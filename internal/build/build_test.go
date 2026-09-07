@@ -1142,6 +1142,12 @@ func TestBaremetalRuntimeKeepsSchedulerFreeLifecycleStubs(t *testing.T) {
 	if slices.Contains(pkg.GoFiles, "cleanup_wasm.go") {
 		t.Fatalf("bare-metal runtime selected WebAssembly lifecycle implementation; GoFiles=%v", pkg.GoFiles)
 	}
+	if slices.Contains(pkg.GoFiles, "proc_atomic.go") {
+		t.Fatalf("bare-metal runtime selected hosted scheduler counters; GoFiles=%v", pkg.GoFiles)
+	}
+	if slices.Contains(pkg.Imports, "sync/atomic") {
+		t.Fatalf("bare-metal runtime must not pull in the hosted sync/atomic runtime; imports=%v", pkg.Imports)
+	}
 }
 
 func TestNeedsLinuxExportDynamic(t *testing.T) {
