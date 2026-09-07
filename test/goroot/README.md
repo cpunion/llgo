@@ -34,6 +34,11 @@ run in `xgo-dev/llgo` also replaces the previous `[GOROOT daily] YYYY-MM-DD`
 issue. A manual dispatch or adding the existing `go-test-compat` label to a
 pull request runs the same matrix without modifying issues.
 
+Version-independent not-applicable entries omit `version`, so upgrading Go does
+not reclassify the same out-of-scope mechanism as a new compatibility failure.
+Case, directive, and platform selectors still apply; this does not broaden
+xfail, flaky, timeout, host-skip, or WebAssembly acceptance rules.
+
 Basic usage:
 
 ```bash
