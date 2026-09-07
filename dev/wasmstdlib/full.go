@@ -16,8 +16,9 @@ import (
 	"strings"
 )
 
-// Full auditing deliberately has no compatibility allowlist. Source exclusions,
-// host test drivers and failures remain unresolved until reviewed individually.
+// Full auditing deliberately has no compatibility allowlist. Source exclusions
+// and failures remain unresolved until reviewed individually; independently
+// executable host-side suites are named explicitly in the report.
 type fullPackage struct {
 	Package string `json:"package"`
 	Status  string `json:"status"`
@@ -196,7 +197,7 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 		pkg, exists := selected[e.Package]
 		switch {
 		case e.Package == "test/goroot":
-			e.Status, e.Reason = "unresolved", "host-side GOROOT driver: needs target-aware compile/run integration; not a wasm package"
+			e.Status, e.Reason = "separate-suite", "host-side target runner is executed by the wasm GOROOT acceptance jobs"
 		case !exists || len(pkg.TestGoFiles)+len(pkg.XTestGoFiles) == 0:
 			e.Status, e.Reason = "source-excluded", "no tests selected by source context; applicability not yet established"
 		case pkg.Error != nil:
@@ -220,7 +221,7 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 				e.Status, e.Reason = "fail", runErr.Error()
 			}
 		}
-		if e.Status != "pass" {
+		if e.Status != "pass" && e.Status != "separate-suite" {
 			failures++
 		}
 		fmt.Printf("%s %s: %s %s\n", name, e.Package, e.Status, e.Reason)
