@@ -26,7 +26,8 @@ import (
 const numGoroutineChildEnv = "LLGO_TEST_NUM_GOROUTINE_CHILD"
 
 func TestRuntimeNumGoroutineIncludesNewProc(t *testing.T) {
-	if os.Getenv(numGoroutineChildEnv) == "" {
+	// Wasm has no child processes; run the same count assertion in the guest.
+	if runtime.GOARCH != "wasm" && os.Getenv(numGoroutineChildEnv) == "" {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestRuntimeNumGoroutineIncludesNewProc$")
 		cmd.Env = append(os.Environ(), numGoroutineChildEnv+"=1")
 		if output, err := cmd.CombinedOutput(); err != nil {
@@ -44,11 +45,13 @@ func TestRuntimeNumGoroutineIncludesNewProc(t *testing.T) {
 		<-release
 		close(done)
 	}()
+	defer func() {
+		close(release)
+		<-done
+	}()
 	<-started
 	during := runtime.NumGoroutine()
 	if during != before+1 {
 		t.Fatalf("NumGoroutine: before=%d during=%d, want %d", before, during, before+1)
 	}
-	close(release)
-	<-done
 }

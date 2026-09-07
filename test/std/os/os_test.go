@@ -184,6 +184,12 @@ func TestEnviron(t *testing.T) {
 
 func TestExecutable(t *testing.T) {
 	exe, err := os.Executable()
+	if runtime.GOARCH == "wasm" {
+		if exe != "" || err == nil || err.Error() != "Executable not implemented for "+runtime.GOOS {
+			t.Fatalf("Executable = %q, %v; want the Go wasm unsupported-operation contract", exe, err)
+		}
+		return
+	}
 	if err != nil {
 		t.Errorf("Executable() failed: %v", err)
 	}
@@ -380,6 +386,9 @@ func TestTempDir(t *testing.T) {
 }
 
 func TestUserCacheDir(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	}
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		t.Fatalf("UserCacheDir() failed: %v", err)
@@ -390,6 +399,9 @@ func TestUserCacheDir(t *testing.T) {
 }
 
 func TestUserConfigDir(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatalf("UserConfigDir() failed: %v", err)
@@ -401,6 +413,12 @@ func TestUserConfigDir(t *testing.T) {
 
 func TestUserHomeDir(t *testing.T) {
 	dir, err := os.UserHomeDir()
+	if runtime.GOARCH == "wasm" && os.Getenv("HOME") == "" {
+		if dir != "" || err == nil || err.Error() != "$HOME is not defined" {
+			t.Fatalf("UserHomeDir without HOME = %q, %v", dir, err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatalf("UserHomeDir() failed: %v", err)
 	}
@@ -673,16 +691,21 @@ func TestSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.Symlink(target, link); err != nil {
-		t.Errorf("Symlink failed: %v", err)
+	// A relative target stays within the WASI preopen capability. Absolute
+	// host paths are not necessarily valid symlink targets in a WASI guest.
+	if err := os.Symlink("target.txt", link); err != nil {
+		t.Fatalf("Symlink failed: %v", err)
 	}
 
 	linkTarget, err := os.Readlink(link)
 	if err != nil {
 		t.Errorf("Readlink failed: %v", err)
 	}
-	if linkTarget != target {
-		t.Errorf("Readlink = %q, want %q", linkTarget, target)
+	if linkTarget != "target.txt" {
+		t.Errorf("Readlink = %q, want target.txt", linkTarget)
+	}
+	if data, err := os.ReadFile(link); err != nil || string(data) != "content" {
+		t.Errorf("ReadFile through symlink = %q, %v", data, err)
 	}
 }
 
@@ -720,7 +743,11 @@ func TestChown(t *testing.T) {
 	}
 
 	err := os.Chown(testFile, -1, -1)
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "wasip1" {
+		if !errors.Is(err, syscall.ENOSYS) {
+			t.Errorf("Chown = %v, want ENOSYS on wasip1", err)
+		}
+	} else if runtime.GOOS == "windows" {
 		var pathError *os.PathError
 		if err == nil || !errors.As(err, &pathError) {
 			t.Errorf("Chown = %v, want a PathError wrapping unsupported Windows operation", err)
@@ -738,7 +765,11 @@ func TestLchown(t *testing.T) {
 	}
 
 	err := os.Lchown(testFile, -1, -1)
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "wasip1" {
+		if !errors.Is(err, syscall.ENOSYS) {
+			t.Errorf("Lchown = %v, want ENOSYS on wasip1", err)
+		}
+	} else if runtime.GOOS == "windows" {
 		var pathError *os.PathError
 		if err == nil || !errors.As(err, &pathError) {
 			t.Errorf("Lchown = %v, want a PathError wrapping unsupported Windows operation", err)
@@ -795,8 +826,14 @@ func TestCopyFS(t *testing.T) {
 
 func TestPipe(t *testing.T) {
 	r, w, err := os.Pipe()
+	if runtime.GOARCH == "wasm" {
+		if r != nil || w != nil || !errors.Is(err, syscall.ENOSYS) {
+			t.Fatalf("Pipe = %v, %v, %v; want nil, nil, ENOSYS on wasm", r, w, err)
+		}
+		return
+	}
 	if err != nil {
-		t.Errorf("Pipe failed: %v", err)
+		t.Fatalf("Pipe failed: %v", err)
 	}
 	defer r.Close()
 	defer w.Close()
@@ -1302,7 +1339,11 @@ func TestFileChown(t *testing.T) {
 	defer f.Close()
 
 	err = f.Chown(-1, -1)
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "wasip1" {
+		if !errors.Is(err, syscall.ENOSYS) {
+			t.Errorf("File.Chown = %v, want ENOSYS on wasip1", err)
+		}
+	} else if runtime.GOOS == "windows" {
 		var pathError *os.PathError
 		if err == nil || !errors.As(err, &pathError) {
 			t.Errorf("File.Chown = %v, want a PathError wrapping unsupported Windows operation", err)
@@ -1373,7 +1414,13 @@ func TestFileSetDeadline(t *testing.T) {
 		"SetReadDeadline":  f.SetReadDeadline,
 		"SetWriteDeadline": f.SetWriteDeadline,
 	} {
-		if err := set(deadline); !errors.Is(err, os.ErrNoDeadline) {
+		err := set(deadline)
+		if runtime.GOARCH == "wasm" {
+			// Go's wasm poller accepts deadlines on regular files too.
+			if err != nil {
+				t.Errorf("File.%s = %v, want nil on wasm", name, err)
+			}
+		} else if !errors.Is(err, os.ErrNoDeadline) {
 			t.Errorf("File.%s = %v, want ErrNoDeadline for a regular file", name, err)
 		}
 	}
@@ -1406,6 +1453,13 @@ func TestFileSyscallConn(t *testing.T) {
 }
 
 func TestStartProcess(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		proc, err := os.StartProcess("/wasm-child", []string{"/wasm-child"}, &os.ProcAttr{})
+		if proc != nil || !errors.Is(err, syscall.ENOSYS) {
+			t.Fatalf("StartProcess = %v, %v; want nil, ENOSYS on wasm", proc, err)
+		}
+		return
+	}
 	proc := startOSHelper(t, "success")
 	state, err := proc.Wait()
 	if err != nil {
@@ -1435,6 +1489,10 @@ func TestStartProcess(t *testing.T) {
 }
 
 func TestProcessSignal(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		testWasmForeignProcess(t, false)
+		return
+	}
 	proc, err := os.FindProcess(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
@@ -1453,6 +1511,10 @@ func TestProcessSignal(t *testing.T) {
 }
 
 func TestProcessKill(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		testWasmForeignProcess(t, true)
+		return
+	}
 	proc := startOSHelper(t, "sleep")
 	if err := proc.Kill(); err != nil {
 		t.Fatalf("Process.Kill failed: %v", err)
@@ -1463,6 +1525,32 @@ func TestProcessKill(t *testing.T) {
 	}
 	if state == nil || state.Success() {
 		t.Errorf("ProcessState after Kill = %v, want unsuccessful exit", state)
+	}
+}
+
+func testWasmForeignProcess(t *testing.T, kill bool) {
+	t.Helper()
+	// WASI treats even signal 0 to self as process termination. Use a foreign
+	// PID to test its no-such-process contract without terminating the suite.
+	proc, err := os.FindProcess(os.Getpid() + 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proc.Release()
+	if kill {
+		err = proc.Kill()
+	} else {
+		err = proc.Signal(syscall.Signal(0))
+	}
+	var want error = syscall.ENOSYS
+	if runtime.GOOS == "wasip1" {
+		want = os.ErrProcessDone
+	}
+	if !errors.Is(err, want) {
+		t.Fatalf("foreign process signal (kill=%v) = %v, want %v", kill, err, want)
+	}
+	if state, err := proc.Wait(); state != nil || !errors.Is(err, syscall.ENOSYS) {
+		t.Fatalf("foreign process Wait = %v, %v; want nil, ENOSYS", state, err)
 	}
 }
 

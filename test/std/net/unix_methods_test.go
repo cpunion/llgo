@@ -78,9 +78,7 @@ func TestUnixConnMethodCoverage(t *testing.T) {
 		if err := conn.SetReadBuffer(2048); err != nil {
 			t.Errorf("SetReadBuffer: %v", err)
 		}
-		if err := conn.SetWriteBuffer(2048); err != nil {
-			t.Errorf("SetWriteBuffer: %v", err)
-		}
+		checkWriteBuffer(t, conn.SetWriteBuffer(2048))
 		if err := conn.SetDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
 			t.Errorf("SetDeadline: %v", err)
 		}
@@ -200,9 +198,7 @@ func TestUnixConnMethodCoverage(t *testing.T) {
 	if err := gram.SetReadBuffer(1024); err != nil {
 		t.Errorf("unixgram SetReadBuffer: %v", err)
 	}
-	if err := gram.SetWriteBuffer(1024); err != nil {
-		t.Errorf("unixgram SetWriteBuffer: %v", err)
-	}
+	checkWriteBuffer(t, gram.SetWriteBuffer(1024))
 
 	clientGramPath := filepath.Join(dir, "client.sock")
 	clientGramAddr := &net.UnixAddr{Name: clientGramPath, Net: "unixgram"}
