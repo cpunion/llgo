@@ -1,4 +1,4 @@
-//go:build js && wasm && llgo.wasm.emscripten
+//go:build llgo && js && wasm
 
 package runtime
 
@@ -13,9 +13,9 @@ import (
 //go:noescape
 func cGetentropy(buffer unsafe.Pointer, length uintptr) c.Int
 
-// crypto/internal/sysrand uses the official Go js/wasm host symbol. The
-// explicit Emscripten profiles keep that standard-library call site and bridge
-// only its host boundary to Emscripten libc.
+// crypto/internal/sysrand uses the official Go js/wasm host symbol. LLGo's raw
+// GJS and named Emscripten profiles keep that standard-library call site and
+// bridge only its private host boundary to Emscripten libc.
 //
 //go:linkname runtimeGetRandomData runtime.getRandomData
 func runtimeGetRandomData(buffer []byte) {
