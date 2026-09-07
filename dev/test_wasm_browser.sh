@@ -24,6 +24,12 @@ export LLGO_WASM_BROWSER_REPORT_DIR="${LLGO_WASM_BROWSER_REPORT_DIR:-${RUNNER_TE
 node --test dev/wasmbrowser/browser.test.mjs
 
 cp dev/wasmbrowser/browser.html "$work_dir/browser.html"
+go_wasm_exec="$(go env GOROOT)/lib/wasm/wasm_exec.js"
+if [[ ! -f "$go_wasm_exec" ]]; then
+	echo "Go WebAssembly support file not found: $go_wasm_exec" >&2
+	exit 1
+fi
+cp "$go_wasm_exec" "$work_dir/wasm_exec.js"
 GOOS=js GOARCH=wasm "$llgo" build \
 	-o "$work_dir/timers-gjs.mjs" ./internal/build/testdata/wasm-timers
 "$llgo" build -target emscripten \
