@@ -107,7 +107,10 @@ func TestWasmFailureStatusProbeRejectsFalsePositives(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			fake := filepath.Join(dir, "llgo")
-			if err := os.WriteFile(fake, []byte("#!/usr/bin/env bash\n"+tc.body), 0755); err != nil {
+			// WASI does not inherit arbitrary host environment variables. The
+			// opt-in must reach the guest as a test-binary argument.
+			const checkArgs = "[[ \" $* \" == *\" -args -llgo.intentional-exit-failure \"* ]] || exit 2\n"
+			if err := os.WriteFile(fake, []byte("#!/usr/bin/env bash\n"+checkArgs+tc.body), 0755); err != nil {
 				t.Fatal(err)
 			}
 			cmd := exec.Command(bash, script, filepath.Join(dir, "probe.log"))
