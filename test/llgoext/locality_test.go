@@ -441,10 +441,12 @@ func TestMultiValueInitializerUsesOneGroup(t *testing.T) {
 }
 
 func TestCrossPackageMixedInitializerGroup(t *testing.T) {
+	parentAddress := localityscope.MixedScalarAddress()
 	before := localityscope.MixedCalls()
 	type result struct {
 		scalar        int
 		pointer       *int
+		address       *int
 		addressStable bool
 		calls         int
 	}
@@ -455,12 +457,21 @@ func TestCrossPackageMixedInitializerGroup(t *testing.T) {
 		done <- result{
 			scalar:        scalar,
 			pointer:       localityscope.MixedPointer(),
+			address:       address,
 			addressStable: address == localityscope.MixedScalarAddress(),
 			calls:         localityscope.MixedCalls(),
 		}
 	}()
 	got := <-done
-	if got.scalar == 0 || got.pointer == nil || !got.addressStable || got.calls != before+1 {
+	// TLS belongs to the worker, unlike the GLS groups tested above. Logical
+	// goroutines multiplexed on one worker must reuse its initialized block.
+	multiplexed := schedulerMultiplexesGoroutinesForTesting()
+	wantCalls := before + 1
+	if multiplexed {
+		wantCalls = before
+	}
+	if got.scalar == 0 || got.pointer == nil || !got.addressStable || got.calls != wantCalls ||
+		(got.address == parentAddress) != multiplexed {
 		t.Fatalf("cross-package mixed initializer = %+v, baseline %d", got, before)
 	}
 }
