@@ -17,7 +17,6 @@
 package runtime
 
 import (
-	stdatomic "sync/atomic"
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
@@ -40,17 +39,6 @@ type runtimeContext struct {
 	root unsafe.Pointer
 
 	platform runtimeContextPlatform
-}
-
-var sched struct {
-	goidgen stdatomic.Uint64
-	midgen  stdatomic.Int64
-	pidgen  stdatomic.Int32
-
-	// gstate packs the live/registered goroutine count with the main-exited
-	// bit. The goroutine whose release observes count zero can therefore make
-	// the deadlock decision from one atomic result.
-	gstate stdatomic.Uint64
 }
 
 // goroutineStackSize is initialized by the compiler as a read-only constant in

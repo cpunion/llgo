@@ -18,7 +18,24 @@
 
 package runtime
 
-import "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
+import (
+	stdatomic "sync/atomic"
+
+	"github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
+)
+
+// Keep the atomic scheduler state with its users: bare-metal backends do not
+// use these counters and must not import the hosted sync/atomic runtime.
+var sched struct {
+	goidgen stdatomic.Uint64
+	midgen  stdatomic.Int64
+	pidgen  stdatomic.Int32
+
+	// gstate packs the live/registered goroutine count with the main-exited
+	// bit. The goroutine whose release observes count zero can therefore make
+	// the deadlock decision from one atomic result.
+	gstate stdatomic.Uint64
+}
 
 const (
 	mainExitedBit = uint64(1) << 63
@@ -50,7 +67,14 @@ func releaseG() (remaining uint64, mainExited bool) {
 }
 
 func markMainExited() {
-	sched.gstate.Or(mainExitedBit)
+	// Uint64.Or is unavailable in Go 1.20-1.22. Preserve the packed-state
+	// update atomically without raising the supported GOROOT requirement.
+	for {
+		state := sched.gstate.Load()
+		if sched.gstate.CompareAndSwap(state, state|mainExitedBit) {
+			return
+		}
+	}
 }
 
 func gState() (count uint64, mainExited bool) {
