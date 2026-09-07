@@ -6,6 +6,8 @@ on:
       - 'dev/wasmstdlib/**'
       - 'dev/wasmbrowser/**'
       - 'dev/test_wasm_browser.sh'
+      - 'dev/test_wasm_exit_status.sh'
+      - 'dev/test_wasi_poll.sh'
       - '.github/workflows/wasm-acceptance.yml'
       - 'test/**'
       - 'runtime/**'
@@ -131,6 +133,27 @@ jobs:
         with:
           name: wasm-exit-status-${{ matrix.profile }}
           path: ${{ runner.temp }}/exit-${{ matrix.profile }}.log
+          if-no-files-found: warn
+
+      - name: Verify WASI blocked I/O scheduling and cancellation
+        if: ${{ matrix.profile == 'WC32' || matrix.profile == 'GWASI' }}
+        env:
+          PROFILE: ${{ matrix.profile }}
+          LLGO: ${{ runner.temp }}/llgo
+        run: |
+          case "$PROFILE" in
+            WC32) args=(-target wasi -emulator) ;;
+            GWASI) export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0; args=() ;;
+            *) exit 2 ;;
+          esac
+          bash dev/test_wasi_poll.sh "$RUNNER_TEMP/poll-$PROFILE.log" "${args[@]}"
+
+      - name: Preserve WASI poll regression log
+        if: ${{ always() && (matrix.profile == 'WC32' || matrix.profile == 'GWASI') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-poll-${{ matrix.profile }}
+          path: ${{ runner.temp }}/poll-${{ matrix.profile }}.log
           if-no-files-found: warn
 
       - name: Preserve GJS compiler comparison
