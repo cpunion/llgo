@@ -50,20 +50,20 @@ func (p Program) structLayout(typ Type) (structLayout, bool) {
 	return layout.(structLayout), true
 }
 
-// toLLVMStructBody preserves the native target layout for C types. On 386,
-// LLVM's target layout aligns i64 and double fields to eight bytes while Go
-// aligns them to four. For Go structs whose offsets or size differ, it wraps
-// only the affected fields and keeps the Go field index as the outer LLVM
-// element index.
+// toLLVMStructBody preserves the native target layout for C types. Some
+// 32-bit Go ABIs, including 386 and wasm32, align i64 and double fields to four
+// bytes even when LLVM's target layout aligns them to eight. For Go structs
+// whose offsets or size differ, it wraps only the affected fields and keeps
+// the Go field index as the outer LLVM element index.
 func (p Program) toLLVMStructBody(raw *types.Struct, native bool) ([]llvm.Type, *structLayout) {
 	fields := p.toLLVMFields(raw)
-	if native || p.target.effectiveGOARCH() != "386" || len(fields) == 0 {
+	if native || len(fields) == 0 {
 		return fields, nil
 	}
 
 	sizes := p.sizes
 	if sizes == nil {
-		sizes = types.SizesFor("gc", "386")
+		sizes = &types.StdSizes{WordSize: int64(p.PointerSize()), MaxAlign: int64(p.PointerSize())}
 		p.sizes = sizes
 	}
 	offsets := make([]int64, len(fields))
@@ -133,8 +133,8 @@ func (p Program) toLLVMStructBody(raw *types.Struct, native bool) ([]llvm.Type, 
 
 	probe := p.ctx.StructType(body, false)
 	if int64(p.td.ABITypeAlignment(probe)) < goAlign {
-		// Go/386 alignments are powers of two no greater than four, and the
-		// corresponding LLVM integer type has that same ABI alignment.
+		// Go alignments are powers of two no greater than the target's maximum,
+		// and the corresponding LLVM integer type has that same ABI alignment.
 		alignType := p.ctx.IntType(int(goAlign * 8))
 		body = append(body, llvm.ArrayType(alignType, 0))
 		probe = p.ctx.StructType(body, false)
