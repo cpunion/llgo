@@ -138,3 +138,21 @@ func TestRunnerPolicyPreservesHostedOnlyJobs(t *testing.T) {
 		}
 	}
 }
+
+func TestTimerRuntimeBenchmarksStartCollapsed(t *testing.T) {
+	data, err := os.ReadFile("../llgo-benchmark.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Views map[string]struct {
+			Table struct{ Collapsed bool }
+		}
+	}
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	if !config.Views["timers"].Table.Collapsed {
+		t.Fatal("Timer runtime benchmarks must be collapsed by default")
+	}
+}
