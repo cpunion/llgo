@@ -304,6 +304,10 @@ func TestValidateExecution(t *testing.T) {
 			t.Fatalf("valid output: count %d, error %v", count, err)
 		}
 	}
+	withSkippedSubtest := "=== RUN   TestAs\n=== RUN   TestAs/skipped\n    --- SKIP: TestAs/skipped (0.00s)\n--- PASS: TestAs (0.00s)\nPASS\n"
+	if count, err := validateOutput([]byte(withSkippedSubtest), "TestAs"); err != nil || count != 1 {
+		t.Fatalf("valid intentional subtest skip: count %d, error %v", count, err)
+	}
 	for _, text := range []string{"", "PASS\n", "--- PASS: TestOther (0.00s)\nPASS\n", pass + "PASS\n", pass + "    --- SKIP: subtest (0.00s)\n", pass + "--- FAIL: failed (0.00s)\n"} {
 		if _, err := validateOutput([]byte(text), "TestAs"); err == nil {
 			t.Errorf("accepted incomplete/failed execution: %q", text)
