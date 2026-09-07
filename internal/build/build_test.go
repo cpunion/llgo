@@ -783,8 +783,8 @@ func TestDefaultBuildTags(t *testing.T) {
 		want   string
 	}{
 		{name: "native", goarch: "arm64", want: base},
-		{name: "raw wasm", goarch: "wasm", want: base + ",nogc"},
-		{name: "configured wasm target", goarch: "wasm", target: "wasip1", want: base},
+		{name: "raw wasm", goarch: "wasm", want: base + ",osusergo,nogc"},
+		{name: "configured wasm target", goarch: "wasm", target: "wasip1", want: base + ",osusergo"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := defaultBuildTags(test.goarch, test.target); got != test.want {
@@ -1185,6 +1185,32 @@ func TestRuntimeCounterSourceSelection(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWasmUniqueCleanupSourceSelection(t *testing.T) {
+	dir := filepath.Join(env.LLGoRuntimeDir(), "internal", "lib", "runtime")
+	for _, goos := range []string{"js", "wasip1"} {
+		for _, linear := range []bool{false, true} {
+			ctx := gobuild.Default
+			ctx.GOOS, ctx.GOARCH = goos, "wasm"
+			ctx.BuildTags = []string{"llgo", "nogc"}
+			if linear {
+				ctx.BuildTags = append(ctx.BuildTags, "llgo.wasm.gc.linear")
+			}
+			for name, want := range map[string]bool{
+				"unique_runtime_llgo.go":      linear,
+				"unique_runtime_wasm_nogc.go": !linear,
+			} {
+				got, err := ctx.MatchFile(dir, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != want {
+					t.Errorf("%s linear=%v: MatchFile(%s) = %v, want %v", goos, linear, name, got, want)
+				}
+			}
+		}
 	}
 }
 

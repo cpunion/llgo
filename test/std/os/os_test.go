@@ -133,6 +133,28 @@ func TestChtimes(t *testing.T) {
 }
 
 func TestClearenv(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		// Wasm cannot spawn a child process. Run the same API assertions in
+		// the guest and restore the entire environment before other tests run.
+		saved := os.Environ()
+		defer func() {
+			os.Clearenv()
+			for _, entry := range saved {
+				key, value, _ := strings.Cut(entry, "=")
+				if err := os.Setenv(key, value); err != nil {
+					t.Errorf("restore environment key %s: %v", key, err)
+				}
+			}
+		}()
+		if err := os.Setenv("LLGO_CLEAR_ENV_PROBE", "set"); err != nil {
+			t.Fatal(err)
+		}
+		os.Clearenv()
+		if os.Getenv("LLGO_CLEAR_ENV_PROBE") != "" || len(os.Environ()) != 0 {
+			t.Fatal("Clearenv did not empty the environment")
+		}
+		return
+	}
 	// Clearenv mutates process-global state. Exercise it in a child so this test
 	// cannot erase PATH and platform runtime variables needed by later tests.
 	if output, err := osHelperCommand("clearenv").CombinedOutput(); err != nil {
