@@ -17,9 +17,12 @@ job, but test execution is uncached. `-shard 0 -shards 2` partitions the sorted
 inventory; `other-shard` is not a pass. CI runs at most two shards concurrently
 and preserves JSON accounting and individual package logs even after failures.
 
-Source-excluded packages remain unresolved and make the audit fail. They require
-explicit applicability review or replacement coverage, not silent skips. The
-host-side `test/goroot` package is reported as `separate-suite`: the same workflow
+Unreviewed source-excluded packages remain unresolved and make the audit fail.
+Reviewed exclusions are reported as `not-applicable` with a package- and
+profile-specific reason: OS-only `plugin`, `syscall`, and `test/windows` tests,
+plus `test/cgo` on raw profiles where C interop is absent by contract. The same
+`test/cgo` suite remains mandatory on EC32, EC64, and WC32. The host-side
+`test/goroot` package is reported as `separate-suite`: the same workflow
 first executes three directive-mode sentinels on every LLGo wasm profile, then
 unlocks the complete four-shard GOROOT matrix only if all sentinels pass.
 Interrupted audits retain an `incomplete` result. Passing every package and
