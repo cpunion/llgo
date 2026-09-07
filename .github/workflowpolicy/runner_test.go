@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	directRunner = `${{ github.repository == 'xgo-dev/llgo' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}`
-	matrixRunner = `${{ github.repository == 'xgo-dev/llgo' && matrix.runner || matrix.os }}`
+	directRunner      = `${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}`
+	largeDirectRunner = `${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}`
+	matrixRunner      = `${{ github.repository_owner == 'xgo-dev' && matrix.runner || matrix.os }}`
 )
 
 type workflowJob struct {
@@ -36,7 +37,7 @@ type runnerRow struct {
 // passing while the workflow still uses an unguarded self-hosted label.
 func runnerKind(job workflowJob) (string, error) {
 	expr, scalar := job.RunsOn.(string)
-	if scalar && expr == directRunner {
+	if scalar && (expr == directRunner || expr == largeDirectRunner) {
 		return "direct", nil
 	}
 	if scalar && expr == matrixRunner {
@@ -95,7 +96,9 @@ func TestWorkflowRunnerPolicy(t *testing.T) {
 				}
 				mac = mac || strings.HasPrefix(row.OS, "macos-")
 				windows = windows || strings.HasPrefix(row.OS, "windows-")
-				if len(row.Runner) != 0 && (!reflect.DeepEqual(row.Runner, []string{"qiniu", "ubuntu-24.04"}) || !strings.HasPrefix(row.OS, "ubuntu-")) {
+				standard := reflect.DeepEqual(row.Runner, []string{"qiniu", "ubuntu-24.04"})
+				large := reflect.DeepEqual(row.Runner, []string{"qiniu", "ubuntu-24.04-large"})
+				if len(row.Runner) != 0 && (!(standard || large) || !strings.HasPrefix(row.OS, "ubuntu-")) {
 					t.Errorf("%s/%s: unexpected upstream override for %q: %v", path, id, row.OS, row.Runner)
 				}
 			}
@@ -113,11 +116,13 @@ func hostedOS(name string) bool {
 func TestRunnerPolicyRejectsUnguardedAndInvertedSelectors(t *testing.T) {
 	for _, runsOn := range []any{
 		[]any{"qiniu", "ubuntu-24.04"},
+		[]any{"qiniu", "ubuntu-24.04-large"},
 		"qiniu",
 		"${{ matrix.runner || matrix.os }}",
 		strings.Replace(directRunner, " == ", " != ", 1),
+		strings.Replace(largeDirectRunner, " == ", " != ", 1),
 		strings.Replace(matrixRunner, " == ", " != ", 1),
-		strings.Replace(matrixRunner, "github.repository", "github.event.pull_request.head.repo.full_name", 1),
+		strings.Replace(matrixRunner, "github.repository_owner", "github.event.pull_request.head.repo.full_name", 1),
 	} {
 		if _, err := runnerKind(workflowJob{RunsOn: runsOn}); err == nil {
 			t.Errorf("accepted unsafe selector %v", runsOn)
@@ -127,6 +132,15 @@ func TestRunnerPolicyRejectsUnguardedAndInvertedSelectors(t *testing.T) {
 	job.Strategy.Matrix.Include = []runnerRow{{OS: "ubuntu-latest", Runner: []string{"qiniu", "ubuntu-24.04"}}}
 	if _, err := runnerKind(job); err == nil {
 		t.Fatal("accepted an unused upstream runner override")
+	}
+}
+
+func TestRunnerPolicyAcceptsGuardedRunnerSizes(t *testing.T) {
+	for _, runsOn := range []string{directRunner, largeDirectRunner} {
+		kind, err := runnerKind(workflowJob{RunsOn: runsOn})
+		if err != nil || kind != "direct" {
+			t.Errorf("guarded selector %v: kind=%q err=%v", runsOn, kind, err)
+		}
 	}
 }
 
