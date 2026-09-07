@@ -28,4 +28,10 @@ func ReadMemStats(m *runtime.MemStats) {
 
 func GC() {
 	tinygogc.GC()
+	// weak pointers are cleared by the collection above. Wake unique's map
+	// cleanup worker only after the collector has released its internal lock.
+	unique_runtime_notifyMapCleanup()
+	if poolCleanup != nil {
+		poolCleanup()
+	}
 }
