@@ -16,11 +16,14 @@ budget and a 60-second test deadline. LLGo compilation cache is reused within a
 job, but test execution is uncached. `-shard 0 -shards 2` partitions the sorted
 inventory; `other-shard` is not a pass. CI runs at most two shards concurrently
 and preserves JSON accounting and individual package logs even after failures.
+The normally pattern-excluded `_stress/runtime/timer` package is named
+explicitly and runs with `LLGO_STRESS_PROFILE=quick` inside the same shards.
 
 Unreviewed source-excluded packages remain unresolved and make the audit fail.
 Reviewed exclusions are reported as `not-applicable` with a package- and
-profile-specific reason: OS-only `plugin`, `syscall`, and `test/windows` tests,
-plus `test/cgo` on raw profiles where C interop is absent by contract. The same
+profile-specific reason: OS-only `plugin`, `syscall`, and `test/windows` tests;
+native-only CPU-profiler, BDWGC-finalizer, and signal stress suites; plus
+`test/cgo` on raw profiles where C interop is absent by contract. The same
 `test/cgo` suite remains mandatory on EC32, EC64, and WC32. The host-side
 `test/goroot` package is reported as `separate-suite`: the same workflow
 first executes three directive-mode sentinels on every LLGo wasm profile, then
