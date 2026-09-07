@@ -73,7 +73,7 @@ func fullProfile(name string) (profile, error) {
 }
 
 func fullCommand(p profile, goCmd, llgo, goRoot, pkg string) command {
-	args := []string{"test", "-v", "-count=1", "-timeout=60s"}
+	args := []string{"test", "-v", "-count=1", "-timeout=" + fullTestTimeout(pkg)}
 	env := map[string]string{}
 	program := llgo
 	if p.Reference {
@@ -94,6 +94,35 @@ func fullCommand(p profile, goCmd, llgo, goRoot, pkg string) command {
 	}
 	// GNU timeout bounds compilation as well as execution, including children.
 	return command{"timeout", append([]string{"--kill-after=10s", "5m", program}, args...), env}
+}
+
+func fullTestTimeout(pkg string) string {
+	// DSA parameter generation is intentionally CPU-heavy under wasm. Keep the
+	// global default strict while allowing this known finite test to complete.
+	if pkg == "test/std/crypto/dsa" {
+		return "3m"
+	}
+	return "60s"
+}
+
+func fullSourceContext(p profile) (tags string, cgo string) {
+	if p.Reference {
+		return "", "0"
+	}
+	tags = "llgo"
+	if p.Target == "" {
+		return tags + ",nogc", "0"
+	}
+	tags += ",llgo.wasm.gc.linear"
+	switch p.Target {
+	case "emscripten":
+		tags += ",llgo.wasm.emscripten"
+	case "emscripten-memory64":
+		tags += ",llgo.wasm.emscripten,llgo.wasm.emscripten.memory64"
+	case "wasi":
+		tags += ",llgo.wasm.wasi"
+	}
+	return tags, "1"
 }
 
 func testWitness(pkg selectedPackage) (string, error) {
@@ -162,11 +191,12 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 	}
 	goRoot := strings.TrimSpace(string(data))
 	listArgs := []string{"list", "-e", "-json"}
-	if !p.Reference {
-		listArgs = append(listArgs, "-tags=llgo")
+	tags, cgo := fullSourceContext(p)
+	if tags != "" {
+		listArgs = append(listArgs, "-tags="+tags)
 	}
 	listArgs = append(listArgs, "./test/...")
-	data, err = structured(root, command{goCmd, listArgs, map[string]string{"GOOS": p.GOOS, "GOARCH": "wasm", "CGO_ENABLED": "0"}})
+	data, err = structured(root, command{goCmd, listArgs, map[string]string{"GOOS": p.GOOS, "GOARCH": "wasm", "CGO_ENABLED": cgo}})
 	if err != nil {
 		return err
 	}
