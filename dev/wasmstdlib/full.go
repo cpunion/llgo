@@ -32,6 +32,8 @@ type selectedPackage struct {
 	Error                     *struct{ Err string }
 }
 
+const wasmTimerStressPackage = "test/_stress/runtime/timer"
+
 func discoverFull(root string) ([]string, error) {
 	seen := map[string]bool{}
 	err := filepath.WalkDir(filepath.Join(root, "test"), func(path string, d fs.DirEntry, err error) error {
@@ -39,7 +41,7 @@ func discoverFull(root string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == "testdata" || d.Name() == "vendor" || strings.HasPrefix(d.Name(), ".") || strings.HasPrefix(d.Name(), "_") {
+			if d.Name() == "testdata" || d.Name() == "vendor" || d.Name() == "_manualtest" || strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -86,11 +88,20 @@ func fullCommand(p profile, goCmd, llgo, goRoot, pkg string) command {
 	} else {
 		env["GOOS"], env["GOARCH"], env["CGO_ENABLED"] = p.GOOS, "wasm", "0"
 	}
-	args = append(args, "./"+pkg)
+	packageArg := "./" + pkg
+	if pkg == wasmTimerStressPackage {
+		// The Go command excludes underscore directories from package patterns,
+		// but it accepts this reviewed stress package as an explicit file.
+		packageArg += "/timer_stress_test.go"
+	}
+	args = append(args, packageArg)
 	// Keep the LLGo package cache local to this job. Repeated stdlib builds can
 	// reuse compilation while every test binary still executes with count=1.
 	if !p.Reference {
 		env["LLGO_BUILD_CACHE"] = "on"
+	}
+	if strings.HasPrefix(pkg, "test/_stress/") {
+		env["LLGO_STRESS_PROFILE"] = "quick"
 	}
 	// GNU timeout bounds compilation as well as execution, including children.
 	return command{"timeout", append([]string{"--kill-after=10s", "5m", program}, args...), env}
@@ -99,7 +110,7 @@ func fullCommand(p profile, goCmd, llgo, goRoot, pkg string) command {
 func fullTestTimeout(pkg string) string {
 	// DSA parameter generation is intentionally CPU-heavy under wasm. Keep the
 	// global default strict while allowing this known finite test to complete.
-	if pkg == "test/std/crypto/dsa" {
+	if pkg == "test/std/crypto/dsa" || strings.HasPrefix(pkg, "test/_stress/") {
 		return "3m"
 	}
 	return "60s"
@@ -130,6 +141,12 @@ func fullSourceContext(p profile) (tags string, cgo string) {
 // an unrecognized source exclusion remains a failing acceptance result.
 func fullSourceExclusion(p profile, pkg string) (string, bool) {
 	switch pkg {
+	case "test/_stress/runtime/cpuprof":
+		return "SIGPROF stress requires a native Darwin or Linux process", true
+	case "test/_stress/runtime/finalizer":
+		return "BDWGC finalizer stress is native-only; linear-GC finalizers are covered by target runtime tests", true
+	case "test/_stress/runtime/signal":
+		return "POSIX signal stress is excluded by its native-only build contract", true
 	case "test/std/plugin":
 		return "tests select only darwin, linux, or windows; wasm has no dynamic plugin loader", true
 	case "test/std/syscall":
@@ -214,6 +231,9 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 	if tags != "" {
 		listArgs = append(listArgs, "-tags="+tags)
 	}
+	// Go package patterns intentionally ignore directories beginning with an
+	// underscore. The reviewed wasm timer stress package is selected explicitly
+	// below so it cannot disappear from the acceptance inventory.
 	listArgs = append(listArgs, "./test/...")
 	data, err = structured(root, command{goCmd, listArgs, map[string]string{"GOOS": p.GOOS, "GOARCH": "wasm", "CGO_ENABLED": cgo}})
 	if err != nil {
@@ -233,6 +253,11 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 			return err
 		}
 		selected[filepath.ToSlash(rel)] = pkg
+	}
+	stressDir := filepath.Join(root, filepath.FromSlash(wasmTimerStressPackage))
+	selected[wasmTimerStressPackage] = selectedPackage{
+		Dir:         stressDir,
+		TestGoFiles: []string{"timer_stress_test.go"},
 	}
 	if err := os.MkdirAll(reportPath+".logs", 0755); err != nil {
 		return err
