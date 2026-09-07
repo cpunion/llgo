@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,10 +12,13 @@ test("real browser observes execution completion and asynchronous failures", asy
 	assert.ok(process.env.LLGO_BROWSER, "LLGO_BROWSER must name Chrome or Chromium");
 	const directory = await mkdtemp(join(tmpdir(), "llgo-browser-test-"));
 	await copyFile(new URL("./browser.html", import.meta.url), join(directory, "browser.html"));
+	const goRoot = execFileSync("go", ["env", "GOROOT"], { encoding: "utf8" }).trim();
+	await copyFile(join(goRoot, "lib", "wasm", "wasm_exec.js"), join(directory, "wasm_exec.js"));
 	const server = fixtureServer(directory).listen(0, "127.0.0.1");
 	await once(server, "listening");
 	try {
 		for (const [name, body, passed, message] of [
+			["go-wasm-host", 'if (!globalThis.fs?.constants || !globalThis.process || globalThis.path.resolve("a", "b") !== "a/b" || typeof globalThis.Go !== "function") throw Error("missing Go wasm host contract"); options.print("wasm timers ok")', true, "wasm timers ok"],
 			["async-success", 'setTimeout(() => options.printErr("wasm timers ok"), 25)', true, "wasm timers ok"],
 			["async-zero-exit", 'setTimeout(() => { options.print("wasm timers ok"); throw Object.assign(Error("normal exit"), {name: "ExitStatus", status: 0}) }, 25)', true, "wasm timers ok"],
 			["factory-zero-exit", 'options.print("wasm timers ok"); throw Object.assign(Error("normal exit"), {name: "ExitStatus", status: 0})', true, "wasm timers ok"],
