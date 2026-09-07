@@ -63,7 +63,7 @@ func TestGOROOTWasiRunCommand(t *testing.T) {
 	env := []string{"GOROOT=/go", "LLGO_ROOT=/llgo"}
 	app, args, targetEnv, err := gorootArtifactCommand("/work", "out.wasm", true, env, "arg")
 	want := []string{"out.wasm", "arg"}
-	if err != nil || app != filepath.Join("/go", "lib", "wasm", "go_wasip1_wasm_exec") || !reflect.DeepEqual(args, want) || envEntry(targetEnv, "GOWASIRUNTIME") != "wasmtime" {
+	if err != nil || app != filepath.Join("/go", "lib", "wasm", "go_wasip1_wasm_exec") || !reflect.DeepEqual(args, want) || envEntry(targetEnv, "GOWASIRUNTIME") != "wasmtime" || envEntry(targetEnv, "GOWASIRUNTIMEARGS") != "-W exceptions=y -W multi-memory=y" {
 		t.Fatalf("WASI command: %q %v %v %v", app, args, targetEnv, err)
 	}
 }
