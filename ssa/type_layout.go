@@ -50,6 +50,14 @@ func (p Program) structLayout(typ Type) (structLayout, bool) {
 	return layout.(structLayout), true
 }
 
+// needsGo32StructLayout limits the Go/LLVM layout adapter to the two ABIs
+// that require it. Other targets keep their existing callable aggregate ABI,
+// including the omission of trailing empty fields understood by libffi.
+func (p Program) needsGo32StructLayout() bool {
+	arch := p.target.effectiveGOARCH()
+	return arch == "386" || (arch == "wasm" && p.PointerSize() == 4)
+}
+
 // toLLVMStructBody preserves the native target layout for C types. Some
 // 32-bit Go ABIs, including 386 and wasm32, align i64 and double fields to four
 // bytes even when LLVM's target layout aligns them to eight. For Go structs
@@ -57,7 +65,7 @@ func (p Program) structLayout(typ Type) (structLayout, bool) {
 // the Go field index as the outer LLVM element index.
 func (p Program) toLLVMStructBody(raw *types.Struct, native bool) ([]llvm.Type, *structLayout) {
 	fields := p.toLLVMFields(raw)
-	if native || len(fields) == 0 {
+	if native || !p.needsGo32StructLayout() || len(fields) == 0 {
 		return fields, nil
 	}
 
