@@ -22,7 +22,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/xgo-dev/llgo/internal/mockable"
@@ -48,7 +50,11 @@ type testProgramResult struct {
 }
 
 func runNativeTest(commands commandEnv, program testProgram, conf *Config, stdout, stderr io.Writer) error {
-	defer removeOutFmts(program.temporaryOutputs)
+	diagnosticDir := os.Getenv("LLGO_DIAG_GOROOT")
+	diagnostic := diagnosticDir != "" && strings.HasSuffix(program.pkgName, "/test/goroot")
+	if !diagnostic {
+		defer removeOutFmts(program.temporaryOutputs)
+	}
 	if conf.PrintCommands {
 		fmt.Fprintf(stderr, "%s %s\n", program.app, strings.Join(conf.RunArgs, " "))
 	}
@@ -57,7 +63,26 @@ func runNativeTest(commands commandEnv, program testProgram, conf *Config, stdou
 	cmd.Dir = program.pkgDir
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	err := cmd.Run()
+	if diagnostic {
+		// Fork-only diagnostics: keep the exact DAG-produced binary and stream
+		// its unit-test output before Wait returns, without changing deadlines.
+		cmd.Args = append(cmd.Args, "-test.v")
+		cmd.Stdout = io.MultiWriter(stdout, os.Stdout)
+		cmd.Stderr = io.MultiWriter(stderr, os.Stderr)
+		_ = os.WriteFile(filepath.Join(diagnosticDir, "binary.txt"), []byte(program.app), 0644)
+		_ = os.WriteFile(filepath.Join(diagnosticDir, "directory.txt"), []byte(program.pkgDir), 0644)
+		fmt.Fprintf(os.Stderr, "GOROOT DIAGNOSTIC starting %s %v\n", program.app, cmd.Args[1:])
+	}
+	err := cmd.Start()
+	if err == nil {
+		if diagnostic {
+			_ = os.WriteFile(filepath.Join(diagnosticDir, "pid.txt"), []byte(strconv.Itoa(cmd.Process.Pid)), 0644)
+		}
+		err = cmd.Wait()
+		if diagnostic {
+			fmt.Fprintf(os.Stderr, "GOROOT DIAGNOSTIC Wait returned: %v\n", err)
+		}
+	}
 	if err == nil {
 		return nil
 	}

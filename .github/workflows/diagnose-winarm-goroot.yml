@@ -1,0 +1,68 @@
+name: Diagnose Windows ARM64 goroot hang
+
+on:
+  push:
+    branches: [codex/diagnose-winarm-goroot-timeout-20260907]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-11-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: "22"
+          windows-abi: msvc
+          windows-arch: arm64
+      - uses: ./.github/actions/setup-embed-deps
+      - uses: ./.github/actions/setup-demo-deps
+        with:
+          windows-abi: msvc
+          windows-arch: arm64
+          install-lldb-python: "true"
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: x64
+      - uses: ./.github/actions/setup-llgo-cache
+      - name: Build the same compiler and test tools
+        shell: bash
+        run: |
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: msvc
+          windows-arch: arm64
+      - name: Check Windows native runtime and FFI
+        shell: pwsh
+        run: |
+          .\.github\workflows\test_windows_runtime.ps1 `
+            -LLGo (Join-Path $env:RUNNER_TEMP 'llgo-bin\llgo.exe') `
+            -Profile msvc -GoArch arm64
+      - name: Reproduce the shard and stress its exact goroot binary
+        timeout-minutes: 14
+        shell: bash
+        env:
+          LLGO_BUILD_CACHE: "1"
+          LLGO_STDIO_NOBUF: "1"
+          LLGO_TEST_CHECK_SYMBOLS: "0"
+          LLGO_TEST_STD_BUILDMODES: "0"
+          SHARD_INDEX: "0"
+          SHARD_TOTAL: "2"
+        run: |
+          export LLGO="$RUNNER_TEMP/llgo-bin/llgo.exe"
+          export LLGO_TEST_LLGEN="$RUNNER_TEMP/llgo-bin/llgen.exe"
+          export CHECK_STD_SYMBOLS="$RUNNER_TEMP/llgo-bin/check_std_symbols.exe"
+          python .github/workflows/diagnose_winarm_goroot.py
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64-goroot-diagnostics
+          path: ${{ runner.temp }}/goroot-diagnostics
+          if-no-files-found: warn
