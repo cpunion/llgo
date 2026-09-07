@@ -377,6 +377,23 @@ func (b Builder) AssertNilDeref(ptr Expr) {
 	}
 	nilPtr := llvm.ConstNull(ptr.impl.Type())
 	isNil := Expr{llvm.CreateICmp(b.impl, llvm.IntEQ, ptr.impl, nilPtr), b.Prog.Bool()}
+	if b.Prog.target.GOARCH == "wasm" {
+		// Keep the successful path free of runtime calls. In particular, root
+		// chain and stack-switch helpers must not call through a panic helper
+		// while their execution owner is in transition.
+		logicalBlock := b.blk
+		entryBlock := b.impl.GetInsertBlock()
+		blks := b.Func.MakeBlocks(2)
+		b.If(isNil, blks[0], blks[1])
+		b.SetBlockEx(blks[0], AtEnd, false)
+		b.Call(b.Pkg.rtFunc("AssertNilDeref"), Expr{llvm.ConstInt(b.Prog.Bool().ll, 1, false), b.Prog.Bool()})
+		b.Jump(blks[0])
+		b.SetBlockEx(blks[1], AtEnd, false)
+		if logicalBlock.last == entryBlock {
+			logicalBlock.last = blks[1].last
+		}
+		return
+	}
 	b.InlineCall(b.Pkg.rtFunc("AssertNilDeref"), isNil)
 }
 
