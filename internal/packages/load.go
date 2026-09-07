@@ -280,8 +280,9 @@ func (tc *typecheckContext) targetCompilerAndArch() (compiler, arch string) {
 // computedSizes determines the appropriate types.Sizes for the target package.
 // When cross-compiling for WebAssembly (wasm), types.SizesFor("gc", "wasm") may
 // return nil on certain Go toolchain configurations; we explicitly fall back to
-// 32-bit word size and 4-byte alignment (&types.StdSizes{WordSize: 4, MaxAlign: 4})
-// matching the wasm32 ABI.
+// gc's 32-bit layout. Reusing the 386 gcSizes also preserves the
+// compiler-recognized sync/atomic.align64 exception that a plain StdSizes{4, 4}
+// would lose.
 func (tc *typecheckContext) computedSizes(pkg *Package) types.Sizes {
 	compiler, arch := tc.targetCompilerAndArch()
 	s := pkg.TypesSizes
@@ -289,7 +290,7 @@ func (tc *typecheckContext) computedSizes(pkg *Package) types.Sizes {
 		s = types.SizesFor(compiler, arch)
 		if s == nil {
 			if arch == "wasm" {
-				s = &types.StdSizes{WordSize: 4, MaxAlign: 4}
+				s = types.SizesFor("gc", "386")
 			} else {
 				s = types.SizesFor("gc", "amd64")
 			}

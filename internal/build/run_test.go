@@ -254,7 +254,7 @@ func TestGoCompatibleWasmRunner(t *testing.T) {
 		t.Fatalf("js runner = %q, profile %q", js, profile)
 	}
 	wasi, profile := goCompatibleWasmRunner(&Config{Goos: "wasip1", Goarch: "wasm"})
-	if profile != "GWASI" || wasi != `wasmtime --wasm multi-memory=true "{}"` {
+	if profile != "GWASI" || wasi != `wasmtime run -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "{}"` {
 		t.Fatalf("WASI runner = %q, profile %q", wasi, profile)
 	}
 	if runner, profile := goCompatibleWasmRunner(&Config{Target: "wasi", Goos: "wasip1", Goarch: "wasm"}); runner != "" || profile != "" {

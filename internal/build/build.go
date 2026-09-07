@@ -1122,7 +1122,11 @@ func goCompatibleWasmRunner(conf *Config) (runner, profile string) {
 		runtimeCommand := WasmRuntime()
 		switch runtimeCommand {
 		case "wasmtime":
-			return `wasmtime --wasm multi-memory=true "{}"`, "GWASI"
+			// Keep the same Wasmtime stack allowance as Go's
+			// go_wasip1_wasm_exec helper. LLGo currently also lowers panic and
+			// recover through Wasm EH, so enable that proposal explicitly until
+			// the raw Go profile no longer needs the target-specific lowering.
+			return `wasmtime run -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "{}"`, "GWASI"
 		case "iwasm":
 			return `iwasm --stack-size=819200000 --heap-size=800000000 "{}"`, "GWASI"
 		default:
@@ -1366,14 +1370,18 @@ func effectiveTypeSizes(sizes types.Sizes, arch string, wasmABI crosscompile.Was
 		// official Go ABI. Crucially, this temporary implementation gap does
 		// not add a C-ecosystem source tag or cache identity.
 		if arch == "wasm" {
-			return &types.StdSizes{WordSize: 4, MaxAlign: 4}
+			// Reuse gc's 32-bit layout instead of a plain StdSizes value. In
+			// addition to the ordinary four-byte word/alignment rules, gcSizes
+			// recognizes sync/atomic.align64 and gives the containing atomic
+			// value the natural alignment required by WebAssembly atomics.
+			return types.SizesFor("gc", "386")
 		}
 		return sizes
 	}
 	switch wasmABI {
 	case crosscompile.WasmABIEmscripten, crosscompile.WasmABIWASIPreview1,
 		crosscompile.WasmABIWASIPreview2, crosscompile.WasmABIFreestanding:
-		return &types.StdSizes{WordSize: 4, MaxAlign: 4}
+		return types.SizesFor("gc", "386")
 	case crosscompile.WasmABIEmscriptenMemory64:
 		return &types.StdSizes{WordSize: 8, MaxAlign: 8}
 	default:
