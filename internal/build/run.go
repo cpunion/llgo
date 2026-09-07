@@ -36,6 +36,9 @@ type testProgram struct {
 	pkgDir           string
 	pkgName          string
 	temporaryOutputs *OutFmtDetails
+	runner           string
+	runnerProfile    string
+	runnerEnv        map[string]string
 }
 
 type testRunResult struct {
@@ -147,6 +150,16 @@ func runnerPhase(mode Mode) string {
 
 func runNativeTest(commands commandEnv, program testProgram, conf *Config, stdout, stderr io.Writer) error {
 	defer removeOutFmts(program.temporaryOutputs)
+	if program.runner != "" {
+		return runEmuCmdTo(commands, program.runnerEnv, program.runner, conf.RunArgs, false, conf.PrintCommands, runnerDetails{
+			phase:       "test",
+			target:      conf.Target,
+			profile:     program.runnerProfile,
+			artifact:    program.app,
+			packageName: program.pkgName,
+			timeout:     conf.RunnerTimeout,
+		}, stdout, stderr)
+	}
 	if conf.PrintCommands {
 		fmt.Fprintf(stderr, "%s %s\n", program.app, strings.Join(conf.RunArgs, " "))
 	}
@@ -347,6 +360,10 @@ func runInEmulator(commands commandEnv, emulator, profile string, envMap map[str
 
 // runEmuCmd runs the application in emulator by formatting the emulator command template
 func runEmuCmd(commands commandEnv, envMap map[string]string, emulatorTemplate string, runArgs []string, verbose bool, printCmds bool, details runnerDetails) error {
+	return runEmuCmdTo(commands, envMap, emulatorTemplate, runArgs, verbose, printCmds, details, os.Stdout, os.Stderr)
+}
+
+func runEmuCmdTo(commands commandEnv, envMap map[string]string, emulatorTemplate string, runArgs []string, verbose bool, printCmds bool, details runnerDetails, stdout, stderr io.Writer) error {
 	// Expand the emulator command template
 	emulatorCmd := emulatorTemplate
 	for placeholder, path := range envMap {
@@ -360,7 +377,7 @@ func runEmuCmd(commands commandEnv, envMap map[string]string, emulatorTemplate s
 	}
 
 	if verbose {
-		fmt.Fprintf(os.Stderr, "Running in emulator: %s\n", emulatorCmd)
+		fmt.Fprintf(stderr, "Running in emulator: %s\n", emulatorCmd)
 	}
 
 	// Parse command and arguments safely handling quoted strings
@@ -377,7 +394,7 @@ func runEmuCmd(commands commandEnv, envMap map[string]string, emulatorTemplate s
 	// Add run arguments to the end
 	cmdParts = append(cmdParts, runArgs...)
 	if printCmds {
-		fmt.Fprintf(os.Stderr, "%s %s\n", cmdParts[0], strings.Join(cmdParts[1:], " "))
+		fmt.Fprintf(stderr, "%s %s\n", cmdParts[0], strings.Join(cmdParts[1:], " "))
 	}
 
 	// Execute the emulator command. The test binary owns its Go-level timeout;
@@ -392,8 +409,8 @@ func runEmuCmd(commands commandEnv, envMap map[string]string, emulatorTemplate s
 	cmd := exec.CommandContext(runContext, cmdParts[0], cmdParts[1:]...)
 	commands.configure(cmd)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	err = cmd.Run()
 	if err != nil {
 		status := runnerStatusStart
