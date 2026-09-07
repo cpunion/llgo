@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>LLGo WebAssembly browser acceptance</title>
+<body data-result="running"><pre id="output">running
+</pre>
+<script type="module">
+const body = document.body;
+const output = document.getElementById("output");
+const query = new URLSearchParams(location.search);
+let initialized = false;
+let completed = false;
+let failed = false;
+const log = message => { output.textContent += `${message}\n`; };
+const fail = error => {
+  failed = true;
+  body.dataset.result = "fail";
+  log(error?.stack || String(error));
+};
+const update = () => {
+  if (!failed && initialized && completed) body.dataset.result = "pass";
+};
+const print = (...args) => {
+  const message = args.join(" ");
+  log(message);
+  if (message.trim() === "wasm timers ok") {
+    completed = true;
+    update();
+  }
+};
+const recordExit = status => {
+  if (status !== 0) fail(`module exited with status ${status}`);
+};
+// Asyncify can deliver even a normal exit as an exception or rejection.
+const consumeExit = error => {
+  if (error?.name !== "ExitStatus" || !Number.isInteger(error.status)) return false;
+  recordExit(error.status);
+  return true;
+};
+// A factory promise can resolve before Asyncify resumes main. Only the final
+// fixture marker proves execution completed; later errors still override pass.
+addEventListener("error", event => {
+  if (consumeExit(event.error)) event.preventDefault();
+  else fail(event.error || event.message);
+});
+addEventListener("unhandledrejection", event => {
+  if (consumeExit(event.reason)) event.preventDefault();
+  else fail(event.reason);
+});
+const deadline = Number(query.get("deadline") || 20000);
+setTimeout(() => {
+  if (!initialized || !completed) fail("timed out waiting for wasm timers ok");
+}, deadline);
+try {
+  const name = query.get("module");
+  if (!name || !/^[a-z0-9_.-]+\.mjs$/i.test(name)) {
+    throw new Error("invalid module name");
+  }
+  const loaded = await import(`./${name}`);
+  if (typeof loaded.default !== "function") {
+    throw new Error(`${name} does not export an Emscripten module factory`);
+  }
+  await loaded.default({
+    arguments: ["browser-acceptance"],
+    print,
+    printErr: print,
+    onAbort: reason => fail(`module aborted: ${reason}`),
+    onExit: recordExit,
+    preRun: [module => {
+      if (module.ENV != null) {
+        module.ENV.LLGO_WASM_TEST_ENV = "wasm-env-ok";
+      }
+    }],
+  });
+  initialized = true;
+  update();
+} catch (error) {
+  if (consumeExit(error)) {
+    initialized = true;
+    update();
+  } else fail(error);
+}
+</script>
+</html>
