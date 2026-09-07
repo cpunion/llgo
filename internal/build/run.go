@@ -151,6 +151,12 @@ func runnerPhase(mode Mode) string {
 func runNativeTest(commands commandEnv, program testProgram, conf *Config, stdout, stderr io.Writer) error {
 	defer removeOutFmts(program.temporaryOutputs)
 	if program.runner != "" {
+		// Like native go test, execute each package in its source directory.
+		// WASI runners forward PWD explicitly into the guest environment.
+		if program.pkgDir != "" {
+			commands.dir = program.pkgDir
+			commands.environ = withEnv(commands.environ, "PWD="+program.pkgDir)
+		}
 		return runEmuCmdTo(commands, program.runnerEnv, program.runner, conf.RunArgs, false, conf.PrintCommands, runnerDetails{
 			phase:       "test",
 			target:      conf.Target,
