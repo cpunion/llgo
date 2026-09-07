@@ -113,6 +113,7 @@ type xfailEntry struct {
 	Directive string `yaml:"directive"`
 	Case      string `yaml:"case"`
 	Reason    string `yaml:"reason"`
+	Wasm      bool   `yaml:"wasm"` // Explicitly apply this known failure to wasm too.
 }
 
 type timeoutEntry struct {
@@ -385,10 +386,24 @@ func TestGoRootRunCases(t *testing.T) {
 				t.Fatalf("resource guard stopped case: %v", err)
 			}
 			match, reason := xfails.Match(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, tc)
+			wasmXFail := false
+			if wasmTarget {
+				if ok, wasmReason := xfails.MatchWasm(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, tc); ok {
+					match, reason, wasmXFail = true, wasmReason, true
+				}
+			}
 			flaky, flakyReason := xfails.MatchFlaky(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, tc)
 			notApply, notApplyReason := notApplicable.Match(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, tc)
-			result.Status, result.Reason = gorootCaseOutcome(wasmTarget, err, match, reason, notApply, notApplyReason, flaky, flakyReason)
+			result.Status, result.Reason = gorootCaseOutcome(wasmTarget, err, match, reason, notApply, notApplyReason, flaky, flakyReason, wasmXFail)
 			if wasmTarget {
+				if wasmXFail {
+					if err != nil {
+						t.Logf("expected wasm failure: %s\n%v", reason, err)
+					} else {
+						t.Logf("wasm xfail case passed: %s", reason)
+					}
+					return
+				}
 				// General expectations include native BDWGC and target-fault
 				// assumptions. They are evidence, not a wasm acceptance waiver.
 				if result.Reason != "" {
@@ -2224,6 +2239,17 @@ func parseGoVersion(goVersion string) (int, int, bool) {
 
 func (cfg xfailConfig) Match(goVersion, platform string, tc testCase) (bool, string) {
 	return matchEntries(cfg.Entries, goVersion, platform, tc)
+}
+
+func (cfg xfailConfig) MatchWasm(goVersion, platform string, tc testCase) (bool, string) {
+	for _, entry := range cfg.Entries {
+		if entry.Wasm {
+			if match, reason := matchEntries([]xfailEntry{entry}, goVersion, platform, tc); match {
+				return true, reason
+			}
+		}
+	}
+	return false, ""
 }
 
 func (cfg notApplicableConfig) Match(goVersion, platform string, tc testCase) (bool, string) {

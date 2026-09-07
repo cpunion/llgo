@@ -17,7 +17,7 @@ func TestGOROOTCaseOutcome(t *testing.T) {
 				if failure {
 					err = errors.New("guest execution failed")
 				}
-				status, reason := gorootCaseOutcome(wasm, err, expectation == "xfail", "known compiler bug", expectation == "not-applicable", "native GC assumption", expectation == "flaky", "native scheduling assumption")
+				status, reason := gorootCaseOutcome(wasm, err, expectation == "xfail", "known compiler bug", expectation == "not-applicable", "native GC assumption", expectation == "flaky", "native scheduling assumption", false)
 				want := "pass"
 				if failure {
 					want = "fail"
@@ -36,6 +36,21 @@ func TestGOROOTCaseOutcome(t *testing.T) {
 					t.Errorf("expectation=%s wasm=%v failure=%v: (%s, %q), want %s", expectation, wasm, failure, status, reason, want)
 				}
 			}
+		}
+	}
+}
+
+func TestGOROOTExplicitWasmXFailOutcome(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		var err error
+		want := "pass"
+		if failed {
+			err = errors.New("known compiler failure")
+			want = "expected-failure"
+		}
+		status, reason := gorootCaseOutcome(true, err, true, "tracked compiler issue", false, "", false, "", true)
+		if status != want || reason != "tracked compiler issue" {
+			t.Fatalf("failed=%v: (%s, %q), want (%s, tracked compiler issue)", failed, status, reason, want)
 		}
 	}
 }

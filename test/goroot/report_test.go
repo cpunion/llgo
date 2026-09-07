@@ -79,7 +79,7 @@ func (r *gorootReport) write(name string) error {
 	return os.Rename(f.Name(), name)
 }
 
-func gorootCaseOutcome(wasm bool, err error, xfail bool, xfailReason string, notApply bool, notApplyReason string, flaky bool, flakyReason string) (status, reason string) {
+func gorootCaseOutcome(wasm bool, err error, xfail bool, xfailReason string, notApply bool, notApplyReason string, flaky bool, flakyReason string, wasmXFail bool) (status, reason string) {
 	status = "fail"
 	switch {
 	case xfail:
@@ -92,7 +92,7 @@ func gorootCaseOutcome(wasm bool, err error, xfail bool, xfailReason string, not
 	if err == nil {
 		return "pass", reason
 	}
-	if wasm {
+	if wasm && !(xfail && wasmXFail) {
 		return "fail", reason
 	}
 	return status, reason
