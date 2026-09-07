@@ -1,18 +1,15 @@
-//go:build !baremetal
+//go:build !baremetal && !wasm
 
 package runtime
 
-import "sync/atomic"
+import "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 
-// Reuse the standard library's compiler-recognized align64 marker rather than
-// placing an atomically accessed bare uint64 in a four-byte-aligned wasm32
-// aggregate.
-type memProfileCounter = atomic.Uint64
+type memProfileCounter = uint64
 
 func memProfileAddObject(p *memProfileCounter) {
-	p.Add(1)
+	atomic.Add(p, memProfileCounter(1))
 }
 
-func memProfileLoadObjects(p *memProfileCounter) uint64 {
-	return p.Load()
+func memProfileLoadObjects(p *memProfileCounter) memProfileCounter {
+	return atomic.Load(p)
 }

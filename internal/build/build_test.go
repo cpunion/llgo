@@ -1150,6 +1150,44 @@ func TestBaremetalRuntimeKeepsSchedulerFreeLifecycleStubs(t *testing.T) {
 	}
 }
 
+func TestRuntimeCounterSourceSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name, goos, goarch string
+		extraTags          []string
+		wasm, baremetal    bool
+	}{
+		{name: "darwin", goos: "darwin", goarch: "arm64"},
+		{name: "windows386", goos: "windows", goarch: "386"},
+		{name: "nintendoswitch", goos: "linux", goarch: "arm64", extraTags: []string{"nintendoswitch"}},
+		{name: "baremetal", goos: "linux", goarch: "arm", extraTags: []string{"baremetal"}, baremetal: true},
+		{name: "js", goos: "js", goarch: "wasm", wasm: true},
+		{name: "wasip1", goos: "wasip1", goarch: "wasm", wasm: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := gobuild.Default
+			ctx.GOOS, ctx.GOARCH = tc.goos, tc.goarch
+			ctx.BuildTags = append([]string{"llgo"}, tc.extraTags...)
+			pkg, err := ctx.ImportDir(filepath.Join(env.LLGoRuntimeDir(), "internal", "runtime"), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(pkg.Imports, "sync/atomic"); got != tc.wasm {
+				t.Errorf("standard sync/atomic import = %v, want %v", got, tc.wasm)
+			}
+			for file, want := range map[string]bool{
+				"proc_counter_wasm.go":      tc.wasm,
+				"memprofile_atomic_wasm.go": tc.wasm,
+				"proc_counter_native.go":    !tc.wasm && !tc.baremetal,
+				"memprofile_atomic.go":      !tc.wasm && !tc.baremetal,
+			} {
+				if got := slices.Contains(pkg.GoFiles, file); got != want {
+					t.Errorf("selected %s = %v, want %v", file, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestNeedsLinuxExportDynamic(t *testing.T) {
 	t.Setenv(llgoFuncInfo, "")
 	ctx := &context{buildConf: &Config{Goos: "linux"}}
