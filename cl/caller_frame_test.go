@@ -708,6 +708,33 @@ func f() { runtime.Caller(0) }
 	}
 }
 
+func TestRuntimeCallerTracksGenericInstances(t *testing.T) {
+	ssapkg, _ := buildCallerFrameSSAPackage(t, "example.com/genericcaller", `package genericcaller
+import "runtime"
+//go:noinline
+func generic[T any](v T) uintptr {
+	pc, _, _, _ := runtime.Caller(0)
+	return pc
+}
+func call() uintptr { return generic(1) }
+`)
+	var instance *gossa.Function
+	forEachCall(ssapkg.Func("call"), func(call *gossa.CallCommon) {
+		if fn := call.StaticCallee(); fn != nil && fn.Origin() == ssapkg.Func("generic") {
+			instance = fn
+		}
+	})
+	if instance == nil {
+		t.Fatal("generic call did not instantiate its callee")
+	}
+	if !functionBelongsToPackage(ssapkg, instance) {
+		t.Fatal("generic instance lost its origin package ownership")
+	}
+	if !runtimeCallerFuncSet(NewCallerTracking(), ssapkg)[instance] {
+		t.Fatal("generic runtime.Caller consumer lost its own tracked frame")
+	}
+}
+
 func TestRuntimeFrameNameNormalization(t *testing.T) {
 	tests := []struct {
 		in   string

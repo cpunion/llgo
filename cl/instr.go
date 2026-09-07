@@ -1590,6 +1590,12 @@ func functionBelongsToPackage(pkg *ssa.Package, fn *ssa.Function) bool {
 	if fn.Pkg == pkg {
 		return true
 	}
+	// Instantiations may have neither Pkg nor Parent set. Their source owner
+	// is the generic declaration; losing it also loses caller tracking for
+	// runtime.Caller inside a concrete generic function.
+	if fn.Pkg == nil && fn.Origin() != nil {
+		return functionBelongsToPackage(pkg, fn.Origin())
+	}
 	return fn.Pkg == nil && fn.Parent() != nil && functionBelongsToPackage(pkg, fn.Parent())
 }
 
