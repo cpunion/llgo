@@ -92,6 +92,46 @@ func TestFullDiscoveryIncludesRootAndExcludedSource(t *testing.T) {
 	}
 }
 
+func TestFullAuditClassifiesHostDriverSuiteWithoutExecutingIt(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "test", "cmd", "llgo")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "driver_test.go"), []byte("package llgo_test\nimport \"testing\"\nfunc TestDriver(t *testing.T) {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := json.Marshal(selectedPackage{Dir: dir, TestGoFiles: []string{"driver_test.go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	structured := func(_ string, c command) ([]byte, error) {
+		if c.Args[0] == "env" {
+			return []byte("/goroot"), nil
+		}
+		return inventory, nil
+	}
+	run := func(string, command) ([]byte, error) {
+		t.Fatal("host driver suite executed as a wasm target")
+		return nil, nil
+	}
+	reportPath := filepath.Join(root, "report.json")
+	if err := runFullAt(root, "EC32", reportPath, "go", "llgo", 0, 1, structured, run); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct{ Packages []fullPackage }
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Packages) != 1 || report.Packages[0].Status != "separate-suite" {
+		t.Fatalf("host suite accounting: %s", data)
+	}
+}
+
 func TestFullProfileCommandsKeepLLGoAndReferenceDistinct(t *testing.T) {
 	for _, name := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI", "GJS-reference", "GWASI-reference"} {
 		p, err := fullProfile(name)
