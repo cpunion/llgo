@@ -163,6 +163,11 @@ flakes:
     case: index0.go
     reason: the generated index stress program can pass, time out, or fail during LLVM target object emission on Windows 386
 xfails:
+  - version: go1.27
+    directive: run
+    case: genmeth1.go
+    wasm: true
+    reason: "x/tools v0.49.0 loses generic method type parameters while constructing SSA wrappers; tracked separately in https://github.com/xgo-dev/llgo/issues/2526"
   - platform: darwin/arm64
     directive: runoutput
     case: rangegen.go

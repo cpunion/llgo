@@ -208,6 +208,40 @@ func TestXFailMatch(t *testing.T) {
 	}
 }
 
+func TestGenmethXFailScope(t *testing.T) {
+	cfg := loadXFailConfig(t, repoRoot(t), filepath.Join("test", "goroot", "xfail.yaml"))
+	tc := testCase{RelPath: "genmeth1.go", Directive: "run"}
+	for _, platform := range []string{"linux/amd64", "darwin/arm64", "windows/amd64", "windows/386", "windows/arm64", "js/wasm", "wasip1/wasm"} {
+		match, reason := cfg.Match("go1.27.0", platform, tc)
+		if !match || !strings.Contains(reason, "https://github.com/xgo-dev/llgo/issues/2526") {
+			t.Fatalf("platform=%s: genmeth1.go must reference its separate issue, got (%v, %q)", platform, match, reason)
+		}
+	}
+	for _, platform := range []string{"js/wasm", "wasip1/wasm"} {
+		if match, _ := cfg.MatchWasm("go1.27.0", platform, tc); !match {
+			t.Fatalf("missing explicit wasm xfail for %s", platform)
+		}
+		for _, negative := range []struct {
+			version string
+			tc      testCase
+		}{
+			{"go1.26.0", tc},
+			{"go1.28.0", tc},
+			{"go1.27.0", testCase{RelPath: "genmeth2.go", Directive: "run"}},
+			{"go1.27.0", testCase{RelPath: "genmeth1.go", Directive: "compile"}},
+		} {
+			if match, _ := cfg.MatchWasm(negative.version, platform, negative.tc); match {
+				t.Fatalf("overbroad wasm xfail: platform=%s, %+v", platform, negative)
+			}
+		}
+	}
+	// An ordinary target-independent xfail must still not waive wasm acceptance.
+	cfg = xfailConfig{Entries: []xfailEntry{{Case: "*.go", Reason: "native expectation"}}}
+	if match, _ := cfg.MatchWasm("go1.27.0", "js/wasm", tc); match {
+		t.Fatal("unmarked general xfail waived wasm acceptance")
+	}
+}
+
 func TestNotApplicableMatch(t *testing.T) {
 	guardTestTimeout(t)
 	cfg := notApplicableConfig{
