@@ -700,6 +700,25 @@ func TestWithResolvedGoToolchain(t *testing.T) {
 	}
 }
 
+func TestPackageLoadEnvEnablesCInteropOnlyForNamedWasmTargets(t *testing.T) {
+	tests := []struct {
+		name, goos, goarch, target, wantCGO string
+	}{
+		{"Emscripten", "js", "wasm", "emscripten", "1"},
+		{"WASI", "wasip1", "wasm", "wasi", "1"},
+		{"raw Go wasm", "js", "wasm", "", "0"},
+		{"native", "linux", "amd64", "", "1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := commandEnv{environ: packageLoadEnv([]string{"CGO_ENABLED=1"}, tt.goos, tt.goarch, tt.target)}
+			if got.lookup("GOOS") != tt.goos || got.lookup("GOARCH") != tt.goarch || got.lookup("CGO_ENABLED") != tt.wantCGO {
+				t.Fatalf("package load environment = %q", got.environ)
+			}
+		})
+	}
+}
+
 func TestClosePackageMetas(t *testing.T) {
 	b := meta.NewBuilder()
 	b.Sym("pkg.main")
@@ -864,6 +883,7 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 				"runtime_gc_nonmoving.go",
 				"signal_baremetal_llgo.go",
 				"time_wasm_llgo.go",
+				"unique_runtime_llgo.go",
 				"unwind_wasm_llgo.go",
 			} {
 				if !selected[name] {

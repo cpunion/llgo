@@ -578,7 +578,7 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 		Dir:        dir,
 		Fset:       token.NewFileSet(),
 		Tests:      conf.Mode == ModeTest,
-		Env:        withEnv(commands.environ, "GOOS="+conf.Goos, "GOARCH="+conf.Goarch),
+		Env:        packageLoadEnv(commands.environ, conf.Goos, conf.Goarch, conf.Target),
 	}
 	if conf.Mode == ModeTest {
 		cfg.Mode |= packages.NeedForTest
