@@ -95,3 +95,19 @@ func withResolvedGoToolchain(environ []string, goversion string) []string {
 	}
 	return withEnv(environ, "GOTOOLCHAIN="+goversion)
 }
+
+// packageLoadEnv describes the source context used by go/packages. Named wasm
+// targets have a C toolchain supplied by LLGo (Emscripten or wasi-sdk), so Go's
+// cross-compilation default must not hide files that import "C". Raw GOOS/GOARCH
+// profiles keep the official Go wasm contract, where cgo is disabled.
+func packageLoadEnv(environ []string, goos, goarch, target string) []string {
+	values := []string{"GOOS=" + goos, "GOARCH=" + goarch}
+	if goarch == "wasm" {
+		cgo := "0"
+		if target != "" {
+			cgo = "1"
+		}
+		values = append(values, "CGO_ENABLED="+cgo)
+	}
+	return withEnv(environ, values...)
+}
