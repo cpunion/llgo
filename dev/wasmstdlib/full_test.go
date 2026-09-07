@@ -199,6 +199,9 @@ func TestFullProfileCommandsKeepLLGoAndReferenceDistinct(t *testing.T) {
 		if p.Target == "" && (cmd.Env["GOOS"] != p.GOOS || cmd.Env["GOARCH"] != "wasm") {
 			t.Fatalf("lost raw profile: %+v", cmd)
 		}
+		if p.Reference && cmd.Env["GOMAXPROCS"] != "1" {
+			t.Fatalf("reference runtime may try to create wasm OS threads: %+v", cmd)
+		}
 	}
 }
 
