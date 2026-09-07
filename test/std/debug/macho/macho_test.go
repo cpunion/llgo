@@ -3,29 +3,21 @@ package macho_test
 import (
 	"bytes"
 	"debug/macho"
-	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
-)
 
-const wasmMachoFixture = `z/rt/gcAAAEDAAAAAQAAAAQAAAC4AQAAACAAAAAAAAAZAAAAOAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAAAAAAAA2AEAAAAAAABwAAAAAAAAAAcAAAAHAAAAAwAAAAAAAABfX3RleHQAAAAAAAAAAAAAX19URVhUAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAADYAQAABAAAAAAAAAAAAAAAAAQAgAAAAAAAAAAAAAAAAF9fY29tcGFjdF91bndpbmRfX0xEAAAAAAAAAAAAAAAAEAAAAAAAAAAgAAAAAAAAAOgBAAADAAAASAIAAAEAAAAAAAACAAAAAAAAAAAAAAAAX19laF9mcmFtZQAAAAAAAF9fVEVYVAAAAAAAAAAAAAAwAAAAAAAAAEAAAAAAAAAACAIAAAMAAAAAAAAAAAAAAAsAAGgAAAAAAAAAAAAAAAAyAAAAGAAAAAEAAAAAABAAAAAAAAAAAAACAAAAGAAAAFACAAABAAAAYAIAABAAAAALAAAAUAAAAAAAAAAAAAAAAAAAAAEAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFVIieW4BwAAAF3DAAAAAAAAAAAAAAAAAAsAAAAAAAABAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAXpSAAF4EAEQDAcIkAEAACQAAAAcAAAAsP////////8LAAAAAAAAAABBDhCGAkMNBgAAAAAAAAAAAAAAAQAABgEAAAAPAQAAAAAAAAAAAAAAX2xsZ29fZml4dHVyZQAA`
+	"github.com/xgo-dev/llgo/test/internal/binaryfixture"
+)
 
 func buildDarwinFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	out := filepath.Join(dir, "fixture")
 	if runtime.GOARCH == "wasm" {
-		data, err := base64.StdEncoding.DecodeString(wasmMachoFixture)
-		if err != nil {
-			t.Fatalf("decode embedded Mach-O fixture: %v", err)
-		}
-		if err := os.WriteFile(out, data, 0o644); err != nil {
-			t.Fatalf("WriteFile Mach-O fixture: %v", err)
-		}
-		return out
+		return binaryfixture.MachO(t)
 	}
 	src := filepath.Join(dir, "main.go")
 	if err := os.WriteFile(src, []byte("package main\nfunc main(){}\n"), 0o644); err != nil {
@@ -67,7 +59,12 @@ func TestOpenMachoFixtureAndCoreMethods(t *testing.T) {
 		t.Fatalf("Section.Open read: %v", err)
 	}
 
-	seg := f.Segment("__TEXT")
+	segmentName := "__TEXT"
+	if f.Type == macho.TypeObj {
+		// Mach-O object files put their sections in one unnamed segment.
+		segmentName = ""
+	}
+	seg := f.Segment(segmentName)
 	if seg == nil {
 		t.Fatal("Segment(__TEXT)=nil")
 	}

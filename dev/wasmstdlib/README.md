@@ -25,7 +25,15 @@ Reviewed exclusions are reported as `not-applicable` with a package- and
 profile-specific reason: OS-only `plugin`, `syscall`, and `test/windows` tests;
 native-only CPU-profiler, BDWGC-finalizer, and signal stress suites; plus
 `test/cgo` on raw profiles where C interop is absent by contract. The same
-`test/cgo` suite remains mandatory on EC32, EC64, and WC32. The host-side
+`test/cgo` suite remains mandatory on EC32, EC64, and WC32. Official Go reference
+rows also exclude `runtime/cgo`, whose native runtime symbols cannot link on
+wasm even with cgo disabled; LLGo's handle implementation remains mandatory on
+all five LLGo profiles. JS excludes the heap-dump descriptor test because Go's
+runtime fatally rejects heap-dump writes to file descriptors above stderr;
+WASI and native profiles retain it. Stack reporting, crash-output error
+contracts, and the remaining debug APIs still execute on JS. Binary-parser
+tests use small, generated ELF, Mach-O, and PE inputs with real code and DWARF,
+without requiring a subprocess compiler inside the wasm guest. The host-side
 `test/goroot` package is reported as `separate-suite`: the same workflow
 first executes two startup sentinels (`bom.go` and `helloworld.go`) on every
 LLGo wasm profile, then unlocks the four-shard GOROOT matrix only if all
