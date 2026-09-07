@@ -360,6 +360,11 @@ func TestEmscriptenRunnersForwardProgramArguments(t *testing.T) {
 	if (JSON.stringify(config.arguments) !== '["-test.run=TestOne","value"]') {
 		throw new Error('arguments: ' + JSON.stringify(config.arguments));
 	}
+	let instantiated = false;
+	const exports = config.instantiateWasm({}, () => { instantiated = true; });
+	if (!instantiated || typeof exports !== 'object') {
+		throw new Error('wasm module was not instantiated');
+	}
 	const module = { ENV: {} };
 	for (const hook of config.preRun) hook(module);
 	if (module.ENV.LLGO_RUNNER_TEST !== 'present') {
@@ -369,10 +374,41 @@ func TestEmscriptenRunnersForwardProgramArguments(t *testing.T) {
 	if err := os.WriteFile(module, []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(strings.TrimSuffix(module, ".mjs")+".wasm", []byte("\x00asm\x01\x00\x00\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	for _, runner := range []string{"emscripten-runner.mjs", "emscripten-memory64-runner.mjs"} {
 		t.Run(runner, func(t *testing.T) {
 			cmd := exec.Command(node, filepath.Join(root, "targets", runner), module, "-test.run=TestOne", "value")
 			cmd.Env = append(os.Environ(), "LLGO_RUNNER_TEST=present")
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("runner failed: %v\n%s", err, output)
+			}
+		})
+	}
+}
+
+func TestEmscriptenRunnersAllowSingleFileModules(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatalf("node is required to test the Emscripten runners: %v", err)
+	}
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(t.TempDir(), "single.mjs")
+	const source = `export default async function(config) {
+	if (config.instantiateWasm !== undefined) {
+		throw new Error('single-file module received an external wasm loader');
+	}
+}`
+	if err := os.WriteFile(module, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, runner := range []string{"emscripten-runner.mjs", "emscripten-memory64-runner.mjs"} {
+		t.Run(runner, func(t *testing.T) {
+			cmd := exec.Command(node, filepath.Join(root, "targets", runner), module)
 			if output, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("runner failed: %v\n%s", err, output)
 			}
@@ -419,6 +455,9 @@ export default async function(config) {
 	}
 }`
 	if err := os.WriteFile(module, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(strings.TrimSuffix(module, ".mjs")+".wasm", []byte("\x00asm\x01\x00\x00\x00"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	for _, runner := range []string{"emscripten-runner.mjs", "emscripten-memory64-runner.mjs"} {
