@@ -14,8 +14,9 @@ go run ./dev/wasmstdlib -full -profile EC32 -llgo /path/to/llgo -report /tmp/ful
 The full audit requires GNU `timeout`. Each package has a five-minute build/run
 budget and a 60-second test deadline. LLGo compilation cache is reused within a
 job, but test execution is uncached. `-shard 0 -shards 2` partitions the sorted
-inventory; `other-shard` is not a pass. CI runs at most two shards concurrently
-and preserves JSON accounting and individual package logs even after failures.
+inventory; `other-shard` is not a pass. CI leaves matrix parallelism to GitHub's
+available concurrency and preserves JSON accounting and individual package logs
+even after failures. Per-runner process and memory limits remain in place.
 The normally pattern-excluded `_stress/runtime/timer` package is named
 explicitly and runs with `LLGO_STRESS_PROFILE=quick` inside the same shards.
 
@@ -34,8 +35,7 @@ The last category performs both diagnostic checks and program execution; a
 diagnostic mismatch does not bypass the build/run comparison. It does not claim
 coverage of compiler-diagnostic-only `compile` / `errorcheck` directives.
 The earlier `ci` discovery mode omitted 128 runnable cases per profile in
-Go 1.27; changing the discovery mode preserves the existing shard count and
-concurrency limit.
+Go 1.27; changing the discovery mode preserves the existing shard count.
 
 The seven-directive inventory selects 1,152 cases per profile in Go 1.27.
 
