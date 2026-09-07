@@ -40,8 +40,8 @@ func TestStorageLifecycle(t *testing.T) {
 		t.Fatal("init failed")
 	}
 	wantSize := defaultStackSize + stackAlignment
-	if len(allocated) != 2 || allocated[0] != wantSize || allocated[1] != wantSize {
-		t.Fatalf("allocated sizes = %v, want [%d %d]", allocated, wantSize, wantSize)
+	if len(allocated) != 2 || allocated[0] != wantSize+stackAlignment-1 || allocated[1] != wantSize {
+		t.Fatalf("allocated sizes = %v, want [%d %d]", allocated, wantSize+stackAlignment-1, wantSize)
 	}
 	if stackSize != wantSize || asyncifySize != wantSize {
 		t.Fatalf("returned sizes = %d/%d, want %d/%d", stackSize, asyncifySize, wantSize, wantSize)
@@ -99,8 +99,53 @@ func TestStorageDefaultSize(t *testing.T) {
 	if stackSize != defaultStackSize || asyncifySize != defaultAsyncifyStackSize {
 		t.Fatalf("default sizes = %d/%d", stackSize, asyncifySize)
 	}
-	if len(sizes) != 2 || sizes[0] != defaultStackSize || sizes[1] != defaultAsyncifyStackSize {
+	if len(sizes) != 2 || sizes[0] != defaultStackSize+stackAlignment-1 || sizes[1] != defaultAsyncifyStackSize {
 		t.Fatalf("requested sizes = %v", sizes)
 	}
 	freeStorage(stack, asyncify, func(unsafe.Pointer) {})
+}
+
+func TestStorageAlignsAllocatorAddresses(t *testing.T) {
+	for offset := uintptr(0); offset < stackAlignment; offset++ {
+		var buffers [][]byte
+		var allocated, freed []unsafe.Pointer
+		var sizes []uintptr
+		alloc := func(size uintptr) unsafe.Pointer {
+			buf := make([]byte, size+stackAlignment)
+			buffers = append(buffers, buf)
+			base := unsafe.Pointer(&buf[0])
+			ptr := unsafe.Add(base, (offset-uintptr(base))&(stackAlignment-1))
+			allocated = append(allocated, ptr)
+			sizes = append(sizes, size)
+			return ptr
+		}
+		free := func(ptr unsafe.Pointer) { freed = append(freed, ptr) }
+		stack, size, asyncify, _, ok := allocStorage(127, alloc, free)
+		if !ok {
+			t.Fatalf("offset %d: allocation failed", offset)
+		}
+		base := uintptr(alignedStackBase(stack))
+		if base%stackAlignment != 0 || (base+size)%stackAlignment != 0 {
+			t.Fatalf("offset %d: stack range [%x, %x) is misaligned", offset, base, base+size)
+		}
+		if base < uintptr(stack) || base+size > uintptr(stack)+sizes[0] {
+			t.Fatalf("offset %d: aligned stack exceeds its allocation", offset)
+		}
+		freeStorage(stack, asyncify, free)
+		if len(freed) != 2 || freed[0] != allocated[0] || freed[1] != allocated[1] {
+			t.Fatalf("offset %d: did not free the original allocation pointers", offset)
+		}
+	}
+}
+
+func TestStorageRejectsSizeOverflow(t *testing.T) {
+	for _, size := range []uintptr{^uintptr(0), ^uintptr(0) - stackAlignment + 2} {
+		_, _, _, _, ok := allocStorage(size, func(uintptr) unsafe.Pointer {
+			t.Fatal("overflow reached allocator")
+			return nil
+		}, func(unsafe.Pointer) { t.Fatal("overflow reached free") })
+		if ok {
+			t.Fatalf("size %d accepted", size)
+		}
+	}
 }
