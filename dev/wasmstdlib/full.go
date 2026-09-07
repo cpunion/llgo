@@ -125,6 +125,25 @@ func fullSourceContext(p profile) (tags string, cgo string) {
 	return tags, "1"
 }
 
+// fullSourceExclusion classifies packages whose own build constraints define
+// them outside every wasm source context. Keep this list narrow and explicit:
+// an unrecognized source exclusion remains a failing acceptance result.
+func fullSourceExclusion(p profile, pkg string) (string, bool) {
+	switch pkg {
+	case "test/std/plugin":
+		return "tests select only darwin, linux, or windows; wasm has no dynamic plugin loader", true
+	case "test/std/syscall":
+		return "tests select Unix or Windows syscall surfaces, neither of which is the js/wasm or wasip1/wasm ABI", true
+	case "test/windows":
+		return "Windows-only integration suite", true
+	case "test/cgo":
+		if p.Target == "" {
+			return "raw Go-compatible wasm profiles have no C interop; the same suite is mandatory on EC32, EC64, and WC32", true
+		}
+	}
+	return "", false
+}
+
 func testWitness(pkg selectedPackage) (string, error) {
 	for _, file := range append(append([]string{}, pkg.TestGoFiles...), pkg.XTestGoFiles...) {
 		f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(pkg.Dir, file), nil, 0)
@@ -231,7 +250,11 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 		case e.Package == "test/cmd/llgo":
 			e.Status, e.Reason = "separate-suite", "compiler-driver subprocess tests execute in the regular host CI suite"
 		case !exists || len(pkg.TestGoFiles)+len(pkg.XTestGoFiles) == 0:
-			e.Status, e.Reason = "source-excluded", "no tests selected by source context; applicability not yet established"
+			if reason, classified := fullSourceExclusion(p, e.Package); classified {
+				e.Status, e.Reason = "not-applicable", reason
+			} else {
+				e.Status, e.Reason = "source-excluded", "no tests selected by source context; applicability not yet established"
+			}
 		case pkg.Error != nil:
 			e.Status, e.Reason = "fail", pkg.Error.Err
 		default:
@@ -253,7 +276,7 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 				e.Status, e.Reason = "fail", runErr.Error()
 			}
 		}
-		if e.Status != "pass" && e.Status != "separate-suite" {
+		if e.Status != "pass" && e.Status != "separate-suite" && e.Status != "not-applicable" {
 			failures++
 		}
 		fmt.Printf("%s %s: %s %s\n", name, e.Package, e.Status, e.Reason)

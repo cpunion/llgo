@@ -132,6 +132,49 @@ func TestFullAuditClassifiesHostDriverSuiteWithoutExecutingIt(t *testing.T) {
 	}
 }
 
+func TestFullAuditAcceptsReviewedSourceExclusions(t *testing.T) {
+	root := t.TempDir()
+	for _, pkg := range []string{"test/cgo", "test/std/plugin", "test/std/syscall", "test/windows"} {
+		name := filepath.Join(root, pkg, "excluded_test.go")
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte("//go:build windows\n\npackage excluded\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	structured := func(_ string, c command) ([]byte, error) {
+		if c.Args[0] == "env" {
+			return []byte("/goroot"), nil
+		}
+		return nil, nil
+	}
+	run := func(string, command) ([]byte, error) {
+		t.Fatal("source-excluded package was executed")
+		return nil, nil
+	}
+	reportPath := filepath.Join(root, "report.json")
+	if err := runFullAt(root, "GJS", reportPath, "go", "llgo", 0, 1, structured, run); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct{ Packages []fullPackage }
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Packages) != 4 {
+		t.Fatalf("reviewed exclusion accounting: %s", data)
+	}
+	for _, pkg := range report.Packages {
+		if pkg.Status != "not-applicable" || pkg.Reason == "" {
+			t.Fatalf("reviewed exclusion accounting: %s", data)
+		}
+	}
+}
+
 func TestFullProfileCommandsKeepLLGoAndReferenceDistinct(t *testing.T) {
 	for _, name := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI", "GJS-reference", "GWASI-reference"} {
 		p, err := fullProfile(name)
@@ -190,6 +233,27 @@ func TestFullSourceContextMatchesCompilerProfiles(t *testing.T) {
 				t.Fatalf("reference tags = %q", tags)
 			}
 		})
+	}
+}
+
+func TestFullSourceExclusionsAreProfileSpecific(t *testing.T) {
+	for _, name := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI", "GJS-reference", "GWASI-reference"} {
+		p, err := fullProfile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pkg := range []string{"test/std/plugin", "test/std/syscall", "test/windows"} {
+			if reason, ok := fullSourceExclusion(p, pkg); !ok || reason == "" {
+				t.Fatalf("%s did not classify %s", name, pkg)
+			}
+		}
+		_, cgoExcluded := fullSourceExclusion(p, "test/cgo")
+		if want := p.Target == ""; cgoExcluded != want {
+			t.Fatalf("%s cgo exclusion = %v, want %v", name, cgoExcluded, want)
+		}
+		if _, ok := fullSourceExclusion(p, "test/std/fmt"); ok {
+			t.Fatalf("%s classified an applicable package", name)
+		}
 	}
 }
 
