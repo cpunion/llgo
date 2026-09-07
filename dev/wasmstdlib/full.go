@@ -82,6 +82,11 @@ func fullCommand(p profile, goCmd, llgo, goRoot, pkg string) command {
 		program = goCmd
 		args = append(args, "-exec="+strconv.Quote(filepath.Join(goRoot, "lib", "wasm", "go_"+p.GOOS+"_wasm_exec")))
 		env["GOWASIRUNTIME"] = "wasmtime"
+		// Match the official Go wasm execution contract. The current js/wasm
+		// and wasip1/wasm runtimes do not create operating-system threads, so
+		// inheriting a wider CI GOMAXPROCS makes the reference runtime call
+		// newosproc and abort before package initialization.
+		env["GOMAXPROCS"] = "1"
 	}
 	if p.Target != "" {
 		args = append(args, "-target", p.Target, "-emulator")
