@@ -71,6 +71,12 @@ native runner while compiling both the official Go baseline and LLGo output for
 WebAssembly. LLGo supports `EC32`, `EC64`, `WC32`, `GJS`, and `GWASI`; the
 generated programs run through the profile's Node or Wasmtime adapter.
 
+General native xfail, flaky, and not-applicable entries do not waive WebAssembly
+acceptance. A confirmed shared compiler defect may explicitly set `wasm: true`
+on its xfail entry, with a narrowly scoped case/version and a tracking issue.
+Such cases still execute and preserve diagnostics in the report as
+`expected-failure`; an unexpected pass is reported as `pass`, not as a skip.
+
 ```bash
 go test ./test/goroot -count=1 -args \
   -goroot "$(go env GOROOT)" \
