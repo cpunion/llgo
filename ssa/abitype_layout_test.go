@@ -85,6 +85,43 @@ func TestGo386StructPhysicalLayoutDiffersFromC(t *testing.T) {
 	}
 }
 
+func TestWasm32NestedStructLayoutMatchesReflectionOffsets(t *testing.T) {
+	prog := NewProgram(&Target{GOOS: "js", GOARCH: "wasm", LLVMTarget: "wasm32-unknown-unknown"})
+	defer prog.Dispose()
+	prog.TypeSizes(&types.StdSizes{WordSize: 4, MaxAlign: 4})
+
+	timeFields := []*types.Var{
+		types.NewField(token.NoPos, nil, "Wall", types.Typ[types.Uint64], false),
+		types.NewField(token.NoPos, nil, "Ext", types.Typ[types.Int64], false),
+		types.NewField(token.NoPos, nil, "Loc", types.Typ[types.UnsafePointer], false),
+	}
+	timeStruct := types.NewStruct(timeFields, nil)
+	pkg := types.NewPackage("example.com/time", "time")
+	timeType := types.NewNamed(types.NewTypeName(token.NoPos, pkg, "Time", nil), timeStruct, nil)
+	validity := types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, nil, "Start", timeType, false),
+		types.NewField(token.NoPos, nil, "End", timeType, false),
+	}, nil)
+
+	timeLLVM := prog.Type(timeType, InGo)
+	if got, want := prog.SizeOf(timeLLVM), uint64(20); got != want {
+		t.Fatalf("wasm32 time-like size = %d, want %d", got, want)
+	}
+	if got, want := prog.AlignOf(timeLLVM), uint64(4); got != want {
+		t.Fatalf("wasm32 time-like alignment = %d, want %d", got, want)
+	}
+	validityLLVM := prog.Type(validity, InGo)
+	if got, want := prog.SizeOf(validityLLVM), uint64(40); got != want {
+		t.Fatalf("wasm32 pair size = %d, want %d", got, want)
+	}
+	if got, want := prog.OffsetOf(validityLLVM, 1), uint64(20); got != want {
+		t.Fatalf("wasm32 second field offset = %d, want %d", got, want)
+	}
+	if got, want := (&aBuilder{Prog: prog}).abiStructFieldOffsets(validity)[1], int64(20); got != want {
+		t.Fatalf("reflected second field offset = %d, want %d", got, want)
+	}
+}
+
 func TestGo386StructLayoutEdgeCases(t *testing.T) {
 	prog := NewProgram(&Target{GOOS: "windows", GOARCH: "386"})
 	defer prog.Dispose()
