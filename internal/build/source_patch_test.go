@@ -111,6 +111,50 @@ func TestWASIHostStatRecordsKeepWireOffsetsOnC32(t *testing.T) {
 	}
 }
 
+func TestWASIPollRecordsKeepWireLayout(t *testing.T) {
+	fset := token.NewFileSet()
+	path := filepath.Join(env.LLGoRuntimeDir(), "internal", "lib", "runtime", "poll_wasip1_llgo.go")
+	src, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := &ast.File{Name: ast.NewIdent("runtime")}
+	for _, decl := range src.Decls {
+		if decl, ok := decl.(*ast.GenDecl); ok && decl.Tok == token.TYPE {
+			file.Decls = append(file.Decls, decl)
+		}
+	}
+	for _, align := range []int64{4, 8} {
+		sizes := &types.StdSizes{WordSize: 4, MaxAlign: align}
+		conf := types.Config{Sizes: sizes}
+		pkg, err := conf.Check("runtime", fset, []*ast.File{file}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, want := range map[string]struct {
+			size    int64
+			offsets []int64
+		}{
+			"wasiPollSubscription": {48, []int64{0, 8, 16, 20, 24, 32, 40}},
+			"wasiPollEvent":        {32, []int64{0, 8, 10, 11, 16, 24, 26}},
+		} {
+			st := pkg.Scope().Lookup(name).Type().Underlying().(*types.Struct)
+			fields := make([]*types.Var, st.NumFields())
+			for i := range fields {
+				fields[i] = st.Field(i)
+			}
+			if got := sizes.Sizeof(st); got != want.size {
+				t.Errorf("align %d %s size=%d, want %d", align, name, got, want.size)
+			}
+			for i, got := range sizes.Offsetsof(fields) {
+				if got != want.offsets[i] {
+					t.Errorf("align %d %s field %d offset=%d, want %d", align, name, i, got, want.offsets[i])
+				}
+			}
+		}
+	}
+}
+
 func TestJSWasmRuntimeHostImportsUseCABI(t *testing.T) {
 	for _, target := range []string{"", "emscripten"} {
 		t.Run(map[bool]string{true: "GJS", false: "Emscripten"}[target == ""], func(t *testing.T) {
