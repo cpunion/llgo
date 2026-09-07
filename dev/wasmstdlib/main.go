@@ -281,11 +281,21 @@ func runSlice(r *report, cases []testCase, run func(testCase) ([]byte, error), s
 }
 
 func main() {
+	full := flag.Bool("full", false, "audit all test/ packages, continuing after failures")
+	shard := flag.Int("shard", 0, "full-audit shard index")
+	shards := flag.Int("shards", 1, "full-audit shard count")
 	profileName := flag.String("profile", "", "EC32, EC64, WC32, GJS-reference, or GWASI-reference")
 	reportPath := flag.String("report", "", "output JSON file (required)")
 	llgo := flag.String("llgo", "llgo", "LLGo executable")
 	goCmd := flag.String("go", "go", "Go executable")
 	flag.Parse()
+	if *full {
+		if err := runFull(*profileName, *reportPath, *goCmd, *llgo, *shard, *shards); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(*profileName, *reportPath, *goCmd, *llgo); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
