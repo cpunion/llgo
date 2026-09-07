@@ -14,13 +14,14 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/xgo-dev/llgo/test/internal/rsafixture"
 )
 
 func generateTestCert(t *testing.T) ([]byte, []byte) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("Failed to generate private key: %v", err)
-	}
+	// Certificate/TLS tests retain signing and key serialization; RSA prime
+	// generation has its own tests and need not dominate every certificate.
+	priv := rsafixture.New(0)
 
 	template := x509.Certificate{
 		SerialNumber: big.NewInt(1),
