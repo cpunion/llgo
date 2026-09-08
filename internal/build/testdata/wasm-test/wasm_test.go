@@ -73,6 +73,16 @@ func TestExplicitGCDoesNotStarveRunnableGoroutines(t *testing.T) {
 	}
 }
 
+func TestGCStatsCountCollections(t *testing.T) {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if after.NumGC <= before.NumGC {
+		t.Fatalf("NumGC = %d after explicit collection, want greater than %d", after.NumGC, before.NumGC)
+	}
+}
+
 func TestPanicRecoverAndCaller(t *testing.T) {
 	defer func() {
 		got := recover()
