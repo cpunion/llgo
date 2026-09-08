@@ -989,6 +989,13 @@ func emitWasmFuncInfoEntrySites(mod llvm.Module, symbolIDs map[string]uint64) {
 		// the link phase addresses the surviving row by name after a probe link has
 		// identified the functions that wasm-ld kept naturally.
 		row.SetLinkage(llvm.LinkOnceODRLinkage)
+		// Without an individual section group, LLVM places all of a package's
+		// rows in one data segment. Rooting one live row during the second link
+		// then retains every row and its otherwise-dead function, potentially
+		// resurrecting unresolved imports from unused package-main functions.
+		comdat := mod.Comdat(row.Name())
+		comdat.SetSelectionKind(llvm.AnyComdatSelectionKind)
+		row.SetComdat(comdat)
 		row.SetGlobalConstant(true)
 		row.SetAlignment(8)
 		row.SetSection(entrySiteSectionInfo.elf)

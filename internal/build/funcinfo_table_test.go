@@ -410,6 +410,55 @@ func TestWasmFuncInfoUsesExactEntriesOnlyForAddressTakenFunctions(t *testing.T) 
 	}
 }
 
+func TestWasmFuncInfoRowsHaveIndependentLinkerLiveness(t *testing.T) {
+	compiler, err := exec.LookPath("clang")
+	if err != nil {
+		t.Fatalf("clang is required: %v", err)
+	}
+	linker, err := exec.LookPath("wasm-ld")
+	if err != nil {
+		t.Fatalf("wasm-ld is required: %v", err)
+	}
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "js", GOARCH: "wasm"})
+	defer prog.Dispose()
+	pkg := prog.NewPackage("entry-liveness", "entry-liveness")
+	mod := pkg.Module()
+	ctx := mod.Context()
+	fnType := llvm.FunctionType(ctx.VoidType(), nil, false)
+	missing := llvm.AddFunction(mod, "missing_from_dead_function", fnType)
+	live := llvm.AddFunction(mod, "live", fnType)
+	dead := llvm.AddFunction(mod, "dead", fnType)
+	live.SetSection(".text.live")
+	dead.SetSection(".text.dead")
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(ctx.AddBasicBlock(live, "entry"))
+	builder.CreateRetVoid()
+	builder.SetInsertPointAtEnd(ctx.AddBasicBlock(dead, "entry"))
+	llvm.CreateCall(builder, fnType, missing, nil)
+	builder.CreateRetVoid()
+	addresses := llvm.ConstArray(live.Type(), []llvm.Value{live, dead})
+	unused := llvm.AddGlobal(mod, addresses.Type(), "unused_addresses")
+	unused.SetInitializer(addresses)
+	unused.SetLinkage(llvm.InternalLinkage)
+	emitWasmFuncInfoEntrySites(mod, map[string]uint64{"live": 1, "dead": 2})
+	dir := t.TempDir()
+	ir := filepath.Join(dir, "entries.ll")
+	object := filepath.Join(dir, "entries.o")
+	if err := os.WriteFile(ir, []byte(mod.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(compiler, "--target=wasm32-unknown-unknown", "-c", ir, "-o", object).CombinedOutput(); err != nil {
+		t.Fatalf("compile funcinfo entries: %v\n%s", err, output)
+	}
+	// Exporting one row must not keep its neighboring row and thereby introduce
+	// the dead function's unresolved import. No emcc, Node, or Go runtime needed.
+	args := []string{"--no-entry", "--gc-sections", "--export=" + wasmFuncInfoEntryPrefix + "live", object, "-o", filepath.Join(dir, "entries.wasm")}
+	if output, err := exec.Command(linker, args...).CombinedOutput(); err != nil {
+		t.Fatalf("live funcinfo row retained an unrelated function: %v\n%s", err, output)
+	}
+}
+
 func TestFuncInfoTableSitesDisabledKeepsTables(t *testing.T) {
 	prog := llssa.NewProgram(nil)
 	src := prog.NewPackage("example.com/p", "example.com/p")
