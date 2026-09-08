@@ -17,6 +17,7 @@
 package build
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/xgo-dev/llgo/internal/clang"
 	gllvm "github.com/xgo-dev/llvm"
 )
 
@@ -34,6 +36,10 @@ type wasmFuncInfoRelink struct {
 	inputs    []string
 	userMap   bool
 	stdoutMap bool
+	// An opaque response file may select an unknown map path. --print-map
+	// always wins over -Map in wasm-ld, so capture only the probe's stdout
+	// and always perform a final link with the original arguments afterward.
+	stdoutProbe bool
 }
 
 func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs, linkArgs []string) (*wasmFuncInfoRelink, error) {
@@ -45,8 +51,10 @@ func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs, linkArgs
 	}
 	// A linker accepts only one map destination. Reuse an explicitly requested
 	// map instead of silently overriding -extldflags with our private probe.
-	path := wasmLinkMapOutput(ctx.linker().LinkArguments(linkArgs...))
-	if path != "" && path != "-" {
+	args := ctx.linker().LinkArguments(linkArgs...)
+	stdoutProbe := wasmLinkNeedsStdoutProbe(args)
+	path := wasmLinkMapOutput(args)
+	if !stdoutProbe && path != "" && path != "-" {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(ctx.commands.dir, path)
 		}
@@ -61,7 +69,7 @@ func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs, linkArgs
 		_ = os.Remove(name)
 		return nil, fmt.Errorf("close WebAssembly funcinfo link map: %w", err)
 	}
-	return &wasmFuncInfoRelink{mapPath: name, inputs: slices.Clone(inputs), stdoutMap: path == "-"}, nil
+	return &wasmFuncInfoRelink{mapPath: name, inputs: slices.Clone(inputs), stdoutMap: path == "-", stdoutProbe: stdoutProbe}, nil
 }
 
 // A stdout map is captured privately during the probe. Publish it only when
@@ -94,7 +102,54 @@ func (p *wasmFuncInfoRelink) probeArgs() []string {
 	if p == nil || p.userMap {
 		return nil
 	}
+	if p.stdoutProbe {
+		return []string{"-Xlinker", "--print-map"}
+	}
 	return []string{"-Xlinker", "--Map=" + p.mapPath}
+}
+
+func (p *wasmFuncInfoRelink) linkProbe(cmd *clang.Cmd, args []string) error {
+	args = append(slices.Clone(args), p.probeArgs()...)
+	if p == nil || !p.stdoutProbe {
+		return cmd.Link(args...)
+	}
+	f, err := os.Create(p.mapPath)
+	if err != nil {
+		return fmt.Errorf("open WebAssembly probe stdout map: %w", err)
+	}
+	return linkWasmMapProbe(cmd, f, args)
+}
+
+func linkWasmMapProbe(cmd *clang.Cmd, output io.WriteCloser, args []string) (err error) {
+	stdout := cmd.Stdout
+	cmd.Stdout = output
+	defer func() {
+		cmd.Stdout = stdout
+		if closeErr := output.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close WebAssembly probe stdout map: %w", closeErr))
+		}
+	}()
+	return cmd.Link(args...)
+}
+
+// Do not expand user response files: Clang, wasm-ld and emcc have different
+// tokenizers, encodings and path rules. Passing the original arguments to the
+// final driver preserves those rules, including nested files and spaced paths.
+// Automatic driver response-file creation happens after this inspection and
+// does not select this extra-link path for ordinary large command lines.
+func wasmLinkNeedsStdoutProbe(args []string) bool {
+	for _, arg := range args {
+		options := []string{arg}
+		if strings.HasPrefix(arg, "-Wl,") {
+			options = strings.Split(strings.TrimPrefix(arg, "-Wl,"), ",")
+		}
+		for _, option := range options {
+			if strings.HasPrefix(option, "@") || option == "--print-map" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *wasmFuncInfoRelink) liveEntryObject(ctx *context) (string, error) {
