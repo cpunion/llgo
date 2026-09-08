@@ -34,11 +34,14 @@ if [[ "$target_count" -ne 1 || "$timeout_value" == true ]]; then
   exit 2
 fi
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
-command -v pwsh >/dev/null
+command -v pwsh >/dev/null || { echo 'pwsh is required for Windows diagnostics' >&2; exit 2; }
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 diagnostic_dir="$RUNNER_TEMP/llgo-windows-test-go-diagnostics"
 # Do not overwrite evidence or restoration state from an earlier invocation.
-mkdir "$diagnostic_dir"
+mkdir "$diagnostic_dir" || {
+  echo "Cannot create diagnostic directory: $diagnostic_dir; refusing to overwrite prior evidence" >&2
+  exit 2
+}
 evidence_dir="$diagnostic_dir/evidence"
 mkdir "$evidence_dir" "$diagnostic_dir/dumps"
 

@@ -8,6 +8,7 @@
 package windowsdiagnostics
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,7 +86,8 @@ func (f fixture) run(t *testing.T, args ...string) (int, string) {
 	if err == nil {
 		return 0, string(out)
 	}
-	if e, ok := err.(*exec.ExitError); ok {
+	var e *exec.ExitError
+	if errors.As(err, &e) {
 		return e.ExitCode(), string(out)
 	}
 	t.Fatalf("run diagnostic script: %v\n%s", err, out)
@@ -229,10 +231,25 @@ func TestExistingEvidenceIsNotOverwritten(t *testing.T) {
 	if status, out := f.run(t, coverageArgs()...); status != 0 {
 		t.Fatalf("first exit %d: %s", status, out)
 	}
-	if status, out := f.run(t, coverageArgs()...); status == 0 {
-		t.Fatalf("existing evidence was overwritten: %s", out)
+	if status, out := f.run(t, coverageArgs()...); status != 2 || !strings.Contains(out, "refusing to overwrite prior evidence") {
+		t.Fatalf("existing evidence rejection: exit %d: %s", status, out)
 	}
 	if got := read(t, filepath.Join(f.dir, "modes")); got != "Prepare\nFinish\n" {
 		t.Fatalf("second invocation changed WER: %q", got)
+	}
+}
+
+func TestMissingPowerShellFailsBeforeChangingState(t *testing.T) {
+	f := newFixture(t)
+	// An empty PATH isolates the missing-tool case even when pwsh is installed
+	// on the host. f.shell is absolute; all preceding checks are bash builtins.
+	t.Setenv("PATH", t.TempDir())
+	if status, out := f.run(t, coverageArgs()...); status != 2 || !strings.Contains(out, "pwsh is required") {
+		t.Fatalf("missing-tool rejection: exit %d: %s", status, out)
+	}
+	for _, name := range []string{"modes", "args", "llgo-windows-test-go-diagnostics"} {
+		if _, err := os.Stat(filepath.Join(f.dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("missing tool changed %s: %v", name, err)
+		}
 	}
 }

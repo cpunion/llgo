@@ -21,10 +21,22 @@ func TestPowerShellHelperParses(t *testing.T) {
 	}
 	t.Setenv("LLGO_WER_SCRIPT_TO_PARSE", script)
 	cmd := exec.Command(shell, "-NoProfile", "-NonInteractive", "-Command", `
+$ErrorActionPreference = 'Stop'
 $tokens = $null
 $parseErrors = $null
-$null = [System.Management.Automation.Language.Parser]::ParseFile($env:LLGO_WER_SCRIPT_TO_PARSE, [ref]$tokens, [ref]$parseErrors)
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($env:LLGO_WER_SCRIPT_TO_PARSE, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count -ne 0) { $parseErrors | Out-String | Write-Error; exit 1 }
+# Exercise only the metadata function, never the registry operations.
+$helper = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Read-NativeMetadata' }, $true)
+if ($null -eq $helper) { throw 'metadata helper is missing' }
+. ([scriptblock]::Create($helper.Extent.Text))
+$result = Read-NativeMetadata -Executable $env:ComSpec -NativeArguments @('/d', '/c', 'echo fixture-ok') | Out-String
+if ($result -notmatch 'fixture-ok' -or $result -match 'probe failed') { throw "successful probe: $result" }
+$result = Read-NativeMetadata -Executable $env:ComSpec -NativeArguments @('/d', '/c', 'exit /b 7') | Out-String
+if ($result -notmatch 'Metadata probe failed' -or $result -notmatch 'exit code 7') { throw "failed probe: $result" }
+$result = Read-NativeMetadata -Executable '__llgo_missing_metadata_probe__' -NativeArguments @() | Out-String
+if ($result -notmatch 'Metadata probe failed') { throw "probe exception: $result" }
+exit 0
 `)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("parse WER helper: %v\n%s", err, out)

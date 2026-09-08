@@ -24,11 +24,18 @@ function Invoke-Registry([string[]]$RegistryArguments) {
 }
 
 function Read-NativeMetadata([string]$Executable, [string[]]$NativeArguments) {
-  & $Executable @NativeArguments
-  if ($LASTEXITCODE -ne 0) { throw "$Executable failed with exit code $LASTEXITCODE" }
+  try {
+    & $Executable @NativeArguments 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
+  } catch {
+    "Metadata probe failed ($Executable): $($_.Exception.Message)"
+  }
 }
 
 if ($Mode -eq 'Prepare') {
+  # Missing build tools are configuration errors. Optional version/CPU probes
+  # below must not prevent the coverage command from running.
+  $null = Get-Command go, clang -CommandType Application -ErrorAction Stop
   if (Test-Path -LiteralPath $statePath) { throw 'WER restoration state already exists' }
   $existed = Test-Path -LiteralPath $key
   $addedValues = @('DumpFolder', 'DumpType', 'DumpCount')
@@ -56,10 +63,14 @@ if ($Mode -eq 'Prepare') {
     (Read-NativeMetadata -Executable go -NativeArguments @('env', 'GOOS', 'GOARCH', 'GOVERSION', 'CC', 'CGO_ENABLED'))
     (Read-NativeMetadata -Executable clang -NativeArguments @('--version'))
   ) | Set-Content -LiteralPath (Join-Path $evidence 'metadata.txt') -Encoding utf8
-  Get-CimInstance Win32_Processor |
-    Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors |
-    Format-List | Out-String |
-    Add-Content -LiteralPath (Join-Path $evidence 'metadata.txt') -Encoding utf8
+  $processorMetadata = try {
+    Get-CimInstance Win32_Processor |
+      Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors |
+      Format-List | Out-String
+  } catch {
+    "Processor metadata probe failed: $($_.Exception.Message)"
+  }
+  $processorMetadata | Add-Content -LiteralPath (Join-Path $evidence 'metadata.txt') -Encoding utf8
   exit 0
 }
 
