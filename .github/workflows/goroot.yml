@@ -50,7 +50,7 @@ jobs:
           go test ./internal/abi ./ssa ./cl \
             -run 'Test(LowerLarge|LargeAggregate|Compile.*GCRoot|GCSafepoint|.*GCRoot.*)' \
             -count=1 -coverprofile="$RUNNER_TEMP/evidence/compiler.cover"
-          go test ./internal/build -run '^TestLowerLargeAggregatesGCPolicy$' \
+          go test ./internal/build -run '^Test(CoalesceWasmPanicLocations|LowerLargeAggregatesGCPolicy)' \
             -count=1 -coverprofile="$RUNNER_TEMP/evidence/build-policy.cover"
       - name: Exercise aggregate snapshots and iterators across GC
         if: matrix.profile == 'EC64'
@@ -61,7 +61,7 @@ jobs:
           test -s "$RUNNER_TEMP/evidence/aggregate.wasm"
           GOGC=1 timeout 60s node targets/emscripten-memory64-runner.mjs \
             "$RUNNER_TEMP/evidence/aggregate.mjs" \
-            -test.v '-test.run=^Test(Large(Aggregate|Struct)|RangeIterator)GCRoots$' -test.count=3 -test.timeout=45s \
+            -test.v '-test.run=^Test((Large(Aggregate|Struct)|RangeIterator)GCRoots|Caller.*|PanicRecoverAndCaller|NilPointerAndFunctionRecovery|NilStoreOperandOrder)$' -test.count=3 -test.timeout=45s \
             2>&1 | tee "$RUNNER_TEMP/evidence/aggregate.log"
       - name: Preserve and run original EC64 index program
         if: matrix.profile == 'EC64'
@@ -103,7 +103,7 @@ jobs:
           failed=0
           GOGC=1 timeout 60s wasmtime run --dir=/ --env PWD --env PATH --env GOGC \
             -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/exit.wasm" \
-            -test.v -test.count=3 -test.timeout=45s '-test.run=^Test(Large(Aggregate|Struct)|RangeIterator)GCRoots$' \
+            -test.v -test.count=3 -test.timeout=45s '-test.run=^Test((Large(Aggregate|Struct)|RangeIterator)GCRoots|Caller.*|PanicRecoverAndCaller|NilPointerAndFunctionRecovery|NilStoreOperandOrder)$' \
             2>&1 | tee "$evidence/aggregate.log" || failed=1
           for iteration in {1..10}; do
           for policy in 100 off 1; do
@@ -157,6 +157,41 @@ jobs:
               }
               printf 'cold registry GOGC=%s profiling=%s PASS\n' "$policy" "$mode"
             done
+          done
+      - name: Compile and execute the original complex-division table
+        if: ${{ !cancelled() }}
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          evidence="$RUNNER_TEMP/evidence"
+          goroot="$(go env GOROOT)"
+          args=()
+          if [[ "$PROFILE" == EC64 ]]; then
+            args=(-target emscripten-memory64)
+            module="$evidence/cmplxdivide.mjs"
+          else
+            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
+            module="$evidence/cmplxdivide.wasm"
+          fi
+          /usr/bin/time -v timeout 5m "$RUNNER_TEMP/llgo" build "${args[@]}" -o "$module" \
+            "$goroot/test/cmplxdivide.go" "$goroot/test/cmplxdivide1.go" \
+            > "$evidence/cmplxdivide-build.log" 2>&1 || {
+              cat "$evidence/cmplxdivide-build.log"; exit 1;
+            }
+          for policy in 100 1; do
+            log="$evidence/cmplxdivide-$policy.log"
+            if [[ "$PROFILE" == EC64 ]]; then
+              command=(node targets/emscripten-memory64-runner.mjs "$module")
+            else
+              command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC
+                -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
+            fi
+            GOGC="$policy" /usr/bin/time -v -o "$evidence/cmplxdivide-$policy-time.txt" \
+              timeout 60s "${command[@]}" > "$log" 2>&1 || {
+                cat "$log"; exit 1;
+              }
+            test ! -s "$log" || { cat "$log"; exit 1; }
+            printf 'original cmplxdivide GOGC=%s PASS\n' "$policy"
           done
       - name: Preserve source, modules, and bounded execution evidence
         if: always()
