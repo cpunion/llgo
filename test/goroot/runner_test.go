@@ -417,6 +417,14 @@ func TestGoRootRunCases(t *testing.T) {
 			notApply, notApplyReason := notApplicable.Match(envInfo.GOVERSION, targetPlatform, tc)
 			result.Status, result.Reason = gorootCaseOutcome(wasmTarget, err, match, reason, notApply, notApplyReason, flaky, flakyReason, wasmXFail)
 			if wasmTarget {
+				if notApply {
+					if err != nil {
+						t.Logf("expected not-applicable wasm failure: %s\n%v", notApplyReason, err)
+					} else {
+						t.Logf("not-applicable wasm case passed: %s", notApplyReason)
+					}
+					return
+				}
 				if wasmXFail {
 					if err != nil {
 						t.Logf("expected wasm failure: %s\n%v", reason, err)
@@ -425,7 +433,7 @@ func TestGoRootRunCases(t *testing.T) {
 					}
 					return
 				}
-				// General expectations include native BDWGC and target-fault
+				// General xfails and flakes include native BDWGC and target-fault
 				// assumptions. They are evidence, not a wasm acceptance waiver.
 				if result.Reason != "" {
 					t.Logf("general expectation (not waived for wasm): %s", result.Reason)
