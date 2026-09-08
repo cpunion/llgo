@@ -2,299 +2,105 @@ name: GOROOT
 
 on:
   workflow_dispatch:
-  schedule:
-    # 02:00 Asia/Shanghai (18:00 UTC on the previous day).
-    - cron: "0 18 * * *"
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
-  goroot:
-    name: GOROOT (${{ matrix.os }}${{ startsWith(matrix.os, 'windows') && format(', {0}, {1}', matrix.windows_abi, matrix.windows_arch) || '' }}, Go current, shard ${{ matrix.shard-index }}/4)
-    timeout-minutes: 180
-    env:
-      GOPROXY: https://proxy.golang.org,direct
-      LLGO_GOROOT_HEARTBEAT_SECONDS: "60"
-      LLGO_GOROOT_VERBOSE: "1"
+  diagnose:
+    if: github.repository_owner == 'cpunion'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        # GOROOT is the compiler's primary compatibility suite, so run its
-        # complete corpus only with the current Go release. Older user-source
-        # releases have focused coverage in the LLGo workflow. Recent shards
-        # take 24-49 minutes each and are not short enough to combine.
-        os: [macos-latest, ubuntu-latest, windows-2022, windows-11-arm]
-        windows_abi: [msvc, mingw]
-        windows_arch: [amd64, arm64, "386"]
-        shard-index: ["0", "1", "2", "3"]
-        exclude:
-          - os: macos-latest
-            windows_abi: mingw
-          - os: ubuntu-latest
-            windows_abi: mingw
-          - os: macos-latest
-            windows_arch: arm64
-          - os: macos-latest
-            windows_arch: "386"
-          - os: ubuntu-latest
-            windows_arch: arm64
-          - os: ubuntu-latest
-            windows_arch: "386"
-          - os: windows-2022
-            windows_arch: arm64
-          - os: windows-11-arm
-            windows_arch: amd64
-          - os: windows-11-arm
-            windows_arch: "386"
-        include:
-          - os: ubuntu-latest
-            runner: [qiniu, ubuntu-24.04-large]
-    runs-on: ${{ github.repository_owner == 'xgo-dev' && matrix.runner || matrix.os }}
+        profile: [EC64, GWASI]
+    env:
+      GOMAXPROCS: '2'
+      BINARYEN_CORES: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_ROOT: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v7
-
-      - name: Install dependencies
-        uses: ./.github/actions/setup-deps
+      - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
-          windows-abi: ${{ matrix.windows_abi }}
-          windows-arch: ${{ matrix.windows_arch }}
-
-      - name: Set up Go for building LLGo and the runner
-        uses: ./.github/actions/setup-go
+      - uses: emscripten-core/setup-emsdk@v15
+        if: matrix.profile == 'EC64'
         with:
-          architecture: ${{ matrix.os == 'windows-11-arm' && matrix.windows_abi == 'mingw' && 'arm64' || startsWith(matrix.os, 'windows') && 'x64' || '' }}
-
-      - name: Build LLGo and the GOROOT runner
-        shell: bash
-        run: |
-          LLGO_BUILD_GOROOT_RUNNER=1 dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
-
-          tool_suffix=
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            tool_suffix=.exe
-          fi
-          runner="$RUNNER_TEMP/llgo-bin/goroot-runner${tool_suffix}"
-          llgo="$RUNNER_TEMP/llgo-bin/llgo${tool_suffix}"
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            # The shell launches the runner, while the Go runner launches
-            # llgo through the native Windows process API.
-            llgo="$(cygpath -w "$llgo")"
-          fi
-          echo "LLGO_GOROOT_RUNNER=$runner" >> "$GITHUB_ENV"
-          echo "LLGO_TEST_LLGO=$llgo" >> "$GITHUB_ENV"
-
-      - name: Activate native Windows target
-        if: runner.os == 'Windows'
-        uses: ./.github/actions/activate-windows-target
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        if: matrix.profile == 'EC64'
         with:
-          windows-abi: ${{ matrix.windows_abi }}
-          windows-arch: ${{ matrix.windows_arch }}
-
-      - name: Show toolchain versions
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        if: matrix.profile == 'GWASI'
+        with:
+          version: '39.0.1'
+      - uses: ./.github/actions/setup-go
+      - name: Build compiler
         run: |
-          go version
-          go env GOPROXY GOMODCACHE
-          clang --version
-
-      - name: Run GOROOT runner
-        shell: bash
-        env:
-          GOTOOLCHAIN: local
+          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+          mkdir "$RUNNER_TEMP/evidence"
+      - name: Preserve and run original EC64 index program
+        if: matrix.profile == 'EC64'
         run: |
-          min_swap_free_mib=512
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            # macOS manages swap dynamically; a low instantaneous free value
-            # does not mean the runner cannot make forward progress.
-            min_swap_free_mib=0
-          fi
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            # Generated programs write into pipes and terminate through
-            # ExitProcess, which does not run CRT stream teardown.
-            export LLGO_STDIO_NOBUF=1
-          fi
-          target_goroot="$(go env GOROOT)"
-          set +e
-          bash dev/test_goroot.sh "$target_goroot" -- \
-            -directive-mode ci \
-            -min-swap-free-mib "$min_swap_free_mib" \
-            -progress 60s \
-            -shard-index "${{ matrix.shard-index }}" \
-            -shard-total "4" 2>&1 | tee "$RUNNER_TEMP/goroot.log"
-          runner_status=${PIPESTATUS[0]}
-          set -e
-          exit "$runner_status"
-
-      - name: Summarize GOROOT shard
-        if: always()
-        shell: bash
-        env:
-          MATRIX_OS: ${{ matrix.os }}
-          WINDOWS_ABI: ${{ matrix.windows_abi }}
-          WINDOWS_ARCH: ${{ matrix.windows_arch }}
-          SHARD_INDEX: ${{ matrix.shard-index }}
-        run: |
-          GO_VERSION="$(tr -d '[:space:]' < .go-version)"
-          log="$RUNNER_TEMP/goroot.log"
-          report_dir="$RUNNER_TEMP/goroot-report"
-          mkdir -p "$report_dir"
-          touch "$log"
-
-          platform=linux/amd64
-          if [[ "$MATRIX_OS" == "macos-latest" ]]; then
-            platform=darwin/arm64
-          elif [[ "$MATRIX_OS" == "windows-2022" ]]; then
-            platform="windows-${WINDOWS_ABI}/${WINDOWS_ARCH}"
-          elif [[ "$MATRIX_OS" == "windows-11-arm" ]]; then
-            platform="windows-${WINDOWS_ABI}/${WINDOWS_ARCH}"
-          fi
-
-          selected=$(sed -nE 's/.* shard=[^ ]+ cases=([0-9]+) directive_mode=.*/\1/p' "$log" | tail -1)
-          observed=$(grep -Ec -- '--- (PASS|FAIL|SKIP): TestGoRootRunCases/' "$log" || true)
-          failed=$(grep -Ec -- '--- FAIL: TestGoRootRunCases/' "$log" || true)
-          skipped=$(grep -Ec -- '--- SKIP: TestGoRootRunCases/' "$log" || true)
-          passed=$((observed - failed - skipped))
-          if [[ -z "$selected" ]]; then
-            selected='?'
-          fi
-
-          report_id="${platform//\//-}-${GO_VERSION}-${SHARD_INDEX}"
-          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$platform" "$GO_VERSION" "$SHARD_INDEX" "$selected" \
-            "$observed" "$passed" "$failed" "$skipped" \
-            >"$report_dir/summary-$report_id.tsv"
-          sed -nE 's|.*--- FAIL: TestGoRootRunCases/([^ ]+).*|\1|p' "$log" |
-            while IFS= read -r case_path; do
-              printf '%s\t%s\t%s\t%s\n' \
-                "$platform" "$GO_VERSION" "$SHARD_INDEX" "$case_path"
-            done >"$report_dir/failures-$report_id.tsv"
-
-          {
-            echo "### GOROOT $platform · Go $GO_VERSION · shard $SHARD_INDEX/4"
-            echo
-            echo '| Selected | Observed | Passed | Failed | Skipped |'
-            echo '|---:|---:|---:|---:|---:|'
-            echo "| $selected | $observed | $passed | $failed | $skipped |"
-            echo
-            echo '_Passed means the runner classification succeeded; expected xfail/not-applicable failures and classified flakes are counted as Passed._'
-            echo
-            echo '**Failed case paths**'
-            if [[ "$failed" -eq 0 ]]; then
-              echo
-              echo '- none'
-            else
-              # shellcheck disable=SC2016 # The backreference is expanded by sed.
-              sed -nE 's|.*--- FAIL: TestGoRootRunCases/([^ ]+).*|- `\1`|p' "$log"
+          set -o pipefail
+          evidence="$RUNNER_TEMP/evidence"
+          goroot="$(go env GOROOT)"
+          go run "$goroot/test/index0.go" "$goroot/test/index.go" > "$evidence/index-generated.go"
+          failed=0
+          for mode in original checked; do
+            extra=()
+            if [[ "$mode" == checked ]]; then
+              extra=(-extldflags=-sSTACK_OVERFLOW_CHECK=2)
             fi
-          } >>"$GITHUB_STEP_SUMMARY"
-
-      - name: Upload GOROOT shard statistics
+            timeout 5m "$RUNNER_TEMP/llgo" build -target emscripten-memory64 \
+              "${extra[@]}" -o "$evidence/index-$mode.mjs" "$evidence/index-generated.go" \
+              > "$evidence/build-$mode.log" 2>&1 || { cat "$evidence/build-$mode.log"; exit 1; }
+            for policy in 100 off; do
+              status=0
+              GOGC="$policy" timeout 60s node targets/emscripten-memory64-runner.mjs \
+                "$evidence/index-$mode.mjs" > "$evidence/run-$mode-$policy.log" 2>&1 || status=$?
+              printf '%s GOGC=%s status=%s\n' "$mode" "$policy" "$status" | tee -a "$evidence/verdict.txt"
+              cat "$evidence/run-$mode-$policy.log"
+              if [[ "$status" != 0 || -s "$evidence/run-$mode-$policy.log" ]]; then failed=1; fi
+            done
+          done
+          exit "$failed"
+      - name: Preserve GWASI exit-status binary and compare GC settings
+        if: matrix.profile == 'GWASI'
+        run: |
+          set -o pipefail
+          evidence="$RUNNER_TEMP/evidence"
+          GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 timeout 5m "$RUNNER_TEMP/llgo" test \
+            -c -o "$evidence/exit.wasm" ./internal/build/testdata/wasm-test \
+            > "$evidence/build.log" 2>&1 || { cat "$evidence/build.log"; exit 1; }
+          failed=0
+          for policy in 100 off; do
+            log="$evidence/run-$policy.log"
+            status=0
+            timeout 60s wasmtime run --dir=/ --env PWD --env PATH --env "GOGC=$policy" \
+              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/exit.wasm" \
+              -test.v -test.count=1 -test.timeout=30s \
+              '-test.run=^Test(IntentionalHostExitFailure|NilStoreOperandOrder|NilPointerAndFunctionRecovery)$' \
+              -llgo.intentional-exit-failure > "$log" 2>&1 || status=$?
+            printf 'GOGC=%s status=%s\n' "$policy" "$status" | tee -a "$evidence/verdict.txt"
+            cat "$log"
+            if [[ "$status" != 1 ]] ||
+              ! grep -Fq 'intentional wasm exit-status probe' "$log" ||
+              ! grep -Eq '^--- FAIL: TestIntentionalHostExitFailure' "$log" ||
+              ! grep -Eq '^--- PASS: TestNilStoreOperandOrder' "$log" ||
+              ! grep -Eq '^--- PASS: TestNilPointerAndFunctionRecovery' "$log"; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Preserve source, modules, and bounded execution evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: goroot-stat-${{ matrix.os }}-${{ matrix.windows_abi }}-${{ matrix.windows_arch }}-current-${{ matrix.shard-index }}
-          path: ${{ runner.temp }}/goroot-report
+          name: r4-runtime-${{ matrix.profile }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence
           if-no-files-found: error
-          retention-days: 7
-
-  goroot-summary:
-    name: GOROOT summary
-    if: always()
-    needs: goroot
-    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}
-    steps:
-      - name: Download shard statistics
-        uses: actions/download-artifact@v8
-        with:
-          pattern: goroot-stat-*
-          path: reports
-          merge-multiple: true
-
-      - name: Publish GOROOT run summary
-        env:
-          GOROOT_RESULT: ${{ needs.goroot.result }}
-        run: |
-          summary_tsv="$RUNNER_TEMP/goroot-summary.tsv"
-          failure_tsv="$RUNNER_TEMP/goroot-failures.tsv"
-          find reports -type f -name 'summary-*.tsv' -exec cat {} + >"$summary_tsv"
-          find reports -type f -name 'failures-*.tsv' -exec cat {} + >"$failure_tsv"
-
-          report_count=$(wc -l <"$summary_tsv" | tr -d ' ')
-          primary_version=$(awk -F '\t' 'NR == 1 { print $2 }' "$summary_tsv")
-          version_count=$(awk -F '\t' '{ print $2 }' "$summary_tsv" | sort -u | wc -l | tr -d ' ')
-          if [[ -z "$primary_version" || "$version_count" -ne 1 ]]; then
-            echo "error: could not determine the primary Go version" >&2
-            exit 1
-          fi
-          write_row() {
-            local label=$1
-            local platform=$2
-            local version=${3:-}
-            local expected_shards=$4
-            awk -F '\t' \
-              -v label="$label" \
-              -v platform="$platform" \
-              -v version="$version" \
-              -v expected="$expected_shards" '
-                $1 == platform && (version == "" || $2 == version) {
-                  shards++
-                  if ($4 ~ /^[0-9]+$/) {
-                    selected += $4
-                  } else {
-                    selected_unknown = 1
-                  }
-                  observed += $5
-                  passed += $6
-                  failed += $7
-                  skipped += $8
-                }
-                END {
-                  selected_text = selected_unknown ? "?" : selected
-                  printf "| %s | %d/%d | %s | %d | %d | %d | %d |\n", \
-                    label, shards, expected, selected_text, observed, passed, failed, skipped
-                }
-              ' "$summary_tsv"
-          }
-
-          {
-            echo '## GOROOT run summary'
-            echo
-            echo "Received $report_count/32 shard reports."
-            echo
-            echo '| Platform / toolchain | Shards | Selected | Observed | Passed | Failed | Skipped |'
-            echo '|---|---:|---:|---:|---:|---:|---:|'
-            write_row "Darwin · Go $primary_version" darwin/arm64 "$primary_version" 4
-            write_row "Linux · Go $primary_version" linux/amd64 "$primary_version" 4
-            write_row "Windows MSVC · Go $primary_version" windows-msvc/amd64 "$primary_version" 4
-            write_row "Windows MSVC ARM64 · Go $primary_version" windows-msvc/arm64 "$primary_version" 4
-            write_row "Windows MSVC 386 · Go $primary_version" windows-msvc/386 "$primary_version" 4
-            write_row "Windows MinGW · Go $primary_version" windows-mingw/amd64 "$primary_version" 4
-            write_row "Windows MinGW ARM64 · Go $primary_version" windows-mingw/arm64 "$primary_version" 4
-            write_row "Windows MinGW 386 · Go $primary_version" windows-mingw/386 "$primary_version" 4
-            echo
-            echo '_Passed means the runner classification succeeded; expected xfail/not-applicable failures and classified flakes are counted as Passed._'
-            echo
-            echo '### Failed case paths'
-            if [[ -s "$failure_tsv" ]]; then
-              sort -u "$failure_tsv" |
-                while IFS=$'\t' read -r platform version shard case_path; do
-                  echo "- \`$case_path\` — $platform, Go $version, shard $shard/4"
-                done
-            else
-              echo '- none'
-            fi
-          } >>"$GITHUB_STEP_SUMMARY"
-
-          if [[ "$report_count" -ne 32 ]]; then
-            echo "error: expected 32 shard reports, got $report_count" >&2
-            exit 1
-          fi
-          if [[ "$GOROOT_RESULT" != success ]]; then
-            echo "error: one or more GOROOT shards did not succeed" >&2
-            exit 1
-          fi
+          retention-days: 3
