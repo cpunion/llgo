@@ -629,10 +629,13 @@ func (b Builder) BinOp(op token.Token, x, y Expr) Expr {
 				b.InlineCall(b.Pkg.rtFunc("AssertNegativeShift"), check)
 			}
 			xsize, ysize := b.Prog.SizeOf(x.Type), b.Prog.SizeOf(y.Type)
+			// Compare the shift count at its original width. Truncating a wider
+			// count first can turn values such as uint64(1)<<32 into zero on a
+			// 32-bit target and incorrectly leave the operand unchanged.
+			overflows := llvm.CreateICmp(b.impl, llvm.IntUGE, y.impl, llvm.ConstInt(y.ll, xsize*8, false))
 			if xsize != ysize {
 				y = b.Convert(x.Type, y)
 			}
-			overflows := llvm.CreateICmp(b.impl, llvm.IntUGE, y.impl, llvm.ConstInt(y.ll, xsize*8, false))
 			xzero := llvm.ConstInt(x.ll, 0, false)
 			if op == token.SHL {
 				rhs := llvm.CreateShl(b.impl, x.impl, y.impl)
