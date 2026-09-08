@@ -22,8 +22,18 @@ func LowerLargeAggregates(td llvm.TargetData, m llvm.Module) {
 	l.transformModule(m)
 }
 
+// LowerLargeAggregatesWithRoots also publishes the backing allocations that
+// did not exist when the frontend computed its SSA root plan.
+func LowerLargeAggregatesWithRoots(td llvm.TargetData, m llvm.Module) {
+	l := largeAggregateLowerer{td: td, roots: true}
+	l.transformModule(m)
+}
+
 type largeAggregateLowerer struct {
-	td llvm.TargetData
+	td           llvm.TargetData
+	roots        bool
+	allocations  []llvm.Value
+	resultParams []llvm.Value
 }
 
 func (l largeAggregateLowerer) isLargeAggregate(typ llvm.Type) bool {
@@ -39,7 +49,7 @@ func (l largeAggregateLowerer) indirectType(ctx llvm.Context, typ llvm.Type) llv
 	return llvm.FunctionType(ctx.VoidType(), params, typ.IsFunctionVarArg())
 }
 
-func (l largeAggregateLowerer) transformModule(m llvm.Module) {
+func (l *largeAggregateLowerer) transformModule(m llvm.Module) {
 	var calls []llvm.Value
 	var funcs []llvm.Value
 	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
@@ -63,6 +73,9 @@ func (l largeAggregateLowerer) transformModule(m llvm.Module) {
 		l.transformFunc(m, fn)
 	}
 	l.transformStoredLoads(m)
+	if l.roots {
+		l.publishRoots(m)
+	}
 }
 
 // transformStoredLoads prevents a large aggregate load from reaching
@@ -70,7 +83,7 @@ func (l largeAggregateLowerer) transformModule(m llvm.Module) {
 // directly to memmove. When the value is stored later or more than once,
 // preserve Go assignment semantics by taking one snapshot at the original
 // load and copying that snapshot to every destination at the original sites.
-func (l largeAggregateLowerer) transformStoredLoads(m llvm.Module) {
+func (l *largeAggregateLowerer) transformStoredLoads(m llvm.Module) {
 	var loads []llvm.Value
 	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
 		for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
@@ -101,7 +114,7 @@ func storedLoadUsers(load llvm.Value) ([]llvm.Value, bool) {
 	return stores, len(stores) != 0
 }
 
-func (l largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Value) {
+func (l *largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Value) {
 	stores, ok := storedLoadUsers(load)
 	if !ok {
 		return
@@ -131,7 +144,7 @@ func (l largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Valu
 	load.EraseFromParentAsInstruction()
 }
 
-func (l largeAggregateLowerer) transformCall(m llvm.Module, call llvm.Value) {
+func (l *largeAggregateLowerer) transformCall(m llvm.Module, call llvm.Value) {
 	ctx := m.Context()
 	oldType := call.CalledFunctionType()
 	retType := oldType.ReturnType()
@@ -172,7 +185,7 @@ func (l largeAggregateLowerer) transformCall(m llvm.Module, call llvm.Value) {
 	l.rewriteStoredResult(ctx, value, result, retType)
 }
 
-func (l largeAggregateLowerer) transformFunc(m llvm.Module, fn llvm.Value) {
+func (l *largeAggregateLowerer) transformFunc(m llvm.Module, fn llvm.Value) {
 	ctx := m.Context()
 	oldType := fn.GlobalValueType()
 	retType := oldType.ReturnType()
@@ -208,6 +221,7 @@ func (l largeAggregateLowerer) transformFunc(m llvm.Module, fn llvm.Value) {
 			fn.Param(i).ReplaceAllUsesWith(nfn.Param(i + 1))
 		}
 		l.rewriteReturns(ctx, nfn, retType)
+		l.resultParams = append(l.resultParams, nfn.Param(0))
 	}
 
 	fn.ReplaceAllUsesWith(nfn)
@@ -284,7 +298,7 @@ func (l largeAggregateLowerer) rewriteStoredResult(ctx llvm.Context, value, resu
 	}
 }
 
-func (l largeAggregateLowerer) allocResult(m llvm.Module, ctx llvm.Context, b llvm.Builder, typ llvm.Type) llvm.Value {
+func (l *largeAggregateLowerer) allocResult(m llvm.Module, ctx llvm.Context, b llvm.Builder, typ llvm.Type) llvm.Value {
 	intType := ctx.IntType(l.td.PointerSize() * 8)
 	ptrType := llvm.PointerType(ctx.Int8Type(), 0)
 	fnType := llvm.FunctionType(ptrType, []llvm.Type{intType}, false)
@@ -293,7 +307,40 @@ func (l largeAggregateLowerer) allocResult(m llvm.Module, ctx llvm.Context, b ll
 		fn = llvm.AddFunction(m, runtimeAllocU, fnType)
 	}
 	size := llvm.ConstInt(intType, l.td.TypeAllocSize(typ), false)
-	return llvm.CreateCall(b, fnType, fn, []llvm.Value{size})
+	result := llvm.CreateCall(b, fnType, fn, []llvm.Value{size})
+	l.allocations = append(l.allocations, result)
+	return result
+}
+
+func (l *largeAggregateLowerer) publishRoots(m llvm.Module) {
+	byFunc := make(map[llvm.Value][]llvm.Value)
+	for _, value := range l.allocations {
+		fn := value.InstructionParent().Parent()
+		byFunc[fn] = append(byFunc[fn], value)
+	}
+	for _, value := range l.resultParams {
+		fn := value.ParamParent()
+		byFunc[fn] = append(byFunc[fn], value)
+	}
+	b := m.Context().NewBuilder()
+	defer b.Dispose()
+	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		values := byFunc[fn]
+		if len(values) == 0 {
+			continue
+		}
+		entry := fn.FirstBasicBlock()
+		frame := NewGCRootFrame(m, fn, len(values), l.td.PointerSize(), true)
+		for i, value := range values {
+			if !value.IsAArgument().IsNil() {
+				b.SetInsertPointBefore(entry.FirstInstruction())
+			} else {
+				b.SetInsertPointBefore(llvm.NextInstruction(value))
+			}
+			b.CreateStore(value, frame.Slots[i])
+		}
+		PopGCRootFrame(m, fn, frame)
+	}
 }
 
 func (l largeAggregateLowerer) callMemcpy(ctx llvm.Context, b llvm.Builder, dst, src llvm.Value, typ llvm.Type) llvm.Value {
