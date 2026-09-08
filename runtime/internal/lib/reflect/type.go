@@ -901,6 +901,7 @@ func toFuncType(typ *abi.StructType) *abi.FuncType {
 	t.Str_ = typ.Str_
 	t.In = ftyp.In
 	t.Out = ftyp.Out
+	copyWasmFuncBridge(t, ftyp)
 	if typ.TFlag&abi.TFlagExtraStar != 0 {
 		t.TFlag |= abi.TFlagExtraStar
 	}
@@ -1394,6 +1395,7 @@ func FuncOf(in, out []Type, variadic bool) Type {
 	prototype := closureType.Fields[0].Typ.FuncType()
 	ft := &funcType{}
 	*ft = *prototype
+	resetWasmFuncBridge(ft)
 	ft.In = make([]*abi.Type, len(in))
 	ft.Out = make([]*abi.Type, len(out))
 
