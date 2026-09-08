@@ -210,6 +210,9 @@ func (c *context) collectPackageInputs(m *manifestBuilder, pkg *aPackage) error 
 
 	m.pkg.PkgPath = p.PkgPath
 	m.pkg.PkgID = p.ID
+	// Attribution changes allocation-bearing functions throughout the program,
+	// not just the runtime provider. Keep consumer/nonconsumer archives apart.
+	m.pkg.WasmMemoryProfiling = c.prog != nil && c.prog.WasmMemoryProfilingEnabled()
 	if p.PkgPath == llssa.PkgRuntime {
 		// Only the runtime embeds this setting; goroutine callers have a
 		// configuration-independent ABI. Match SetPthreadStackSize in Build.

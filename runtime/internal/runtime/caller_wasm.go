@@ -14,15 +14,39 @@ import "unsafe"
 //
 //go:noinline
 func PushCallerLocationFrameWasm(entry uintptr, nameData *byte, nameLen int, fileData *byte, fileLen, line int) int {
-	return PushCallerLocationFrame(entry, unsafe.String(nameData, nameLen), unsafe.String(fileData, fileLen), line)
+	if wasmMemProfileEnabled && !memProfileHasCurrentG() {
+		return -1
+	}
+	MemProfilePause()
+	mark := PushCallerLocationFrame(entry, unsafe.String(nameData, nameLen), unsafe.String(fileData, fileLen), line)
+	MemProfileResume()
+	return mark
 }
 
 //go:noinline
 func RecordCallerLocationWasm(entry uintptr, nameData *byte, nameLen int, fileData *byte, fileLen, line int) {
+	if wasmMemProfileEnabled && !memProfileHasCurrentG() {
+		return
+	}
+	MemProfilePause()
 	RecordCallerLocation(entry, unsafe.String(nameData, nameLen), unsafe.String(fileData, fileLen), line)
+	MemProfileResume()
 }
 
 //go:noinline
 func RecordPanicLocationWasm(entry uintptr, nameData *byte, nameLen int, fileData *byte, fileLen, line int) {
+	if wasmMemProfileEnabled && !memProfileHasCurrentG() {
+		return
+	}
+	MemProfilePause()
 	RecordPanicLocation(entry, unsafe.String(nameData, nameLen), unsafe.String(fileData, fileLen), line)
+	MemProfileResume()
+}
+
+//go:noinline
+func PopCallerLocationFrameWasm(mark int) {
+	if wasmMemProfileEnabled && !memProfileHasCurrentG() {
+		return
+	}
+	PopCallerLocationFrame(mark)
 }

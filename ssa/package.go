@@ -244,6 +244,7 @@ type aProgram struct {
 	enableSafepoints      bool
 	disableBoundsChecks   bool
 	pthreadStackSize      uint64
+	wasmMemoryProfiling   bool
 	enableLTOPluginMarker bool
 
 	enableFuncInfoMetadata bool
@@ -361,6 +362,7 @@ func (p Program) NewBackendProgram() Program {
 	backend.enableSafepoints = p.enableSafepoints
 	backend.disableBoundsChecks = p.disableBoundsChecks
 	backend.pthreadStackSize = p.pthreadStackSize
+	backend.wasmMemoryProfiling = p.wasmMemoryProfiling
 	backend.enableLTOPluginMarker = p.enableLTOPluginMarker
 	backend.enableFuncInfoMetadata = p.enableFuncInfoMetadata
 	backend.enableFuncInfoSites = p.enableFuncInfoSites
