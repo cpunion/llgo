@@ -3,11 +3,62 @@
 package build
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
 )
+
+func TestWASIHeapReachesLinker(t *testing.T) {
+	t.Setenv("CCFLAGS", "")
+	t.Setenv("LDFLAGS", "")
+	t.Setenv("LLGO_TEST_LINKER_HELPER", "write")
+	for _, test := range []struct {
+		name     string
+		goos     string
+		config   []string
+		args     []string
+		wantHeap bool
+	}{
+		{name: "single worker default", goos: "wasip1", wantHeap: true},
+		{name: "explicit initial memory", goos: "wasip1", args: []string{"-Wl,--initial-memory=33554432"}},
+		{name: "explicit initial heap", goos: "wasip1", args: []string{"-Wl,--initial-heap=1048576"}},
+		{name: "shared memory contract", goos: "wasip1", config: []string{"-Wl,--initial-memory=67108864", "-Wl,--import-memory"}},
+		{name: "emscripten unchanged", goos: "js"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			argsFile := filepath.Join(dir, "link-args.txt")
+			t.Setenv("LINK_ARGS_FILE", argsFile)
+			ctx := &context{
+				buildConf: &Config{
+					Goos: test.goos, Goarch: "wasm", BuildMode: BuildModeExe,
+					LinkOptions: LinkOptions{DWARF: DWARFOmit},
+				},
+				crossCompile: crosscompile.Export{Linker: os.Args[0], LDFLAGS: test.config},
+			}
+			if err := linkObjFiles(ctx, filepath.Join(dir, "app.wasm"), nil, test.args, false); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if got := slices.Contains(args, defaultWASIHeapFlag); got != test.wantHeap {
+				t.Fatalf("default heap in linker arguments = %v, want %v: %q", got, test.wantHeap, args)
+			}
+			for _, flag := range slices.Concat(test.config, test.args) {
+				if !slices.Contains(args, flag) {
+					t.Errorf("explicit linker option %q was lost: %q", flag, args)
+				}
+			}
+		})
+	}
+}
 
 func TestDefaultWASIHeapArgs(t *testing.T) {
 	for _, test := range []struct {
@@ -49,8 +100,9 @@ func TestDefaultWASIHeapArgs(t *testing.T) {
 					Linker: "clang", LinkerArgs: test.prefix, LDFLAGS: test.config,
 				},
 			}
-			before := ctx.linker().LinkArguments(test.args...)
-			got := defaultWASIHeapArgs(ctx, test.args)
+			linker := ctx.linker()
+			before := linker.LinkArguments(test.args...)
+			got := defaultWASIHeapArgs(ctx, linker, test.args)
 			var want []string
 			if test.wantHeap {
 				want = []string{defaultWASIHeapFlag}
@@ -58,15 +110,15 @@ func TestDefaultWASIHeapArgs(t *testing.T) {
 			if !slices.Equal(got, want) {
 				t.Fatalf("flags = %q, want %q", got, want)
 			}
-			if after := ctx.linker().LinkArguments(test.args...); !slices.Equal(before, after) {
+			if after := linker.LinkArguments(test.args...); !slices.Equal(before, after) {
 				t.Fatalf("explicit arguments changed: before %q, after %q", before, after)
 			}
 		})
 	}
-	if got := defaultWASIHeapArgs(nil, nil); len(got) != 0 {
+	if got := defaultWASIHeapArgs(nil, nil, nil); len(got) != 0 {
 		t.Fatalf("nil context: %q", got)
 	}
-	if got := defaultWASIHeapArgs(&context{}, nil); len(got) != 0 {
+	if got := defaultWASIHeapArgs(&context{}, nil, nil); len(got) != 0 {
 		t.Fatalf("missing config: %q", got)
 	}
 }
