@@ -12,6 +12,14 @@ extern unsigned char __data_end;
 extern unsigned char __global_base;
 extern unsigned char __heap_base;
 
+/* Keep an empty boundary range available even when all compiler metadata is
+ * discarded. This sentinel lives in the collector's object, not the metadata
+ * object: retaining it must not retain unused FuncInfo tables. */
+__attribute__((used, aligned(8), section("llgo_gc_noscan")))
+static const uint64_t llgo_gc_noscan_sentinel;
+extern unsigned char __start_llgo_gc_noscan;
+extern unsigned char __stop_llgo_gc_noscan;
+
 #define LLGO_WASM_PAGE_SIZE 65536
 
 uintptr_t llgo_gc_globals_start(void) {
@@ -20,6 +28,14 @@ uintptr_t llgo_gc_globals_start(void) {
 
 uintptr_t llgo_gc_globals_end(void) {
 	return (uintptr_t)&__data_end;
+}
+
+uintptr_t llgo_gc_noscan_start(void) {
+	return (uintptr_t)&__start_llgo_gc_noscan;
+}
+
+uintptr_t llgo_gc_noscan_end(void) {
+	return (uintptr_t)&__stop_llgo_gc_noscan;
 }
 
 uintptr_t llgo_gc_heap_base(void) {
