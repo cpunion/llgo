@@ -10,6 +10,7 @@ on:
         options:
           - full
           - wasm-build-diagnostics
+          - wasm-optimizer-replay
   schedule:
     # 02:00 Asia/Shanghai (18:00 UTC on the previous day).
     - cron: "0 18 * * *"
@@ -23,7 +24,7 @@ concurrency:
 
 jobs:
   goroot:
-    if: inputs.mode != 'wasm-build-diagnostics'
+    if: inputs.mode != 'wasm-build-diagnostics' && inputs.mode != 'wasm-optimizer-replay'
     name: GOROOT (${{ matrix.os }}${{ startsWith(matrix.os, 'windows') && format(', {0}, {1}', matrix.windows_abi, matrix.windows_arch) || '' }}, Go current, shard ${{ matrix.shard-index }}/4)
     timeout-minutes: 180
     env:
@@ -213,7 +214,7 @@ jobs:
 
   goroot-summary:
     name: GOROOT summary
-    if: always() && inputs.mode != 'wasm-build-diagnostics'
+    if: always() && inputs.mode != 'wasm-build-diagnostics' && inputs.mode != 'wasm-optimizer-replay'
     needs: goroot
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}
     steps:
@@ -351,6 +352,43 @@ jobs:
         with:
           name: wasm-build-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/wasm-build-diagnostics/evidence
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
+
+  wasm-optimizer-replay:
+    name: GWASI preserved Binaryen input replay
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'wasm-optimizer-replay' && github.repository_owner == 'cpunion'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: '39.0.1'
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34260202320
+          name: wasm-build-diagnostics-34260202320-1
+          path: ${{ runner.temp }}/preserved-build
+      - name: Replay the exact input with separate pass measurements
+        run: |
+          python3 -m unittest discover -s dev -p 'wasm_optimizer_replay_test.py' -v
+          wasm-opt --version
+          python3 dev/wasm_optimizer_replay.py \
+            --input "$RUNNER_TEMP/preserved-build/commands/wasm-opt-11978/input-0.wasm" \
+            --output "$RUNNER_TEMP/optimizer-replay"
+      - name: Preserve bounded optimizer replay evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-optimizer-replay-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/optimizer-replay
           if-no-files-found: error
           retention-days: 7
           compression-level: 1
