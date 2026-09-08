@@ -19,10 +19,11 @@ package wasmcontext
 import "unsafe"
 
 const (
-	// LLGo uses fixed-size Fiber stacks. 128 KiB is the smallest default that
-	// accommodates standard-library call depths such as crypto/x509 signing;
-	// 64 KiB reproducibly crosses the Fiber boundary under that workload.
-	defaultStackSize = uintptr(128 << 10)
+	// LLGo uses fixed-size Fiber stacks. Scale the 128 KiB wasm32 budget with
+	// the pointer width: memory64 doubles pointer slots and compiler GC roots.
+	// With only 128 KiB on memory64, ASN.1 certificate encoding crosses the
+	// Fiber boundary (caught by Emscripten's STACK_OVERFLOW_CHECK=2).
+	defaultStackSize = uintptr(128<<10) * unsafe.Sizeof(uintptr(0)) / 4
 	// Asyncify records the native host-call continuation, not the complete Go
 	// call stack, so its independently-tested default can remain smaller.
 	defaultAsyncifyStackSize = uintptr(64 << 10)

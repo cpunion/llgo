@@ -217,6 +217,9 @@ func TestFullProfileCommandsKeepLLGoAndReferenceDistinct(t *testing.T) {
 		if p.Reference && cmd.Env["GOMAXPROCS"] != "1" {
 			t.Fatalf("reference runtime may try to create wasm OS threads: %+v", cmd)
 		}
+		if got, want := slices.Contains(cmd.Args, "-ldflags=-extldflags=-sSTACK_OVERFLOW_CHECK=2"), !p.Reference && p.GOOS == "js"; got != want {
+			t.Fatalf("%s stack overflow checking = %v, want %v", name, got, want)
+		}
 	}
 }
 
