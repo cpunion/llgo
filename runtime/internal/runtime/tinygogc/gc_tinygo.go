@@ -284,11 +284,12 @@ func Alloc(size uintptr) unsafe.Pointer {
 	lock(&gcMutex)
 	lazyInit()
 
-	gcTotalAlloc += uint64(size)
-	gcMallocs++
-
 	neededBlocks := (size + (bytesPerBlock - 1)) / bytesPerBlock
-	gcTotalBlocks += uint64(neededBlocks)
+	collected := false
+	if gcAllocationDue(uint64(neededBlocks) * uint64(bytesPerBlock)) {
+		gc()
+		collected = true
+	}
 
 	// Continue looping until a run of free blocks has been found that fits the
 	// requested size.
@@ -299,12 +300,13 @@ func Alloc(size uintptr) unsafe.Pointer {
 		if index == nextAlloc {
 			if heapScanCount == 0 {
 				heapScanCount = 1
-			} else if heapScanCount == 1 {
+			} else if heapScanCount == 1 && !collected && gcAutomaticAllowed() {
 				// The entire heap has been searched for free memory, but none
 				// could be found. Run a garbage collection cycle to reclaim
 				// free memory and try again.
 				heapScanCount = 2
 				freeBytes := gc()
+				collected = true
 				heapSize := uintptr(metadataStart) - heapStart
 				if freeBytes < heapSize/3 {
 					// Ensure there is at least 33% headroom.
@@ -363,6 +365,11 @@ func Alloc(size uintptr) unsafe.Pointer {
 				gcSetState(i, blockStateTail)
 			}
 			ret := c.Memset(gcPointerOf(thisAlloc), 0, size)
+			// Only committed allocations belong in the live-byte count used
+			// to compute the next collection goal after a sweep.
+			gcTotalAlloc += uint64(size)
+			gcMallocs++
+			gcTotalBlocks += uint64(neededBlocks)
 			unlock(&gcMutex)
 			scheduleFinalizers()
 			// Return a pointer to this allocation.
@@ -468,6 +475,7 @@ func gc() (freeBytes uintptr) {
 	// Sweep phase: free all non-marked objects and unmark marked objects for
 	// the next collection cycle.
 	freeBytes = sweep()
+	gcCollectionComplete()
 	gcNumGC++
 
 	return

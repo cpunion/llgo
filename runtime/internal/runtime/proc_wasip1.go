@@ -97,6 +97,7 @@ func RunWasmMain() {
 	if !initWasmContext(gp, wasmcontext.Entry(wasmMainStart), nil, wasmMainStackSize) {
 		panic("runtime: failed to allocate WebAssembly goroutine stack")
 	}
+	InitWasmGCPolicy()
 
 	for {
 		runWasmContext(gp)

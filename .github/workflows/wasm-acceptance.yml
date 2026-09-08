@@ -144,6 +144,29 @@ jobs:
           go test -count=1 -coverprofile="$RUNNER_TEMP/gjs-storage.cover" \
             ./internal/wasmcontext ./internal/gcroot ./internal/runtime/tinygogc
 
+      - uses: bytecodealliance/actions/wasm-tools/setup@v1
+        if: ${{ matrix.profile == 'WC32' }}
+        with:
+          version: '1.243.0'
+      - name: Verify GC environment and automatic collection
+        if: ${{ matrix.profile == 'WC32' || matrix.profile == 'GJS' }}
+        env:
+          PROFILE: ${{ matrix.profile }}
+          LLGO: ${{ runner.temp }}/llgo
+        run: |
+          set -o pipefail
+          suite=gc-env
+          if [[ "$PROFILE" == WC32 ]]; then suite=gc-pacing; fi
+          bash dev/test_wasm_single_worker.sh "$suite" \
+            2>&1 | tee "$RUNNER_TEMP/gc-pacing-$PROFILE.log"
+      - name: Preserve GC pacing regression log
+        if: ${{ always() && (matrix.profile == 'WC32' || matrix.profile == 'GJS') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-gc-pacing-${{ matrix.profile }}
+          path: ${{ runner.temp }}/gc-pacing-${{ matrix.profile }}.log
+          if-no-files-found: error
+
       - name: Upload Wasm runtime helper coverage
         if: ${{ matrix.profile == 'GJS' }}
         uses: codecov/codecov-action@v7
