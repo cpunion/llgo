@@ -88,6 +88,29 @@ jobs:
             ${{ runner.temp }}/goroot-smoke-${{ matrix.profile }}.json
           if-no-files-found: error
 
+      - name: Check WASI typed reflection before full acceptance
+        if: ${{ matrix.profile == 'WC32' || matrix.profile == 'GWASI' }}
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -o pipefail
+          args=(-target wasi)
+          if [[ "$PROFILE" == GWASI ]]; then
+            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
+            args=()
+          fi
+          "$RUNNER_TEMP/llgo" test "${args[@]}" -emulator -v -timeout=2m \
+            -run '^(TestReflect.*Bridge|TestMakeFunc|TestValueMethodAndCall|TestValueCallSlice)$' \
+            ./test/std/reflect 2>&1 | tee "$RUNNER_TEMP/reflect-$PROFILE.log"
+
+      - name: Preserve WASI reflection log
+        if: ${{ always() && (matrix.profile == 'WC32' || matrix.profile == 'GWASI') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-reflect-${{ matrix.profile }}
+          path: ${{ runner.temp }}/reflect-${{ matrix.profile }}.log
+          if-no-files-found: error
+
       - name: Compare GJS host behavior with the official Go helper
         if: ${{ matrix.profile == 'GJS' }}
         env:
@@ -104,7 +127,9 @@ jobs:
           for compiler in go llgo; do
             log="$RUNNER_TEMP/gjs-$compiler.log"
             test "$(grep -c '^PASS$' "$log")" = 1
-            ! grep -Eq '^(panic:|fatal error:|--- FAIL:|FAIL([[:space:]]|$))' "$log"
+            if grep -Eq '^(panic:|fatal error:|--- FAIL:|FAIL([[:space:]]|$))' "$log"; then
+              exit 1
+            fi
           done
 
       - name: Verify Fiber storage alignment and ownership
