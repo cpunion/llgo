@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"testing"
+	"unsafe"
 )
 
 var tinySink []*int32
@@ -28,12 +29,14 @@ func TestRuntimeMemProfileBufferContract(t *testing.T) {
 	for i := range records {
 		records[i].AllocBytes = -1
 	}
-	if got, ok := runtime.MemProfile(records[:n-1], true); ok || got < n {
-		t.Fatalf("short buffer = %d, %t, want at least %d, false", got, ok, n)
-	}
-	for i := range records {
-		if records[i].AllocBytes != -1 {
-			t.Fatalf("short snapshot modified record %d", i)
+	for _, length := range []int{0, n - 1} {
+		if got, ok := runtime.MemProfile(records[:length], true); ok || got < n {
+			t.Fatalf("buffer length %d = %d, %t, want at least %d, false", length, got, ok, n)
+		}
+		for i := range records {
+			if records[i].AllocBytes != -1 {
+				t.Fatalf("snapshot with buffer length %d modified record %d", length, i)
+			}
 		}
 	}
 	got, ok := runtime.MemProfile(records, true)
@@ -66,6 +69,10 @@ func TestRuntimeMemProfileReportsTinyAllocations(t *testing.T) {
 
 	records := readMemProfile(t)
 	wantBytes := int64(n * 4)
+	wantGranule := int64(16)
+	if runtime.GOARCH == "wasm" {
+		wantGranule = int64(4 * unsafe.Sizeof(uintptr(0)))
+	}
 	for _, r := range records {
 		inUseObjects := r.InUseObjects()
 		inUseBytes := r.InUseBytes()
@@ -75,7 +82,7 @@ func TestRuntimeMemProfileReportsTinyAllocations(t *testing.T) {
 		if got := len(r.Stack()); got > len(r.Stack0) {
 			t.Fatalf("MemProfileRecord.Stack length = %d, want <= %d", got, len(r.Stack0))
 		}
-		if inUseBytes/inUseObjects == 16 && inUseBytes >= wantBytes {
+		if inUseBytes/inUseObjects == wantGranule && inUseBytes >= wantBytes {
 			return
 		}
 	}
