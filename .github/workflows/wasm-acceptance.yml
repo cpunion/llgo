@@ -70,9 +70,10 @@ jobs:
           target_goroot="$(go env GOROOT)"
           cases='^(helloworld\.go|bom\.go)$'
           if [[ "$PROFILE" == GWASI ]]; then
-            # This original generated program catches excessive inlining
-            # before Asyncify. Guard it once before starting the full matrix.
-            cases='^(helloworld\.go|bom\.go|fixedbugs/issue5162\.go)$'
+            # Original generated programs catch excessive pre-Asyncify
+            # inlining and duplicated panic-location calls in large initializers.
+            # Guard them once before starting the full matrix.
+            cases='^(helloworld\.go|bom\.go|fixedbugs/issue5162\.go|cmplxdivide\.go)$'
           fi
           (
             cd test/goroot
