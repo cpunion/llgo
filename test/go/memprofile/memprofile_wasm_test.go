@@ -15,6 +15,10 @@ import (
 var wasmProfileObjects [][]byte
 var wasmProfileTimerObject []byte
 
+func init() {
+	tinyAllocationGranule = int64(4 * unsafe.Sizeof(uintptr(0)))
+}
+
 //go:noinline
 func allocateWasmProfileTimerObject() {
 	wasmProfileTimerObject = make([]byte, 96)
