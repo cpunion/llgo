@@ -31,14 +31,24 @@ type wasmFuncInfoRelink struct {
 	mapPath  string
 	rootPath string
 	inputs   []string
+	userMap  bool
 }
 
-func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs []string) (*wasmFuncInfoRelink, error) {
+func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs, linkArgs []string) (*wasmFuncInfoRelink, error) {
 	if ctx == nil || ctx.buildConf == nil || ctx.prog == nil ||
 		ctx.buildConf.BuildMode != BuildModeExe ||
 		runtimeSiteObjectFormat(ctx) != siteObjectWasm ||
 		!shouldEmitRuntimeEntrySites(ctx) {
 		return nil, nil
+	}
+	// A linker accepts only one map destination. Reuse an explicitly requested
+	// map instead of silently overriding -extldflags with our private probe.
+	args := slices.Concat(ctx.crossCompile.LinkerArgs, ctx.crossCompile.LDFLAGS, linkArgs)
+	if path := wasmLinkMapOutput(args); path != "" {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(ctx.commands.dir, path)
+		}
+		return &wasmFuncInfoRelink{mapPath: path, inputs: slices.Clone(inputs), userMap: true}, nil
 	}
 	f, err := os.CreateTemp(filepath.Dir(outputPath), ".llgo-wasm-funcinfo-*.map")
 	if err != nil {
@@ -54,13 +64,15 @@ func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs []string)
 
 func (p *wasmFuncInfoRelink) cleanup() {
 	if p != nil {
-		_ = os.Remove(p.mapPath)
+		if !p.userMap {
+			_ = os.Remove(p.mapPath)
+		}
 		_ = os.Remove(p.rootPath)
 	}
 }
 
 func (p *wasmFuncInfoRelink) probeArgs() []string {
-	if p == nil {
+	if p == nil || p.userMap {
 		return nil
 	}
 	return []string{"-Xlinker", "--Map=" + p.mapPath}
@@ -89,11 +101,46 @@ func (p *wasmFuncInfoRelink) liveEntryObject(ctx *context) (string, error) {
 	if len(roots) == 0 {
 		return "", nil
 	}
-	p.rootPath = strings.TrimSuffix(p.mapPath, filepath.Ext(p.mapPath)) + ".o"
+	f, err := os.CreateTemp("", "llgo-wasm-funcinfo-roots-*.o")
+	if err != nil {
+		return "", fmt.Errorf("create WebAssembly funcinfo root object: %w", err)
+	}
+	p.rootPath = f.Name()
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("close WebAssembly funcinfo root object: %w", err)
+	}
 	if err := writeWasmFuncInfoRootObject(ctx, p.rootPath, roots); err != nil {
 		return "", err
 	}
 	return p.rootPath, nil
+}
+
+// wasmLinkMapOutput follows the linker's last-option-wins rule after unwrapping
+// the two Clang driver spellings. Keep paths (including spaces) intact.
+func wasmLinkMapOutput(args []string) string {
+	var linkerArgs []string
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "-Xlinker" && i+1 < len(args):
+			i++
+			linkerArgs = append(linkerArgs, args[i])
+		case strings.HasPrefix(arg, "-Wl,"):
+			linkerArgs = append(linkerArgs, strings.Split(strings.TrimPrefix(arg, "-Wl,"), ",")...)
+		}
+	}
+	var path string
+	for i := 0; i < len(linkerArgs); i++ {
+		switch arg := linkerArgs[i]; {
+		case (arg == "-Map" || arg == "--Map") && i+1 < len(linkerArgs):
+			i++
+			path = linkerArgs[i]
+		case strings.HasPrefix(arg, "-Map="):
+			path = strings.TrimPrefix(arg, "-Map=")
+		case strings.HasPrefix(arg, "--Map="):
+			path = strings.TrimPrefix(arg, "--Map=")
+		}
+	}
+	return path
 }
 
 func writeWasmFuncInfoRootObject(ctx *context, path string, roots []string) error {
