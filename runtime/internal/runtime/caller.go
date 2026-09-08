@@ -47,6 +47,7 @@ const (
 )
 
 type callerLocationStore struct {
+	wasmPanicTrace
 	frames        []CallerFrame
 	stack         []CallerFrame
 	synthetic     []CallerFrame
@@ -240,7 +241,7 @@ func SavePanicCallerFrames() {
 		p.armed = 0
 		return
 	}
-	if PanicPCSnapshot != nil {
+	if !snapshotWasmPanicFrames() && PanicPCSnapshot != nil {
 		PanicPCSnapshot()
 	}
 }
