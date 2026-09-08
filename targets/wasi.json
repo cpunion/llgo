@@ -5,5 +5,5 @@
 	"goos": "wasip1",
 	"goarch": "wasm",
 	"wasm-abi": "wasi-preview1",
-	"emulator": "wasmtime run -W exceptions=y --dir={tmpDir}::/tmp {}"
+	"emulator": "wasmtime run --dir=/ --env PWD --env PATH -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 {}"
 }
