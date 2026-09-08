@@ -2,10 +2,29 @@ package runtime
 
 // MemProfileRecord describes allocations aggregated by size class.
 type MemProfileRecord struct {
-	ObjectSize                int64
 	AllocBytes, FreeBytes     int64
 	AllocObjects, FreeObjects int64
 	Stack0                    [32]uintptr
+}
+
+// The compiler makes this read-only and enables it only for single-worker
+// linear-memory Wasm programs with a heap-profile consumer.
+var wasmMemProfileEnabled bool
+
+var memProfilePauseDepth uint32
+
+// MemProfilePause excludes profiler-owned allocations from samples. The Wasm
+// sampler is single-worker and cannot yield while changing this nested guard.
+func MemProfilePause() {
+	if wasmMemProfileEnabled {
+		memProfilePauseDepth++
+	}
+}
+
+func MemProfileResume() {
+	if wasmMemProfileEnabled {
+		memProfilePauseDepth--
+	}
 }
 
 func (r *MemProfileRecord) InUseBytes() int64 {
@@ -109,7 +128,6 @@ func MemProfile(p []MemProfileRecord, inuseZero bool) (n int, ok bool) {
 			continue
 		}
 		p[j] = MemProfileRecord{
-			ObjectSize:   int64(b.size),
 			AllocBytes:   int64(uint64(b.size) * uint64(objects)),
 			AllocObjects: int64(objects),
 		}
