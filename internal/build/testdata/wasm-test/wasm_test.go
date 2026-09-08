@@ -48,3 +48,23 @@ func TestPanicRecoverAndCaller(t *testing.T) {
 	}
 	panic("wasm-test-panic")
 }
+
+func TestCallerSeesPanicFrame(t *testing.T) {
+	panicCallerLine := 0
+	defer func() {
+		_, file, line, ok := runtime.Caller(2)
+		if !ok || file == "" || line != panicCallerLine {
+			t.Errorf("runtime.Caller(2) during panic = %q:%d, %v; want line %d", file, line, ok, panicCallerLine)
+		}
+		if got := recover(); got != "wasm-caller-panic" {
+			t.Errorf("recover = %v, want wasm-caller-panic", got)
+		}
+		_, file, line, ok = runtime.Caller(2)
+		if !ok || file == "" || line != panicCallerLine {
+			t.Errorf("runtime.Caller(2) after recover = %q:%d, %v; want line %d", file, line, ok, panicCallerLine)
+		}
+	}()
+	_, _, panicCallerLine, _ = runtime.Caller(0)
+	panicCallerLine += 2
+	panic("wasm-caller-panic")
+}

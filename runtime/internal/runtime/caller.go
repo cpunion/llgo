@@ -164,10 +164,11 @@ func Caller(skip int) (CallerFrame, bool) {
 	if store == nil || len(store.stack) == 0 {
 		return CallerFrame{}, false
 	}
-	if skip < len(store.stack) {
-		return store.captureFrameAt(&store.stack[len(store.stack)-1-skip], callerPCValue), true
+	depth := callerShadowStackDepth(store)
+	if skip < depth {
+		return callerShadowStackFrame(store, skip, callerPCValue), true
 	}
-	switch skip - len(store.stack) {
+	switch skip - depth {
 	case 0:
 		return store.captureFrame(runtimeMainFrame, callerPCValue), true
 	case 1:
@@ -197,7 +198,8 @@ func Callers(skip int, pcs []uintptr) int {
 		pcs[n] = store.staticPC(runtimeCallersFrame, &store.callersPCBase, callersPCValue)
 		n++
 	}
-	for i := len(store.stack) - 1; i >= 0; i-- {
+	depth := callerShadowStackDepth(store)
+	for i := 0; i < depth; i++ {
 		if skip > 0 {
 			skip--
 			continue
@@ -205,7 +207,7 @@ func Callers(skip int, pcs []uintptr) int {
 		if n >= len(pcs) {
 			return n
 		}
-		pcs[n] = store.capturePC(&store.stack[i], callersPCValue)
+		pcs[n] = callerShadowStackFrame(store, i, callersPCValue).PC
 		n++
 	}
 	if skip > 0 {
@@ -333,9 +335,24 @@ func BindCallerLocation(pc uintptr, rawName string) {
 
 var (
 	runtimeCallersFrame = CallerFrame{Function: "runtime.Callers"}
+	runtimeGopanicFrame = CallerFrame{Function: "runtime.gopanic"}
 	runtimeMainFrame    = CallerFrame{Function: "runtime.main"}
 	runtimeGoexitFrame  = CallerFrame{Function: "runtime.goexit"}
 )
+
+func callerShadowStackDepth(store *callerLocationStore) int {
+	if depth := panicShadowStackDepth(store); depth >= 0 {
+		return depth
+	}
+	return len(store.stack)
+}
+
+func callerShadowStackFrame(store *callerLocationStore, skip int, pcValue uintptr) CallerFrame {
+	if frame, ok := panicShadowStackFrame(store, skip, pcValue); ok {
+		return frame
+	}
+	return store.captureFrameAt(&store.stack[len(store.stack)-1-skip], pcValue)
+}
 
 func callerLocationByName(store *callerLocationStore, rawName string) (CallerFrame, bool) {
 	if rawName == "" {
