@@ -32,11 +32,11 @@ const callerSyntheticPCNamespace = uintptr(1) << (unsafe.Sizeof(uintptr(0))*8 - 
 //
 // This backend has one mutator. These runtime helpers have no cooperative
 // safepoints, and allocation-triggered GC queues finalizers without invoking
-// user callbacks, so interning cannot switch goroutines or reenter itself.
+// user callbacks. Interning suppresses allocation sampling while updating the
+// registry, so the sampler cannot recursively modify a half-written table.
 // No lock is held while growing the globally rooted slices; in particular,
 // GC during growth cannot deadlock on a symbolization lock. A future threaded
-// backend or allocation-stack profiler must supply its own synchronization or
-// suppress profiler recursion before using this registry.
+// backend must supply its own synchronization before using this registry.
 var wasmCallerSyntheticRegistry callerLocationStore
 
 func callerSyntheticRegistryFor(*callerLocationStore) *callerLocationStore {

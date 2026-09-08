@@ -197,12 +197,35 @@ jobs:
           esac
           bash dev/test_wasm_exit_status.sh "$RUNNER_TEMP/exit-$PROFILE.log" "${args[@]}"
 
+      - name: Verify stack capture during first-allocation profiling
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          case "$PROFILE" in
+            EC32) args=(-target emscripten -emulator) ;;
+            EC64) args=(-target emscripten-memory64 -emulator) ;;
+            WC32) args=(-target wasi -emulator) ;;
+            GJS) export GOOS=js GOARCH=wasm CGO_ENABLED=0; args=() ;;
+            GWASI) export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0; args=() ;;
+            *) exit 2 ;;
+          esac
+          # This needs a fresh process: testing.M warms the PC registry and
+          # masks recursion while its initial slices are being allocated.
+          timeout 5m "$RUNNER_TEMP/llgo" run "${args[@]}" \
+            ./internal/build/testdata/wasm-profile-reentry \
+            > "$RUNNER_TEMP/profile-reentry-$PROFILE.log" 2>&1 || {
+              cat "$RUNNER_TEMP/profile-reentry-$PROFILE.log"; exit 1;
+            }
+          cat "$RUNNER_TEMP/profile-reentry-$PROFILE.log"
+
       - name: Preserve process status regression log
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: wasm-exit-status-${{ matrix.profile }}
-          path: ${{ runner.temp }}/exit-${{ matrix.profile }}.log
+          path: |
+            ${{ runner.temp }}/exit-${{ matrix.profile }}.log
+            ${{ runner.temp }}/profile-reentry-${{ matrix.profile }}.log
           if-no-files-found: warn
 
       - name: Verify WASI blocked I/O scheduling and cancellation
