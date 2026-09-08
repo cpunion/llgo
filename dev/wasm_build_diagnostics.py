@@ -6,10 +6,14 @@ import datetime
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
 import sys
 import threading
+
+from wasm_optimizer_replay import bounded_run
 
 
 def now():
@@ -105,12 +109,44 @@ def runner_args(runner, goroot, wrapper, report):
             "-min-swap-free-mib=512", "-progress=60s", "-report", str(report)]
 
 
+def preserve_main_ir(log, work, evidence):
+    text = log.read_text()
+    saved = []
+    # Failed compiler output is printed after the child process was killed.
+    # -keepwork retains its inputs. Copy only main's LLVM IR, not the cache.
+    for match in re.finditer(r"^\s*# compiling (.+) for pkg: main\s*$", text, re.MULTILINE):
+        source = Path(match.group(1)).resolve()
+        if not source.is_relative_to(work.resolve()) or not source.is_file():
+            raise ValueError(f"main IR missing or outside diagnostic work directory: {source}")
+        if source.stat().st_size > 64 << 20:
+            raise ValueError("main IR exceeds the bounded 64 MiB artifact limit")
+        destination = evidence / f"main-{len(saved)}.ll"
+        save_file(source, destination)
+        for line in text.splitlines():
+            if str(source) not in line or "clang" not in line:
+                continue
+            args = shlex.split(line.strip())
+            if Path(args[0]).name not in ("clang", "clang++") or not Path(args[0]).is_absolute():
+                continue
+            if "-c" not in args or "-o" not in args:
+                continue
+            args[args.index(str(source))] = str(destination)
+            args[args.index("-o")+1] = str(evidence / f"main-{len(saved)}.o")
+            saved.append(args)
+            break
+        else:
+            raise ValueError("preserved main IR has no matching clang command")
+    return saved
+
+
 def run_diagnostics(args):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--llgo", type=Path, required=True)
     parser.add_argument("--runner", type=Path, required=True)
     parser.add_argument("--goroot", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cmplx-only", action="store_true")
+    parser.add_argument("--clang-passes", action="store_true")
     opts = parser.parse_args(args)
     if sys.platform != "linux":
         parser.error("diagnostic execution requires Linux ps and GNU time")
@@ -133,6 +169,8 @@ def run_diagnostics(args):
                WASMOPT=str(wrappers / "wasm-opt"), TMPDIR=str(work))
     command = runner_args(opts.runner.resolve(), opts.goroot.resolve(), wrappers / "llgo",
                           evidence / "goroot-GWASI.json")
+    if opts.cmplx_only:
+        command = ["-case=^cmplxdivide\\.go$" if arg.startswith("-case=") else arg for arg in command]
     # Do not serialize env: runner tokens and other unrelated secrets must not
     # enter diagnostics. Leave GOMAXPROCS/BINARYEN_CORES/optimization unchanged.
     (evidence / "runner-command.json").write_text(json.dumps(command, indent=2) + "\n")
@@ -151,6 +189,14 @@ def run_diagnostics(args):
     finally:
         stop.set()
         monitor.join()
+    if opts.clang_passes:
+        commands = preserve_main_ir(evidence / "goroot.log", work, evidence)
+        if not commands:
+            raise ValueError("no main IR was preserved; clang phase cannot be diagnosed")
+        for index, clang in enumerate(commands):
+            # This replay adds logging only. The original acceptance command
+            # above is unchanged and its failure status is retained below.
+            bounded_run(f"clang-passes-{index}", [*clang, "-Xclang", "-fdebug-pass-manager", "-ftime-report"], evidence)
     # Work remains on this disposable runner (-keepwork). Artifact upload is
     # restricted to evidence: exact staged sources, Binaryen inputs, outputs,
     # and logs. Never recursively archive caches or symlinked repositories.

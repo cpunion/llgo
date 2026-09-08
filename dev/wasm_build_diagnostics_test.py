@@ -5,10 +5,12 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
 
+sys.path.insert(0, str(Path(__file__).parent))
 spec = importlib.util.spec_from_file_location(
     "diagnostics", Path(__file__).with_name("wasm_build_diagnostics.py"))
 diag = importlib.util.module_from_spec(spec)
@@ -16,6 +18,28 @@ spec.loader.exec_module(diag)
 
 
 class DiagnosticsTest(unittest.TestCase):
+    def test_preserve_only_main_ir_and_exact_compiler_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work, evidence = root / "work", root / "evidence"
+            work.mkdir()
+            evidence.mkdir()
+            source = work / "main.ll"
+            source.write_text("define void @test() { ret void }\n")
+            log = root / "log"
+            log.write_text(f"# compiling {source} for pkg: main\n"
+                           f"clang -c {source} -o old.o\n"
+                           f"/usr/bin/clang++ -Os -c {source} -o old.o\n")
+            commands = diag.preserve_main_ir(log, work, evidence)
+            self.assertEqual(commands, [["/usr/bin/clang++", "-Os", "-c", str(evidence / "main-0.ll"),
+                                        "-o", str(evidence / "main-0.o")]])
+            self.assertEqual((evidence / "main-0.ll").read_text(), source.read_text())
+            outside = root / "outside.ll"
+            outside.write_text("not a diagnostic input")
+            log.write_text(f"# compiling {outside} for pkg: main\n")
+            with self.assertRaisesRegex(ValueError, "outside"):
+                diag.preserve_main_ir(log, work, evidence)
+
     def test_compiler_args_are_transparent_except_tracing(self):
         self.assertEqual(diag.compiler_args(["build", "-o", "a b.wasm", "."]),
                          ["build", "-x", "-o", "a b.wasm", "."])

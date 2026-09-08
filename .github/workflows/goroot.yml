@@ -310,7 +310,7 @@ jobs:
           fi
 
   wasm-build-diagnostics:
-    name: GWASI build diagnostics (two original cases)
+    name: GWASI cmplxdivide clang pass diagnostics
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'wasm-build-diagnostics' && github.repository_owner == 'cpunion'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -341,11 +341,12 @@ jobs:
           clang --version
           wasm-opt --version
           /usr/bin/time --version
-      - name: Diagnose the original GWASI compile failures
+      - name: Diagnose the original GWASI cmplxdivide compile failure
         run: |
           python3 dev/wasm_build_diagnostics.py \
             --llgo "$RUNNER_TEMP/llgo" --runner "$RUNNER_TEMP/goroot-runner" \
-            --goroot "$(go env GOROOT)" --output "$RUNNER_TEMP/wasm-build-diagnostics"
+            --goroot "$(go env GOROOT)" --output "$RUNNER_TEMP/wasm-build-diagnostics" \
+            --cmplx-only --clang-passes
       - name: Upload bounded diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v7
