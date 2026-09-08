@@ -183,16 +183,24 @@ func TestWasmFailureStatusProbeRejectsFalsePositives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
+	const validFailure = "printf '%s\\n' 'intentional wasm exit-status probe' '--- FAIL: TestIntentionalHostExitFailure' '--- PASS: TestNilStoreOperandOrder' '--- PASS: TestNilPointerAndFunctionRecovery' '--- PASS: TestLargeAggregateGCRoots' '--- PASS: TestLargeStructGCRoots' '--- PASS: TestRangeIteratorGCRoots' 'FAIL'\nexit 1\n"
+	tests := []struct {
 		name, body string
 		accept     bool
 	}{
-		{"failed test", "printf '%s\\n' 'intentional wasm exit-status probe' '--- FAIL: TestIntentionalHostExitFailure' '--- PASS: TestNilStoreOperandOrder' '--- PASS: TestNilPointerAndFunctionRecovery' 'FAIL'\nexit 1\n", true},
+		{"failed test", validFailure, true},
 		{"nil recovery missing", "printf '%s\\n' 'intentional wasm exit-status probe' '--- FAIL: TestIntentionalHostExitFailure' 'FAIL'\nexit 1\n", false},
 		{"false success", "printf '%s\\n' 'intentional wasm exit-status probe' '--- FAIL: TestIntentionalHostExitFailure' 'FAIL'\nexit 0\n", false},
 		{"compiler error", "echo 'compiler failed'\nexit 1\n", false},
 		{"deadline", "exit 124\n", false},
-	} {
+	}
+	for _, required := range []string{"LargeAggregateGCRoots", "LargeStructGCRoots", "RangeIteratorGCRoots"} {
+		tests = append(tests, struct {
+			name, body string
+			accept     bool
+		}{required + " missing", strings.Replace(validFailure, "'--- PASS: Test"+required+"' ", "", 1), false})
+	}
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			fake := filepath.Join(dir, "llgo")
