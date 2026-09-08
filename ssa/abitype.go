@@ -345,6 +345,9 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 			b.abiTuples(t.Params(), name+"$in"),
 			b.abiTuples(t.Results(), name+"$out"),
 		}
+		if prog.target.GOARCH == "wasm" && prog.target.effectiveGOOS() == "wasip1" {
+			fields = append(fields, pkg.wasiReflectCallBridge(t, name).impl, pkg.wasiReflectMakeBridge(t, name).impl)
+		}
 	case *types.Struct:
 		name, _ = prog.abi.TypeName(t)
 		var pkgPath string
@@ -559,6 +562,18 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		values = append(values, ifn)
 		values = append(values, tfn)
 		fields[i] = prog.constStructValue(ft, values)
+		if prog.target.GOARCH == "wasm" && prog.target.effectiveGOOS() == "wasip1" {
+			// Type.Method constructs the method-expression signature at runtime.
+			// WASI needs its typed bridge even if no source expression explicitly
+			// materializes that function type. Retain it with the Tfn entry, not
+			// unconditionally with every receiver type and its unused methods.
+			expression := methodExprSignature(m.Type().(*types.Signature))
+			b.abiType(expression)
+			if mb := b.Pkg.metaBuilder; mb != nil {
+				expressionName, _ := prog.abi.TypeName(expression)
+				mb.AddOrdinaryEdge(mb.Sym(tfn.Name()), mb.Sym(expressionName))
+			}
+		}
 		if mb := b.Pkg.metaBuilder; mb != nil {
 			mtypeName, _ := prog.abi.TypeName(ftyp)
 			mb.AddMethodSlot(mb.Sym(typeName), fullName, mb.Sym(mtypeName), mb.Sym(ifn.Name()), mb.Sym(tfn.Name()))
