@@ -113,14 +113,12 @@ func updateCurrentFrame(entry uintptr, name, file string, line int) {
 	for i := len(store.stack) - 1; i >= 0; i-- {
 		frame := &store.stack[i]
 		if frame.Entry == entry {
-			frame.Function = name
-			frame.File = file
-			// For one entry the instrumented name/file operands are
-			// constants; only the line changes between call sites. Comparing
-			// just the line keeps this per-call path free of string
-			// comparisons while still invalidating the capture memo whenever
-			// the frame content can differ.
-			if frame.Line != line {
+			// //line directives can change the runtime-visible filename while
+			// retaining the same line number. Invalidate the captured synthetic
+			// PC whenever any symbolized field changes.
+			if frame.Function != name || frame.File != file || frame.Line != line {
+				frame.Function = name
+				frame.File = file
 				frame.Line = line
 				frame.captured = 0
 			}
