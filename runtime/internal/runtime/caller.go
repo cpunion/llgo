@@ -53,7 +53,8 @@ type callerLocationStore struct {
 	synthetic     []CallerFrame
 	syntheticHash []uintptr
 	// Memoized synthetic PC bases for the static frames emitted around every
-	// Callers walk. Per-store because synthetic sequences are per-store.
+	// Callers walk. On single-worker WebAssembly these refer to the shared
+	// process registry; other backends retain per-store synthetic sequences.
 	callersPCBase uintptr
 	mainPCBase    uintptr
 	goexitPCBase  uintptr
@@ -374,6 +375,10 @@ func bindCallerLocationPC(pc uintptr, frame CallerFrame) {
 }
 
 func FrameForPC(pc uintptr) (CallerFrame, bool) {
+	if callerSyntheticPCNamespace != 0 && IsWasmSyntheticPC(pc) {
+		// Even an unknown logical PC must not fall back to the function table.
+		return syntheticFrameForPC(pc)
+	}
 	if pc&callerPCMask != 0 {
 		if frame, ok := syntheticFrameForPC(pc); ok {
 			return frame, true
@@ -417,21 +422,24 @@ func FrameForPC(pc uintptr) (CallerFrame, bool) {
 }
 
 func syntheticFrameForPC(pc uintptr) (CallerFrame, bool) {
-	store := callerLocationStoreCurrent
+	if callerSyntheticPCNamespace != 0 && !IsWasmSyntheticPC(pc) {
+		return CallerFrame{}, false
+	}
+	store := callerSyntheticLookupStore()
 	if store == nil {
 		return CallerFrame{}, false
 	}
-	seq := pc >> 2
+	seq := (pc &^ callerSyntheticPCNamespace) >> 2
 	if seq == 0 || seq > uintptr(len(store.synthetic)) {
 		return CallerFrame{}, false
 	}
 	frame := store.synthetic[seq-1]
-	if frame.PC>>2 != seq {
+	if (frame.PC&^callerSyntheticPCNamespace)>>2 != seq {
 		return CallerFrame{}, false
 	}
 	frame.PC = pc
 	if frame.Entry == 0 {
-		frame.Entry = pc
+		frame.Entry = callerSyntheticEntryPC(pc)
 	}
 	return frame, true
 }
@@ -446,12 +454,13 @@ func callerLocationStoreForGoroutine() *callerLocationStore {
 }
 
 func (s *callerLocationStore) captureFrame(frame CallerFrame, pcValue uintptr) CallerFrame {
+	s = callerSyntheticRegistryFor(s)
 	idx := s.internSyntheticFrame(frame)
 	rec := s.synthetic[idx]
 	seq := uintptr(idx + 1)
-	rec.PC = (seq << 2) | pcValue
+	rec.PC = callerSyntheticPCNamespace | (seq << 2) | pcValue
 	if rec.Entry == 0 {
-		rec.Entry = rec.PC
+		rec.Entry = callerSyntheticEntryPC(rec.PC)
 	}
 	return rec
 }
@@ -464,18 +473,19 @@ func (s *callerLocationStore) capturePC(frame *CallerFrame, pcValue uintptr) uin
 		return frame.captured | pcValue
 	}
 	idx := s.internSyntheticFrame(*frame)
-	base := uintptr(idx+1) << 2
+	base := callerSyntheticPCNamespace | uintptr(idx+1)<<2
 	frame.captured = base
 	return base | pcValue
 }
 
 // captureFrameAt is capturePC plus the full frame copy Caller needs.
 func (s *callerLocationStore) captureFrameAt(frame *CallerFrame, pcValue uintptr) CallerFrame {
+	s = callerSyntheticRegistryFor(s)
 	pc := s.capturePC(frame, pcValue)
-	rec := s.synthetic[(pc>>2)-1]
+	rec := s.synthetic[((pc&^callerSyntheticPCNamespace)>>2)-1]
 	rec.PC = pc
 	if rec.Entry == 0 {
-		rec.Entry = rec.PC
+		rec.Entry = callerSyntheticEntryPC(rec.PC)
 	}
 	return rec
 }
@@ -484,12 +494,13 @@ func (s *callerLocationStore) captureFrameAt(frame *CallerFrame, pcValue uintptr
 // runtime.main) in the per-store cache slot.
 func (s *callerLocationStore) staticPC(frame CallerFrame, cache *uintptr, pcValue uintptr) uintptr {
 	if *cache == 0 {
-		*cache = uintptr(s.internSyntheticFrame(frame)+1) << 2
+		*cache = callerSyntheticPCNamespace | uintptr(s.internSyntheticFrame(frame)+1)<<2
 	}
 	return *cache | pcValue
 }
 
 func (s *callerLocationStore) internSyntheticFrame(frame CallerFrame) int {
+	s = callerSyntheticRegistryFor(s)
 	frame.captured = 0
 	if len(s.syntheticHash) == 0 {
 		s.syntheticHash = make([]uintptr, callerPCHashInit)
@@ -501,7 +512,10 @@ func (s *callerLocationStore) internSyntheticFrame(frame CallerFrame) int {
 	for {
 		idx := s.syntheticHash[slot]
 		if idx == 0 {
-			frame.PC = (uintptr(len(s.synthetic)+1) << 2) | callerPCValue
+			if callerSyntheticPCNamespace != 0 && uintptr(len(s.synthetic)+1) >= callerSyntheticPCNamespace>>2 {
+				panic("runtime: synthetic program counter space exhausted")
+			}
+			frame.PC = callerSyntheticPCNamespace | (uintptr(len(s.synthetic)+1) << 2) | callerPCValue
 			s.synthetic = append(s.synthetic, frame)
 			s.syntheticHash[slot] = uintptr(len(s.synthetic))
 			return len(s.synthetic) - 1

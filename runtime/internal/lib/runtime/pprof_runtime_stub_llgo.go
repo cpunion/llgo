@@ -131,6 +131,13 @@ func FuncForPC(pc uintptr) *Func {
 }
 
 func funcForPCSlow(pc uintptr) *Func {
+	if GOARCH == "wasm" && llrt.IsWasmSyntheticPC(pc) {
+		// Logical WebAssembly PCs belong to the process registry, never to
+		// the function table. Resolve that domain before exact-entry lookup.
+		fn := newFuncForPC(pc, frameSymbol(pc))
+		cacheFuncForPC(pc, fn)
+		return fn
+	}
 	// Exact-entry lookup first, regardless of alignment: arm64 functions are
 	// always 4-aligned, but amd64 function and stub entries need not be, and
 	// an unaligned function-value pc must not be mistaken for a shadow-stack
