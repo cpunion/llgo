@@ -251,6 +251,12 @@ func isPointer(ptr uintptr) bool {
 	return isOnHeap(ptr)
 }
 
+// AllocationSize is the number of bytes charged for a successful allocation.
+// Heap profiles use the same 16-byte wasm32 / 32-byte wasm64 block rounding.
+func AllocationSize(size uintptr) uintptr {
+	return (size + bytesPerBlock - 1) &^ (bytesPerBlock - 1)
+}
+
 // alloc tries to find some free space on the heap, possibly doing a garbage
 // collection cycle if needed. If no space is free, it panics.
 //
@@ -397,6 +403,7 @@ func Free(ptr unsafe.Pointer) {
 	}
 	head := gcFindHead(block)
 	end := gcFindNext(head)
+	memProfileFree(gcAddressOf(head))
 	for block = head; block < end; block++ {
 		gcMarkFree(block)
 	}
@@ -571,6 +578,7 @@ func sweep() (freeBytes uintptr) {
 		switch gcStateOf(block) {
 		case blockStateHead:
 			// Unmarked head. Free it, including all tail blocks following it.
+			memProfileFree(gcAddressOf(block))
 			gcMarkFree(block)
 			freeCurrentObject = true
 			gcFrees++
