@@ -53,7 +53,7 @@ func TestWasmGJSComparisonUsesCheckoutRuntime(t *testing.T) {
 	}
 }
 
-func TestWASIReflectProbeCoversBothProfiles(t *testing.T) {
+func TestWasmReflectProbeCoversAllProfiles(t *testing.T) {
 	data, err := os.ReadFile("../workflows/wasm-acceptance.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -77,29 +77,31 @@ func TestWASIReflectProbeCoversBothProfiles(t *testing.T) {
 			continue
 		}
 		probes++
-		if step.If != "${{ matrix.profile == 'WC32' || matrix.profile == 'GWASI' }}" || step.Env["PROFILE"] != "${{ matrix.profile }}" {
-			t.Fatal("WASI reflection regression must run on WC32 and GWASI")
+		if step.If != "" || step.Env["PROFILE"] != "${{ matrix.profile }}" {
+			t.Fatal("Wasm reflection regression must run on every profile")
 		}
 		root := job.Env["LLGO_ROOT"]
 		if override, ok := step.Env["LLGO_ROOT"]; ok {
 			root = override
 		}
 		if root != "${{ github.workspace }}" {
-			t.Fatalf("WASI reflection regression must use the checkout runtime, got LLGO_ROOT=%q", root)
+			t.Fatalf("Wasm reflection regression must use the checkout runtime, got LLGO_ROOT=%q", root)
 		}
 		for _, required := range []string{
-			"set -o pipefail", "args=(-target wasi)", `if [[ "$PROFILE" == GWASI ]]`,
-			"export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0", "args=()",
+			"set -o pipefail", `case "$PROFILE" in`, "args=()",
+			"EC32) args=(-target emscripten)", "EC64) args=(-target emscripten-memory64)",
+			"WC32) args=(-target wasi)", "GJS) export GOOS=js GOARCH=wasm CGO_ENABLED=0",
+			"GWASI) export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0",
 			`"$RUNNER_TEMP/llgo" test "${args[@]}" -emulator`, "./test/std/reflect",
 			"-run '^(TestReflect.*Bridge|TestMakeFunc|TestValueMethodAndCall|TestValueCallSlice)$'",
 		} {
 			if !strings.Contains(step.Run, required) {
-				t.Fatalf("missing WASI reflection acceptance requirement: %s", required)
+				t.Fatalf("missing Wasm reflection acceptance requirement: %s", required)
 			}
 		}
 	}
 	if probes != 1 {
-		t.Fatalf("expected one WASI reflection probe, got %d", probes)
+		t.Fatalf("expected one Wasm reflection probe, got %d", probes)
 	}
 }
 
