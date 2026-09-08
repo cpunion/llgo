@@ -2565,6 +2565,8 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 			if err := cmd.Link(append(slices.Clone(buildArgs), rootObject)...); err != nil {
 				return fmt.Errorf("relink WebAssembly funcinfo entries: %w", err)
 			}
+		} else if err := funcInfoRelink.publishProbeMap(cmd.Stdout); err != nil {
+			return err
 		}
 	}
 	if !moveExactWindowsOutput {
