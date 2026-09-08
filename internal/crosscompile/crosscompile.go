@@ -95,8 +95,7 @@ const (
 	WasmABIWASIPreview2       WasmABI = "wasi-preview2"
 	WasmABIFreestanding       WasmABI = "freestanding"
 
-	emscriptenBrowserEnvironment = "-sENVIRONMENT=web,worker"
-	emscriptenNamedEnvironment   = "-sENVIRONMENT=web,worker,node"
+	emscriptenEnvironment = "-sENVIRONMENT=web,worker,node"
 )
 
 func (abi WasmABI) valid() bool {
@@ -746,7 +745,7 @@ func useWithGOARMAndToolchain(goos, goarch, goarm string, wasiThreads, forceEspC
 			// "-Wl,--export=malloc", "-Wl,--export=free",
 		}
 		export.LDFLAGS = append(export.LDFLAGS, []string{
-			emscriptenBrowserEnvironment,
+			emscriptenEnvironment,
 			"-DPLATFORM_WEB",
 			"-sEXPORT_KEEPALIVE=1",
 			"-sEXPORT_ES6=1",
@@ -1119,14 +1118,6 @@ func UseWithGOARMAndToolchain(goos, goarch, goarm, targetName string, wasiThread
 		export.Emulator = env.ExpandEnvWithDefault(config.Emulator, buildEnvMap(env.LLGoROOT()), "{}")
 		export.BuildTags = appendUniqueStrings(export.BuildTags, config.BuildTags...)
 		if wasmABI == WasmABIEmscripten || wasmABI == WasmABIEmscriptenMemory64 {
-			// The existing raw js/wasm path remains browser/worker-only. Named
-			// Emscripten targets also promise their configured Node emulator, so
-			// enable that host without changing raw output or its glue size.
-			for i, flag := range export.LDFLAGS {
-				if flag == emscriptenBrowserEnvironment {
-					export.LDFLAGS[i] = emscriptenNamedEnvironment
-				}
-			}
 			// Asyncify otherwise keeps Node alive after exit(2), so fatal runtime
 			// errors neither terminate the process nor produce a useful status.
 			export.LDFLAGS = appendUniqueStrings(export.LDFLAGS, "-sEXIT_RUNTIME=1")
