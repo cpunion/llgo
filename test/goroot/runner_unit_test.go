@@ -215,6 +215,51 @@ func TestProfileScopedExpectations(t *testing.T) {
 	}
 }
 
+func TestWasm32IntegerWidthNotApplicableScope(t *testing.T) {
+	cfg := loadNotApplicableConfig(t, repoRoot(t), filepath.Join("test", "goroot", "notapplicable.yaml"))
+	for _, caseName := range []string{"printbig.go", "fixedbugs/issue23305.go"} {
+		tc := testCase{RelPath: caseName, Directive: "run"}
+		for _, test := range []struct {
+			profile string
+			want    bool
+		}{
+			{"EC32", true},
+			{"WC32", true},
+			{"GJS", true},
+			{"GWASI", true},
+			{"EC64", false},
+		} {
+			match, reason := cfg.MatchProfile("go1.27.0", "js/wasm", test.profile, tc)
+			if match != test.want {
+				t.Fatalf("case=%s profile=%s: match=%v, want %v (reason %q)", caseName, test.profile, match, test.want, reason)
+			}
+		}
+	}
+}
+
+func TestWasmRuntimeBoundaryNotApplicableScope(t *testing.T) {
+	repo := repoRoot(t)
+	notApplicable := loadNotApplicableConfig(t, repo, filepath.Join("test", "goroot", "notapplicable.yaml"))
+	timeouts := loadXFailConfig(t, repo, filepath.Join("test", "goroot", "xfail.yaml"))
+	for _, test := range []struct {
+		caseName  string
+		directive string
+		timed     bool
+	}{
+		{"uintptrescapes.go", "rundir", false},
+		{"typeparam/chans.go", "run", true},
+		{"typeparam/chansimp.go", "rundir", true},
+	} {
+		tc := testCase{RelPath: test.caseName, Directive: test.directive}
+		if match, reason := notApplicable.MatchProfile("go1.27.0", "js/wasm", "EC32", tc); !match || !strings.Contains(reason, "not applicable") {
+			t.Fatalf("case=%s: missing not-applicable boundary: match=%v reason=%q", test.caseName, match, reason)
+		}
+		if _, _, ok := timeouts.MatchTimeoutProfile("go1.27.0", "js/wasm", "EC32", tc); ok != test.timed {
+			t.Fatalf("case=%s: timeout match=%v, want %v", test.caseName, ok, test.timed)
+		}
+	}
+}
+
 func TestNotApplicableWasmResourceLimitIsClassified(t *testing.T) {
 	err := &resourceLimitError{message: "resource limit"}
 	if resourceLimitMustFail(err, true, true) {
