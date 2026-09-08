@@ -85,12 +85,16 @@ func (l *largeAggregateLowerer) transformModule(m llvm.Module) {
 // load and copying that snapshot to every destination at the original sites.
 func (l *largeAggregateLowerer) transformStoredLoads(m llvm.Module) {
 	var loads []llvm.Value
+	var zeroStores []llvm.Value
 	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
 		for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
 			for instr := bb.FirstInstruction(); !instr.IsNil(); instr = llvm.NextInstruction(instr) {
+				if store := instr.IsAStoreInst(); !store.IsNil() && store.Operand(0).IsNull() && l.isLargeAggregate(store.Operand(0).Type()) {
+					zeroStores = append(zeroStores, store)
+				}
 				load := instr.IsALoadInst()
-				if !load.IsNil() && !load.IsVolatile() && l.isLargeAggregate(load.Type()) {
-					if _, ok := storedLoadUsers(load); ok {
+				if !load.IsNil() && l.isLargeAggregate(load.Type()) {
+					if _, _, ok := l.aggregateUsers(load); ok {
 						loads = append(loads, load)
 					}
 				}
@@ -100,22 +104,39 @@ func (l *largeAggregateLowerer) transformStoredLoads(m llvm.Module) {
 	for _, load := range loads {
 		l.transformStoredLoad(m, load)
 	}
+	// A deferred result starts with a volatile zero store. Keep the barrier
+	// while avoiding a SelectionDAG value with one operand per byte.
+	ctx := m.Context()
+	b := ctx.NewBuilder()
+	defer b.Dispose()
+	for _, store := range zeroStores {
+		b.SetInsertPointBefore(store)
+		size := llvm.ConstInt(ctx.IntType(l.td.PointerSize()*8), l.td.TypeAllocSize(store.Operand(0).Type()), false)
+		zero := b.CreateIntrinsic(ctx.VoidType(), llvm.LookupIntrinsicID("llvm.memset"), []llvm.Value{
+			store.Operand(1), llvm.ConstInt(ctx.Int8Type(), 0, false), size, llvm.ConstInt(ctx.Int1Type(), 0, false),
+		}, "")
+		setCopyVolatile(ctx, zero, store.IsVolatile())
+		zero.InstructionSetDebugLoc(store.InstructionDebugLoc())
+		store.EraseFromParentAsInstruction()
+	}
 }
 
-func storedLoadUsers(load llvm.Value) ([]llvm.Value, bool) {
-	var stores []llvm.Value
-	for use := load.FirstUse(); !use.IsNil(); use = use.NextUse() {
-		store := use.User().IsAStoreInst()
-		if store.IsNil() || store.IsVolatile() || store.Operand(0) != load {
-			return nil, false
+func (l largeAggregateLowerer) aggregateUsers(value llvm.Value) (stores, extracts []llvm.Value, ok bool) {
+	for use := value.FirstUse(); !use.IsNil(); use = use.NextUse() {
+		user := use.User()
+		if store := user.IsAStoreInst(); !store.IsNil() && store.Operand(0) == value {
+			stores = append(stores, store)
+		} else if extract := user.IsAExtractValueInst(); !extract.IsNil() && !l.isLargeAggregate(extract.Type()) {
+			extracts = append(extracts, extract)
+		} else {
+			return nil, nil, false
 		}
-		stores = append(stores, store)
 	}
-	return stores, len(stores) != 0
+	return stores, extracts, len(stores)+len(extracts) != 0
 }
 
 func (l *largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Value) {
-	stores, ok := storedLoadUsers(load)
+	stores, extracts, ok := l.aggregateUsers(load)
 	if !ok {
 		return
 	}
@@ -125,8 +146,9 @@ func (l *largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Val
 	typ := load.Type()
 
 	b.SetInsertPointBefore(load)
-	if len(stores) == 1 && llvm.NextInstruction(load) == stores[0] {
+	if len(stores) == 1 && len(extracts) == 0 && llvm.NextInstruction(load) == stores[0] {
 		copy := l.callMemmove(ctx, b, stores[0].Operand(1), load.Operand(0), typ)
+		setCopyVolatile(ctx, copy, load.IsVolatile() || stores[0].IsVolatile())
 		copy.InstructionSetDebugLoc(load.InstructionDebugLoc())
 		stores[0].EraseFromParentAsInstruction()
 		load.EraseFromParentAsInstruction()
@@ -134,14 +156,9 @@ func (l *largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Val
 	}
 	snapshot := l.allocResult(m, ctx, b, typ)
 	copy := l.callMemcpy(ctx, b, snapshot, load.Operand(0), typ)
+	setCopyVolatile(ctx, copy, load.IsVolatile())
 	copy.InstructionSetDebugLoc(load.InstructionDebugLoc())
-	for _, store := range stores {
-		b.SetInsertPointBefore(store)
-		copy := l.callMemcpy(ctx, b, store.Operand(1), snapshot, typ)
-		copy.InstructionSetDebugLoc(store.InstructionDebugLoc())
-		store.EraseFromParentAsInstruction()
-	}
-	load.EraseFromParentAsInstruction()
+	l.rewriteMemoryUsers(ctx, load, snapshot, typ, stores, extracts)
 }
 
 func (l *largeAggregateLowerer) transformCall(m llvm.Module, call llvm.Value) {
@@ -278,23 +295,44 @@ func (l largeAggregateLowerer) rewriteReturns(ctx llvm.Context, fn llvm.Value, r
 }
 
 func (l largeAggregateLowerer) rewriteStoredResult(ctx llvm.Context, value, result llvm.Value, typ llvm.Type) {
-	var stores []llvm.Value
-	for use := value.FirstUse(); !use.IsNil(); use = use.NextUse() {
-		store := use.User().IsAStoreInst()
-		if store.IsNil() || store.IsVolatile() || store.Operand(0) != value {
-			return
-		}
-		stores = append(stores, store)
+	stores, extracts, ok := l.aggregateUsers(value)
+	if !ok && !value.FirstUse().IsNil() {
+		return
 	}
+	l.rewriteMemoryUsers(ctx, value, result, typ, stores, extracts)
+}
+
+// Root publication extracts pointer members from aggregate SSA values. Rewrite
+// those projections as loads from the same immutable snapshot as its stores;
+// leaving even one aggregate use expands the entire value in SelectionDAG.
+func (l largeAggregateLowerer) rewriteMemoryUsers(ctx llvm.Context, value, result llvm.Value, typ llvm.Type, stores, extracts []llvm.Value) {
 	b := ctx.NewBuilder()
 	defer b.Dispose()
 	for _, store := range stores {
 		b.SetInsertPointBefore(store)
-		l.callMemcpy(ctx, b, store.Operand(1), result, typ)
+		copy := l.callMemcpy(ctx, b, store.Operand(1), result, typ)
+		setCopyVolatile(ctx, copy, store.IsVolatile())
+		copy.InstructionSetDebugLoc(store.InstructionDebugLoc())
 		store.EraseFromParentAsInstruction()
 	}
-	if len(stores) != 0 || value.FirstUse().IsNil() {
-		value.EraseFromParentAsInstruction()
+	for _, extract := range extracts {
+		b.SetInsertPointBefore(extract)
+		indices := []llvm.Value{llvm.ConstInt(ctx.Int32Type(), 0, false)}
+		for _, index := range extract.Indices() {
+			indices = append(indices, llvm.ConstInt(ctx.Int32Type(), uint64(index), false))
+		}
+		field := b.CreateInBoundsGEP(typ, result, indices, "")
+		projected := b.CreateLoad(extract.Type(), field, "")
+		projected.InstructionSetDebugLoc(extract.InstructionDebugLoc())
+		extract.ReplaceAllUsesWith(projected)
+		extract.EraseFromParentAsInstruction()
+	}
+	value.EraseFromParentAsInstruction()
+}
+
+func setCopyVolatile(ctx llvm.Context, copy llvm.Value, volatile bool) {
+	if volatile {
+		copy.SetOperand(3, llvm.ConstInt(ctx.Int1Type(), 1, false))
 	}
 }
 
