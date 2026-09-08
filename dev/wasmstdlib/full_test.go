@@ -134,7 +134,7 @@ func TestFullAuditClassifiesHostDriverSuiteWithoutExecutingIt(t *testing.T) {
 
 func TestFullAuditAcceptsReviewedSourceExclusions(t *testing.T) {
 	root := t.TempDir()
-	reviewed := []string{"test/cgo", "test/_stress/runtime/cpuprof", "test/_stress/runtime/finalizer", "test/_stress/runtime/signal", "test/std/plugin", "test/std/syscall", "test/windows"}
+	reviewed := []string{"test/cgo", "test/_stress/runtime/cpuprof", "test/_stress/runtime/finalizer", "test/_stress/runtime/signal", "test/std/plugin", "test/std/runtime/cgo", "test/std/syscall", "test/windows"}
 	for _, pkg := range reviewed {
 		name := filepath.Join(root, pkg, "excluded_test.go")
 		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
@@ -176,15 +176,17 @@ func TestFullAuditAcceptsReviewedSourceExclusions(t *testing.T) {
 	}
 }
 
-func TestRuntimeCGOExclusionIsReferenceOnly(t *testing.T) {
+func TestCGOExclusionsCoverEveryWasmProfile(t *testing.T) {
 	for _, name := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI", "GJS-reference", "GWASI-reference"} {
 		p, err := fullProfile(name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		reason, excluded := fullSourceExclusion(p, "test/std/runtime/cgo")
-		if excluded != p.Reference || excluded && reason == "" {
-			t.Fatalf("%s runtime/cgo exclusion = %q, %v", name, reason, excluded)
+		for _, pkg := range []string{"test/cgo", "test/std/runtime/cgo"} {
+			reason, excluded := fullSourceExclusion(p, pkg)
+			if !excluded || reason == "" {
+				t.Fatalf("%s %s exclusion = %q, %v", name, pkg, reason, excluded)
+			}
 		}
 	}
 }
@@ -287,15 +289,11 @@ func TestFullSourceExclusionsAreProfileSpecific(t *testing.T) {
 				t.Fatalf("%s did not classify %s", name, pkg)
 			}
 		}
-		_, cgoExcluded := fullSourceExclusion(p, "test/cgo")
 		for _, pkg := range []string{"test/llgoext", "test/llgoext/localitymulti"} {
 			reason, excluded := fullSourceExclusion(p, pkg)
 			if excluded != p.Reference || (excluded && reason == "") {
 				t.Fatalf("%s extension exclusion for %s = (%v, %q), want reference-only", name, pkg, excluded, reason)
 			}
-		}
-		if want := p.Target == ""; cgoExcluded != want {
-			t.Fatalf("%s cgo exclusion = %v, want %v", name, cgoExcluded, want)
 		}
 		if _, ok := fullSourceExclusion(p, "test/std/fmt"); ok {
 			t.Fatalf("%s classified an applicable package", name)
@@ -303,9 +301,11 @@ func TestFullSourceExclusionsAreProfileSpecific(t *testing.T) {
 	}
 }
 
-func TestFullDSATimeoutIsTargeted(t *testing.T) {
-	if got := fullTestTimeout("test/std/crypto/dsa"); got != "3m" {
-		t.Fatalf("DSA timeout = %q", got)
+func TestFullLongRunningTimeoutsAreTargeted(t *testing.T) {
+	for _, pkg := range []string{"test/std/crypto/dsa", "test/std/crypto/rsa", "test/std/go/types", "test/std/os", "test/std/runtime/pprof"} {
+		if got := fullTestTimeout(pkg); got != "3m" {
+			t.Fatalf("%s timeout = %q", pkg, got)
+		}
 	}
 	if got := fullTestTimeout("test/std/crypto/aes"); got != "60s" {
 		t.Fatalf("default timeout = %q", got)
