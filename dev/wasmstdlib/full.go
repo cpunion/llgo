@@ -134,7 +134,7 @@ func fullSourceContext(p profile) (tags string, cgo string) {
 	}
 	tags = "llgo,osusergo"
 	if p.Target == "" {
-		return tags + ",nogc", "0"
+		return tags + ",llgo.wasm.gc.linear", "0"
 	}
 	tags += ",llgo.wasm.gc.linear"
 	switch p.Target {
