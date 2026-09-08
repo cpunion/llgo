@@ -21,6 +21,36 @@ host_skips:
     case: fixedbugs/bug449.go
     reason: go1.26 bug449 generated build exceeds the linux/amd64 hosted runner memory budget
 timeouts:
+  - platform: js/wasm
+    directive: run
+    case: cmplxdivide.go
+    timeout: 5m
+    reason: the generated complex-division table makes the LLGo WebAssembly build exceed the default 3m build timeout
+  - platform: wasip1/wasm
+    directive: run
+    case: cmplxdivide.go
+    timeout: 5m
+    reason: the generated complex-division table makes the LLGo WebAssembly build exceed the default 3m build timeout
+  - platform: js/wasm
+    directive: run
+    case: recover.go
+    timeout: 5m
+    reason: the comprehensive recover and reflection case makes the LLGo WebAssembly build exceed the default 3m build timeout
+  - platform: wasip1/wasm
+    directive: run
+    case: recover.go
+    timeout: 5m
+    reason: the comprehensive recover and reflection case makes the LLGo WebAssembly build exceed the default 3m build timeout
+  - platform: js/wasm
+    directive: run
+    case: fixedbugs/issue30116.go
+    timeout: 2m
+    reason: the complete bounds-panic matrix emits enough WebAssembly output to exceed the default 1m run timeout
+  - platform: wasip1/wasm
+    directive: run
+    case: fixedbugs/issue30116.go
+    timeout: 2m
+    reason: the complete bounds-panic matrix emits enough WebAssembly output to exceed the default 1m run timeout
   - platform: darwin/arm64
     directive: run
     case: fixedbugs/issue79186.go

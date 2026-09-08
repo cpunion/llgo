@@ -2,7 +2,8 @@
 # outside LLGo compatibility goals. They are skipped before execution and are not
 # counted as remaining compatibility xfails. Every entry names the mechanism
 # under test and explains the LLGo design choice that puts it out of scope.
-# Applicability is global: entries must not select a Go version or platform.
+# Applicability is independent of Go releases. General entries are global;
+# WebAssembly-only ABI or host limitations may select a wasm platform/profile.
 not_applicable:
   - directive: run
     case: fixedbugs/issue15277.go
@@ -382,6 +383,80 @@ not_applicable:
   - directive: run
     case: stack.go
     reason: "not applicable: this case recursively grows through 8,000 large frames to validate cmd/compile's stack-splitting implementation; LLGo maps each goroutine to a native OS thread with a fixed stack, so reproducing Go's growable-stack mechanism is not currently an LLGo compatibility goal"
+  - directive: run
+    case: fixedbugs/issue59680.go
+    reason: "not applicable: this case deliberately drives more than 10,000 recursive calls to force gc stack growth and relocation; LLGo uses fixed native stacks, so reproducing growable-stack behavior is not an LLGo compatibility goal"
+  - directive: run
+    case: finprofiled.go
+    reason: "not applicable: this case asserts gc's 16-byte tiny allocator packing and its private heap-profile accounting for interior finalizers; LLGo uses BDWGC or tinygogc rather than gc's tiny allocator, so reproducing those allocator records is not an LLGo compatibility goal"
+  - directive: run
+    case: fixedbugs/issue30041.go
+    reason: "not applicable: this case forces gc's write barrier on and validates its reflect-call result copy path with a deliberately invalid heap pointer; LLGo's collectors do not use Go GC write barriers, so reproducing that implementation path is not an LLGo compatibility goal"
+  - directive: run
+    case: fixedbugs/issue30977.go
+    reason: "not applicable: this case forces gc's write barrier on and checks whether its barrier call clobbers a volatile aggregate result; LLGo's collectors do not use Go GC write barriers, so reproducing that implementation path is not an LLGo compatibility goal"
+  - directive: run
+    case: fixedbugs/issue4618.go
+    reason: "not applicable: this case asserts an exact zero-allocation escape-analysis result from cmd/compile; LLGo uses go/types plus LLVM and does not reproduce gc's escape and allocation decisions, so matching that optimization count is not an LLGo compatibility goal"
+  - directive: run
+    case: winbatch.go
+    reason: "not applicable: this case audits CRLF formatting in the upstream Go repository checkout rather than Go program behavior; LLGo does not own or validate GOROOT repository hygiene, so reproducing this maintenance check is not an LLGo compatibility goal"
+  - platform: js/wasm
+    directive: run
+    case: fixedbugs/issue79186.go
+    reason: "not applicable: this case performs 51.2 million lock operations to expose POWER8/9 acquire-ordering faults; LLGo's current single-worker WebAssembly profiles cannot exercise POWER memory ordering or parallel map access, so running the serial stress loop is not an LLGo WebAssembly compatibility goal"
+  - platform: wasip1/wasm
+    directive: run
+    case: fixedbugs/issue79186.go
+    reason: "not applicable: this case performs 51.2 million lock operations to expose POWER8/9 acquire-ordering faults; LLGo's current single-worker WebAssembly profiles cannot exercise POWER memory ordering or parallel map access, so running the serial stress loop is not an LLGo WebAssembly compatibility goal"
+  - platform: js/wasm
+    directive: runindir
+    case: wasmmemsize.go
+    reason: "not applicable: this case combines Go-assembler memory.size with an exact upper bound for the official Go allocator; LLGo uses LLVM plus its own WebAssembly collector and memory policy, so reproducing gc's assembler and allocator footprint is not an LLGo compatibility goal"
+  - platform: wasip1/wasm
+    directive: runindir
+    case: wasmmemsize.go
+    reason: "not applicable: this case combines Go-assembler memory.size with an exact upper bound for the official Go allocator; LLGo uses LLVM plus its own WebAssembly collector and memory policy, so reproducing gc's assembler and allocator footprint is not an LLGo compatibility goal"
+  - platform: js/wasm
+    profile: EC32
+    directive: run
+    case: fixedbugs/bug114.go
+    reason: "not applicable: this case requires the official Go wasm port's 64-bit int data model; LLGo EC32 intentionally uses the Emscripten wasm32 C data model, so 64-bit native int parity is not an EC32 compatibility goal"
+  - platform: js/wasm
+    profile: GJS
+    directive: run
+    case: fixedbugs/bug114.go
+    reason: "not applicable: this case requires the official Go wasm port's 64-bit int data model; LLGo GJS provides Go source and host API compatibility over LLGo's wasm32 data layout rather than binary ABI parity, so 64-bit native int parity is not a GJS compatibility goal"
+  - platform: wasip1/wasm
+    profile: WC32
+    directive: run
+    case: fixedbugs/bug114.go
+    reason: "not applicable: this case requires the official Go wasm port's 64-bit int data model; LLGo WC32 intentionally uses the WASI wasm32 C data model, so 64-bit native int parity is not a WC32 compatibility goal"
+  - platform: wasip1/wasm
+    profile: GWASI
+    directive: run
+    case: fixedbugs/bug114.go
+    reason: "not applicable: this case requires the official Go wasm port's 64-bit int data model; LLGo GWASI provides Go source and host API compatibility over LLGo's wasm32 data layout rather than binary ABI parity, so 64-bit native int parity is not a GWASI compatibility goal"
+  - platform: js/wasm
+    profile: EC32
+    directive: runoutput
+    case: index0.go
+    reason: "not applicable: the official Go wasm generator emits constant indices that require a 64-bit native int; LLGo EC32 intentionally uses the Emscripten wasm32 C data model, so compiling those generated 64-bit-int cases is not an EC32 compatibility goal"
+  - platform: js/wasm
+    profile: GJS
+    directive: runoutput
+    case: index0.go
+    reason: "not applicable: the official Go wasm generator emits constant indices that require a 64-bit native int; LLGo GJS retains LLGo's wasm32 data layout rather than official-Go binary ABI parity, so compiling those generated 64-bit-int cases is not a GJS compatibility goal"
+  - platform: wasip1/wasm
+    profile: WC32
+    directive: runoutput
+    case: index0.go
+    reason: "not applicable: the official Go wasm generator emits constant indices that require a 64-bit native int; LLGo WC32 intentionally uses the WASI wasm32 C data model, so compiling those generated 64-bit-int cases is not a WC32 compatibility goal"
+  - platform: wasip1/wasm
+    profile: GWASI
+    directive: runoutput
+    case: index0.go
+    reason: "not applicable: the official Go wasm generator emits constant indices that require a 64-bit native int; LLGo GWASI retains LLGo's wasm32 data layout rather than official-Go binary ABI parity, so compiling those generated 64-bit-int cases is not a GWASI compatibility goal"
   - directive: errorcheckandrundir
     case: intrinsic.go
     reason: "not applicable: this case asserts gc SSA intrinsic diagnostics; LLGo uses LLVM's optimization pipeline instead of gc SSA; the language-level run stage remains covered separately; supporting this toolchain-specific behavior is not an LLGo compatibility goal"
