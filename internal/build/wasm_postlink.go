@@ -28,6 +28,13 @@ import (
 	"github.com/xgo-dev/llgo/internal/optlevel"
 )
 
+// Asyncify expands every suspendable call site. Binaryen's default inlining
+// budget can merge hundreds of single-use functions into one enormous body
+// before that expansion (Go's issue5162 is one such program). Keep ordinary
+// small-function inlining while limiting the estimated combined body size.
+// This affects final-link optimization only, not package compilation caches.
+const wasmAsyncifyInlineLimit = "--inline-max-combined-binary-size=16384"
+
 func needsWasmPostLink(conf *Config, target *crosscompile.Export) bool {
 	return conf != nil && conf.BuildMode == BuildModeExe &&
 		target != nil && target.WasmPostLink.Asyncify
@@ -46,7 +53,7 @@ func wasmPostLinkArgs(target *crosscompile.Export, input, output string, debug b
 		// optimization pipeline. Run the matching Binaryen pipeline afterwards;
 		// without it, ordinary test binaries can exceed Wasmtime's per-function
 		// decoding limit even when the requested LLGo level is optimized.
-		args = append(args, level.Flag())
+		args = append(args, level.Flag(), wasmAsyncifyInlineLimit)
 	}
 	if debug {
 		args = append(args, "-g")
@@ -60,8 +67,9 @@ func wasmPreAsyncifyArgs(target *crosscompile.Export, input, output string, leve
 	}
 	// Clang normally runs this optimization after wasm-ld. Keep it explicit so
 	// LLGo can disable clang's implicit wasm-opt pass without changing the
-	// established optimization order or binary size.
-	return []string{level.Flag(), input, "-o", output}
+	// established optimization order. Use the same bounded inlining policy in
+	// both passes so the first cannot create an oversized Asyncify input.
+	return []string{level.Flag(), wasmAsyncifyInlineLimit, input, "-o", output}
 }
 
 func prepareWasmLinkOutput(conf *Config, target *crosscompile.Export, output string) (string, error) {
