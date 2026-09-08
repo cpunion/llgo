@@ -3,7 +3,6 @@ package gotest
 import (
 	"reflect"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -483,7 +482,6 @@ func fixedbug73916MustPanic(t *testing.T, fn func()) any {
 }
 
 func TestRecoverFixedbug73916IndirectRecoverDoesNotRecover(t *testing.T) {
-	skipBeforeGo126(t)
 	fixedbug73916Recovered = false
 	fixedbug73916MustPanic(t, func() {
 		defer fixedbug73916Deferred(1)
@@ -510,7 +508,6 @@ func fixedbug73916bDeferred() int {
 }
 
 func TestRecoverFixedbug73916NestedRecoverDoesNotRecover(t *testing.T) {
-	skipBeforeGo126(t)
 	fixedbug73916bRecovered = false
 	fixedbug73916MustPanic(t, func() {
 		defer fixedbug73916bDeferred()
@@ -519,13 +516,4 @@ func TestRecoverFixedbug73916NestedRecoverDoesNotRecover(t *testing.T) {
 	if fixedbug73916bRecovered {
 		t.Fatal("nested recover returned non-nil")
 	}
-}
-
-func skipBeforeGo126(t *testing.T) {
-	t.Helper()
-	version := runtime.Version()
-	if strings.HasPrefix(version, "go1.26") || strings.HasPrefix(version, "devel") {
-		return
-	}
-	t.Skip("requires Go 1.26 recover semantics")
 }
