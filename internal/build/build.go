@@ -2542,7 +2542,7 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	}
 
 	buildArgs = append(buildArgs, objFiles...)
-	funcInfoRelink, err := prepareWasmFuncInfoRelink(ctx, linkOutput, objFiles)
+	funcInfoRelink, err := prepareWasmFuncInfoRelink(ctx, linkOutput, objFiles, buildArgs)
 	if err != nil {
 		return err
 	}
