@@ -24,6 +24,7 @@ func main() {
 		panic("aligned allocation failed")
 	}
 	testRoots()
+	testUintptrEscapesRoots()
 	testCooperativeSafepoint()
 	testSuspendedGRoots()
 	testTimerWaitingRoot()
