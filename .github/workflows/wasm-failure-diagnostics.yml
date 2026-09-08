@@ -1,0 +1,106 @@
+name: R4 bounded runtime diagnostics
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.repository_owner == 'cpunion'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [EC64, GWASI]
+    env:
+      GOMAXPROCS: '2'
+      BINARYEN_CORES: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        if: matrix.profile == 'EC64'
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        if: matrix.profile == 'EC64'
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        if: matrix.profile == 'GWASI'
+        with:
+          version: '39.0.1'
+      - uses: ./.github/actions/setup-go
+      - name: Build compiler
+        run: |
+          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+          mkdir "$RUNNER_TEMP/evidence"
+      - name: Preserve and run original EC64 index program
+        if: matrix.profile == 'EC64'
+        run: |
+          set -o pipefail
+          evidence="$RUNNER_TEMP/evidence"
+          goroot="$(go env GOROOT)"
+          go run "$goroot/test/index0.go" "$goroot/test/index.go" > "$evidence/index-generated.go"
+          failed=0
+          for mode in original checked; do
+            extra=()
+            if [[ "$mode" == checked ]]; then
+              extra=(-extldflags=-sSTACK_OVERFLOW_CHECK=2)
+            fi
+            timeout 5m "$RUNNER_TEMP/llgo" build -target emscripten-memory64 \
+              "${extra[@]}" -o "$evidence/index-$mode.mjs" "$evidence/index-generated.go" \
+              > "$evidence/build-$mode.log" 2>&1 || { cat "$evidence/build-$mode.log"; exit 1; }
+            for policy in 100 off; do
+              status=0
+              GOGC="$policy" timeout 60s node targets/emscripten-memory64-runner.mjs \
+                "$evidence/index-$mode.mjs" > "$evidence/run-$mode-$policy.log" 2>&1 || status=$?
+              printf '%s GOGC=%s status=%s\n' "$mode" "$policy" "$status" | tee -a "$evidence/verdict.txt"
+              cat "$evidence/run-$mode-$policy.log"
+              if [[ "$status" != 0 || -s "$evidence/run-$mode-$policy.log" ]]; then failed=1; fi
+            done
+          done
+          exit "$failed"
+      - name: Preserve GWASI exit-status binary and compare GC settings
+        if: matrix.profile == 'GWASI'
+        run: |
+          set -o pipefail
+          evidence="$RUNNER_TEMP/evidence"
+          GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 timeout 5m "$RUNNER_TEMP/llgo" test \
+            -c -o "$evidence/exit.wasm" ./internal/build/testdata/wasm-test \
+            > "$evidence/build.log" 2>&1 || { cat "$evidence/build.log"; exit 1; }
+          failed=0
+          for policy in 100 off; do
+            log="$evidence/run-$policy.log"
+            status=0
+            timeout 60s wasmtime run --dir=/ --env PWD --env PATH --env "GOGC=$policy" \
+              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/exit.wasm" \
+              -test.v -test.count=1 -test.timeout=30s \
+              '-test.run=^Test(IntentionalHostExitFailure|NilStoreOperandOrder|NilPointerAndFunctionRecovery)$' \
+              -llgo.intentional-exit-failure > "$log" 2>&1 || status=$?
+            printf 'GOGC=%s status=%s\n' "$policy" "$status" | tee -a "$evidence/verdict.txt"
+            cat "$log"
+            if [[ "$status" != 1 ]] ||
+              ! grep -Fq 'intentional wasm exit-status probe' "$log" ||
+              ! grep -Eq '^--- FAIL: TestIntentionalHostExitFailure' "$log" ||
+              ! grep -Eq '^--- PASS: TestNilStoreOperandOrder' "$log" ||
+              ! grep -Eq '^--- PASS: TestNilPointerAndFunctionRecovery' "$log"; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Preserve source, modules, and bounded execution evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: r4-runtime-${{ matrix.profile }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 3
