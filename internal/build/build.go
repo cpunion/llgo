@@ -524,6 +524,9 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 		return nil, err
 	}
 	applyWasmGCLinkFlags(conf, &export)
+	if err := applyWasmExternalLinkOptions(conf, &export); err != nil {
+		return nil, err
+	}
 	if conf.AppExt == "" {
 		conf.AppExt = defaultAppExt(conf)
 	}
