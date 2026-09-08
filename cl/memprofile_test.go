@@ -44,7 +44,7 @@ type g struct { context *runtimeContext }
 var currentG *g
 type CallerFrame struct { captured uintptr }
 type callerLocationStore struct { stack []CallerFrame }
-//llgo:gls
+//llgointernal:gls
 var callerLocationStoreCurrent *callerLocationStore
 const callersPCValue = uintptr(3)
 func callerSyntheticRegistryFor(s *callerLocationStore) *callerLocationStore { return s }
@@ -88,7 +88,9 @@ func RecordPanicLocation(uintptr, string, string, int) { callerLocationStoreCurr
 		return rt
 	})
 	prog.EnableLogicalGoroutineLocality(true)
-	if err := ParsePkgSyntax(prog, fset, pkg, files); err != nil {
+	// This fixture compiles production runtime source under a synthetic package
+	// path, so opt in to the same internal-directive authority as that source.
+	if err := ParsePkgSyntaxWithOptions(prog, fset, pkg, files, Options{AllowInternalDirectives: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := PrepareLocalVariables(prog, fset, pkg, info, files); err != nil {

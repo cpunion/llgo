@@ -255,13 +255,13 @@ var backing int
 func scalar() int { return 42 }
 func pointer() *int { return &backing }
 
-//llgo:tls
+//llgointernal:tls
 var tlsScalar = scalar()
-//llgo:tls
+//llgointernal:tls
 var tlsPointer = pointer()
-//llgo:gls
+//llgointernal:gls
 var glsScalar = scalar()
-//llgo:gls
+//llgointernal:gls
 var glsPointer = pointer()
 
 func values() (int, *int, int, *int) {
