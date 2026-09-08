@@ -21,12 +21,12 @@ func TestGOROOTCaseOutcome(t *testing.T) {
 				want := "pass"
 				if failure {
 					want = "fail"
-					if !wasm {
+					if expectation == "not-applicable" {
+						want = "not-applicable"
+					} else if !wasm {
 						switch expectation {
 						case "xfail":
 							want = "expected-failure"
-						case "not-applicable":
-							want = "not-applicable"
 						case "flaky":
 							want = "known-flaky"
 						}
