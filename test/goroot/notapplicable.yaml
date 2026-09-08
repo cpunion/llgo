@@ -8,35 +8,35 @@ not_applicable:
   - profile: EC32
     directive: run
     case: printbig.go
-    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; the EC32 profile has a 32-bit int, and the official Go compiler rejects the same source for GOARCH=386"
+    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; LLGo's EC32 profile has a 32-bit int, and matching a 64-bit int data model is not an EC32 compatibility goal"
   - profile: WC32
     directive: run
     case: printbig.go
-    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; the WC32 profile has a 32-bit int, and the official Go compiler rejects the same source for GOARCH=386"
+    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; LLGo's WC32 profile has a 32-bit int, and matching a 64-bit int data model is not a WC32 compatibility goal"
   - profile: GJS
     directive: run
     case: printbig.go
-    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; LLGo's GJS profile retains its wasm32 data layout, and the official Go compiler rejects the same source for GOARCH=386"
+    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; LLGo's GJS profile retains its wasm32 data layout, and matching a 64-bit int data model is not a GJS compatibility goal"
   - profile: GWASI
     directive: run
     case: printbig.go
-    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; LLGo's GWASI profile retains its wasm32 data layout, and the official Go compiler rejects the same source for GOARCH=386"
+    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; LLGo's GWASI profile retains its wasm32 data layout, and matching a 64-bit int data model is not a GWASI compatibility goal"
   - profile: EC32
     directive: run
     case: fixedbugs/issue23305.go
-    reason: "not applicable: this case passes the untyped constant 0xffffffff to println, which does not fit the EC32 profile's 32-bit int; the official Go compiler rejects the same source for GOARCH=386"
+    reason: "not applicable: this case passes the untyped constant 0xffffffff to println, which does not fit LLGo's EC32 32-bit int; accepting values outside that data model is not an EC32 compatibility goal"
   - profile: WC32
     directive: run
     case: fixedbugs/issue23305.go
-    reason: "not applicable: this case passes the untyped constant 0xffffffff to println, which does not fit the WC32 profile's 32-bit int; the official Go compiler rejects the same source for GOARCH=386"
+    reason: "not applicable: this case passes the untyped constant 0xffffffff to println, which does not fit LLGo's WC32 32-bit int; accepting values outside that data model is not a WC32 compatibility goal"
   - profile: GJS
     directive: run
     case: fixedbugs/issue23305.go
-    reason: "not applicable: this case passes the untyped constant 0xffffffff to println; LLGo's GJS profile retains its wasm32 data layout, and the official Go compiler rejects the same source for GOARCH=386"
+    reason: "not applicable: this case passes the untyped constant 0xffffffff to println, which does not fit LLGo's GJS 32-bit int; accepting values outside that data model is not a GJS compatibility goal"
   - profile: GWASI
     directive: run
     case: fixedbugs/issue23305.go
-    reason: "not applicable: this case passes the untyped constant 0xffffffff to println; LLGo's GWASI profile retains its wasm32 data layout, and the official Go compiler rejects the same source for GOARCH=386"
+    reason: "not applicable: this case passes the untyped constant 0xffffffff to println, which does not fit LLGo's GWASI 32-bit int; accepting values outside that data model is not a GWASI compatibility goal"
   - directive: run
     case: fixedbugs/issue15277.go
     reason: "not applicable: this case requires precise PC-specific stack and register liveness after a value's last use; LLGo uses conservative BDWGC roots, so exact GC liveness is not currently an LLGo compatibility goal"
@@ -519,3 +519,11 @@ not_applicable:
   - directive: buildrundir
     case: retjmp.go
     reason: "not applicable: LLGo does not accept Go assembler, so its return-jump ABI is outside the supported build path; supporting this toolchain-specific behavior is not an LLGo compatibility goal"
+  - platform: js/wasm
+    directive: buildrundir
+    case: retjmp.go
+    reason: "not applicable: this case's wasm assembly exercises the official Go compiler's resumable stack-machine return-jump ABI; LLGo lowers Go through LLVM's direct WebAssembly ABI, so that backend-specific assembly contract is not an LLGo compatibility goal"
+  - platform: wasip1/wasm
+    directive: buildrundir
+    case: retjmp.go
+    reason: "not applicable: this case's wasm assembly exercises the official Go compiler's resumable stack-machine return-jump ABI; LLGo lowers Go through LLVM's direct WebAssembly ABI, so that backend-specific assembly contract is not an LLGo compatibility goal"
