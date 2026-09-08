@@ -24,9 +24,13 @@ const (
 	// With only 128 KiB on memory64, ASN.1 certificate encoding crosses the
 	// Fiber boundary (caught by Emscripten's STACK_OVERFLOW_CHECK=2).
 	defaultStackSize = uintptr(128<<10) * unsafe.Sizeof(uintptr(0)) / 4
-	// Asyncify records the native host-call continuation, not the complete Go
-	// call stack, so its independently-tested default can remain smaller.
-	defaultAsyncifyStackSize = uintptr(64 << 10)
+	// A suspension within Go code spills the complete active Wasm call chain,
+	// not just the host-call boundary. The checked memory64 recursion test
+	// spills 44 bytes per frame even with scalar caller instrumentation: its
+	// 4096-frame suspension exceeds 64 KiB while its C stack fits in 256 KiB.
+	// Keep independent buffers with the same pointer-width-scaled budget.
+	// Both remain fixed-size stacks, not Go-style automatically growing stacks.
+	defaultAsyncifyStackSize = defaultStackSize
 	stackAlignment           = uintptr(16)
 )
 
