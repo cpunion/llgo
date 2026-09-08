@@ -92,7 +92,7 @@ func gorootCaseOutcome(wasm bool, err error, xfail bool, xfailReason string, not
 	if err == nil {
 		return "pass", reason
 	}
-	if wasm && !(xfail && wasmXFail) {
+	if wasm && !notApply && !(xfail && wasmXFail) {
 		return "fail", reason
 	}
 	return status, reason
