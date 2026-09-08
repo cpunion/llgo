@@ -3,7 +3,9 @@
 package runtime
 
 type wasmPanicTrace struct {
-	panicFrames []CallerFrame
+	panicFrames     []CallerFrame
+	panicFrameStart int
+	panicStackDepth int
 }
 
 // The native hook walks frame pointers. WebAssembly instead records compiler
@@ -22,8 +24,58 @@ func snapshotWasmPanicFrames() bool {
 			start = 0
 		}
 		store.panicFrames = append(store.panicFrames[:0], store.stack[start:]...)
+		store.panicFrameStart = start
+		store.panicStackDepth = len(store.stack)
 	}
 	return true
+}
+
+// panicShadowStackDepth reports the logical shadow-stack depth while a panic
+// is running deferred functions. gc exposes a runtime.gopanic frame between
+// those live deferred calls and the saved panic-site stack. A recovering defer
+// keeps that view until it returns, even though Recover has unlinked the panic.
+func panicShadowStackDepth(store *callerLocationStore) int {
+	if store == nil || len(store.panicFrames) == 0 ||
+		store.panicStackDepth <= 0 || store.panicStackDepth > len(store.stack) {
+		return -1
+	}
+	if !PanicActive() && len(store.stack) <= store.panicStackDepth {
+		return -1
+	}
+	start := store.panicFrameStart
+	if start < 0 || start+len(store.panicFrames) != store.panicStackDepth {
+		return -1
+	}
+	for i := range store.panicFrames {
+		if store.stack[start+i].Entry != store.panicFrames[i].Entry {
+			return -1
+		}
+	}
+	return len(store.stack) + 1
+}
+
+func panicShadowStackFrame(store *callerLocationStore, skip int, pcValue uintptr) (CallerFrame, bool) {
+	depth := panicShadowStackDepth(store)
+	if skip < 0 || skip >= depth {
+		return CallerFrame{}, false
+	}
+	live := len(store.stack) - store.panicStackDepth
+	if skip < live {
+		return store.captureFrameAt(&store.stack[len(store.stack)-1-skip], pcValue), true
+	}
+	skip -= live
+	if skip == 0 {
+		return store.captureFrame(runtimeGopanicFrame, pcValue), true
+	}
+	skip--
+	if skip < len(store.panicFrames) {
+		return store.captureFrameAt(&store.panicFrames[len(store.panicFrames)-1-skip], pcValue), true
+	}
+	skip -= len(store.panicFrames)
+	if skip < store.panicFrameStart {
+		return store.captureFrameAt(&store.stack[store.panicFrameStart-1-skip], pcValue), true
+	}
+	return CallerFrame{}, false
 }
 
 func printWasmPanicTraceback(_ int) bool {
