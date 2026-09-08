@@ -66,6 +66,50 @@ func TestDebugInfoLinkerArgs(t *testing.T) {
 	}
 }
 
+func TestWasmExternalLinkOptions(t *testing.T) {
+	for _, profile := range []struct{ goos, target string }{
+		{"js", "emscripten"}, {"js", "emscripten-memory64"},
+		{"wasip1", "wasi"}, {"js", ""}, {"wasip1", ""},
+	} {
+		t.Run(profile.goos+"/"+profile.target, func(t *testing.T) {
+			conf := Config{Goos: profile.goos, Goarch: "wasm", Target: profile.target,
+				LinkOptions: LinkOptions{ExternalLinker: `"/sdk with spaces/emcc" --driver-mode=g++`,
+					ExternalLinkerFlags: `-sSTACK_OVERFLOW_CHECK=2 '-Wl,-Map,map with spaces'`}}
+			target := crosscompile.Export{Linker: "default", LinkerArgs: []string{"old"}, LDFLAGS: []string{"baseline"}}
+			if err := applyWasmExternalLinkOptions(&conf, &target); err != nil {
+				t.Fatal(err)
+			}
+			if target.Linker != "/sdk with spaces/emcc" || !reflect.DeepEqual(target.LinkerArgs, []string{"--driver-mode=g++"}) {
+				t.Fatalf("linker command = %q %q", target.Linker, target.LinkerArgs)
+			}
+			if want := []string{"baseline", "-sSTACK_OVERFLOW_CHECK=2", "-Wl,-Map,map with spaces"}; !reflect.DeepEqual(target.LDFLAGS, want) {
+				t.Fatalf("linker flags = %q, want %q", target.LDFLAGS, want)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name string
+		conf Config
+		want string
+	}{
+		{"default", Config{Goarch: "wasm"}, ""},
+		{"native untouched", Config{Goarch: "amd64", LinkOptions: LinkOptions{ExternalLinker: "invalid '"}}, ""},
+		{"bad linker", Config{Goarch: "wasm", LinkOptions: LinkOptions{ExternalLinker: "'"}}, "-extld"},
+		{"bad flags", Config{Goarch: "wasm", LinkOptions: LinkOptions{ExternalLinker: "emcc", ExternalLinkerFlags: "'"}}, "-extldflags"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := crosscompile.Export{Linker: "default", LDFLAGS: []string{"baseline"}}
+			err := applyWasmExternalLinkOptions(&test.conf, &target)
+			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+			if target.Linker != "default" || !reflect.DeepEqual(target.LDFLAGS, []string{"baseline"}) {
+				t.Fatalf("unexpected mutation: %+v", target)
+			}
+		})
+	}
+}
+
 func TestDebugInfoCompilerArgs(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -60,6 +60,30 @@ func (o LinkOptions) validate() error {
 	}
 }
 
+// applyWasmExternalLinkOptions applies explicit linker choices to both named
+// and raw Go wasm profiles. The native Windows resolver does not run for these
+// targets; accepting the flags without forwarding them silently disables such
+// diagnostics as Emscripten's STACK_OVERFLOW_CHECK.
+func applyWasmExternalLinkOptions(conf *Config, target *crosscompile.Export) error {
+	if conf.Goarch != "wasm" {
+		return nil
+	}
+	linker, err := quoted.Split(conf.LinkOptions.ExternalLinker)
+	if err != nil {
+		return fmt.Errorf("could not parse -extld: %w", err)
+	}
+	flags, err := quoted.Split(conf.LinkOptions.ExternalLinkerFlags)
+	if err != nil {
+		return fmt.Errorf("could not parse -extldflags: %w", err)
+	}
+	if len(linker) != 0 {
+		target.Linker = linker[0]
+		target.LinkerArgs = linker[1:]
+	}
+	target.LDFLAGS = append(slices.Clone(target.LDFLAGS), flags...)
+	return nil
+}
+
 // EffectiveOmitDWARF reports whether the backend should omit DWARF. As in
 // cmd/link, an explicit -w value takes precedence; otherwise -s implies -w.
 func (o LinkOptions) EffectiveOmitDWARF() bool {
