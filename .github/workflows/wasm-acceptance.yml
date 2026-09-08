@@ -13,6 +13,7 @@ on:
       - 'runtime/**'
       - 'cl/**'
       - 'ssa/**'
+      - 'internal/abi/**'
       - 'internal/build/**'
       - 'targets/**'
   workflow_dispatch:
