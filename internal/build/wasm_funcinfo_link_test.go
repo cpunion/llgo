@@ -3,6 +3,8 @@
 package build
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -35,6 +37,8 @@ func TestWasmLinkMapOutput(t *testing.T) {
 }
 
 func TestWasmFuncInfoRelinkPreservesUserMap(t *testing.T) {
+	t.Setenv("CCFLAGS", "")
+	t.Setenv("LDFLAGS", "")
 	prog := llssa.NewProgram(&llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
 	defer prog.Dispose()
 	prog.EnableFuncInfoSites(true)
@@ -80,3 +84,55 @@ func TestWasmFuncInfoRelinkPreservesUserMap(t *testing.T) {
 		})
 	}
 }
+
+func TestWasmFuncInfoRelinkEnvironmentAndStdoutMaps(t *testing.T) {
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableFuncInfoSites(true)
+	for _, destination := range []string{"env.map", "-"} {
+		t.Run(destination, func(t *testing.T) {
+			t.Setenv("CCFLAGS", "-Wl,--Map=earlier.map")
+			t.Setenv("LDFLAGS", "-Wl,--Map="+destination)
+			dir := t.TempDir()
+			ctx := &context{prog: prog, buildConf: &Config{Goarch: "wasm", BuildMode: BuildModeExe}}
+			ctx.commands.dir = dir
+			p, err := prepareWasmFuncInfoRelink(ctx, filepath.Join(dir, "out.wasm"), nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.cleanup()
+			if p.stdoutMap != (destination == "-") || p.userMap != (destination != "-") {
+				t.Fatalf("incorrect map destination: %+v", p)
+			}
+			if destination != "-" && p.mapPath != filepath.Join(dir, destination) {
+				t.Fatalf("environment map was overridden: %+v", p)
+			}
+			const contents = "Addr Off Size Symbol\n"
+			if err := os.WriteFile(p.mapPath, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			if err := p.publishProbeMap(&output); err != nil {
+				t.Fatal(err)
+			}
+			if p.stdoutMap {
+				if output.String() != contents || len(p.probeArgs()) == 0 {
+					t.Fatalf("stdout map was not captured and published: %+v, %q", p, output.String())
+				}
+				if err := p.publishProbeMap(mapErrorWriter{}); err == nil {
+					t.Fatal("stdout write error was ignored")
+				}
+				p.cleanup()
+				if err := p.publishProbeMap(&output); err == nil {
+					t.Fatal("missing map file was ignored")
+				}
+			} else if output.Len() != 0 {
+				t.Fatal("file map was also printed to stdout")
+			}
+		})
+	}
+}
+
+type mapErrorWriter struct{}
+
+func (mapErrorWriter) Write([]byte) (int, error) { return 0, errors.New("map write failed") }
