@@ -24,11 +24,10 @@ Unreviewed source-excluded packages remain unresolved and make the audit fail.
 Reviewed exclusions are reported as `not-applicable` with a package- and
 profile-specific reason: OS-only `plugin`, `syscall`, and `test/windows` tests;
 native-only CPU-profiler, BDWGC-finalizer, and signal stress suites; plus
-`test/cgo` on raw profiles where C interop is absent by contract. The same
-`test/cgo` suite remains mandatory on EC32, EC64, and WC32. Official Go reference
-rows also exclude `runtime/cgo`, whose native runtime symbols cannot link on
-wasm even with cgo disabled; LLGo's handle implementation remains mandatory on
-all five LLGo profiles. JS excludes the heap-dump descriptor test because Go's
+`test/cgo` and `test/std/runtime/cgo` on all wasm profiles, because Go's cgo
+frontend does not support `GOARCH=wasm`. These exclusions do not waive LLGo's
+Emscripten/WASI C interoperability or handle/host-boundary behavior: dedicated
+target tests cover those contracts. JS excludes the heap-dump descriptor test because Go's
 runtime fatally rejects heap-dump writes to file descriptors above stderr;
 WASI and native profiles retain it. Stack reporting, crash-output error
 contracts, and the remaining debug APIs still execute on JS. Binary-parser
@@ -37,7 +36,9 @@ without requiring a subprocess compiler inside the wasm guest. The host-side
 `test/goroot` package is reported as `separate-suite`: the same workflow
 first executes two startup sentinels (`bom.go` and `helloworld.go`) on every
 LLGo wasm profile, then unlocks the four-shard GOROOT matrix only if all
-sentinels pass. The full matrix recursively discovers `run`, `runoutput`,
+sentinels pass. WC32 and GWASI also execute typed reflection bridge regressions
+before unlocking the full matrix: calls, MakeFunc, deferred recovery, variadic
+arguments, interface results, and GC-rooted callback lifetimes. The full matrix recursively discovers `run`, `runoutput`,
 `buildrun`, `rundir`, `runindir`, `buildrundir`, and `errorcheckandrundir` cases.
 The last category performs both diagnostic checks and program execution; a
 diagnostic mismatch does not bypass the build/run comparison. It does not claim
@@ -111,6 +112,20 @@ GJS still uses LLGo's wasm32 data layout and Emscripten/Asyncify module loader,
 not Go's 64-bit Go value layout and `gojs` stack-call convention. Named EC32 and
 EC64 profiles retain their Emscripten C-ABI `syscall/js` backend. Their passing
 tests do not substitute for GJS validation.
+
+## Fixed stack budgets
+
+LLGo's single-worker wasm scheduler currently uses fixed-size C/Fiber and
+Asyncify buffers, not Go's automatically growing goroutine stacks. Both default
+to 128 KiB on the four wasm32 profiles and 256 KiB on EC64. Suspending a deep Go
+call chain saves all active frames in Asyncify, not only the host-call boundary.
+The `-pthread-stack-size` override changes generated goroutine creation calls;
+larger explicit sizes increase both buffers and participate in compilation
+cache keys.
+
+Executable `test/go` regressions retain a depth of 4096 and check ordinary
+recursion as well as deep `Gosched`, GC, and caller symbolization. This tests the
+default budget; it does not promise arbitrary recursion within a fixed buffer.
 
 ## Initial standard-library slice
 
