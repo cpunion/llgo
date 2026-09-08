@@ -1,4 +1,4 @@
-//go:build llgo && !baremetal
+//go:build !llgo || !wasm || (wasip1 && llgo.wasi_threads)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,10 +18,16 @@
 
 package runtime
 
-// callerLocationStoreCurrent follows the logical goroutine: its shadow stack
-// must move with that goroutine when the backend eventually permits migration
-// between OS threads. Single-worker WebAssembly interns synthetic PCs in a
-// separate process-owned registry so they survive transfer and goroutine exit.
-//
-//llgo:gls
-var callerLocationStoreCurrent *callerLocationStore
+const callerSyntheticPCNamespace = uintptr(0)
+
+func callerSyntheticRegistryFor(store *callerLocationStore) *callerLocationStore {
+	return store
+}
+
+func callerSyntheticLookupStore() *callerLocationStore {
+	return callerLocationStoreCurrent
+}
+
+func IsWasmSyntheticPC(uintptr) bool { return false }
+
+func callerSyntheticEntryPC(pc uintptr) uintptr { return pc }

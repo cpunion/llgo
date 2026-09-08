@@ -2075,8 +2075,10 @@ func frameSymbol(pc uintptr) pcSymbol {
 }
 
 func frameSymbolUncached(pc uintptr) pcSymbol {
-	if pc&3 != 0 && !prebuiltTextContains(pc+1) {
-		// Unaligned pcs outside the text range are shadow-stack synthetic
+	wasmSynthetic := GOARCH == "wasm" && rtdebug.IsWasmSyntheticPC(pc)
+	if wasmSynthetic || pc&3 != 0 && !prebuiltTextContains(pc+1) {
+		// WebAssembly has a separate logical-PC namespace. On native targets,
+		// unaligned pcs outside the text range are shadow-stack synthetic
 		// markers. Text-range pcs — return addresses minus one, and on
 		// amd64 any instruction pc — flow through the normal lookups:
 		// pcline nearest-below is byte-exact, no alignment games (rounding
@@ -2091,6 +2093,9 @@ func frameSymbolUncached(pc uintptr) pcSymbol {
 				startLine: frame.StartLine,
 				ok:        true,
 			}
+		}
+		if wasmSynthetic {
+			return pcSymbol{}
 		}
 	}
 	if pc == 0 {
