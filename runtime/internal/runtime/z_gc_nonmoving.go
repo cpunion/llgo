@@ -34,7 +34,11 @@ func AllocU(size uintptr) unsafe.Pointer {
 	if ret == nil {
 		panic("out of memory")
 	}
-	recordMemProfileAlloc(size)
+	if wasmMemProfileEnabled {
+		recordWasmMemProfileAlloc(ret, tinygogc.AllocationSize(size))
+	} else {
+		recordMemProfileAlloc(size)
+	}
 	return ret
 }
 
