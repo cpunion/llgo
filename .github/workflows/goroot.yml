@@ -61,7 +61,7 @@ jobs:
           test -s "$RUNNER_TEMP/evidence/aggregate.wasm"
           GOGC=1 timeout 60s node targets/emscripten-memory64-runner.mjs \
             "$RUNNER_TEMP/evidence/aggregate.mjs" \
-            -test.v '-test.run=^TestLargeAggregateGCRoots$' -test.count=3 -test.timeout=45s \
+            -test.v '-test.run=^TestLarge(Aggregate|Struct)GCRoots$' -test.count=3 -test.timeout=45s \
             2>&1 | tee "$RUNNER_TEMP/evidence/aggregate.log"
       - name: Preserve and run original EC64 index program
         if: matrix.profile == 'EC64'
@@ -100,11 +100,11 @@ jobs:
             -c -o "$evidence/exit.wasm" ./internal/build/testdata/wasm-test \
             > "$evidence/build.log" 2>&1 || { cat "$evidence/build.log"; exit 1; }
           test -s "$evidence/exit.wasm"
+          failed=0
           GOGC=1 timeout 60s wasmtime run --dir=/ --env PWD --env PATH --env GOGC \
             -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/exit.wasm" \
-            -test.v -test.count=3 -test.timeout=45s '-test.run=^TestLargeAggregateGCRoots$' \
-            2>&1 | tee "$evidence/aggregate.log"
-          failed=0
+            -test.v -test.count=3 -test.timeout=45s '-test.run=^TestLarge(Aggregate|Struct)GCRoots$' \
+            2>&1 | tee "$evidence/aggregate.log" || failed=1
           for iteration in {1..10}; do
           for policy in 100 off 1; do
             log="$evidence/run-$policy-$iteration.log"
