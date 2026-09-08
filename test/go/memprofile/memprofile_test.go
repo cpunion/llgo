@@ -70,7 +70,9 @@ func TestRuntimeMemProfileReportsTinyAllocations(t *testing.T) {
 	records := readMemProfile(t)
 	wantBytes := int64(n * 4)
 	wantGranule := int64(16)
-	if runtime.GOARCH == "wasm" {
+	// Go's tiny allocator uses 16-byte blocks even on its 64-bit-pointer
+	// wasm profile. Only LLGo's linear collector scales its four-word blocks.
+	if runtime.Compiler == "llgo" && runtime.GOARCH == "wasm" {
 		wantGranule = int64(4 * unsafe.Sizeof(uintptr(0)))
 	}
 	for _, r := range records {
