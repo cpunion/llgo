@@ -56,6 +56,22 @@ func TestCallerSeesPanicFrame(t *testing.T) {
 		if !ok || file == "" || line != panicCallerLine {
 			t.Errorf("runtime.Caller(2) during panic = %q:%d, %v; want line %d", file, line, ok, panicCallerLine)
 		}
+		var pcs [8]uintptr
+		n := runtime.Callers(0, pcs[:])
+		frames := runtime.CallersFrames(pcs[:n])
+		foundPanic := false
+		for {
+			frame, more := frames.Next()
+			if frame.Function == "runtime.gopanic" {
+				foundPanic = true
+			}
+			if !more {
+				break
+			}
+		}
+		if !foundPanic {
+			t.Error("runtime.Callers omitted runtime.gopanic")
+		}
 		if got := recover(); got != "wasm-caller-panic" {
 			t.Errorf("recover = %v, want wasm-caller-panic", got)
 		}
