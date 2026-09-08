@@ -2,6 +2,7 @@ package net_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"runtime"
@@ -1149,8 +1150,8 @@ func TestResolverLookupHost(t *testing.T) {
 func TestResolverLookupAddr(t *testing.T) {
 	r := net.DefaultResolver
 	names, err := r.LookupAddr(context.Background(), "127.0.0.1")
-	if err != nil {
-		t.Skip("LookupAddr failed (may not have reverse DNS)")
+	if acceptDNSLookupError(t, "Resolver.LookupAddr", err) {
+		return
 	}
 	_ = names
 }
@@ -1158,8 +1159,8 @@ func TestResolverLookupAddr(t *testing.T) {
 func TestResolverLookupCNAME(t *testing.T) {
 	r := net.DefaultResolver
 	cname, err := r.LookupCNAME(context.Background(), "localhost")
-	if err != nil {
-		t.Skipf("LookupCNAME error (DNS configuration issue): %v", err)
+	if acceptDNSLookupError(t, "Resolver.LookupCNAME", err) {
+		return
 	}
 	if cname == "" {
 		t.Error("LookupCNAME returned empty string")
@@ -1188,16 +1189,16 @@ func TestLookupIP(t *testing.T) {
 
 func TestLookupAddr(t *testing.T) {
 	names, err := net.LookupAddr("127.0.0.1")
-	if err != nil {
-		t.Skip("LookupAddr failed (may not have reverse DNS)")
+	if acceptDNSLookupError(t, "LookupAddr", err) {
+		return
 	}
 	_ = names
 }
 
 func TestLookupCNAME(t *testing.T) {
 	cname, err := net.LookupCNAME("localhost")
-	if err != nil {
-		t.Skipf("LookupCNAME error (DNS configuration issue): %v", err)
+	if acceptDNSLookupError(t, "LookupCNAME", err) {
+		return
 	}
 	if cname == "" {
 		t.Error("LookupCNAME returned empty string")
@@ -1216,34 +1217,47 @@ func TestLookupPort(t *testing.T) {
 
 func TestLookupTXT(t *testing.T) {
 	records, err := net.LookupTXT("localhost")
-	if err != nil {
-		t.Skip("LookupTXT failed")
+	if acceptDNSLookupError(t, "LookupTXT", err) {
+		return
 	}
 	_ = records
 }
 
 func TestLookupMX(t *testing.T) {
 	records, err := net.LookupMX("localhost")
-	if err != nil {
-		t.Skip("LookupMX failed")
+	if acceptDNSLookupError(t, "LookupMX", err) {
+		return
 	}
 	_ = records
 }
 
 func TestLookupNS(t *testing.T) {
 	records, err := net.LookupNS("localhost")
-	if err != nil {
-		t.Skip("LookupNS failed")
+	if acceptDNSLookupError(t, "LookupNS", err) {
+		return
 	}
 	_ = records
 }
 
 func TestLookupSRV(t *testing.T) {
 	cname, records, err := net.LookupSRV("xmpp-server", "tcp", "localhost")
-	if err != nil {
-		t.Skip("LookupSRV failed")
+	if acceptDNSLookupError(t, "LookupSRV", err) {
+		return
 	}
 	_, _ = cname, records
+}
+
+func acceptDNSLookupError(t *testing.T, operation string, err error) bool {
+	t.Helper()
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if !errors.As(err, &dnsErr) {
+		t.Fatalf("%s returned non-DNS error %T: %v", operation, err, err)
+	}
+	t.Logf("%s returned the expected DNS error for an optional localhost record: %v", operation, dnsErr)
+	return true
 }
 
 func TestIPMaskSize(t *testing.T) {
@@ -1472,24 +1486,16 @@ func TestResolverLookupMethods(t *testing.T) {
 	}
 
 	_, err = r.LookupMX(ctx, "localhost")
-	if err != nil {
-		t.Skip("LookupMX failed")
-	}
+	acceptDNSLookupError(t, "Resolver.LookupMX", err)
 
 	_, err = r.LookupNS(ctx, "localhost")
-	if err != nil {
-		t.Skip("LookupNS failed")
-	}
+	acceptDNSLookupError(t, "Resolver.LookupNS", err)
 
 	_, err = r.LookupTXT(ctx, "localhost")
-	if err != nil {
-		t.Skip("LookupTXT failed")
-	}
+	acceptDNSLookupError(t, "Resolver.LookupTXT", err)
 
 	_, _, err = r.LookupSRV(ctx, "xmpp-server", "tcp", "localhost")
-	if err != nil {
-		t.Skip("LookupSRV failed")
-	}
+	acceptDNSLookupError(t, "Resolver.LookupSRV", err)
 
 	_, err = r.LookupIP(ctx, "ip4", "localhost")
 	if err != nil {
