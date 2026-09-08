@@ -80,17 +80,28 @@ def main():
         original = opts.pre_asyncify_input.resolve()
         if hashlib.sha256(original.read_bytes()).hexdigest() != PRE_INPUT_SHA256:
             parser.error("pre-optimization input does not match the preserved issue5162 module")
-        preopt, final = output / "limited-preopt.wasm", output / "limited-final.wasm"
         # Diagnostic only: test whether unlimited single-caller inlining is
         # what creates the 929 KiB main before Asyncify. Preserve every other
         # production optimization setting, and validate the resulting program.
-        limit = "--one-caller-inline-max-function-size=0"
-        pre_ok = bounded_run("limited-preopt", [wasm_opt, "-Os", limit, str(original), "-o", str(preopt)], output)
-        final_ok = pre_ok and bounded_run("limited-asyncify", [wasm_opt, "--asyncify", "--translate-to-exnref",
+        results = []
+        for name, limit in (("one-caller-128", "--one-caller-inline-max-function-size=128"),
+                            ("combined-16384", "--inline-max-combined-binary-size=16384")):
+            preopt, final = output / f"{name}-preopt.wasm", output / f"{name}-final.wasm"
+            pre_ok = bounded_run(name+"-preopt", [wasm_opt, "-Os", limit, str(original), "-o", str(preopt)], output)
+            final_ok = pre_ok and bounded_run(name+"-asyncify", [wasm_opt, "--asyncify", "--translate-to-exnref",
                                                                "-Os", limit, str(preopt), "-o", str(final)], output)
-        ran = final_ok and bounded_run("run-limited", [wasmtime, "run", "-W", "exceptions=y", str(final)],
-                                      output, seconds=60)
-        return 0 if ran else 1
+            ran = final_ok and bounded_run("run-"+name, [wasmtime, "run", "-W", "exceptions=y", str(final)],
+                                          output, seconds=60)
+            # The original runoutput fixture reports mismatches by printing,
+            # not necessarily by failing its exit status. Its expected output
+            # is empty, which must be checked independently of process success.
+            matched = ran and (output / ("run-"+name) / "output.log").stat().st_size == 0
+            result = {"variant": name, "execution_ok": ran, "output_matches": matched,
+                      "module_bytes": final.stat().st_size if final_ok else None}
+            (output / f"{name}-verdict.json").write_text(json.dumps(result, indent=2)+"\n")
+            print(json.dumps(result), flush=True)
+            results.append(matched)
+        return 0 if all(results) else 1
     combined, asyncified, split = [output / f"{name}.wasm" for name in ("combined", "asyncified", "split")]
     combined_ok = bounded_run("combined", [wasm_opt, "--asyncify", "--translate-to-exnref", "-Os",
                                            str(source), "-o", str(combined)], output)
