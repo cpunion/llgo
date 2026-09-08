@@ -144,28 +144,45 @@ func preserveFinalizableObjects() {
 	finishMark()
 	finalizerDependencyScan = false
 
-	for block := uintptr(0); block < endBlock; block++ {
+	// Visit the registered objects, not every block of the heap. Looking up
+	// each heap block in this list multiplies heap size by callback count, even
+	// when almost all of the heap has no lifecycle callbacks at all.
+	for record := finalizers; record != nil; {
+		key := record.objectKey
+		// Queueing can unlink several adjacent records for this object. Save
+		// a successor for a different object before their next links are cleared.
+		next := record.next
+		for next != nil && next.objectKey == key {
+			next = next.next
+		}
+		if !record.candidate || finalizerObjectBlocked(key) {
+			record = next
+			continue
+		}
+		block := finalizerObjectBlock(record)
 		state := gcStateOf(block)
-		if state != blockStateHead && state != blockStateMark {
-			continue
-		}
-		key := encodeFinalizerAddress(gcAddressOf(block))
-		record := candidateForObject(key)
-		if record == nil {
-			continue
-		}
 		if hasCandidateFinalizer(key) {
-			if finalizerObjectBlocked(key) || !queueCallbacksForObject(key, objectFinalizer) {
+			if !queueCallbacksForObject(key, objectFinalizer) {
+				record = next
 				continue
 			}
 		} else {
-			if finalizerObjectBlocked(key) || !queueCallbacksForObject(key, objectCleanup) {
+			if !queueCallbacksForObject(key, objectCleanup) {
+				record = next
 				continue
+			}
+		}
+		// An object with both a finalizer and cleanups gets only its finalizer
+		// this cycle, including when its cleanup records are not adjacent.
+		for pending := finalizers; pending != nil; pending = pending.next {
+			if pending.objectKey == key {
+				pending.candidate = false
 			}
 		}
 		if state == blockStateHead {
 			startMark(block)
 		}
+		record = next
 	}
 
 	// A cycle of finalizable objects has no valid dependency order. Preserve it
