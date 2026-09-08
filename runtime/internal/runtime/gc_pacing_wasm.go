@@ -11,7 +11,7 @@
 package runtime
 
 import (
-	"unsafe"
+	_ "unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc"
@@ -22,7 +22,6 @@ import (
 // allocate, so do not invoke it while initializing or locking the collector.
 // A prior explicit SetGCPercent also initializes the policy and is preserved.
 func InitWasmGCPolicy() {
-	tinygogc.DiagnosticAllocationHook = diagnoseGCAllocation
 	if tinygogc.GCPercentInitialized() {
 		return
 	}
@@ -32,22 +31,6 @@ func InitWasmGCPolicy() {
 		percent = tinygogc.ParseGCPercent(c.GoString(value))
 	}
 	tinygogc.InitGCPercent(percent)
-}
-
-func diagnoseGCAllocation(size uintptr) {
-	c.Printf(c.Str("DIAG collecting allocation=%llu\n"), uint64(size))
-	store := callerLocationStoreCurrent
-	if store == nil {
-		return
-	}
-	start := len(store.stack) - 4
-	if start < 0 {
-		start = 0
-	}
-	for i := start; i < len(store.stack); i++ {
-		frame := &store.stack[i]
-		c.Printf(c.Str("DIAG frame %.*s:%d\n"), c.Int(len(frame.Function)), unsafe.StringData(frame.Function), c.Int(frame.Line))
-	}
 }
 
 //go:linkname gcGetenv C.getenv

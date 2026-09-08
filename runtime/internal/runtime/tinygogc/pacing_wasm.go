@@ -39,11 +39,11 @@ func gcAutomaticAllowed() bool {
 	// Allocation must grow (or fail with OOM), never collect, in that window.
 	// A hard Wasm memory maximum is not a Go soft memory limit: this backend
 	// does not implement the latter's exception to GOGC=off.
-	return wasmGCPacing.automatic() && !gcroot.CollectionBlocked()
+	return wasmGCPacing.automatic() && !gcroot.Rebuilding()
 }
 
 func gcAllocationDue(size uint64) bool {
-	return wasmGCPacing.shouldCollect(gcLiveBytes(), size) && !gcroot.CollectionBlocked()
+	return wasmGCPacing.shouldCollect(gcLiveBytes(), size) && !gcroot.Rebuilding()
 }
 
 func gcCollectionComplete() { wasmGCPacing.collected(gcLiveBytes()) }

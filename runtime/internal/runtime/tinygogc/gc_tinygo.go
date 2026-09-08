@@ -83,10 +83,8 @@ var (
 	// zeroSizedAlloc is just a sentinel that gets returned when allocating 0 bytes.
 	zeroSizedAlloc uint8
 
-	gcMutex                  mutex // gcMutex protects GC related variables
-	isGCInit                 bool  // isGCInit indicates GC initialization state
-	diagnosticObjectBlock    uintptr
-	DiagnosticAllocationHook func(uintptr)
+	gcMutex  mutex // gcMutex protects GC related variables
+	isGCInit bool  // isGCInit indicates GC initialization state
 )
 
 // Some globals + constants for the entire GC.
@@ -289,9 +287,6 @@ func Alloc(size uintptr) unsafe.Pointer {
 	neededBlocks := (size + (bytesPerBlock - 1)) / bytesPerBlock
 	collected := false
 	if gcAllocationDue(uint64(neededBlocks) * uint64(bytesPerBlock)) {
-		if DiagnosticAllocationHook != nil {
-			DiagnosticAllocationHook(size)
-		}
 		gc()
 		collected = true
 	}
@@ -370,10 +365,6 @@ func Alloc(size uintptr) unsafe.Pointer {
 				gcSetState(i, blockStateTail)
 			}
 			ret := c.Memset(gcPointerOf(thisAlloc), 0, size)
-			if size == 4000528 {
-				diagnosticObjectBlock = ^thisAlloc
-				c.Printf(c.Str("DIAG object block=%llu size=%llu globals=%llu..%llu\n"), uint64(thisAlloc), uint64(size), uint64(globalsStart), uint64(globalsEnd))
-			}
 			// Only committed allocations belong in the live-byte count used
 			// to compute the next collection goal after a sweep.
 			gcTotalAlloc += uint64(size)
@@ -476,10 +467,6 @@ func gc() (freeBytes uintptr) {
 	finishMark()
 	preserveFinalizableObjects()
 	markHeads.reset()
-	if diagnosticObjectBlock != 0 {
-		block := ^diagnosticObjectBlock
-		c.Printf(c.Str("DIAG collection=%u object=%llu state=%u len=%llu cap=%llu\n"), gcNumGC, uint64(block), uint32(gcStateOf(block)), *(*uint64)(unsafe.Pointer(gcAddressOf(block) + 472)), *(*uint64)(unsafe.Pointer(gcAddressOf(block) + 480)))
-	}
 
 	// If we're using threads, resume all other threads before starting the
 	// sweep.

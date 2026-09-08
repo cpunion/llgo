@@ -36,21 +36,10 @@ type stackEntry struct {
 }
 
 var (
-	contexts             *Context
-	active               *Context
-	rebuilding           bool
-	instrumentationDepth uint32
+	contexts   *Context
+	active     *Context
+	rebuilding bool
 )
-
-// BeginInstrumentation protects allocations made by compiler-inserted caller
-// bookkeeping. These calls may run between Go SSA safepoints, where the
-// interrupted expression's temporary pointers have not been published yet.
-// The matching EndInstrumentation must run before entering user code or yielding.
-func BeginInstrumentation() { instrumentationDepth++ }
-
-func EndInstrumentation() { instrumentationDepth-- }
-
-func CollectionBlocked() bool { return rebuilding || instrumentationDepth != 0 }
 
 // RestoreChain installs a chain captured before a non-local control transfer.
 func RestoreChain(chain unsafe.Pointer) {
