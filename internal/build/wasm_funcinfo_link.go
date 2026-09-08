@@ -18,6 +18,7 @@ package build
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,10 +29,11 @@ import (
 )
 
 type wasmFuncInfoRelink struct {
-	mapPath  string
-	rootPath string
-	inputs   []string
-	userMap  bool
+	mapPath   string
+	rootPath  string
+	inputs    []string
+	userMap   bool
+	stdoutMap bool
 }
 
 func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs, linkArgs []string) (*wasmFuncInfoRelink, error) {
@@ -43,8 +45,8 @@ func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs, linkArgs
 	}
 	// A linker accepts only one map destination. Reuse an explicitly requested
 	// map instead of silently overriding -extldflags with our private probe.
-	args := slices.Concat(ctx.crossCompile.LinkerArgs, ctx.crossCompile.LDFLAGS, linkArgs)
-	if path := wasmLinkMapOutput(args); path != "" {
+	path := wasmLinkMapOutput(ctx.linker().LinkArguments(linkArgs...))
+	if path != "" && path != "-" {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(ctx.commands.dir, path)
 		}
@@ -59,7 +61,24 @@ func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs, linkArgs
 		_ = os.Remove(name)
 		return nil, fmt.Errorf("close WebAssembly funcinfo link map: %w", err)
 	}
-	return &wasmFuncInfoRelink{mapPath: name, inputs: slices.Clone(inputs)}, nil
+	return &wasmFuncInfoRelink{mapPath: name, inputs: slices.Clone(inputs), stdoutMap: path == "-"}, nil
+}
+
+// A stdout map is captured privately during the probe. Publish it only when
+// there is no second link; otherwise the final link prints the final map.
+func (p *wasmFuncInfoRelink) publishProbeMap(out io.Writer) error {
+	if p == nil || !p.stdoutMap {
+		return nil
+	}
+	f, err := os.Open(p.mapPath)
+	if err != nil {
+		return fmt.Errorf("open WebAssembly stdout link map: %w", err)
+	}
+	defer f.Close()
+	if _, err := io.Copy(out, f); err != nil {
+		return fmt.Errorf("publish WebAssembly stdout link map: %w", err)
+	}
+	return nil
 }
 
 func (p *wasmFuncInfoRelink) cleanup() {

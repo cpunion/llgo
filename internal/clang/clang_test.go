@@ -35,6 +35,24 @@ import (
 
 const clangTestHelperEnv = "GO_WANT_LLGO_CLANG_TEST_HELPER"
 
+func TestLinkArgumentsIncludesEffectiveDriverFlags(t *testing.T) {
+	t.Setenv("CCFLAGS", "-Wl,--Map=cc.map")
+	t.Setenv("LDFLAGS", "-Wl,--Map=env.map")
+	config := Config{Linker: "clang", LinkerArgs: []string{"--driver-mode=g++"}, LDFLAGS: []string{"-Wl,--Map=config.map"}}
+	cmd := NewLinker(config)
+	args := []string{"-Wl,--Map=final.map", "input.o"}
+	want := []string{"--driver-mode=g++", "-Wl,--Map=cc.map", "-Wl,--Map=env.map", "-Wl,--Map=config.map", "-Wl,--Map=final.map", "input.o"}
+	got := cmd.LinkArguments(args...)
+	if !slices.Equal(got, want) {
+		t.Fatalf("effective driver arguments = %q, want %q", got, want)
+	}
+	got[0] = "changed"
+	got[len(got)-1] = "changed.o"
+	if args[1] != "input.o" || config.LinkerArgs[0] != "--driver-mode=g++" {
+		t.Fatal("effective arguments alias the caller's configuration")
+	}
+}
+
 func init() {
 	if os.Getenv(clangTestHelperEnv) != "1" {
 		return
