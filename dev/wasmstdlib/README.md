@@ -140,10 +140,23 @@ without them discard the sampler and its metadata rather than paying for it.
 Focused tests cover sampling, cross-goroutine PC lifetime, finalizers, address
 reuse, rate changes, nested pauses and large snapshots. Original Go 1.27
 `heapsampling.go` passes locally on GJS, GWASI and EC64; final-head full-profile
-CI remains required. GC pacing is a separate remaining compatibility gap:
-`debug.SetGCPercent` currently stores its setting without changing TinyGC's
-collection trigger, so its argument must not be treated as evidence that an
-aggressive-GC workload actually uses Go's requested pacing.
+CI remains required.
+
+## GC policy
+
+Single-worker linear-GC profiles read `GOGC` before user initialization and apply
+`debug.SetGCPercent` to automatic collection. Negative settings and `off` disable
+automatic GC; explicit `runtime.GC` remains available. With automatic collection
+disabled, exhausted capacity grows or reports OOM instead of silently collecting.
+`runtime.MemStats.NextGC` reports the current allocation goal.
+
+This is a synchronous, non-moving collector, not Go's concurrent GC algorithm.
+Its low-percentage policy guarantees at least 64 KiB of allocation progress
+between collections; it does not implement Go's soft memory limit. Focused CI
+tests cover startup settings, live changes, disabled growth, explicit collection,
+low-percentage roots/finalizers and hard-limit OOM. Passing those tests does not
+establish that the original high-goroutine-count GOROOT workloads meet their
+execution limits.
 
 ## Initial standard-library slice
 
