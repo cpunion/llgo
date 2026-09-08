@@ -1,4 +1,4 @@
-//go:build wasm && wasip1
+//go:build wasm
 
 package reflect
 
@@ -29,7 +29,7 @@ func callWasmBridge(ft *abi.FuncType, fn, env unsafe.Pointer, method bool, prefi
 		wasmMakeFuncInvoke(env, unsafe.SliceData(args), unsafe.SliceData(results))
 	} else {
 		if ft.Call_ == nil {
-			panic("reflect: missing WASI call bridge for " + stringFor(&ft.Type))
+			panic("reflect: missing WebAssembly call bridge for " + stringFor(&ft.Type))
 		}
 		entry := closure{fn: ft.Call_}
 		call := *(*func(unsafe.Pointer, unsafe.Pointer, bool, *unsafe.Pointer, *unsafe.Pointer))(unsafe.Pointer(&entry))
@@ -80,7 +80,7 @@ func makeWasmFunc(ft *abi.FuncType, fn func([]Value) []Value, recoverTo unsafe.P
 }
 
 func wasmReflectOnly() {
-	panic("reflect: dynamic function has no compiled WASI entry")
+	panic("reflect: dynamic function has no compiled WebAssembly entry")
 }
 
 func wasmMakeFuncInvoke(env unsafe.Pointer, args, results *unsafe.Pointer) {

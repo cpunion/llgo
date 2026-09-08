@@ -1,6 +1,7 @@
 package reflect_test
 
 import (
+	"io"
 	"reflect"
 	"runtime"
 	"testing"
@@ -22,6 +23,38 @@ func (v *bridgeRecord) Read() int64 {
 type bridgeCounter int
 
 func (v bridgeCounter) Add(n int) int { return int(v) + n }
+
+type bridgeGCMethod struct{}
+
+func (*bridgeGCMethod) Pointer() *byte {
+	runtime.GC()
+	runtime.Gosched()
+	return nil
+}
+
+func (*bridgeGCMethod) Error(err error) error {
+	runtime.GC()
+	runtime.Gosched()
+	return err
+}
+
+func TestReflectMethodValueGCBridge(t *testing.T) {
+	// A method extracted as a typed function crosses the MakeFunc adapter as
+	// well as the reflected call adapter. Both must survive a suspension.
+	v := reflect.ValueOf(&bridgeGCMethod{})
+	pointer := v.MethodByName("Pointer").Interface().(func() *byte)
+	errorValue := v.MethodByName("Error").Interface().(func(error) error)
+	for i := 0; i < 3; i++ {
+		if got := pointer(); got != nil {
+			t.Fatalf("pointer method returned %p, want nil", got)
+		}
+		for _, input := range []error{nil, io.EOF} {
+			if got := errorValue(input); got != input {
+				t.Fatalf("error method returned %v, want %v", got, input)
+			}
+		}
+	}
+}
 
 func TestReflectMethodExpressionBridge(t *testing.T) {
 	p := &bridgeRecord{Value: 23}

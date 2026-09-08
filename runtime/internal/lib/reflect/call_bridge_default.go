@@ -1,4 +1,4 @@
-//go:build !wasm || !wasip1
+//go:build !wasm
 
 package reflect
 
