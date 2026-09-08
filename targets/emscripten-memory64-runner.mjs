@@ -60,8 +60,8 @@ const options = {
 	}],
 };
 if (wasmBinary != null) {
-	// Raw GOOS=js/GOARCH=wasm output intentionally omits Node support. Supply
-	// its sibling module through Emscripten's supported host injection point.
+	// Supply the sibling module through Emscripten's supported host injection
+	// point so both raw GJS and named Emscripten profiles use the same loader.
 	options.instantiateWasm = (imports, receiveInstance) => {
 		const module = new WebAssembly.Module(wasmBinary);
 		const instance = new WebAssembly.Instance(module, imports);
