@@ -85,6 +85,13 @@ func TestStorageInitFailure(t *testing.T) {
 }
 
 func TestStorageDefaultSize(t *testing.T) {
+	wantDefault := uintptr(128<<10) * unsafe.Sizeof(uintptr(0)) / 4
+	if defaultStackSize != wantDefault {
+		t.Fatalf("default C stack budget = %d, want %d", defaultStackSize, wantDefault)
+	}
+	if defaultAsyncifyStackSize != wantDefault {
+		t.Fatalf("default Asyncify budget = %d, want %d", defaultAsyncifyStackSize, wantDefault)
+	}
 	var sizes []uintptr
 	buffers := make([][]byte, 0, 2)
 	stack, stackSize, asyncify, asyncifySize, ok := allocStorage(0, func(size uintptr) unsafe.Pointer {
@@ -103,6 +110,20 @@ func TestStorageDefaultSize(t *testing.T) {
 		t.Fatalf("requested sizes = %v", sizes)
 	}
 	freeStorage(stack, asyncify, func(unsafe.Pointer) {})
+}
+
+func TestStorageSmallCustomStackKeepsAsyncifyBudget(t *testing.T) {
+	var sizes []uintptr
+	var buffers [][]byte
+	_, stackSize, _, asyncifySize, ok := allocStorage(16<<10, func(size uintptr) unsafe.Pointer {
+		sizes = append(sizes, size)
+		buf := make([]byte, size)
+		buffers = append(buffers, buf)
+		return unsafe.Pointer(&buf[0])
+	}, func(unsafe.Pointer) {})
+	if !ok || stackSize != 16<<10 || asyncifySize != defaultAsyncifyStackSize {
+		t.Fatalf("small custom stack = %d/%d, ok=%t; allocated %v", stackSize, asyncifySize, ok, sizes)
+	}
 }
 
 func TestStorageAlignsAllocatorAddresses(t *testing.T) {
