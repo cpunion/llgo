@@ -135,10 +135,22 @@ jobs:
             fi
           done
 
-      - name: Verify Fiber storage alignment and ownership
+      - name: Verify Fiber storage and GC range helpers
         if: ${{ matrix.profile == 'GJS' }}
         working-directory: runtime
-        run: go test -count=1 -coverprofile="$RUNNER_TEMP/gjs-storage.cover" ./internal/wasmcontext
+        # This nested module is outside the host workflow's root ./... tests.
+        # Run the pure helpers once, not once per Wasm profile or GOROOT shard.
+        run: |
+          go test -count=1 -coverprofile="$RUNNER_TEMP/gjs-storage.cover" \
+            ./internal/wasmcontext ./internal/gcroot ./internal/runtime/tinygogc
+
+      - name: Upload Wasm runtime helper coverage
+        if: ${{ matrix.profile == 'GJS' }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ runner.temp }}/gjs-storage.cover
+          flags: wasm-runtime-helpers
 
       - name: Reject failed tests with a successful process status
         env:
