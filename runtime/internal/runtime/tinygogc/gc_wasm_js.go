@@ -47,7 +47,7 @@ func calloc(nmemb, size uintptr) unsafe.Pointer {
 // such as atexit. MALLOC=none leaves it for the embedding allocator to supply.
 //
 //export __libc_calloc
-func libcCalloc(nmemb, size uintptr) unsafe.Pointer {
+func __libc_calloc(nmemb, size uintptr) unsafe.Pointer {
 	return wasmCalloc(nmemb, size)
 }
 
@@ -62,7 +62,7 @@ func memalign(alignment, size uintptr) unsafe.Pointer {
 }
 
 //export posix_memalign
-func posixMemalign(result *unsafe.Pointer, alignment, size uintptr) int32 {
+func posix_memalign(result *unsafe.Pointer, alignment, size uintptr) int32 {
 	if !wasmValidMemalign(alignment) {
 		return 22
 	}

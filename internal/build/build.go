@@ -1322,15 +1322,19 @@ func configureWasmGC(conf *Config, export *crosscompile.Export) (bool, error) {
 		}
 		defaultEnabled = true
 	case crosscompile.WasmABIUnspecified:
-		// Raw GOOS/GOARCH builds retain their current compatibility behavior
-		// until the official-Go wasm ABI line is complete. The explicit tag is
-		// still available for focused runtime development.
-		if explicit && conf.Goos != "js" && conf.Goos != "wasip1" {
+		if conf.Goos != "js" && conf.Goos != "wasip1" {
+			if !explicit {
+				return false, nil
+			}
 			return false, fmt.Errorf("llgo.wasm.gc.linear does not support GOOS=%s", conf.Goos)
 		}
-		if explicit && conf.Goos == "wasip1" && IsWasiThreadsEnabled() {
-			return false, errors.New("llgo.wasm.gc.linear requires single-worker WASI (set LLGO_WASI_THREADS=0)")
+		if conf.Goos == "wasip1" && IsWasiThreadsEnabled() {
+			if explicit {
+				return false, errors.New("llgo.wasm.gc.linear requires single-worker WASI (set LLGO_WASI_THREADS=0)")
+			}
+			return false, nil
 		}
+		defaultEnabled = true
 	default:
 		if explicit {
 			return false, fmt.Errorf("llgo.wasm.gc.linear does not support WebAssembly ABI %q", export.WasmABI)
