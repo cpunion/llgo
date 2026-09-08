@@ -806,10 +806,12 @@ func TestConfigureWasmGC(t *testing.T) {
 		{name: "Emscripten", conf: Config{Goos: "js", Goarch: "wasm"}, abi: crosscompile.WasmABIEmscripten, wantGC: true},
 		{name: "Emscripten Memory64", conf: Config{Goos: "js", Goarch: "wasm"}, abi: crosscompile.WasmABIEmscriptenMemory64, wantGC: true},
 		{name: "WASI", conf: Config{Goos: "wasip1", Goarch: "wasm"}, abi: crosscompile.WasmABIWASIPreview1, wantGC: true},
-		{name: "raw wasm", conf: Config{Goos: "js", Goarch: "wasm"}},
+		{name: "raw GJS", conf: Config{Goos: "js", Goarch: "wasm"}, wantGC: true},
+		{name: "raw GWASI", conf: Config{Goos: "wasip1", Goarch: "wasm"}, wantGC: true},
 		{name: "raw wasm explicit", conf: Config{Goos: "js", Goarch: "wasm", Tags: "other,llgo.wasm.gc.linear"}, wantGC: true},
 		{name: "native", conf: Config{Goos: "linux", Goarch: "amd64"}},
 		{name: "native explicit", conf: Config{Goos: "linux", Goarch: "amd64", Tags: "llgo.wasm.gc.linear"}, err: true},
+		{name: "unsupported raw host implicit", conf: Config{Goos: "linux", Goarch: "wasm"}},
 		{name: "unsupported raw host", conf: Config{Goos: "linux", Goarch: "wasm", Tags: "llgo.wasm.gc.linear"}, err: true},
 		{name: "freestanding explicit", conf: Config{Goos: "linux", Goarch: "wasm", Tags: "llgo.wasm.gc.linear"}, abi: crosscompile.WasmABIFreestanding, err: true},
 	}
@@ -840,6 +842,12 @@ func TestConfigureWasmGCRejectsWASIThreads(t *testing.T) {
 		conf := Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo.wasm.gc.linear"}
 		if _, err := configureWasmGC(&conf, &crosscompile.Export{WasmABI: abi}); err == nil {
 			t.Fatalf("expected llgo.wasm.gc.linear with WASI threads and ABI %q to fail", abi)
+		}
+	}
+	for _, abi := range []crosscompile.WasmABI{crosscompile.WasmABIUnspecified, crosscompile.WasmABIWASIPreview1} {
+		conf := Config{Goos: "wasip1", Goarch: "wasm"}
+		if enabled, err := configureWasmGC(&conf, &crosscompile.Export{WasmABI: abi}); err != nil || enabled {
+			t.Fatalf("implicit WASI GC with threads and ABI %q = %v, %v; want disabled, nil", abi, enabled, err)
 		}
 	}
 }
@@ -1211,6 +1219,33 @@ func TestWasmUniqueCleanupSourceSelection(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestWasmGCAllocatorSourceSelection(t *testing.T) {
+	dir := filepath.Join(env.LLGoRuntimeDir(), "internal", "runtime", "tinygogc")
+	for _, test := range []struct {
+		name, goos string
+		tags       []string
+		file       string
+		want       bool
+	}{
+		{name: "raw GJS supplies Fiber allocator", goos: "js", tags: []string{"llgo", "nogc", "llgo.wasm.gc.linear"}, file: "gc_wasm_js.go", want: true},
+		{name: "EC32 supplies Emscripten allocator", goos: "js", tags: []string{"llgo", "llgo.wasm.gc.linear", "llgo.wasm.emscripten"}, file: "gc_wasm_js.go", want: true},
+		{name: "raw GWASI supplies WASI wrappers", goos: "wasip1", tags: []string{"llgo", "nogc", "llgo.wasm.gc.linear"}, file: "gc_wasm_wasip1.go", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := gobuild.Default
+			ctx.GOOS, ctx.GOARCH = test.goos, "wasm"
+			ctx.BuildTags = test.tags
+			got, err := ctx.MatchFile(dir, test.file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("MatchFile(%s) = %v, want %v", test.file, got, test.want)
+			}
+		})
 	}
 }
 
