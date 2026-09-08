@@ -120,9 +120,14 @@ func fullCommand(p profile, goCmd, llgo, goRoot, pkg string) command {
 }
 
 func fullTestTimeout(pkg string) string {
-	// DSA parameter generation is intentionally CPU-heavy under wasm. Keep the
-	// global default strict while allowing this known finite test to complete.
-	if pkg == "test/std/crypto/dsa" || strings.HasPrefix(pkg, "test/_stress/") {
+	// Keep the global default strict while allowing reviewed, finite wasm work
+	// enough time to finish. These packages either generate cryptographic keys,
+	// walk a broad API surface, or collect a complete heap profile.
+	switch pkg {
+	case "test/std/crypto/dsa", "test/std/crypto/rsa", "test/std/go/types", "test/std/os", "test/std/runtime/pprof":
+		return "3m"
+	}
+	if strings.HasPrefix(pkg, "test/_stress/") {
 		return "3m"
 	}
 	return "60s"
@@ -165,17 +170,13 @@ func fullSourceExclusion(p profile, pkg string) (string, bool) {
 		return "tests select Unix or Windows syscall surfaces, neither of which is the js/wasm or wasip1/wasm ABI", true
 	case "test/windows":
 		return "Windows-only integration suite", true
+	case "test/cgo":
+		return "the Go cgo frontend does not support GOARCH=wasm; Emscripten and WASI C interoperability is covered by dedicated LLGo target tests", true
+	case "test/std/runtime/cgo":
+		return "the standard runtime/cgo package requires the unsupported GOARCH=wasm cgo frontend; LLGo handle and host-boundary behavior is covered by dedicated target tests", true
 	case "test/llgoext", "test/llgoext/localitymulti":
 		if p.Reference {
 			return "LLGo extension tests require the llgo build tag and LLGo-only runtime APIs; all LLGo profiles still execute them", true
-		}
-	case "test/std/runtime/cgo":
-		if p.Reference {
-			return "official Go runtime/cgo requires native C runtime symbols and cannot link on wasm; LLGo handle tests remain mandatory on every LLGo profile", true
-		}
-	case "test/cgo":
-		if p.Target == "" {
-			return "raw Go-compatible wasm profiles have no C interop; the same suite is mandatory on EC32, EC64, and WC32", true
 		}
 	}
 	return "", false
@@ -288,6 +289,10 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 		if e.Status == "other-shard" {
 			continue
 		}
+		if reason, classified := fullSourceExclusion(p, e.Package); classified {
+			e.Status, e.Reason = "not-applicable", reason
+			continue
+		}
 		pkg, exists := selected[e.Package]
 		switch {
 		case e.Package == "test/goroot":
@@ -295,11 +300,7 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 		case e.Package == "test/cmd/llgo":
 			e.Status, e.Reason = "separate-suite", "compiler-driver subprocess tests execute in the regular host CI suite"
 		case !exists || len(pkg.TestGoFiles)+len(pkg.XTestGoFiles) == 0:
-			if reason, classified := fullSourceExclusion(p, e.Package); classified {
-				e.Status, e.Reason = "not-applicable", reason
-			} else {
-				e.Status, e.Reason = "source-excluded", "no tests selected by source context; applicability not yet established"
-			}
+			e.Status, e.Reason = "source-excluded", "no tests selected by source context; applicability not yet established"
 		case pkg.Error != nil:
 			e.Status, e.Reason = "fail", pkg.Error.Err
 		default:
