@@ -10,6 +10,43 @@ import (
 
 var tinySink []*int32
 
+func TestRuntimeMemProfileBufferContract(t *testing.T) {
+	oldRate := runtime.MemProfileRate
+	defer func() { runtime.MemProfileRate = oldRate }()
+	runtime.MemProfileRate = 1
+	allocateTinyObjects(256)
+	runtime.GC()
+	runtime.GC()
+	runtime.MemProfileRate = 0
+	n, _ := runtime.MemProfile(nil, true)
+	if n == 0 {
+		t.Fatal("missing allocation records")
+	}
+	// Extra capacity must not be overwritten, and a short buffer must be
+	// rejected without exposing a partial snapshot.
+	records := make([]runtime.MemProfileRecord, n+256)
+	for i := range records {
+		records[i].AllocBytes = -1
+	}
+	if got, ok := runtime.MemProfile(records[:n-1], true); ok || got < n {
+		t.Fatalf("short buffer = %d, %t, want at least %d, false", got, ok, n)
+	}
+	for i := range records {
+		if records[i].AllocBytes != -1 {
+			t.Fatalf("short snapshot modified record %d", i)
+		}
+	}
+	got, ok := runtime.MemProfile(records, true)
+	if !ok || got < n {
+		t.Fatalf("full buffer = %d, %t, want at least %d, true", got, ok, n)
+	}
+	for i := got; i < len(records); i++ {
+		if records[i].AllocBytes != -1 {
+			t.Fatalf("snapshot modified trailing record %d", i)
+		}
+	}
+}
+
 func TestRuntimeMemProfileReportsTinyAllocations(t *testing.T) {
 	oldRate := runtime.MemProfileRate
 	runtime.MemProfileRate = 1
