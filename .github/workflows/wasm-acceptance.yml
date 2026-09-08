@@ -67,6 +67,12 @@ jobs:
         run: |
           set -o pipefail
           target_goroot="$(go env GOROOT)"
+          cases='^(helloworld\.go|bom\.go)$'
+          if [[ "$PROFILE" == GWASI ]]; then
+            # This original generated program catches excessive inlining
+            # before Asyncify. Guard it once before starting the full matrix.
+            cases='^(helloworld\.go|bom\.go|fixedbugs/issue5162\.go)$'
+          fi
           (
             cd test/goroot
             "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
@@ -74,7 +80,7 @@ jobs:
               -goroot "$target_goroot" -llgo "$RUNNER_TEMP/llgo" \
               -wasm-profile "$PROFILE" -directive-mode ci \
               -report "$RUNNER_TEMP/goroot-smoke-$PROFILE.json" \
-              -case '^(helloworld\.go|bom\.go)$' \
+              -case "$cases" \
               -max-rss-mib 4096 -rss-warn-mib 1024 \
               -min-memory-free-percent 15 -min-swap-free-mib 512
           ) 2>&1 | tee "$RUNNER_TEMP/goroot-$PROFILE.log"

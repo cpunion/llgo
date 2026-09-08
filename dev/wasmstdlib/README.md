@@ -35,7 +35,8 @@ tests use small, generated ELF, Mach-O, and PE inputs with real code and DWARF,
 without requiring a subprocess compiler inside the wasm guest. The host-side
 `test/goroot` package is reported as `separate-suite`: the same workflow
 first executes two startup sentinels (`bom.go` and `helloworld.go`) on every
-LLGo wasm profile, then unlocks the four-shard GOROOT matrix only if all
+LLGo wasm profile and the original generated `fixedbugs/issue5162.go` on GWASI
+to catch excessive pre-Asyncify inlining, then unlocks the four-shard GOROOT matrix only if all
 sentinels pass. WC32 and GWASI also execute typed reflection bridge regressions
 before unlocking the full matrix: calls, MakeFunc, deferred recovery, variadic
 arguments, interface results, and GC-rooted callback lifetimes. The full matrix recursively discovers `run`, `runoutput`,

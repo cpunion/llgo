@@ -71,11 +71,11 @@ func writeBuildTestTool(t *testing.T, dir, name string) string {
 func TestWasmPostLinkArgs(t *testing.T) {
 	target := &crosscompile.Export{WasmPostLink: crosscompile.WasmPostLink{Asyncify: true}}
 	if got, want := wasmPostLinkArgs(target, "in.wasm", "out.wasm", false, optlevel.O2),
-		[]string{"--asyncify", "--translate-to-exnref", "-O2", "in.wasm", "-o", "out.wasm"}; !reflect.DeepEqual(got, want) {
+		[]string{"--asyncify", "--translate-to-exnref", "-O2", "--inline-max-combined-binary-size=16384", "in.wasm", "-o", "out.wasm"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("wasmPostLinkArgs() = %v, want %v", got, want)
 	}
 	if got, want := wasmPostLinkArgs(target, "in.wasm", "out.wasm", true, optlevel.Oz),
-		[]string{"--asyncify", "--translate-to-exnref", "-Oz", "-g", "in.wasm", "-o", "out.wasm"}; !reflect.DeepEqual(got, want) {
+		[]string{"--asyncify", "--translate-to-exnref", "-Oz", "--inline-max-combined-binary-size=16384", "-g", "in.wasm", "-o", "out.wasm"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("wasmPostLinkArgs(debug) = %v, want %v", got, want)
 	}
 	if got, want := wasmPostLinkArgs(target, "in.wasm", "out.wasm", false, optlevel.O0),
@@ -90,7 +90,7 @@ func TestWasmPostLinkArgs(t *testing.T) {
 func TestWasmPreAsyncifyArgs(t *testing.T) {
 	target := &crosscompile.Export{WasmPostLink: crosscompile.WasmPostLink{Asyncify: true}}
 	if got, want := wasmPreAsyncifyArgs(target, "in.wasm", "out.wasm", optlevel.Oz),
-		[]string{"-Oz", "in.wasm", "-o", "out.wasm"}; !reflect.DeepEqual(got, want) {
+		[]string{"-Oz", "--inline-max-combined-binary-size=16384", "in.wasm", "-o", "out.wasm"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("wasmPreAsyncifyArgs() = %v, want %v", got, want)
 	}
 	if got := wasmPreAsyncifyArgs(target, "in", "out", optlevel.O0); got != nil {
@@ -214,8 +214,8 @@ func TestPostLinkWasmPublishesOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(args); !strings.Contains(got, "---\n-O2\n"+input+"\n-o\n") ||
-		!strings.Contains(got, "---\n--asyncify\n--translate-to-exnref\n-O2\n"+input+"\n-o\n") {
+	if got := string(args); !strings.Contains(got, "---\n-O2\n--inline-max-combined-binary-size=16384\n"+input+"\n-o\n") ||
+		!strings.Contains(got, "---\n--asyncify\n--translate-to-exnref\n-O2\n--inline-max-combined-binary-size=16384\n"+input+"\n-o\n") {
 		t.Fatalf("wasm-opt args = %q", got)
 	}
 }
