@@ -52,7 +52,8 @@ func callerPanicCaller() {
 
 func TestCallerPanicTraceback(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
-	cmd.Env = append(os.Environ(), callerPanicChild+"=1")
+	// Assert the default traceback format independently of parent crash diagnostics.
+	cmd.Env = append(os.Environ(), callerPanicChild+"=1", "GOTRACEBACK=single")
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("panic child unexpectedly succeeded:\n%s", output)
