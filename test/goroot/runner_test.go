@@ -110,6 +110,7 @@ type notApplicableConfig struct {
 type xfailEntry struct {
 	Version   string `yaml:"version"`
 	Platform  string `yaml:"platform"`
+	Profile   string `yaml:"profile"`
 	Directive string `yaml:"directive"`
 	Case      string `yaml:"case"`
 	Reason    string `yaml:"reason"`
@@ -119,6 +120,7 @@ type xfailEntry struct {
 type timeoutEntry struct {
 	Version   string `yaml:"version"`
 	Platform  string `yaml:"platform"`
+	Profile   string `yaml:"profile"`
 	Directive string `yaml:"directive"`
 	Case      string `yaml:"case"`
 	Timeout   string `yaml:"timeout"`
@@ -373,7 +375,7 @@ func TestGoRootRunCases(t *testing.T) {
 				t.Skipf("skipping host-unsafe case: %s", reason)
 			}
 			runTimeout := *flagRunTO
-			if timeout, reason, ok := xfails.MatchTimeout(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, tc); ok {
+			if timeout, reason, ok := xfails.MatchTimeoutProfile(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, *flagWasmProfile, tc); ok {
 				runTimeout = timeout
 				t.Logf("using timeout override %s: %s", timeout, reason)
 			}
@@ -382,19 +384,18 @@ func TestGoRootRunCases(t *testing.T) {
 			if err != nil {
 				result.Error = err.Error()
 			}
-			var resourceErr *resourceLimitError
-			if errors.As(err, &resourceErr) {
-				t.Fatalf("resource guard stopped case: %v", err)
-			}
-			match, reason := xfails.Match(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, tc)
+			match, reason := xfails.MatchProfile(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, *flagWasmProfile, tc)
 			wasmXFail := false
 			if wasmTarget {
-				if ok, wasmReason := xfails.MatchWasm(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, tc); ok {
+				if ok, wasmReason := xfails.MatchWasmProfile(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, *flagWasmProfile, tc); ok {
 					match, reason, wasmXFail = true, wasmReason, true
 				}
 			}
-			flaky, flakyReason := xfails.MatchFlaky(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, tc)
-			notApply, notApplyReason := notApplicable.Match(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, tc)
+			flaky, flakyReason := xfails.MatchFlakyProfile(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, *flagWasmProfile, tc)
+			notApply, notApplyReason := notApplicable.MatchProfile(envInfo.GOVERSION, envInfo.GOOS+"/"+envInfo.GOARCH, *flagWasmProfile, tc)
+			if resourceLimitMustFail(err, wasmTarget, notApply) {
+				t.Fatalf("resource guard stopped case: %v", err)
+			}
 			result.Status, result.Reason = gorootCaseOutcome(wasmTarget, err, match, reason, notApply, notApplyReason, flaky, flakyReason, wasmXFail)
 			if wasmTarget {
 				if notApply {
@@ -1100,6 +1101,11 @@ type resourceLimitError struct {
 }
 
 func (err *resourceLimitError) Error() string { return err.message }
+
+func resourceLimitMustFail(err error, wasmTarget, notApplicable bool) bool {
+	var resourceErr *resourceLimitError
+	return errors.As(err, &resourceErr) && !(wasmTarget && notApplicable)
+}
 
 type systemMemoryState struct {
 	freePercent int
@@ -2223,13 +2229,21 @@ func parseGoVersion(goVersion string) (int, int, bool) {
 }
 
 func (cfg xfailConfig) Match(goVersion, platform string, tc testCase) (bool, string) {
-	return matchEntries(cfg.Entries, goVersion, platform, tc)
+	return cfg.MatchProfile(goVersion, platform, "", tc)
+}
+
+func (cfg xfailConfig) MatchProfile(goVersion, platform, profile string, tc testCase) (bool, string) {
+	return matchEntriesProfile(cfg.Entries, goVersion, platform, profile, tc)
 }
 
 func (cfg xfailConfig) MatchWasm(goVersion, platform string, tc testCase) (bool, string) {
+	return cfg.MatchWasmProfile(goVersion, platform, "", tc)
+}
+
+func (cfg xfailConfig) MatchWasmProfile(goVersion, platform, profile string, tc testCase) (bool, string) {
 	for _, entry := range cfg.Entries {
 		if entry.Wasm {
-			if match, reason := matchEntries([]xfailEntry{entry}, goVersion, platform, tc); match {
+			if match, reason := matchEntriesProfile([]xfailEntry{entry}, goVersion, platform, profile, tc); match {
 				return true, reason
 			}
 		}
@@ -2238,11 +2252,19 @@ func (cfg xfailConfig) MatchWasm(goVersion, platform string, tc testCase) (bool,
 }
 
 func (cfg notApplicableConfig) Match(goVersion, platform string, tc testCase) (bool, string) {
-	return matchEntries(cfg.Entries, goVersion, platform, tc)
+	return cfg.MatchProfile(goVersion, platform, "", tc)
+}
+
+func (cfg notApplicableConfig) MatchProfile(goVersion, platform, profile string, tc testCase) (bool, string) {
+	return matchEntriesProfile(cfg.Entries, goVersion, platform, profile, tc)
 }
 
 func (cfg xfailConfig) MatchFlaky(goVersion, platform string, tc testCase) (bool, string) {
-	return matchEntries(cfg.Flakes, goVersion, platform, tc)
+	return cfg.MatchFlakyProfile(goVersion, platform, "", tc)
+}
+
+func (cfg xfailConfig) MatchFlakyProfile(goVersion, platform, profile string, tc testCase) (bool, string) {
+	return matchEntriesProfile(cfg.Flakes, goVersion, platform, profile, tc)
 }
 
 func (cfg xfailConfig) MatchHostSkip(goVersion, platform string, tc testCase) (bool, string) {
@@ -2250,8 +2272,12 @@ func (cfg xfailConfig) MatchHostSkip(goVersion, platform string, tc testCase) (b
 }
 
 func (cfg xfailConfig) MatchTimeout(goVersion, platform string, tc testCase) (time.Duration, string, bool) {
+	return cfg.MatchTimeoutProfile(goVersion, platform, "", tc)
+}
+
+func (cfg xfailConfig) MatchTimeoutProfile(goVersion, platform, profile string, tc testCase) (time.Duration, string, bool) {
 	for _, entry := range cfg.Timeouts {
-		if !entry.matches(goVersion, platform, tc) {
+		if !entry.matchesProfile(goVersion, platform, profile, tc) {
 			continue
 		}
 		timeout, err := time.ParseDuration(entry.Timeout)
@@ -2268,8 +2294,12 @@ func (cfg xfailConfig) MatchTimeout(goVersion, platform string, tc testCase) (ti
 }
 
 func matchEntries(entries []xfailEntry, goVersion, platform string, tc testCase) (bool, string) {
+	return matchEntriesProfile(entries, goVersion, platform, "", tc)
+}
+
+func matchEntriesProfile(entries []xfailEntry, goVersion, platform, profile string, tc testCase) (bool, string) {
 	for _, entry := range entries {
-		if !entry.matches(goVersion, platform, tc) {
+		if !entry.matchesProfile(goVersion, platform, profile, tc) {
 			continue
 		}
 		reason := entry.Reason
@@ -2282,18 +2312,33 @@ func matchEntries(entries []xfailEntry, goVersion, platform string, tc testCase)
 }
 
 func (entry xfailEntry) matches(goVersion, platform string, tc testCase) bool {
-	return matchEntry(entry.Version, entry.Platform, entry.Directive, entry.Case, goVersion, platform, tc)
+	return entry.matchesProfile(goVersion, platform, "", tc)
+}
+
+func (entry xfailEntry) matchesProfile(goVersion, platform, profile string, tc testCase) bool {
+	return matchEntryProfile(entry.Version, entry.Platform, entry.Profile, entry.Directive, entry.Case, goVersion, platform, profile, tc)
 }
 
 func (entry timeoutEntry) matches(goVersion, platform string, tc testCase) bool {
-	return matchEntry(entry.Version, entry.Platform, entry.Directive, entry.Case, goVersion, platform, tc)
+	return entry.matchesProfile(goVersion, platform, "", tc)
+}
+
+func (entry timeoutEntry) matchesProfile(goVersion, platform, profile string, tc testCase) bool {
+	return matchEntryProfile(entry.Version, entry.Platform, entry.Profile, entry.Directive, entry.Case, goVersion, platform, profile, tc)
 }
 
 func matchEntry(version, platform, directive, casePattern, goVersion, goPlatform string, tc testCase) bool {
+	return matchEntryProfile(version, platform, "", directive, casePattern, goVersion, goPlatform, "", tc)
+}
+
+func matchEntryProfile(version, platform, profile, directive, casePattern, goVersion, goPlatform, wasmProfile string, tc testCase) bool {
 	if version != "" && !matchGoVersion(version, goVersion) {
 		return false
 	}
 	if platform != "" && platform != goPlatform {
+		return false
+	}
+	if profile != "" && profile != wasmProfile {
 		return false
 	}
 	if directive != "" && directive != tc.Directive {
