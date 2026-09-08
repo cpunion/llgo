@@ -35,6 +35,44 @@ func TestScheduler(t *testing.T) {
 	}
 }
 
+func TestExplicitGCDoesNotStarveRunnableGoroutines(t *testing.T) {
+	gcStarted := make(chan struct{})
+	stopGC := make(chan struct{})
+	gcDone := make(chan struct{})
+	go func() {
+		defer close(gcDone)
+		close(gcStarted)
+		for {
+			select {
+			case <-stopGC:
+				return
+			default:
+				runtime.GC()
+			}
+		}
+	}()
+	<-gcStarted
+	defer func() {
+		close(stopGC)
+		<-gcDone
+	}()
+
+	const goroutines = 20
+	done := make(chan struct{}, goroutines)
+	for range goroutines {
+		go func() {
+			done <- struct{}{}
+		}()
+	}
+	for range goroutines {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("explicit GC starved runnable goroutines")
+		}
+	}
+}
+
 func TestPanicRecoverAndCaller(t *testing.T) {
 	defer func() {
 		got := recover()

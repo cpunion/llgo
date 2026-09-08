@@ -34,4 +34,10 @@ func GC() {
 	if poolCleanup != nil {
 		poolCleanup()
 	}
+	// A single-worker WebAssembly caller can invoke GC in a tight loop without
+	// reaching a compiler-inserted slow safepoint for a long time. The
+	// collection is complete at this point, so give already-runnable goroutines
+	// the same scheduling opportunity that a stop-the-world Go GC naturally
+	// provides. Native and bare-metal backends implement Gosched as a no-op.
+	llruntime.Gosched()
 }
