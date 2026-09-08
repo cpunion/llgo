@@ -2,7 +2,10 @@
 
 package runtime
 
-import "unsafe"
+import (
+	"github.com/xgo-dev/llgo/runtime/internal/gcroot"
+	"unsafe"
+)
 
 // Compiler instrumentation passes the parts of immutable string literals as
 // scalar arguments. Passing Go strings directly uses indirect C ABI arguments
@@ -18,7 +21,9 @@ func PushCallerLocationFrameWasm(entry uintptr, nameData *byte, nameLen int, fil
 		return -1
 	}
 	MemProfilePause()
+	gcroot.BeginInstrumentation()
 	mark := PushCallerLocationFrame(entry, unsafe.String(nameData, nameLen), unsafe.String(fileData, fileLen), line)
+	gcroot.EndInstrumentation()
 	MemProfileResume()
 	return mark
 }
@@ -29,7 +34,9 @@ func RecordCallerLocationWasm(entry uintptr, nameData *byte, nameLen int, fileDa
 		return
 	}
 	MemProfilePause()
+	gcroot.BeginInstrumentation()
 	RecordCallerLocation(entry, unsafe.String(nameData, nameLen), unsafe.String(fileData, fileLen), line)
+	gcroot.EndInstrumentation()
 	MemProfileResume()
 }
 
@@ -39,7 +46,9 @@ func RecordPanicLocationWasm(entry uintptr, nameData *byte, nameLen int, fileDat
 		return
 	}
 	MemProfilePause()
+	gcroot.BeginInstrumentation()
 	RecordPanicLocation(entry, unsafe.String(nameData, nameLen), unsafe.String(fileData, fileLen), line)
+	gcroot.EndInstrumentation()
 	MemProfileResume()
 }
 
