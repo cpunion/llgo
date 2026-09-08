@@ -51,8 +51,13 @@ func gcMarkReachable() {
 	if sp < top {
 		markRoots(sp, top)
 	}
-	if globalsStart < globalsEnd {
-		markRoots(globalsStart, globalsEnd)
+	beforeEnd, afterStart := gcroot.SplitStaticRoots(globalsStart, globalsEnd,
+		gcWasmNoScanStart(), gcWasmNoScanEnd(), unsafe.Alignof(uintptr(0)))
+	if globalsStart < beforeEnd {
+		markRoots(globalsStart, beforeEnd)
+	}
+	if afterStart < globalsEnd {
+		markRoots(afterStart, globalsEnd)
 	}
 	gcroot.Visit(markWasmGCRoot)
 }
@@ -84,6 +89,12 @@ func gcWasmGlobalsStart() uintptr
 
 //go:linkname gcWasmGlobalsEnd C.llgo_gc_globals_end
 func gcWasmGlobalsEnd() uintptr
+
+//go:linkname gcWasmNoScanStart C.llgo_gc_noscan_start
+func gcWasmNoScanStart() uintptr
+
+//go:linkname gcWasmNoScanEnd C.llgo_gc_noscan_end
+func gcWasmNoScanEnd() uintptr
 
 //go:linkname gcWasmHeapBase C.llgo_gc_heap_base
 func gcWasmHeapBase() uintptr
