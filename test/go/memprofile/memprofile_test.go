@@ -6,10 +6,13 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"testing"
-	"unsafe"
 )
 
 var tinySink []*int32
+
+// The compiler's wasm linear-GC build tags select its block size in
+// memprofile_wasm_test.go. Official Go retains its 16-byte tiny allocator.
+var tinyAllocationGranule = int64(16)
 
 func TestRuntimeMemProfileBufferContract(t *testing.T) {
 	oldRate := runtime.MemProfileRate
@@ -69,12 +72,7 @@ func TestRuntimeMemProfileReportsTinyAllocations(t *testing.T) {
 
 	records := readMemProfile(t)
 	wantBytes := int64(n * 4)
-	wantGranule := int64(16)
-	// Go's tiny allocator uses 16-byte blocks even on its 64-bit-pointer
-	// wasm profile. Only LLGo's linear collector scales its four-word blocks.
-	if runtime.Compiler == "llgo" && runtime.GOARCH == "wasm" {
-		wantGranule = int64(4 * unsafe.Sizeof(uintptr(0)))
-	}
+	wantGranule := tinyAllocationGranule
 	for _, r := range records {
 		inUseObjects := r.InUseObjects()
 		inUseBytes := r.InUseBytes()
