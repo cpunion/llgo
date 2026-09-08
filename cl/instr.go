@@ -899,7 +899,7 @@ func (p *context) shouldTrackCallerFrames() bool {
 	if p == nil || p.pkg == nil || p.fn == nil || p.goFn == nil || !p.trackCallerFrames {
 		return false
 	}
-	if !p.runtimeCallerFuncs[p.goFn] {
+	if !p.runtimeCallerFuncs[p.goFn] && !p.memoryProfileFuncs[p.goFn] {
 		return false
 	}
 	if target := p.prog.Target(); target != nil && target.Target != "" && target.GOARCH != "wasm" {
@@ -1231,10 +1231,12 @@ func (a *runtimeCallerAnalysis) callTargets(fn *ssa.Function, call *ssa.CallComm
 // Precompute before workers start; recover facts also synchronize lazy queries
 // for nested and synthetic functions that are not package members.
 type CallerTracking struct {
-	base        map[*ssa.Package]map[*ssa.Function]bool
-	extended    map[*ssa.Package]callerTrackingFuncSets
-	recover     *recoverFacts
-	precomputed bool
+	memoryProfileAttribution bool
+	memoryProfileFrames      map[*ssa.Function]bool
+	base                     map[*ssa.Package]map[*ssa.Function]bool
+	extended                 map[*ssa.Package]callerTrackingFuncSets
+	recover                  *recoverFacts
+	precomputed              bool
 }
 
 // Precompute resolves caller-tracking and recover data before package backends
@@ -1284,6 +1286,15 @@ func (c *CallerTracking) Precompute(pkgs []*ssa.Package) {
 	for i := range pkgs {
 		analyses[i] = analyzeCallerTrackingPackage(pkgs[i], methods[pkgs[i]])
 		base[i] = analyses[i].base
+	}
+	if c.memoryProfileAttribution {
+		roots := make(map[*ssa.Function]bool)
+		for _, analysis := range analyses {
+			for fn := range analysis.funcs {
+				roots[fn] = true
+			}
+		}
+		c.memoryProfileFrames = memoryProfileAllocationFrames(memoryProfileFunctions(roots))
 	}
 	for i := range pkgs {
 		extended[i] = computeRuntimeCallerFuncSets(c.recoverAnalysis(), pkgs[i], analyses[i].funcs, base[i], analyses[i].trackable, func(dep *ssa.Package) map[*ssa.Function]bool {
@@ -2192,7 +2203,11 @@ func (p *context) popCallerLocationFrame(b llssa.Builder) {
 	if p.callerFrameMark.IsNil() {
 		return
 	}
-	b.Call(p.runtimeFunc("PopCallerLocationFrame", popCallerLocationFrameSig()), p.callerFrameMark)
+	name := "PopCallerLocationFrame"
+	if p.prog.WasmMemoryProfilingEnabled() {
+		name += "Wasm"
+	}
+	b.Call(p.runtimeFunc(name, popCallerLocationFrameSig()), p.callerFrameMark)
 }
 
 func (p *context) runtimeFunc(name string, sig *types.Signature) llssa.Expr {
@@ -2557,6 +2572,10 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		args := p.compileValues(b, args, kind)
 		ret = p.emitDo(b, act, ds, false, llssa.Builtin(fn), llssa.Builder.Call, args...)
 	case *ssa.Function:
+		if p.omitWasmMemProfileCall(cv) {
+			p.compileValues(b, args, kind)
+			return
+		}
 		aFn, pyFn, ftype := p.compileFunction(cv)
 		// TODO(xsw): check ca != llssa.Call
 		switch ftype {
