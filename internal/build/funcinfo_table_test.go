@@ -347,6 +347,69 @@ func TestWin32FuncInfoUsesExactEntryForAddressTakenFunction(t *testing.T) {
 	buf.Dispose()
 }
 
+func TestWasmFuncInfoUsesExactEntriesOnlyForAddressTakenFunctions(t *testing.T) {
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "js", GOARCH: "wasm"})
+	defer prog.Dispose()
+	prog.EnableFuncInfoMetadata(true)
+	prog.EnableFuncInfoSites(true)
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode: BuildModeExe,
+			Goos:      "js",
+			Goarch:    "wasm",
+		},
+	}
+	pkg := prog.NewPackage("example.com/p", "example.com/p")
+	for _, name := range []string{"example.com/p.direct", "example.com/p.addressed"} {
+		pkg.EmitFuncInfo(name, name, "p.go", 1, 1)
+		pkg.NewFunc(name, llssa.NoArgsNoRet, llssa.InGo).MakeBody(1).Return()
+	}
+	addressed := pkg.Module().NamedFunction("example.com/p.addressed")
+	keep := llvm.AddGlobal(pkg.Module(), addressed.Type(), "example.com/p.funcValue")
+	keep.SetInitializer(addressed)
+
+	// Exercise coexistence with a retention entry installed by another
+	// compiler subsystem; the entry-site emitter must append, not replace it.
+	i8Type := pkg.Module().Context().Int8Type()
+	pointerType := llvm.PointerType(i8Type, 0)
+	marker := llvm.AddGlobal(pkg.Module(), i8Type, "example.com/p.marker")
+	marker.SetInitializer(llvm.ConstInt(i8Type, 0, false))
+	usedInit := llvm.ConstArray(pointerType, []llvm.Value{llvm.ConstBitCast(marker, pointerType)})
+	used := llvm.AddGlobal(pkg.Module(), usedInit.Type(), "llvm.used")
+	used.SetInitializer(usedInit)
+	used.SetLinkage(llvm.AppendingLinkage)
+	used.SetSection("llvm.metadata")
+
+	records := collectFuncInfo([]Package{{LPkg: pkg}})
+	emitFuncInfoTable(ctx, pkg, records, nil)
+	emitFuncInfoEntrySites(ctx, pkg)
+	ir := pkg.String()
+	for _, want := range []string{
+		"@__llgo_funcinfo_entry_start = global ptr @__start_llgo_funcinfo_entry",
+		"@__llgo_funcinfo_entry_end = global ptr @__stop_llgo_funcinfo_entry",
+		`section "llgo_funcinfo_entry"`,
+		`linkonce_odr constant { ptr, i64 }`,
+		`@llvm.used = appending global [2 x ptr]`,
+		`@llvm.compiler.used = appending global [1 x ptr]`,
+		`ptr @"example.com/p.marker"`,
+		`ptr @"example.com/p.addressed"`,
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("wasm funcinfo entry IR missing %q:\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, wasmFuncInfoEntryPrefix+"example.com/p.direct") {
+		t.Fatalf("direct-only wasm function received an entry record:\n%s", ir)
+	}
+	if !strings.Contains(ir, wasmFuncInfoEntryPrefix+"example.com/p.addressed") {
+		t.Fatalf("address-taken wasm function is missing its entry record:\n%s", ir)
+	}
+	if got := strings.Count(ir, `section "llgo_funcinfo_entry"`); got != 2 {
+		t.Fatalf("wasm funcinfo section rows = %d, want addressed entry plus sentinel:\n%s", got, ir)
+	}
+}
+
 func TestFuncInfoTableSitesDisabledKeepsTables(t *testing.T) {
 	prog := llssa.NewProgram(nil)
 	src := prog.NewPackage("example.com/p", "example.com/p")
