@@ -5,6 +5,38 @@
 # These exclusions are independent of the Go release: omit version selectors,
 # but retain each case's directive and any platform-specific boundary.
 not_applicable:
+  - profile: EC32
+    directive: run
+    case: printbig.go
+    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; the EC32 profile has a 32-bit int, and the official Go compiler rejects the same source for GOARCH=386"
+  - profile: WC32
+    directive: run
+    case: printbig.go
+    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; the WC32 profile has a 32-bit int, and the official Go compiler rejects the same source for GOARCH=386"
+  - profile: GJS
+    directive: run
+    case: printbig.go
+    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; LLGo's GJS profile retains its wasm32 data layout, and the official Go compiler rejects the same source for GOARCH=386"
+  - profile: GWASI
+    directive: run
+    case: printbig.go
+    reason: "not applicable: this case requires untyped integer constants at the signed 64-bit limits to default to int; LLGo's GWASI profile retains its wasm32 data layout, and the official Go compiler rejects the same source for GOARCH=386"
+  - profile: EC32
+    directive: run
+    case: fixedbugs/issue23305.go
+    reason: "not applicable: this case passes the untyped constant 0xffffffff to println, which does not fit the EC32 profile's 32-bit int; the official Go compiler rejects the same source for GOARCH=386"
+  - profile: WC32
+    directive: run
+    case: fixedbugs/issue23305.go
+    reason: "not applicable: this case passes the untyped constant 0xffffffff to println, which does not fit the WC32 profile's 32-bit int; the official Go compiler rejects the same source for GOARCH=386"
+  - profile: GJS
+    directive: run
+    case: fixedbugs/issue23305.go
+    reason: "not applicable: this case passes the untyped constant 0xffffffff to println; LLGo's GJS profile retains its wasm32 data layout, and the official Go compiler rejects the same source for GOARCH=386"
+  - profile: GWASI
+    directive: run
+    case: fixedbugs/issue23305.go
+    reason: "not applicable: this case passes the untyped constant 0xffffffff to println; LLGo's GWASI profile retains its wasm32 data layout, and the official Go compiler rejects the same source for GOARCH=386"
   - directive: run
     case: fixedbugs/issue15277.go
     reason: "not applicable: this case requires precise PC-specific stack and register liveness after a value's last use; LLGo uses conservative BDWGC roots, so exact GC liveness is not currently an LLGo compatibility goal"
@@ -386,6 +418,15 @@ not_applicable:
   - directive: run
     case: fixedbugs/issue59680.go
     reason: "not applicable: this case deliberately drives more than 10,000 recursive calls to force gc stack growth and relocation; LLGo uses fixed native stacks, so reproducing growable-stack behavior is not an LLGo compatibility goal"
+  - directive: rundir
+    case: uintptrescapes.go
+    reason: "not applicable: this case deliberately keeps a 1 KiB local array live across 4,096 recursive calls in four goroutines to force gc stack growth; LLGo uses fixed native and WebAssembly Fiber stacks, so reproducing growable-stack relocation is not currently an LLGo compatibility goal"
+  - directive: run
+    case: typeparam/chans.go
+    reason: "not applicable: this case requires a finalizer to observe the precise last use of a local channel receiver and run immediately after one explicit GC; LLGo's conservative collectors may retain the receiver from an ambiguous stack root, so exact finalizer timing is not currently an LLGo compatibility goal"
+  - directive: rundir
+    case: typeparam/chansimp.go
+    reason: "not applicable: this case requires a finalizer to observe the precise last use of a local channel receiver and run immediately after one explicit GC; LLGo's conservative collectors may retain the receiver from an ambiguous stack root, so exact finalizer timing is not currently an LLGo compatibility goal"
   - directive: run
     case: finprofiled.go
     reason: "not applicable: this case asserts gc's 16-byte tiny allocator packing and its private heap-profile accounting for interior finalizers; LLGo uses BDWGC or tinygogc rather than gc's tiny allocator, so reproducing those allocator records is not an LLGo compatibility goal"
