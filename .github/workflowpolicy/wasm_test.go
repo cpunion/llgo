@@ -19,8 +19,8 @@ func TestWasmGJSComparisonUsesCheckoutRuntime(t *testing.T) {
 		Jobs map[string]struct {
 			Env   map[string]string
 			Steps []struct {
-				Run string
-				Env map[string]string
+				Run, If string
+				Env     map[string]string
 			}
 		}
 	}
@@ -33,10 +33,13 @@ func TestWasmGJSComparisonUsesCheckoutRuntime(t *testing.T) {
 	}
 	comparisons := 0
 	for _, step := range job.Steps {
-		if !strings.Contains(step.Run, `"$RUNNER_TEMP/llgo" test`) {
+		if !strings.Contains(step.Run, `"$RUNNER_TEMP/gjs-llgo.log"`) {
 			continue
 		}
 		comparisons++
+		if step.If != "${{ matrix.profile == 'GJS' }}" || !strings.Contains(step.Run, `"$RUNNER_TEMP/llgo" test`) {
+			t.Fatal("raw GJS comparison must run the checkout compiler only on GJS")
+		}
 		root := job.Env["LLGO_ROOT"]
 		if override, ok := step.Env["LLGO_ROOT"]; ok {
 			root = override
@@ -47,6 +50,56 @@ func TestWasmGJSComparisonUsesCheckoutRuntime(t *testing.T) {
 	}
 	if comparisons != 1 {
 		t.Fatalf("expected one raw GJS compiler comparison, got %d", comparisons)
+	}
+}
+
+func TestWASIReflectProbeCoversBothProfiles(t *testing.T) {
+	data, err := os.ReadFile("../workflows/wasm-acceptance.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Env   map[string]string
+			Steps []struct {
+				Run, If string
+				Env     map[string]string
+			}
+		}
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	job := workflow.Jobs["goroot-smoke"]
+	probes := 0
+	for _, step := range job.Steps {
+		if !strings.Contains(step.Run, `"$RUNNER_TEMP/reflect-$PROFILE.log"`) {
+			continue
+		}
+		probes++
+		if step.If != "${{ matrix.profile == 'WC32' || matrix.profile == 'GWASI' }}" || step.Env["PROFILE"] != "${{ matrix.profile }}" {
+			t.Fatal("WASI reflection regression must run on WC32 and GWASI")
+		}
+		root := job.Env["LLGO_ROOT"]
+		if override, ok := step.Env["LLGO_ROOT"]; ok {
+			root = override
+		}
+		if root != "${{ github.workspace }}" {
+			t.Fatalf("WASI reflection regression must use the checkout runtime, got LLGO_ROOT=%q", root)
+		}
+		for _, required := range []string{
+			"set -o pipefail", "args=(-target wasi)", `if [[ "$PROFILE" == GWASI ]]`,
+			"export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0", "args=()",
+			`"$RUNNER_TEMP/llgo" test "${args[@]}" -emulator`, "./test/std/reflect",
+			"-run '^(TestReflect.*Bridge|TestMakeFunc|TestValueMethodAndCall|TestValueCallSlice)$'",
+		} {
+			if !strings.Contains(step.Run, required) {
+				t.Fatalf("missing WASI reflection acceptance requirement: %s", required)
+			}
+		}
+	}
+	if probes != 1 {
+		t.Fatalf("expected one WASI reflection probe, got %d", probes)
 	}
 }
 
