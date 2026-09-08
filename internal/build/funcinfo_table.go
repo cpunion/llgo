@@ -516,6 +516,7 @@ func emitFuncInfoTable(ctx *context, pkg llssa.Package, records []funcInfoRecord
 		hashData.SetGlobalConstant(true)
 		hashData.SetUnnamedAddr(true)
 		hashData.SetAlignment(2)
+		setWasmFuncInfoNoScan(ctx, mod, hashData)
 		hashPtr.SetInitializer(llvm.ConstInBoundsGEP(hashArrayType, hashData, []llvm.Value{
 			llvm.ConstInt(countType, 0, false),
 			llvm.ConstInt(countType, 0, false),
@@ -545,11 +546,27 @@ func emitFuncInfoTable(ctx *context, pkg llssa.Package, records []funcInfoRecord
 		symbolIndexData.SetGlobalConstant(true)
 		symbolIndexData.SetUnnamedAddr(true)
 		symbolIndexData.SetAlignment(8)
+		setWasmFuncInfoNoScan(ctx, mod, symbolIndexData)
 		symbolIndexPtr.SetInitializer(llvm.ConstInBoundsGEP(symbolIndexArrayType, symbolIndexData, []llvm.Value{
 			llvm.ConstInt(countType, 0, false),
 			llvm.ConstInt(countType, 0, false),
 		}))
 		symbolIndexCount.SetInitializer(llvm.ConstInt(countType, uint64(len(symbolIndexValues)), false))
+	}
+}
+
+// These immutable integer tables cannot contain Go heap pointers. In a
+// conservative wasm collector their packed indices and symbol hashes otherwise
+// look like pointers and permanently retain unrelated heap allocations.
+// The section boundaries are supplied by wasm-ld, without rooting its contents.
+func setWasmFuncInfoNoScan(ctx *context, mod llvm.Module, data llvm.Value) {
+	if runtimeSiteObjectFormat(ctx) == siteObjectWasm {
+		data.SetSection("llgo_gc_noscan")
+		// Preserve per-table linker GC: otherwise LLVM combines same-section
+		// globals into one input segment and one live table retains every table.
+		comdat := mod.Comdat(data.Name())
+		comdat.SetSelectionKind(llvm.AnyComdatSelectionKind)
+		data.SetComdat(comdat)
 	}
 }
 
