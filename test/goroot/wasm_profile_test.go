@@ -148,7 +148,10 @@ func gorootArtifactCommand(dir, artifact string, llgo bool, env []string, progra
 		return runner, append([]string{artifact}, programArgs...), runEnv, nil
 	}
 	if p.runner == "wasmtime" {
-		args := []string{"run", "-W", "exceptions=y", "--dir=."}
+		// Match Go's WASI host helper: expose the host filesystem and the two
+		// process environment variables that GOROOT cases are allowed to observe.
+		// Wasmtime does not inherit either variable unless requested explicitly.
+		args := []string{"run", "--dir=/", "--env", "PWD", "--env", "PATH", "-W", "exceptions=y", "-W", "max-wasm-stack=8388608"}
 		args = append(args, artifact)
 		args = append(args, programArgs...)
 		return "wasmtime", args, gorootRuntimeEnv(env), nil

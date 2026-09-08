@@ -67,3 +67,16 @@ func TestGOROOTWasiRunCommand(t *testing.T) {
 		t.Fatalf("WASI command: %q %v %v %v", app, args, targetEnv, err)
 	}
 }
+
+func TestGOROOTWasiCRunCommand(t *testing.T) {
+	withGOROOTWasmProfile(t, "WC32")
+	env := []string{"GOROOT=/go", "LLGO_ROOT=/llgo", "PATH=/bin", "PWD=/work"}
+	app, args, targetEnv, err := gorootArtifactCommand("/work", "out.wasm", true, env, "arg")
+	want := []string{"run", "--dir=/", "--env", "PWD", "--env", "PATH", "-W", "exceptions=y", "-W", "max-wasm-stack=8388608", "out.wasm", "arg"}
+	if err != nil || app != "wasmtime" || !reflect.DeepEqual(args, want) {
+		t.Fatalf("WASI C command: %q %v %v %v", app, args, targetEnv, err)
+	}
+	if envEntry(targetEnv, "PATH") != "/bin" || envEntry(targetEnv, "PWD") != "/work" || envEntry(targetEnv, "GOMAXPROCS") != "1" {
+		t.Fatalf("WASI C environment: %v", targetEnv)
+	}
+}
