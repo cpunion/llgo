@@ -545,9 +545,8 @@ func TestRawWasmStandardTagsRemainUnqualified(t *testing.T) {
 	if js.WasmABI != WasmABIUnspecified || js.LLVMTarget != "" {
 		t.Fatalf("raw js/wasm was relabeled as ABI %q, LLVM profile %q", js.WasmABI, js.LLVMTarget)
 	}
-	if !slices.Contains(js.LDFLAGS, "-sENVIRONMENT=web,worker") ||
-		slices.Contains(js.LDFLAGS, "-sENVIRONMENT=web,worker,node") {
-		t.Fatalf("raw js/wasm host environment unexpectedly changed: %v", js.LDFLAGS)
+	if !slices.Contains(js.LDFLAGS, "-sENVIRONMENT=web,worker,node") {
+		t.Fatalf("raw js/wasm does not support the Node host used by Go's js/wasm tools: %v", js.LDFLAGS)
 	}
 	if slices.Contains(js.BuildTags, "llgo.wasm.emscripten") {
 		t.Fatalf("raw js/wasm acquired an Emscripten source tag: %v", js.BuildTags)
