@@ -285,6 +285,12 @@ func TestFullSourceExclusionsAreProfileSpecific(t *testing.T) {
 			}
 		}
 		_, cgoExcluded := fullSourceExclusion(p, "test/cgo")
+		for _, pkg := range []string{"test/llgoext", "test/llgoext/localitymulti"} {
+			reason, excluded := fullSourceExclusion(p, pkg)
+			if excluded != p.Reference || (excluded && reason == "") {
+				t.Fatalf("%s extension exclusion for %s = (%v, %q), want reference-only", name, pkg, excluded, reason)
+			}
+		}
 		if want := p.Target == ""; cgoExcluded != want {
 			t.Fatalf("%s cgo exclusion = %v, want %v", name, cgoExcluded, want)
 		}
