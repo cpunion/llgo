@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -142,6 +143,9 @@ func TestPthreadStackSizePackageCache(t *testing.T) {
 			conf.PthreadStackSize = tc.size
 			conf.ForceRebuild = tc.force
 			conf.OutFile = filepath.Join(t.TempDir(), "stackcache")
+			if runtime.GOOS == "windows" {
+				conf.OutFile += ".exe"
+			}
 			conf.BuildParallelism = 2
 			normalizedSize := max(0, tc.size)
 			generated := make(map[string]bool)
