@@ -541,6 +541,46 @@ func TestGenMainModuleLibraryInitializesRuntime(t *testing.T) {
 	}
 }
 
+func TestGenMainModuleLibraryWasmGCPolicy(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	for _, mode := range []BuildMode{BuildModeCArchive, BuildModeCShared} {
+		for _, test := range []struct {
+			name, goos, goarch, tags string
+			want                     bool
+		}{
+			{"wasi-linear", "wasip1", "wasm", "llgo.wasm.gc.linear", true},
+			{"js-linear", "js", "wasm", "llgo,llgo.wasm.gc.linear", true},
+			{"wasm-nogc", "wasip1", "wasm", "nogc", false},
+			{"native", "linux", "amd64", "", false},
+		} {
+			t.Run(string(mode)+"/"+test.name, func(t *testing.T) {
+				ctx := &context{
+					prog:      llssa.NewProgram(nil),
+					buildConf: &Config{BuildMode: mode, Goos: test.goos, Goarch: test.goarch, Tags: test.tags},
+				}
+				pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
+				mod := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{
+					rtInit: true, packageInits: []string{"example.com/dep.init"},
+				})
+				if err := llvm.VerifyModule(mod.LPkg.Module(), llvm.ReturnStatusAction); err != nil {
+					t.Fatal(err)
+				}
+				ir := mod.LPkg.String()
+				hook := `call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.InitWasmGCPolicy"()`
+				if strings.Contains(ir, hook) != test.want {
+					t.Fatalf("policy hook present = %v, want %v:\n%s", !test.want, test.want, ir)
+				}
+				if test.want {
+					assertInOrder(t, ir,
+						`call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.init"()`,
+						hook, `call void @"example.com/dep.init"()`)
+				}
+			})
+		}
+	}
+}
+
 func TestGenMainModuleWindowsCSharedInitializesFromCExport(t *testing.T) {
 	llvm.InitializeAllTargets()
 	t.Setenv(llgoStdioNobuf, "")

@@ -113,6 +113,7 @@ func RunWasmMain() {
 	if !initWasmFiber(gp, wasmcontext.Entry(wasmMainStart), nil, wasmMainStackSize) {
 		panic("runtime: failed to allocate WebAssembly main stack")
 	}
+	InitWasmGCPolicy()
 
 	for {
 		runWasmContext(gp)

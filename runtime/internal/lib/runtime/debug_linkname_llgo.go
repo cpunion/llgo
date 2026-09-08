@@ -8,7 +8,6 @@ import (
 
 var (
 	llgoMaxStack   int
-	llgoGCPercent  int32 = 100
 	llgoMemLimit   int64
 	llgoMaxThreads int
 )
@@ -26,13 +25,6 @@ func freeOSMemory() {}
 func setMaxStack(in int) (out int) {
 	out = llgoMaxStack
 	llgoMaxStack = in
-	return out
-}
-
-//go:linkname setGCPercent runtime/debug.setGCPercent
-func setGCPercent(in int32) (out int32) {
-	out = llgoGCPercent
-	llgoGCPercent = in
 	return out
 }
 

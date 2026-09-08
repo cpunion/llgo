@@ -11,6 +11,7 @@ scheduler_fixture="${repo_root}/internal/build/testdata/wasm-scheduler"
 timer_fixture="${repo_root}/internal/build/testdata/wasm-timers"
 callback_fixture="${repo_root}/internal/build/testdata/wasm-callback"
 gc_fixture="${repo_root}/internal/build/testdata/wasm-gc"
+gc_pacing_fixture="${repo_root}/internal/build/testdata/wasm-gc-pacing"
 lifecycle_fixture="${repo_root}/internal/build/testdata/wasm-lifecycle"
 test_fixture="${repo_root}/internal/build/testdata/wasm-test"
 suite="${1:-all}"
@@ -31,7 +32,7 @@ trap finish EXIT
 export LLGO_WASM_TEST_ENV=wasm-env-ok
 
 case "${suite}" in
-all | runtime | test-command | gc-heap) ;;
+all | runtime | test-command | gc-heap | gc-pacing | gc-env) ;;
 *)
 	echo "unknown single-worker WebAssembly suite: ${suite}" >&2
 	exit 2
@@ -170,6 +171,60 @@ run_wasi() {
 	run_with_timeout "${wasmtime_cmd}" run -W exceptions=y \
 		--env LLGO_WASM_TEST_ENV="${LLGO_WASM_TEST_ENV}" "${module}" 2>&1 | tee "${work_dir}/${name}.out"
 	grep -Fq "${expected}" "${work_dir}/${name}.out"
+}
+
+run_wasi_gc_pacing() {
+	local module="${work_dir}/gc-pacing.wasm"
+	local value expected
+	# Reuse compilation when only the memory policy changes at the final link.
+	env LLGO_BUILD_CACHE=on LDFLAGS="${LDFLAGS:-} -Wl,--initial-heap=0" \
+		"${llgo_cmd}" build -target wasi -o "${module}" "${gc_pacing_fixture}"
+	wasm-tools validate --features all "${module}"
+	run_with_timeout "${wasmtime_cmd}" run -W exceptions=y "${module}" startup
+	for value in off -7 0 1 100 invalid 2147483648; do
+		expected="${value}"
+		case "${value}" in
+		-7) expected=off ;;
+		invalid | 2147483648) expected=100 ;;
+		esac
+		run_with_timeout "${wasmtime_cmd}" run -W exceptions=y \
+			--env "GOGC=${value}" --env "LLGO_GOGC_EXPECT=${expected}" "${module}" startup
+	done
+	run_with_timeout "${wasmtime_cmd}" run -W exceptions=y \
+		--env GOGC=1 --env LLGO_GOGC_EXPECT=1 "${module}"
+	# A hard Wasm memory maximum is not Go's soft memory limit. With automatic
+	# collection disabled, exhausted capacity must report OOM, not run GC.
+	env LLGO_BUILD_CACHE=on \
+		LDFLAGS="${LDFLAGS:-} -Wl,--initial-memory=67108864,--max-memory=67108864" \
+		"${llgo_cmd}" build -target wasi -o "${work_dir}/gc-pacing-oom.wasm" "${gc_pacing_fixture}"
+	expect_failure "out of memory" "${wasmtime_cmd}" run -W exceptions=y \
+		--env GOGC=off --env LLGO_GOGC_EXPECT=off "${work_dir}/gc-pacing-oom.wasm" oom
+	# More frequent collection must preserve root replay, weak pointers and
+	# finalizer ordering. Set GOGC only in the guest, not in the host compiler.
+	local name fixture
+	for name in gc lifecycle; do
+		fixture="${gc_fixture}"
+		if [[ "${name}" == lifecycle ]]; then fixture="${lifecycle_fixture}"; fi
+		"${llgo_cmd}" build -target wasi -o "${work_dir}/pacing-${name}.wasm" "${fixture}"
+		run_with_timeout "${wasmtime_cmd}" run -W exceptions=y --env GOGC=1 \
+			"${work_dir}/pacing-${name}.wasm" 2>&1 | tee "${work_dir}/pacing-${name}.out"
+		grep -Fq "wasm ${name} ok" "${work_dir}/pacing-${name}.out"
+	done
+}
+
+run_gjs_gc_environment() {
+	local module="${work_dir}/gc-env.mjs"
+	env GOOS=js GOARCH=wasm CGO_ENABLED=0 "${llgo_cmd}" build -o "${module}" \
+		"${repo_root}/internal/build/testdata/wasm-gc-env"
+	local value expected
+	for value in off 1; do
+		expected="${value}"
+		if [[ "${value}" == off ]]; then expected=-1; fi
+		run_with_timeout env GOGC="${value}" "${node_cmd}" \
+			"${repo_root}/targets/emscripten-runner.mjs" "${module}" \
+			2>&1 | tee "${work_dir}/gc-env-${value}.out"
+		grep -Fxq "wasm gc startup ${expected}" "${work_dir}/gc-env-${value}.out"
+	done
 }
 
 run_llgo_run() {
@@ -374,10 +429,20 @@ wasm_ci_run_case LW32/wasip1-alias scheduler 1 0 0 0 0 \
 	run_llgo_run wasip1 "${scheduler_fixture}" "wasm scheduler ok" "scheduler-legacy-wasip1"
 fi
 
-if [[ "${suite}" != "test-command" ]]; then
+if [[ "${suite}" == "all" || "${suite}" == "runtime" || "${suite}" == "gc-heap" ]]; then
 # Two GC package executions and one expected startup failure when growth is
 # forbidden; the rejected module never reaches Go package initialization.
 wasm_ci_run_case WC32/wasi gc-heap-policy 2 1 0 0 0 run_wasi_empty_heap
+fi
+
+if [[ "${suite}" == "all" || "${suite}" == "gc-pacing" ]]; then
+# One fixture is built once for eight startup environments and live pacing,
+# then relinked once to check hard memory exhaustion with GOGC disabled.
+wasm_ci_run_case WC32/wasi gc-pacing 11 1 0 0 0 run_wasi_gc_pacing
+fi
+
+if [[ "${suite}" == "all" || "${suite}" == "gc-env" ]]; then
+wasm_ci_run_case GJS gc-environment 2 0 0 0 0 run_gjs_gc_environment
 fi
 
 if [[ "${suite}" == "all" || "${suite}" == "test-command" ]]; then
