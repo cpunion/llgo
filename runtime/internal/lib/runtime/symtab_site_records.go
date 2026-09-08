@@ -1,4 +1,4 @@
-//go:build !windows || !386
+//go:build (!windows || !386) && (!wasm || llgo.wasm.emscripten.memory64)
 
 package runtime
 
