@@ -23,6 +23,26 @@ host_skips:
 timeouts:
   - platform: js/wasm
     directive: run
+    case: typeparam/chans.go
+    timeout: 10s
+    reason: the only LLGo-inapplicable phase waits one minute for precise finalizer timing; bound that diagnostic wait on WebAssembly
+  - platform: wasip1/wasm
+    directive: run
+    case: typeparam/chans.go
+    timeout: 10s
+    reason: the only LLGo-inapplicable phase waits one minute for precise finalizer timing; bound that diagnostic wait on WebAssembly
+  - platform: js/wasm
+    directive: rundir
+    case: typeparam/chansimp.go
+    timeout: 10s
+    reason: the only LLGo-inapplicable phase waits one minute for precise finalizer timing; bound that diagnostic wait on WebAssembly
+  - platform: wasip1/wasm
+    directive: rundir
+    case: typeparam/chansimp.go
+    timeout: 10s
+    reason: the only LLGo-inapplicable phase waits one minute for precise finalizer timing; bound that diagnostic wait on WebAssembly
+  - platform: js/wasm
+    directive: run
     case: cmplxdivide.go
     timeout: 5m
     reason: the generated complex-division table makes the LLGo WebAssembly build exceed the default 3m build timeout
