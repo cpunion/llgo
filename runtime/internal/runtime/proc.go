@@ -44,7 +44,8 @@ type runtimeContext struct {
 // goroutineStackSize is initialized by the compiler as a read-only constant in
 // this package, before any package init or goroutine can run. Zero preserves
 // the backend's default. Keep it without a Go initializer so init cannot
-// overwrite the configured value.
+// overwrite the configured value. The compiler names this symbol through
+// ssa.RuntimeGoroutineStackSizeVar; update both when renaming it.
 var goroutineStackSize uintptr
 
 // NewProc creates a new G running fn.

@@ -70,7 +70,7 @@ func checkStackCacheNewProc(t *testing.T, pkg Package) bool {
 func checkStackCacheRuntimeConstant(t *testing.T, pkg Package, size int64) {
 	t.Helper()
 	mod := pkg.LPkg.Module()
-	global := mod.NamedGlobal(llssa.PkgRuntime + ".goroutineStackSize")
+	global := mod.NamedGlobal(llssa.RuntimeGoroutineStackSizeVar)
 	if global.IsNil() {
 		t.Error("runtime did not emit goroutineStackSize")
 		return

@@ -407,7 +407,7 @@ func (p *context) compileGlobal(pkg llssa.Package, gbl *ssa.Global) {
 	if skip {
 		return
 	}
-	if define && name == llssa.PkgRuntime+".goroutineStackSize" {
+	if define && name == llssa.RuntimeGoroutineStackSizeVar {
 		p.prog.InitPthreadStackSize(g)
 		return
 	}

@@ -162,7 +162,7 @@ func TestRuntimePthreadStackSizeConstant(t *testing.T) {
 			prog := ssatest.NewProgram(t, target)
 			prog.SetPthreadStackSize(size)
 			pkg := prog.NewPackage("runtime", ssa.PkgRuntime)
-			name := ssa.PkgRuntime + ".goroutineStackSize"
+			name := ssa.RuntimeGoroutineStackSizeVar
 			g := pkg.NewVarEx(name, prog.Pointer(prog.Uintptr()))
 			prog.InitPthreadStackSize(g)
 			global := pkg.Module().NamedGlobal(name)
