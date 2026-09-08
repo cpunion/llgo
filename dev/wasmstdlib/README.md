@@ -119,13 +119,31 @@ LLGo's single-worker wasm scheduler currently uses fixed-size C/Fiber and
 Asyncify buffers, not Go's automatically growing goroutine stacks. Both default
 to 128 KiB on the four wasm32 profiles and 256 KiB on EC64. Suspending a deep Go
 call chain saves all active frames in Asyncify, not only the host-call boundary.
-The `-pthread-stack-size` override changes generated goroutine creation calls;
-larger explicit sizes increase both buffers and participate in compilation
-cache keys.
+The `-pthread-stack-size` override initializes a read-only constant inside the
+internal runtime's two-argument `NewProc(fn, arg)`. Larger explicit sizes increase
+both buffers. Only the internal runtime package has a direct stack-size cache
+input; callers retain their configuration-independent calling convention.
 
 Executable `test/go` regressions retain a depth of 4096 and check ordinary
 recursion as well as deep `Gosched`, GC, and caller symbolization. This tests the
 default budget; it does not promise arbitrary recursion within a fixed buffer.
+
+## Heap profiling
+
+Single-worker linear-GC profiles implement sampled allocation stacks and weak
+live-object accounting for `runtime.MemProfile` and Go's `runtime/pprof` readers.
+Explicit frees and collection update previous samples even after sampling is
+paused or `MemProfileRate` becomes zero. Snapshots are not limited to 64 buckets.
+Compiler instrumentation is enabled by actual profiling consumers; executables
+without them discard the sampler and its metadata rather than paying for it.
+
+Focused tests cover sampling, cross-goroutine PC lifetime, finalizers, address
+reuse, rate changes, nested pauses and large snapshots. Original Go 1.27
+`heapsampling.go` passes locally on GJS, GWASI and EC64; final-head full-profile
+CI remains required. GC pacing is a separate remaining compatibility gap:
+`debug.SetGCPercent` currently stores its setting without changing TinyGC's
+collection trigger, so its argument must not be treated as evidence that an
+aggressive-GC workload actually uses Go's requested pacing.
 
 ## Initial standard-library slice
 
