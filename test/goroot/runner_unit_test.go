@@ -189,6 +189,55 @@ func TestNotApplicableMatch(t *testing.T) {
 	}
 }
 
+func TestProfileScopedExpectations(t *testing.T) {
+	tc := testCase{RelPath: "fixedbugs/bug114.go", Directive: "run"}
+	notApplicable := notApplicableConfig{Entries: []xfailEntry{{
+		Platform:  "js/wasm",
+		Profile:   "GJS",
+		Directive: "run",
+		Case:      "fixedbugs/bug114.go",
+		Reason:    "profile-specific ABI expectation",
+	}}}
+	if match, _ := notApplicable.MatchProfile("go1.27.0", "js/wasm", "GJS", tc); !match {
+		t.Fatal("profile-specific expectation did not match its profile")
+	}
+	for _, profile := range []string{"", "EC32", "EC64"} {
+		if match, _ := notApplicable.MatchProfile("go1.27.0", "js/wasm", profile, tc); match {
+			t.Fatalf("profile-specific expectation matched %q", profile)
+		}
+	}
+
+	timeouts := xfailConfig{Timeouts: []timeoutEntry{{
+		Profile:   "EC64",
+		Directive: "run",
+		Case:      "fixedbugs/issue30116u.go",
+		Timeout:   "2m",
+	}}}
+	timeoutCase := testCase{RelPath: "fixedbugs/issue30116u.go", Directive: "run"}
+	if timeout, _, ok := timeouts.MatchTimeoutProfile("go1.27.0", "js/wasm", "EC64", timeoutCase); !ok || timeout != 2*time.Minute {
+		t.Fatalf("EC64 timeout = %s, %v", timeout, ok)
+	}
+	if _, _, ok := timeouts.MatchTimeoutProfile("go1.27.0", "js/wasm", "GJS", timeoutCase); ok {
+		t.Fatal("EC64 timeout matched GJS")
+	}
+}
+
+func TestNotApplicableWasmResourceLimitIsClassified(t *testing.T) {
+	err := &resourceLimitError{message: "resource limit"}
+	if resourceLimitMustFail(err, true, true) {
+		t.Fatal("a reviewed not-applicable wasm case made its resource guard fatal")
+	}
+	if !resourceLimitMustFail(err, true, false) {
+		t.Fatal("an applicable wasm case did not preserve the resource guard")
+	}
+	if !resourceLimitMustFail(err, false, true) {
+		t.Fatal("a native resource guard was waived")
+	}
+	if resourceLimitMustFail(fmt.Errorf("ordinary failure"), true, false) {
+		t.Fatal("an ordinary failure was classified as a resource guard")
+	}
+}
+
 func TestRepositoryNotApplicableAcrossGoVersions(t *testing.T) {
 	cfg := loadNotApplicableConfig(t, repoRoot(t), filepath.Join("test", "goroot", "notapplicable.yaml"))
 	cases := []struct {
@@ -230,6 +279,42 @@ func TestRepositoryNotApplicableAcrossGoVersions(t *testing.T) {
 	}
 }
 
+func TestRepositoryProfileScopedNotApplicable(t *testing.T) {
+	cfg := loadNotApplicableConfig(t, repoRoot(t), filepath.Join("test", "goroot", "notapplicable.yaml"))
+	for _, tc := range []struct {
+		platform  string
+		profile   string
+		directive string
+		path      string
+	}{
+		{"js/wasm", "EC32", "run", "fixedbugs/bug114.go"},
+		{"js/wasm", "GJS", "run", "fixedbugs/bug114.go"},
+		{"wasip1/wasm", "WC32", "run", "fixedbugs/bug114.go"},
+		{"wasip1/wasm", "GWASI", "run", "fixedbugs/bug114.go"},
+		{"js/wasm", "EC32", "runoutput", "index0.go"},
+		{"wasip1/wasm", "GWASI", "runoutput", "index0.go"},
+	} {
+		match, reason := cfg.MatchProfile("go1.27.0", tc.platform, tc.profile, testCase{RelPath: tc.path, Directive: tc.directive})
+		if !match || !strings.HasPrefix(reason, "not applicable:") {
+			t.Errorf("%s %s: %s must be not-applicable, got (%v, %q)", tc.profile, tc.platform, tc.path, match, reason)
+		}
+	}
+	for _, tc := range []struct {
+		platform  string
+		profile   string
+		directive string
+		path      string
+	}{
+		{"js/wasm", "EC64", "run", "fixedbugs/bug114.go"},
+		{"js/wasm", "EC64", "runoutput", "index0.go"},
+		{"js/wasm", "EC32", "run", "fixedbugs/bug115.go"},
+	} {
+		if match, _ := cfg.MatchProfile("go1.27.0", tc.platform, tc.profile, testCase{RelPath: tc.path, Directive: tc.directive}); match {
+			t.Errorf("profile-specific not-applicable scope broadened: %+v", tc)
+		}
+	}
+}
+
 func TestRepositoryExpectationsAreSeparated(t *testing.T) {
 	guardTestTimeout(t)
 	repo := repoRoot(t)
@@ -242,6 +327,7 @@ func TestRepositoryExpectationsAreSeparated(t *testing.T) {
 	type selector struct {
 		version   string
 		platform  string
+		profile   string
 		directive string
 		casePath  string
 	}
@@ -250,7 +336,7 @@ func TestRepositoryExpectationsAreSeparated(t *testing.T) {
 		if strings.HasPrefix(entry.Reason, "not applicable:") {
 			t.Fatalf("xfail entry %q has a not-applicable reason", entry.Case)
 		}
-		xfailSelectors[selector{entry.Version, entry.Platform, entry.Directive, entry.Case}] = struct{}{}
+		xfailSelectors[selector{entry.Version, entry.Platform, entry.Profile, entry.Directive, entry.Case}] = struct{}{}
 	}
 	notApplicableSelectors := make(map[selector]struct{}, len(notApplicable.Entries))
 	for _, entry := range notApplicable.Entries {
@@ -263,7 +349,7 @@ func TestRepositoryExpectationsAreSeparated(t *testing.T) {
 		if !strings.Contains(entry.Reason, "compatibility goal") {
 			t.Fatalf("not-applicable entry %q has reason %q without explaining why support is not planned", entry.Case, entry.Reason)
 		}
-		key := selector{entry.Version, entry.Platform, entry.Directive, entry.Case}
+		key := selector{entry.Version, entry.Platform, entry.Profile, entry.Directive, entry.Case}
 		if _, ok := notApplicableSelectors[key]; ok {
 			t.Fatalf("duplicate not-applicable selector: %+v", key)
 		}
