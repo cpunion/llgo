@@ -375,7 +375,9 @@ wasm_ci_run_case LW32/wasip1-alias scheduler 1 0 0 0 0 \
 fi
 
 if [[ "${suite}" != "test-command" ]]; then
-run_wasi_empty_heap
+# Two GC package executions and one expected startup failure when growth is
+# forbidden; the rejected module never reaches Go package initialization.
+wasm_ci_run_case WC32/wasi gc-heap-policy 2 1 0 0 0 run_wasi_empty_heap
 fi
 
 if [[ "${suite}" == "all" || "${suite}" == "test-command" ]]; then
