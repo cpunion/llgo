@@ -190,10 +190,47 @@ func assertPanics(t *testing.T, fn func()) {
 	fn()
 }
 
+func TestInstrumentationCollectionBoundary(t *testing.T) {
+	resetForTest()
+	t.Cleanup(resetForTest)
+	if CollectionBlocked() {
+		t.Fatal("collection blocked outside a protected boundary")
+	}
+	BeginInstrumentation()
+	BeginInstrumentation()
+	if !CollectionBlocked() || Rebuilding() {
+		t.Fatal("instrumentation must block collection without starting stack replay")
+	}
+	EndInstrumentation()
+	if !CollectionBlocked() {
+		t.Fatal("nested instrumentation ended the outer boundary")
+	}
+	BeginSJLJReplay()
+	EndInstrumentation()
+	if !CollectionBlocked() {
+		t.Fatal("ending instrumentation must not end stack replay")
+	}
+	FinishSJLJReplay()
+	if CollectionBlocked() {
+		t.Fatal("collection remained blocked after both boundaries ended")
+	}
+	BeginInstrumentation()
+	BeginSJLJReplay()
+	FinishSJLJReplay()
+	if !CollectionBlocked() {
+		t.Fatal("ending stack replay must not end instrumentation")
+	}
+	EndInstrumentation()
+	if CollectionBlocked() {
+		t.Fatal("balanced instrumentation left collection blocked")
+	}
+}
+
 func resetForTest() {
 	contexts = nil
 	active = nil
 	rebuilding = false
+	instrumentationDepth = 0
 	sjljReplaying = false
 	currentRootChain = nil
 }

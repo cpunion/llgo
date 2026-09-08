@@ -83,9 +83,10 @@ var (
 	// zeroSizedAlloc is just a sentinel that gets returned when allocating 0 bytes.
 	zeroSizedAlloc uint8
 
-	gcMutex               mutex // gcMutex protects GC related variables
-	isGCInit              bool  // isGCInit indicates GC initialization state
-	diagnosticObjectBlock uintptr
+	gcMutex                  mutex // gcMutex protects GC related variables
+	isGCInit                 bool  // isGCInit indicates GC initialization state
+	diagnosticObjectBlock    uintptr
+	DiagnosticAllocationHook func(uintptr)
 )
 
 // Some globals + constants for the entire GC.
@@ -288,6 +289,9 @@ func Alloc(size uintptr) unsafe.Pointer {
 	neededBlocks := (size + (bytesPerBlock - 1)) / bytesPerBlock
 	collected := false
 	if gcAllocationDue(uint64(neededBlocks) * uint64(bytesPerBlock)) {
+		if DiagnosticAllocationHook != nil {
+			DiagnosticAllocationHook(size)
+		}
 		gc()
 		collected = true
 	}
