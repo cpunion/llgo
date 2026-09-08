@@ -11,6 +11,7 @@ on:
           - full
           - wasm-build-diagnostics
           - wasm-optimizer-replay
+          - wasm-clang-replay
   schedule:
     # 02:00 Asia/Shanghai (18:00 UTC on the previous day).
     - cron: "0 18 * * *"
@@ -24,7 +25,7 @@ concurrency:
 
 jobs:
   goroot:
-    if: inputs.mode != 'wasm-build-diagnostics' && inputs.mode != 'wasm-optimizer-replay'
+    if: inputs.mode != 'wasm-build-diagnostics' && inputs.mode != 'wasm-optimizer-replay' && inputs.mode != 'wasm-clang-replay'
     name: GOROOT (${{ matrix.os }}${{ startsWith(matrix.os, 'windows') && format(', {0}, {1}', matrix.windows_abi, matrix.windows_arch) || '' }}, Go current, shard ${{ matrix.shard-index }}/4)
     timeout-minutes: 180
     env:
@@ -214,7 +215,7 @@ jobs:
 
   goroot-summary:
     name: GOROOT summary
-    if: always() && inputs.mode != 'wasm-build-diagnostics' && inputs.mode != 'wasm-optimizer-replay'
+    if: always() && inputs.mode != 'wasm-build-diagnostics' && inputs.mode != 'wasm-optimizer-replay' && inputs.mode != 'wasm-clang-replay'
     needs: goroot
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}
     steps:
@@ -391,6 +392,41 @@ jobs:
         with:
           name: wasm-optimizer-replay-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/optimizer-replay
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
+
+  wasm-clang-replay:
+    name: GWASI preserved LLVM IR backend replay
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'wasm-clang-replay' && github.repository_owner == 'cpunion'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34268734534
+          name: wasm-build-diagnostics-34268734534-1
+          path: ${{ runner.temp }}/preserved-clang
+      - name: Replay only LLVM IR with backend pass tracing
+        run: |
+          python3 -m unittest discover -s dev -p 'wasm_optimizer_replay_test.py' -v
+          python3 dev/wasm_clang_replay.py \
+            --input "$RUNNER_TEMP/preserved-clang/main-0.ll" \
+            --output "$RUNNER_TEMP/clang-replay"
+      - name: Preserve bounded clang replay evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-clang-replay-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clang-replay
           if-no-files-found: error
           retention-days: 7
           compression-level: 1
