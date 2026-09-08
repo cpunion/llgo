@@ -2255,8 +2255,9 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		runDefers := p.returnNeedsImplicitRunDefers(v)
 		if runDefers {
 			p.spillImplicitDeferResults(b, v)
-			p.recordPanicLocation(b, v.Pos())
-			p.emitPCLineLabel(b, p.deferRunPos(v.Pos()))
+			runPos := p.deferRunPos(v.Pos())
+			p.recordPanicLocation(b, runPos)
+			p.emitPCLineLabel(b, runPos)
 			b.RunDefers()
 		}
 		var results []llssa.Expr
@@ -2306,8 +2307,9 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 	case *ssa.Go:
 		p.call(b, llssa.Go, &v.Call)
 	case *ssa.RunDefers:
-		p.recordPanicLocation(b, v.Pos())
-		p.emitPCLineLabel(b, p.deferRunPos(v.Pos()))
+		runPos := p.deferRunPos(v.Pos())
+		p.recordPanicLocation(b, runPos)
+		p.emitPCLineLabel(b, runPos)
 		b.RunDefers()
 	case *ssa.Panic:
 		arg := p.compileValue(b, v.X)
