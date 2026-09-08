@@ -1395,7 +1395,10 @@ func effectiveTypeSizes(sizes types.Sizes, arch string, wasmABI crosscompile.Was
 		crosscompile.WasmABIWASIPreview2, crosscompile.WasmABIFreestanding:
 		return types.SizesFor("gc", "386")
 	case crosscompile.WasmABIEmscriptenMemory64:
-		return &types.StdSizes{WordSize: 8, MaxAlign: 8}
+		// StdSizes omits struct tail padding. Its nested-field offsets then
+		// disagree with LLVM's physical layout, so reflected fields and unsafe
+		// constants can address padding instead of the following field.
+		return types.SizesFor("gc", "amd64")
 	default:
 		return sizes
 	}
