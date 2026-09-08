@@ -1,6 +1,6 @@
 package runtime
 
-// MemProfileRecord describes allocations aggregated by size class.
+// MemProfileRecord describes allocations aggregated into one profile bucket.
 type MemProfileRecord struct {
 	AllocBytes, FreeBytes     int64
 	AllocObjects, FreeObjects int64
@@ -12,6 +12,16 @@ type MemProfileRecord struct {
 var wasmMemProfileEnabled bool
 
 var memProfilePauseDepth uint32
+
+var memProfileRatePtr *int
+
+// InitWasmMemProfile connects the public, user-controlled rate after the
+// public runtime package has initialized. No-consumer programs discard it.
+func InitWasmMemProfile(rate *int) {
+	if wasmMemProfileEnabled {
+		memProfileRatePtr = rate
+	}
+}
 
 // MemProfilePause excludes profiler-owned allocations from samples. The Wasm
 // sampler is single-worker and cannot yield while changing this nested guard.
@@ -112,6 +122,9 @@ func memProfileSizeClass(size uintptr) uintptr {
 }
 
 func MemProfile(p []MemProfileRecord, inuseZero bool) (n int, ok bool) {
+	if wasmMemProfileEnabled {
+		return wasmMemProfile(p, inuseZero)
+	}
 	for i := range memProfileBuckets {
 		if memProfileLoadObjects(&memProfileBuckets[i].objects) != 0 {
 			n++
