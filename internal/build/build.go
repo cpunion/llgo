@@ -2538,8 +2538,7 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	defer funcInfoRelink.cleanup()
 
 	cmd.Verbose = printCmds
-	probeArgs := append(slices.Clone(buildArgs), funcInfoRelink.probeArgs()...)
-	if err := cmd.Link(probeArgs...); err != nil {
+	if err := funcInfoRelink.linkProbe(cmd, buildArgs); err != nil {
 		return err
 	}
 	if funcInfoRelink != nil {
@@ -2547,10 +2546,14 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 		if err != nil {
 			return err
 		}
-		if rootObject != "" {
+		if rootObject != "" || funcInfoRelink.stdoutProbe {
 			cmd = ctx.linker()
 			cmd.Verbose = printCmds
-			if err := cmd.Link(append(slices.Clone(buildArgs), rootObject)...); err != nil {
+			finalArgs := slices.Clone(buildArgs)
+			if rootObject != "" {
+				finalArgs = append(finalArgs, rootObject)
+			}
+			if err := cmd.Link(finalArgs...); err != nil {
 				return fmt.Errorf("relink WebAssembly funcinfo entries: %w", err)
 			}
 		} else if err := funcInfoRelink.publishProbeMap(cmd.Stdout); err != nil {
