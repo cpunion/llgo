@@ -167,8 +167,31 @@ jobs:
             -coverpkg=github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
             -coverprofile="coverage-compiler.txt" -covermode=atomic \
             -bench '^BenchmarkGo126' -benchtime=1x ./cl
-          "${go_test[@]}" -timeout 45m \
-            -coverprofile="coverage-test-go.txt" -covermode=atomic ./test/go
+          if [[ "$RUNNER_OS" == Windows && "${{ matrix.windows_abi }}" == mingw ]]; then
+            # Capture the first failure, without retrying or quarantining it.
+            bash dev/go_test_windows_diagnostics.sh "${go_test[@]}" -timeout 45m \
+              -coverprofile="coverage-test-go.txt" -covermode=atomic ./test/go
+          else
+            "${go_test[@]}" -timeout 45m \
+              -coverprofile="coverage-test-go.txt" -covermode=atomic ./test/go
+          fi
+
+      - name: Restore Windows test-go crash reporting
+        id: restore_test_go_wer
+        if: always() && runner.os == 'Windows' && matrix.windows_abi == 'mingw'
+        shell: pwsh
+        run: |
+          # Also covers cancellation between registry setup and the bash trap.
+          & ./dev/go_test_windows_wer.ps1 -Mode Finish -Directory "$env:RUNNER_TEMP/llgo-windows-test-go-diagnostics"
+
+      - name: Upload Windows test-go failure evidence
+        if: always() && runner.os == 'Windows' && matrix.windows_abi == 'mingw' && (steps.test_coverage.outputs.windows_test_go_failed == 'true' || steps.restore_test_go_wer.outcome == 'failure')
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-mingw-test-go-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/llgo-windows-test-go-diagnostics/evidence/
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Test with embedded emulator env
         env:
