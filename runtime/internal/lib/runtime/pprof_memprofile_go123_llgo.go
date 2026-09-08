@@ -2,7 +2,11 @@
 
 package runtime
 
-import _ "unsafe"
+import (
+	_ "unsafe"
+
+	llrt "github.com/xgo-dev/llgo/runtime/internal/runtime"
+)
 
 type pprofMemProfileRecord struct {
 	AllocBytes, FreeBytes     int64
@@ -12,6 +16,8 @@ type pprofMemProfileRecord struct {
 
 //go:linkname pprof_memProfileInternal runtime.pprof_memProfileInternal
 func pprof_memProfileInternal(p []pprofMemProfileRecord, inuseZero bool) (n int, ok bool) {
+	llrt.MemProfilePause()
+	defer llrt.MemProfileResume()
 	n, _ = MemProfile(nil, inuseZero)
 	if len(p) < n {
 		return n, false
@@ -19,11 +25,8 @@ func pprof_memProfileInternal(p []pprofMemProfileRecord, inuseZero bool) (n int,
 	if n == 0 {
 		return 0, true
 	}
-	var records [64]MemProfileRecord
-	if n > len(records) {
-		return n, false
-	}
-	n, ok = MemProfile(records[:n], inuseZero)
+	records := make([]MemProfileRecord, n)
+	n, ok = MemProfile(records, inuseZero)
 	if !ok {
 		return n, false
 	}

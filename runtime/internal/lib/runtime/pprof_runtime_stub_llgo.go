@@ -50,29 +50,11 @@ type BlockProfileRecord struct {
 }
 
 func MemProfile(p []MemProfileRecord, inuseZero bool) (n int, ok bool) {
-	n, _ = llrt.MemProfile(nil, inuseZero)
-	if len(p) < n {
-		return n, false
-	}
-	if n == 0 {
-		return 0, true
-	}
-	var records [64]llrt.MemProfileRecord
-	if n > len(records) {
-		return n, false
-	}
-	n, ok = llrt.MemProfile(records[:n], inuseZero)
-	if !ok {
-		return n, false
-	}
-	for i := 0; i < n; i++ {
-		p[i] = MemProfileRecord{
-			AllocBytes: records[i].AllocBytes, FreeBytes: records[i].FreeBytes,
-			AllocObjects: records[i].AllocObjects, FreeObjects: records[i].FreeObjects,
-			Stack0: records[i].Stack0,
-		}
-	}
-	return n, true
+	// This ordinary pointer conversion compiles only while both record types
+	// have identical underlying structs. Reuse the caller's buffer without a
+	// second snapshot, a fixed bucket limit, or profiler-owned allocations.
+	records := unsafe.Slice((*llrt.MemProfileRecord)(unsafe.SliceData(p)), len(p))
+	return llrt.MemProfile(records, inuseZero)
 }
 
 func BlockProfile(p []BlockProfileRecord) (n int, ok bool) {
