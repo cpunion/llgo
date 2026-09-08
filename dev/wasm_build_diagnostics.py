@@ -115,7 +115,8 @@ def preserve_main_ir(log, work, evidence):
     # Failed compiler output is printed after the child process was killed.
     # -keepwork retains its inputs. Copy only main's LLVM IR, not the cache.
     for match in re.finditer(r"^\s*# compiling (.+) for pkg: main\s*$", text, re.MULTILINE):
-        source = Path(match.group(1)).resolve()
+        source_arg = match.group(1)
+        source = Path(source_arg).resolve()
         if not source.is_relative_to(work.resolve()) or not source.is_file():
             raise ValueError(f"main IR missing or outside diagnostic work directory: {source}")
         if source.stat().st_size > 64 << 20:
@@ -123,14 +124,14 @@ def preserve_main_ir(log, work, evidence):
         destination = evidence / f"main-{len(saved)}.ll"
         save_file(source, destination)
         for line in text.splitlines():
-            if str(source) not in line or "clang" not in line:
+            if source_arg not in line or "clang" not in line:
                 continue
             args = shlex.split(line.strip())
             if Path(args[0]).name not in ("clang", "clang++") or not Path(args[0]).is_absolute():
                 continue
             if "-c" not in args or "-o" not in args:
                 continue
-            args[args.index(str(source))] = str(destination)
+            args[args.index(source_arg)] = str(destination)
             args[args.index("-o")+1] = str(evidence / f"main-{len(saved)}.o")
             saved.append(args)
             break
