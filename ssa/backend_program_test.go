@@ -32,6 +32,7 @@ func TestNewBackendProgramSharesPreparedGoState(t *testing.T) {
 	coordinator.EnableLogicalGoroutineLocality(true)
 	coordinator.EnableCooperativeSafepoints(true)
 	coordinator.SetPthreadStackSize(4096)
+	coordinator.wasmMemoryProfiling = true
 	coordinator.EnableLTOPluginMarkers(true)
 	coordinator.EnableFuncInfoMetadata(true)
 	coordinator.EnableFuncInfoSites(true)
@@ -86,7 +87,7 @@ func TestNewBackendProgramSharesPreparedGoState(t *testing.T) {
 	}
 	if !backend.disableBoundsChecks || !backend.enableGoGlobalDCE || !backend.enableDeadcodeDrop || !backend.enableGCRoots ||
 		!backend.logicalGoroutineLocal || !backend.enableSafepoints ||
-		backend.pthreadStackSize != 4096 || !backend.enableLTOPluginMarker ||
+		backend.pthreadStackSize != 4096 || !backend.wasmMemoryProfiling || !backend.enableLTOPluginMarker ||
 		!backend.enableFuncInfoMetadata || !backend.enableFuncInfoSites || backend.debugInfoOptimized ||
 		!backend.emitCodeViewDebugInfo {
 		t.Fatal("backend Program did not preserve coordinator configuration")

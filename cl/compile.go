@@ -215,8 +215,9 @@ type context struct {
 	embedMap   goembed.VarMap
 	embedInits []embedInit
 
-	trackCallerFrames bool
-	callerFrameMark   llssa.Expr
+	trackCallerFrames  bool
+	memoryProfileFuncs map[*ssa.Function]bool
+	callerFrameMark    llssa.Expr
 
 	staticGlobalInits map[*ssa.Global]llssa.Expr
 	staticInitStores  map[*ssa.Store]none
@@ -412,6 +413,10 @@ func (p *context) compileGlobal(pkg llssa.Package, gbl *ssa.Global) {
 	}
 	if define && name == llssa.RuntimeGoroutineStackSizeVar {
 		p.prog.InitPthreadStackSize(g)
+		return
+	}
+	if define && name == llssa.RuntimeWasmMemProfileEnabledVar {
+		p.prog.InitWasmMemProfileEnabled(g)
 		return
 	}
 	if p.tryEmbedGlobalInit(pkg, gbl, g, name) {
@@ -1493,6 +1498,15 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		defer func() {
 			p.publishGCRoot(b, iv, ret)
 		}()
+	}
+	if p.prog.WasmMemoryProfilingEnabled() {
+		if instr, ok := iv.(ssa.Instruction); ok && memoryProfileInstructionMayAllocate(instr, nil) {
+			// Calls already update their source location in callEx. Implicit
+			// allocator calls (new, make, boxing, string conversion, ...) do not.
+			if _, call := instr.(ssa.CallInstruction); !call {
+				p.recordPanicLocation(b, instr.Pos())
+			}
+		}
 	}
 	switch v := iv.(type) {
 	case *ssa.Call:
@@ -2790,6 +2804,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	if ct == nil {
 		ct = NewCallerTracking()
 	}
+	profileFrames := memoryProfileFrameSet(prog, ct, pkg)
 	ctx := &context{
 		prog:             prog,
 		pkg:              ret,
@@ -2811,7 +2826,8 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		cgoSymbols: make([]string, 0, 128),
 		rewrites:   rewrites,
 
-		trackCallerFrames:  filesUseRuntimeCaller(files) || packageUsesRuntimeCaller(ct, pkg),
+		trackCallerFrames:  filesUseRuntimeCaller(files) || packageUsesRuntimeCaller(ct, pkg) || prog.WasmMemoryProfilingEnabled(),
+		memoryProfileFuncs: profileFrames,
 		runtimeCallerFuncs: runtimeCallerFuncSet(ct, pkg),
 		panicSiteFuncs:     recoverPanicSiteFuncSet(ct, pkg),
 	}

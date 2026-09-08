@@ -832,6 +832,7 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 	}
 	buildSSAPkgs(ctx, append(append(altEntries, pkgEntries...), depEntries...))
 	recordPackageSSAInstructions(ctx)
+	ctx.configureWasmMemoryProfiling(wasmGC)
 	callerSpan := buildTrace.startCoordinator("precompute caller tracking", nil)
 	ctx.callerTracking.Precompute(ctx.progSSA.AllPackages())
 	callerSpan.done()
