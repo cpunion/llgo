@@ -121,3 +121,127 @@ func TestReflectDynamicMakeFuncBridge(t *testing.T) {
 		t.Fatalf("dynamic MakeFunc result = %v", got)
 	}
 }
+
+// A MakeFunc entry and an extracted method value are transparent wrappers
+// for a directly deferred recover, but must not make an indirect call direct.
+func TestReflectDeferredRecoverBridge(t *testing.T) {
+	const marker = "reflection deferred panic"
+	var recovered any
+	f := reflect.MakeFunc(reflect.TypeOf((func())(nil)), func([]reflect.Value) []reflect.Value {
+		recovered = recover()
+		runtime.GC()
+		return nil
+	}).Interface().(func())
+	if escaped := bridgePanicWithDeferred(f, marker); escaped != nil || recovered != marker {
+		t.Fatalf("direct MakeFunc recover = %v, escaped panic = %v", recovered, escaped)
+	}
+	recovered = nil
+	if escaped := bridgePanicWithDeferred(func() { f() }, marker); escaped != marker || recovered != nil {
+		t.Fatalf("indirect MakeFunc recover = %v, escaped panic = %v", recovered, escaped)
+	}
+	for _, indirect := range []bool{false, true} {
+		recovered = nil
+		receiver := &bridgeRecoverer{recovered: &recovered}
+		method := reflect.ValueOf(receiver).MethodByName("Recover").Interface().(func())
+		deferred := method
+		if indirect {
+			deferred = func() { method() }
+		}
+		escaped := bridgePanicWithDeferred(deferred, marker)
+		if indirect {
+			if escaped != marker || recovered != nil {
+				t.Fatalf("indirect method recover = %v, escaped panic = %v", recovered, escaped)
+			}
+		} else if escaped != nil || recovered != marker {
+			t.Fatalf("direct method recover = %v, escaped panic = %v", recovered, escaped)
+		}
+	}
+}
+
+//go:noinline
+func bridgePanicWithDeferred(f func(), marker any) (escaped any) {
+	defer func() { escaped = recover() }()
+	defer f()
+	panic(marker)
+}
+
+type bridgeRecoverer struct {
+	recovered *any
+}
+
+//go:noinline
+func (r *bridgeRecoverer) Recover() {
+	*r.recovered = recover()
+	runtime.GC()
+}
+
+func TestReflectVariadicMakeFuncBridge(t *testing.T) {
+	type signature func(int, ...bridgeRecord) (int64, []bridgeRecord)
+	value := reflect.MakeFunc(reflect.TypeOf(signature(nil)), func(in []reflect.Value) []reflect.Value {
+		if len(in) != 2 || in[1].Kind() != reflect.Slice {
+			t.Fatalf("variadic callback arguments = %v", in)
+		}
+		runtime.GC()
+		items := in[1].Interface().([]bridgeRecord)
+		total := in[0].Int()
+		for _, item := range items {
+			total += item.Value
+		}
+		return []reflect.Value{reflect.ValueOf(total), in[1]}
+	})
+	f := value.Interface().(signature)
+	if n, items := f(3); n != 3 || items != nil {
+		t.Fatalf("empty variadic result = (%d, %v)", n, items)
+	}
+	items := []bridgeRecord{{Label: "first", Value: 7}, {Label: "second", Value: 11}}
+	if n, got := f(3, items...); n != 21 || len(got) != 2 || &got[0] != &items[0] {
+		t.Fatalf("typed variadic result = (%d, %v)", n, got)
+	}
+	called := value.Call([]reflect.Value{reflect.ValueOf(3), reflect.ValueOf(items[0]), reflect.ValueOf(items[1])})
+	sliced := value.CallSlice([]reflect.Value{reflect.ValueOf(3), reflect.ValueOf(items)})
+	for _, got := range [][]reflect.Value{called, sliced} {
+		if got[0].Int() != 21 || !reflect.DeepEqual(got[1].Interface(), items) {
+			t.Fatalf("reflected variadic result = %v", got)
+		}
+	}
+}
+
+type bridgeReader interface {
+	Read() int64
+}
+
+func TestReflectInterfaceMakeFuncBridge(t *testing.T) {
+	type signature func(bridgeReader) bridgeReader
+	value := reflect.MakeFunc(reflect.TypeOf(signature(nil)), func(in []reflect.Value) []reflect.Value {
+		runtime.GC()
+		runtime.Gosched()
+		return in
+	})
+	f := value.Interface().(signature)
+	plain := reflect.ValueOf(func(v bridgeReader) bridgeReader {
+		runtime.GC()
+		return v
+	})
+	var nilPointer *bridgeRecord
+	for _, input := range []bridgeReader{nil, nilPointer, &bridgeRecord{Value: 37}} {
+		if got := f(input); got != input {
+			t.Fatalf("typed interface roundtrip = %v, want %v", got, input)
+		}
+		for _, callable := range []reflect.Value{value, plain} {
+			out := callable.Call([]reflect.Value{reflect.ValueOf(&input).Elem()})[0]
+			if got := out.Interface(); got != input {
+				t.Fatalf("reflected interface roundtrip = %v, want %v", got, input)
+			}
+			if !out.IsNil() && out.Interface().(bridgeReader).Read() != input.Read() {
+				t.Fatal("interface result method table was corrupted")
+			}
+		}
+	}
+	concrete := &bridgeRecord{Value: 43}
+	assigned := reflect.MakeFunc(reflect.TypeOf((func() bridgeReader)(nil)), func([]reflect.Value) []reflect.Value {
+		return []reflect.Value{reflect.ValueOf(concrete)}
+	}).Interface().(func() bridgeReader)()
+	if assigned.Read() != 43 {
+		t.Fatal("concrete result assignment lost the interface method table")
+	}
+}
