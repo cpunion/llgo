@@ -100,6 +100,12 @@ func fullCommand(p profile, goCmd, llgo, goRoot, pkg string) command {
 	} else {
 		env["GOOS"], env["GOARCH"], env["CGO_ENABLED"] = p.GOOS, "wasm", "0"
 	}
+	if !p.Reference && p.GOOS == "js" {
+		// Catch fixed-size Fiber exhaustion at the offending frame, before it
+		// corrupts another heap allocation and surfaces as an unrelated failure.
+		// Exercise LLGo's external-linker flag forwarding at the same time.
+		args = append(args, "-ldflags=-extldflags=-sSTACK_OVERFLOW_CHECK=2")
+	}
 	packageArg := "./" + pkg
 	if pkg == wasmTimerStressPackage {
 		// The Go command excludes underscore directories from package patterns,
