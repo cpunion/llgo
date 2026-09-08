@@ -18,6 +18,7 @@ package ssa
 
 import (
 	"go/types"
+	"strconv"
 
 	"github.com/xgo-dev/llvm"
 )
@@ -132,6 +133,16 @@ func (p Function) newGCRootMap(count int) llvm.Value {
 	prog := p.Prog
 	mapType := prog.ctx.StructType([]llvm.Type{prog.tyInt32(), prog.tyInt32()}, false)
 	name := p.Name() + "$gcmap"
+	if prog.target.GOARCH == "wasm" {
+		// These immutable maps contain only the root count and zero metadata
+		// entries. Sharing equal maps across functions and packages preserves
+		// the precise frame shape while letting the linker and Binaryen fold
+		// equivalent code that would otherwise reference distinct map addresses.
+		name = "__llgo_wasm_gcmap$" + strconv.Itoa(count)
+		if existing := p.Pkg.mod.NamedGlobal(name); !existing.IsNil() {
+			return existing
+		}
+	}
 	global := llvm.AddGlobal(p.Pkg.mod, mapType, name)
 	global.SetInitializer(llvm.ConstNamedStruct(mapType, []llvm.Value{
 		llvm.ConstInt(prog.tyInt32(), uint64(count), false),
@@ -139,6 +150,13 @@ func (p Function) newGCRootMap(count int) llvm.Value {
 	}))
 	global.SetGlobalConstant(true)
 	global.SetLinkage(llvm.InternalLinkage)
+	if prog.target.GOARCH == "wasm" {
+		global.SetLinkage(llvm.LinkOnceODRLinkage)
+		comdat := p.Pkg.mod.Comdat(name)
+		comdat.SetSelectionKind(llvm.AnyComdatSelectionKind)
+		global.SetComdat(comdat)
+		global.SetUnnamedAddr(true)
+	}
 	global.SetAlignment(4)
 	return global
 }
