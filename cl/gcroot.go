@@ -37,6 +37,10 @@ func (p *context) prepareGCRoots(fn *ssa.Function, hasClosureContext bool) {
 		switch value.(type) {
 		case *ssa.FreeVar:
 			return false
+		case *ssa.Range:
+			// Go SSA calls this opaque value rangeIter, but LLGo lowers both
+			// string and map iterators to heap-allocated runtime pointers.
+			return true
 		}
 		if call, ok := value.(*ssa.Call); ok {
 			if callee, ok := call.Call.Value.(*ssa.Function); ok {
@@ -73,11 +77,14 @@ func (p *context) prepareGCRoots(fn *ssa.Function, hasClosureContext bool) {
 		if _, ok := planned[value]; !ok {
 			return
 		}
-		typ := p.type_(value.Type(), llssa.InGo)
-		n := p.prog.GCRootCount(typ)
-		if basicKind(value.Type()) == types.Uintptr {
-			// Only pragma-designated uintptr parameters enter planned.
-			n = 1
+		n := 1
+		if _, iterator := value.(*ssa.Range); !iterator {
+			typ := p.type_(value.Type(), llssa.InGo)
+			n = p.prog.GCRootCount(typ)
+			if basicKind(value.Type()) == types.Uintptr {
+				// Only pragma-designated uintptr parameters enter planned.
+				n = 1
+			}
 		}
 		if n != 0 {
 			counts[value] = n
