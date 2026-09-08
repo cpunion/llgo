@@ -533,6 +533,11 @@ func TestWASIProfileTargets(t *testing.T) {
 			if !export.WasmPostLink.Asyncify {
 				t.Fatal("single-worker WASI does not request Asyncify post-link processing")
 			}
+			if !strings.Contains(export.Emulator, "--dir=/") ||
+				!strings.Contains(export.Emulator, "--env PWD") ||
+				!strings.Contains(export.Emulator, "--env PATH") {
+				t.Fatalf("WASI emulator does not expose the Go-compatible filesystem and process environment: %q", export.Emulator)
+			}
 		})
 	}
 }
