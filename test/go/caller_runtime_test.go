@@ -57,10 +57,7 @@ func callerPanicCaller() {
 	callerPanicBoom() // PANIC_CALLER_MARK
 }
 
-func TestCallerPanicTraceback(t *testing.T) {
-	if runtime.GOARCH == "wasm" {
-		t.Skip("unrecovered init panic checked by the host wasm acceptance driver")
-	}
+func testCallerPanicTraceback(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), callerPanicChild+"=1")
 	output, err := cmd.CombinedOutput()
