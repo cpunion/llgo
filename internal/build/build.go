@@ -2536,11 +2536,30 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	}
 
 	buildArgs = append(buildArgs, objFiles...)
+	funcInfoRelink, err := prepareWasmFuncInfoRelink(ctx, linkOutput, objFiles)
+	if err != nil {
+		return err
+	}
+	defer funcInfoRelink.cleanup()
 
 	cmd := ctx.linker()
 	cmd.Verbose = printCmds
-	if err := cmd.Link(buildArgs...); err != nil {
+	probeArgs := append(slices.Clone(buildArgs), funcInfoRelink.probeArgs()...)
+	if err := cmd.Link(probeArgs...); err != nil {
 		return err
+	}
+	if funcInfoRelink != nil {
+		rootObject, err := funcInfoRelink.liveEntryObject(ctx)
+		if err != nil {
+			return err
+		}
+		if rootObject != "" {
+			cmd = ctx.linker()
+			cmd.Verbose = printCmds
+			if err := cmd.Link(append(slices.Clone(buildArgs), rootObject)...); err != nil {
+				return fmt.Errorf("relink WebAssembly funcinfo entries: %w", err)
+			}
+		}
 	}
 	if !moveExactWindowsOutput {
 		return nil
