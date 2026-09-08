@@ -78,6 +78,7 @@ var (
 	// stackOverflow is a flag which is set when the GC scans too deep while marking.
 	// After it is set, all marked allocations must be re-scanned.
 	markStackOverflow bool
+	markHeads         markHeadCache
 
 	// zeroSizedAlloc is just a sentinel that gets returned when allocating 0 bytes.
 	zeroSizedAlloc uint8
@@ -178,6 +179,21 @@ func gcFindHead(blockAddr uintptr) uintptr {
 		gcPanic(c.Str("gc: found tail without head"))
 	}
 	return blockAddr
+}
+
+// gcFindHeadForMark is valid only while object boundaries cannot change.
+// The collector clears this memoization before and after its complete mark
+// phase, including finalizer preservation. Free and Realloc use gcFindHead.
+func gcFindHeadForMark(block uintptr) uintptr {
+	if state := gcStateOf(block); state == blockStateHead || state == blockStateMark {
+		return block
+	}
+	if head, ok := markHeads.lookup(block); ok {
+		return head
+	}
+	head := gcFindHead(block)
+	markHeads.remember(head, block+1)
+	return head
 }
 
 // findNext returns the first block just past the end of the tail. This may or
@@ -438,10 +454,12 @@ func gc() (freeBytes uintptr) {
 	}
 
 	// Mark phase: mark all reachable objects, recursively.
+	markHeads.reset()
 	gcMarkReachable()
 
 	finishMark()
 	preserveFinalizableObjects()
+	markHeads.reset()
 
 	// If we're using threads, resume all other threads before starting the
 	// sweep.
@@ -484,7 +502,9 @@ func startMark(root uintptr) {
 		stackLen--
 		block := stack[stackLen]
 
-		start, end := gcAddressOf(block), gcAddressOf(gcFindNext(block))
+		endBlock := gcFindNext(block)
+		markHeads.remember(block, endBlock)
+		start, end := gcAddressOf(block), gcAddressOf(endBlock)
 
 		for addr := start; addr != end; addr += unsafe.Alignof(addr) {
 			// Load the word.
@@ -505,7 +525,7 @@ func startMark(root uintptr) {
 			}
 
 			// Move to the block's head.
-			referencedBlock = gcFindHead(referencedBlock)
+			referencedBlock = gcFindHeadForMark(referencedBlock)
 			noteFinalizerReference(referencedBlock)
 
 			if gcStateOf(referencedBlock) == blockStateMark {
@@ -560,7 +580,7 @@ func markRoot(addr, root uintptr) {
 			// just a false positive.
 			return
 		}
-		head := gcFindHead(block)
+		head := gcFindHeadForMark(block)
 
 		if gcStateOf(head) != blockStateMark {
 			startMark(head)
