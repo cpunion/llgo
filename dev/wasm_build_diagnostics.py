@@ -114,7 +114,11 @@ def preserve_main_ir(log, work, evidence):
     saved = []
     # Failed compiler output is printed after the child process was killed.
     # -keepwork retains its inputs. Copy only main's LLVM IR, not the cache.
-    for match in re.finditer(r"^\s*# compiling (.+) for pkg: main\s*$", text, re.MULTILINE):
+    for match in re.finditer(r"^\s*# compiling (.+) for pkg: (.+)$", text, re.MULTILINE):
+        package = match.group(2).strip()
+        if package != "main" and not (package.startswith("_/") and
+                                      Path(package[1:]).resolve().is_relative_to(work.resolve())):
+            continue
         source_arg = match.group(1)
         source = Path(source_arg).resolve()
         if not source.is_relative_to(work.resolve()) or not source.is_file():

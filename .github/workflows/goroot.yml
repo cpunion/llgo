@@ -383,6 +383,7 @@ jobs:
           wasm-opt --version
           python3 dev/wasm_optimizer_replay.py \
             --input "$RUNNER_TEMP/preserved-build/commands/wasm-opt-11978/input-0.wasm" \
+            --pre-asyncify-input "$RUNNER_TEMP/preserved-build/commands/wasm-opt-11869/input-0.wasm" \
             --output "$RUNNER_TEMP/optimizer-replay"
       - name: Preserve bounded optimizer replay evidence
         if: always()

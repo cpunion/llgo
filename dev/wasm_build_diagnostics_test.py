@@ -34,6 +34,9 @@ class DiagnosticsTest(unittest.TestCase):
             self.assertEqual(commands, [["/usr/bin/clang++", "-Os", "-c", str(evidence / "main-0.ll"),
                                         "-o", str(evidence / "main-0.o")]])
             self.assertEqual((evidence / "main-0.ll").read_text(), source.read_text())
+            log.write_text(f"# compiling {source} for pkg: _{work}\n"
+                           f"/usr/bin/clang++ -Os -c {source} -o old.o\n")
+            self.assertEqual(diag.preserve_main_ir(log, work, evidence), commands)
             outside = root / "outside.ll"
             outside.write_text("not a diagnostic input")
             log.write_text(f"# compiling {outside} for pkg: main\n")

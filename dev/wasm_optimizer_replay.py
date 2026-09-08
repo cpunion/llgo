@@ -13,6 +13,7 @@ import time
 
 
 INPUT_SHA256 = "eff14a9d7ae3ee2e95743bb693896e13c088c1aacaf03355294caf7ee1b7d987"
+PRE_INPUT_SHA256 = "3e15b3e6a01ecdb34b4226efed5391857225b527d8b0330718759e906b9ba1e4"
 
 
 def group_rss(pgid):
@@ -65,6 +66,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--pre-asyncify-input", type=Path)
     opts = parser.parse_args()
     source = opts.input.resolve()
     if hashlib.sha256(source.read_bytes()).hexdigest() != INPUT_SHA256:
@@ -74,10 +76,26 @@ def main():
         parser.error("wasm-opt and wasmtime are required")
     output = opts.output.resolve()
     output.mkdir()
+    if opts.pre_asyncify_input is not None:
+        original = opts.pre_asyncify_input.resolve()
+        if hashlib.sha256(original.read_bytes()).hexdigest() != PRE_INPUT_SHA256:
+            parser.error("pre-optimization input does not match the preserved issue5162 module")
+        preopt, final = output / "limited-preopt.wasm", output / "limited-final.wasm"
+        # Diagnostic only: test whether unlimited single-caller inlining is
+        # what creates the 929 KiB main before Asyncify. Preserve every other
+        # production optimization setting, and validate the resulting program.
+        limit = "--one-caller-inline-max-function-size=0"
+        pre_ok = bounded_run("limited-preopt", [wasm_opt, "-Os", limit, str(original), "-o", str(preopt)], output)
+        final_ok = pre_ok and bounded_run("limited-asyncify", [wasm_opt, "--asyncify", "--translate-to-exnref",
+                                                               "-Os", limit, str(preopt), "-o", str(final)], output)
+        ran = final_ok and bounded_run("run-limited", [wasmtime, "run", "-W", "exceptions=y", str(final)],
+                                      output, seconds=60)
+        return 0 if ran else 1
     combined, asyncified, split = [output / f"{name}.wasm" for name in ("combined", "asyncified", "split")]
     combined_ok = bounded_run("combined", [wasm_opt, "--asyncify", "--translate-to-exnref", "-Os",
                                            str(source), "-o", str(combined)], output)
     asyncify_ok = bounded_run("asyncify", [wasm_opt, "--asyncify", "--translate-to-exnref",
+                                          "--optimize-level=2", "--shrink-level=1",
                                           str(source), "-o", str(asyncified)], output)
     split_ok = asyncify_ok and bounded_run("post-opt", [wasm_opt, "-Os", str(asyncified), "-o", str(split)], output)
     executions = []
