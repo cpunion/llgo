@@ -2529,14 +2529,14 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	}
 
 	buildArgs = append(buildArgs, objFiles...)
-	buildArgs = append(buildArgs, defaultWASIHeapArgs(ctx, buildArgs)...)
+	cmd := ctx.linker()
+	buildArgs = append(buildArgs, defaultWASIHeapArgs(ctx, cmd, buildArgs)...)
 	funcInfoRelink, err := prepareWasmFuncInfoRelink(ctx, linkOutput, objFiles, buildArgs)
 	if err != nil {
 		return err
 	}
 	defer funcInfoRelink.cleanup()
 
-	cmd := ctx.linker()
 	cmd.Verbose = printCmds
 	probeArgs := append(slices.Clone(buildArgs), funcInfoRelink.probeArgs()...)
 	if err := cmd.Link(probeArgs...); err != nil {
