@@ -52,7 +52,7 @@ jobs:
             -count=1 -coverprofile="$RUNNER_TEMP/evidence/compiler.cover"
           go test ./internal/build -run '^TestLowerLargeAggregatesGCPolicy$' \
             -count=1 -coverprofile="$RUNNER_TEMP/evidence/build-policy.cover"
-      - name: Exercise aggregate snapshots across GC and suspension
+      - name: Exercise aggregate snapshots and iterators across GC
         if: matrix.profile == 'EC64'
         run: |
           set -o pipefail
@@ -61,7 +61,7 @@ jobs:
           test -s "$RUNNER_TEMP/evidence/aggregate.wasm"
           GOGC=1 timeout 60s node targets/emscripten-memory64-runner.mjs \
             "$RUNNER_TEMP/evidence/aggregate.mjs" \
-            -test.v '-test.run=^TestLarge(Aggregate|Struct)GCRoots$' -test.count=3 -test.timeout=45s \
+            -test.v '-test.run=^Test(Large(Aggregate|Struct)|RangeIterator)GCRoots$' -test.count=3 -test.timeout=45s \
             2>&1 | tee "$RUNNER_TEMP/evidence/aggregate.log"
       - name: Preserve and run original EC64 index program
         if: matrix.profile == 'EC64'
@@ -103,7 +103,7 @@ jobs:
           failed=0
           GOGC=1 timeout 60s wasmtime run --dir=/ --env PWD --env PATH --env GOGC \
             -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/exit.wasm" \
-            -test.v -test.count=3 -test.timeout=45s '-test.run=^TestLarge(Aggregate|Struct)GCRoots$' \
+            -test.v -test.count=3 -test.timeout=45s '-test.run=^Test(Large(Aggregate|Struct)|RangeIterator)GCRoots$' \
             2>&1 | tee "$evidence/aggregate.log" || failed=1
           for iteration in {1..10}; do
           for policy in 100 off 1; do
@@ -124,6 +124,40 @@ jobs:
           done
           done
           exit "$failed"
+      - name: Check cold synthetic-PC registry with allocation profiling
+        if: ${{ !cancelled() }}
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -o pipefail
+          evidence="$RUNNER_TEMP/evidence"
+          args=()
+          if [[ "$PROFILE" == EC64 ]]; then
+            args=(-target emscripten-memory64)
+            module="$evidence/profile.mjs"
+          else
+            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
+            module="$evidence/profile.wasm"
+          fi
+          timeout 5m "$RUNNER_TEMP/llgo" build "${args[@]}" -o "$module" \
+            ./internal/build/testdata/wasm-profile-reentry > "$evidence/profile-build.log" 2>&1 || {
+              cat "$evidence/profile-build.log"; exit 1;
+            }
+          for policy in 100 off 1; do
+            for mode in on off; do
+              log="$evidence/profile-$policy-$mode.log"
+              if [[ "$PROFILE" == EC64 ]]; then
+                command=(node targets/emscripten-memory64-runner.mjs "$module")
+              else
+                command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC
+                  -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
+              fi
+              GOGC="$policy" timeout 60s "${command[@]}" "$mode" > "$log" 2>&1 || {
+                cat "$log"; exit 1;
+              }
+              printf 'cold registry GOGC=%s profiling=%s PASS\n' "$policy" "$mode"
+            done
+          done
       - name: Preserve source, modules, and bounded execution evidence
         if: always()
         uses: actions/upload-artifact@v7
