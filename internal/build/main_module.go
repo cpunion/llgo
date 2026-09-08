@@ -29,6 +29,7 @@ package build
 import (
 	"go/token"
 	"go/types"
+	"slices"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
 	"github.com/xgo-dev/llgo/internal/packages"
@@ -190,6 +191,12 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 			initArraySection = ".init_array"
 		}
 		inits := []llssa.Function{pyInit, rtInit, abiInit, runtimeStub}
+		if ctx.buildConf.Goarch == "wasm" &&
+			slices.Contains(splitSourcePatchBuildTags(ctx.buildConf.Tags), "llgo.wasm.gc.linear") {
+			// Libraries do not enter RunWasmMain. Enable the linear collector's
+			// environment policy before user initializers on this path too.
+			inits = append(inits, declareNoArgFunc(mainPkg, rtPkgPath+".InitWasmGCPolicy"))
+		}
 		// Windows already enables this during runtime initialization because
 		// callbacks in ordinary executables also enter from foreign threads.
 		// Other platforms enable it only for libraries with C exports.

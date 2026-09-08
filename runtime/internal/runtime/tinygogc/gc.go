@@ -143,6 +143,9 @@ type GCStats struct {
 	// GCSys is bytes of memory in garbage collection metadata.
 	GCSys uint64
 
+	// NextGC is the heap allocation goal for the next automatic collection.
+	NextGC uint64
+
 	// NumGC is the number of completed GC cycles.
 	NumGC uint32
 }
@@ -177,10 +180,15 @@ func ReadGCStats() GCStats {
 		StackInuse: uint64(stackInuse),
 		StackSys:   uint64(stackSys),
 		GCSys:      uint64(heapEnd - uintptr(metadataStart)),
+		NextGC:     gcNextGoal(),
 		NumGC:      gcNumGC,
 	}
 
 	unlock(&gcMutex)
 
 	return stats
+}
+
+func gcLiveBytes() uint64 {
+	return (gcTotalBlocks - gcFreedBlocks) * uint64(bytesPerBlock)
 }
