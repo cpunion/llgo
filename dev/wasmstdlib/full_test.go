@@ -243,8 +243,8 @@ func TestFullSourceContextMatchesCompilerProfiles(t *testing.T) {
 		{"EC32", "1", []string{"llgo", "llgo.wasm.gc.linear", "llgo.wasm.emscripten"}},
 		{"EC64", "1", []string{"llgo", "llgo.wasm.gc.linear", "llgo.wasm.emscripten", "llgo.wasm.emscripten.memory64"}},
 		{"WC32", "1", []string{"llgo", "llgo.wasm.gc.linear", "llgo.wasm.wasi"}},
-		{"GJS", "0", []string{"llgo", "nogc"}},
-		{"GWASI", "0", []string{"llgo", "nogc"}},
+		{"GJS", "0", []string{"llgo", "llgo.wasm.gc.linear"}},
+		{"GWASI", "0", []string{"llgo", "llgo.wasm.gc.linear"}},
 		{"GJS-reference", "0", nil},
 		{"GWASI-reference", "0", nil},
 	}
@@ -265,6 +265,9 @@ func TestFullSourceContextMatchesCompilerProfiles(t *testing.T) {
 			}
 			if !p.Reference && !slices.Contains(strings.Split(tags, ","), "osusergo") {
 				t.Fatalf("LLGo wasm source inventory is missing os/user's pure-Go selection: %q", tags)
+			}
+			if !p.Reference && slices.Contains(strings.Split(tags, ","), "nogc") {
+				t.Fatalf("LLGo wasm source inventory unexpectedly disabled collection: %q", tags)
 			}
 			if len(tt.wantTags) == 0 && tags != "" {
 				t.Fatalf("reference tags = %q", tags)
