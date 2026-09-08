@@ -507,6 +507,13 @@ func (s *callerLocationStore) staticPC(frame CallerFrame, cache *uintptr, pcValu
 }
 
 func (s *callerLocationStore) internSyntheticFrame(frame CallerFrame) int {
+	if wasmMemProfileEnabled {
+		// Growing either slice can sample an allocation and intern its stack
+		// recursively. An outer append would then overwrite the inner update,
+		// leaving already-issued PCs and hash indexes outside the registry.
+		MemProfilePause()
+		defer MemProfileResume()
+	}
 	s = callerSyntheticRegistryFor(s)
 	frame.captured = 0
 	if len(s.syntheticHash) == 0 {
