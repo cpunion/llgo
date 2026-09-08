@@ -4,12 +4,32 @@ package cl_test
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/xgo-dev/llgo/cl/cltest"
 	llssa "github.com/xgo-dev/llgo/ssa"
 )
+
+func TestCompileRangeIteratorGCRoots(t *testing.T) {
+	const src = `package main
+func collect()
+func text(s string) int {
+    total := 0
+    for _, r := range s { collect(); total += int(r) }
+    return total
+}
+`
+	ir := cltest.CompileIREx(t, src, "range_roots.go", false, func(prog llssa.Program) {
+		prog.EnableGCRoots(true)
+	})
+	pattern := regexp.MustCompile(`(%[0-9]+) = call ptr @[^\n]*\.NewStringIter"?\(`)
+	match := pattern.FindStringSubmatch(ir)
+	if len(match) != 2 || !strings.Contains(ir, "store ptr "+match[1]+",") {
+		t.Fatalf("string iterator is not published as a GC root:\n%s", ir)
+	}
+}
 
 func TestCompileLargeSnapshotGCRoots(t *testing.T) {
 	for _, tc := range []struct {
