@@ -798,6 +798,45 @@ func f() {
 	}
 }
 
+func TestCompileDeferredCallerUsesOwnerClosingBrace(t *testing.T) {
+	ssapkg, files := buildCallerFrameSSAPackage(t, "example.com/foo", `package foo
+import "runtime"
+func outer() {
+	func() {
+		defer func() {
+			runtime.Caller(1)
+		}()
+	}()
+}
+`)
+	prog := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "js", GOARCH: "wasm"})
+	pkg, _, err := NewPackageExWithEmbedMetaOptions(
+		prog, nil, nil, nil, ssapkg, files, nil, false, Options{ShadowStack: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir := pkg.Module().String()
+	inOwner := false
+	found := false
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.HasPrefix(line, "define ") {
+			inOwner = strings.Contains(line, "example.com/foo.outer$1") &&
+				!strings.Contains(line, "example.com/foo.outer$1$1")
+		}
+		if inOwner && strings.Contains(line, "RecordPanicLocation") && strings.Contains(line, "i32 8") {
+			found = true
+			break
+		}
+		if inOwner && line == "}" {
+			inOwner = false
+		}
+	}
+	if !found {
+		t.Fatalf("defer owner did not record its closing-brace line:\n%s", ir)
+	}
+}
+
 func TestCompileRuntimeCallerPCLineMetadata(t *testing.T) {
 	ssapkg, files := buildCallerFrameSSAPackage(t, "example.com/foo", `package foo
 import "runtime"
