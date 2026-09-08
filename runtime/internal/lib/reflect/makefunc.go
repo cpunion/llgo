@@ -53,6 +53,9 @@ func makeFunc(typ Type, fn func(args []Value) (results []Value), recoverTo unsaf
 
 	t := typ.common()
 	ftyp := (*funcType)(unsafe.Pointer(t))
+	if useWasmReflectBridges {
+		return makeWasmFunc(ftyp, fn, recoverTo)
+	}
 	ins := ftyp.In
 	sig, err := toFFISig(ins, ftyp.Out)
 	if err != nil {
