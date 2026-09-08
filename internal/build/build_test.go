@@ -1067,6 +1067,112 @@ func TestWasmStandardRuntimeBackendSelection(t *testing.T) {
 	}
 }
 
+func TestWasmSiteRecordLayoutSelection(t *testing.T) {
+	runtimeDir := filepath.Join(env.LLGoRuntimeDir(), "internal", "lib", "runtime")
+	tests := []struct {
+		name       string
+		goos       string
+		tags       []string
+		wantFile   string
+		rejectFile string
+	}{
+		{
+			name:       "wasm32",
+			goos:       "js",
+			wantFile:   "symtab_site_records_wasm32.go",
+			rejectFile: "symtab_site_records.go",
+		},
+		{
+			name:       "wasm64",
+			goos:       "js",
+			tags:       []string{"llgo.wasm.emscripten.memory64"},
+			wantFile:   "symtab_site_records.go",
+			rejectFile: "symtab_site_records_wasm32.go",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := gobuild.Default
+			ctx.GOOS = test.goos
+			ctx.GOARCH = "wasm"
+			ctx.BuildTags = test.tags
+			for name, want := range map[string]bool{test.wantFile: true, test.rejectFile: false} {
+				got, err := ctx.MatchFile(runtimeDir, name)
+				if err != nil {
+					t.Fatalf("MatchFile(%q): %v", name, err)
+				}
+				if got != want {
+					t.Errorf("MatchFile(%q) = %v, want %v", name, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestWasmFuncInfoRelinkParsing(t *testing.T) {
+	candidates := parseWasmFuncInfoEntryCandidates(strings.Join([]string{
+		"archive.o:",
+		wasmFuncInfoEntryPrefix + "main.f",
+		wasmFuncInfoEntryPrefix + "main.g",
+		wasmFuncInfoEntryPrefix + "example.com/p.F[int, string]",
+		wasmFuncInfoEntryPrefix + "sentinel",
+		"unrelated",
+	}, "\n"))
+	if got, want := candidates, map[string]string{
+		"main.f":                       wasmFuncInfoEntryPrefix + "main.f",
+		"main.g":                       wasmFuncInfoEntryPrefix + "main.g",
+		"example.com/p.F[int, string]": wasmFuncInfoEntryPrefix + "example.com/p.F[int, string]",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("entry candidates = %v, want %v", got, want)
+	}
+	linkMap := strings.Join([]string{
+		"    Addr      Off     Size Out     In      Symbol",
+		"       -     157e        e         /tmp/main.o:(main.f)",
+		"       -     157e        e                 main.f",
+		"       -     158c       14                 main.g",
+		"       -     158c       14                 main.g",
+	}, "\n")
+	if got, want := wasmFuncInfoLiveEntryRoots(linkMap, candidates), []string{
+		wasmFuncInfoEntryPrefix + "main.f",
+		wasmFuncInfoEntryPrefix + "main.g",
+	}; !slices.Equal(got, want) {
+		t.Fatalf("live entry roots = %q, want %q", got, want)
+	}
+	if !wasmLinkMapHasSymbol(linkMap+"\n       -     90229      122                 runtime.FuncForPC", "runtime.FuncForPC") {
+		t.Fatal("live runtime.FuncForPC was not detected")
+	}
+	if wasmLinkMapHasSymbol(linkMap, "runtime.FuncForPC") {
+		t.Fatal("absent runtime.FuncForPC was detected")
+	}
+}
+
+func TestWasmFuncInfoRootObjectReferencesSelectedRows(t *testing.T) {
+	nm, err := exec.LookPath("llvm-nm")
+	if err != nil {
+		t.Fatalf("llvm-nm is required: %v", err)
+	}
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "js", GOARCH: "wasm"})
+	defer prog.Dispose()
+	ctx := &context{prog: prog}
+	roots := []string{
+		wasmFuncInfoEntryPrefix + "main.f",
+		wasmFuncInfoEntryPrefix + "example.com/p.F[int]",
+	}
+	object := filepath.Join(t.TempDir(), "funcinfo-roots.o")
+	if err := writeWasmFuncInfoRootObject(ctx, object, roots); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(nm, "--undefined-only", "--format=just-symbols", object).CombinedOutput()
+	if err != nil {
+		t.Fatalf("inspect funcinfo root object: %v\n%s", err, out)
+	}
+	for _, root := range roots {
+		if !strings.Contains(string(out), root) {
+			t.Errorf("root object does not reference %q:\n%s", root, out)
+		}
+	}
+}
+
 func TestWindowsRuntimeSyscallVersionSelection(t *testing.T) {
 	runtimeDir := filepath.Join(env.LLGoRuntimeDir(), "internal", "lib", "runtime")
 	releaseTags := func(lastMinor int) []string {

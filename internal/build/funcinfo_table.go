@@ -55,6 +55,8 @@ const (
 	funcInfoEntryCOFFEndSymbol      = "__llgo_funcinfo_entry_coff_end"
 	pcSiteCOFFStartSymbol           = "__llgo_pcsite_coff_start"
 	pcSiteCOFFEndSymbol             = "__llgo_pcsite_coff_end"
+	wasmFuncInfoEntryPrefix         = "__llgo_funcinfo_entry$"
+	wasmFuncInfoEntrySentinelSymbol = "__llgo_funcinfo_entry$sentinel"
 )
 
 type funcInfoRecord struct {
@@ -678,6 +680,7 @@ const (
 	siteObjectELF
 	siteObjectMachO
 	siteObjectCOFF
+	siteObjectWasm
 )
 
 func runtimeSiteObjectFormat(ctx *context) siteObjectFormat {
@@ -688,6 +691,8 @@ func runtimeSiteObjectFormat(ctx *context) siteObjectFormat {
 		return siteObjectMachO
 	case shouldEmitRuntimeCOFFSites(ctx):
 		return siteObjectCOFF
+	case ctx != nil && ctx.buildConf != nil && ctx.buildConf.Goarch == "wasm":
+		return siteObjectWasm
 	default:
 		return siteObjectUnsupported
 	}
@@ -709,11 +714,15 @@ func shouldEmitRuntimeSites(ctx *context) bool {
 	if ctx == nil || ctx.prog == nil || !ctx.prog.FuncInfoSitesEnabled() {
 		return false
 	}
-	return runtimeSiteObjectFormat(ctx) != siteObjectUnsupported
+	format := runtimeSiteObjectFormat(ctx)
+	return format != siteObjectUnsupported && format != siteObjectWasm
 }
 
 func shouldEmitRuntimeEntrySites(ctx *context) bool {
-	return shouldEmitRuntimeSites(ctx)
+	if ctx == nil || ctx.prog == nil || !ctx.prog.FuncInfoSitesEnabled() {
+		return false
+	}
+	return runtimeSiteObjectFormat(ctx) != siteObjectUnsupported
 }
 
 // siteSectionInfo names one metadata site section in each supported object format.
@@ -851,6 +860,10 @@ func emitFuncInfoEntrySites(ctx *context, pkg llssa.Package) {
 	if len(symbolIDs) == 0 {
 		return
 	}
+	if runtimeSiteObjectFormat(ctx) == siteObjectWasm {
+		emitWasmFuncInfoEntrySites(mod, symbolIDs)
+		return
+	}
 	// This is LLGo's DCE-safe substitute for the function PC list that Go's
 	// linker has while building pclntab. The inline-asm fragment lives in a
 	// section tied to the function body (SHF_LINK_ORDER on ELF; live_support
@@ -942,6 +955,93 @@ func emitFuncInfoEntrySites(ctx *context, pkg llssa.Package) {
 	}
 }
 
+// emitWasmFuncInfoEntrySites materializes exact function-table indices for
+// function values. WebAssembly has no native symbol lookup, and unlike the
+// native object formats it has no body-associated metadata section that can
+// follow every function through linker GC. Limit the table to functions that
+// already have a non-call use after package optimization: retaining the row
+// therefore does not make an otherwise direct-only function addressable.
+// wasm-ld concatenates same-named data segments and synthesizes __start/__stop
+// boundary symbols for them, so the runtime can consume these records through
+// the same ABI as native entry sites.
+func emitWasmFuncInfoEntrySites(mod llvm.Module, symbolIDs map[string]uint64) {
+	llvmCtx := mod.Context()
+	i8Type := llvmCtx.Int8Type()
+	i64Type := llvmCtx.Int64Type()
+	pointerType := llvm.PointerType(i8Type, 0)
+	recordType := llvmCtx.StructType([]llvm.Type{pointerType, i64Type}, false)
+	var used []llvm.Value
+	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		if fn.IsDeclaration() || fn.BasicBlocksCount() == 0 || !functionAddressTaken(fn) {
+			continue
+		}
+		symbolID := symbolIDs[fn.Name()]
+		if symbolID == 0 {
+			continue
+		}
+		row := llvm.AddGlobal(mod, recordType, wasmFuncInfoEntryPrefix+fn.Name())
+		row.SetInitializer(llvm.ConstNamedStruct(recordType, []llvm.Value{
+			llvm.ConstBitCast(fn, pointerType),
+			llvm.ConstInt(i64Type, symbolID, false),
+		}))
+		// Generic instantiations can be emitted into more than one package archive.
+		// Match their ODR semantics so wasm-ld coalesces identical entry records;
+		// the link phase addresses the surviving row by name after a probe link has
+		// identified the functions that wasm-ld kept naturally.
+		row.SetLinkage(llvm.LinkOnceODRLinkage)
+		row.SetGlobalConstant(true)
+		row.SetAlignment(8)
+		row.SetSection(entrySiteSectionInfo.elf)
+		used = append(used, row)
+	}
+	appendLLVMCompilerUsed(mod, used)
+}
+
+// appendLLVMUsed adds values to the module's linker-retention list while
+// preserving entries that another compiler subsystem already installed.
+func appendLLVMUsed(mod llvm.Module, values []llvm.Value) {
+	appendLLVMRetentionList(mod, "llvm.used", values)
+}
+
+// appendLLVMCompilerUsed keeps values through LLVM optimization while still
+// allowing the object linker to discard unreachable WebAssembly data segments.
+func appendLLVMCompilerUsed(mod llvm.Module, values []llvm.Value) {
+	appendLLVMRetentionList(mod, "llvm.compiler.used", values)
+}
+
+func appendLLVMRetentionList(mod llvm.Module, globalName string, values []llvm.Value) {
+	if len(values) == 0 {
+		return
+	}
+	pointerType := llvm.PointerType(mod.Context().Int8Type(), 0)
+	used := mod.NamedGlobal(globalName)
+	items := make([]llvm.Value, 0, len(values)+4)
+	if !used.IsNil() {
+		init := used.Initializer()
+		if !init.IsNil() {
+			for i, n := 0, init.Type().ArrayLength(); i < n; i++ {
+				items = append(items, init.Operand(i))
+			}
+		}
+	}
+	for _, value := range values {
+		items = append(items, llvm.ConstBitCast(value, pointerType))
+	}
+	init := llvm.ConstArray(pointerType, items)
+	name := globalName
+	if !used.IsNil() {
+		name += ".llgo"
+	}
+	replacement := llvm.AddGlobal(mod, init.Type(), name)
+	replacement.SetInitializer(init)
+	replacement.SetLinkage(llvm.AppendingLinkage)
+	replacement.SetSection("llvm.metadata")
+	if !used.IsNil() {
+		used.EraseFromParentAsGlobal()
+		replacement.SetName(globalName)
+	}
+}
+
 func functionAddressTaken(fn llvm.Value) bool {
 	for use := fn.FirstUse(); !use.IsNil(); use = use.NextUse() {
 		user := use.User()
@@ -990,6 +1090,24 @@ const funcInfoMetaRecordMagic = uint64(0x3154454D4F474C4C)
 
 func emitRuntimeFuncInfoSites(mod llvm.Module, pointerSize int, format siteObjectFormat, entrySiteInfo siteSectionInfo, pcSite bool, entrySite bool) {
 	if !pcSite && !entrySite {
+		return
+	}
+	if format == siteObjectWasm {
+		// Keep one zero row so wasm-ld can always resolve the section boundary
+		// symbols, including programs with no address-taken Go function.
+		if entrySite {
+			llvmCtx := mod.Context()
+			recordType := llvmCtx.StructType([]llvm.Type{
+				llvm.PointerType(llvmCtx.Int8Type(), 0), llvmCtx.Int64Type(),
+			}, false)
+			sentinel := llvm.AddGlobal(mod, recordType, wasmFuncInfoEntrySentinelSymbol)
+			sentinel.SetInitializer(llvm.ConstNull(recordType))
+			sentinel.SetLinkage(llvm.PrivateLinkage)
+			sentinel.SetGlobalConstant(true)
+			sentinel.SetAlignment(8)
+			sentinel.SetSection(entrySiteInfo.elf)
+			appendLLVMUsed(mod, []llvm.Value{sentinel})
+		}
 		return
 	}
 	// COFF boundaries are ordinary LLVM globals in $a/$z subsections. The
