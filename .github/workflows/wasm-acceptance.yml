@@ -88,23 +88,26 @@ jobs:
             ${{ runner.temp }}/goroot-smoke-${{ matrix.profile }}.json
           if-no-files-found: error
 
-      - name: Check WASI typed reflection before full acceptance
-        if: ${{ matrix.profile == 'WC32' || matrix.profile == 'GWASI' }}
+      - name: Check typed reflection before full acceptance
         env:
           PROFILE: ${{ matrix.profile }}
         run: |
           set -o pipefail
-          args=(-target wasi)
-          if [[ "$PROFILE" == GWASI ]]; then
-            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
-            args=()
-          fi
+          args=()
+          case "$PROFILE" in
+            EC32) args=(-target emscripten) ;;
+            EC64) args=(-target emscripten-memory64) ;;
+            WC32) args=(-target wasi) ;;
+            GJS) export GOOS=js GOARCH=wasm CGO_ENABLED=0 ;;
+            GWASI) export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 ;;
+            *) echo "unknown wasm reflection profile: $PROFILE" >&2; exit 1 ;;
+          esac
           "$RUNNER_TEMP/llgo" test "${args[@]}" -emulator -v -timeout=2m \
             -run '^(TestReflect.*Bridge|TestMakeFunc|TestValueMethodAndCall|TestValueCallSlice)$' \
             ./test/std/reflect 2>&1 | tee "$RUNNER_TEMP/reflect-$PROFILE.log"
 
-      - name: Preserve WASI reflection log
-        if: ${{ always() && (matrix.profile == 'WC32' || matrix.profile == 'GWASI') }}
+      - name: Preserve reflection log
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: wasm-reflect-${{ matrix.profile }}
