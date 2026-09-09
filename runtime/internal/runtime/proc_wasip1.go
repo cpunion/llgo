@@ -177,8 +177,8 @@ func initWasmContext(gp *g, entry wasmcontext.Entry, arg unsafe.Pointer, stackSi
 		entry,
 		arg,
 		stackSize,
-		AllocRoot,
-		FreeRoot,
+		AllocNoScanRoot,
+		FreeNoScanRoot,
 	)
 }
 
@@ -191,7 +191,7 @@ func releaseWasmContext(gp *g) {
 		unregisterWasmGCRoot(&ctx.platform.gcRoot)
 	}
 	releaseGoroutineLocalBlocks(&ctx.platform.glsContext)
-	ctx.platform.context.Close(FreeRoot)
+	ctx.platform.context.Close(FreeNoScanRoot)
 	freeRuntimeContext(ctx)
 }
 

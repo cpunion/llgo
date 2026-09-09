@@ -576,6 +576,9 @@ func startMark(root uintptr) {
 	var stack [markStackSize]uintptr
 	stack[0] = root
 	gcSetState(root, blockStateMark)
+	if !shouldScanObject(root) {
+		return
+	}
 	stackLen := 1
 	for stackLen > 0 {
 		// Pop a block off of the stack.

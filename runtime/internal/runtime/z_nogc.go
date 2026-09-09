@@ -63,6 +63,14 @@ func FreeRoot(ptr unsafe.Pointer) {
 	c.Free(ptr)
 }
 
+func AllocNoScanRoot(size uintptr) unsafe.Pointer {
+	return AllocRoot(size)
+}
+
+func FreeNoScanRoot(ptr unsafe.Pointer) {
+	FreeRoot(ptr)
+}
+
 // AddCleanupPtr is not implemented when GC is disabled.
 // Cleanup functions will never be called.
 func AddCleanupPtr(ptr unsafe.Pointer, cleanup func()) (cancel func()) {

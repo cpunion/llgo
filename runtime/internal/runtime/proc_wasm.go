@@ -101,7 +101,7 @@ func RunWasmMain() {
 		fatal("runtime: invalid WebAssembly main goroutine")
 		return
 	}
-	if !wasmSched.system.InitCurrent(AllocRoot) {
+	if !wasmSched.system.InitCurrent(AllocNoScanRoot) {
 		panic("runtime: failed to initialize WebAssembly scheduler context")
 	}
 	// Do not defer Close here. The scheduler starts on the bootstrap G and then
@@ -125,7 +125,7 @@ func RunWasmMain() {
 			if isMain {
 				_, mainExited := gState()
 				if !mainExited {
-					wasmSched.system.Close(FreeRoot)
+					wasmSched.system.Close(FreeNoScanRoot)
 					return
 				}
 			}
@@ -202,8 +202,8 @@ func initWasmFiber(gp *g, entry wasmcontext.Entry, arg unsafe.Pointer, stackSize
 		entry,
 		arg,
 		stackSize,
-		AllocRoot,
-		FreeRoot,
+		AllocNoScanRoot,
+		FreeNoScanRoot,
 	)
 }
 
@@ -216,7 +216,7 @@ func releaseWasmContext(gp *g) {
 		unregisterWasmGCRoot(&ctx.platform.gcRoot)
 	}
 	releaseGoroutineLocalBlocks(&ctx.platform.glsContext)
-	ctx.platform.context.Close(FreeRoot)
+	ctx.platform.context.Close(FreeNoScanRoot)
 	freeRuntimeContext(ctx)
 }
 
