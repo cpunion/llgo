@@ -19,6 +19,15 @@ func (value gcReflectionAggregate) Check() int {
 	return *value.pointer + int(value.data[0]) + int(value.data[len(value.data)-1])
 }
 
+//go:noinline
+func callGCReflectionDeferred(value gcReflectionAggregate, callback func(gcReflectionAggregate)) {
+	// The indirect deferred call loads its aggregate argument from another
+	// aggregate snapshot. Mutating the source must not change that argument.
+	defer callback(value)
+	value.data[0], value.data[len(value.data)-1] = 0, 0
+	collectGCAggregate()
+}
+
 func TestLargeReflectionGCRoots(t *testing.T) {
 	value := gcReflectionAggregate{pointer: new(int)}
 	*value.pointer = 101
@@ -36,6 +45,16 @@ func TestLargeReflectionGCRoots(t *testing.T) {
 			if got != want {
 				t.Fatalf("reflection snapshot = %d, want %d", got, want)
 			}
+		}
+		called := false
+		callGCReflectionDeferred(value, func(snapshot gcReflectionAggregate) {
+			called = true
+			if got := snapshot.Check(); got != want {
+				t.Fatalf("deferred aggregate snapshot = %d, want %d", got, want)
+			}
+		})
+		if !called {
+			t.Fatal("deferred aggregate callback did not run")
 		}
 	}
 }
