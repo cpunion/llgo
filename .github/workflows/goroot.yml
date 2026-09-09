@@ -7,12 +7,74 @@ on:
         description: CPU sampling or unchanged full-package verification
         type: choice
         default: profile
-        options: [profile, verify, unit, coverage-auth]
+        options: [profile, verify, unit, coverage-auth, build-trace]
 
 permissions:
   contents: read
 
 jobs:
+  build-trace:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'build-trace'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOMAXPROCS: '2'
+      BINARYEN_CORES: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-go
+      - name: Build compiler and unchanged GOROOT runner
+        env:
+          R4_TRACE_LLGO: ${{ runner.temp }}/llgo
+          R4_TRACE_DIR: ${{ runner.temp }}/evidence
+        run: |
+          mkdir "$R4_TRACE_DIR"
+          go build -o "$R4_TRACE_LLGO" ./cmd/llgo
+          go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
+      - name: Trace the original EC64 case within its existing budget
+        env:
+          R4_TRACE_LLGO: ${{ runner.temp }}/llgo
+          R4_TRACE_DIR: ${{ runner.temp }}/evidence
+        run: |
+          set -o pipefail
+          target_goroot="$(go env GOROOT)"
+          (
+            cd test/goroot
+            "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
+              -test.count=1 -test.timeout=10m -goroot "$target_goroot" \
+              -llgo "$GITHUB_WORKSPACE/dev/r4_cmplxdivide_trace.sh" \
+              -wasm-profile EC64 -directive-mode ci -case '^cmplxdivide\.go$' \
+              -report "$R4_TRACE_DIR/goroot.json" -progress 30s \
+              -max-rss-mib 4096 -rss-warn-mib 1024 \
+              -min-memory-free-percent 15 -min-swap-free-mib 512
+          ) 2>&1 | tee "$R4_TRACE_DIR/runner.log" &
+          trace_job=$!
+          while kill -0 "$trace_job" 2>/dev/null; do
+            date -u >> "$R4_TRACE_DIR/processes.log"
+            ps -eo pid,ppid,pcpu,rss,etime,comm \
+              | rg 'llgo|clang|wasm|opt|node|python' >> "$R4_TRACE_DIR/processes.log" || true
+            sleep 10
+          done
+          wait "$trace_job"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: r4-cmplxdivide-EC64-build-trace
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+
   coverage-auth:
     if: github.repository_owner == 'cpunion' && inputs.mode == 'coverage-auth'
     runs-on: ubuntu-24.04
