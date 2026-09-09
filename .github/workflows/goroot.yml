@@ -47,6 +47,7 @@ jobs:
         env:
           R4_TRACE_LLGO: ${{ runner.temp }}/llgo
           R4_TRACE_DIR: ${{ runner.temp }}/evidence
+          LLGO_R4_BACKEND_TRACE: ${{ runner.temp }}/evidence
         run: |
           set -o pipefail
           command -v ps awk date

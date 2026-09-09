@@ -2949,6 +2949,7 @@ func lowerLargeAggregates(prog llssa.Program, mod gllvm.Module) {
 
 // compilePackageModule applies LLVM transforms and emits package objects.
 func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbose bool) error {
+	r4DiagnosticBackendStage(aPkg, "module-lowering", false)
 	pkg := aPkg.Package
 	pkgPath := pkg.PkgPath
 	ret := aPkg.LPkg
@@ -2988,6 +2989,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	}
 
 	// Run the default LLVM optimization pipeline selected by the requested -O level.
+	r4DiagnosticBackendStage(aPkg, "before-opt", true)
 	if ctx.passOpt {
 		mod := ret.Module()
 		mod.SetDataLayout(ctx.prog.DataLayout())
@@ -3001,6 +3003,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 			return fmt.Errorf("run LLVM passes failed for %v: %w", pkgPath, err)
 		}
 	}
+	r4DiagnosticBackendStage(aPkg, "after-opt", true)
 	localizeWasmStackAddresses(ctx.buildConf.Goarch, ret.Module())
 	dropUnusedWindowsTestMain(ctx, aPkg, ret.Module())
 	emitFuncInfoEntrySites(ctx, ret)
@@ -3047,6 +3050,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		aPkg.LinkArgs = append(aPkg.LinkArgs, goCgoLinkArgs(aPkg.AltPkg.Syntax)...)
 	}
 	if pkg.ExportFile != "" {
+		r4DiagnosticBackendStage(aPkg, "before-codegen", true)
 		exportFile, exportBuffer, err := exportPackageObject(ctx, pkg.PkgPath, pkg.ExportFile, ret)
 		if err != nil {
 			return fmt.Errorf("export object of %v failed: %v", pkgPath, err)
@@ -3059,6 +3063,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		if debugBuild || verbose {
 			fmt.Fprintf(os.Stderr, "==> Export %s: %s\n", aPkg.PkgPath, pkg.ExportFile)
 		}
+		r4DiagnosticBackendStage(aPkg, "after-codegen", false)
 	}
 	return nil
 }
