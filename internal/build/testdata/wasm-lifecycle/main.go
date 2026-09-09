@@ -23,6 +23,7 @@ var nonCapturingEvents chan<- int
 
 func main() {
 	testFinalizerCalls()
+	testFinalizerBatch()
 	testFinalizerCancellation()
 	testFinalizerReplacement()
 	testFinalizerDependencyOrder()
@@ -194,6 +195,39 @@ func testFinalizerCalls() {
 		seen[event] = true
 	}
 	nonCapturingEvents = nil
+}
+
+// Keep all arguments alive while the registry grows, then retire the complete
+// installing goroutine. This exercises index publication under GOGC=1 without
+// relying on conservative stack slots to stop retaining the last few objects.
+//
+//go:noinline
+func installFinalizerBatch(events chan<- int) {
+	values := make([]*object, 1024)
+	for i := range values {
+		values[i] = &object{value: i}
+		runtime.SetFinalizer(values[i], func(value *object) { events <- value.value })
+	}
+	runtime.KeepAlive(values)
+}
+
+func testFinalizerBatch() {
+	events := make(chan int, 1024)
+	done := make(chan struct{})
+	go func() {
+		installFinalizerBatch(events)
+		close(done)
+	}()
+	<-done
+	collectUntil("finalizer batch", func() bool { return len(events) == 1024 })
+	var seen [1024]bool
+	for range seen {
+		id := <-events
+		if id < 0 || id >= len(seen) || seen[id] {
+			panic("finalizer batch lost an argument or dispatched it twice")
+		}
+		seen[id] = true
+	}
 }
 
 //go:noinline
