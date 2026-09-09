@@ -14,7 +14,11 @@ import (
 // string in the compiler heap while measuring the compiler's own RSS.
 func traceR4MainModule(stage, pkgPath string, mod llvm.Module) bool {
 	dir := os.Getenv("LLGO_R4_LLVM_TRACE")
-	if dir == "" || pkgPath != "main" && pkgPath != "command-line-arguments" {
+	selected := pkgPath == "main" || pkgPath == "command-line-arguments"
+	if pkg := os.Getenv("LLGO_R4_LLVM_TRACE_PACKAGE"); pkg != "" {
+		selected = pkgPath == pkg
+	}
+	if dir == "" || !selected {
 		return false
 	}
 	fmt.Fprintf(os.Stderr, "[r4-llvm-phase] %s %s %s\n", time.Now().UTC().Format(time.RFC3339Nano), pkgPath, stage)

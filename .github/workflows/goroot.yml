@@ -36,6 +36,8 @@ jobs:
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: 'on'
       LLGO_ROOT: ${{ github.workspace }}
+      LLGO_R4_LLVM_TRACE: ${{ runner.temp }}/evidence/llvm-phases
+      LLGO_R4_LLVM_TRACE_PACKAGE: go/types
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-deps

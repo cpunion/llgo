@@ -30,4 +30,11 @@ func TestTraceR4MainModule(t *testing.T) {
 	if err != nil || len(data) < 4 || string(data[:4]) != "BC\xc0\xde" {
 		t.Fatalf("missing bitcode input: %v", err)
 	}
+	t.Setenv("LLGO_R4_LLVM_TRACE_PACKAGE", "go/types")
+	if traceR4MainModule("unselected", "main", mod) {
+		t.Fatal("captured main while selecting a dependency")
+	}
+	if !traceR4MainModule("selected", "go/types", mod) {
+		t.Fatal("missing selected dependency bitcode")
+	}
 }
