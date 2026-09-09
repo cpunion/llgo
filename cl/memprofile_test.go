@@ -126,16 +126,27 @@ func RecordPanicLocation(uintptr, string, string, int) { callerLocationStoreCurr
 		t.Fatalf("active-stack boundary may be inlined before the guard:\n%s", inner)
 	}
 	for _, name := range []string{"PushCallerLocationFrame", "PopCallerLocationFrame", "RecordCallerLocation", "RecordPanicLocation"} {
-		body := compiled.Module().NamedFunction("example.com/capture." + name + "Wasm").String()
+		fn := compiled.Module().NamedFunction("example.com/capture." + name + "Wasm")
+		body := fn.String()
 		if strings.Contains(body, "__llgo_gls_block") || !strings.Contains(body, ".memProfileHasCurrentG") {
 			t.Errorf("%s must guard the raw G without resolving GLS:\n%s", name, body)
 		}
 		if !strings.Contains(body, "; Function Attrs: noinline") || !strings.Contains(body, "example.com/capture."+name+"\"") {
 			t.Errorf("%s must retain a guarded non-inline runtime boundary:\n%s", name, body)
 		}
-		for _, forbidden := range []string{"AssertRuntimeError", "AllocU", "AllocZ", "clite.GoString"} {
-			if strings.Contains(body, forbidden) {
-				t.Errorf("%s must construct trusted literal strings without checks, allocations, or a helper call:\n%s", name, body)
+		// Check all callees, not just direct allocator names: a string-copy
+		// conversion hides its allocations behind runtime.StringFrom.
+		for block := fn.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+			for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+				if call := instruction.IsACallInst(); !call.IsNil() {
+					switch callee := call.CalledValue().Name(); callee {
+					case "example.com/capture.memProfileHasCurrentG", "example.com/capture.MemProfilePause",
+						"example.com/capture.MemProfileResume", "example.com/capture." + name,
+						llssa.PkgRuntime + ".AssertRuntimeError":
+					default:
+						t.Errorf("%s calls unexpected helper %s; caller literals must not be copied", name, callee)
+					}
+				}
 			}
 		}
 	}
