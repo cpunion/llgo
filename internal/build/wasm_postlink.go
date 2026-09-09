@@ -61,7 +61,7 @@ func wasmPostLinkArgs(target *crosscompile.Export, input, output string, debug b
 	return append(args, input, "-o", output)
 }
 
-func wasmPreAsyncifyArgs(target *crosscompile.Export, input, output string, level optlevel.Level) []string {
+func wasmPreAsyncifyArgs(target *crosscompile.Export, input, output string, debug bool, level optlevel.Level) []string {
 	if target == nil || !target.WasmPostLink.Asyncify || !level.IsValid() || level == optlevel.O0 {
 		return nil
 	}
@@ -69,7 +69,12 @@ func wasmPreAsyncifyArgs(target *crosscompile.Export, input, output string, leve
 	// LLGo can disable clang's implicit wasm-opt pass without changing the
 	// established optimization order. Use the same bounded inlining policy in
 	// both passes so the first cannot create an oversized Asyncify input.
-	return []string{level.Flag(), wasmAsyncifyInlineLimit, input, "-o", output}
+	args := []string{level.Flag(), wasmAsyncifyInlineLimit}
+	if debug {
+		// The later Asyncify pass cannot restore names already stripped here.
+		args = append(args, "-g")
+	}
+	return append(args, input, "-o", output)
 }
 
 func prepareWasmLinkOutput(conf *Config, target *crosscompile.Export, output string) (string, error) {
@@ -122,6 +127,7 @@ func postLinkWasm(ctx *context, input, output string, verbose bool) error {
 		&ctx.crossCompile,
 		input,
 		input,
+		shouldEmitDebugInfo(ctx.buildConf, &ctx.crossCompile),
 		ctx.buildConf.OptLevel,
 	)
 	if preAsyncifyArgs != nil {
