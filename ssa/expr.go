@@ -403,6 +403,26 @@ func (b Builder) checkUnsafeBuiltinBounds(name string, data, size Expr, elemSize
 }
 
 func (b Builder) assertRuntimeError(check llvm.Value, msg string) {
+	if b.Prog.target.GOARCH == "wasm" {
+		// A successful unsafe.String/Slice must not call a panic helper.
+		// InlineCall is not an inlining guarantee; these checks also run in
+		// every compiler-generated caller-location string reconstruction.
+		if check.IsConstant() && check.IsNull() {
+			return
+		}
+		logicalBlock := b.blk
+		entryBlock := b.impl.GetInsertBlock()
+		blocks := b.Func.MakeBlocks(2)
+		b.If(Expr{check, b.Prog.Bool()}, blocks[0], blocks[1])
+		b.SetBlockEx(blocks[0], AtEnd, false)
+		b.Call(b.Pkg.rtFunc("AssertRuntimeError"), b.Prog.BoolVal(true), b.Str(msg))
+		b.Jump(blocks[0])
+		b.SetBlockEx(blocks[1], AtEnd, false)
+		if logicalBlock.last == entryBlock {
+			logicalBlock.last = blocks[1].last
+		}
+		return
+	}
 	b.InlineCall(b.Pkg.rtFunc("AssertRuntimeError"), Expr{check, b.Prog.Bool()}, b.Str(msg))
 }
 
