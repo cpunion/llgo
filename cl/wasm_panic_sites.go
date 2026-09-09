@@ -1,0 +1,28 @@
+package cl
+
+import (
+	"go/constant"
+	"go/token"
+	"go/types"
+
+	"golang.org/x/tools/go/ssa"
+)
+
+// Known-safe initializer addresses need no panic-location runtime update.
+// Keep dynamic indexes, slices, and possibly nil array pointers unchanged.
+// Otherwise each field of a generated table introduces a suspendable call
+// that Asyncify must expand despite the address being statically valid.
+func isKnownSafeArrayIndexAddr(address *ssa.IndexAddr) bool {
+	pointer, ok := types.Unalias(address.X.Type()).Underlying().(*types.Pointer)
+	if !ok || !isKnownNonNilAddr(address.X) {
+		return false
+	}
+	array, ok := types.Unalias(pointer.Elem()).Underlying().(*types.Array)
+	if !ok {
+		return false
+	}
+	index, ok := address.Index.(*ssa.Const)
+	return ok && index.Value.Kind() == constant.Int &&
+		constant.Compare(index.Value, token.GEQ, constant.MakeInt64(0)) &&
+		constant.Compare(index.Value, token.LSS, constant.MakeInt64(array.Len()))
+}

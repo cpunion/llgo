@@ -1629,7 +1629,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 		}
 		x := p.compileValue(b, v.X)
-		if v.Op != token.ARROW {
+		if v.Op != token.ARROW && (p.prog.Target().GOARCH != "wasm" || v.Op == token.MUL && !isKnownNonNilAddr(v.X)) {
 			p.recordPanicSite(b, v.Pos())
 		}
 		if shouldAssertDirectNilDeref(v) || v.Op == token.MUL && p.needsWasmNilGuard(v.X) {
@@ -1673,7 +1673,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		ret = b.Convert(p.type_(t, llssa.InGo), x)
 	case *ssa.FieldAddr:
 		x := p.compileValue(b, v.X)
-		p.recordPanicSite(b, v.Pos())
+		if p.prog.Target().GOARCH != "wasm" || !isKnownNonNilAddr(v.X) {
+			p.recordPanicSite(b, v.Pos())
+		}
 		if p.isAddressOfFieldAddr(v) {
 			b.AssertNilDeref(x)
 		}
@@ -1700,7 +1702,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		x := p.compileValue(b, vx)
 		idx := p.compileValue(b, v.Index)
-		p.recordPanicSite(b, v.Pos())
+		if p.prog.Target().GOARCH != "wasm" || !isKnownSafeArrayIndexAddr(v) {
+			p.recordPanicSite(b, v.Pos())
+		}
 		ret = b.IndexAddr(x, idx)
 	case *ssa.Index:
 		x := p.compileValue(b, v.X)
