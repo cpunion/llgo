@@ -114,3 +114,85 @@ func TestGCPacingProgressAndCollection(t *testing.T) {
 		t.Fatal("allocation addition overflowed")
 	}
 }
+
+func TestGCPacingRuntimeRootsPreserveHeapBudget(t *testing.T) {
+	const initialLive = uint64(10 << 20)
+	const stackSize = uint64(128 << 10)
+	for _, percent := range []int32{0, 1, 100} {
+		var p gcPacing
+		p.init(percent, initialLive)
+		initialGoal := p.nextGC()
+		budget := initialGoal - initialLive
+		live := initialLive
+		for range 100 {
+			p.rootAllocated(stackSize)
+			live += stackSize
+			if p.live != live || p.nextGC()-live != budget {
+				t.Fatalf("GOGC=%d: root allocation changed heap budget: %+v", percent, p)
+			}
+			if p.shouldCollect(live, budget-1) || !p.shouldCollect(live, budget) {
+				t.Fatalf("GOGC=%d: Go allocations no longer obey their budget", percent)
+			}
+		}
+		for range 100 {
+			p.rootFreed(stackSize)
+			live -= stackSize
+			if p.live != live || p.nextGC()-live != budget {
+				t.Fatalf("GOGC=%d: root release changed heap budget: %+v", percent, p)
+			}
+		}
+		if p.nextGC() != initialGoal {
+			t.Fatalf("GOGC=%d: releasing roots did not restore original goal", percent)
+		}
+	}
+}
+
+func TestGCPacingRuntimeRootsLifecycle(t *testing.T) {
+	var p gcPacing
+	p.rootAllocated(128 << 10)
+	p.rootFreed(64 << 10)
+	if p.initialized || p.live != 0 || p.nextGC() != disabledGCGoal {
+		t.Fatal("bootstrap root storage initialized pacing")
+	}
+	p.init(-1, 10<<20)
+	p.rootAllocated(128 << 10)
+	p.rootFreed(64 << 10)
+	if p.live != 10<<20+64<<10 || p.nextGC() != disabledGCGoal || p.automatic() {
+		t.Fatalf("root storage changed GOGC=off: %+v", p)
+	}
+	p.setPercent(1, 0)
+	if p.nextGC() != gcHeapGoal(10<<20+64<<10, 1) {
+		t.Fatal("reenabling GC did not include current root storage")
+	}
+	p.collected(9 << 20)
+	if p.live != 9<<20 || p.nextGC() != gcHeapGoal(9<<20, 1) {
+		t.Fatal("collection did not reset the adjusted live baseline")
+	}
+	p.rootFreed(64 << 10)
+	if p.live != 9<<20-64<<10 || p.nextGC() != gcHeapGoal(9<<20, 1)-64<<10 {
+		t.Fatal("root release after collection did not adjust the new baseline")
+	}
+	p.rootAllocated(0)
+	p.rootFreed(0)
+	if p.live != 9<<20-64<<10 {
+		t.Fatal("zero-sized root changed pacing")
+	}
+}
+
+func TestGCPacingRuntimeRootsSaturation(t *testing.T) {
+	var p gcPacing
+	p.init(1, disabledGCGoal-32)
+	p.rootAllocated(64)
+	if p.live != disabledGCGoal || p.nextGC() != disabledGCGoal {
+		t.Fatalf("root allocation overflowed: %+v", p)
+	}
+	p.rootFreed(64)
+	if p.live != disabledGCGoal-64 || p.nextGC() != disabledGCGoal-64 {
+		t.Fatalf("saturated root release overflowed: %+v", p)
+	}
+	p.collected(32)
+	p.rootFreed(64)
+	if p.live != 0 || p.nextGC() != gcHeapGoal(32, 1)-32 {
+		t.Fatalf("root release underflowed: %+v", p)
+	}
+}

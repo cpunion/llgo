@@ -15,3 +15,5 @@ func gcAutomaticAllowed() bool         { return true }
 func gcAllocationDue(size uint64) bool { return false }
 func gcCollectionComplete()            {}
 func gcNextGoal() uint64               { return 0 }
+func gcRootAllocated(size uint64)      {}
+func gcRootFreed(size uint64)          {}
