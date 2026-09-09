@@ -25,8 +25,10 @@ func TestWasmGCPacing(t *testing.T) {
 		t.Run(arch, func(t *testing.T) {
 			ctx, cancel := stdctx.WithTimeout(stdctx.Background(), 30*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "-timeout=20s", "-cover",
-				filepath.Join(dir, "pacing.go"), filepath.Join(dir, "pacing_test.go"))
+			// Use the nested module's language version, not the language
+			// version of the host Go command's synthetic file-list package.
+			cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "-timeout=20s", "-cover", ".")
+			cmd.Dir = dir
 			cmd.Env = append(os.Environ(), "GOARCH="+arch, "CGO_ENABLED=0")
 			output, err := cmd.CombinedOutput()
 			if err != nil {
