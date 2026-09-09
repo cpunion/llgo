@@ -147,6 +147,28 @@ func Pure(x uint) uint { return x + 1 }
 	}
 }
 
+func TestWasmScalarLeafForeignPackage(t *testing.T) {
+	prog := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	for _, kind := range []string{"decl", "decl: intrinsics", "link", "link: -lexternal", "py.foreign"} {
+		t.Run(kind, func(t *testing.T) {
+			pkg, _ := buildCallerFrameSSAPackage(t, "example.com/foreign", fmt.Sprintf(`package foreign
+const LLGoPackage = %q
+func Stub(x uint) uint { return x }
+`, kind))
+			if (&context{prog: prog}).isWasmScalarLeaf(pkg.Func("Stub")) {
+				t.Fatal("foreign declaration's Go placeholder accepted as its implementation")
+			}
+		})
+	}
+	pkg, _ := buildCallerFrameSSAPackage(t, "example.com/cgo", `package cgo
+func _Cfunc_hidden(x uint) uint { return x }
+`)
+	if (&context{prog: prog}).isWasmScalarLeaf(pkg.Func("_Cfunc_hidden")) {
+		t.Fatal("Cgo entry accepted as a Go scalar function")
+	}
+}
+
 func TestWasmScalarLeafCrossPackageAndInstrumentation(t *testing.T) {
 	dep, root := buildCallerFrameSSAProgram(t,
 		"example.com/dep", `package dep

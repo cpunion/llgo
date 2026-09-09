@@ -42,6 +42,11 @@ func (p *context) wasmScalarLeafCost(fn *ssa.Function) int {
 	if _, patched := p.patches[llssa.PathOf(fn.Pkg.Pkg)]; patched {
 		return -1
 	}
+	// Link/decl packages and Cgo entries can carry Go placeholder bodies;
+	// their actual effects belong to foreign code, not this SSA graph.
+	if kind, _ := PkgKindOf(fn.Pkg.Pkg); kind == PkgPyModule || kind >= PkgDeclOnly || isCgoExternSymbol(fn) {
+		return -1
+	}
 	for _, directive := range []string{"go:linkname", "llgo:link", "go:wasmimport", "export", "llgo:env"} {
 		if hasFuncDirective(fn, directive) {
 			return -1
