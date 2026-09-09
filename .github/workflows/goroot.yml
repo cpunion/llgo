@@ -7,7 +7,7 @@ on:
         description: CPU sampling or unchanged full-package verification
         type: choice
         default: profile
-        options: [profile, verify, unit, coverage-auth, build-trace, base-coverage, opt-trace]
+        options: [profile, verify, unit, coverage-auth, build-trace, base-coverage, opt-trace, complex-verify]
 
 permissions:
   contents: read
@@ -102,26 +102,37 @@ jobs:
           override_branch: codex/wasm-r4-main-base-20260907
 
   build-trace:
-    if: github.repository_owner == 'cpunion' && inputs.mode == 'build-trace'
+    if: github.repository_owner == 'cpunion' && (inputs.mode == 'build-trace' || inputs.mode == 'complex-verify')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(inputs.mode == 'complex-verify' && '["EC32","EC64","WC32","GJS","GWASI"]' || '["EC64"]') }}
     env:
       GOMAXPROCS: '2'
       BINARYEN_CORES: '2'
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: 'on'
       LLGO_ROOT: ${{ github.workspace }}
+      PROFILE: ${{ matrix.profile }}
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
       - uses: emscripten-core/setup-emsdk@v15
+        if: matrix.profile == 'EC32' || matrix.profile == 'EC64' || matrix.profile == 'GJS'
         with:
           version: '4.0.21'
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        if: matrix.profile == 'WC32' || matrix.profile == 'GWASI'
+        with:
+          version: '39.0.1'
       - uses: ./.github/actions/setup-go
       - name: Build compiler and unchanged GOROOT runner
         env:
@@ -131,7 +142,7 @@ jobs:
           mkdir "$R4_TRACE_DIR"
           go build -o "$R4_TRACE_LLGO" ./cmd/llgo
           go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
-      - name: Trace the original EC64 case within its existing budget
+      - name: Trace the original complex table within its existing budget
         env:
           R4_TRACE_LLGO: ${{ runner.temp }}/llgo
           R4_TRACE_DIR: ${{ runner.temp }}/evidence
@@ -145,7 +156,7 @@ jobs:
             "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
               -test.count=1 -test.timeout=10m -goroot "$target_goroot" \
               -llgo "$GITHUB_WORKSPACE/dev/r4_cmplxdivide_trace.sh" \
-              -wasm-profile EC64 -directive-mode ci -case '^cmplxdivide\.go$' \
+              -wasm-profile "$PROFILE" -directive-mode ci -case '^cmplxdivide\.go$' \
               -report "$R4_TRACE_DIR/goroot.json" -progress 30s \
               -max-rss-mib 4096 -rss-warn-mib 1024 \
               -min-memory-free-percent 15 -min-swap-free-mib 512
@@ -161,7 +172,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: r4-cmplxdivide-EC64-build-trace
+          name: r4-cmplxdivide-${{ matrix.profile }}-build-trace
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
 
