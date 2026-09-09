@@ -14,6 +14,7 @@ on:
           - runtime-only
           - copy-only
           - cmplx-only
+          - gc-only
 
 permissions:
   contents: read
@@ -270,14 +271,14 @@ jobs:
           retention-days: 3
 
   resource-probes:
-    if: github.repository_owner == 'cpunion' && (inputs.mode == 'resource-probes' || inputs.mode == 'recover-only' || inputs.mode == 'runtime-only' || inputs.mode == 'cmplx-only')
+    if: github.repository_owner == 'cpunion' && (inputs.mode == 'resource-probes' || inputs.mode == 'recover-only' || inputs.mode == 'runtime-only' || inputs.mode == 'cmplx-only' || inputs.mode == 'gc-only')
     name: Bounded resource probes (${{ matrix.profile }})
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        profile: ${{ fromJSON(inputs.mode == 'runtime-only' && '["GWASI"]' || inputs.mode == 'cmplx-only' && '["EC64", "GWASI"]' || '["EC32", "GWASI"]') }}
+        profile: ${{ fromJSON(inputs.mode == 'runtime-only' && '["GWASI"]' || (inputs.mode == 'cmplx-only' || inputs.mode == 'gc-only') && '["EC64", "GWASI"]' || '["EC32", "GWASI"]') }}
     env:
       GOMAXPROCS: '2'
       BINARYEN_CORES: '2'
@@ -309,7 +310,7 @@ jobs:
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
           go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
       - name: Preserve the original compile and optimizer inputs
-        if: inputs.mode != 'runtime-only'
+        if: inputs.mode != 'runtime-only' && inputs.mode != 'gc-only'
         env:
           PROFILE: ${{ matrix.profile }}
           MODE: ${{ inputs.mode }}
@@ -320,6 +321,49 @@ jobs:
             --llgo "$RUNNER_TEMP/llgo" --runner "$RUNNER_TEMP/goroot-runner" \
             --goroot "$(go env GOROOT)" --output "$RUNNER_TEMP/recover-probe" \
             --profile "$PROFILE" --case "$probe_case" --clang-passes
+      - name: Exhaust collector metadata states and run original GC workloads
+        if: inputs.mode == 'gc-only'
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          evidence="$RUNNER_TEMP/gc-probe"
+          mkdir "$evidence"
+          go test ./internal/build -run '^TestWasmGCMetadata$' -count=1 -timeout=60s -v \
+            > "$evidence/metadata.log" 2>&1 || { cat "$evidence/metadata.log"; exit 1; }
+          args=()
+          if [[ "$PROFILE" == EC64 ]]; then
+            args=(-target emscripten-memory64)
+            module="$evidence/gc.mjs"
+            command=(node targets/emscripten-memory64-runner.mjs "$module")
+          else
+            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
+            module="$evidence/gc.wasm"
+            command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC
+              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
+          fi
+          timeout 5m "$RUNNER_TEMP/llgo" build "${args[@]}" -o "$module" \
+            ./internal/build/testdata/wasm-gc > "$evidence/gc-build.log" 2>&1 || {
+              cat "$evidence/gc-build.log"; exit 1;
+            }
+          for policy in 100 1; do
+            GOGC="$policy" timeout 60s "${command[@]}" > "$evidence/gc-$policy.log" 2>&1 || {
+              cat "$evidence/gc-$policy.log"; exit 1;
+            }
+            grep -Fxq 'wasm gc ok' "$evidence/gc-$policy.log"
+          done
+          # The host-side runner configures the target environment itself.
+          unset GOOS GOARCH CGO_ENABLED
+          cd test/goroot
+          "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
+            -test.count=1 -test.timeout=20m -llgo "$RUNNER_TEMP/llgo" \
+            -goroot "$(go env GOROOT)" -wasm-profile "$PROFILE" \
+            -directive-mode coverage -directives run,runoutput \
+            -case '^(gcgort\.go|chan/goroutines\.go|fixedbugs/(issue22781|issue27695|issue78081)\.go)$' \
+            -shard-index 0 -shard-total 1 -max-rss-mib 4096 -rss-warn-mib 1024 \
+            -build-timeout 180s -run-timeout 60s -progress 60s \
+            -report "$evidence/goroot-$PROFILE.json" > "$evidence/goroot-$PROFILE.log" 2>&1 || {
+              cat "$evidence/goroot-$PROFILE.log"; exit 1;
+            }
       - name: Capture bounded execution stacks of original goroutine workloads
         if: ${{ !cancelled() && matrix.profile == 'GWASI' && (inputs.mode == 'resource-probes' || inputs.mode == 'runtime-only') }}
         run: |
@@ -362,5 +406,6 @@ jobs:
           path: |
             ${{ runner.temp }}/recover-probe/evidence
             ${{ runner.temp }}/runtime-probe
+            ${{ runner.temp }}/gc-probe
           if-no-files-found: error
           retention-days: 3
