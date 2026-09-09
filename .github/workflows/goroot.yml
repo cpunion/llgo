@@ -222,6 +222,17 @@ jobs:
           PROFILE: ${{ matrix.profile }}
         run: |
           evidence="$RUNNER_TEMP/evidence"
+          bounded_build() {
+            PYTHONPATH=dev python3 - "$evidence" "$@" <<'PY'
+          import sys
+          from pathlib import Path
+          from wasm_optimizer_replay import bounded_run
+          ok = bounded_run(sys.argv[2], sys.argv[3:], Path(sys.argv[1]), seconds=300)
+          if not ok:
+              print((Path(sys.argv[1]) / sys.argv[2] / "output.log").read_text())
+          raise SystemExit(0 if ok else 1)
+          PY
+          }
           args=()
           if [[ "$PROFILE" == EC64 ]]; then
             args=(-target emscripten-memory64)
@@ -230,11 +241,8 @@ jobs:
             export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
             module="$evidence/recover.wasm"
           fi
-          /usr/bin/time -v timeout 5m "$RUNNER_TEMP/llgo" build "${args[@]}" \
-            -o "$module" "$(go env GOROOT)/test/recover.go" \
-            > "$evidence/recover-build.log" 2>&1 || {
-              cat "$evidence/recover-build.log"; exit 1;
-            }
+          bounded_build recover-build "$RUNNER_TEMP/llgo" build "${args[@]}" \
+            -o "$module" "$(go env GOROOT)/test/recover.go"
           if [[ "$PROFILE" == EC64 ]]; then
             command=(node targets/emscripten-memory64-runner.mjs "$module")
           else
@@ -249,11 +257,8 @@ jobs:
             printf 'original recover GOGC=%s PASS\n' "$policy"
           done
           if [[ "$PROFILE" == GWASI ]]; then
-            /usr/bin/time -v timeout 5m "$RUNNER_TEMP/llgo" test -c \
-              -o "$evidence/importer.wasm" ./test/std/go/importer \
-              > "$evidence/importer-build.log" 2>&1 || {
-                cat "$evidence/importer-build.log"; exit 1;
-              }
+            bounded_build importer-build "$RUNNER_TEMP/llgo" test -c \
+              -o "$evidence/importer.wasm" ./test/std/go/importer
             timeout 60s wasmtime run --dir=/ --env PWD --env PATH \
               -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/importer.wasm" \
               -test.v -test.timeout=45s > "$evidence/importer.log" 2>&1 || {
