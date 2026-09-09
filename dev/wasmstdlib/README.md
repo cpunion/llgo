@@ -151,6 +151,12 @@ automatic GC; explicit `runtime.GC` remains available. With automatic collection
 disabled, exhausted capacity grows or reports OOM instead of silently collecting.
 `runtime.MemStats.NextGC` reports the current allocation goal.
 
+Runtime-owned stacks and scheduler records share the collector's arena with Go
+objects. Allocating or explicitly releasing these roots adjusts both the live
+baseline and the goal, preserving the remaining Go-object allocation budget.
+The roots remain fully traced and included in the arena's memory statistics;
+collection still includes their scanning cost when computing the next goal.
+
 This is a synchronous, non-moving collector, not Go's concurrent GC algorithm.
 Its low-percentage policy guarantees at least 64 KiB of allocation progress
 between collections; it does not implement Go's soft memory limit. Focused CI
