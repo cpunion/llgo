@@ -902,6 +902,9 @@ func (p *context) shouldTrackCallerFrames() bool {
 	if !p.runtimeCallerFuncs[p.goFn] && !p.memoryProfileFuncs[p.goFn] {
 		return false
 	}
+	if p.isWasmScalarLeaf(p.goFn) {
+		return false
+	}
 	if target := p.prog.Target(); target != nil && target.Target != "" && target.GOARCH != "wasm" {
 		return false
 	}
@@ -2030,6 +2033,11 @@ func (p *context) recordCallerLocationForCall(b llssa.Builder, call *ssa.CallCom
 		return
 	}
 	callee := call.StaticCallee()
+	if p.isWasmScalarLeaf(callee) {
+		// The same proof omits the callee's entry poll and shadow frame: it
+		// cannot suspend, allocate, panic, or inspect its caller's location.
+		return
+	}
 	if isRuntimeCallerLookupFunc(callee) {
 		p.recordCallerLocation(b, call.Pos())
 		return
