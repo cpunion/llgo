@@ -163,6 +163,18 @@ func gcFindHead(blockAddr uintptr) uintptr {
 		// large allocation.
 		stateByte := gcStateByteOf(blockAddr)
 		if stateByte == blockStateByteAllTails {
+			// Large Fiber buffers contain long runs of tail metadata. Read
+			// one aligned machine word when it lies entirely inside the
+			// already-addressable prefix; otherwise retain the byte path.
+			const wordSize = unsafe.Sizeof(uintptr(0))
+			stateAddress := uintptr(metadataStart) + blockAddr/blocksPerStateByte
+			if stateAddress%wordSize == wordSize-1 && blockAddr/blocksPerStateByte >= wordSize {
+				word := *(*uintptr)(unsafe.Add(metadataStart, blockAddr/blocksPerStateByte-(wordSize-1)))
+				if word == ^uintptr(0)/0xff*uintptr(blockStateByteAllTails) {
+					blockAddr -= blockAddr%blocksPerStateByte + (wordSize-1)*blocksPerStateByte + 1
+					continue
+				}
+			}
 			blockAddr -= (blockAddr % blocksPerStateByte) + 1
 			continue
 		}
@@ -205,6 +217,16 @@ func gcFindNext(blockAddr uintptr) uintptr {
 	for blockAddr < endBlock {
 		stateByte := gcStateByteOf(blockAddr)
 		if stateByte == blockStateByteAllTails {
+			const wordSize = unsafe.Sizeof(uintptr(0))
+			stateAddress := uintptr(metadataStart) + blockAddr/blocksPerStateByte
+			firstBlock := blockAddr - blockAddr%blocksPerStateByte
+			if stateAddress%wordSize == 0 && endBlock-firstBlock >= wordSize*blocksPerStateByte {
+				word := *(*uintptr)(unsafe.Add(metadataStart, blockAddr/blocksPerStateByte))
+				if word == ^uintptr(0)/0xff*uintptr(blockStateByteAllTails) {
+					blockAddr = firstBlock + wordSize*blocksPerStateByte
+					continue
+				}
+			}
 			// Mirror gcFindHead: stack buffers have long runs of tails. One
 			// metadata byte describes four blocks, including a partial byte at
 			// the beginning or end of the range.
