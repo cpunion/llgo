@@ -452,6 +452,8 @@ func TestCrossPackageMixedInitializerGroup(t *testing.T) {
 	}
 	done := make(chan result)
 	go func() {
+		runtime.GC()
+		runtime.GC()
 		scalar := localityscope.MixedScalar()
 		address := localityscope.MixedScalarAddress()
 		done <- result{
