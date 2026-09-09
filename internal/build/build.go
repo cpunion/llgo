@@ -2553,15 +2553,22 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 		if err != nil {
 			return err
 		}
-		if rootObject != "" || funcInfoRelink.stdoutProbe {
+		staticRootObject, err := funcInfoRelink.staticRootObject(ctx)
+		if err != nil {
+			return err
+		}
+		if rootObject != "" || staticRootObject != "" || funcInfoRelink.stdoutProbe {
 			cmd = ctx.linker()
 			cmd.Verbose = printCmds
 			finalArgs := slices.Clone(buildArgs)
 			if rootObject != "" {
 				finalArgs = append(finalArgs, rootObject)
 			}
+			if staticRootObject != "" {
+				finalArgs = append(finalArgs, staticRootObject)
+			}
 			if err := cmd.Link(finalArgs...); err != nil {
-				return fmt.Errorf("relink WebAssembly funcinfo entries: %w", err)
+				return fmt.Errorf("relink WebAssembly support objects: %w", err)
 			}
 		} else if err := funcInfoRelink.publishProbeMap(cmd.Stdout); err != nil {
 			return err

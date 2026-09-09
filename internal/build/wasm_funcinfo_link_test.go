@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	llssa "github.com/xgo-dev/llgo/ssa"
@@ -33,6 +35,61 @@ func TestWasmLinkMapOutput(t *testing.T) {
 				t.Fatalf("map = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWasmMutableDataStart(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		text string
+		want uint64
+		ok   bool
+	}{
+		{"data", "  400 100 200 .rodata\n  600 300 40 .data\n", 0x600, true},
+		{"bss-only", "  800 0 20 .bss\n", 0x800, true},
+		{"malformed", "  nope 300 40 .data\n", 0, false},
+		{"unrelated", "  600 300 40 llgo_gc_noscan\n", 0, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := wasmMutableDataStart(test.text)
+			if got != test.want || ok != test.ok {
+				t.Fatalf("start = %#x/%t, want %#x/%t", got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+func TestWasmStaticRootObject(t *testing.T) {
+	nm, err := exec.LookPath("llvm-nm")
+	if err != nil {
+		t.Fatalf("llvm-nm is required: %v", err)
+	}
+	prog := llssa.NewProgram(&llssa.Target{
+		GOOS: "wasip1", GOARCH: "wasm", LLVMTarget: "wasm32-unknown-unknown",
+	})
+	defer prog.Dispose()
+	prog.EnableGCRoots(true)
+	dir := t.TempDir()
+	ctx := &context{prog: prog, buildConf: &Config{Goarch: "wasm", BuildMode: BuildModeExe}}
+	ctx.commands.dir = dir
+	plan, err := prepareWasmFuncInfoRelink(ctx, filepath.Join(dir, "out.wasm"), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plan.cleanup()
+	if plan == nil || !plan.gcRoots {
+		t.Fatalf("linear GC did not request a static-root relink: %+v", plan)
+	}
+	if err := os.WriteFile(plan.mapPath, []byte("  12340 400 80 .data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	object, err := plan.staticRootObject(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command(nm, "--defined-only", object).CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "llgo_gc_globals_start") {
+		t.Fatalf("static-root object lacks its strong getter: %v\n%s", err, output)
 	}
 }
 

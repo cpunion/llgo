@@ -22,7 +22,10 @@ extern unsigned char __stop_llgo_gc_noscan;
 
 #define LLGO_WASM_PAGE_SIZE 65536
 
-uintptr_t llgo_gc_globals_start(void) {
+/* The first probe link uses this fallback. LLGo's final link supplies a strong
+ * constant-returning definition at the first mutable data segment, so packed
+ * immutable data is never treated as a conservative Go root. */
+__attribute__((weak)) uintptr_t llgo_gc_globals_start(void) {
 	return (uintptr_t)&__global_base;
 }
 
