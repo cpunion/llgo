@@ -28,9 +28,6 @@ jobs:
       LLGO_ROOT: ${{ github.workspace }}
       LLGO_BUILD_CACHE: 'on'
       LLGO_WASI_THREADS: '0'
-      GOOS: js
-      GOARCH: wasm
-      CGO_ENABLED: '0'
     steps:
       - uses: actions/checkout@v7
       - name: Ignore the unrelated Chrome apt mirror for this compiler-only job
@@ -56,7 +53,8 @@ jobs:
           mkdir "$RUNNER_TEMP/evidence"
           git rev-parse HEAD | tee "$RUNNER_TEMP/evidence/source-head.txt"
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
-          timeout 5m "$RUNNER_TEMP/llgo" build \
+          GOOS=js GOARCH=wasm CGO_ENABLED=0 timeout 5m \
+            "$RUNNER_TEMP/llgo" build \
             -o "$RUNNER_TEMP/evidence/lifecycle.mjs" \
             ./internal/build/testdata/wasm-lifecycle \
             2>&1 | tee "$RUNNER_TEMP/evidence/build.log"
