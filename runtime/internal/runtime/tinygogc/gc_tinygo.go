@@ -491,6 +491,7 @@ func GC() uintptr {
 // free bytes in the heap after the GC is finished.
 func gc() (freeBytes uintptr) {
 	lazyInit()
+	r4GCVolume = r4GCVolumeCounters{}
 
 	if gcDebug {
 		println("running collection cycle...")
@@ -513,6 +514,9 @@ func gc() (freeBytes uintptr) {
 	freeBytes = sweep()
 	gcCollectionComplete()
 	gcNumGC++
+	if gcNumGC <= 4 || gcNumGC%32 == 0 {
+		r4ReportGCVolume()
+	}
 
 	return
 }
@@ -528,6 +532,9 @@ func markRoots(start, end uintptr) {
 	// Reduce the end bound to avoid reading too far on platforms where pointer alignment is smaller than pointer size.
 	// If the size of the range is 0, then end will be slightly below start after this.
 	end -= unsafe.Sizeof(end) - unsafe.Alignof(end)
+	if end > start {
+		r4GCVolume.rootWords += uint64((end - start) / unsafe.Alignof(start))
+	}
 
 	for addr := start; addr < end; addr += unsafe.Alignof(addr) {
 		root := *(*uintptr)(unsafe.Pointer(addr))
@@ -549,6 +556,12 @@ func startMark(root uintptr) {
 		endBlock := gcFindNext(block)
 		markHeads.remember(block, endBlock)
 		start, end := gcAddressOf(block), gcAddressOf(endBlock)
+		r4GCVolume.scans++
+		words := uint64((end - start) / unsafe.Alignof(start))
+		r4GCVolume.words += words
+		if end-start >= 64<<10 {
+			r4GCVolume.largeWords += words
+		}
 
 		for addr := start; addr != end; addr += unsafe.Alignof(addr) {
 			// Load the word.
@@ -581,6 +594,7 @@ func startMark(root uintptr) {
 			gcSetState(referencedBlock, blockStateMark)
 
 			if stackLen == len(stack) {
+				r4GCVolume.overflows++
 				// The stack is full.
 				// It is necessary to rescan all marked blocks once we are done.
 				markStackOverflow = true

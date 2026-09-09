@@ -1,310 +1,16 @@
-name: GOROOT
+name: R4 GC scan-volume diagnostic
 
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: Focused correctness or bounded resource diagnostics
-        type: choice
-        default: correctness
-        options:
-          - correctness
-          - resource-probes
-          - recover-only
-          - runtime-only
-          - copy-only
-          - cmplx-only
-          - gc-only
-          - compile-phases
-          - postlink-only
 
 permissions:
   contents: read
 
 jobs:
-  diagnose:
-    if: github.repository_owner == 'cpunion' && (inputs.mode == '' || inputs.mode == 'correctness' || inputs.mode == 'copy-only')
+  volume:
+    if: github.repository_owner == 'cpunion'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [EC64, GWASI]
-    env:
-      GOMAXPROCS: '2'
-      BINARYEN_CORES: '2'
-      GOFLAGS: -tags=llvm22
-      LLGO_BUILD_CACHE: 'on'
-      LLGO_ROOT: ${{ github.workspace }}
-      LLGO_R4_LLVM_TRACE_PACKAGE: go/types
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-deps
-        with:
-          llvm-version: 22
-      - uses: emscripten-core/setup-emsdk@v15
-        if: matrix.profile == 'EC64'
-        with:
-          version: '4.0.21'
-      - uses: actions/setup-node@v7
-        if: matrix.profile == 'EC64'
-        with:
-          node-version: '24'
-      - uses: ./.github/actions/setup-binaryen
-      - uses: bytecodealliance/actions/wasmtime/setup@v1
-        if: matrix.profile == 'GWASI'
-        with:
-          version: '39.0.1'
-      - uses: ./.github/actions/setup-go
-      - name: Build compiler
-        run: |
-          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
-          mkdir "$RUNNER_TEMP/evidence"
-          echo "LLGO_R4_LLVM_TRACE=$RUNNER_TEMP/evidence/llvm-phases" >> "$GITHUB_ENV"
-      - name: Preserve unchanged postlink inputs for bounded builds
-        if: matrix.profile == 'GWASI'
-        run: |
-          wrapper="$RUNNER_TEMP/evidence/optimizer-bin/wasm-opt"
-          mkdir "$RUNNER_TEMP/evidence/optimizer-bin"
-          ln -s "$GITHUB_WORKSPACE/dev/wasm_build_diagnostics.py" "$wrapper"
-          {
-            echo "LLGO_DIAG_REAL_WASMOPT=$(command -v wasm-opt)"
-            echo "LLGO_DIAG_EVIDENCE=$RUNNER_TEMP/evidence/optimizer"
-            echo "WASMOPT=$wrapper"
-          } >> "$GITHUB_ENV"
-      - name: Check late-allocation root lowering
-        if: matrix.profile == 'EC64'
-        run: |
-          go test ./internal/abi ./ssa ./cl \
-            -run 'Test(LowerLarge|LowerWasmAggregateCopies|LargeAggregate|Compile.*GCRoot|GCSafepoint|.*GCRoot.*|PruneStableWasmRoot|CompileStableWasmRoot|WasmSafePanicSites|KnownSafeArrayIndexAddrBounds|WasmUnsafeRuntimeErrorGuards)' \
-            -count=1 -coverprofile="$RUNNER_TEMP/evidence/compiler.cover"
-          go test ./internal/build -run '^Test(WasmStackAddresses|CoalesceWasmPanicLocations|LowerWasmAggregateCopies|WasmPreAsyncify|WasmPostLink|PostLinkWasm|LowerLargeAggregatesGCPolicy)' \
-            -count=1 -coverprofile="$RUNNER_TEMP/evidence/build-policy.cover"
-      - name: Exercise aggregate snapshots and iterators across GC
-        if: matrix.profile == 'EC64'
-        run: |
-          set -o pipefail
-          timeout 5m "$RUNNER_TEMP/llgo" test -c -target emscripten-memory64 \
-            -o "$RUNNER_TEMP/evidence/aggregate.mjs" ./internal/build/testdata/wasm-test
-          test -s "$RUNNER_TEMP/evidence/aggregate.wasm"
-          GOGC=1 timeout 60s node targets/emscripten-memory64-runner.mjs \
-            "$RUNNER_TEMP/evidence/aggregate.mjs" \
-            -test.v '-test.run=^Test((Large(Aggregate|Struct|Reflection)|RangeIterator|InteriorAlias)GCRoots|Caller.*|PanicRecoverAndCaller|NilPointerAndFunctionRecovery|NilStoreOperandOrder|UnsafeBuiltinBounds)$' -test.count=3 -test.timeout=45s \
-            2>&1 | tee "$RUNNER_TEMP/evidence/aggregate.log"
-      - name: Preserve and run original EC64 index program
-        if: matrix.profile == 'EC64'
-        run: |
-          set -o pipefail
-          evidence="$RUNNER_TEMP/evidence"
-          goroot="$(go env GOROOT)"
-          go run "$goroot/test/index0.go" "$goroot/test/index.go" > "$evidence/index-generated.go"
-          failed=0
-          for mode in original checked; do
-            extra=()
-            if [[ "$mode" == checked ]]; then
-              extra=(-ldflags=-extldflags=-sSTACK_OVERFLOW_CHECK=2)
-            fi
-            timeout 5m "$RUNNER_TEMP/llgo" build -target emscripten-memory64 \
-              "${extra[@]}" -o "$evidence/index-$mode.mjs" "$evidence/index-generated.go" \
-              > "$evidence/build-$mode.log" 2>&1 || { cat "$evidence/build-$mode.log"; exit 1; }
-            test -s "$evidence/index-$mode.mjs"
-            test -s "$evidence/index-$mode.wasm"
-            for policy in 100 off; do
-              status=0
-              GOGC="$policy" timeout 60s node targets/emscripten-memory64-runner.mjs \
-                "$evidence/index-$mode.mjs" > "$evidence/run-$mode-$policy.log" 2>&1 || status=$?
-              printf '%s GOGC=%s status=%s\n' "$mode" "$policy" "$status" | tee -a "$evidence/verdict.txt"
-              cat "$evidence/run-$mode-$policy.log"
-              if [[ "$status" != 0 || -s "$evidence/run-$mode-$policy.log" ]]; then failed=1; fi
-            done
-          done
-          exit "$failed"
-      - name: Preserve GWASI exit-status binary and compare GC settings
-        if: matrix.profile == 'GWASI'
-        run: |
-          set -o pipefail
-          evidence="$RUNNER_TEMP/evidence"
-          GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 timeout 5m "$RUNNER_TEMP/llgo" test \
-            -c -o "$evidence/exit.wasm" ./internal/build/testdata/wasm-test \
-            > "$evidence/build.log" 2>&1 || { cat "$evidence/build.log"; exit 1; }
-          test -s "$evidence/exit.wasm"
-          failed=0
-          GOGC=1 timeout 60s wasmtime run --dir=/ --env PWD --env PATH --env GOGC \
-            -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/exit.wasm" \
-            -test.v -test.count=3 -test.timeout=45s '-test.run=^Test((Large(Aggregate|Struct|Reflection)|RangeIterator|InteriorAlias)GCRoots|Caller.*|PanicRecoverAndCaller|NilPointerAndFunctionRecovery|NilStoreOperandOrder|UnsafeBuiltinBounds)$' \
-            2>&1 | tee "$evidence/aggregate.log" || failed=1
-          for iteration in {1..10}; do
-          for policy in 100 off 1; do
-            log="$evidence/run-$policy-$iteration.log"
-            status=0
-            timeout 60s wasmtime run --dir=/ --env PWD --env PATH --env "GOGC=$policy" \
-              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/exit.wasm" \
-              -test.v -test.count=1 -test.timeout=30s \
-              '-test.run=^Test(IntentionalHostExitFailure|NilStoreOperandOrder|NilPointerAndFunctionRecovery)$' \
-              -llgo.intentional-exit-failure > "$log" 2>&1 || status=$?
-            printf 'iteration=%s GOGC=%s status=%s\n' "$iteration" "$policy" "$status" | tee -a "$evidence/verdict.txt"
-            cat "$log"
-            if [[ "$status" != 1 ]] ||
-              ! grep -Fq 'intentional wasm exit-status probe' "$log" ||
-              ! grep -Eq '^--- FAIL: TestIntentionalHostExitFailure' "$log" ||
-              ! grep -Eq '^--- PASS: TestNilStoreOperandOrder' "$log" ||
-              ! grep -Eq '^--- PASS: TestNilPointerAndFunctionRecovery' "$log"; then failed=1; fi
-          done
-          done
-          exit "$failed"
-      - name: Check cold synthetic-PC registry with allocation profiling
-        if: ${{ !cancelled() }}
-        env:
-          PROFILE: ${{ matrix.profile }}
-        run: |
-          set -o pipefail
-          evidence="$RUNNER_TEMP/evidence"
-          args=()
-          if [[ "$PROFILE" == EC64 ]]; then
-            args=(-target emscripten-memory64)
-            module="$evidence/profile.mjs"
-          else
-            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
-            module="$evidence/profile.wasm"
-          fi
-          timeout 5m "$RUNNER_TEMP/llgo" build "${args[@]}" -o "$module" \
-            ./internal/build/testdata/wasm-profile-reentry > "$evidence/profile-build.log" 2>&1 || {
-              cat "$evidence/profile-build.log"; exit 1;
-            }
-          for policy in 100 off 1; do
-            for mode in on off; do
-              log="$evidence/profile-$policy-$mode.log"
-              if [[ "$PROFILE" == EC64 ]]; then
-                command=(node targets/emscripten-memory64-runner.mjs "$module")
-              else
-                command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC
-                  -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
-              fi
-              GOGC="$policy" timeout 60s "${command[@]}" "$mode" > "$log" 2>&1 || {
-                cat "$log"; exit 1;
-              }
-              printf 'cold registry GOGC=%s profiling=%s PASS\n' "$policy" "$mode"
-            done
-          done
-      - name: Compile and execute the original complex-division table
-        if: ${{ !cancelled() && inputs.mode != 'copy-only' }}
-        env:
-          PROFILE: ${{ matrix.profile }}
-        run: |
-          evidence="$RUNNER_TEMP/evidence"
-          goroot="$(go env GOROOT)"
-          args=()
-          if [[ "$PROFILE" == EC64 ]]; then
-            args=(-target emscripten-memory64)
-            module="$evidence/cmplxdivide.mjs"
-          else
-            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
-            module="$evidence/cmplxdivide.wasm"
-          fi
-          PYTHONPATH=dev python3 - "$evidence" "$RUNNER_TEMP/llgo" build "${args[@]}" -o "$module" \
-            "$goroot/test/cmplxdivide.go" "$goroot/test/cmplxdivide1.go" <<'PY'
-          import sys
-          from pathlib import Path
-          from wasm_optimizer_replay import bounded_run
-          evidence = Path(sys.argv[1])
-          ok = bounded_run("cmplxdivide-build", sys.argv[2:], evidence, seconds=300)
-          if not ok:
-              print((evidence / "cmplxdivide-build" / "output.log").read_text())
-          raise SystemExit(0 if ok else 1)
-          PY
-          for policy in 100 1; do
-            log="$evidence/cmplxdivide-$policy.log"
-            if [[ "$PROFILE" == EC64 ]]; then
-              command=(node targets/emscripten-memory64-runner.mjs "$module")
-            else
-              command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC
-                -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
-            fi
-            GOGC="$policy" /usr/bin/time -v -o "$evidence/cmplxdivide-$policy-time.txt" \
-              timeout 60s "${command[@]}" > "$log" 2>&1 || {
-                cat "$log"; exit 1;
-              }
-            test ! -s "$log" || { cat "$log"; exit 1; }
-            printf 'original cmplxdivide GOGC=%s PASS\n' "$policy"
-          done
-      - name: Preserve source, modules, and bounded execution evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: r4-runtime-${{ matrix.profile }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/evidence
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Compile and execute original recover and full importer tests
-        if: ${{ !cancelled() }}
-        env:
-          PROFILE: ${{ matrix.profile }}
-        run: |
-          evidence="$RUNNER_TEMP/evidence"
-          bounded_build() {
-            PYTHONPATH=dev python3 - "$evidence" "$@" <<'PY'
-          import sys
-          from pathlib import Path
-          from wasm_optimizer_replay import bounded_run
-          ok = bounded_run(sys.argv[2], sys.argv[3:], Path(sys.argv[1]), seconds=300)
-          if not ok:
-              print((Path(sys.argv[1]) / sys.argv[2] / "output.log").read_text())
-          raise SystemExit(0 if ok else 1)
-          PY
-          }
-          args=()
-          if [[ "$PROFILE" == EC64 ]]; then
-            args=(-target emscripten-memory64)
-            module="$evidence/recover.mjs"
-          else
-            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
-            module="$evidence/recover.wasm"
-          fi
-          bounded_build recover-build "$RUNNER_TEMP/llgo" build "${args[@]}" \
-            -o "$module" "$(go env GOROOT)/test/recover.go"
-          if [[ "$PROFILE" == EC64 ]]; then
-            command=(node targets/emscripten-memory64-runner.mjs "$module")
-          else
-            command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC
-              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
-          fi
-          for policy in 100 1; do
-            GOGC="$policy" timeout 60s "${command[@]}" > "$evidence/recover-$policy.log" 2>&1 || {
-              cat "$evidence/recover-$policy.log"; exit 1;
-            }
-            test ! -s "$evidence/recover-$policy.log" || { cat "$evidence/recover-$policy.log"; exit 1; }
-            printf 'original recover GOGC=%s PASS\n' "$policy"
-          done
-          if [[ "$PROFILE" == GWASI ]]; then
-            bounded_build importer-build "$RUNNER_TEMP/llgo" test -c \
-              -o "$evidence/importer.wasm" ./test/std/go/importer
-            timeout 60s wasmtime run --dir=/ --env PWD --env PATH \
-              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/importer.wasm" \
-              -test.v -test.timeout=45s > "$evidence/importer.log" 2>&1 || {
-                cat "$evidence/importer.log"; exit 1;
-              }
-            cat "$evidence/importer.log"
-            grep -q '^PASS$' "$evidence/importer.log"
-          fi
-      - name: Upload recovery and importer evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: r4-copy-validation-${{ matrix.profile }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/evidence
-          if-no-files-found: error
-          retention-days: 3
-
-  resource-probes:
-    if: github.repository_owner == 'cpunion' && (inputs.mode == 'resource-probes' || inputs.mode == 'recover-only' || inputs.mode == 'runtime-only' || inputs.mode == 'cmplx-only' || inputs.mode == 'gc-only' || inputs.mode == 'compile-phases')
-    name: Bounded resource probes (${{ matrix.profile }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: ${{ fromJSON(inputs.mode == 'runtime-only' && '["GWASI"]' || (inputs.mode == 'cmplx-only' || inputs.mode == 'gc-only' || inputs.mode == 'compile-phases') && '["EC64", "GWASI"]' || '["EC32", "GWASI"]') }}
+    timeout-minutes: 12
     env:
       GOMAXPROCS: '2'
       BINARYEN_CORES: '2'
@@ -316,207 +22,49 @@ jobs:
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
-      - uses: emscripten-core/setup-emsdk@v15
-        if: matrix.profile == 'EC32' || matrix.profile == 'EC64'
-        with:
-          version: '4.0.21'
-      - uses: actions/setup-node@v7
-        if: matrix.profile == 'EC32' || matrix.profile == 'EC64'
-        with:
-          node-version: '24'
       - uses: ./.github/actions/setup-binaryen
       - uses: bytecodealliance/actions/wasmtime/setup@v1
-        if: matrix.profile == 'GWASI'
         with:
           version: '39.0.1'
       - uses: ./.github/actions/setup-go
-      - name: Build compiler and check diagnostic wrappers
+      - name: Build unchanged original program with collector counters
         run: |
-          python3 -m unittest discover -s dev -p 'wasm_build_diagnostics_test.py' -v
-          go test ./internal/build -run '^Test(TraceR4MainModule|WasmCallerStoreUpdates)$' -count=1 -timeout=60s
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
-          go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
-      - name: Preserve the original compile and optimizer inputs
-        if: inputs.mode != 'runtime-only' && inputs.mode != 'gc-only'
-        env:
-          PROFILE: ${{ matrix.profile }}
-          MODE: ${{ inputs.mode }}
-          LLGO_R4_LLVM_TRACE: ${{ runner.temp }}/llvm-phases
+          mkdir "$RUNNER_TEMP/volume"
+          GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 timeout 5m "$RUNNER_TEMP/llgo" build \
+            -ldflags=-w=false -o "$RUNNER_TEMP/volume/gcgort.wasm" \
+            "$(go env GOROOT)/test/gcgort.go"
+      - name: Sample bounded collection volumes, not acceptance verdicts
         run: |
-          probe_case='^recover\.go$'
-          if [[ "$MODE" == cmplx-only ]]; then probe_case='^cmplxdivide\.go$'; fi
-          if [[ "$MODE" == compile-phases ]]; then probe_case='^(cmplxdivide|recover)\.go$'; fi
-          python3 dev/wasm_build_diagnostics.py \
-            --llgo "$RUNNER_TEMP/llgo" --runner "$RUNNER_TEMP/goroot-runner" \
-            --goroot "$(go env GOROOT)" --output "$RUNNER_TEMP/recover-probe" \
-            --profile "$PROFILE" --case "$probe_case" --clang-passes
-      - name: Verify isolated allocation accounting and zero-copy caller strings
-        if: ${{ !cancelled() && inputs.mode == 'gc-only' }}
-        env:
-          LLGO: ${{ runner.temp }}/llgo
-          PROFILE: ${{ matrix.profile }}
-        run: |
-          python3 -m unittest discover -s dev -p wasm_caller_alloc_test.py
-          go test ./cl -run '^TestWasm(MemProfileCaptureSeparatesGLSResolver|MemProfileFramePop|CallerLocationScalarABI)$' -count=1 -timeout=90s
-          mkdir "$RUNNER_TEMP/caller-probe"
-          set -o pipefail
-          bash dev/test_wasm_caller_alloc.sh '${{ matrix.profile }}' \
-            2>&1 | tee "$RUNNER_TEMP/caller-probe/output.log"
-          args=()
-          if [[ "$PROFILE" == EC64 ]]; then
-            args=(-target emscripten-memory64)
-            module="$RUNNER_TEMP/caller-probe/frames.mjs"
-            command=(node targets/emscripten-memory64-runner.mjs "$module")
-          else
-            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
-            module="$RUNNER_TEMP/caller-probe/frames.wasm"
-            command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC
-              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
-          fi
-          timeout 5m "$LLGO" test -c "${args[@]}" -o "$module" \
-            ./internal/build/testdata/wasm-test
-          GOGC=1 timeout 60s "${command[@]}" -test.v -test.count=3 -test.timeout=45s \
-            '-test.run=^Test(Caller.*|PanicRecoverAndCaller|NilPointerAndFunctionRecovery|NilStoreOperandOrder)$' \
-            2>&1 | tee "$RUNNER_TEMP/caller-probe/frames.log"
-      - name: Preserve caller allocation verdict
-        if: ${{ always() && inputs.mode == 'gc-only' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: r4-caller-${{ matrix.profile }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/caller-probe
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Exhaust collector metadata states and run original GC workloads
-        if: ${{ !cancelled() && inputs.mode == 'gc-only' }}
-        env:
-          PROFILE: ${{ matrix.profile }}
-        run: |
-          evidence="$RUNNER_TEMP/gc-probe"
-          mkdir "$evidence"
-          go test ./internal/build -run '^TestWasmGC(Metadata|HeadCacheWorkloads)$' -count=1 -timeout=60s -v \
-            > "$evidence/metadata.log" 2>&1 || { cat "$evidence/metadata.log"; exit 1; }
-          args=()
-          if [[ "$PROFILE" == EC64 ]]; then
-            args=(-target emscripten-memory64)
-            module="$evidence/gc.mjs"
-            command=(node targets/emscripten-memory64-runner.mjs "$module")
-          else
-            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
-            module="$evidence/gc.wasm"
-            command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC
-              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
-          fi
-          timeout 5m "$RUNNER_TEMP/llgo" build "${args[@]}" -o "$module" \
-            ./internal/build/testdata/wasm-gc > "$evidence/gc-build.log" 2>&1 || {
-              cat "$evidence/gc-build.log"; exit 1;
-            }
-          for policy in 100 1; do
-            GOGC="$policy" timeout 60s "${command[@]}" > "$evidence/gc-$policy.log" 2>&1 || {
-              cat "$evidence/gc-$policy.log"; exit 1;
-            }
-            grep -Fxq 'wasm gc ok' "$evidence/gc-$policy.log"
-          done
-          # The host-side runner configures the target environment itself.
-          unset GOOS GOARCH CGO_ENABLED
-          cd test/goroot
-          "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
-            -test.count=1 -test.timeout=20m -llgo "$RUNNER_TEMP/llgo" \
-            -goroot "$(go env GOROOT)" -wasm-profile "$PROFILE" \
-            -directive-mode coverage -directives run,runoutput \
-            -case '^(gcgort\.go|chan/goroutines\.go|fixedbugs/(issue22781|issue27695|issue78081)\.go)$' \
-            -shard-index 0 -shard-total 1 -max-rss-mib 4096 -rss-warn-mib 1024 \
-            -build-timeout 180s -run-timeout 60s -progress 60s \
-            -report "$evidence/goroot-$PROFILE.json" > "$evidence/goroot-$PROFILE.log" 2>&1 || {
-              cat "$evidence/goroot-$PROFILE.log"; exit 1;
-            }
-      - name: Capture bounded execution stacks of original goroutine workloads
-        if: ${{ !cancelled() && matrix.profile == 'GWASI' && (inputs.mode == 'resource-probes' || inputs.mode == 'runtime-only') }}
-        run: |
-          evidence="$RUNNER_TEMP/runtime-probe"
-          mkdir "$evidence"
-          goroot="$(go env GOROOT)"
-          failed=0
-          for case_path in gcgort.go chan/goroutines.go fixedbugs/issue27695.go fixedbugs/issue78081.go; do
-            case_name="${case_path//\//-}"
-            module="$evidence/$case_name.wasm"
-            cp "$goroot/test/$case_path" "$evidence/$case_name"
-            GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 \
-              /usr/bin/time -v timeout 5m "$RUNNER_TEMP/llgo" build -ldflags=-w=false \
-              -o "$module" "$goroot/test/$case_path" > "$evidence/$case_name-build.log" 2>&1 || {
-                cat "$evidence/$case_name-build.log"; failed=1; continue;
-              }
-            test -s "$module" || { failed=1; continue; }
-            # Epoch interrupts retain a named Wasm backtrace on timeout. These
-            # are diagnostic samples, not acceptance runs or a CPU percentage.
-            # Wasmtime 39 guest profiling does not flush its profile on traps.
-            for duration in 2s 8s 20s; do
-              log="$evidence/$case_name-$duration.log"
-              probe_status=0
-              WASMTIME_BACKTRACE_DETAILS=1 timeout 60s wasmtime run \
-                --dir=/ --env PWD --env PATH --env GOMAXPROCS=1 \
-                -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 \
-                -W "timeout=$duration" "$module" > "$log" 2>&1 || probe_status=$?
-              printf '%s duration=%s status=%s (diagnostic only)\n' \
-                "$case_path" "$duration" "$probe_status" | tee -a "$evidence/verdict.txt"
-              cat "$log"
-              if [[ "$probe_status" == 124 ]]; then failed=1; fi
-            done
-          done
-          exit "$failed"
-      - name: Upload bounded resource evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: r4-resources-${{ matrix.profile }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/recover-probe/evidence
-            ${{ runner.temp }}/runtime-probe
-            ${{ runner.temp }}/gc-probe
-            ${{ runner.temp }}/llvm-phases
-          if-no-files-found: error
-          retention-days: 3
-
-  postlink-replay:
-    if: github.repository_owner == 'cpunion' && inputs.mode == 'postlink-only'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      actions: read
-      contents: read
-    env:
-      BINARYEN_CORES: '2'
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-binaryen
-      - name: Download exact failing Asyncify input
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh run download 34301262954 -R cpunion/llgo \
-            -n r4-resources-GWASI-34301262954 -D "$RUNNER_TEMP/preserved"
-      - name: Replay unchanged postlink arguments with pass logging
-        env:
-          BINARYEN_PASS_DEBUG: '1'
-        run: |
-          PYTHONPATH=dev python3 - <<'PY'
-          import hashlib, os, shutil
+          for duration in 20s 55s; do
+            probe_status=0
+            WASMTIME_BACKTRACE_DETAILS=1 timeout 60s wasmtime run \
+              --dir=/ --env PWD --env PATH --env GOMAXPROCS=1 \
+              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 \
+              -W "timeout=$duration" "$RUNNER_TEMP/volume/gcgort.wasm" \
+              > "$RUNNER_TEMP/volume/$duration.bin" \
+              2> "$RUNNER_TEMP/volume/$duration-stack.log" || probe_status=$?
+            printf 'diagnostic duration=%s status=%s\n' "$duration" "$probe_status"
+            python3 - "$RUNNER_TEMP/volume/$duration.bin" <<'PY'
+          import json, struct, sys
           from pathlib import Path
-          from wasm_optimizer_replay import bounded_run
-          root = Path(os.environ["RUNNER_TEMP"])
-          source = root / "preserved/recover-probe/evidence/commands/wasm-opt-8483/input-0.wasm"
-          assert hashlib.sha256(source.read_bytes()).hexdigest() == "7adc896d2db64873b30ddadc7397d4c3e63dd30565a149ddadd2fd03350cafff"
-          output = root / "postlink-probe"
-          output.mkdir()
-          ok = bounded_run("cmplx-asyncify", [shutil.which("wasm-opt"), "--asyncify", "--translate-to-exnref",
-                           "-Os", "--inline-max-combined-binary-size=16384", str(source),
-                           "-o", str(output / "cmplx.wasm")], output, seconds=300)
-          raise SystemExit(0 if ok else 1)
+          data = Path(sys.argv[1]).read_bytes()
+          if not data or len(data) % 72:
+              raise SystemExit(f"incomplete GC records: {len(data)} bytes")
+          names = ('cycle', 'heap_bytes', 'live_bytes', 'root_words', 'object_scans',
+                   'object_words', 'large_object_words', 'overflow_events')
+          for row in struct.iter_unpack('<9Q', data):
+              if row[0] != 0x52344743564f4c31:
+                  raise SystemExit('invalid GC record magic')
+              print(json.dumps(dict(zip(names, row[1:]))))
           PY
+            head -45 "$RUNNER_TEMP/volume/$duration-stack.log"
+            if [[ "$probe_status" == 124 ]]; then exit 1; fi
+          done
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: r4-postlink-${{ github.run_id }}
-          path: ${{ runner.temp }}/postlink-probe
+          name: r4-gc-volume-${{ github.run_id }}
+          path: ${{ runner.temp }}/volume
           if-no-files-found: error
           retention-days: 3
