@@ -576,9 +576,6 @@ func startMark(root uintptr) {
 	var stack [markStackSize]uintptr
 	stack[0] = root
 	gcSetState(root, blockStateMark)
-	if !shouldScanObject(root) {
-		return
-	}
 	stackLen := 1
 	for stackLen > 0 {
 		// Pop a block off of the stack.
@@ -587,6 +584,9 @@ func startMark(root uintptr) {
 
 		endBlock := gcFindNext(block)
 		markHeads.remember(block, endBlock)
+		if !shouldScanObject(block) {
+			continue
+		}
 		start, end := gcAddressOf(block), gcAddressOf(endBlock)
 
 		for addr := start; addr != end; addr += unsafe.Alignof(addr) {

@@ -264,7 +264,7 @@ func testGCIndependentArena(t *testing.T, lifecycle bool) {
 	var source bytes.Buffer
 	source.WriteString("package arena\nimport \"unsafe\"\n")
 	dir := filepath.Join("..", "..", "runtime", "internal", "runtime", "tinygogc")
-	names := []string{"gc_tinygo.go", "head_cache.go", "pacing.go", "gc.go", "mutex.go"}
+	names := []string{"gc_tinygo.go", "head_cache.go", "pacing.go", "gc.go", "mutex.go", "noscan_wasm.go"}
 	if lifecycle {
 		names = append(names, "finalizer.go")
 	}
@@ -336,7 +336,7 @@ func testGCIndependentArena(t *testing.T, lifecycle bool) {
 		}
 		decls := file.Decls[:0]
 		for _, decl := range file.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok && (fn.Name.Name == "noteFinalizerReference" || fn.Name.Name == "preserveFinalizableObjects" || fn.Name.Name == "resetArenaFinalizers" || fn.Name.Name == "markArenaFinalizerRoots") {
+			if fn, ok := decl.(*ast.FuncDecl); ok && (fn.Name.Name == "noteFinalizerReference" || fn.Name.Name == "preserveFinalizableObjects" || fn.Name.Name == "resetArenaFinalizers" || fn.Name.Name == "markArenaFinalizerRoots" || fn.Name.Name == "beginFinalizerDebugRootScan" || fn.Name.Name == "endFinalizerDebugRootScan" || fn.Name.Name == "noteFinalizerDebugRoot") {
 				continue
 			}
 			decls = append(decls, decl)
@@ -419,6 +419,7 @@ func newArena(initial, maximum uintptr, grow bool) {
   nextAlloc, gcTotalAlloc, gcTotalBlocks, gcMallocs, gcFrees, gcFreedBlocks, gcNumGC = 0,0,0,0,0,0,0
   markStackOverflow, isGCInit = false, false
   markHeads, gcMutex, arenaPacing = markHeadCache{}, mutex{}, gcPacing{}
+  noScanIndex, noScanCount = nil, 0
   arenaRoots, profileFrees, memoryHook = nil, nil, nil
   arenaMetadataReads = 0
   resetArenaFinalizers()
@@ -478,6 +479,9 @@ func gcRootAllocated(n uint64) { if arenaGrow { arenaPacing.rootAllocated(n) } }
 func gcRootFreed(n uint64) { if arenaGrow { arenaPacing.rootFreed(n) } }
 func memProfileFree(address uintptr) { profileFrees = append(profileFrees,address) }
 func noteFinalizerReference(block uintptr) {}
+func beginFinalizerDebugRootScan() {}
+func endFinalizerDebugRootScan() {}
+func noteFinalizerDebugRoot(uintptr,uintptr) {}
 func preserveFinalizableObjects() {}
 func scheduleFinalizers() {}
 func wantPanic(t *testing.T, text string, fn func()) {
@@ -547,6 +551,74 @@ func TestGraphMarkSweepAndOverflow(t *testing.T) {
     if ReadGCStats().HeapAlloc != 0 { t.Fatal("unrooted graph was not reclaimed") }
     checkCanaries(t)
   }
+}
+
+func TestNoScanRootDoesNotTracePayload(t *testing.T) {
+  newArena(64<<10,64<<10,false)
+  normal, normalChild := AllocRoot(64), Alloc(64)
+  *(*unsafe.Pointer)(normal) = normalChild
+  arenaRoots = []unsafe.Pointer{normal}
+  GC()
+  if gcStateOf(blockFromAddr(uintptr(normalChild))) != blockStateHead {
+    t.Fatal("ordinary root did not trace its payload")
+  }
+  arenaRoots = nil
+  FreeRoot(normal)
+  GC()
+  if gcStateOf(blockFromAddr(uintptr(normalChild))) != blockStateFree {
+    t.Fatal("ordinary child remained live after dropping its root")
+  }
+
+  // Reach the no-scan allocation through another heap object. The allocation
+  // itself remains live, but its stale payload must not retain a child.
+  holder, opaque, stale := Alloc(64), AllocNoScanRoot(64), Alloc(64)
+  *(*unsafe.Pointer)(holder) = opaque
+  *(*unsafe.Pointer)(opaque) = stale
+  arenaRoots = []unsafe.Pointer{holder}
+  GC()
+  if gcStateOf(blockFromAddr(uintptr(holder))) != blockStateHead ||
+      gcStateOf(blockFromAddr(uintptr(opaque))) != blockStateHead {
+    t.Fatal("indirect no-scan allocation was not retained")
+  }
+  if gcStateOf(blockFromAddr(uintptr(stale))) != blockStateFree {
+    t.Fatal("no-scan payload retained a stale child")
+  }
+  arenaRoots = nil
+  FreeNoScanRoot(opaque)
+  GC()
+  if ReadGCStats().HeapAlloc != 0 || noScanCount != 0 {
+    t.Fatal("no-scan release leaked storage or registry state")
+  }
+  checkCanaries(t)
+}
+
+func TestNoScanRootIndexGrowthAndRelease(t *testing.T) {
+  newArena(256<<10,256<<10,false)
+  roots := make([]unsafe.Pointer, 65)
+  for i := range roots {
+    roots[i] = AllocNoScanRoot(64)
+    *(*unsafe.Pointer)(roots[i]) = Alloc(64)
+  }
+  arenaRoots = roots
+  GC()
+  if noScanCount != len(roots) || len(noScanIndex) < len(roots) {
+    t.Fatal("no-scan index did not grow with its registrations")
+  }
+  for _, root := range roots {
+    if gcStateOf(blockFromAddr(uintptr(root))) != blockStateHead {
+      t.Fatal("indexed no-scan allocation was not retained")
+    }
+    if stale := *(*unsafe.Pointer)(root); gcStateOf(blockFromAddr(uintptr(stale))) != blockStateFree {
+      t.Fatal("indexed no-scan allocation traced its payload")
+    }
+  }
+  arenaRoots = nil
+  for _, root := range roots { FreeNoScanRoot(root) }
+  GC()
+  if ReadGCStats().HeapAlloc != 0 || noScanCount != 0 {
+    t.Fatal("growing no-scan index leaked storage or registrations")
+  }
+  checkCanaries(t)
 }
 
 func TestFixedArenaExhaustionAndGrowingArena(t *testing.T) {

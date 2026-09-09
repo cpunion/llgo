@@ -1006,6 +1006,7 @@ func (p Package) markLLVMUsed(v llvm.Value) {
 }
 
 func (p Package) MaterializePreserveSyms() {
+	p.classifyWasmNoScanGlobals()
 	if len(p.llvmUsedValues) == 0 {
 		return
 	}
@@ -1015,6 +1016,23 @@ func (p Package) MaterializePreserveSyms() {
 	global.SetInitializer(init)
 	global.SetLinkage(llvm.AppendingLinkage)
 	global.SetSection("llvm.metadata")
+}
+
+// classifyWasmNoScanGlobals groups compiler-emitted immutable data outside the
+// conservative static-root range. Such data can contain only link-time
+// addresses, never a Go heap pointer stored after program initialization.
+// Leaving packed strings, type metadata and root maps in the scanned range can
+// make bytes spanning two constants look like an interior heap pointer.
+func (p Package) classifyWasmNoScanGlobals() {
+	if p.Prog.target.GOARCH != "wasm" || !p.Prog.GCRootsEnabled() {
+		return
+	}
+	for global := p.mod.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+		if global.IsDeclaration() || !global.IsGlobalConstant() || global.Section() != "" {
+			continue
+		}
+		global.SetSection("llgo_gc_noscan")
+	}
 }
 
 func (p Package) rtFunc(fnName string) Expr {
