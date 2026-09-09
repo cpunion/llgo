@@ -182,6 +182,7 @@ type context struct {
 	gcClosureRoot          llssa.Expr
 	safepointEntry         bool
 	safepoints             map[ssa.Instruction]struct{}
+	wasmScalarCosts        map[*ssa.Function]int
 	pcLineSeq              uint64
 	// The runtime PC-line table stores file and line, but not column. Keep the
 	// last emitted position within one SSA basic block so repeated checks for a

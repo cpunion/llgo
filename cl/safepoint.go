@@ -36,6 +36,9 @@ func (p *context) prepareCooperativeSafepoints(fn *ssa.Function, isCgo bool) {
 	if path := safepointPackagePath(fn); path == "" || excludeSafepointPackage(path) {
 		return
 	}
+	if p.isWasmScalarLeaf(fn) {
+		return
+	}
 	p.safepointEntry = true
 	p.safepoints = safepointplan.Backedges(fn)
 }
