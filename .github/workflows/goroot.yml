@@ -333,7 +333,7 @@ jobs:
       - name: Build compiler and check diagnostic wrappers
         run: |
           python3 -m unittest discover -s dev -p 'wasm_build_diagnostics_test.py' -v
-          go test ./internal/build -run '^TestTraceR4MainModule$' -count=1 -timeout=60s
+          go test ./internal/build -run '^Test(TraceR4MainModule|WasmCallerStoreUpdates)$' -count=1 -timeout=60s
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
           go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
       - name: Preserve the original compile and optimizer inputs
@@ -354,6 +354,7 @@ jobs:
         if: ${{ !cancelled() && inputs.mode == 'gc-only' }}
         env:
           LLGO: ${{ runner.temp }}/llgo
+          PROFILE: ${{ matrix.profile }}
         run: |
           python3 -m unittest discover -s dev -p wasm_caller_alloc_test.py
           go test ./cl -run '^TestWasm(MemProfileCaptureSeparatesGLSResolver|MemProfileFramePop|CallerLocationScalarABI)$' -count=1 -timeout=90s
@@ -361,6 +362,22 @@ jobs:
           set -o pipefail
           bash dev/test_wasm_caller_alloc.sh '${{ matrix.profile }}' \
             2>&1 | tee "$RUNNER_TEMP/caller-probe/output.log"
+          args=()
+          if [[ "$PROFILE" == EC64 ]]; then
+            args=(-target emscripten-memory64)
+            module="$RUNNER_TEMP/caller-probe/frames.mjs"
+            command=(node targets/emscripten-memory64-runner.mjs "$module")
+          else
+            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
+            module="$RUNNER_TEMP/caller-probe/frames.wasm"
+            command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC
+              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
+          fi
+          timeout 5m "$LLGO" test -c "${args[@]}" -o "$module" \
+            ./internal/build/testdata/wasm-test
+          GOGC=1 timeout 60s "${command[@]}" -test.v -test.count=3 -test.timeout=45s \
+            '-test.run=^Test(Caller.*|PanicRecoverAndCaller|NilPointerAndFunctionRecovery|NilStoreOperandOrder)$' \
+            2>&1 | tee "$RUNNER_TEMP/caller-probe/frames.log"
       - name: Preserve caller allocation verdict
         if: ${{ always() && inputs.mode == 'gc-only' }}
         uses: actions/upload-artifact@v7
