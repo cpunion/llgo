@@ -6,6 +6,7 @@ import (
 	"go/types"
 
 	"github.com/xgo-dev/llgo/internal/safepointplan"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -33,6 +34,12 @@ func (p *context) wasmScalarLeafCost(fn *ssa.Function) int {
 	// recursion. This map belongs to one package's lowering context.
 	p.wasmScalarCosts[fn] = -1
 	if fn == nil || fn.Pkg == nil || len(fn.Blocks) == 0 || len(fn.Blocks) > wasmScalarLeafBudget || len(fn.FreeVars) != 0 {
+		return -1
+	}
+	// Original and replacement packages share linked symbols, but callers can
+	// still reference the original SSA bodies. Reject both sides consistently
+	// instead of proving effects for a body that may never execute.
+	if _, patched := p.patches[llssa.PathOf(fn.Pkg.Pkg)]; patched {
 		return -1
 	}
 	for _, directive := range []string{"go:linkname", "llgo:link", "go:wasmimport", "export", "llgo:env"} {
