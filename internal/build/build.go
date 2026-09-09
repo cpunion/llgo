@@ -2484,7 +2484,17 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 		linkOutput = app + ".exe"
 		moveExactWindowsOutput = true
 	}
+	staticRootMarker, cleanupStaticRootMarker, err := prepareWasmStaticRootMarker(ctx, linkOutput)
+	if err != nil {
+		return err
+	}
+	defer cleanupStaticRootMarker()
 	buildArgs := []string{"-o", linkOutput}
+	if staticRootMarker != "" {
+		// wasm-ld preserves input order while merging .data.* sections. Keep the
+		// marker before user objects, archives and their linker flags.
+		buildArgs = append(buildArgs, staticRootMarker)
+	}
 	buildArgs = append(buildArgs, linkArgs...)
 	siteLayoutArgs, cleanupSiteLayout, err := funcInfoSiteLayoutArgs(ctx, app)
 	if err != nil {
