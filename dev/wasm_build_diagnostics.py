@@ -150,7 +150,7 @@ def run_diagnostics(args):
     parser.add_argument("--runner", type=Path, required=True)
     parser.add_argument("--goroot", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--profile", choices=("GWASI", "EC32"), default="GWASI")
+    parser.add_argument("--profile", choices=("GWASI", "EC32", "EC64"), default="GWASI")
     parser.add_argument("--case", help="exact diagnostic case regular expression")
     parser.add_argument("--cmplx-only", action="store_true")
     parser.add_argument("--clang-passes", action="store_true")

@@ -12,13 +12,15 @@ on:
           - resource-probes
           - recover-only
           - runtime-only
+          - copy-only
+          - cmplx-only
 
 permissions:
   contents: read
 
 jobs:
   diagnose:
-    if: github.repository_owner == 'cpunion' && (inputs.mode == '' || inputs.mode == 'correctness')
+    if: github.repository_owner == 'cpunion' && (inputs.mode == '' || inputs.mode == 'correctness' || inputs.mode == 'copy-only')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -169,7 +171,7 @@ jobs:
             done
           done
       - name: Compile and execute the original complex-division table
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.mode != 'copy-only' }}
         env:
           PROFILE: ${{ matrix.profile }}
         run: |
@@ -268,14 +270,14 @@ jobs:
           retention-days: 3
 
   resource-probes:
-    if: github.repository_owner == 'cpunion' && (inputs.mode == 'resource-probes' || inputs.mode == 'recover-only' || inputs.mode == 'runtime-only')
+    if: github.repository_owner == 'cpunion' && (inputs.mode == 'resource-probes' || inputs.mode == 'recover-only' || inputs.mode == 'runtime-only' || inputs.mode == 'cmplx-only')
     name: Bounded resource probes (${{ matrix.profile }})
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        profile: ${{ fromJSON(inputs.mode == 'runtime-only' && '["GWASI"]' || '["EC32", "GWASI"]') }}
+        profile: ${{ fromJSON(inputs.mode == 'runtime-only' && '["GWASI"]' || inputs.mode == 'cmplx-only' && '["EC64", "GWASI"]' || '["EC32", "GWASI"]') }}
     env:
       GOMAXPROCS: '2'
       BINARYEN_CORES: '2'
@@ -288,11 +290,11 @@ jobs:
         with:
           llvm-version: 22
       - uses: emscripten-core/setup-emsdk@v15
-        if: matrix.profile == 'EC32'
+        if: matrix.profile == 'EC32' || matrix.profile == 'EC64'
         with:
           version: '4.0.21'
       - uses: actions/setup-node@v7
-        if: matrix.profile == 'EC32'
+        if: matrix.profile == 'EC32' || matrix.profile == 'EC64'
         with:
           node-version: '24'
       - uses: ./.github/actions/setup-binaryen
@@ -306,15 +308,18 @@ jobs:
           python3 -m unittest discover -s dev -p 'wasm_build_diagnostics_test.py' -v
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
           go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
-      - name: Preserve the original recover compile and optimizer inputs
+      - name: Preserve the original compile and optimizer inputs
         if: inputs.mode != 'runtime-only'
         env:
           PROFILE: ${{ matrix.profile }}
+          MODE: ${{ inputs.mode }}
         run: |
+          probe_case='^recover\.go$'
+          if [[ "$MODE" == cmplx-only ]]; then probe_case='^cmplxdivide\.go$'; fi
           python3 dev/wasm_build_diagnostics.py \
             --llgo "$RUNNER_TEMP/llgo" --runner "$RUNNER_TEMP/goroot-runner" \
             --goroot "$(go env GOROOT)" --output "$RUNNER_TEMP/recover-probe" \
-            --profile "$PROFILE" --case '^recover\.go$' --clang-passes
+            --profile "$PROFILE" --case "$probe_case" --clang-passes
       - name: Capture bounded execution stacks of original goroutine workloads
         if: ${{ !cancelled() && matrix.profile == 'GWASI' && (inputs.mode == 'resource-probes' || inputs.mode == 'runtime-only') }}
         run: |
