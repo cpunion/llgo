@@ -418,7 +418,7 @@ jobs:
           mkdir "$evidence"
           goroot="$(go env GOROOT)"
           failed=0
-          for case_path in gcgort.go chan/goroutines.go fixedbugs/issue78081.go; do
+          for case_path in gcgort.go chan/goroutines.go fixedbugs/issue27695.go fixedbugs/issue78081.go; do
             case_name="${case_path//\//-}"
             module="$evidence/$case_name.wasm"
             cp "$goroot/test/$case_path" "$evidence/$case_name"
