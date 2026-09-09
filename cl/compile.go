@@ -1589,7 +1589,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				if skipUnusedArrayDeref(v) {
 					x := p.compileValue(b, v.X)
 					if effectfulArrayDeref {
-						p.recordPanicSite(b, v.Pos())
+						defer p.guardPanicSite(b, v.Pos())()
 						b.AssertNilDeref(x)
 					}
 					return
@@ -1597,14 +1597,14 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				// Elide the unused load, but keep an explicit nil check so the
 				// Go dereference still panics instead of relying on a trapping load.
 				x := p.compileValue(b, v.X)
-				p.recordPanicSite(b, v.Pos())
+				defer p.guardPanicSite(b, v.Pos())()
 				p.assertNilDerefBase(b, v.X)
 				b.AssertNilDeref(x)
 				return
 			}
 			if effectfulArrayDeref {
 				x := p.compileValue(b, v.X)
-				p.recordPanicSite(b, v.Pos())
+				defer p.guardPanicSite(b, v.Pos())()
 				b.AssertNilDeref(x)
 			}
 			if refs, ok := nonDebugReferrers(v); ok && len(refs) == 1 {
@@ -1633,7 +1633,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		x := p.compileValue(b, v.X)
 		if v.Op != token.ARROW && (p.prog.Target().GOARCH != "wasm" || v.Op == token.MUL && !isKnownNonNilAddr(v.X)) {
-			p.recordPanicSite(b, v.Pos())
+			defer p.guardPanicSite(b, v.Pos())()
 		}
 		if shouldAssertDirectNilDeref(v) || v.Op == token.MUL && p.needsWasmNilGuard(v.X) {
 			if p.needsWasmNilGuard(v.X) {
@@ -1677,7 +1677,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.FieldAddr:
 		x := p.compileValue(b, v.X)
 		if p.prog.Target().GOARCH != "wasm" || !isKnownNonNilAddr(v.X) {
-			p.recordPanicSite(b, v.Pos())
+			defer p.guardPanicSite(b, v.Pos())()
 		}
 		if p.isAddressOfFieldAddr(v) {
 			b.AssertNilDeref(x)
@@ -1706,13 +1706,13 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		x := p.compileValue(b, vx)
 		idx := p.compileValue(b, v.Index)
 		if p.prog.Target().GOARCH != "wasm" || !isKnownSafeArrayIndexAddr(v) {
-			p.recordPanicSite(b, v.Pos())
+			defer p.guardPanicSite(b, v.Pos())()
 		}
 		ret = b.IndexAddr(x, idx)
 	case *ssa.Index:
 		x := p.compileValue(b, v.X)
 		idx := p.compileValue(b, v.Index)
-		p.recordPanicSite(b, v.Pos())
+		defer p.guardPanicSite(b, v.Pos())()
 		ret = b.Index(x, idx, func() (addr llssa.Expr, zero bool) {
 			switch n := v.X.(type) {
 			case *ssa.Const:
@@ -2262,7 +2262,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		ptr := p.compileValue(b, va)
 		val := p.compileValue(b, v.Val)
 		if p.needsWasmNilGuard(va) {
-			p.recordPanicSite(b, v.Pos())
+			defer p.guardPanicSite(b, v.Pos())()
 			// A field assignment evaluates its RHS before faulting on a nil
 			// destination. Check the original base here, not at FieldAddr.
 			p.emitNilDerefBaseCheck(b, va)
