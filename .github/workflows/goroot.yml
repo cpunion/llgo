@@ -7,12 +7,85 @@ on:
         description: CPU sampling or unchanged full-package verification
         type: choice
         default: profile
-        options: [profile, bounds-profile, verify, unit, coverage-auth, build-trace, base-coverage, reuse-base-coverage, opt-trace, complex-verify, promote-trace]
+        options: [profile, bounds-profile, bounds-verify, verify, unit, coverage-auth, build-trace, base-coverage, reuse-base-coverage, opt-trace, complex-verify, promote-trace]
+      source_ref:
+        description: Exact production source to build for bounds diagnostics/verification
+        type: string
+        default: 88c934ba227d59713dc2a26ff89be4f952632390
 
 permissions:
   contents: read
 
 jobs:
+  bounds-verify:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'bounds-verify'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [EC32, EC64, WC32, GJS, GWASI]
+    env:
+      GOMAXPROCS: '2'
+      BINARYEN_CORES: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_ROOT: ${{ github.workspace }}
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_WASI_THREADS: '0'
+      PROFILE: ${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - uses: emscripten-core/setup-emsdk@v15
+        if: matrix.profile == 'EC32' || matrix.profile == 'EC64' || matrix.profile == 'GJS'
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        if: matrix.profile == 'WC32' || matrix.profile == 'GWASI'
+        with:
+          version: '39.0.1'
+      - name: Build the exact candidate and original GOROOT runner
+        run: |
+          mkdir "$RUNNER_TEMP/evidence"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/evidence/source-head.txt"
+          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+          go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
+      - name: Original signed and unsigned bounds matrices at acceptance limits
+        working-directory: test/goroot
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
+            -test.count=1 -test.timeout=10m -llgo "$RUNNER_TEMP/llgo" \
+            -goroot "$(go env GOROOT)" -wasm-profile "$PROFILE" \
+            -directive-mode ci -case '^fixedbugs/issue30116u?\.go$' \
+            -shard-index 0 -shard-total 1 -build-timeout 180s -run-timeout 60s \
+            -max-rss-mib 4096 -rss-warn-mib 1024 -progress 30s \
+            -report "$RUNNER_TEMP/evidence/goroot.json" \
+            2>&1 | tee "$RUNNER_TEMP/evidence/goroot.log"
+      - name: Full GC root, pacing and lifecycle integration
+        if: ${{ !cancelled() }}
+        env:
+          LLGO: ${{ runner.temp }}/llgo
+        run: |
+          set -o pipefail
+          bash dev/test_gc_wasm.sh "$PROFILE" "$RUNNER_TEMP/evidence/gc" \
+            2>&1 | tee "$RUNNER_TEMP/evidence/gc.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: r4-bounds-verify-${{ matrix.profile }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+
   bounds-profile:
     if: github.repository_owner == 'cpunion' && inputs.mode == 'bounds-profile'
     runs-on: ubuntu-24.04
@@ -40,7 +113,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
         with:
-          ref: 88c934ba227d59713dc2a26ff89be4f952632390
+          ref: ${{ inputs.source_ref }}
           path: source
           persist-credentials: false
       - uses: ./.github/actions/setup-deps
