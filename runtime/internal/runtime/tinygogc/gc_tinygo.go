@@ -392,9 +392,17 @@ func alloc(size uintptr, root bool) unsafe.Pointer {
 
 		// Is the block we're looking at free?
 		if gcStateOf(index) != blockStateFree {
-			// This block is in use. Try again from this point.
+			// No allocation can start inside an occupied object. Fiber
+			// buffers can span thousands of blocks: reuse the bounded tail
+			// search instead of inspecting every block individually.
 			numFreeBlocks = 0
-			index++
+			end := gcFindNext(index)
+			// After wrapping, retain the exact origin checkpoint above.
+			// Skipping over it would bypass collection and OOM detection.
+			if index < nextAlloc && end > nextAlloc {
+				end = nextAlloc
+			}
+			index = end
 			continue
 		}
 		numFreeBlocks++
