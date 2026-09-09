@@ -3002,6 +3002,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		traceR4MainModule("after-llvm", pkgPath, ret.Module())
 	}
 	localizeWasmStackAddresses(ctx.buildConf.Goarch, ret.Module())
+	traceR4MainModule("after-stack-addresses", pkgPath, ret.Module())
 	dropUnusedWindowsTestMain(ctx, aPkg, ret.Module())
 	emitFuncInfoEntrySites(ctx, ret)
 	// ModeGen callers consume the in-memory LLVM module directly. They do not

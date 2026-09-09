@@ -78,7 +78,7 @@ jobs:
           go test ./internal/abi ./ssa ./cl \
             -run 'Test(LowerLarge|LowerWasmAggregateCopies|LargeAggregate|Compile.*GCRoot|GCSafepoint|.*GCRoot.*|PruneStableWasmRoot|CompileStableWasmRoot|WasmSafePanicSites|KnownSafeArrayIndexAddrBounds|WasmUnsafeRuntimeErrorGuards)' \
             -count=1 -coverprofile="$RUNNER_TEMP/evidence/compiler.cover"
-          go test ./internal/build -run '^Test(CoalesceWasmPanicLocations|LowerWasmAggregateCopies|WasmPreAsyncify|WasmPostLink|PostLinkWasm|LowerLargeAggregatesGCPolicy)' \
+          go test ./internal/build -run '^Test(WasmStackAddresses|CoalesceWasmPanicLocations|LowerWasmAggregateCopies|WasmPreAsyncify|WasmPostLink|PostLinkWasm|LowerLargeAggregatesGCPolicy)' \
             -count=1 -coverprofile="$RUNNER_TEMP/evidence/build-policy.cover"
       - name: Exercise aggregate snapshots and iterators across GC
         if: matrix.profile == 'EC64'
