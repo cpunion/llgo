@@ -15,6 +15,43 @@ import (
 	"time"
 )
 
+// The embedded serial fixture calls ReadGCStats through go:linkname. Its
+// hand-written result must match the complete value-return ABI, not a prefix.
+func TestEmbeddedGCStatsABI(t *testing.T) {
+	fields := func(path, name string) string {
+		t.Helper()
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				typ := spec.(*ast.TypeSpec)
+				if typ.Name.Name == name {
+					var out bytes.Buffer
+					if err := format.Node(&out, fset, typ.Type); err != nil {
+						t.Fatal(err)
+					}
+					return string(bytes.Join(bytes.Fields(out.Bytes()), []byte(" ")))
+				}
+			}
+		}
+		t.Fatalf("missing %s in %s", name, path)
+		return ""
+	}
+	root := filepath.Join("..", "..")
+	want := fields(filepath.Join(root, "runtime/internal/runtime/tinygogc/gc.go"), "GCStats")
+	got := fields(filepath.Join(root, "_demo/embed/testdata/esp32-serial/gc-runtime/main.go"), "gcStats")
+	if got != want {
+		t.Fatalf("embedded GC result ABI differs from collector\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
 // Exercise the production allocator, marker, sweeper, metadata, entry guard,
 // statistics and pacer together, without using them to collect the test runner.
 // Only platform memory/root discovery and finalizer/profiler hooks are shims.

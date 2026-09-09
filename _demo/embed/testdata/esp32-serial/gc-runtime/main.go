@@ -35,6 +35,8 @@ type gcStats struct {
 	StackInuse uint64
 	StackSys   uint64
 	GCSys      uint64
+	NextGC     uint64
+	NumGC      uint32
 }
 
 //go:linkname gcCollect github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc.GC
@@ -1407,6 +1409,7 @@ func main() {
 	}
 
 	if ok {
+		println("gc standalone ok")
 		println("OK")
 	}
 }
