@@ -37,6 +37,11 @@ class DiagnosticsTest(unittest.TestCase):
             log.write_text(f"# compiling {source} for pkg: _{work}\n"
                            f"/usr/bin/clang++ -Os -c {source} -o old.o\n")
             self.assertEqual(diag.preserve_main_ir(log, work, evidence), commands)
+            log.write_text(f"# compiling {source} for pkg: command-line-arguments\n"
+                           f"/emsdk/emcc -Oz -c {source} -o old.o\n")
+            self.assertEqual(diag.preserve_main_ir(log, work, evidence),
+                             [["/emsdk/emcc", "-Oz", "-c", str(evidence / "main-0.ll"),
+                               "-o", str(evidence / "main-0.o")]])
             outside = root / "outside.ll"
             outside.write_text("not a diagnostic input")
             log.write_text(f"# compiling {outside} for pkg: main\n")

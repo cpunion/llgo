@@ -116,7 +116,7 @@ def preserve_main_ir(log, work, evidence):
     # -keepwork retains its inputs. Copy only main's LLVM IR, not the cache.
     for match in re.finditer(r"^\s*# compiling (.+) for pkg: (.+)$", text, re.MULTILINE):
         package = match.group(2).strip()
-        if package != "main" and not (package.startswith("_/") and
+        if package not in ("main", "command-line-arguments") and not (package.startswith("_/") and
                                       Path(package[1:]).resolve().is_relative_to(work.resolve())):
             continue
         source_arg = match.group(1)
@@ -128,10 +128,10 @@ def preserve_main_ir(log, work, evidence):
         destination = evidence / f"main-{len(saved)}.ll"
         save_file(source, destination)
         for line in text.splitlines():
-            if source_arg not in line or "clang" not in line:
+            if source_arg not in line:
                 continue
             args = shlex.split(line.strip())
-            if Path(args[0]).name not in ("clang", "clang++") or not Path(args[0]).is_absolute():
+            if Path(args[0]).name not in ("clang", "clang++", "emcc", "em++") or not Path(args[0]).is_absolute():
                 continue
             if "-c" not in args or "-o" not in args:
                 continue
