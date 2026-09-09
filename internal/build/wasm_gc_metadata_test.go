@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -26,7 +27,7 @@ func TestWasmGCMetadata(t *testing.T) {
 	functions := map[string]bool{
 		"gcFindHead": true, "gcFindNext": true, "gcStateByteOf": true, "gcStateFromByte": true,
 		"gcStateOf": true, "gcAddressOf": true, "gcPointerOf": true,
-		"gcMarkFree": true, "gcUnmark": true, "sweep": true,
+		"gcMarkFree": true, "gcUnmark": true, "sweep": true, "finishMark": true,
 	}
 	var source bytes.Buffer
 	source.WriteString(gcMetadataTestSource)
@@ -51,10 +52,21 @@ func TestWasmGCMetadata(t *testing.T) {
 	}
 	ctx, cancel := stdctx.WithTimeout(stdctx.Background(), 45*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "-timeout=30s", path)
-	cmd.Dir = dir
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("collector metadata operations: %v\n%s", err, output)
+	architectures := []string{runtime.GOARCH}
+	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		// Linux CI can execute both pointer widths. Metadata word loads and
+		// block rounding must not be validated only with eight-byte words.
+		architectures = append(architectures, "386")
+	}
+	for _, arch := range architectures {
+		cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "-timeout=30s", "-bench=BenchmarkMarkScan", "-benchtime=50ms", path)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GOARCH="+arch, "CGO_ENABLED=0")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("collector metadata operations (%s): %v\n%s", arch, err, output)
+		}
+		t.Logf("collector metadata checks (%s) and host-only scan timings:\n%s", arch, output)
 	}
 }
 
@@ -79,6 +91,13 @@ var heapStart, endBlock uintptr
 var metadataStart unsafe.Pointer
 var gcFreedBlocks, gcFrees, profileCalls uint64
 var profileHash uintptr
+var markStackOverflow bool
+var markVisits []uintptr
+var markVisitHook func(uintptr)
+func startMark(block uintptr) {
+  markVisits = append(markVisits, block)
+  if markVisitHook != nil { markVisitHook(block) }
+}
 var c = struct {
   Str func(string) string
   Memset func(unsafe.Pointer, int, uintptr)
@@ -92,6 +111,98 @@ func gcPanic(s string) { panic(s) }
 func memProfileFree(address uintptr) {
   profileCalls++
   profileHash = profileHash*31 + address
+}
+func TestMarkScanAlignmentAndOverflow(t *testing.T) {
+  const wordSize = unsafe.Sizeof(uintptr(0))
+  const wordBlocks = wordSize*blocksPerStateByte
+  for alignment := uintptr(0); alignment < wordSize; alignment++ {
+    data := make([]byte, alignment+5*wordSize+1)
+    metadataStart = unsafe.Pointer(&data[alignment])
+    setState := func(block uintptr, state byte) {
+      p := (*byte)(unsafe.Add(metadataStart, block/4))
+      *p = *p &^ (3 << ((block%4)*2)) | state << ((block%4)*2)
+    }
+    for length := uintptr(1); length <= 4*wordBlocks+3; length++ {
+      endBlock = length
+      for _, fill := range []byte{0, 0xaa, 0x55, 0xee, 0xe4} {
+        for i := range data { data[i] = fill }
+        // In-range marks at different byte/word offsets; the mark just
+        // beyond the logical heap end must never be visited.
+        setState(length/3, blockStateMark)
+        setState(length-1, blockStateMark)
+        setState(length, blockStateMark)
+        var want []uintptr
+        for block := uintptr(0); block < length; block++ {
+          if gcStateOf(block) == blockStateMark { want = append(want, block) }
+        }
+        markVisits = markVisits[:0]
+        markStackOverflow = true
+        finishMark()
+        if !equalVisits(markVisits, want) {
+          t.Fatalf("align=%d length=%d fill=%x visits=%v want=%v", alignment, length, fill, markVisits, want)
+        }
+      }
+    }
+    for i := range data { data[i] = 0x55 }
+    endBlock = 3*wordBlocks
+    first := wordBlocks+1
+    setState(first, blockStateMark)
+    triggered := false
+    markVisitHook = func(block uintptr) {
+      if !triggered && block == first {
+        triggered = true
+        // A late overflow can publish work both before and after the
+        // current scanner position. The earlier mark needs another pass.
+        setState(1, blockStateMark)
+        setState(first+1, blockStateMark)
+        markStackOverflow = true
+      }
+    }
+    markVisits = markVisits[:0]
+    markStackOverflow = true
+    finishMark()
+    markVisitHook = nil
+    want := []uintptr{first, first+1, 1, first, first+1}
+    if !equalVisits(markVisits, want) { t.Fatalf("overflow: got=%v want=%v", markVisits, want) }
+  }
+}
+func equalVisits(got, want []uintptr) bool {
+  if len(got) != len(want) { return false }
+  for i := range got { if got[i] != want[i] { return false } }
+  return true
+}
+func BenchmarkMarkScan(b *testing.B) {
+  for _, workload := range []struct { name string; blocks, spacing uintptr }{
+    {"stack-tails", 1<<20, 1<<15},
+    {"dense-heads", 1<<12, 4},
+  } {
+    data := make([]byte, workload.blocks/4)
+    for i := range data { data[i] = blockStateByteAllTails }
+    for block := uintptr(0); block < workload.blocks; block += workload.spacing {
+      data[block/4] |= 1 << ((block%4)*2)
+    }
+    metadataStart = unsafe.Pointer(&data[0])
+    endBlock = workload.blocks
+    for _, mode := range []string{"blocks", "packed"} {
+      b.Run(workload.name+"/"+mode, func(b *testing.B) {
+        markVisits = make([]uintptr, 0, workload.blocks/workload.spacing)
+        b.ResetTimer()
+        for iteration := 0; iteration < b.N; iteration++ {
+          markVisits = markVisits[:0]
+          if mode == "packed" {
+            markStackOverflow = true
+            finishMark()
+          } else {
+            // Original overflow-pass traversal, with the same startMark
+            // stand-in. This measures traversal, not complete collections.
+            for block := uintptr(0); block < endBlock; block++ {
+              if gcStateOf(block) == blockStateMark { startMark(block) }
+            }
+          }
+        }
+      })
+    }
+  }
 }
 func TestTailScanAlignmentAndBounds(t *testing.T) {
   const wordSize = unsafe.Sizeof(uintptr(0))
@@ -143,6 +254,19 @@ func TestPackedStates(t *testing.T) {
       *(*byte)(unsafe.Add(metadataStart, 1)) = byte(pattern >> 8)
       copy(expected, arena)
       endBlock = length
+      markVisits = markVisits[:0]
+      markStackOverflow = true
+      finishMark()
+      count := 0
+      for block := uintptr(0); block < length; block++ {
+        if uint8(pattern >> (block*2)) & 3 == blockStateMark {
+          if count >= len(markVisits) || markVisits[count] != block {
+            t.Fatalf("mark scan: pattern=%04x length=%d visits=%v", pattern, length, markVisits)
+          }
+          count++
+        }
+      }
+      if count != len(markVisits) { t.Fatalf("extra mark visits: %v", markVisits) }
       for start := uintptr(0); start < length; start++ {
         want := start
         state := uint8(pattern >> (want*2)) & 3
