@@ -15,6 +15,7 @@ on:
           - copy-only
           - cmplx-only
           - gc-only
+          - gc-validation
           - compile-phases
           - postlink-only
 
@@ -22,6 +23,12 @@ permissions:
   contents: read
 
 jobs:
+  gc-validation:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'gc-validation'
+    uses: ./.github/workflows/gc-validation.yml
+    with:
+      scope: all
+
   diagnose:
     if: github.repository_owner == 'cpunion' && (inputs.mode == '' || inputs.mode == 'correctness' || inputs.mode == 'copy-only')
     runs-on: ubuntu-24.04
