@@ -7,12 +7,58 @@ on:
         description: CPU sampling or unchanged full-package verification
         type: choice
         default: profile
-        options: [profile, verify, unit, coverage-auth, build-trace, base-coverage, opt-trace, complex-verify]
+        options: [profile, verify, unit, coverage-auth, build-trace, base-coverage, opt-trace, complex-verify, promote-trace]
 
 permissions:
   contents: read
 
 jobs:
+  promote-trace:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'promote-trace'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - name: Prepare source-pinned LLVM promotion counters
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/input" "$RUNNER_TEMP/evidence" "$RUNNER_TEMP/llvm-trace"
+          gh run download 34358466593 --repo cpunion/llgo \
+            -n r4-cmplxdivide-GWASI-build-trace --dir "$RUNNER_TEMP/input"
+          curl --fail --location --retry 3 \
+            https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-22.1.8/llvm/lib/Transforms/Utils/PromoteMemoryToRegister.cpp \
+            --output "$RUNNER_TEMP/llvm-trace/PromoteMemoryToRegister.cpp"
+          patch -p1 --directory="$RUNNER_TEMP/llvm-trace" < dev/r4_promote_trace.patch
+          read -r -a compile_flags <<< "$(llvm-config --cxxflags)"
+          read -r -a link_flags <<< "$(llvm-config --ldflags) $(llvm-config --libs) $(llvm-config --system-libs)"
+          clang++ "${compile_flags[@]}" -O2 -DPromoteMemToReg=TracePromoteMemToReg \
+            -DisAllocaPromotable=TraceIsAllocaPromotable \
+            -c "$RUNNER_TEMP/llvm-trace/PromoteMemoryToRegister.cpp" \
+            -o "$RUNNER_TEMP/llvm-trace/PromoteMemoryToRegister.o"
+          clang++ "${compile_flags[@]}" -O2 dev/r4_promote_trace.cpp \
+            "$RUNNER_TEMP/llvm-trace/PromoteMemoryToRegister.o" "${link_flags[@]}" \
+            -o "$RUNNER_TEMP/promote-trace"
+      - name: Count full-block rescans on the exact failing module
+        run: |
+          set -o pipefail
+          /usr/bin/time -v timeout --kill-after=5s 5m "$RUNNER_TEMP/promote-trace" \
+            "$RUNNER_TEMP/input/before-opt.ll" \
+            2>&1 | tee "$RUNNER_TEMP/evidence/promotion.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: r4-llvm-promotion-counters
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+
   opt-trace:
     if: github.repository_owner == 'cpunion' && inputs.mode == 'opt-trace'
     runs-on: ubuntu-24.04

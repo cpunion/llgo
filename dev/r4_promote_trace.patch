@@ -1,0 +1,106 @@
+--- a/PromoteMemoryToRegister.cpp
++++ b/PromoteMemoryToRegister.cpp
+@@ -304,44 +304,59 @@
+-class LargeBlockInfo {
+-  /// For each instruction that we track, keep the index of the
+-  /// instruction.
+-  ///
+-  /// The index starts out as the number of the instruction from the start of
+-  /// the block.
+-  DenseMap<const Instruction *, unsigned> InstNumbers;
+-
+-public:
+-
+-  /// This code only looks at accesses to allocas.
+-  static bool isInterestingInstruction(const Instruction *I) {
+-    return (isa<LoadInst>(I) && isa<AllocaInst>(I->getOperand(0))) ||
+-           (isa<StoreInst>(I) && isa<AllocaInst>(I->getOperand(1)));
+-  }
+-
+-  /// Get or calculate the index of the specified instruction.
+-  unsigned getInstructionIndex(const Instruction *I) {
+-    assert(isInterestingInstruction(I) &&
+-           "Not a load/store to/from an alloca?");
+-
+-    // If we already have this instruction number, return it.
+-    DenseMap<const Instruction *, unsigned>::iterator It = InstNumbers.find(I);
+-    if (It != InstNumbers.end())
+-      return It->second;
+-
+-    // Scan the whole block to get the instruction.  This accumulates
+-    // information for every interesting instruction in the block, in order to
+-    // avoid gratuitus rescans.
+-    const BasicBlock *BB = I->getParent();
+-    unsigned InstNo = 0;
+-    for (const Instruction &BBI : *BB)
+-      if (isInterestingInstruction(&BBI))
+-        InstNumbers[&BBI] = InstNo++;
+-    It = InstNumbers.find(I);
+-
+-    assert(It != InstNumbers.end() && "Didn't insert instruction?");
+-    return It->second;
+-  }
+-
+-  void deleteValue(const Instruction *I) { InstNumbers.erase(I); }
+-
+-  void clear() { InstNumbers.clear(); }
+-};
++class LargeBlockInfo {
++  /// For each instruction that we track, keep the index of the
++  /// instruction.
++  ///
++  /// The index starts out as the number of the instruction from the start of
++  /// the block.
++  DenseMap<const Instruction *, unsigned> InstNumbers;
++
++  uint64_t Lookups = 0, Scans = 0, ScannedInstructions = 0;
++
++public:
++  ~LargeBlockInfo() {
++    errs() << "R4 LargeBlockInfo lookups=" << Lookups << " scans=" << Scans
++           << " instructions=" << ScannedInstructions << "\n";
++  }
++
++  /// This code only looks at accesses to allocas.
++  static bool isInterestingInstruction(const Instruction *I) {
++    return (isa<LoadInst>(I) && isa<AllocaInst>(I->getOperand(0))) ||
++           (isa<StoreInst>(I) && isa<AllocaInst>(I->getOperand(1)));
++  }
++
++  /// Get or calculate the index of the specified instruction.
++  unsigned getInstructionIndex(const Instruction *I) {
++    ++Lookups;
++    assert(isInterestingInstruction(I) &&
++           "Not a load/store to/from an alloca?");
++
++    // If we already have this instruction number, return it.
++    DenseMap<const Instruction *, unsigned>::iterator It = InstNumbers.find(I);
++    if (It != InstNumbers.end())
++      return It->second;
++
++    // Scan the whole block to get the instruction.  This accumulates
++    // information for every interesting instruction in the block, in order to
++    // avoid gratuitus rescans.
++    ++Scans;
++    if (Scans <= 3 || Scans % 1000 == 0)
++      errs() << "R4 cache miss " << Scans << " on " << *I << "\n";
++    const BasicBlock *BB = I->getParent();
++    unsigned InstNo = 0;
++    for (const Instruction &BBI : *BB) {
++      ++ScannedInstructions;
++      if (isInterestingInstruction(&BBI))
++        InstNumbers[&BBI] = InstNo++;
++    }
++    It = InstNumbers.find(I);
++
++    if (It == InstNumbers.end()) {
++      errs() << "R4 missing requested instruction: " << *I << "\n";
++      llvm_unreachable("R4 instruction numbering did not record request");
++    }
++    return It->second;
++  }
++
++  void deleteValue(const Instruction *I) { InstNumbers.erase(I); }
++
++  void clear() { InstNumbers.clear(); }
++};
