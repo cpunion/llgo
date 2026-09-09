@@ -101,20 +101,19 @@ func RecordCallerLocation(entry uintptr, name, file string, line int) {
 	if entry == 0 || line <= 0 {
 		return
 	}
-	updateCurrentFrame(entry, name, file, line)
-	recordPCLocation(0, entry, name, file, line)
+	// Resolve the goroutine-local store once for the whole update. On Wasm
+	// each independent GLS access calls into the logical-G package resolver;
+	// recursive callers must not pay for it again in both update helpers.
+	store := callerLocationStoreForGoroutine()
+	store.updateCurrentFrame(entry, name, file, line)
+	store.recordPCLocation(0, entry, name, file, line)
 }
 
 func RecordPanicLocation(entry uintptr, name, file string, line int) {
-	if entry == 0 || line <= 0 {
-		return
-	}
-	updateCurrentFrame(entry, name, file, line)
-	recordPCLocation(0, entry, name, file, line)
+	RecordCallerLocation(entry, name, file, line)
 }
 
-func updateCurrentFrame(entry uintptr, name, file string, line int) {
-	store := callerLocationStoreCurrent
+func (store *callerLocationStore) updateCurrentFrame(entry uintptr, name, file string, line int) {
 	if store == nil {
 		return
 	}
@@ -136,7 +135,10 @@ func updateCurrentFrame(entry uintptr, name, file string, line int) {
 }
 
 func recordPCLocation(pc, entry uintptr, name, file string, line int) {
-	store := callerLocationStoreForGoroutine()
+	callerLocationStoreForGoroutine().recordPCLocation(pc, entry, name, file, line)
+}
+
+func (store *callerLocationStore) recordPCLocation(pc, entry uintptr, name, file string, line int) {
 	for i := range store.frames {
 		frame := &store.frames[i]
 		if (pc != 0 && frame.PC == pc) || (pc == 0 && frame.PC == 0 && frame.Entry == entry) {
