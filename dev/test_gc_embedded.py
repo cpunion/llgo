@@ -76,22 +76,39 @@ def run_until_marker(command, timeout_seconds=60):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--llgo", required=True)
-    parser.add_argument("--target", choices=["cortex-m-qemu", "riscv-qemu"], required=True)
+    parser.add_argument("--target", choices=["esp32", "esp32c3-basic", "cortex-m-qemu", "riscv-qemu"], required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     executable = evidence / "gc.elf"
-    command = [args.llgo, "build", "-target", args.target, "-o", str(executable),
-               "./internal/test/gc-standalone"]
+    command = [args.llgo, "build", "-target", args.target, "-o", str(executable)]
+    esp = args.target in ("esp32", "esp32c3-basic")
+    if esp:
+        # Reuse the supported embedded ports' existing GC regression suite,
+        # including register roots, defer liveness, graph release and pressure.
+        command += ["-oimg", "./testdata/esp32-serial/gc-runtime"]
+        build_dir = root / "_demo/embed"
+    else:
+        # A file-list executable is not a runtime package. Otherwise link
+        # planning may defer the fixture's own archive as runtime-only code.
+        command += ["./internal/test/gc-standalone/main.go"]
+        build_dir = root / "runtime"
     report = {"target": args.target, "mutators": 1, "result": "incomplete",
               "concurrent_mutators": "unsupported", "interrupt_allocation": "unsupported"}
     try:
         with (evidence / "build.log").open("w") as log:
-            subprocess.run(command, cwd=root / "runtime", stdout=log,
+            subprocess.run(command, cwd=build_dir, stdout=log,
                            stderr=subprocess.STDOUT, timeout=300, check=True)
-        if args.target == "cortex-m-qemu":
+        if esp:
+            executable_name = "qemu-system-xtensa" if args.target == "esp32" else "qemu-system-riscv32"
+            machine = "esp32" if args.target == "esp32" else "esp32c3"
+            emulator = [executable_name, "-semihosting", "-machine", machine, "-nographic",
+                        "-drive", "file=" + str(evidence / "gc.img") + ",if=mtd,format=raw"]
+            if machine == "esp32c3":
+                emulator += ["-serial", "mon:stdio"]
+        elif args.target == "cortex-m-qemu":
             emulator = ["qemu-system-arm", "-machine", "lm3s6965evb", "-semihosting",
                         "-nographic", "-kernel", str(executable)]
         else:

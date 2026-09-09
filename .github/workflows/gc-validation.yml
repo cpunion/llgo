@@ -12,7 +12,7 @@ on:
         description: Independent collector verification scope
         type: choice
         default: all
-        options: [all, core, wasm, embedded]
+        options: [all, core, wasm, embedded, generic-ports]
 
 permissions:
   contents: read
@@ -130,6 +130,43 @@ jobs:
   embedded:
     if: inputs.scope == 'all' || inputs.scope == 'embedded'
     name: GC embedded (${{ matrix.target }}, single mutator)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32c3-basic]
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_ROOT: ${{ github.workspace }}
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - uses: ./.github/actions/setup-embed-deps
+      - name: Build compiler
+        run: go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+      - name: Execute collector fixture on an embedded ISA
+        run: |
+          python3 dev/test_gc_embedded.py --llgo "$RUNNER_TEMP/llgo" \
+            --target '${{ matrix.target }}' --evidence "$RUNNER_TEMP/gc-embedded"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gc-embedded-${{ matrix.target }}
+          path: ${{ runner.temp }}/gc-embedded
+          if-no-files-found: error
+
+  generic-ports:
+    # These target descriptions do not yet provide a complete LLGo executable
+    # port (startup/libc/thread/heap symbols). Keep their diagnostic failures
+    # explicit, separate from validation of the supported ESP GC backend.
+    if: inputs.scope == 'generic-ports'
+    name: GC port diagnostic (${{ matrix.target }})
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:

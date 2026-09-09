@@ -26,7 +26,14 @@ insufficient: another core must not mutate roots or payloads during collection.
 | Core arenas | Production allocator, mark/sweep, metadata, statistics, pacing and guard; fixed and growable memory; graph cycles/interior roots/worklist overflow; OOM; realloc/free; busy-entry rejection | Platform stack/register roots, real finalizers or LLGo code generation |
 | Host CPU matrix | Linux x86-64/ARM64, macOS ARM64, Windows x86-64; also Linux 386; each arena test with `GOMAXPROCS=1,4`; serialized requests from eight goroutines | Concurrent GC, a race-detector result, or 16-bit AVR coverage |
 | Wasm profiles | EC32, EC64, WC32, GJS, GWASI; actual LLGo root/liveness/finalizer fixtures, `GOGC=100,1,0,off`, negative reentry/configuration tests, original Go GC workloads | Full standard-library compatibility or final R4 acceptance |
-| Embedded ISA | Cortex-M and RISC-V firmware built by LLGo and run by QEMU, one mutator; explicit collections and surviving interior roots | Physical-board, interrupt-allocation, RTOS/multi-hart or multicore GC support |
+| Embedded ISA | Existing ESP32/Xtensa and ESP32-C3/RISC-V GC regression firmware built by LLGo and run by Espressif QEMU, one mutator; register/global/interior roots, graph release, defer liveness and pressure | Physical-board, interrupt-allocation, RTOS/multi-hart or multicore GC support |
+
+Initial attempts to execute the generic `cortex-m-qemu` and `riscv-qemu` target
+descriptions failed before GC ran: missing startup handlers, libc/pthread
+entry points and heap-symbol aliases. These are **unvalidated executable
+ports**, not GC passes. Their strict diagnostic jobs remain available under
+`generic-ports`; the normal embedded gate uses the existing ESP ports and
+regression suite instead of filling missing platform APIs with no-op stubs.
 
 The native arena harness extracts declarations from the current production
 files, rather than maintaining another collector. Only platform memory/root
@@ -41,8 +48,9 @@ hart even when the inherited target configuration mentions four cores.
 
 ## Running the gate
 
-The `Independent GC validation` workflow accepts `all`, `core`, `wasm` or
-`embedded`. It needs no unrelated standard-library/benchmark jobs. Before this
+The `Independent GC validation` workflow accepts `all`, `core`, `wasm`,
+`embedded` or the separate `generic-ports` diagnostic. It needs no unrelated
+standard-library/benchmark jobs. Before this
 new workflow is present on the fork's default branch, the diagnostic branch's
 existing `GOROOT` dispatch can invoke it as a reusable workflow:
 
@@ -50,6 +58,9 @@ existing `GOROOT` dispatch can invoke it as a reusable workflow:
 gh workflow run goroot.yml --repo cpunion/llgo \
   --ref codex/gc-validation-20260909 -f mode=gc-validation
 ```
+
+Use `-f gc_scope=embedded` to rerun only the ESP jobs after a fixture/platform
+fix, without consuming runners for already-validated host or Wasm code.
 
 Fast local core checks (Go only, no LLVM or device toolchain):
 
