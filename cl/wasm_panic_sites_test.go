@@ -36,6 +36,19 @@ func StoreField(p *struct{ value int }, v int) { runtime.Caller(0); p.value = v 
 func UnusedField(p *struct{ value int }) { runtime.Caller(0); _ = p.value }
 func Empty(p *[0]int) [0]int { runtime.Caller(0); return *p }
 func Loop(s []int) { runtime.Caller(0); for i := range s { s[i] = s[i] + 1 } }
+func BuiltinComplex(x, y float64) complex128 { runtime.Caller(0); return complex(x, y) }
+func BuiltinReal(x complex128) float64 { runtime.Caller(0); return real(x) }
+func BuiltinImag(x complex128) float64 { runtime.Caller(0); return imag(x) }
+func BuiltinComplex32(x, y float32) complex64 { runtime.Caller(0); return complex(x, y) }
+func BuiltinReal32(x complex64) float32 { runtime.Caller(0); return real(x) }
+func BuiltinImag32(x complex64) float32 { runtime.Caller(0); return imag(x) }
+func PointerComplex(p *float64) complex128 { runtime.Caller(0); return complex(*p, 1) }
+func Close(ch chan int) { runtime.Caller(0); close(ch) }
+func ShadowedComplex(x, y float64) complex128 {
+  complex := func(x, y float64) complex128 { runtime.Caller(0); return 0 }
+  runtime.Caller(0)
+  return complex(x, y)
+}
 `
 	for _, target := range []*llssa.Target{
 		{GOOS: "wasip1", GOARCH: "wasm"},
@@ -62,10 +75,10 @@ func Loop(s []int) { runtime.Caller(0); for i := range s { s[i] = s[i] + 1 } }
 			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"Global", "Field", "Constant", "Allocated", "Pointer", "PointerField", "PointerArray", "Dynamic", "Slice", "Wide", "String", "Store", "StoreField", "UnusedField", "Empty", "Loop"} {
+			for _, name := range []string{"Global", "Field", "Constant", "Allocated", "Pointer", "PointerField", "PointerArray", "Dynamic", "Slice", "Wide", "String", "Store", "StoreField", "UnusedField", "Empty", "Loop", "BuiltinComplex", "BuiltinReal", "BuiltinImag", "BuiltinComplex32", "BuiltinReal32", "BuiltinImag32", "PointerComplex", "Close", "ShadowedComplex"} {
 				fn := pkg.Module().NamedFunction("example.com/sites." + name)
 				body := fn.String()
-				want := name != "Global" && name != "Field" && name != "Constant" && name != "Allocated"
+				want := name != "Global" && name != "Field" && name != "Constant" && name != "Allocated" && !strings.HasPrefix(name, "Builtin")
 				if target.GOARCH != "wasm" {
 					want = name != "Store"
 				}
@@ -75,7 +88,9 @@ func Loop(s []int) { runtime.Caller(0); for i := range s { s[i] = s[i] + 1 } }
 				if !strings.Contains(body, "RecordCallerLocation") {
 					t.Errorf("%s lost its actual runtime.Caller source location", name)
 				}
-				if target.GOARCH == "wasm" {
+				// Close and the shadowing Go function retain ordinary call
+				// attribution, not just failure-block guard attribution.
+				if target.GOARCH == "wasm" && name != "Close" && name != "ShadowedComplex" {
 					assertWasmGuardLocationsAreCold(t, fn)
 				}
 			}
