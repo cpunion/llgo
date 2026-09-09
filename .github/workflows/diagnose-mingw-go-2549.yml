@@ -1,0 +1,57 @@
+name: Diagnose PR 2549 Windows Go crash
+
+on:
+  push:
+    branches: [codex/diagnose-mingw-go-2549-20260909]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3]
+    env:
+      LLGO_ROOT: ${{ github.workspace }}
+      LLGO_STDIO_NOBUF: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+          windows-abi: mingw
+      - uses: ./.github/actions/setup-go
+      - name: Record runner and build the original test package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force diag-results | Out-Null
+          Get-CimInstance Win32_Processor | Select-Object Name, Architecture, NumberOfCores |
+            Format-List | Out-File diag-results/host.txt
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber |
+            Format-List | Out-File diag-results/host.txt -Append
+          Get-Content diag-results/host.txt
+          git rev-parse HEAD
+          go version
+          go env GOOS GOARCH CGO_ENABLED CC
+          clang --version
+          go test -c -cover -covermode=atomic '-ldflags=-linkmode=external -extldflags=-lsynchronization' -o diag-results/go.test.exe ./test/go
+          if ($LASTEXITCODE -ne 0) { throw 'Test binary build failed' }
+      - name: Repeat the full package with per-test logs
+        shell: python {0}
+        run: |
+          import runpy
+          runpy.run_path('dev/diagnose_mingw_go.py', run_name='__main__')
+      - name: Upload test logs and matching executable
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-mingw-go-${{ matrix.attempt }}
+          path: diag-results/
+          retention-days: 3
