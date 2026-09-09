@@ -161,10 +161,61 @@ func (b Builder) Alloc(elem Type, heap bool) (ret Expr) {
 		}
 		ret = Expr{llvm.CreateAlloca(entryBuilder, elem.ll), prog.VoidPtr()}
 		entryBuilder.Dispose()
-		ret.impl = b.zeroinit(ret, size).impl
+		budget := 32
+		if prog.target.effectiveGOARCH() == "wasm" && prog.SizeOf(elem) > 0 && prog.SizeOf(elem) <= 64 &&
+			denseLocalZeroType(prog.td, elem.ll, &budget) {
+			// LLVM 22's SROA emits dead read-before-write operations when it
+			// splits a memset of floating-point locals. Thousands of these can
+			// make mem2reg's live-in scan quadratic. A typed zero avoids those
+			// reads. Limit expansion, and retain memset when padding needs zeroing.
+			b.impl.CreateStore(llvm.ConstNull(elem.ll), ret.impl)
+		} else {
+			ret.impl = b.zeroinit(ret, size).impl
+		}
 	}
 	ret.Type = prog.Pointer(elem)
 	return
+}
+
+// denseLocalZeroType checks that a bounded typed store writes every byte that
+// memset would write. In particular, sub-byte integers and struct padding do
+// not satisfy this contract. The budget also bounds zero-sized nested types.
+func denseLocalZeroType(td llvm.TargetData, typ llvm.Type, budget *int) bool {
+	if *budget == 0 {
+		return false
+	}
+	*budget--
+	switch typ.TypeKind() {
+	case llvm.IntegerTypeKind:
+		return uint64(typ.IntTypeWidth()) == td.TypeAllocSize(typ)*8
+	case llvm.FloatTypeKind, llvm.DoubleTypeKind:
+		return true
+	case llvm.PointerTypeKind:
+		return typ.PointerAddressSpace() == 0
+	case llvm.StructTypeKind:
+		if typ.StructElementTypesCount() > *budget {
+			return false
+		}
+		var size uint64
+		for i, field := range typ.StructElementTypes() {
+			if td.ElementOffset(typ, i) != size || !denseLocalZeroType(td, field, budget) {
+				return false
+			}
+			size += td.TypeAllocSize(field)
+		}
+		return size == td.TypeAllocSize(typ)
+	case llvm.ArrayTypeKind:
+		if typ.ArrayLength() > *budget {
+			return false
+		}
+		for i := 0; i < typ.ArrayLength(); i++ {
+			if !denseLocalZeroType(td, typ.ElementType(), budget) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // AllocU allocates uninitialized space for n*sizeof(elem) bytes.
