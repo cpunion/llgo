@@ -73,6 +73,14 @@ func TestGCIndependentArena(t *testing.T) {
 			if fn, ok := decl.(*ast.FuncDecl); ok && (fn.Name.Name == "gcPanic" || fn.Name.Name == "getsp" || fn.Name.Name == "gcReentryAbort") {
 				continue
 			}
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "gcStateByteOf" {
+				// Count metadata probes without replacing the production search.
+				// This makes the large occupied-run regression deterministic,
+				// independent of host clock speed or CI contention.
+				fn.Body.List = append([]ast.Stmt{&ast.IncDecStmt{
+					X: ast.NewIdent("arenaMetadataReads"), Tok: token.INC,
+				}}, fn.Body.List...)
+			}
 			if err := format.Node(&source, fset, decl); err != nil {
 				t.Fatal(err)
 			}
@@ -141,6 +149,7 @@ var arenaRoots []unsafe.Pointer
 var arenaPacing gcPacing
 var memoryHook func()
 var profileFrees []uintptr
+var arenaMetadataReads uint64
 
 func newArena(initial, maximum uintptr, grow bool) {
   // Canaries are outside the maximum heap, not inside its metadata.
@@ -155,6 +164,7 @@ func newArena(initial, maximum uintptr, grow bool) {
   markStackOverflow, isGCInit = false, false
   markHeads, gcMutex, arenaPacing = markHeadCache{}, mutex{}, gcPacing{}
   arenaRoots, profileFrees, memoryHook = nil, nil, nil
+  arenaMetadataReads = 0
 }
 func checkCanaries(t *testing.T) {
   t.Helper()
@@ -332,6 +342,39 @@ func TestReallocation(t *testing.T) {
   q := Realloc(p,1027)
   for i,b := range memory(q,37) { if b != byte(i+1) { t.Fatal("growing realloc lost payload") } }
   if gcStateOf(blockFromAddr(uintptr(p))) != blockStateFree { t.Fatal("old realloc storage not released") }
+  checkCanaries(t)
+}
+
+func TestAllocationSkipsOccupiedRun(t *testing.T) {
+  newArena(1<<20,1<<20,false)
+  hole := Alloc(1)
+  large := Alloc(256<<10)
+  arenaRoots = []unsafe.Pointer{large}
+  Free(hole)
+  arenaMetadataReads = 0
+  p := Alloc(2*bytesPerBlock)
+  probes := arenaMetadataReads
+  if uintptr(p) != uintptr(large)+AllocationSize(256<<10) {
+    t.Fatal("occupied-run skip changed first-fit allocation order")
+  }
+  if probes >= uint64((256<<10)/bytesPerBlock)/4 {
+    t.Fatalf("allocation probed %d metadata bytes while skipping one large object",probes)
+  }
+  checkCanaries(t)
+}
+
+func TestAllocationOccupiedRunCannotSkipSearchOrigin(t *testing.T) {
+  newArena(64<<10,64<<10,false)
+  hole := Alloc(1)
+  large := Alloc((endBlock-1)*bytesPerBlock)
+  arenaRoots = []unsafe.Pointer{large}
+  Free(hole)
+  // The search origin is allowed to be any block. On its second traversal,
+  // a bulk occupied-run skip must stop here so exhaustion still collects
+  // once and reports OOM, rather than looping forever around the origin.
+  nextAlloc = blockFromAddr(uintptr(large))+2
+  wantPanic(t,"out of memory",func(){Alloc(2*bytesPerBlock)})
+  if gcNumGC != 1 { t.Fatalf("exhausted search collected %d times, want 1",gcNumGC) }
   checkCanaries(t)
 }
 
