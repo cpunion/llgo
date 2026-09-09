@@ -29,6 +29,9 @@ concurrency:
 jobs:
   goroot-smoke:
     name: wasm GOROOT sentinels (${{ matrix.profile }})
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -206,6 +209,10 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          # Fork PRs cannot request the base repository's OIDC identity.
+          use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          fail_ci_if_error: true
+          disable_search: true
           files: ${{ runner.temp }}/gjs-storage.cover
           flags: wasm-runtime-helpers
 
