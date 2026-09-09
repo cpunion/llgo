@@ -62,6 +62,22 @@ func gorootTargetEnv(env []string) []string {
 func gorootRuntimeEnv(env []string) []string {
 	out := gorootTargetEnv(env)
 	if _, ok := activeGOROOTWasmProfile(); ok {
+		// These configure the CI host, not the test program. Passing their
+		// long paths and diagnostic settings to Go's JS helper can exhaust
+		// its fixed argv/environment area before main runs. Give LLGo and
+		// the reference compiler the same program environment, while leaving
+		// build commands and ordinary test-specific variables unchanged.
+		programEnv := out[:0]
+		for _, item := range out {
+			key, _, _ := strings.Cut(item, "=")
+			if strings.HasPrefix(key, "ACTIONS_") || strings.HasPrefix(key, "GITHUB_") ||
+				strings.HasPrefix(key, "RUNNER_") || strings.HasPrefix(key, "LLGO_DIAG_") ||
+				strings.HasPrefix(key, "LLGO_R4_") {
+				continue
+			}
+			programEnv = append(programEnv, item)
+		}
+		out = programEnv
 		// Official Go's current js/wasm and wasip1/wasm ports do not create
 		// operating-system threads. These profiles intentionally exercise the
 		// same single-worker contract in LLGo while the native driver and the
