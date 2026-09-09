@@ -217,50 +217,6 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  postlink-replay:
-    if: github.repository_owner == 'cpunion' && inputs.mode == 'postlink-only'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      actions: read
-      contents: read
-    env:
-      BINARYEN_CORES: '2'
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-binaryen
-      - name: Download exact failing Asyncify input
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh run download 34301262954 -R cpunion/llgo \
-            -n r4-resources-GWASI-34301262954 -D "$RUNNER_TEMP/preserved"
-      - name: Replay unchanged postlink arguments with pass logging
-        env:
-          BINARYEN_PASS_DEBUG: '1'
-        run: |
-          PYTHONPATH=dev python3 - <<'PY'
-          import hashlib, os, shutil
-          from pathlib import Path
-          from wasm_optimizer_replay import bounded_run
-          root = Path(os.environ["RUNNER_TEMP"])
-          source = root / "preserved/recover-probe/evidence/commands/wasm-opt-8483/input-0.wasm"
-          assert hashlib.sha256(source.read_bytes()).hexdigest() == "7adc896d2db64873b30ddadc7397d4c3e63dd30565a149ddadd2fd03350cafff"
-          output = root / "postlink-probe"
-          output.mkdir()
-          ok = bounded_run("cmplx-asyncify", [shutil.which("wasm-opt"), "--asyncify", "--translate-to-exnref",
-                           "-Os", "--inline-max-combined-binary-size=16384", str(source),
-                           "-o", str(output / "cmplx.wasm")], output, seconds=300)
-          raise SystemExit(0 if ok else 1)
-          PY
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: r4-postlink-${{ github.run_id }}
-          path: ${{ runner.temp }}/postlink-probe
-          if-no-files-found: error
-          retention-days: 3
-
       - name: Compile and execute original recover and full importer tests
         if: ${{ !cancelled() }}
         env:
@@ -462,5 +418,49 @@ jobs:
             ${{ runner.temp }}/runtime-probe
             ${{ runner.temp }}/gc-probe
             ${{ runner.temp }}/llvm-phases
+          if-no-files-found: error
+          retention-days: 3
+
+  postlink-replay:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'postlink-only'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    env:
+      BINARYEN_CORES: '2'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-binaryen
+      - name: Download exact failing Asyncify input
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 34301262954 -R cpunion/llgo \
+            -n r4-resources-GWASI-34301262954 -D "$RUNNER_TEMP/preserved"
+      - name: Replay unchanged postlink arguments with pass logging
+        env:
+          BINARYEN_PASS_DEBUG: '1'
+        run: |
+          PYTHONPATH=dev python3 - <<'PY'
+          import hashlib, os, shutil
+          from pathlib import Path
+          from wasm_optimizer_replay import bounded_run
+          root = Path(os.environ["RUNNER_TEMP"])
+          source = root / "preserved/recover-probe/evidence/commands/wasm-opt-8483/input-0.wasm"
+          assert hashlib.sha256(source.read_bytes()).hexdigest() == "7adc896d2db64873b30ddadc7397d4c3e63dd30565a149ddadd2fd03350cafff"
+          output = root / "postlink-probe"
+          output.mkdir()
+          ok = bounded_run("cmplx-asyncify", [shutil.which("wasm-opt"), "--asyncify", "--translate-to-exnref",
+                           "-Os", "--inline-max-combined-binary-size=16384", str(source),
+                           "-o", str(output / "cmplx.wasm")], output, seconds=300)
+          raise SystemExit(0 if ok else 1)
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: r4-postlink-${{ github.run_id }}
+          path: ${{ runner.temp }}/postlink-probe
           if-no-files-found: error
           retention-days: 3
