@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	llssa "github.com/xgo-dev/llgo/ssa"
+	"github.com/xgo-dev/llgo/ssa/abi"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -106,6 +107,43 @@ func TestWasmScalarLeafExpandedBudget(t *testing.T) {
 		if !p.isWasmScalarLeaf(pkg.Func("f2")) || p.isWasmScalarLeaf(pkg.Func("f9")) {
 			t.Fatalf("expanded work budget not respected (reverse=%v)", reverse)
 		}
+	}
+}
+
+func TestWasmScalarLeafPatchedPackage(t *testing.T) {
+	dep, root := buildCallerFrameSSAProgram(t,
+		"example.com/dep", `package dep
+func Add(x, y uint) uint { return x + y }
+`, "example.com/root", `package root
+import "example.com/dep"
+func Scalar(x, y uint) uint { return dep.Add(x, y) }
+`)
+	alt, _ := buildCallerFrameSSAPackage(t, abi.PatchPathPrefix+"example.com/dep", `package dep
+func Add(x, y uint) uint { for y != 0 { x++; y-- }; return x }
+func Pure(x uint) uint { return x + 1 }
+`)
+	prog := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	patches := Patches{dep.Pkg.Path(): {Alt: alt, Types: alt.Pkg}}
+	p := &context{prog: prog, patches: patches}
+	for _, fn := range []*ssa.Function{dep.Func("Add"), root.Func("Scalar"), alt.Func("Pure")} {
+		if p.isWasmScalarLeaf(fn) {
+			t.Errorf("%s accepted despite a package replacement", fn)
+		}
+	}
+	// The caller still refers to the original Go SSA function, whose scalar
+	// body says nothing about the replacement that will execute at link time.
+	prog.EnableCooperativeSafepoints(true)
+	pkg, _, err := NewPackageExWithEmbedMetaOptions(prog, nil, patches, nil, root, nil, nil, false, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatal(err)
+	}
+	body := pkg.Module().NamedFunction("example.com/root.Scalar").String()
+	if strings.Count(body, "CooperativeSafepoint") != 1 {
+		t.Errorf("patched call tree lost its entry poll:\n%s", body)
 	}
 }
 
