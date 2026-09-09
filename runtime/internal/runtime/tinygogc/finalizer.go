@@ -62,11 +62,19 @@ func DebugFinalizerState() (active, ready int, worker bool) {
 
 // DebugFinalizerRecord returns one active record and the slot that first made
 // it reachable in the most recent ordinary root scan.
-func DebugFinalizerRecord(index int) (object, root uintptr, ok bool) {
+func DebugFinalizerRecord(index int) (object, root, parent, parentSize uintptr, ok bool) {
 	lock(&gcMutex)
 	for record := finalizers; record != nil; record = record.next {
 		if index == 0 {
 			object, root, ok = ^record.object, record.debugRoot, true
+			if isOnHeap(root) {
+				block := blockFromAddr(root)
+				if gcStateOf(block) != blockStateFree {
+					head := gcFindHead(block)
+					parent = gcAddressOf(head)
+					parentSize = (gcFindNext(head) - head) * bytesPerBlock
+				}
+			}
 			break
 		}
 		index--

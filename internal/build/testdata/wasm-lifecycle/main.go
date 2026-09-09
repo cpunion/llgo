@@ -26,7 +26,7 @@ var nonCapturingEvents chan<- int
 func debugTinyFinalizerState() (active, ready int, worker bool)
 
 //go:linkname debugTinyFinalizerRecord github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc.DebugFinalizerRecord
-func debugTinyFinalizerRecord(index int) (object, root uintptr, ok bool)
+func debugTinyFinalizerRecord(index int) (object, root, parent, parentSize uintptr, ok bool)
 
 //go:linkname debugWasmFinalizerEntries runtime.debugWasmFinalizerEntries
 func debugWasmFinalizerEntries() int
@@ -256,11 +256,11 @@ func testFinalizerBatch() {
 
 func printActiveFinalizerRoots() {
 	for index := 0; ; index++ {
-		object, root, ok := debugTinyFinalizerRecord(index)
+		object, root, parent, parentSize, ok := debugTinyFinalizerRecord(index)
 		if !ok {
 			return
 		}
-		println("active finalizer", index, "object", object, "value", *(*int)(unsafe.Pointer(object)), "root", root)
+		println("active finalizer", index, "object", object, "value", *(*int)(unsafe.Pointer(object)), "root", root, "parent", parent, "parent-size", parentSize)
 	}
 }
 
