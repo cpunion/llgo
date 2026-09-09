@@ -331,6 +331,15 @@ jobs:
             --llgo "$RUNNER_TEMP/llgo" --runner "$RUNNER_TEMP/goroot-runner" \
             --goroot "$(go env GOROOT)" --output "$RUNNER_TEMP/recover-probe" \
             --profile "$PROFILE" --case "$probe_case" --clang-passes
+      - name: Verify isolated allocation accounting and trusted caller strings
+        if: ${{ !cancelled() && inputs.mode == 'gc-only' }}
+        env:
+          LLGO: ${{ runner.temp }}/llgo
+        run: |
+          python3 -m unittest discover -s dev -p wasm_caller_alloc_test.py
+          go test ./cl -run '^TestWasm(MemProfileCaptureSeparatesGLSResolver|MemProfileFramePop|CallerLocationScalarABI)$' -count=1 -timeout=90s
+          bash dev/test_wasm_caller_alloc.sh '${{ matrix.profile }}'
+
       - name: Exhaust collector metadata states and run original GC workloads
         if: inputs.mode == 'gc-only'
         env:
