@@ -255,6 +255,9 @@ func testFinalizerCancellation() {
 func installReplacementFinalizer(events chan<- int) {
 	value := &object{value: 51}
 	runtime.SetFinalizer(value, func(*object) { events <- 1 })
+	// Go rejects setting a second non-nil finalizer without first clearing the
+	// existing one. Test replacement through the shared, valid API contract.
+	runtime.SetFinalizer(value, nil)
 	runtime.SetFinalizer(value, func(*object) { events <- 2 })
 }
 
