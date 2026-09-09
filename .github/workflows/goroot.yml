@@ -11,6 +11,7 @@ on:
           - correctness
           - resource-probes
           - recover-only
+          - runtime-only
 
 permissions:
   contents: read
@@ -267,14 +268,14 @@ jobs:
           retention-days: 3
 
   resource-probes:
-    if: github.repository_owner == 'cpunion' && (inputs.mode == 'resource-probes' || inputs.mode == 'recover-only')
+    if: github.repository_owner == 'cpunion' && (inputs.mode == 'resource-probes' || inputs.mode == 'recover-only' || inputs.mode == 'runtime-only')
     name: Bounded resource probes (${{ matrix.profile }})
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        profile: [EC32, GWASI]
+        profile: ${{ fromJSON(inputs.mode == 'runtime-only' && '["GWASI"]' || '["EC32", "GWASI"]') }}
     env:
       GOMAXPROCS: '2'
       BINARYEN_CORES: '2'
@@ -306,6 +307,7 @@ jobs:
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
           go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
       - name: Preserve the original recover compile and optimizer inputs
+        if: inputs.mode != 'runtime-only'
         env:
           PROFILE: ${{ matrix.profile }}
         run: |
@@ -314,7 +316,7 @@ jobs:
             --goroot "$(go env GOROOT)" --output "$RUNNER_TEMP/recover-probe" \
             --profile "$PROFILE" --case '^recover\.go$' --clang-passes
       - name: Capture bounded execution stacks of original goroutine workloads
-        if: ${{ !cancelled() && matrix.profile == 'GWASI' && inputs.mode == 'resource-probes' }}
+        if: ${{ !cancelled() && matrix.profile == 'GWASI' && (inputs.mode == 'resource-probes' || inputs.mode == 'runtime-only') }}
         run: |
           evidence="$RUNNER_TEMP/runtime-probe"
           mkdir "$evidence"

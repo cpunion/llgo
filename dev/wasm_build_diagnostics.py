@@ -199,10 +199,15 @@ def run_diagnostics(args):
     finally:
         stop.set()
         monitor.join()
+    # Preserve the original verdict even if diagnostic replay cannot run.
+    (evidence / "result.json").write_text(json.dumps({"finished": now(), "returncode": status,
+                                                     "kept_work": str(work)}, indent=2) + "\n")
     if opts.clang_passes:
         commands = preserve_main_ir(evidence / "goroot.log", work, evidence)
-        if not commands:
+        if not commands and status != 0:
             raise ValueError("no main IR was preserved; clang phase cannot be diagnosed")
+        # Successful builds are intentionally quiet in the acceptance runner.
+        # They do not need a failure-phase replay or an artificial failure.
         for index, clang in enumerate(commands):
             # This replay adds logging only. The original acceptance command
             # above is unchanged and its failure status is retained below.
@@ -210,8 +215,6 @@ def run_diagnostics(args):
     # Work remains on this disposable runner (-keepwork). Artifact upload is
     # restricted to evidence: exact staged sources, Binaryen inputs, outputs,
     # and logs. Never recursively archive caches or symlinked repositories.
-    (evidence / "result.json").write_text(json.dumps({"finished": now(), "returncode": status,
-                                                     "kept_work": str(work)}, indent=2) + "\n")
     return status
 
 

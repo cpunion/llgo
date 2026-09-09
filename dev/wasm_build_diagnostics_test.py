@@ -150,6 +150,30 @@ class DiagnosticsTest(unittest.TestCase):
             self.assertNotIn("BINARYEN_PASS_DEBUG", env)
             self.assertEqual(env.get("BINARYEN_CORES"), os.environ.get("BINARYEN_CORES"))
 
+    def test_missing_replay_input_keeps_original_verdict(self):
+        for returncode in (0, 1):
+            with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "run"
+                process = MagicMock()
+                process.stdout = iter(["PASS\n" if returncode == 0 else "FAIL\n"])
+                process.wait.return_value = returncode
+                process.__enter__.return_value = process
+                with patch.object(diag.sys, "platform", "linux"), \
+                     patch.object(diag.shutil, "which", return_value="/real/wasm-opt"), \
+                     patch.object(diag, "sample_processes"), \
+                     patch.object(diag.subprocess, "Popen", return_value=process), \
+                     patch.object(diag, "bounded_run") as replay:
+                    args = ["--llgo", "/real/llgo", "--runner", "/real/runner",
+                            "--goroot", "/real/goroot", "--output", str(output), "--clang-passes"]
+                    if returncode == 0:
+                        self.assertEqual(diag.run_diagnostics(args), 0)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "no main IR"):
+                            diag.run_diagnostics(args)
+                    replay.assert_not_called()
+                result = json.loads((output / "evidence" / "result.json").read_text())
+                self.assertEqual(result["returncode"], returncode)
+
 
 if __name__ == "__main__":
     unittest.main()
