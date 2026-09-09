@@ -36,7 +36,6 @@ jobs:
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: 'on'
       LLGO_ROOT: ${{ github.workspace }}
-      LLGO_R4_LLVM_TRACE: ${{ runner.temp }}/evidence/llvm-phases
       LLGO_R4_LLVM_TRACE_PACKAGE: go/types
     steps:
       - uses: actions/checkout@v7
@@ -61,6 +60,7 @@ jobs:
         run: |
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
           mkdir "$RUNNER_TEMP/evidence"
+          echo "LLGO_R4_LLVM_TRACE=$RUNNER_TEMP/evidence/llvm-phases" >> "$GITHUB_ENV"
       - name: Preserve unchanged postlink inputs for bounded builds
         if: matrix.profile == 'GWASI'
         run: |
