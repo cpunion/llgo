@@ -53,4 +53,24 @@ func testUintptrEscapesRoots() {
 		}
 		runtime.GC()
 	}()
+
+	ready := make(chan struct{})
+	resume := make(chan struct{})
+	go func() {
+		<-ready
+		runtime.GC()
+		runtime.GC()
+		close(resume)
+	}()
+	waitWithUintptrRoot(uintptr(newUintptrRoot()), ready, resume)
+}
+
+//go:noinline
+//go:uintptrescapes
+func waitWithUintptrRoot(root uintptr, ready chan<- struct{}, resume <-chan struct{}) {
+	ready <- struct{}{}
+	<-resume
+	if (*uintptrRootObject)(unsafe.Pointer(root)).value != 47 {
+		panic("suspended pragma-designated uintptr root was finalized")
+	}
 }

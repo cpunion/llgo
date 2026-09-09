@@ -63,3 +63,21 @@ func FreeRoot(ptr unsafe.Pointer) {
 	}
 	tinygogc.FreeRoot(ptr)
 }
+
+func AllocNoScanRoot(size uintptr) unsafe.Pointer {
+	if size == 0 {
+		return unsafe.Pointer(&zerobase)
+	}
+	ret := tinygogc.AllocNoScanRoot(size)
+	if ret == nil {
+		panic("out of memory")
+	}
+	return ret
+}
+
+func FreeNoScanRoot(ptr unsafe.Pointer) {
+	if ptr == unsafe.Pointer(&zerobase) {
+		return
+	}
+	tinygogc.FreeNoScanRoot(ptr)
+}

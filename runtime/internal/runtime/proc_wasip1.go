@@ -94,9 +94,16 @@ func RunWasmMain() {
 		fatal("runtime: invalid WebAssembly main goroutine")
 		return
 	}
-	if !initWasmContext(gp, wasmcontext.Entry(wasmMainStart), nil, wasmMainStackSize) {
+	if !gp.context.platform.context.Init(
+		wasmcontext.Entry(wasmMainStart),
+		nil,
+		wasmMainStackSize,
+		AllocNoScanRoot,
+		FreeNoScanRoot,
+	) {
 		panic("runtime: failed to allocate WebAssembly goroutine stack")
 	}
+	updateWasmMainStackRoot(gp)
 	InitWasmGCPolicy()
 
 	for {
@@ -144,6 +151,7 @@ func runWasmContext(gp *g) {
 	gp.context.platform.context.Resume(
 		wasmGCRootPointer(&gp.context.platform.gcRoot),
 	)
+	updateWasmMainStackRoot(gp)
 	// Resume returns on the scheduler's physical system stack. Keep callbacks
 	// and timer polling detached from the G that just suspended or exited.
 	setg(&wasmSched.systemG)
@@ -191,7 +199,11 @@ func releaseWasmContext(gp *g) {
 		unregisterWasmGCRoot(&ctx.platform.gcRoot)
 	}
 	releaseGoroutineLocalBlocks(&ctx.platform.glsContext)
-	ctx.platform.context.Close(FreeRoot)
+	if gp.isMain {
+		ctx.platform.context.Close(FreeNoScanRoot)
+	} else {
+		ctx.platform.context.Close(FreeRoot)
+	}
 	freeRuntimeContext(ctx)
 }
 

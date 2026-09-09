@@ -582,6 +582,9 @@ func startMark(root uintptr) {
 
 		endBlock := gcFindNext(block)
 		markHeads.remember(block, endBlock)
+		if !shouldScanObject(block) {
+			continue
+		}
 		start, end := gcAddressOf(block), gcAddressOf(endBlock)
 
 		for addr := start; addr != end; addr += unsafe.Alignof(addr) {

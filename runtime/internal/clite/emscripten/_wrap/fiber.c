@@ -4,6 +4,9 @@
 _Static_assert(
     sizeof(emscripten_fiber_t) == 8 * sizeof(void *),
     "LLGo Fiber storage does not match emscripten_fiber_t");
+_Static_assert(
+    offsetof(emscripten_fiber_t, stack_ptr) == 2 * sizeof(void *),
+    "LLGo Fiber stack pointer offset does not match emscripten_fiber_t");
 
 EM_JS(int, llgo_emscripten_fiber_rewinding_state, (), {
     return Asyncify.state === Asyncify.State.Rewinding;

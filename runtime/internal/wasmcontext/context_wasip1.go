@@ -37,6 +37,7 @@ type Context struct {
 	stackPointer  unsafe.Pointer
 	launched      bool
 	stack         unsafe.Pointer
+	stackTop      unsafe.Pointer
 }
 
 func (ctx *Context) Init(entry Entry, arg unsafe.Pointer, stackSize uintptr, alloc func(uintptr) unsafe.Pointer, free func(unsafe.Pointer)) bool {
@@ -48,10 +49,17 @@ func (ctx *Context) Init(entry Entry, arg unsafe.Pointer, stackSize uintptr, all
 	ctx.arg = arg
 	ctx.asyncifyStack = asyncifyStack
 	ctx.asyncifyEnd = unsafe.Add(asyncifyStack, asyncifySize)
-	ctx.stackPointer = unsafe.Add(alignedStackBase(stack), stackSize)
+	ctx.stackTop = unsafe.Add(alignedStackBase(stack), stackSize)
+	ctx.stackPointer = ctx.stackTop
 	ctx.launched = false
 	ctx.stack = stack
 	return true
+}
+
+// StackRange reports the pointer saved at suspension and the logical C stack
+// top. While this context is active the collector substitutes its current SP.
+func (ctx *Context) StackRange() (start, end uintptr) {
+	return uintptr(ctx.stackPointer), uintptr(ctx.stackTop)
 }
 
 func (ctx *Context) Close(free func(unsafe.Pointer)) {

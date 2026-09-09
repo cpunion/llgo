@@ -23,7 +23,14 @@ import c "github.com/xgo-dev/llgo/runtime/internal/clite"
 // Fiber is the opaque emscripten_fiber_t storage. The C layout consists of
 // eight pointer-sized fields.
 type Fiber struct {
-	_ [8]uintptr
+	words [8]uintptr
+}
+
+// StackPointer returns the C stack pointer saved by emscripten_fiber_swap.
+// The first three pointer-sized fields are stack_base, stack_limit, and
+// stack_ptr in emscripten_fiber_t.
+func (fiber *Fiber) StackPointer() uintptr {
+	return fiber.words[2]
 }
 
 //llgo:type C

@@ -101,7 +101,7 @@ func RunWasmMain() {
 		fatal("runtime: invalid WebAssembly main goroutine")
 		return
 	}
-	if !wasmSched.system.InitCurrent(AllocRoot) {
+	if !wasmSched.system.InitCurrent(AllocNoScanRoot) {
 		panic("runtime: failed to initialize WebAssembly scheduler context")
 	}
 	// Do not defer Close here. The scheduler starts on the bootstrap G and then
@@ -110,9 +110,16 @@ func RunWasmMain() {
 	// Package initialization and testing.M.Run previously used Emscripten's
 	// five-megabyte process stack. Preserve that headroom when main becomes a
 	// logical fiber; ordinary goroutines retain the smaller context default.
-	if !initWasmFiber(gp, wasmcontext.Entry(wasmMainStart), nil, wasmMainStackSize) {
+	if !gp.context.platform.context.Init(
+		wasmcontext.Entry(wasmMainStart),
+		nil,
+		wasmMainStackSize,
+		AllocNoScanRoot,
+		FreeNoScanRoot,
+	) {
 		panic("runtime: failed to allocate WebAssembly main stack")
 	}
+	updateWasmMainStackRoot(gp)
 	InitWasmGCPolicy()
 
 	for {
@@ -125,7 +132,7 @@ func RunWasmMain() {
 			if isMain {
 				_, mainExited := gState()
 				if !mainExited {
-					wasmSched.system.Close(FreeRoot)
+					wasmSched.system.Close(FreeNoScanRoot)
 					return
 				}
 			}
@@ -171,6 +178,7 @@ func runWasmContext(gp *g) {
 		&gp.context.platform.context,
 		wasmGCRootPointer(&gp.context.platform.gcRoot),
 	)
+	updateWasmMainStackRoot(gp)
 	// Host callbacks and timer polling run on the physical system stack. Do
 	// not leave currentG pointing at the suspended G: it may be released before
 	// event polling, and a compiler safepoint in a callback must not requeue it.
@@ -216,7 +224,11 @@ func releaseWasmContext(gp *g) {
 		unregisterWasmGCRoot(&ctx.platform.gcRoot)
 	}
 	releaseGoroutineLocalBlocks(&ctx.platform.glsContext)
-	ctx.platform.context.Close(FreeRoot)
+	if gp.isMain {
+		ctx.platform.context.Close(FreeNoScanRoot)
+	} else {
+		ctx.platform.context.Close(FreeRoot)
+	}
 	freeRuntimeContext(ctx)
 }
 

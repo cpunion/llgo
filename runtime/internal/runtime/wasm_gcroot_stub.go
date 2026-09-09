@@ -12,6 +12,8 @@ func registerWasmGCRoot(*wasmGCRootContext, bool) {}
 
 func wasmGCRootPointer(*wasmGCRootContext) unsafe.Pointer { return nil }
 
+func setWasmGCRootStack(*wasmGCRootContext, uintptr, uintptr) {}
+
 func adoptWasmGCRoot(*wasmGCRootContext) {}
 
 func finishWasmGCRootRebuild() {}
