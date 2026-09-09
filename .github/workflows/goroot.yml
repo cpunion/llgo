@@ -53,7 +53,7 @@ jobs:
           set -o pipefail
           timeout --kill-after=10s 5m "$RUNNER_TEMP/llgo" test -c \
             -target emscripten \
-            "-ldflags=-extldflags='--profiling-funcs -sSTACK_OVERFLOW_CHECK=2'" \
+            "-ldflags=-extldflags '--profiling-funcs -sSTACK_OVERFLOW_CHECK=2'" \
             -o "$RUNNER_TEMP/evidence/dsa.mjs" ./test/std/crypto/dsa \
             2>&1 | tee "$RUNNER_TEMP/evidence/build.log"
           test -s "$RUNNER_TEMP/evidence/dsa.wasm"
