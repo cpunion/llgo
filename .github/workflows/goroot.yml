@@ -291,7 +291,7 @@ jobs:
       - name: Compiler attribution regressions with shared coverage
         run: |
           mkdir "$RUNNER_TEMP/evidence"
-          go test ./cl ./ssa -run 'Caller|Panic|Nil|Bounds|MemProfile|Safepoint|Guard|WasmScalarLeaf' \
+          go test ./cl ./ssa -run 'Caller|Panic|Nil|Bounds|MemProfile|Safepoint|Guard|WasmScalarLeaf|WasmTypedLocalZero' \
             -timeout=3m -count=1 -coverpkg=./cl,./ssa -coverprofile="$RUNNER_TEMP/evidence/compiler.cover"
           go tool cover -func="$RUNNER_TEMP/evidence/compiler.cover" \
             | tee "$RUNNER_TEMP/evidence/coverage.txt"
