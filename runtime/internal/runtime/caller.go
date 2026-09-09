@@ -50,11 +50,13 @@ type callerLocationStore struct {
 	wasmPanicTrace
 	frames []CallerFrame
 	stack  []CallerFrame
-	// Repeated call sites in one function update the same historical slot.
-	// This is only a hint: eviction can move slots, so every hit checks its key.
-	lastLocation  int
-	synthetic     []CallerFrame
-	syntheticHash []uintptr
+	// Repeated sites and short alternating call chains reuse historical slots.
+	// These are only hints: eviction can move slots, so every hit checks its key.
+	lastLocation     int
+	locationHints    [4]int
+	nextLocationHint uint
+	synthetic        []CallerFrame
+	syntheticHash    []uintptr
 	// Memoized synthetic PC bases for the static frames emitted around every
 	// Callers walk. On single-worker WebAssembly these refer to the shared
 	// process registry; other backends retain per-store synthetic sequences.
@@ -143,12 +145,22 @@ func recordPCLocation(pc, entry uintptr, name, file string, line int) {
 
 func (store *callerLocationStore) recordPCLocation(pc, entry uintptr, name, file string, line int) {
 	i := store.lastLocation
-	if uint(i) >= uint(len(store.frames)) ||
-		!((pc != 0 && store.frames[i].PC == pc) || (pc == 0 && store.frames[i].PC == 0 && store.frames[i].Entry == entry)) {
-		for i = 0; i < len(store.frames); i++ {
-			frame := &store.frames[i]
-			if (pc != 0 && frame.PC == pc) || (pc == 0 && frame.PC == 0 && frame.Entry == entry) {
+	if !store.locationMatches(i, pc, entry) {
+		i = len(store.frames)
+		for _, hint := range store.locationHints {
+			if store.locationMatches(hint, pc, entry) {
+				i = hint
 				break
+			}
+		}
+		if i == len(store.frames) {
+			for i = 0; i < len(store.frames); i++ {
+				if store.locationMatches(i, pc, entry) {
+					break
+				}
+			}
+			if i < len(store.frames) {
+				store.rememberLocation(i)
 			}
 		}
 	}
@@ -168,6 +180,7 @@ func (store *callerLocationStore) recordPCLocation(pc, entry uintptr, name, file
 		store.frames = store.frames[:len(store.frames)-1]
 	}
 	store.lastLocation = len(store.frames)
+	store.rememberLocation(store.lastLocation)
 	store.frames = append(store.frames, CallerFrame{
 		PC:       pc,
 		Entry:    entry,
@@ -175,6 +188,20 @@ func (store *callerLocationStore) recordPCLocation(pc, entry uintptr, name, file
 		File:     file,
 		Line:     line,
 	})
+}
+
+func (store *callerLocationStore) locationMatches(i int, pc, entry uintptr) bool {
+	if uint(i) >= uint(len(store.frames)) {
+		return false
+	}
+	frame := &store.frames[i]
+	return (pc != 0 && frame.PC == pc) || (pc == 0 && frame.PC == 0 && frame.Entry == entry)
+}
+
+func (store *callerLocationStore) rememberLocation(i int) {
+	// Insert only after a miss, so repeated hits do not evict other hot sites.
+	store.locationHints[store.nextLocationHint] = i
+	store.nextLocationHint = (store.nextLocationHint + 1) % uint(len(store.locationHints))
 }
 
 func Caller(skip int) (CallerFrame, bool) {
