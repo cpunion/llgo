@@ -71,6 +71,9 @@ func (p *context) prepareGCRoots(fn *ssa.Function, hasClosureContext bool) {
 			}
 		}
 	}
+	if p.prog.Target().GOARCH == "wasm" {
+		pruneStableWasmRootAliases(planned)
+	}
 	counts := make(map[ssa.Value]int, len(planned))
 	total := 0
 	count := func(value ssa.Value) {
