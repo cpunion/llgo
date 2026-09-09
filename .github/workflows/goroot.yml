@@ -19,7 +19,7 @@ jobs:
   diagnose:
     if: github.repository_owner == 'cpunion' && (inputs.mode == '' || inputs.mode == 'correctness')
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -59,7 +59,7 @@ jobs:
           go test ./internal/abi ./ssa ./cl \
             -run 'Test(LowerLarge|LargeAggregate|Compile.*GCRoot|GCSafepoint|.*GCRoot.*)' \
             -count=1 -coverprofile="$RUNNER_TEMP/evidence/compiler.cover"
-          go test ./internal/build -run '^Test(CoalesceWasmPanicLocations|LowerLargeAggregatesGCPolicy)' \
+          go test ./internal/build -run '^Test(CoalesceWasmPanicLocations|LowerWasmAggregateCopies|WasmPreAsyncify|WasmPostLink|PostLinkWasm|LowerLargeAggregatesGCPolicy)' \
             -count=1 -coverprofile="$RUNNER_TEMP/evidence/build-policy.cover"
       - name: Exercise aggregate snapshots and iterators across GC
         if: matrix.profile == 'EC64'
@@ -207,6 +207,61 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: r4-runtime-${{ matrix.profile }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Compile and execute original recover and full importer tests
+        if: ${{ !cancelled() }}
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          evidence="$RUNNER_TEMP/evidence"
+          args=()
+          if [[ "$PROFILE" == EC64 ]]; then
+            args=(-target emscripten-memory64)
+            module="$evidence/recover.mjs"
+          else
+            export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
+            module="$evidence/recover.wasm"
+          fi
+          /usr/bin/time -v timeout 5m "$RUNNER_TEMP/llgo" build "${args[@]}" \
+            -o "$module" "$(go env GOROOT)/test/recover.go" \
+            > "$evidence/recover-build.log" 2>&1 || {
+              cat "$evidence/recover-build.log"; exit 1;
+            }
+          if [[ "$PROFILE" == EC64 ]]; then
+            command=(node targets/emscripten-memory64-runner.mjs "$module")
+          else
+            command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC
+              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
+          fi
+          for policy in 100 1; do
+            GOGC="$policy" timeout 60s "${command[@]}" > "$evidence/recover-$policy.log" 2>&1 || {
+              cat "$evidence/recover-$policy.log"; exit 1;
+            }
+            test ! -s "$evidence/recover-$policy.log" || { cat "$evidence/recover-$policy.log"; exit 1; }
+            printf 'original recover GOGC=%s PASS\n' "$policy"
+          done
+          if [[ "$PROFILE" == GWASI ]]; then
+            /usr/bin/time -v timeout 5m "$RUNNER_TEMP/llgo" test -c \
+              -o "$evidence/importer.wasm" ./test/std/go/importer \
+              > "$evidence/importer-build.log" 2>&1 || {
+                cat "$evidence/importer-build.log"; exit 1;
+              }
+            timeout 60s wasmtime run --dir=/ --env PWD --env PATH \
+              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/importer.wasm" \
+              -test.v -test.timeout=45s > "$evidence/importer.log" 2>&1 || {
+                cat "$evidence/importer.log"; exit 1;
+              }
+            cat "$evidence/importer.log"
+            grep -q '^PASS$' "$evidence/importer.log"
+          fi
+      - name: Upload recovery and importer evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: r4-copy-validation-${{ matrix.profile }}-${{ github.run_id }}
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
           retention-days: 3
