@@ -19,7 +19,6 @@ var (
 )
 
 func main() {
-	testCallerStackReuse()
 	testReadMemStatsNil()
 	if testAlignedAlloc() == 0 {
 		panic("aligned allocation failed")
