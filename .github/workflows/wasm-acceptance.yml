@@ -96,6 +96,15 @@ jobs:
             ${{ runner.temp }}/goroot-smoke-${{ matrix.profile }}.json
           if-no-files-found: error
 
+      - name: Check caller stack allocation in an isolated process
+        env:
+          LLGO: ${{ runner.temp }}/llgo
+        run: bash dev/test_wasm_caller_alloc.sh '${{ matrix.profile }}'
+
+      - name: Reject missing artifacts and false caller-allocation success
+        if: matrix.profile == 'GJS'
+        run: python3 -m unittest discover -s dev -p wasm_caller_alloc_test.py
+
       - name: Check typed reflection before full acceptance
         env:
           PROFILE: ${{ matrix.profile }}
