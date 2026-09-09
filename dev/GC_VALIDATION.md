@@ -24,6 +24,7 @@ insufficient: another core must not mutate roots or payloads during collection.
 | Layer | What runs | What it does not establish |
 | --- | --- | --- |
 | Core arenas | Production allocator, mark/sweep, metadata, statistics, pacing and guard; fixed and growable memory; graph cycles/interior roots/worklist overflow; OOM; realloc/free; busy-entry rejection | Platform stack/register roots, real finalizers or LLGo code generation |
+| Lifecycle arena | Same production collector plus actual Wasm finalizer registry, dependency traversal and callback dispatch; large batches, hash collisions, collection during index growth, cancellation and cleanup ordering | Host-owned registration metadata/closures and explicitly drained worker are test shims; this is not guest root-publication or concurrent-GC validation |
 | Host CPU matrix | Linux x86-64/ARM64, macOS ARM64, Windows x86-64; also Linux 386; each arena test with `GOMAXPROCS=1,4`; serialized requests from eight goroutines | Concurrent GC, a race-detector result, or 16-bit AVR coverage |
 | Wasm profiles | EC32, EC64, WC32, GJS, GWASI; actual LLGo root/liveness/finalizer fixtures, `GOGC=100,1,0,off`, negative reentry/configuration tests, original Go GC workloads | Full standard-library compatibility or final R4 acceptance |
 | Embedded ISA | Existing ESP32/Xtensa and ESP32-C3/RISC-V GC regression firmware built by LLGo and run by Espressif QEMU, one mutator; register/global/interior roots, graph release, defer liveness and pressure | Physical-board, interrupt-allocation, RTOS/multi-hart or multicore GC support |
@@ -37,7 +38,11 @@ regression suite instead of filling missing platform APIs with no-op stubs.
 
 The native arena harness extracts declarations from the current production
 files, rather than maintaining another collector. Only platform memory/root
-discovery and profiler/finalizer integration are substituted. Its coverage
+discovery and profiler integration are substituted. The core-only variant stubs
+finalizers; the lifecycle variant extracts `finalizer.go` too, tracing published
+ready arguments explicitly and draining its worker on the sole arena mutator.
+Wasm integration also dispatches 1,024 finalizers at GOGC=100 and GOGC=1, with
+real LLGo allocation, root publication and goroutine lifetime. The arena coverage
 percentage describes that extracted core, **not** whole-runtime or PR coverage.
 
 Embedded firmware passes only after emitting its exact checked completion line.

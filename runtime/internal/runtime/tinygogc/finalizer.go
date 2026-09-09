@@ -32,11 +32,15 @@ type finalizerRecord struct {
 	candidate bool
 	blocked   bool
 	next      *finalizerRecord
+	prev      *finalizerRecord
+	indexNext *finalizerRecord
 	readyNext *finalizerRecord
 }
 
 var (
 	finalizers              *finalizerRecord
+	finalizerIndex          []*finalizerRecord
+	finalizerCount          int
 	readyFinalizers         *finalizerRecord
 	finalizerWorkerRunning  bool
 	finalizerDependencyScan bool
@@ -63,6 +67,7 @@ func addFinalizer(ptr unsafe.Pointer, callback func(unsafe.Pointer), kind finali
 	}
 
 	record := &finalizerRecord{callback: callback, kind: kind}
+	prepareFinalizerIndex()
 	lock(&gcMutex)
 	lazyInit()
 	address := uintptr(ptr)
@@ -80,7 +85,14 @@ func addFinalizer(ptr unsafe.Pointer, callback func(unsafe.Pointer), kind finali
 	// collector has established that the object is unreachable.
 	record.object = encodeFinalizerAddress(address)
 	record.next = finalizers
+	if finalizers != nil {
+		finalizers.prev = record
+	}
 	finalizers = record
+	bucket := finalizerBucket(record.objectKey, len(finalizerIndex))
+	record.indexNext = finalizerIndex[bucket]
+	finalizerIndex[bucket] = record
+	finalizerCount++
 	unlock(&gcMutex)
 
 	return func() {
@@ -103,15 +115,64 @@ func encodeFinalizerAddress(address uintptr) uintptr {
 	return ^address
 }
 
+// Grow only on the mutator path, before taking gcMutex. An allocation here can
+// collect using the old, fully published registry. Rebuilding and publication
+// under the guard do not allocate, so GC never observes a half-built index.
+func prepareFinalizerIndex() {
+	for finalizerCount >= len(finalizerIndex) {
+		size := len(finalizerIndex) * 2
+		if size == 0 {
+			size = 16
+		}
+		index := make([]*finalizerRecord, size)
+		lock(&gcMutex)
+		if len(index) > len(finalizerIndex) {
+			for record := finalizers; record != nil; record = record.next {
+				bucket := finalizerBucket(record.objectKey, len(index))
+				record.indexNext = index[bucket]
+				index[bucket] = record
+			}
+			finalizerIndex = index
+		}
+		unlock(&gcMutex)
+	}
+}
+
+func finalizerBucket(key uintptr, size int) uintptr {
+	// Remove object alignment before mixing. Keys remain encoded in records;
+	// no decoded address is retained in the index as a conservative root.
+	key /= bytesPerBlock
+	key ^= key >> 16
+	return key * 0x9e3779b1 & uintptr(size-1)
+}
+
+func finalizersForObject(key uintptr) *finalizerRecord {
+	if len(finalizerIndex) == 0 {
+		return nil
+	}
+	return finalizerIndex[finalizerBucket(key, len(finalizerIndex))]
+}
+
 func unlinkFinalizer(record *finalizerRecord) {
-	link := &finalizers
+	link := &finalizerIndex[finalizerBucket(record.objectKey, len(finalizerIndex))]
 	for *link != nil {
 		if *link == record {
-			*link = record.next
+			*link = record.indexNext
+			if record.prev == nil {
+				finalizers = record.next
+			} else {
+				record.prev.next = record.next
+			}
+			if record.next != nil {
+				record.next.prev = record.prev
+			}
 			record.next = nil
+			record.prev = nil
+			record.indexNext = nil
+			finalizerCount--
 			return
 		}
-		link = &(*link).next
+		link = &(*link).indexNext
 	}
 }
 
@@ -133,7 +194,7 @@ func preserveFinalizableObjects() {
 
 	finalizerDependencyScan = true
 	for record := finalizers; record != nil; record = record.next {
-		if !record.candidate || record.kind != objectFinalizer || earlierFinalizerForObject(record) {
+		if !record.candidate || record.kind != objectFinalizer {
 			continue
 		}
 		block := finalizerObjectBlock(record)
@@ -174,7 +235,7 @@ func preserveFinalizableObjects() {
 		}
 		// An object with both a finalizer and cleanups gets only its finalizer
 		// this cycle, including when its cleanup records are not adjacent.
-		for pending := finalizers; pending != nil; pending = pending.next {
+		for pending := finalizersForObject(key); pending != nil; pending = pending.indexNext {
 			if pending.objectKey == key {
 				pending.candidate = false
 			}
@@ -220,11 +281,11 @@ func finalizerObjectState(record *finalizerRecord) uint8 {
 	return gcStateOf(finalizerObjectBlock(record))
 }
 
-// These lookups intentionally scan the callback list while the allocator is
-// stopped. Building an index here would itself allocate; registered lifecycle
-// callbacks are expected to remain a small set.
+// Only inspect the matching bucket while the allocator is stopped. In
+// particular, syscall/js can register thousands of short-lived emval handles;
+// rescanning the complete registry per object would make collection quadratic.
 func candidateForObject(key uintptr) *finalizerRecord {
-	for record := finalizers; record != nil; record = record.next {
+	for record := finalizersForObject(key); record != nil; record = record.indexNext {
 		if record.candidate && record.objectKey == key {
 			return record
 		}
@@ -232,17 +293,8 @@ func candidateForObject(key uintptr) *finalizerRecord {
 	return nil
 }
 
-func earlierFinalizerForObject(record *finalizerRecord) bool {
-	for candidate := finalizers; candidate != record; candidate = candidate.next {
-		if candidate.candidate && candidate.kind == objectFinalizer && candidate.objectKey == record.objectKey {
-			return true
-		}
-	}
-	return false
-}
-
 func hasCandidateFinalizer(key uintptr) bool {
-	for record := finalizers; record != nil; record = record.next {
+	for record := finalizersForObject(key); record != nil; record = record.indexNext {
 		if record.candidate && record.kind == objectFinalizer && record.objectKey == key {
 			return true
 		}
@@ -251,7 +303,7 @@ func hasCandidateFinalizer(key uintptr) bool {
 }
 
 func finalizerObjectBlocked(key uintptr) bool {
-	for record := finalizers; record != nil; record = record.next {
+	for record := finalizersForObject(key); record != nil; record = record.indexNext {
 		if record.candidate && record.objectKey == key {
 			return record.blocked
 		}
@@ -260,7 +312,7 @@ func finalizerObjectBlocked(key uintptr) bool {
 }
 
 func markFinalizerObjectBlocked(key uintptr) {
-	for record := finalizers; record != nil; record = record.next {
+	for record := finalizersForObject(key); record != nil; record = record.indexNext {
 		if record.objectKey == key {
 			record.blocked = true
 		}
@@ -269,21 +321,20 @@ func markFinalizerObjectBlocked(key uintptr) {
 
 func queueCallbacksForObject(key uintptr, kind finalizerKind) bool {
 	queued := false
-	link := &finalizers
-	for *link != nil {
-		record := *link
+	for record := finalizersForObject(key); record != nil; {
+		next := record.indexNext
 		if record.objectKey != key || record.kind != kind || record.state != finalizerActive || !record.candidate || record.blocked {
-			link = &record.next
+			record = next
 			continue
 		}
-		*link = record.next
-		record.next = nil
+		unlinkFinalizer(record)
 		record.state = finalizerQueued
 		original := ^record.object
 		record.ready = unsafe.Pointer(original)
 		record.readyNext = readyFinalizers
 		readyFinalizers = record
 		queued = true
+		record = next
 	}
 	return queued
 }

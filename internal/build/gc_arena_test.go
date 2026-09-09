@@ -57,10 +57,218 @@ func TestEmbeddedGCStatsABI(t *testing.T) {
 // Only platform memory/root discovery and finalizer/profiler hooks are shims.
 // Finalizer and compiler-root integration remain separate target-side tests.
 func TestGCIndependentArena(t *testing.T) {
+	testGCIndependentArena(t, false)
+}
+
+// The lifecycle variant also executes the real callback registry and dependency
+// traversal. Its worker is drained explicitly, so the host runner never becomes
+// a second mutator of the arena.
+func TestGCFinalizerArena(t *testing.T) {
+	testGCIndependentArena(t, true)
+}
+
+const gcFinalizerArenaTestSource = `
+var arenaFinalizerSteps uint64
+var arenaIndexAllocationHook func()
+func resetArenaFinalizers() {
+  finalizers, readyFinalizers = nil, nil
+  finalizerIndex, finalizerCount = nil, 0
+  finalizerWorkerRunning, finalizerDependencyScan = false, false
+  arenaFinalizerSteps = 0
+  arenaIndexAllocationHook = nil
+}
+func arenaMakeFinalizerIndex(size int) []*finalizerRecord {
+  if gcMutex.active { panic("finalizer index allocation under collector guard") }
+  if hook := arenaIndexAllocationHook; hook != nil {
+    arenaIndexAllocationHook = nil
+    hook()
+  }
+  return make([]*finalizerRecord,size)
+}
+func markArenaFinalizerRoots() {
+  // Registry records/callback closures live in the host Go heap; only their
+  // published ready arguments are roots in this collector's test arena.
+  for r := readyFinalizers; r != nil; r = r.readyNext {
+    if r.ready != nil { markRoot(0, uintptr(r.ready)) }
+  }
+}
+func readyCount() int {
+  n := 0
+  for r := readyFinalizers; r != nil; r = r.readyNext { n++ }
+  return n
+}
+func checkFinalizerIndex(t *testing.T) {
+  t.Helper()
+  seen:=map[*finalizerRecord]bool{}
+  var prev *finalizerRecord
+  for r:=finalizers;r!=nil;r=r.next {
+    if seen[r] || r.prev!=prev {t.Fatal("registry cycle or broken predecessor")}
+    seen[r]=true;prev=r
+  }
+  if len(seen)!=finalizerCount {t.Fatal("registry count mismatch")}
+  for bucket,r:=range finalizerIndex {
+    for ;r!=nil;r=r.indexNext {
+      if !seen[r] || finalizerBucket(r.objectKey,len(finalizerIndex))!=uintptr(bucket) {t.Fatal("stale/duplicate/misplaced index entry")}
+      delete(seen,r)
+    }
+  }
+  if len(seen)!=0 {t.Fatal("unindexed registry entry")}
+}
+func TestFinalizerRegistryScaling(t *testing.T) {
+  for _, count := range []int{64, 1024, 2048} {
+    newArena(512<<10,512<<10,false)
+    called := 0
+    for i := 0; i < count; i++ {
+      p := Alloc(2*bytesPerBlock)
+      *(*uintptr)(p) = 123
+      _, ok := AddFinalizer(p, func(p unsafe.Pointer) {
+        if *(*uintptr)(p) != 123 { t.Fatal("finalizer argument was not preserved") }
+        called++
+      })
+      if !ok { t.Fatal("registration failed") }
+    }
+    checkFinalizerIndex(t)
+    arenaFinalizerSteps = 0
+    GC()
+    steps := arenaFinalizerSteps
+    if readyCount() != count || finalizers != nil { t.Fatal("lost or retained callbacks") }
+    checkFinalizerIndex(t)
+    // Recollection before dispatch must retain the queued objects.
+    GC()
+    drainFinalizers()
+    if called != count || readyFinalizers != nil { t.Fatal("callback count") }
+    GC()
+    if ReadGCStats().HeapAlloc != 0 { t.Fatal("finalized objects were not reclaimed") }
+    t.Logf("callbacks=%d registry iterations=%d", count, steps)
+    if steps > uint64(count)*128 { t.Fatalf("quadratic callback scan: %d iterations for %d callbacks", steps, count) }
+    checkCanaries(t)
+  }
+}
+func TestFinalizerIndexCollectionDuringGrowth(t *testing.T) {
+  newArena(64<<10,64<<10,false)
+  called:=0
+  for i:=0;i<16;i++ {AddFinalizer(Alloc(64),func(unsafe.Pointer){called++})}
+  p:=Alloc(64)
+  arenaRoots=[]unsafe.Pointer{p} // the registering caller's live argument
+  arenaIndexAllocationHook=func(){GC();drainFinalizers()}
+  AddFinalizer(p,func(unsafe.Pointer){called++})
+  if arenaIndexAllocationHook!=nil || called!=16 || finalizerCount!=1 {t.Fatal("growth did not tolerate collection of the old registry")}
+  checkFinalizerIndex(t)
+  arenaRoots=nil
+  GC();drainFinalizers();GC()
+  if called!=17 || ReadGCStats().HeapAlloc!=0 {t.Fatal("registration was lost during growth")}
+  checkFinalizerIndex(t)
+}
+func TestFinalizerIndexCollisions(t *testing.T) {
+  newArena(64<<10,64<<10,false)
+  var cancels []func()
+  called:=0
+  // Same low bucket bits, distinct object keys. The index must still compare
+  // the full encoded address, including after unlinking a middle bucket node.
+  for i:=0;i<12;i++ {
+    cancel,_:=AddFinalizer(Alloc(16*bytesPerBlock),func(unsafe.Pointer){called++})
+    cancels=append(cancels,cancel)
+  }
+  checkFinalizerIndex(t)
+  for i:=0;i<12;i+=2 {cancels[i]();checkFinalizerIndex(t)}
+  GC();checkFinalizerIndex(t);drainFinalizers();GC()
+  if called!=6 || ReadGCStats().HeapAlloc!=0 {t.Fatal("colliding callback lost or canceled callback dispatched")}
+}
+func TestFinalizerDependencies(t *testing.T) {
+  newArena(64<<10,64<<10,false)
+  a,b,c,middle := Alloc(64),Alloc(64),Alloc(64),Alloc(64)
+  *(*unsafe.Pointer)(a) = middle
+  *(*unsafe.Pointer)(middle) = b
+  *(*unsafe.Pointer)(b) = c
+  var events []int
+  for i,p := range []unsafe.Pointer{c,a,b} {
+    id := []int{3,1,2}[i]
+    AddFinalizer(p,func(unsafe.Pointer){events=append(events,id)})
+  }
+  for want := 1; want <= 3; want++ {
+    GC()
+    if readyCount()!=1 { t.Fatalf("dependency stage %d: ready=%d",want,readyCount()) }
+    drainFinalizers()
+    if len(events)!=want || events[want-1]!=want { t.Fatalf("dependency order: %v",events) }
+  }
+  GC()
+  if ReadGCStats().HeapAlloc!=0 { t.Fatal("dependency graph retained after callbacks") }
+}
+func TestFinalizerCyclesAndLiveRoots(t *testing.T) {
+  newArena(64<<10,64<<10,false)
+  a,b := Alloc(64),Alloc(64)
+  *(*unsafe.Pointer)(a)=b
+  *(*unsafe.Pointer)(b)=a
+  AddFinalizer(a,func(unsafe.Pointer){t.Fatal("cycle finalized")})
+  AddFinalizer(b,func(unsafe.Pointer){t.Fatal("cycle finalized")})
+  for i:=0;i<3;i++ {GC();if readyCount()!=0 {t.Fatal("cycle queued")}}
+  if gcStateOf(blockFromAddr(uintptr(a)))!=blockStateHead || gcStateOf(blockFromAddr(uintptr(b)))!=blockStateHead {t.Fatal("cycle collected")}
+  newArena(64<<10,64<<10,false)
+  p:=Alloc(64)
+  arenaRoots=[]unsafe.Pointer{unsafe.Add(p,8)}
+  AddFinalizer(p,func(unsafe.Pointer){})
+  GC()
+  if readyCount()!=0 {t.Fatal("live object queued")}
+  arenaRoots=nil
+  GC()
+  if readyCount()!=1 {t.Fatal("dropped root not queued")}
+  drainFinalizers()
+}
+func TestFinalizerCleanupAndCancellation(t *testing.T) {
+  newArena(64<<10,64<<10,false)
+  p,q := Alloc(64),Alloc(64)
+  var finalCalls,cleanupCalls int
+  AddCleanup(p,func(unsafe.Pointer){cleanupCalls++})
+  cancelQ,_:=AddFinalizer(q,func(unsafe.Pointer){t.Fatal("canceled active callback ran")})
+  AddFinalizer(unsafe.Add(p,8),func(got unsafe.Pointer){
+    if got!=unsafe.Add(p,8) {t.Fatal("interior pointer changed")}
+    finalCalls++
+    // User callbacks run after the collection guard is released.
+    Alloc(64)
+  })
+  AddCleanup(unsafe.Add(p,16),func(unsafe.Pointer){cleanupCalls++})
+  AddFinalizer(p,func(unsafe.Pointer){finalCalls++})
+  cancelQ();cancelQ()
+  GC()
+  if readyCount()!=2 {t.Fatalf("expected only the two finalizers, got %d",readyCount())}
+  drainFinalizers()
+  if finalCalls!=2 || cleanupCalls!=0 {t.Fatal("cleanup ran before finalizers")}
+  GC();drainFinalizers()
+  if cleanupCalls!=2 {t.Fatal("lost cleanup")}
+  p=Alloc(64)
+  cancel,_:=AddCleanup(p,func(unsafe.Pointer){t.Fatal("canceled queued cleanup ran")})
+  GC();cancel();cancel();drainFinalizers()
+  if readyFinalizers!=nil || finalizerWorkerRunning {t.Fatal("cancellation left worker active")}
+  GC()
+  if ReadGCStats().HeapAlloc!=0 {t.Fatal("cancellation leaked storage")}
+}
+func TestFinalizerInvalidRegistration(t *testing.T) {
+  newArena(64<<10,64<<10,false)
+  p:=Alloc(64)
+  cases:=[]struct{p unsafe.Pointer; callback func(unsafe.Pointer)}{
+    {nil,func(unsafe.Pointer){}},{p,nil},{unsafe.Pointer(&arenaFinalizerSteps),func(unsafe.Pointer){}},
+  }
+  for _,c:=range cases {
+    cancel,ok:=AddFinalizer(c.p,c.callback)
+    if ok {t.Fatal("invalid registration accepted")}
+    cancel()
+  }
+  Free(p)
+  cancel,ok:=AddFinalizer(p,func(unsafe.Pointer){})
+  if ok {t.Fatal("free block registered")};cancel()
+  if finalizers!=nil {t.Fatal("invalid registration retained")}
+}
+`
+
+func testGCIndependentArena(t *testing.T, lifecycle bool) {
 	var source bytes.Buffer
 	source.WriteString("package arena\nimport \"unsafe\"\n")
 	dir := filepath.Join("..", "..", "runtime", "internal", "runtime", "tinygogc")
-	for _, name := range []string{"gc_tinygo.go", "head_cache.go", "pacing.go", "gc.go", "mutex.go"} {
+	names := []string{"gc_tinygo.go", "head_cache.go", "pacing.go", "gc.go", "mutex.go"}
+	if lifecycle {
+		names = append(names, "finalizer.go")
+	}
+	for _, name := range names {
 		fset := token.NewFileSet()
 		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
 		if err != nil {
@@ -70,8 +278,34 @@ func TestGCIndependentArena(t *testing.T) {
 			if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.IMPORT {
 				continue
 			}
-			if fn, ok := decl.(*ast.FuncDecl); ok && (fn.Name.Name == "gcPanic" || fn.Name.Name == "getsp" || fn.Name.Name == "gcReentryAbort") {
+			if fn, ok := decl.(*ast.FuncDecl); ok && (fn.Name.Name == "gcPanic" || fn.Name.Name == "getsp" || fn.Name.Name == "gcReentryAbort" || fn.Name.Name == "scheduleFinalizers") {
 				continue
+			}
+			if name == "finalizer.go" {
+				// Count actual registry iterations, not elapsed time. Do not
+				// replace the search/queue implementation with a test model.
+				ast.Inspect(decl, func(node ast.Node) bool {
+					if call, ok := node.(*ast.CallExpr); ok {
+						if name, ok := call.Fun.(*ast.Ident); ok && name.Name == "make" {
+							// The one index allocation may collect before publication.
+							// Exercise that window without allocating the index in
+							// the test arena or changing the production control flow.
+							call.Fun = ast.NewIdent("arenaMakeFinalizerIndex")
+							call.Args = call.Args[1:]
+						}
+					}
+					var body *ast.BlockStmt
+					switch loop := node.(type) {
+					case *ast.ForStmt:
+						body = loop.Body
+					case *ast.RangeStmt:
+						body = loop.Body
+					}
+					if body != nil {
+						body.List = append([]ast.Stmt{&ast.IncDecStmt{X: ast.NewIdent("arenaFinalizerSteps"), Tok: token.INC}}, body.List...)
+					}
+					return true
+				})
 			}
 			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "gcStateByteOf" {
 				// Count metadata probes without replacing the production search.
@@ -93,7 +327,29 @@ func TestGCIndependentArena(t *testing.T) {
 	if err := os.WriteFile(collector, source.Bytes(), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(gcArenaTestSource), 0600); err != nil {
+	shim := []byte(gcArenaTestSource)
+	if lifecycle {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "arena_test.go", shim, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decls := file.Decls[:0]
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && (fn.Name.Name == "noteFinalizerReference" || fn.Name.Name == "preserveFinalizableObjects" || fn.Name.Name == "resetArenaFinalizers" || fn.Name.Name == "markArenaFinalizerRoots") {
+				continue
+			}
+			decls = append(decls, decl)
+		}
+		file.Decls = decls
+		var out bytes.Buffer
+		if err := format.Node(&out, fset, file); err != nil {
+			t.Fatal(err)
+		}
+		out.WriteString(gcFinalizerArenaTestSource)
+		shim = out.Bytes()
+	}
+	if err := os.WriteFile(path, shim, 0600); err != nil {
 		t.Fatal(err)
 	}
 	files := []string{collector, path}
@@ -165,6 +421,7 @@ func newArena(initial, maximum uintptr, grow bool) {
   markHeads, gcMutex, arenaPacing = markHeadCache{}, mutex{}, gcPacing{}
   arenaRoots, profileFrees, memoryHook = nil, nil, nil
   arenaMetadataReads = 0
+  resetArenaFinalizers()
 }
 func checkCanaries(t *testing.T) {
   t.Helper()
@@ -206,7 +463,12 @@ func gcGrowMemory(old uintptr) uintptr {
   if size > arenaMaximum { size = arenaMaximum }
   return arenaBase+size
 }
-func gcMarkReachable() { for _, p := range arenaRoots { markRoot(0,uintptr(p)) } }
+func gcMarkReachable() {
+  for _, p := range arenaRoots { markRoot(0,uintptr(p)) }
+  markArenaFinalizerRoots()
+}
+func resetArenaFinalizers() {}
+func markArenaFinalizerRoots() {}
 func gcStackStats() (uintptr,uintptr) { return 0,0 }
 func gcAutomaticAllowed() bool { return !arenaGrow || arenaPacing.automatic() }
 func gcAllocationDue(n uint64) bool { return arenaGrow && arenaPacing.shouldCollect(gcLiveBytes(),n) }
