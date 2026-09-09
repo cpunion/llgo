@@ -15,6 +15,7 @@ on:
           - copy-only
           - cmplx-only
           - gc-only
+          - compile-phases
 
 permissions:
   contents: read
@@ -271,14 +272,14 @@ jobs:
           retention-days: 3
 
   resource-probes:
-    if: github.repository_owner == 'cpunion' && (inputs.mode == 'resource-probes' || inputs.mode == 'recover-only' || inputs.mode == 'runtime-only' || inputs.mode == 'cmplx-only' || inputs.mode == 'gc-only')
+    if: github.repository_owner == 'cpunion' && (inputs.mode == 'resource-probes' || inputs.mode == 'recover-only' || inputs.mode == 'runtime-only' || inputs.mode == 'cmplx-only' || inputs.mode == 'gc-only' || inputs.mode == 'compile-phases')
     name: Bounded resource probes (${{ matrix.profile }})
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        profile: ${{ fromJSON(inputs.mode == 'runtime-only' && '["GWASI"]' || (inputs.mode == 'cmplx-only' || inputs.mode == 'gc-only') && '["EC64", "GWASI"]' || '["EC32", "GWASI"]') }}
+        profile: ${{ fromJSON(inputs.mode == 'runtime-only' && '["GWASI"]' || (inputs.mode == 'cmplx-only' || inputs.mode == 'gc-only' || inputs.mode == 'compile-phases') && '["EC64", "GWASI"]' || '["EC32", "GWASI"]') }}
     env:
       GOMAXPROCS: '2'
       BINARYEN_CORES: '2'
@@ -307,6 +308,7 @@ jobs:
       - name: Build compiler and check diagnostic wrappers
         run: |
           python3 -m unittest discover -s dev -p 'wasm_build_diagnostics_test.py' -v
+          go test ./internal/build -run '^TestTraceR4MainModule$' -count=1 -timeout=60s
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
           go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
       - name: Preserve the original compile and optimizer inputs
@@ -314,9 +316,11 @@ jobs:
         env:
           PROFILE: ${{ matrix.profile }}
           MODE: ${{ inputs.mode }}
+          LLGO_R4_LLVM_TRACE: ${{ runner.temp }}/llvm-phases
         run: |
           probe_case='^recover\.go$'
           if [[ "$MODE" == cmplx-only ]]; then probe_case='^cmplxdivide\.go$'; fi
+          if [[ "$MODE" == compile-phases ]]; then probe_case='^(cmplxdivide|recover)\.go$'; fi
           python3 dev/wasm_build_diagnostics.py \
             --llgo "$RUNNER_TEMP/llgo" --runner "$RUNNER_TEMP/goroot-runner" \
             --goroot "$(go env GOROOT)" --output "$RUNNER_TEMP/recover-probe" \
@@ -407,5 +411,6 @@ jobs:
             ${{ runner.temp }}/recover-probe/evidence
             ${{ runner.temp }}/runtime-probe
             ${{ runner.temp }}/gc-probe
+            ${{ runner.temp }}/llvm-phases
           if-no-files-found: error
           retention-days: 3

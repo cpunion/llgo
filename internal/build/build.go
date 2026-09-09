@@ -2910,6 +2910,7 @@ func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string,
 	// the command package needs alternate export symbols, and command packages
 	// are deliberately excluded from the package cache.
 	options.CExportWrappers = needsCExportWrappers(ctx, aPkg)
+	traceR4MainModule("frontend-enter", pkgPath, gllvm.Module{})
 	ret, externs, err := cl.NewPackageExWithEmbedMetaOptions(
 		ctx.prog, ctx.callerTracking, ctx.patches, aPkg.rewriteVars,
 		aPkg.SSA, syntax, embedMap, needMeta, options)
@@ -2947,8 +2948,11 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	ret := aPkg.LPkg
 
 	ctx.cTransformer.SetSkipFuncs(cabiSkipFuncsForPlan9Asm(ctx, pkgPath, ret.Module()))
+	traceMain := traceR4MainModule("frontend-ready", pkgPath, ret.Module())
 	lowerLargeAggregates(ctx.prog, ret.Module())
+	traceR4MainModule("after-large-aggregates", pkgPath, ret.Module())
 	ctx.cTransformer.TransformModule(ret.Path(), ret.Module())
+	traceR4MainModule("after-cabi", pkgPath, ret.Module())
 	ctx.cTransformer.SetSkipFuncs(nil)
 	if ctx.buildConf.Goos == "windows" {
 		pragmaSyntax := append([]*ast.File(nil), pkg.Syntax...)
@@ -2962,6 +2966,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	coalesceWasmPanicLocations(ctx.buildConf.Goarch, ret.Module())
 	lowerWasmAggregateCopies(ctx.buildConf.Goarch, ctx.prog.TargetData(), ret.Module(), ctx.prog.GCRootsEnabled())
 	applySizeOptimizationAttributes(ret.Module(), ctx.buildConf.OptLevel)
+	traceR4MainModule("before-llvm", pkgPath, ret.Module())
 	printCmds := ctx.shouldPrintCommands(verbose)
 	if ctx.mode != ModeGen {
 		if aPkg.AltPkg == nil || llruntime.HasAdditiveAltPkg(pkgPath) {
@@ -2987,12 +2992,14 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		mod.SetTarget(ctx.prog.Target().Spec().Triple)
 		pbo := gllvm.NewPassBuilderOptions()
 		defer pbo.Dispose()
+		pbo.SetDebugLogging(traceMain)
 		if err := gllvm.VerifyModule(mod, gllvm.ReturnStatusAction); err != nil {
 			return fmt.Errorf("verify LLVM module for %v failed: %w", pkgPath, err)
 		}
 		if err := mod.RunPasses(llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode()), ctx.prog.TargetMachine(), pbo); err != nil {
 			return fmt.Errorf("run LLVM passes failed for %v: %w", pkgPath, err)
 		}
+		traceR4MainModule("after-llvm", pkgPath, ret.Module())
 	}
 	dropUnusedWindowsTestMain(ctx, aPkg, ret.Module())
 	emitFuncInfoEntrySites(ctx, ret)
