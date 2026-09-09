@@ -23,11 +23,17 @@ jobs:
         include:
           - name: baseline
             passes: default<Os>
-          - name: pre-instcombine
-            passes: function(instcombine<max-iterations=8>),default<Os>
+            skip_mem2reg: 'false'
+          - name: early-mem2reg
+            passes: function(mem2reg),default<Os>
+            skip_mem2reg: 'false'
+          - name: diagnostic-sroa-no-mem2reg
+            passes: default<Os>
+            skip_mem2reg: 'true'
     name: opt-trace (${{ matrix.name }})
     env:
       OPT_PIPELINE: ${{ matrix.passes }}
+      SKIP_MEM2REG: ${{ matrix.skip_mem2reg }}
     permissions:
       contents: read
       actions: read
@@ -49,7 +55,8 @@ jobs:
           set -o pipefail
           opt --version
           /usr/bin/time -v timeout --kill-after=5s 5m opt \
-            "-passes=$OPT_PIPELINE" -debug-pass-manager -time-passes \
+            "-passes=$OPT_PIPELINE" "-sroa-skip-mem2reg=$SKIP_MEM2REG" \
+            -debug-pass-manager -time-passes -time-passes-per-run \
             -mtriple=wasm32-unknown-wasip1 -S "$RUNNER_TEMP/input/before-opt.ll" \
             -o "$RUNNER_TEMP/evidence/optimized.ll" \
             2>&1 | tee "$RUNNER_TEMP/evidence/passes.log"
