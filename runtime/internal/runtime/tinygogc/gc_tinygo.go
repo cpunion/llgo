@@ -309,11 +309,22 @@ func AllocationSize(size uintptr) uintptr {
 	return (size + bytesPerBlock - 1) &^ (bytesPerBlock - 1)
 }
 
-// alloc tries to find some free space on the heap, possibly doing a garbage
+// Alloc tries to find some free space on the heap, possibly doing a garbage
 // collection cycle if needed. If no space is free, it panics.
 //
 //go:noinline
 func Alloc(size uintptr) unsafe.Pointer {
+	return alloc(size, false)
+}
+
+// AllocRoot allocates an explicitly owned runtime root. Its storage remains
+// fully traced, but does not consume the ordinary Go heap allocation budget.
+func AllocRoot(size uintptr) unsafe.Pointer {
+	return alloc(size, true)
+}
+
+//go:noinline
+func alloc(size uintptr, root bool) unsafe.Pointer {
 	if size == 0 {
 		return unsafe.Pointer(&zeroSizedAlloc)
 	}
@@ -322,7 +333,7 @@ func Alloc(size uintptr) unsafe.Pointer {
 
 	neededBlocks := (size + (bytesPerBlock - 1)) / bytesPerBlock
 	collected := false
-	if gcAllocationDue(uint64(neededBlocks) * uint64(bytesPerBlock)) {
+	if !root && gcAllocationDue(uint64(neededBlocks)*uint64(bytesPerBlock)) {
 		gc()
 		collected = true
 	}
@@ -406,6 +417,9 @@ func Alloc(size uintptr) unsafe.Pointer {
 			gcTotalAlloc += uint64(size)
 			gcMallocs++
 			gcTotalBlocks += uint64(neededBlocks)
+			if root {
+				gcRootAllocated(uint64(neededBlocks) * uint64(bytesPerBlock))
+			}
 			unlock(&gcMutex)
 			scheduleFinalizers()
 			// Return a pointer to this allocation.
@@ -444,6 +458,15 @@ func Realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
 // retired Fiber and Asyncify stacks whose stale words would otherwise remain
 // conservative roots until an arbitrary later collection.
 func Free(ptr unsafe.Pointer) {
+	free(ptr, false)
+}
+
+// FreeRoot releases storage obtained from AllocRoot and its pacing credit.
+func FreeRoot(ptr unsafe.Pointer) {
+	free(ptr, true)
+}
+
+func free(ptr unsafe.Pointer, root bool) {
 	if ptr == nil || ptr == unsafe.Pointer(&zeroSizedAlloc) {
 		return
 	}
@@ -468,6 +491,9 @@ func Free(ptr unsafe.Pointer) {
 	}
 	gcFrees++
 	gcFreedBlocks += uint64(end - head)
+	if root {
+		gcRootFreed(uint64(end-head) * uint64(bytesPerBlock))
+	}
 	if head < nextAlloc {
 		nextAlloc = head
 	}

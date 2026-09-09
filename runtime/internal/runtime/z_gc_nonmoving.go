@@ -50,7 +50,7 @@ func AllocRoot(size uintptr) unsafe.Pointer {
 	if size == 0 {
 		return unsafe.Pointer(&zerobase)
 	}
-	ret := tinygogc.Alloc(size)
+	ret := tinygogc.AllocRoot(size)
 	if ret == nil {
 		panic("out of memory")
 	}
@@ -61,5 +61,5 @@ func FreeRoot(ptr unsafe.Pointer) {
 	if ptr == unsafe.Pointer(&zerobase) {
 		return
 	}
-	tinygogc.Free(ptr)
+	tinygogc.FreeRoot(ptr)
 }
