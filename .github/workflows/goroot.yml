@@ -59,11 +59,22 @@ jobs:
         run: |
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
           mkdir "$RUNNER_TEMP/evidence"
+      - name: Preserve unchanged postlink inputs for bounded builds
+        if: matrix.profile == 'GWASI'
+        run: |
+          wrapper="$RUNNER_TEMP/evidence/optimizer-bin/wasm-opt"
+          mkdir "$RUNNER_TEMP/evidence/optimizer-bin"
+          ln -s "$GITHUB_WORKSPACE/dev/wasm_build_diagnostics.py" "$wrapper"
+          {
+            echo "LLGO_DIAG_REAL_WASMOPT=$(command -v wasm-opt)"
+            echo "LLGO_DIAG_EVIDENCE=$RUNNER_TEMP/evidence/optimizer"
+            echo "WASMOPT=$wrapper"
+          } >> "$GITHUB_ENV"
       - name: Check late-allocation root lowering
         if: matrix.profile == 'EC64'
         run: |
           go test ./internal/abi ./ssa ./cl \
-            -run 'Test(LowerLarge|LargeAggregate|Compile.*GCRoot|GCSafepoint|.*GCRoot.*)' \
+            -run 'Test(LowerLarge|LowerWasmAggregateCopies|LargeAggregate|Compile.*GCRoot|GCSafepoint|.*GCRoot.*|PruneStableWasmRoot|CompileStableWasmRoot)' \
             -count=1 -coverprofile="$RUNNER_TEMP/evidence/compiler.cover"
           go test ./internal/build -run '^Test(CoalesceWasmPanicLocations|LowerWasmAggregateCopies|WasmPreAsyncify|WasmPostLink|PostLinkWasm|LowerLargeAggregatesGCPolicy)' \
             -count=1 -coverprofile="$RUNNER_TEMP/evidence/build-policy.cover"
@@ -76,7 +87,7 @@ jobs:
           test -s "$RUNNER_TEMP/evidence/aggregate.wasm"
           GOGC=1 timeout 60s node targets/emscripten-memory64-runner.mjs \
             "$RUNNER_TEMP/evidence/aggregate.mjs" \
-            -test.v '-test.run=^Test((Large(Aggregate|Struct|Reflection)|RangeIterator)GCRoots|Caller.*|PanicRecoverAndCaller|NilPointerAndFunctionRecovery|NilStoreOperandOrder)$' -test.count=3 -test.timeout=45s \
+            -test.v '-test.run=^Test((Large(Aggregate|Struct|Reflection)|RangeIterator|InteriorAlias)GCRoots|Caller.*|PanicRecoverAndCaller|NilPointerAndFunctionRecovery|NilStoreOperandOrder)$' -test.count=3 -test.timeout=45s \
             2>&1 | tee "$RUNNER_TEMP/evidence/aggregate.log"
       - name: Preserve and run original EC64 index program
         if: matrix.profile == 'EC64'
@@ -118,7 +129,7 @@ jobs:
           failed=0
           GOGC=1 timeout 60s wasmtime run --dir=/ --env PWD --env PATH --env GOGC \
             -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$evidence/exit.wasm" \
-            -test.v -test.count=3 -test.timeout=45s '-test.run=^Test((Large(Aggregate|Struct|Reflection)|RangeIterator)GCRoots|Caller.*|PanicRecoverAndCaller|NilPointerAndFunctionRecovery|NilStoreOperandOrder)$' \
+            -test.v -test.count=3 -test.timeout=45s '-test.run=^Test((Large(Aggregate|Struct|Reflection)|RangeIterator|InteriorAlias)GCRoots|Caller.*|PanicRecoverAndCaller|NilPointerAndFunctionRecovery|NilStoreOperandOrder)$' \
             2>&1 | tee "$evidence/aggregate.log" || failed=1
           for iteration in {1..10}; do
           for policy in 100 off 1; do
@@ -188,11 +199,17 @@ jobs:
             export GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0
             module="$evidence/cmplxdivide.wasm"
           fi
-          /usr/bin/time -v timeout 5m "$RUNNER_TEMP/llgo" build "${args[@]}" -o "$module" \
-            "$goroot/test/cmplxdivide.go" "$goroot/test/cmplxdivide1.go" \
-            > "$evidence/cmplxdivide-build.log" 2>&1 || {
-              cat "$evidence/cmplxdivide-build.log"; exit 1;
-            }
+          PYTHONPATH=dev python3 - "$evidence" "$RUNNER_TEMP/llgo" build "${args[@]}" -o "$module" \
+            "$goroot/test/cmplxdivide.go" "$goroot/test/cmplxdivide1.go" <<'PY'
+          import sys
+          from pathlib import Path
+          from wasm_optimizer_replay import bounded_run
+          evidence = Path(sys.argv[1])
+          ok = bounded_run("cmplxdivide-build", sys.argv[2:], evidence, seconds=300)
+          if not ok:
+              print((evidence / "cmplxdivide-build" / "output.log").read_text())
+          raise SystemExit(0 if ok else 1)
+          PY
           for policy in 100 1; do
             log="$evidence/cmplxdivide-$policy.log"
             if [[ "$PROFILE" == EC64 ]]; then
@@ -331,17 +348,28 @@ jobs:
             --llgo "$RUNNER_TEMP/llgo" --runner "$RUNNER_TEMP/goroot-runner" \
             --goroot "$(go env GOROOT)" --output "$RUNNER_TEMP/recover-probe" \
             --profile "$PROFILE" --case "$probe_case" --clang-passes
-      - name: Verify isolated allocation accounting and trusted caller strings
+      - name: Verify isolated allocation accounting and zero-copy caller strings
         if: ${{ !cancelled() && inputs.mode == 'gc-only' }}
         env:
           LLGO: ${{ runner.temp }}/llgo
         run: |
           python3 -m unittest discover -s dev -p wasm_caller_alloc_test.py
           go test ./cl -run '^TestWasm(MemProfileCaptureSeparatesGLSResolver|MemProfileFramePop|CallerLocationScalarABI)$' -count=1 -timeout=90s
-          bash dev/test_wasm_caller_alloc.sh '${{ matrix.profile }}'
+          mkdir "$RUNNER_TEMP/caller-probe"
+          set -o pipefail
+          bash dev/test_wasm_caller_alloc.sh '${{ matrix.profile }}' \
+            2>&1 | tee "$RUNNER_TEMP/caller-probe/output.log"
+      - name: Preserve caller allocation verdict
+        if: ${{ always() && inputs.mode == 'gc-only' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: r4-caller-${{ matrix.profile }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/caller-probe
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Exhaust collector metadata states and run original GC workloads
-        if: inputs.mode == 'gc-only'
+        if: ${{ !cancelled() && inputs.mode == 'gc-only' }}
         env:
           PROFILE: ${{ matrix.profile }}
         run: |
