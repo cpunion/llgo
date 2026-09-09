@@ -8,6 +8,14 @@ package runtime
 // smaller wasmcontext default.
 const wasmMainStackSize = uintptr(5 << 20)
 
+func updateWasmMainStackRoot(gp *g) {
+	if gp == nil || !gp.isMain || gp.context == nil || !wasmGCRootEnabled {
+		return
+	}
+	start, end := gp.context.platform.context.StackRange()
+	setWasmGCRootStack(&gp.context.platform.gcRoot, start, end)
+}
+
 func (gp *g) RunqueueNext() *g {
 	return gp.context.platform.runqNext
 }

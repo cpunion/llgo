@@ -12,6 +12,14 @@ func TestFiberStorageUsesEightWords(t *testing.T) {
 	}
 }
 
+func TestFiberStackPointerUsesThirdWord(t *testing.T) {
+	var fiber Fiber
+	fiber.words[2] = 0x1234
+	if got := fiber.StackPointer(); got != 0x1234 {
+		t.Fatalf("Fiber.StackPointer() = %#x, want 0x1234", got)
+	}
+}
+
 func TestFiberHasNoReflectableHostMethods(t *testing.T) {
 	if got := reflect.TypeOf(Fiber{}).NumMethod(); got != 0 {
 		t.Fatalf("Fiber has %d reflectable methods, want 0", got)
