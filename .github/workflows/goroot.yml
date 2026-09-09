@@ -394,7 +394,7 @@ jobs:
         run: |
           evidence="$RUNNER_TEMP/gc-probe"
           mkdir "$evidence"
-          go test ./internal/build -run '^TestWasmGC(Metadata|HeadCacheWorkloads)$' -count=1 -timeout=60s -v \
+          go test ./internal/build -run '^TestWasm(GC(Metadata|HeadCacheWorkloads|Pacing)|CallerStoreUpdates)$' -count=1 -timeout=90s -v \
             > "$evidence/metadata.log" 2>&1 || { cat "$evidence/metadata.log"; exit 1; }
           args=()
           if [[ "$PROFILE" == EC64 ]]; then
@@ -416,6 +416,23 @@ jobs:
               cat "$evidence/gc-$policy.log"; exit 1;
             }
             grep -Fxq 'wasm gc ok' "$evidence/gc-$policy.log"
+          done
+          timeout 5m "$RUNNER_TEMP/llgo" build "${args[@]}" -o "$module" \
+            ./internal/build/testdata/wasm-gc-pacing > "$evidence/pacing-build.log" 2>&1 || {
+              cat "$evidence/pacing-build.log"; exit 1;
+            }
+          if [[ "$PROFILE" == GWASI ]]; then
+            command=(wasmtime run --dir=/ --env PWD --env PATH --env GOGC --env LLGO_GOGC_EXPECT
+              -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 "$module")
+          fi
+          for policy in 100 1 0 off; do
+            # This fixture checks startup policy, growth with GC disabled,
+            # explicit collection, and the ordinary heap allocation trigger.
+            GOGC="$policy" LLGO_GOGC_EXPECT="$policy" timeout 60s "${command[@]}" \
+              > "$evidence/pacing-$policy.log" 2>&1 || {
+                cat "$evidence/pacing-$policy.log"; exit 1;
+              }
+            grep -Fxq 'wasm gc pacing ok' "$evidence/pacing-$policy.log"
           done
           # The host-side runner configures the target environment itself.
           unset GOOS GOARCH CGO_ENABLED
