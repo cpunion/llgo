@@ -33,6 +33,12 @@ jobs:
       CGO_ENABLED: '0'
     steps:
       - uses: actions/checkout@v7
+      - name: Ignore the unrelated Chrome apt mirror for this compiler-only job
+        run: |
+          if [[ -f /etc/apt/sources.list.d/google-chrome.list ]]; then
+            sudo mv /etc/apt/sources.list.d/google-chrome.list \
+              /etc/apt/sources.list.d/google-chrome.list.disabled
+          fi
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
