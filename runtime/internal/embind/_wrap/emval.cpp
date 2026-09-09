@@ -102,27 +102,64 @@ EM_VAL llgo_emval_get_module_property(const char *name) {
 }
 
 static volatile uint8_t llgo_emval_invoke_pending;
+static volatile int32_t llgo_emval_js_call_depth;
 
-EM_JS(void, llgo_emval_install_invoke_js, (uint8_t *pending_flag), {
+struct JSCallScope {
+    JSCallScope() { ++llgo_emval_js_call_depth; }
+    ~JSCallScope() { --llgo_emval_js_call_depth; }
+};
+
+void llgo_go_dispatch_sync(uintptr_t handle);
+
+EMSCRIPTEN_KEEPALIVE
+void llgo_dispatch_sync(void) {
+    val event = val::module_property("llgoWasmSyncInvoke");
+    if (event.isUndefined() || event.isNull()) {
+        return;
+    }
+    EM_VAL handle = event.release_ownership();
+    llgo_go_dispatch_sync(reinterpret_cast<uintptr_t>(handle));
+}
+
+EM_JS(void, llgo_emval_install_invoke_js, (uint8_t *pending_flag, int32_t *js_call_depth), {
     const pending = [];
     const pendingFlag = Number(pending_flag);
-    Module['llgoWasmPendingInvokes'] = pending;
-    Module['_llgo_invoke'] = function(event) {
+    const jsCallDepthPtr = Number(js_call_depth);
+    const dispatchSync = (typeof wasmExports === "object" && wasmExports)
+        ? (wasmExports["llgo_dispatch_sync"] || wasmExports["_llgo_dispatch_sync"])
+        : (Module["_llgo_dispatch_sync"] || Module["llgo_dispatch_sync"]);
+    Module["llgoWasmPendingInvokes"] = pending;
+    Module["_llgo_invoke"] = function(event) {
+        // A Go-initiated JS call is still on the wasm stack (syscall/js
+        // Value.Call/Invoke). Official Go runs js.FuncOf synchronously in
+        // that window; host events such as setTimeout still queue.
+        const heap32 = typeof HEAP32 !== "undefined" ? HEAP32 : Module["HEAP32"];
+        if (jsCallDepthPtr && heap32 && heap32[jsCallDepthPtr >> 2] > 0 && typeof dispatchSync === "function") {
+            Module["llgoWasmSyncInvoke"] = event;
+            try {
+                dispatchSync();
+                return event.result;
+            } finally {
+                delete Module["llgoWasmSyncInvoke"];
+            }
+        }
         pending.push(event);
         HEAPU8[pendingFlag] = 1;
-        const state = Module['llgoWasmHostWait'];
+        const state = Module["llgoWasmHostWait"];
         if (state !== undefined && state.wake !== undefined) {
             const wake = state.wake;
             delete state.wake;
             setTimeout(wake, 0);
         }
-        return true;
     };
 });
 
 void llgo_emval_install_invoke(void) {
     llgo_emval_invoke_pending = 0;
-    llgo_emval_install_invoke_js(const_cast<uint8_t *>(&llgo_emval_invoke_pending));
+    llgo_emval_js_call_depth = 0;
+    llgo_emval_install_invoke_js(
+        const_cast<uint8_t *>(&llgo_emval_invoke_pending),
+        const_cast<int32_t *>(&llgo_emval_js_call_depth));
 }
 
 bool llgo_emval_has_pending_invoke(void) {
@@ -234,6 +271,7 @@ EM_VAL llgo_emval_method_call(EM_VAL object, const char* name, EM_VAL args[], in
 #endif
     EM_GENERIC_WIRE_TYPE ret;
     try {
+        JSCallScope jsCall;
         EM_DESTRUCTORS destructors = nullptr;
 #if LLGO_EMVAL_INVOKER_API
         ret = _emval_invoke(caller, llgo_emval_normalize(object), name, &destructors, elements.data());
@@ -281,6 +319,7 @@ EM_VAL llgo_emval_call(EM_VAL fn, EM_VAL args[], int nargs, int kind, int *error
 #endif
    EM_GENERIC_WIRE_TYPE ret;
    try {
+       JSCallScope jsCall;
        EM_DESTRUCTORS destructors = nullptr;
 #if LLGO_EMVAL_INVOKER_API
        ret = _emval_invoke(caller, llgo_emval_normalize(fn), nullptr, &destructors, elements.data());

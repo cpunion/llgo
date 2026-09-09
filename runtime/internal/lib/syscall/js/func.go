@@ -28,13 +28,20 @@ type Func struct {
 
 // FuncOf returns a function to be used by JavaScript.
 //
-// The Go function fn is eventually called with the value of JavaScript's
-// "this" keyword and the arguments of the invocation. In LLGo's Emscripten C
-// profiles the host callback only queues an event and wakes the scheduler; Go
-// dispatch happens later on a new goroutine, after the JavaScript bridge has
-// returned. The JavaScript invocation therefore returns undefined rather than
-// synchronously returning fn's result. This prevents a callback from reentering
-// Go while an Asyncify context is suspended.
+// The Go function fn is called with the value of JavaScript's "this" keyword
+// and the arguments of the invocation.
+//
+// When JavaScript invokes the function in the middle of a Go-initiated JS call
+// (syscall/js Value.Call or Value.Invoke, as used by syscall.fsCall), LLGo
+// runs fn on the current goroutine so a buffered channel send can complete
+// before the JS call returns. Host events such as setTimeout still queue an
+// event and wake the scheduler; those callbacks run later on a new goroutine
+// and the JavaScript invocation returns undefined. This prevents a callback
+// from reentering Go while an Asyncify context is suspended.
+//
+// A synchronously invoked callback must not park the current goroutine
+// (unbuffered channel receive, time.Sleep, and similar). Parking would nest a
+// Fiber swap inside the JS call and can abort with Asyncify unreachable.
 //
 // Func.Release must be called to free up resources when the function will not be invoked any more.
 func FuncOf(fn func(this Value, args []Value) any) Func {
@@ -56,7 +63,7 @@ func FuncOf(fn func(this Value, args []Value) any) Func {
 	factory := functionConstructor.New(ValueOf("invoke"), ValueOf(`
 		return function() {
 			const event = { id:`+sid+`, this: this, args: arguments };
-			invoke(event);
+			return invoke(event);
 		};
 	`))
 	wrap := factory.Invoke(invoke)
@@ -87,6 +94,14 @@ func (c Func) Release() {
 		llruntime.RegisterWasmCallbackPoll(nil)
 	}
 	funcsMu.Unlock()
+}
+
+//export llgo_go_dispatch_sync
+func llgo_go_dispatch_sync(handle uintptr) {
+	if handle == 0 {
+		return
+	}
+	dispatchCallback(handle)
 }
 
 func dispatchCallback(handle uintptr) {

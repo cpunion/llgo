@@ -34,6 +34,44 @@ func TestHostCallbackWakesScheduler(t *testing.T) {
 	}
 }
 
+func TestJSFuncRunsSynchronouslyFromGoCall(t *testing.T) {
+	ran := false
+	callback := js.FuncOf(func(js.Value, []js.Value) any {
+		ran = true
+		return 7
+	})
+	defer callback.Release()
+
+	got := callback.Invoke()
+	if !ran {
+		t.Fatal("js.FuncOf callback did not run before Invoke returned")
+	}
+	if got.Int() != 7 {
+		t.Fatalf("Invoke() = %v, want 7", got)
+	}
+}
+
+func TestJSFuncCompletesBufferedChannelBeforeCallReturns(t *testing.T) {
+	c := make(chan int, 1)
+	callback := js.FuncOf(func(js.Value, []js.Value) any {
+		c <- 99
+		return nil
+	})
+	defer callback.Release()
+
+	obj := js.Global().Get("Object").New()
+	obj.Set("write", callback)
+	obj.Call("write")
+	select {
+	case got := <-c:
+		if got != 99 {
+			t.Fatalf("got %d, want 99", got)
+		}
+	default:
+		t.Fatal("js.FuncOf callback did not send on the buffered channel before Call returned")
+	}
+}
+
 func TestHostCallbackCanBlock(t *testing.T) {
 	done := make(chan int, 1)
 	callback := js.FuncOf(func(js.Value, []js.Value) any {
