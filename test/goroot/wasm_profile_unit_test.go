@@ -80,3 +80,39 @@ func TestGOROOTWasiCRunCommand(t *testing.T) {
 		t.Fatalf("WASI C environment: %v", targetEnv)
 	}
 }
+
+func TestGOROOTWasmRuntimeEnvironmentExcludesHostControls(t *testing.T) {
+	base := []string{"PATH=/bin", "GOROOT=/go", "GOGC=1", "GODEBUG=checkptr=1", "USER_CASE=kept",
+		"ACTIONS_RUNTIME_TOKEN=host-only", "GITHUB_ENV=/host/environment", "RUNNER_TEMP=/host/tmp",
+		"LLGO_DIAG_EVIDENCE=/diagnostics", "LLGO_R4_LLVM_TRACE=/bitcode", "GOMAXPROCS=2"}
+	before := append([]string(nil), base...)
+	for _, profile := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI", ""} {
+		t.Run(profile, func(t *testing.T) {
+			withGOROOTWasmProfile(t, profile)
+			buildEnv := gorootTargetEnv(base)
+			runEnv := gorootRuntimeEnv(base)
+			if !reflect.DeepEqual(base, before) {
+				t.Fatal("runtime environment filtering mutated the caller's environment")
+			}
+			if profile == "" {
+				if !reflect.DeepEqual(runEnv, base) {
+					t.Fatal("native test environment changed")
+				}
+				return
+			}
+			for _, key := range []string{"ACTIONS_RUNTIME_TOKEN", "GITHUB_ENV", "RUNNER_TEMP", "LLGO_DIAG_EVIDENCE", "LLGO_R4_LLVM_TRACE"} {
+				if envEntry(runEnv, key) != "" || envEntry(buildEnv, key) == "" {
+					t.Fatalf("%s must remain available only to the host build", key)
+				}
+			}
+			for _, key := range []string{"PATH", "GOROOT", "GOGC", "GODEBUG", "USER_CASE"} {
+				if envEntry(runEnv, key) != envEntry(base, key) {
+					t.Fatalf("lost program environment variable %s", key)
+				}
+			}
+			if envEntry(runEnv, "GOMAXPROCS") != "1" {
+				t.Fatal("lost the official single-worker contract")
+			}
+		})
+	}
+}
