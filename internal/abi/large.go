@@ -34,7 +34,18 @@ func LowerLargeAggregatesWithRoots(td llvm.TargetData, m llvm.Module) {
 // wrappers. Return types and the native stack/return ABI limits are unchanged.
 func LowerWasmAggregateCopies(td llvm.TargetData, m llvm.Module, roots bool) int {
 	l := largeAggregateLowerer{td: td, roots: roots, copyMinSize: 4 << 10}
-	changed := l.transformStoredLoads(m)
+	changed := 0
+	for {
+		count := l.transformStoredLoads(m)
+		if count == 0 {
+			break
+		}
+		changed += count
+		// Projecting a field of an aggregate snapshot can expose another
+		// large load, for example the array argument inside a deferred call's
+		// closure. Lower those loads too before handing the module to LLVM.
+		// Each projection descends into a strictly nested aggregate type.
+	}
 	if roots {
 		l.publishRoots(m)
 	}

@@ -141,3 +141,49 @@ define [8192 x i8] @identity([8192 x i8] %value) {
 		}
 	}
 }
+
+func TestLowerWasmAggregateCopiesNestedSnapshots(t *testing.T) {
+	const source = `
+%Deferred = type { ptr, { i32, [8192 x i8] } }
+declare void @mutate(ptr)
+define void @copy(ptr %src, ptr %dst, ptr %other, i1 %choice) {
+entry:
+  %closure = load %Deferred, ptr %src
+  call void @mutate(ptr %src)
+  %argument = extractvalue %Deferred %closure, 1, 1
+  br i1 %choice, label %first, label %second
+first:
+  store [8192 x i8] %argument, ptr %dst
+  ret void
+second:
+  store [8192 x i8] %argument, ptr %other
+  ret void
+}
+`
+	for _, bits := range []int{32, 64} {
+		for _, roots := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%d/roots=%t", bits, roots), func(t *testing.T) {
+				td := llvm.NewTargetData(fmt.Sprintf("e-p:%d:%d-i64:64-n32:64-S128", bits, bits))
+				defer td.Dispose()
+				mod := parseWasmCallerIR(t, source)
+				if got := lowerWasmAggregateCopies("wasm", td, mod, roots); got != 2 {
+					t.Fatalf("lowered %d copies, want the closure and its array argument", got)
+				}
+				if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+					t.Fatal(err)
+				}
+				body := mod.NamedFunction("copy").String()
+				if strings.Contains(body, "load [8192 x i8]") || strings.Contains(body, "store [8192 x i8]") ||
+					strings.Contains(body, "extractvalue") || strings.Count(body, "@llvm.memcpy") != 4 {
+					t.Fatalf("nested array escaped copy lowering:\n%s", body)
+				}
+				if strings.Contains(body, "llvm_gc_root_chain") != roots {
+					t.Fatalf("nested snapshot root publication does not match GC policy:\n%s", body)
+				}
+				if got := lowerWasmAggregateCopies("wasm", td, mod, roots); got != 0 {
+					t.Fatalf("another pass still lowered %d copies", got)
+				}
+			})
+		}
+	}
+}
