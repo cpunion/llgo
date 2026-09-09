@@ -46,5 +46,7 @@ func gcAllocationDue(size uint64) bool {
 	return wasmGCPacing.shouldCollect(gcLiveBytes(), size) && !gcroot.Rebuilding()
 }
 
-func gcCollectionComplete() { wasmGCPacing.collected(gcLiveBytes()) }
-func gcNextGoal() uint64    { return wasmGCPacing.nextGC() }
+func gcCollectionComplete()       { wasmGCPacing.collected(gcLiveBytes()) }
+func gcNextGoal() uint64          { return wasmGCPacing.nextGC() }
+func gcRootAllocated(size uint64) { wasmGCPacing.rootAllocated(size) }
+func gcRootFreed(size uint64)     { wasmGCPacing.rootFreed(size) }

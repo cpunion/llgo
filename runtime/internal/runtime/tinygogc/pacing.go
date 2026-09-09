@@ -55,6 +55,34 @@ func (p *gcPacing) collected(live uint64) {
 	}
 }
 
+// Runtime-owned roots share the arena with Go objects, but allocating a new
+// stack must not consume the Go allocation budget. Translate both the live
+// baseline and the goal by its size, preserving the remaining heap headroom.
+// Collections still include these roots in the live set and scanning budget.
+func (p *gcPacing) rootAllocated(size uint64) {
+	if !p.initialized {
+		return
+	}
+	p.live = gcSaturatingAdd(p.live, size)
+	if p.percent >= 0 {
+		p.goal = gcSaturatingAdd(p.goal, size)
+	}
+}
+
+func (p *gcPacing) rootFreed(size uint64) {
+	if !p.initialized {
+		return
+	}
+	// Do not underflow if the preceding baseline or goal was saturated.
+	if size > p.live {
+		size = p.live
+	}
+	p.live -= size
+	if p.percent >= 0 {
+		p.goal -= size
+	}
+}
+
 func (p *gcPacing) automatic() bool { return p.initialized && p.percent >= 0 }
 
 func (p *gcPacing) nextGC() uint64 {
