@@ -419,7 +419,7 @@ func newArena(initial, maximum uintptr, grow bool) {
   nextAlloc, gcTotalAlloc, gcTotalBlocks, gcMallocs, gcFrees, gcFreedBlocks, gcNumGC = 0,0,0,0,0,0,0
   markStackOverflow, isGCInit = false, false
   markHeads, gcMutex, arenaPacing = markHeadCache{}, mutex{}, gcPacing{}
-  noScanIndex, noScanCount = nil, 0
+  noScanAllocations, noScanCount = nil, 0
   arenaRoots, profileFrees, memoryHook = nil, nil, nil
   arenaMetadataReads = 0
   resetArenaFinalizers()
@@ -589,7 +589,7 @@ func TestNoScanRootDoesNotTracePayload(t *testing.T) {
   checkCanaries(t)
 }
 
-func TestNoScanRootIndexGrowthAndRelease(t *testing.T) {
+func TestNoScanRootRegistryAndRelease(t *testing.T) {
   newArena(256<<10,256<<10,false)
   roots := make([]unsafe.Pointer, 65)
   for i := range roots {
@@ -598,22 +598,22 @@ func TestNoScanRootIndexGrowthAndRelease(t *testing.T) {
   }
   arenaRoots = roots
   GC()
-  if noScanCount != len(roots) || len(noScanIndex) < len(roots) {
-    t.Fatal("no-scan index did not grow with its registrations")
+  if noScanCount != len(roots) {
+    t.Fatal("no-scan registry lost a registration")
   }
   for _, root := range roots {
     if gcStateOf(blockFromAddr(uintptr(root))) != blockStateHead {
-      t.Fatal("indexed no-scan allocation was not retained")
+      t.Fatal("registered no-scan allocation was not retained")
     }
     if stale := *(*unsafe.Pointer)(root); gcStateOf(blockFromAddr(uintptr(stale))) != blockStateFree {
-      t.Fatal("indexed no-scan allocation traced its payload")
+      t.Fatal("registered no-scan allocation traced its payload")
     }
   }
   arenaRoots = nil
   for _, root := range roots { FreeNoScanRoot(root) }
   GC()
   if ReadGCStats().HeapAlloc != 0 || noScanCount != 0 {
-    t.Fatal("growing no-scan index leaked storage or registrations")
+    t.Fatal("no-scan registry leaked storage or registrations")
   }
   checkCanaries(t)
 }
