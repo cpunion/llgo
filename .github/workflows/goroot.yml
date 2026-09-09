@@ -24,9 +24,7 @@ jobs:
           - name: baseline
             passes: default<Os>
           - name: pre-instcombine
-            passes: function(instcombine),default<Os>
-          - name: pre-memcpyopt
-            passes: function(memcpyopt),default<Os>
+            passes: function(instcombine<max-iterations=8>),default<Os>
     name: opt-trace (${{ matrix.name }})
     env:
       OPT_PIPELINE: ${{ matrix.passes }}
