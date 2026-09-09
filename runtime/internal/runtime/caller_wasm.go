@@ -9,6 +9,8 @@ import "unsafe"
 // and reserves aggregate temporaries in every instrumented caller's stack.
 // Construct the strings here instead, so those slots are live only during the
 // runtime update and disappear before the instrumented call runs.
+// unsafe.String preserves the compiler-owned immutable literals without a copy;
+// the C string conversion intrinsic would allocate on every runtime update.
 // Keep the ABI boundary under LTO too: inlining would move the aggregate
 // argument storage back into each instrumented caller.
 //
@@ -18,7 +20,9 @@ func PushCallerLocationFrameWasm(entry uintptr, nameData *byte, nameLen int, fil
 		return -1
 	}
 	MemProfilePause()
-	mark := PushCallerLocationFrame(entry, unsafe.String(nameData, nameLen), unsafe.String(fileData, fileLen), line)
+	name := unsafe.String(nameData, nameLen)
+	file := unsafe.String(fileData, fileLen)
+	mark := PushCallerLocationFrame(entry, name, file, line)
 	MemProfileResume()
 	return mark
 }
@@ -29,7 +33,9 @@ func RecordCallerLocationWasm(entry uintptr, nameData *byte, nameLen int, fileDa
 		return
 	}
 	MemProfilePause()
-	RecordCallerLocation(entry, unsafe.String(nameData, nameLen), unsafe.String(fileData, fileLen), line)
+	name := unsafe.String(nameData, nameLen)
+	file := unsafe.String(fileData, fileLen)
+	RecordCallerLocation(entry, name, file, line)
 	MemProfileResume()
 }
 
@@ -39,7 +45,9 @@ func RecordPanicLocationWasm(entry uintptr, nameData *byte, nameLen int, fileDat
 		return
 	}
 	MemProfilePause()
-	RecordPanicLocation(entry, unsafe.String(nameData, nameLen), unsafe.String(fileData, fileLen), line)
+	name := unsafe.String(nameData, nameLen)
+	file := unsafe.String(fileData, fileLen)
+	RecordPanicLocation(entry, name, file, line)
 	MemProfileResume()
 }
 
