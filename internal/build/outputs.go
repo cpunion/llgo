@@ -325,7 +325,7 @@ func defaultAppExt(conf *Config) string {
 	case BuildModeExe:
 		if conf.Goos == "js" && conf.OutFile != "" {
 			switch ext := filepath.Ext(conf.OutFile); ext {
-			case ".js", ".mjs":
+			case ".js", ".mjs", ".html":
 				return ext
 			}
 		}

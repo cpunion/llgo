@@ -2317,7 +2317,10 @@ func executeMainLink(ctx *context, plan *mainLinkPlan, verbose bool) error {
 	if err := linkObjFiles(ctx, linkOutput, plan.linkInputs, plan.linkArgs, verbose); err != nil {
 		return err
 	}
-	return publishWasmLinkOutput(ctx, linkOutput, plan.outputPath, verbose)
+	if err := publishWasmLinkOutput(ctx, linkOutput, plan.outputPath, verbose); err != nil {
+		return err
+	}
+	return publishEmscriptenBrowserHost(ctx, plan.outputPath, verbose)
 }
 
 func fullRpathArgs(toolchain crosscompile.NativeToolchain, linkArgs []string) (rpathArgs []string) {

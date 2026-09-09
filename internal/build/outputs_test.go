@@ -105,6 +105,12 @@ func TestWebAssemblyTargetDefaultExtension(t *testing.T) {
 	if got := defaultAppExt(&Config{BuildMode: BuildModeExe, Target: "esp32"}); got != ".elf" {
 		t.Errorf("embedded target extension = %q, want .elf", got)
 	}
+	if got := defaultAppExt(&Config{BuildMode: BuildModeExe, Goos: "js", OutFile: "main.html"}); got != ".html" {
+		t.Errorf("js html output extension = %q, want .html", got)
+	}
+	if got := defaultAppExt(&Config{BuildMode: BuildModeExe, Goos: "js", Target: "emscripten", OutFile: "main.html"}); got != ".html" {
+		t.Errorf("emscripten html output extension = %q, want .html", got)
+	}
 }
 
 func sameHostPath(got, want string) bool {
