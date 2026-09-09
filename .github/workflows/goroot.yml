@@ -377,7 +377,7 @@ jobs:
         run: |
           evidence="$RUNNER_TEMP/gc-probe"
           mkdir "$evidence"
-          go test ./internal/build -run '^TestWasmGCMetadata$' -count=1 -timeout=60s -v \
+          go test ./internal/build -run '^TestWasmGC(Metadata|HeadCacheWorkloads)$' -count=1 -timeout=60s -v \
             > "$evidence/metadata.log" 2>&1 || { cat "$evidence/metadata.log"; exit 1; }
           args=()
           if [[ "$PROFILE" == EC64 ]]; then
