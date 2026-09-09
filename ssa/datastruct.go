@@ -303,6 +303,7 @@ func (b Builder) checkIndex(idx Expr, max Expr) Expr {
 		blks := b.Func.MakeBlocks(2)
 		b.If(check, blks[0], blks[1])
 		b.SetBlockEx(blks[0], AtEnd, false)
+		b.recordGuardPanicLocation()
 		panicIndex := "PanicIndexU"
 		if signed {
 			panicIndex = "PanicIndex"

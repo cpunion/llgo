@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	llssa "github.com/xgo-dev/llgo/ssa"
+	"github.com/xgo-dev/llgo/ssa/ssatest"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -28,6 +29,13 @@ func PointerField(p *struct{ value int }) int { runtime.Caller(0); return p.valu
 func PointerArray(p *[4]int) int { runtime.Caller(0); return p[2] }
 func Dynamic(i int) int { runtime.Caller(0); return array[i] }
 func Slice(s []int) int { runtime.Caller(0); return s[2] }
+func Wide(s []int, i uint64) int { runtime.Caller(0); return s[i] }
+func String(s string, i int) byte { runtime.Caller(0); return s[i] }
+func Store(p *int, v int) { runtime.Caller(0); *p = v }
+func StoreField(p *struct{ value int }, v int) { runtime.Caller(0); p.value = v }
+func UnusedField(p *struct{ value int }) { runtime.Caller(0); _ = p.value }
+func Empty(p *[0]int) [0]int { runtime.Caller(0); return *p }
+func Loop(s []int) { runtime.Caller(0); for i := range s { s[i] = s[i] + 1 } }
 `
 	for _, target := range []*llssa.Target{
 		{GOOS: "wasip1", GOARCH: "wasm"},
@@ -36,12 +44,16 @@ func Slice(s []int) int { runtime.Caller(0); return s[2] }
 	} {
 		t.Run(target.GOOS+"/"+target.LLVMTarget, func(t *testing.T) {
 			ssaPkg, files := buildCallerFrameSSAPackage(t, "example.com/sites", source)
-			prog := newLLSSAProgForTarget(t, target)
+			prog := ssatest.NewProgram(t, target)
 			defer prog.Dispose()
 			// Match the physical pointer layout selected by build.effectiveTypeSizes,
 			// not cmd/compile's eight-byte Go wasm word layout.
 			if target.GOARCH == "wasm" && prog.PointerSize() == 4 {
 				prog.TypeSizes(types.SizesFor("gc", "386"))
+				// Import the 32-bit runtime declarations (including the wide
+				// index helpers), independent of this test process's host arch.
+				t.Setenv("GOOS", "windows")
+				t.Setenv("GOARCH", "386")
 			}
 			pkg, _, err := NewPackageExWithEmbedMetaOptions(prog, nil, nil, nil, ssaPkg, files, nil, false, Options{ShadowStack: true})
 			if err != nil {
@@ -50,17 +62,54 @@ func Slice(s []int) int { runtime.Caller(0); return s[2] }
 			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"Global", "Field", "Constant", "Allocated", "Pointer", "PointerField", "PointerArray", "Dynamic", "Slice"} {
-				body := pkg.Module().NamedFunction("example.com/sites." + name).String()
-				want := target.GOARCH != "wasm" || name == "Pointer" || name == "PointerField" || name == "PointerArray" || name == "Dynamic" || name == "Slice"
+			for _, name := range []string{"Global", "Field", "Constant", "Allocated", "Pointer", "PointerField", "PointerArray", "Dynamic", "Slice", "Wide", "String", "Store", "StoreField", "UnusedField", "Empty", "Loop"} {
+				fn := pkg.Module().NamedFunction("example.com/sites." + name)
+				body := fn.String()
+				want := name != "Global" && name != "Field" && name != "Constant" && name != "Allocated"
+				if target.GOARCH != "wasm" {
+					want = name != "Store"
+				}
 				if got := strings.Contains(body, "RecordPanicLocation"); got != want {
 					t.Errorf("%s records panic=%v, want %v:\n%s", name, got, want, body)
 				}
 				if !strings.Contains(body, "RecordCallerLocation") {
 					t.Errorf("%s lost its actual runtime.Caller source location", name)
 				}
+				if target.GOARCH == "wasm" {
+					assertWasmGuardLocationsAreCold(t, fn)
+				}
 			}
 		})
+	}
+}
+
+// Each record must precede a real panic helper in the same isolated failure
+// block. A record merely following a conditional branch is not sufficient:
+// accidentally inserting it in the successful successor would retain the hot
+// loop cost and could leave an incorrect source location for the next guard.
+func assertWasmGuardLocationsAreCold(t *testing.T, fn llvm.Value) {
+	t.Helper()
+	for block := fn.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+		for instr := block.FirstInstruction(); !instr.IsNil(); instr = llvm.NextInstruction(instr) {
+			if instr.IsACallInst().IsNil() || !strings.HasSuffix(instr.CalledValue().Name(), ".RecordPanicLocationWasm") {
+				continue
+			}
+			found := false
+			for next := llvm.NextInstruction(instr); !next.IsNil(); next = llvm.NextInstruction(next) {
+				if !next.IsACallInst().IsNil() {
+					name := next.CalledValue().Name()
+					found = strings.Contains(name, ".PanicIndex") || strings.Contains(name, ".PanicExtendIndex") || strings.HasSuffix(name, ".AssertNilDeref")
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s records a guard outside its panic path:\n%s", fn.Name(), fn.String())
+			}
+			last := block.LastInstruction()
+			if last.InstructionOpcode() != llvm.Br || last.SuccessorsCount() != 1 || last.Successor(0) != block {
+				t.Errorf("%s panic-location block can escape into the successful continuation:\n%s", fn.Name(), fn.String())
+			}
+		}
 	}
 }
 
