@@ -458,15 +458,15 @@ func Realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
 // retired Fiber and Asyncify stacks whose stale words would otherwise remain
 // conservative roots until an arbitrary later collection.
 func Free(ptr unsafe.Pointer) {
-	free(ptr, false)
+	freeAllocation(ptr, false)
 }
 
 // FreeRoot releases storage obtained from AllocRoot and its pacing credit.
 func FreeRoot(ptr unsafe.Pointer) {
-	free(ptr, true)
+	freeAllocation(ptr, true)
 }
 
-func free(ptr unsafe.Pointer, root bool) {
+func freeAllocation(ptr unsafe.Pointer, root bool) {
 	if ptr == nil || ptr == unsafe.Pointer(&zeroSizedAlloc) {
 		return
 	}
