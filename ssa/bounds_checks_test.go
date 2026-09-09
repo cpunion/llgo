@@ -10,7 +10,44 @@ import (
 
 	"github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llgo/ssa/ssatest"
+	"github.com/xgo-dev/llvm"
 )
+
+func TestNilDerefCheckTargetIR(t *testing.T) {
+	for _, target := range []*ssa.Target{
+		{GOOS: "wasip1", GOARCH: "wasm"},
+		{GOOS: "js", GOARCH: "wasm", LLVMTarget: "wasm64-unknown-emscripten"},
+		{GOOS: "linux", GOARCH: "amd64"},
+	} {
+		t.Run(target.GOOS+"/"+target.LLVMTarget, func(t *testing.T) {
+			prog := ssatest.NewProgram(t, target)
+			defer prog.Dispose()
+			pointer := types.NewPointer(types.Typ[types.Int])
+			params := types.NewTuple(types.NewVar(0, nil, "p", pointer))
+			results := types.NewTuple(types.NewVar(0, nil, "", pointer))
+			sig := types.NewSignatureType(nil, nil, nil, params, results, false)
+			pkg := prog.NewPackage("guard", "example.com/guard")
+			fn := pkg.NewFunc("checked", sig, ssa.InGo)
+			b := fn.MakeBody(1)
+			defer b.Dispose()
+			emissions := 0
+			b.SetPanicLocation(func() { emissions++ })
+			b.Return(b.NilDerefCheck(fn.Param(0)))
+			b.EndBuild()
+			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+			ir := pkg.String()
+			if target.GOARCH == "wasm" {
+				if emissions != 1 || strings.Contains(ir, "AssertNilDerefPtr") || !strings.Contains(ir, "br i1") || !strings.Contains(ir, "AssertNilDeref") {
+					t.Errorf("Wasm pointer check must use a cold guard with attribution, emissions=%d:\n%s", emissions, ir)
+				}
+			} else if emissions != 0 || !strings.Contains(ir, "AssertNilDerefPtr") {
+				t.Errorf("native pointer check changed, emissions=%d:\n%s", emissions, ir)
+			}
+		})
+	}
+}
 
 func TestBoundsCheckModesIR(t *testing.T) {
 	checked := boundsCheckModeIR(t, false)
