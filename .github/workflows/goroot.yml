@@ -7,12 +7,64 @@ on:
         description: CPU sampling or unchanged full-package verification
         type: choice
         default: profile
-        options: [profile, verify, unit, coverage-auth, build-trace]
+        options: [profile, verify, unit, coverage-auth, build-trace, base-coverage]
 
 permissions:
   contents: read
 
 jobs:
+  base-coverage:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'base-coverage'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 49bc1b5afde370e89341461844889171a52d4ecb
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-embed-deps
+      - uses: ./.github/actions/setup-go
+      - uses: ./.github/actions/setup-demo-deps
+      - name: Generate baseline reports with the regular Linux coverage suites
+        run: |
+          set -euo pipefail
+          go list ./... \
+            | grep -v '^github.com/xgo-dev/llgo/test/go$' \
+            | grep -v '^github.com/xgo-dev/llgo/cl$' \
+            | xargs go test -timeout 45m -coverprofile=coverage-main.txt -covermode=atomic \
+                -bench '^BenchmarkGo126' -benchtime=1x
+          go test -timeout 45m -coverpkg=github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
+            -coverprofile=coverage-compiler.txt -covermode=atomic \
+            -bench '^BenchmarkGo126' -benchtime=1x ./cl
+          go test -timeout 45m -coverprofile=coverage-test-go.txt -covermode=atomic ./test/go
+          for report in coverage-main.txt coverage-compiler.txt coverage-test-go.txt; do
+            test -s "$report"
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: r4-main-baseline-linux-coverage
+          path: coverage-*.txt
+          if-no-files-found: error
+      - uses: codecov/codecov-action@v7
+        with:
+          use_oidc: true
+          fail_ci_if_error: true
+          disable_search: true
+          files: coverage-main.txt,coverage-compiler.txt,coverage-test-go.txt
+          override_commit: 49bc1b5afde370e89341461844889171a52d4ecb
+          override_branch: codex/wasm-r4-main-base-20260907
+
   build-trace:
     if: github.repository_owner == 'cpunion' && inputs.mode == 'build-trace'
     runs-on: ubuntu-24.04
