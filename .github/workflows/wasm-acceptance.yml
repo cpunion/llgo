@@ -71,9 +71,9 @@ jobs:
           cases='^(helloworld\.go|bom\.go)$'
           if [[ "$PROFILE" == GWASI ]]; then
             # Original generated programs catch excessive pre-Asyncify
-            # inlining and duplicated panic-location calls in large initializers.
+            # inlining, duplicated panic locations and scalar aggregate copies.
             # Guard them once before starting the full matrix.
-            cases='^(helloworld\.go|bom\.go|fixedbugs/issue5162\.go|cmplxdivide\.go)$'
+            cases='^(helloworld\.go|bom\.go|fixedbugs/issue5162\.go|cmplxdivide\.go|recover\.go)$'
           fi
           (
             cd test/goroot
