@@ -7,12 +7,111 @@ on:
         description: CPU sampling or unchanged full-package verification
         type: choice
         default: profile
-        options: [profile, verify, unit, coverage-auth, build-trace, base-coverage, reuse-base-coverage, opt-trace, complex-verify, promote-trace]
+        options: [profile, bounds-profile, verify, unit, coverage-auth, build-trace, base-coverage, reuse-base-coverage, opt-trace, complex-verify, promote-trace]
 
 permissions:
   contents: read
 
 jobs:
+  bounds-profile:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'bounds-profile'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: EC32
+            target: emscripten
+            case: issue30116u.go
+          - profile: EC64
+            target: emscripten-memory64
+            case: issue30116.go
+    env:
+      GOMAXPROCS: '2'
+      BINARYEN_CORES: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_ROOT: ${{ github.workspace }}/source
+      PROFILE: ${{ matrix.profile }}
+      TARGET: ${{ matrix.target }}
+      CASE: ${{ matrix.case }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          ref: 88c934ba227d59713dc2a26ff89be4f952632390
+          path: source
+          persist-credentials: false
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-go
+      - name: Verify sampler termination and normal-exit behavior
+        run: node --test dev/r4_cpu_window_test.mjs
+      - name: Build the unchanged GOROOT case with the exact failing R4 source
+        working-directory: source
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/evidence"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/evidence/source-head.txt"
+          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+          cp "$(go env GOROOT)/test/fixedbugs/$CASE" "$RUNNER_TEMP/evidence/$CASE"
+          /usr/bin/time -v timeout --kill-after=10s 3m "$RUNNER_TEMP/llgo" build \
+            -target "$TARGET" \
+            "-ldflags=-extldflags '--profiling-funcs -sSTACK_OVERFLOW_CHECK=2'" \
+            -o "$RUNNER_TEMP/evidence/bounds.mjs" "$RUNNER_TEMP/evidence/$CASE" \
+            2>&1 | tee "$RUNNER_TEMP/evidence/build.log"
+          test -s "$RUNNER_TEMP/evidence/bounds.wasm"
+      - name: Sample at most 45 seconds without changing the acceptance timeout
+        working-directory: source
+        run: |
+          set -euo pipefail
+          status=0
+          LLGO_DIAG_CPU_PROFILE="$RUNNER_TEMP/evidence/window.cpuprofile" \
+          LLGO_DIAG_CPU_WINDOW_MS=45000 \
+            timeout --kill-after=5s 60s node --cpu-prof --cpu-prof-interval=1000 \
+            --cpu-prof-dir="$RUNNER_TEMP/evidence" --cpu-prof-name=completed.cpuprofile \
+            --import ../dev/r4_cpu_window.mjs \
+            "targets/${TARGET}-runner.mjs" "$RUNNER_TEMP/evidence/bounds.mjs" \
+            2>&1 | tee "$RUNNER_TEMP/evidence/run.log" || status=$?
+          printf 'Sampling exit status: %s; this job is diagnostic, not an acceptance result.\n' "$status" \
+            | tee "$RUNNER_TEMP/evidence/status.txt"
+          case "$status" in 0|143) ;; *) exit "$status" ;; esac
+          node <<'NODE' | tee "$RUNNER_TEMP/evidence/hotspots.json"
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = path.join(process.env.RUNNER_TEMP, 'evidence');
+          const name = fs.existsSync(path.join(root, 'window.cpuprofile'))
+            ? 'window.cpuprofile' : 'completed.cpuprofile';
+          const p = JSON.parse(fs.readFileSync(path.join(root, name)));
+          if (!p.samples?.length) throw new Error('CPU sample is empty');
+          const nodes = new Map(p.nodes.map(n => [n.id, n]));
+          const hits = new Map();
+          let total = 0;
+          for (let i = 0; i < p.samples.length; i++) {
+            const name = nodes.get(p.samples[i]).callFrame.functionName;
+            const delta = p.timeDeltas[i] || 0;
+            hits.set(name, (hits.get(name) || 0) + delta);
+            total += delta;
+          }
+          const hot = [...hits].sort((a,b) => b[1]-a[1]).slice(0,40)
+            .map(([name,us]) => ({name,ms:us/1000,self_percent:100*us/total}));
+          console.log(JSON.stringify({sampled_ms:total/1000,hot}, null, 2));
+          NODE
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: r4-bounds-profile-${{ matrix.profile }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+
   reuse-base-coverage:
     if: github.repository_owner == 'cpunion' && inputs.mode == 'reuse-base-coverage'
     runs-on: ubuntu-24.04
