@@ -202,7 +202,21 @@ func gcFindNext(blockAddr uintptr) uintptr {
 	if gcStateOf(blockAddr) == blockStateHead || gcStateOf(blockAddr) == blockStateMark {
 		blockAddr++
 	}
-	for gcAddressOf(blockAddr) < uintptr(metadataStart) && gcStateOf(blockAddr) == blockStateTail {
+	for blockAddr < endBlock {
+		stateByte := gcStateByteOf(blockAddr)
+		if stateByte == blockStateByteAllTails {
+			// Mirror gcFindHead: stack buffers have long runs of tails. One
+			// metadata byte describes four blocks, including a partial byte at
+			// the beginning or end of the range.
+			blockAddr += blocksPerStateByte - blockAddr%blocksPerStateByte
+			if blockAddr > endBlock {
+				return endBlock
+			}
+			continue
+		}
+		if gcStateFromByte(blockAddr, stateByte) != blockStateTail {
+			break
+		}
 		blockAddr++
 	}
 	return blockAddr
@@ -603,6 +617,25 @@ func sweep() (freeBytes uintptr) {
 	var freed uint64
 
 	for block := uintptr(0); block < endBlock; block++ {
+		if block%blocksPerStateByte == 0 && endBlock-block >= blocksPerStateByte {
+			state := (*uint8)(unsafe.Add(metadataStart, block/blocksPerStateByte))
+			switch *state {
+			case 0:
+				freeBytes += blocksPerStateByte * bytesPerBlock
+				block += blocksPerStateByte - 1
+				continue
+			case blockStateByteAllTails:
+				// No object starts here, so neither profiler notifications nor
+				// the preceding head's live/dead decision change within the byte.
+				if freeCurrentObject {
+					*state = 0
+					c.Memset(gcPointerOf(block), 0, blocksPerStateByte*bytesPerBlock)
+					freed += blocksPerStateByte
+				}
+				block += blocksPerStateByte - 1
+				continue
+			}
+		}
 		switch gcStateOf(block) {
 		case blockStateHead:
 			// Unmarked head. Free it, including all tail blocks following it.
