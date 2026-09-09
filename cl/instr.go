@@ -2032,6 +2032,17 @@ func (p *context) recordCallerLocationForCall(b llssa.Builder, call *ssa.CallCom
 	if !p.shouldTrackCallerFrames() {
 		return
 	}
+	if p.prog.Target().GOARCH == "wasm" {
+		if builtin, ok := call.Value.(*ssa.Builtin); ok {
+			switch builtin.Name() {
+			case "complex", "real", "imag":
+				// These are scalar insert/extract operations, not runtime
+				// calls. Their operand instructions retain their own call
+				// and panic locations. Do not match shadowing Go functions.
+				return
+			}
+		}
+	}
 	callee := call.StaticCallee()
 	if p.isWasmScalarLeaf(callee) {
 		// The same proof omits the callee's entry poll and shadow frame: it
