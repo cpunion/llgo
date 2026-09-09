@@ -49,6 +49,7 @@ jobs:
           R4_TRACE_DIR: ${{ runner.temp }}/evidence
         run: |
           set -o pipefail
+          command -v ps awk date
           target_goroot="$(go env GOROOT)"
           (
             cd test/goroot
@@ -64,7 +65,7 @@ jobs:
           while kill -0 "$trace_job" 2>/dev/null; do
             date -u >> "$R4_TRACE_DIR/processes.log"
             ps -eo pid,ppid,pcpu,rss,etime,comm \
-              | rg 'llgo|clang|wasm|opt|node|python' >> "$R4_TRACE_DIR/processes.log" || true
+              | awk 'NR == 1 || /llgo|clang|wasm|opt|node|python/' >> "$R4_TRACE_DIR/processes.log"
             sleep 10
           done
           wait "$trace_job"
