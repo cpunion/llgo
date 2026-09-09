@@ -53,7 +53,8 @@ jobs:
           mkdir "$RUNNER_TEMP/evidence"
           git rev-parse HEAD | tee "$RUNNER_TEMP/evidence/source-head.txt"
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
-          GOOS=js GOARCH=wasm CGO_ENABLED=0 timeout 5m \
+          GOOS=js GOARCH=wasm CGO_ENABLED=0 \
+            LDFLAGS="-Wl,--Map=$RUNNER_TEMP/evidence/lifecycle.map" timeout 5m \
             "$RUNNER_TEMP/llgo" build \
             -o "$RUNNER_TEMP/evidence/lifecycle.mjs" \
             ./internal/build/testdata/wasm-lifecycle \
