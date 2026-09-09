@@ -7,12 +7,48 @@ on:
         description: CPU sampling or unchanged full-package verification
         type: choice
         default: profile
-        options: [profile, verify, unit, coverage-auth, build-trace, base-coverage]
+        options: [profile, verify, unit, coverage-auth, build-trace, base-coverage, opt-trace]
 
 permissions:
   contents: read
 
 jobs:
+  opt-trace:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'opt-trace'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - name: Fetch the exact failing pre-optimization module
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/input" "$RUNNER_TEMP/evidence"
+          gh run download 34356698146 --repo cpunion/llgo \
+            -n r4-cmplxdivide-EC64-build-trace --dir "$RUNNER_TEMP/input"
+          test -s "$RUNNER_TEMP/input/before-opt.ll"
+      - name: Identify the expensive LLVM pass without rebuilding Go sources
+        run: |
+          set -o pipefail
+          opt --version
+          /usr/bin/time -v timeout --kill-after=5s 5m opt \
+            '-passes=default<Oz>' -debug-pass-manager -time-passes \
+            -mtriple=wasm64-unknown-emscripten -S "$RUNNER_TEMP/input/before-opt.ll" \
+            -o "$RUNNER_TEMP/evidence/optimized.ll" \
+            2>&1 | tee "$RUNNER_TEMP/evidence/passes.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: r4-exact-module-opt-trace
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+
   base-coverage:
     if: github.repository_owner == 'cpunion' && inputs.mode == 'base-coverage'
     runs-on: ubuntu-24.04
