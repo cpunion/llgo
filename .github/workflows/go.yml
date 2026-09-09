@@ -17,6 +17,9 @@ concurrency:
 jobs:
   test:
     name: test (${{ matrix.os }}${{ matrix.windows_abi && format(', {0}', matrix.windows_abi) || '' }}, LLVM ${{ matrix.llvm }}, Go current)
+    permissions:
+      contents: read
+      id-token: write
     # The known-good #172 Windows coverage run took about 56 minutes. Leave
     # room for runner variance and the additional shared-matrix checks without
     # changing the established Linux/macOS budget.
@@ -200,6 +203,10 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           token: ${{secrets.CODECOV_TOKEN}}
+          # Keep token/tokenless uploads for cross-fork PRs, whose OIDC
+          # permission is restricted by GitHub. Same-repository CI uses OIDC.
+          use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          fail_ci_if_error: true
           files: coverage-main.txt,coverage-compiler.txt,coverage-test-go.txt
           disable_search: true
 
