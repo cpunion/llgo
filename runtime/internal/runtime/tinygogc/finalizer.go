@@ -46,6 +46,19 @@ var (
 	finalizerDependencyScan bool
 )
 
+// DebugFinalizerState reports collector lifecycle state for the focused R4
+// diagnostic workflow. It is deliberately kept off the production branch.
+func DebugFinalizerState() (active, ready int, worker bool) {
+	lock(&gcMutex)
+	active = finalizerCount
+	for record := readyFinalizers; record != nil; record = record.readyNext {
+		ready++
+	}
+	worker = finalizerWorkerRunning
+	unlock(&gcMutex)
+	return
+}
+
 // AddFinalizer registers callback for ptr without retaining the object. The
 // returned function cancels a callback that has not started. Multiple callbacks
 // may be registered for one object.

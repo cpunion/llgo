@@ -3,6 +3,7 @@ package main
 import (
 	"runtime"
 	"time"
+	_ "unsafe"
 	"weak"
 )
 
@@ -20,6 +21,12 @@ type valued interface {
 
 var weakObject weak.Pointer[object]
 var nonCapturingEvents chan<- int
+
+//go:linkname debugTinyFinalizerState github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc.DebugFinalizerState
+func debugTinyFinalizerState() (active, ready int, worker bool)
+
+//go:linkname debugWasmFinalizerEntries runtime.debugWasmFinalizerEntries
+func debugWasmFinalizerEntries() int
 
 func main() {
 	testFinalizerCalls()
@@ -219,7 +226,20 @@ func testFinalizerBatch() {
 		close(done)
 	}()
 	<-done
-	collectUntil("finalizer batch", func() bool { return len(events) == 1024 })
+	printFinalizerBatchState("installed", events)
+	for cycle := range 24 {
+		clobberStack(16, 1)
+		runtime.GC()
+		time.Sleep(time.Millisecond)
+		if len(events) == 1024 {
+			printFinalizerBatchState("complete", events)
+			break
+		}
+		if cycle == 23 {
+			printFinalizerBatchState("incomplete", events)
+			panic("finalizer batch did not complete")
+		}
+	}
 	var seen [1024]bool
 	for range seen {
 		id := <-events
@@ -228,6 +248,11 @@ func testFinalizerBatch() {
 		}
 		seen[id] = true
 	}
+}
+
+func printFinalizerBatchState(phase string, events chan int) {
+	active, ready, worker := debugTinyFinalizerState()
+	println("finalizer batch", phase, "events", len(events), "public", debugWasmFinalizerEntries(), "active", active, "ready", ready, "worker", worker)
 }
 
 //go:noinline
@@ -255,6 +280,9 @@ func testFinalizerCancellation() {
 func installReplacementFinalizer(events chan<- int) {
 	value := &object{value: 51}
 	runtime.SetFinalizer(value, func(*object) { events <- 1 })
+	// Go rejects setting a second non-nil finalizer without first clearing the
+	// existing one. Test replacement through the shared, valid API contract.
+	runtime.SetFinalizer(value, nil)
 	runtime.SetFinalizer(value, func(*object) { events <- 2 })
 }
 

@@ -51,6 +51,16 @@ func initWasmFinalizers() {
 	wasmFinalizers.m = make(map[uintptr]*wasmFinalizerEntry)
 }
 
+// debugWasmFinalizerEntries reports the public registry size for the focused
+// R4 diagnostic workflow. It is deliberately kept off the production branch.
+func debugWasmFinalizerEntries() int {
+	wasmFinalizers.once.Do(initWasmFinalizers)
+	wasmFinalizers.mu.Lock()
+	count := len(wasmFinalizers.m)
+	wasmFinalizers.mu.Unlock()
+	return count
+}
+
 // SetFinalizer implements the Go finalizer contract for the linear-memory
 // WebAssembly collector. The registry stores only an encoded object address;
 // the collector publishes a real pointer after preserving an unreachable
