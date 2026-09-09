@@ -29,11 +29,29 @@ func LowerLargeAggregatesWithRoots(td llvm.TargetData, m llvm.Module) {
 	l.transformModule(m)
 }
 
+// LowerWasmAggregateCopies applies the same snapshot lowering to copies of at
+// least 4 KiB. LLVM scalarizes these too, notably in reflection's by-value
+// wrappers. Return types and the native stack/return ABI limits are unchanged.
+func LowerWasmAggregateCopies(td llvm.TargetData, m llvm.Module, roots bool) int {
+	l := largeAggregateLowerer{td: td, roots: roots, copyMinSize: 4 << 10}
+	changed := l.transformStoredLoads(m)
+	if roots {
+		l.publishRoots(m)
+	}
+	return changed
+}
+
+type aggregateRoot struct {
+	value, before llvm.Value
+}
+
 type largeAggregateLowerer struct {
 	td           llvm.TargetData
 	roots        bool
+	copyMinSize  uint64
 	allocations  []llvm.Value
 	resultParams []llvm.Value
+	sourceRoots  []aggregateRoot
 }
 
 func (l largeAggregateLowerer) isLargeAggregate(typ llvm.Type) bool {
@@ -47,6 +65,17 @@ func (l largeAggregateLowerer) isLargeAggregate(typ llvm.Type) bool {
 func (l largeAggregateLowerer) indirectType(ctx llvm.Context, typ llvm.Type) llvm.Type {
 	params := append([]llvm.Type{llvm.PointerType(typ.ReturnType(), 0)}, typ.ParamTypes()...)
 	return llvm.FunctionType(ctx.VoidType(), params, typ.IsFunctionVarArg())
+}
+
+func (l largeAggregateLowerer) isLargeCopy(typ llvm.Type) bool {
+	if l.copyMinSize == 0 {
+		return l.isLargeAggregate(typ)
+	}
+	switch typ.TypeKind() {
+	case llvm.ArrayTypeKind, llvm.StructTypeKind:
+		return l.td.TypeAllocSize(typ) >= l.copyMinSize
+	}
+	return false
 }
 
 func (l *largeAggregateLowerer) transformModule(m llvm.Module) {
@@ -83,17 +112,17 @@ func (l *largeAggregateLowerer) transformModule(m llvm.Module) {
 // directly to memmove. When the value is stored later or more than once,
 // preserve Go assignment semantics by taking one snapshot at the original
 // load and copying that snapshot to every destination at the original sites.
-func (l *largeAggregateLowerer) transformStoredLoads(m llvm.Module) {
+func (l *largeAggregateLowerer) transformStoredLoads(m llvm.Module) int {
 	var loads []llvm.Value
 	var zeroStores []llvm.Value
 	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
 		for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
 			for instr := bb.FirstInstruction(); !instr.IsNil(); instr = llvm.NextInstruction(instr) {
-				if store := instr.IsAStoreInst(); !store.IsNil() && store.Operand(0).IsNull() && l.isLargeAggregate(store.Operand(0).Type()) {
+				if store := instr.IsAStoreInst(); !store.IsNil() && store.Operand(0).IsNull() && l.isLargeCopy(store.Operand(0).Type()) {
 					zeroStores = append(zeroStores, store)
 				}
 				load := instr.IsALoadInst()
-				if !load.IsNil() && l.isLargeAggregate(load.Type()) {
+				if !load.IsNil() && l.isLargeCopy(load.Type()) {
 					if _, _, ok := l.aggregateUsers(load); ok {
 						loads = append(loads, load)
 					}
@@ -119,6 +148,7 @@ func (l *largeAggregateLowerer) transformStoredLoads(m llvm.Module) {
 		zero.InstructionSetDebugLoc(store.InstructionDebugLoc())
 		store.EraseFromParentAsInstruction()
 	}
+	return len(loads) + len(zeroStores)
 }
 
 func (l largeAggregateLowerer) aggregateUsers(value llvm.Value) (stores, extracts []llvm.Value, ok bool) {
@@ -155,6 +185,10 @@ func (l *largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Val
 		return
 	}
 	snapshot := l.allocResult(m, ctx, b, typ)
+	// This allocation is a new safepoint that was absent from the frontend's
+	// root plan. Keep the source alive before allocating, not only the result
+	// afterwards; reflection wrappers can have no original allocation at all.
+	l.sourceRoots = append(l.sourceRoots, aggregateRoot{value: load.Operand(0), before: snapshot})
 	copy := l.callMemcpy(ctx, b, snapshot, load.Operand(0), typ)
 	setCopyVolatile(ctx, copy, load.IsVolatile())
 	copy.InstructionSetDebugLoc(load.InstructionDebugLoc())
@@ -351,14 +385,18 @@ func (l *largeAggregateLowerer) allocResult(m llvm.Module, ctx llvm.Context, b l
 }
 
 func (l *largeAggregateLowerer) publishRoots(m llvm.Module) {
-	byFunc := make(map[llvm.Value][]llvm.Value)
+	byFunc := make(map[llvm.Value][]aggregateRoot)
 	for _, value := range l.allocations {
 		fn := value.InstructionParent().Parent()
-		byFunc[fn] = append(byFunc[fn], value)
+		byFunc[fn] = append(byFunc[fn], aggregateRoot{value: value, before: llvm.NextInstruction(value)})
 	}
 	for _, value := range l.resultParams {
 		fn := value.ParamParent()
-		byFunc[fn] = append(byFunc[fn], value)
+		byFunc[fn] = append(byFunc[fn], aggregateRoot{value: value, before: fn.FirstBasicBlock().FirstInstruction()})
+	}
+	for _, root := range l.sourceRoots {
+		fn := root.before.InstructionParent().Parent()
+		byFunc[fn] = append(byFunc[fn], root)
 	}
 	b := m.Context().NewBuilder()
 	defer b.Dispose()
@@ -367,15 +405,10 @@ func (l *largeAggregateLowerer) publishRoots(m llvm.Module) {
 		if len(values) == 0 {
 			continue
 		}
-		entry := fn.FirstBasicBlock()
 		frame := NewGCRootFrame(m, fn, len(values), l.td.PointerSize(), true)
-		for i, value := range values {
-			if !value.IsAArgument().IsNil() {
-				b.SetInsertPointBefore(entry.FirstInstruction())
-			} else {
-				b.SetInsertPointBefore(llvm.NextInstruction(value))
-			}
-			b.CreateStore(value, frame.Slots[i])
+		for i, root := range values {
+			b.SetInsertPointBefore(root.before)
+			b.CreateStore(root.value, frame.Slots[i])
 		}
 		PopGCRootFrame(m, fn, frame)
 	}
