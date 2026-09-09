@@ -69,10 +69,28 @@ type aBuilder struct {
 	// diLocation mirrors the LLVM builder state. Route every debug-location
 	// mutation through setDebugLocation so generated builders can copy it safely.
 	diLocation llvm.DebugLoc
+
+	// panicLocation emits source attribution in an explicit guard's failure
+	// block. The frontend scopes it to the instruction being lowered.
+	panicLocation func()
 }
 
 // Builder represents a builder for creating instructions in a function.
 type Builder = *aBuilder
+
+// SetPanicLocation installs the source-location emitter for explicit bounds and
+// nil guards and returns the previous emitter. Restore it after lowering the
+// instruction so later guards cannot inherit an unrelated source location.
+func (b Builder) SetPanicLocation(record func()) (previous func()) {
+	previous, b.panicLocation = b.panicLocation, record
+	return
+}
+
+func (b Builder) recordGuardPanicLocation() {
+	if b.panicLocation != nil {
+		b.panicLocation()
+	}
+}
 
 // EndBuild ends the build process of a function.
 func (b Builder) EndBuild() {

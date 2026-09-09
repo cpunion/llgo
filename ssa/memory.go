@@ -388,6 +388,7 @@ func (b Builder) AssertNilDeref(ptr Expr) {
 		blks := b.Func.MakeBlocks(2)
 		b.If(isNil, blks[0], blks[1])
 		b.SetBlockEx(blks[0], AtEnd, false)
+		b.recordGuardPanicLocation()
 		b.Call(b.Pkg.rtFunc("AssertNilDeref"), Expr{llvm.ConstInt(b.Prog.Bool().ll, 1, false), b.Prog.Bool()})
 		b.Jump(blks[0])
 		b.SetBlockEx(blks[1], AtEnd, false)
@@ -400,6 +401,10 @@ func (b Builder) AssertNilDeref(ptr Expr) {
 }
 
 func (b Builder) NilDerefCheck(ptr Expr) Expr {
+	if b.Prog.target.GOARCH == "wasm" {
+		b.AssertNilDeref(ptr)
+		return ptr
+	}
 	checked := b.Call(b.Pkg.rtFunc("AssertNilDerefPtr"), b.Convert(b.Prog.VoidPtr(), ptr))
 	return b.Convert(ptr.Type, checked)
 }
