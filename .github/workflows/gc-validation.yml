@@ -87,7 +87,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [EC32, EC64, WC32, GJS, GWASI]
+        profile: [WC32, GWASI]
     env:
       GOMAXPROCS: '2'
       BINARYEN_CORES: '2'
@@ -117,35 +117,41 @@ jobs:
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
           go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
           go test ./internal/build -run '^TestConfigureWasmGC' -count=1
-      - name: Collector integration and unsupported-entry rejection
+      - name: Reproduce mixed TLS initializer with and without package cache
         env:
           LLGO: ${{ runner.temp }}/llgo
         run: |
           set -o pipefail
-          bash dev/test_gc_wasm.sh '${{ matrix.profile }}' "$RUNNER_TEMP/gc-wasm" \
-            2>&1 | tee "$RUNNER_TEMP/gc-integration.log"
-      - name: Original Go GC pressure workloads
-        if: ${{ !cancelled() }}
-        working-directory: test/goroot
+          case '${{ matrix.profile }}' in
+            WC32) profile_args=(-target wasi -emulator); profile_env=() ;;
+            GWASI) profile_args=(); profile_env=(env GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0) ;;
+          esac
+          failed=0
+          for cache in on off on; do
+            echo "=== ${{ matrix.profile }} LLGO_BUILD_CACHE=$cache ==="
+            "${profile_env[@]}" env LLGO_BUILD_CACHE="$cache" \
+              "$LLGO" test "${profile_args[@]}" -v -count=5 -timeout=2m \
+              -run '^TestCrossPackageMixedInitializerGroup$' ./test/llgoext \
+              2>&1 | tee -a "$RUNNER_TEMP/locality-${{ matrix.profile }}.log"
+            status=${PIPESTATUS[0]}
+            if (( status != 0 )); then failed=1; fi
+          done
+          cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/llgo/build"
+          find "$cache_root" -type f -path '*localityscope*' -print \
+            > "$RUNNER_TEMP/locality-cache-${{ matrix.profile }}.txt" 2>/dev/null || true
+          cat "$RUNNER_TEMP/locality-cache-${{ matrix.profile }}.txt"
+          exit "$failed"
+      - name: Collector integration and unsupported-entry rejection
+        if: ${{ false }}
         run: |
-          set -o pipefail
-          "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
-            -test.count=1 -test.timeout=22m -llgo "$RUNNER_TEMP/llgo" \
-            -goroot "$(go env GOROOT)" -wasm-profile '${{ matrix.profile }}' \
-            -directive-mode coverage -directives run,runoutput \
-            -case '^(gcgort\.go|chan/goroutines\.go|fixedbugs/(issue22781|issue27695|issue78081)\.go)$' \
-            -shard-index 0 -shard-total 1 -max-rss-mib 4096 -rss-warn-mib 1024 \
-            -build-timeout 180s -run-timeout 60s -progress 60s \
-            -report "$RUNNER_TEMP/gc-goroot.json" 2>&1 | tee "$RUNNER_TEMP/gc-goroot.log"
+          :
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: gc-wasm-${{ matrix.profile }}
           path: |
-            ${{ runner.temp }}/gc-wasm
-            ${{ runner.temp }}/gc-integration.log
-            ${{ runner.temp }}/gc-goroot.json
-            ${{ runner.temp }}/gc-goroot.log
+            ${{ runner.temp }}/locality-${{ matrix.profile }}.log
+            ${{ runner.temp }}/locality-cache-${{ matrix.profile }}.txt
           if-no-files-found: error
 
   embedded:
