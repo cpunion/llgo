@@ -1,7 +1,6 @@
 name: GOROOT
 
 on:
-  workflow_dispatch:
   pull_request:
     types: [labeled]
   schedule:
