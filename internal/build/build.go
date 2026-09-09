@@ -1348,6 +1348,13 @@ func configureWasmGC(conf *Config, export *crosscompile.Export) (bool, error) {
 	}
 
 	enabled := explicit || defaultEnabled
+	if enabled {
+		for _, tag := range splitSourcePatchBuildTags(conf.Tags) {
+			if tag == "llgo.wasm.workers" || tag == "llgo.wasi_threads" {
+				return false, fmt.Errorf("llgo.wasm.gc.linear supports only a single mutator; incompatible build tag %s", tag)
+			}
+		}
+	}
 	if enabled && !explicit {
 		if conf.Tags != "" {
 			conf.Tags += ","

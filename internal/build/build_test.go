@@ -809,6 +809,11 @@ func TestConfigureWasmGC(t *testing.T) {
 		{name: "raw GJS", conf: Config{Goos: "js", Goarch: "wasm"}, wantGC: true},
 		{name: "raw GWASI", conf: Config{Goos: "wasip1", Goarch: "wasm"}, wantGC: true},
 		{name: "raw wasm explicit", conf: Config{Goos: "js", Goarch: "wasm", Tags: "other,llgo.wasm.gc.linear"}, wantGC: true},
+		{name: "Emscripten workers rejected", conf: Config{Goos: "js", Goarch: "wasm", Tags: "llgo.wasm.workers"}, abi: crosscompile.WasmABIEmscripten, err: true},
+		{name: "Memory64 workers rejected", conf: Config{Goos: "js", Goarch: "wasm", Tags: "llgo.wasm.gc.linear,llgo.wasm.workers"}, abi: crosscompile.WasmABIEmscriptenMemory64, err: true},
+		{name: "WASI thread tag rejected", conf: Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo.wasi_threads"}, abi: crosscompile.WasmABIWASIPreview1, err: true},
+		{name: "raw GJS workers rejected", conf: Config{Goos: "js", Goarch: "wasm", Tags: "llgo.wasm.workers"}, err: true},
+		{name: "raw GWASI threads rejected", conf: Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo.wasm.gc.linear,llgo.wasi_threads"}, err: true},
 		{name: "native", conf: Config{Goos: "linux", Goarch: "amd64"}},
 		{name: "native explicit", conf: Config{Goos: "linux", Goarch: "amd64", Tags: "llgo.wasm.gc.linear"}, err: true},
 		{name: "unsupported raw host implicit", conf: Config{Goos: "linux", Goarch: "wasm"}},
@@ -824,6 +829,9 @@ func TestConfigureWasmGC(t *testing.T) {
 			}
 			if enabled != test.wantGC {
 				t.Fatalf("configureWasmGC enabled = %v, want %v", enabled, test.wantGC)
+			}
+			if err != nil {
+				return // Failed configuration must not proceed to linker setup.
 			}
 			applyWasmGCLinkFlags(&test.conf, &export)
 			if got := slices.Contains(export.LDFLAGS, "-sMALLOC=none"); got != (test.wantGC && test.conf.Goos == "js") {
