@@ -48,8 +48,11 @@ const (
 
 type callerLocationStore struct {
 	wasmPanicTrace
-	frames        []CallerFrame
-	stack         []CallerFrame
+	frames []CallerFrame
+	stack  []CallerFrame
+	// Repeated call sites in one function update the same historical slot.
+	// This is only a hint: eviction can move slots, so every hit checks its key.
+	lastLocation  int
 	synthetic     []CallerFrame
 	syntheticHash []uintptr
 	// Memoized synthetic PC bases for the static frames emitted around every
@@ -139,22 +142,32 @@ func recordPCLocation(pc, entry uintptr, name, file string, line int) {
 }
 
 func (store *callerLocationStore) recordPCLocation(pc, entry uintptr, name, file string, line int) {
-	for i := range store.frames {
-		frame := &store.frames[i]
-		if (pc != 0 && frame.PC == pc) || (pc == 0 && frame.PC == 0 && frame.Entry == entry) {
-			frame.PC = pc
-			frame.Entry = entry
-			frame.Function = name
-			frame.File = file
-			frame.Line = line
-			return
+	i := store.lastLocation
+	if uint(i) >= uint(len(store.frames)) ||
+		!((pc != 0 && store.frames[i].PC == pc) || (pc == 0 && store.frames[i].PC == 0 && store.frames[i].Entry == entry)) {
+		for i = 0; i < len(store.frames); i++ {
+			frame := &store.frames[i]
+			if (pc != 0 && frame.PC == pc) || (pc == 0 && frame.PC == 0 && frame.Entry == entry) {
+				break
+			}
 		}
+	}
+	if i < len(store.frames) {
+		store.lastLocation = i
+		frame := &store.frames[i]
+		frame.PC = pc
+		frame.Entry = entry
+		frame.Function = name
+		frame.File = file
+		frame.Line = line
+		return
 	}
 	if len(store.frames) >= callerLocationLimit {
 		copy(store.frames, store.frames[1:])
 		store.frames[len(store.frames)-1] = CallerFrame{}
 		store.frames = store.frames[:len(store.frames)-1]
 	}
+	store.lastLocation = len(store.frames)
 	store.frames = append(store.frames, CallerFrame{
 		PC:       pc,
 		Entry:    entry,
