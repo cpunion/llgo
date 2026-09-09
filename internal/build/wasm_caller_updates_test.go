@@ -26,6 +26,7 @@ func TestWasmCallerStoreUpdates(t *testing.T) {
 	functions := map[string]int{
 		"RecordCallerLocation": 1, "RecordPanicLocation": 1,
 		"updateCurrentFrame": 1, "recordPCLocation": 2,
+		"locationMatches": 1, "rememberLocation": 1,
 	}
 	var source bytes.Buffer
 	source.WriteString("package caller\n")
@@ -83,7 +84,12 @@ type CallerFrame struct {
   Line, StartLine int
   captured uintptr
 }
-type callerLocationStore struct { frames, stack []CallerFrame; lastLocation int }
+type callerLocationStore struct {
+  frames, stack []CallerFrame
+  lastLocation int
+  locationHints [4]int
+  nextLocationHint uint
+}
 const callerLocationLimit = 4096
 var current *callerLocationStore
 var lookups int
@@ -156,7 +162,7 @@ func TestPCBindingsAndEviction(t *testing.T) {
 }
 func TestLocationHintValidity(t *testing.T) {
   for _, hint := range []int{-1, 0, 1, 2, 1000} {
-    current = &callerLocationStore{lastLocation:hint, frames:[]CallerFrame{
+    current = &callerLocationStore{lastLocation:hint, locationHints:[4]int{hint,-1,1000,hint}, frames:[]CallerFrame{
       {PC:0, Entry:7, Function:"entry"},
       {PC:7, Entry:8, Function:"pc"},
     }}
@@ -197,6 +203,60 @@ func TestLocationHintAvoidsLinearSearch(t *testing.T) {
   if linearLocationProbes != 0 || allocations != 0 || len(current.frames) != callerLocationLimit ||
     current.frames[callerLocationLimit-1].Line != 2 {
     t.Fatalf("cached update: linear probes=%d allocations=%g", linearLocationProbes, allocations)
+  }
+}
+func TestLocationHintsAlternatingCalls(t *testing.T) {
+  current = &callerLocationStore{frames:make([]CallerFrame, callerLocationLimit)}
+  for i := range current.frames { current.frames[i].Entry = uintptr(i+1) }
+  keys := []struct { pc, entry uintptr }{{0,7001},{7001,9001},{0,7002},{7002,9002}}
+  for i, key := range keys {
+    current.frames[callerLocationLimit-len(keys)+i] = CallerFrame{PC:key.pc, Entry:key.entry}
+    recordPCLocation(key.pc, key.entry, "hot", "hot.go", 1)
+  }
+  linearLocationProbes = 0
+  allocations := testing.AllocsPerRun(1000, func() {
+    for _, key := range keys { recordPCLocation(key.pc, key.entry, "hot", "hot.go", 2) }
+  })
+  if linearLocationProbes != 0 || allocations != 0 || len(current.frames) != callerLocationLimit {
+    t.Fatalf("alternating updates: linear probes=%d allocations=%g", linearLocationProbes, allocations)
+  }
+  // Cached slots may move without changing the history length. Both PC and
+  // entry-only keys must still resolve their actual record after the move.
+  for i, key := range keys {
+    slot := callerLocationLimit-len(keys)+i
+    current.frames[i], current.frames[slot] = current.frames[slot], current.frames[i]
+    recordPCLocation(key.pc, key.entry, "moved", "moved.go", 3)
+    if current.frames[i].Function != "moved" || current.frames[i].Line != 3 || current.frames[slot].Function == "moved" {
+      t.Fatal("a stale multi-location hint updated another record")
+    }
+  }
+}
+func TestLocationHintsMatchLinearHistory(t *testing.T) {
+  current = &callerLocationStore{}
+  var want []CallerFrame
+  // Fill and repeatedly evict a full history while mixing new entries with
+  // frequently rebound PC keys. Check against the original linear algorithm.
+  for n := 1; n <= callerLocationLimit+1024; n++ {
+    pc, entry := uintptr(0), uintptr(n)
+    if n%7 == 0 { pc = uintptr(n%31+1) }
+    recordPCLocation(pc, entry, "f", "a.go", n)
+    i := 0
+    for ; i < len(want); i++ {
+      if (pc != 0 && want[i].PC == pc) || (pc == 0 && want[i].PC == 0 && want[i].Entry == entry) { break }
+    }
+    if i == len(want) {
+      if len(want) == callerLocationLimit { want = want[1:]; i-- }
+      want = append(want, CallerFrame{})
+    }
+    want[i] = CallerFrame{PC:pc, Entry:entry, Function:"f", File:"a.go", Line:n}
+    if current.lastLocation != i || len(current.frames) != len(want) {
+      t.Fatalf("history shape changed on update %d", n)
+    }
+    if n%17 == 0 || n == callerLocationLimit+1024 {
+      for j := range want {
+        if current.frames[j] != want[j] { t.Fatalf("history differs at update %d slot %d", n, j) }
+      }
+    }
   }
 }
 `
