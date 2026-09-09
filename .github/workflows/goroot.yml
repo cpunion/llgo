@@ -17,6 +17,19 @@ jobs:
     if: github.repository_owner == 'cpunion' && inputs.mode == 'opt-trace'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: baseline
+            passes: default<Os>
+          - name: pre-instcombine
+            passes: function(instcombine),default<Os>
+          - name: pre-memcpyopt
+            passes: function(memcpyopt),default<Os>
+    name: opt-trace (${{ matrix.name }})
+    env:
+      OPT_PIPELINE: ${{ matrix.passes }}
     permissions:
       contents: read
       actions: read
@@ -30,22 +43,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir "$RUNNER_TEMP/input" "$RUNNER_TEMP/evidence"
-          gh run download 34356698146 --repo cpunion/llgo \
-            -n r4-cmplxdivide-EC64-build-trace --dir "$RUNNER_TEMP/input"
+          gh run download 34358466593 --repo cpunion/llgo \
+            -n r4-cmplxdivide-GWASI-build-trace --dir "$RUNNER_TEMP/input"
           test -s "$RUNNER_TEMP/input/before-opt.ll"
       - name: Identify the expensive LLVM pass without rebuilding Go sources
         run: |
           set -o pipefail
           opt --version
           /usr/bin/time -v timeout --kill-after=5s 5m opt \
-            '-passes=default<Oz>' -debug-pass-manager -time-passes \
-            -mtriple=wasm64-unknown-emscripten -S "$RUNNER_TEMP/input/before-opt.ll" \
+            "-passes=$OPT_PIPELINE" -debug-pass-manager -time-passes \
+            -mtriple=wasm32-unknown-wasip1 -S "$RUNNER_TEMP/input/before-opt.ll" \
             -o "$RUNNER_TEMP/evidence/optimized.ll" \
             2>&1 | tee "$RUNNER_TEMP/evidence/passes.log"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: r4-exact-module-opt-trace
+          name: r4-exact-module-opt-trace-${{ matrix.name }}
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
 
