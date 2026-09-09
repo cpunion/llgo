@@ -7,12 +7,40 @@ on:
         description: CPU sampling or unchanged full-package verification
         type: choice
         default: profile
-        options: [profile, verify]
+        options: [profile, verify, unit]
 
 permissions:
   contents: read
 
 jobs:
+  unit:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'unit'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOFLAGS: -tags=llvm22
+      GOMAXPROCS: '2'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - name: Compiler attribution regressions with shared coverage
+        run: |
+          mkdir "$RUNNER_TEMP/evidence"
+          go test ./cl ./ssa -run 'Caller|Panic|Nil|Bounds|MemProfile|Safepoint|Guard' \
+            -timeout=3m -count=1 -coverpkg=./cl,./ssa -coverprofile="$RUNNER_TEMP/evidence/compiler.cover"
+          go tool cover -func="$RUNNER_TEMP/evidence/compiler.cover" \
+            | tee "$RUNNER_TEMP/evidence/coverage.txt"
+          go test ./internal/build/testdata/wasm-test -run '^TestGuardPanicLocations$' -count=1
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: r4-crypto-compiler-coverage
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+
   profile:
     if: github.repository_owner == 'cpunion' && inputs.mode == 'profile'
     runs-on: ubuntu-24.04
