@@ -124,7 +124,7 @@ func TestGCPacingRuntimeRootsPreserveHeapBudget(t *testing.T) {
 		initialGoal := p.nextGC()
 		budget := initialGoal - initialLive
 		live := initialLive
-		for range 100 {
+		for i := 0; i < 100; i++ {
 			p.rootAllocated(stackSize)
 			live += stackSize
 			if p.live != live || p.nextGC()-live != budget {
@@ -134,7 +134,7 @@ func TestGCPacingRuntimeRootsPreserveHeapBudget(t *testing.T) {
 				t.Fatalf("GOGC=%d: Go allocations no longer obey their budget", percent)
 			}
 		}
-		for range 100 {
+		for i := 0; i < 100; i++ {
 			p.rootFreed(stackSize)
 			live -= stackSize
 			if p.live != live || p.nextGC()-live != budget {
