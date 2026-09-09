@@ -18,6 +18,19 @@ import (
 )
 
 func TestWasmMemProfileCaptureSeparatesGLSResolver(t *testing.T) {
+	for _, target := range []llssa.Target{
+		{GOOS: "js", GOARCH: "wasm"},
+		{GOOS: "wasip1", GOARCH: "wasm"},
+		{GOOS: "js", GOARCH: "wasm", Target: "emscripten-memory64", LLVMTarget: "wasm64-unknown-emscripten"},
+	} {
+		t.Run(target.GOOS+"/"+target.Target, func(t *testing.T) {
+			checkWasmMemProfileCaptureGLS(t, &target)
+		})
+	}
+}
+
+func checkWasmMemProfileCaptureGLS(t *testing.T, target *llssa.Target) {
+	t.Helper()
 	// Compile the production capture source with minimal stand-ins for the
 	// runtime data. A source-level guard alone is insufficient: locality
 	// lowering resolves a function's GLS package block in its entry block.
@@ -55,12 +68,15 @@ func RecordPanicLocation(uintptr, string, string, int) { callerLocationStoreCurr
 	}
 	files := []*ast.File{file, wrappers}
 	info := newLocalityTypeInfo()
-	pkg, err := (&types.Config{Importer: importer.Default()}).Check("example.com/capture", fset, files, info)
+	pkg, err := (&types.Config{Importer: importer.ForCompiler(fset, "source", nil)}).Check("example.com/capture", fset, files, info)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prog := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "js", GOARCH: "wasm"})
+	prog := newLLSSAProgForTarget(t, target)
 	defer prog.Dispose()
+	if target.Target == "emscripten-memory64" {
+		prog.TypeSizes(types.SizesFor("gc", "amd64"))
+	}
 	prog.SetRuntime(func() *types.Package {
 		rt, err := importer.For("source", nil).Import(llssa.PkgRuntime)
 		if err != nil {
@@ -80,6 +96,11 @@ func RecordPanicLocation(uintptr, string, string, int) { callerLocationStoreCurr
 	}
 	goProg := ssa.NewProgram(fset, ssa.SanityCheckFunctions)
 	goProg.CreatePackage(types.Unsafe, nil, nil, true)
+	for _, imported := range pkg.Imports() {
+		if imported != types.Unsafe {
+			goProg.CreatePackage(imported, nil, nil, true)
+		}
+	}
 	ssaPkg := goProg.CreatePackage(pkg, files, info, true)
 	ssaPkg.Build()
 	compiled, err := NewPackage(prog, ssaPkg, files)
@@ -111,6 +132,11 @@ func RecordPanicLocation(uintptr, string, string, int) { callerLocationStoreCurr
 		}
 		if !strings.Contains(body, "; Function Attrs: noinline") || !strings.Contains(body, "example.com/capture."+name+"\"") {
 			t.Errorf("%s must retain a guarded non-inline runtime boundary:\n%s", name, body)
+		}
+		for _, forbidden := range []string{"AssertRuntimeError", "AllocU", "AllocZ", "clite.GoString"} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("%s must construct trusted literal strings without checks, allocations, or a helper call:\n%s", name, body)
+			}
 		}
 	}
 }
