@@ -2960,6 +2960,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		}
 	}
 	coalesceWasmPanicLocations(ctx.buildConf.Goarch, ret.Module())
+	lowerWasmAggregateCopies(ctx.buildConf.Goarch, ctx.prog.TargetData(), ret.Module())
 	applySizeOptimizationAttributes(ret.Module(), ctx.buildConf.OptLevel)
 	printCmds := ctx.shouldPrintCommands(verbose)
 	if ctx.mode != ModeGen {
