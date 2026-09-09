@@ -7,12 +7,47 @@ on:
         description: CPU sampling or unchanged full-package verification
         type: choice
         default: profile
-        options: [profile, verify, unit]
+        options: [profile, verify, unit, coverage-auth]
 
 permissions:
   contents: read
 
 jobs:
+  coverage-auth:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'coverage-auth'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 8daf581e7be00531bcf288c68cc58e2c44f114b0
+      - uses: ./.github/actions/setup-go
+      - name: Reproduce final-head runtime helper coverage
+        working-directory: runtime
+        run: |
+          go test -count=1 -coverprofile="$RUNNER_TEMP/gjs-storage.cover" \
+            ./internal/wasmcontext ./internal/gcroot ./internal/runtime/tinygogc
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: final-head-runtime-helper-coverage
+          path: ${{ runner.temp }}/gjs-storage.cover
+          if-no-files-found: error
+      - name: Authenticate coverage with the workflow identity
+        uses: codecov/codecov-action@v7
+        with:
+          use_oidc: true
+          fail_ci_if_error: true
+          disable_search: true
+          files: ${{ runner.temp }}/gjs-storage.cover
+          flags: wasm-runtime-helpers
+          override_commit: 8daf581e7be00531bcf288c68cc58e2c44f114b0
+          override_branch: codex/wasm-r4-stdlib-text-io-20260905
+          override_pr: 235
+
   unit:
     if: github.repository_owner == 'cpunion' && inputs.mode == 'unit'
     runs-on: ubuntu-24.04
