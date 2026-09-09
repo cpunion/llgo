@@ -30,6 +30,7 @@ type Entry = emscripten.FiberEntry
 type Context struct {
 	fiber         emscripten.Fiber
 	stack         unsafe.Pointer
+	stackTop      unsafe.Pointer
 	asyncifyStack unsafe.Pointer
 }
 
@@ -39,6 +40,7 @@ func (ctx *Context) Init(entry Entry, arg unsafe.Pointer, stackSize uintptr, all
 		return false
 	}
 	ctx.stack = stack
+	ctx.stackTop = unsafe.Add(alignedStackBase(stack), stackSize)
 	ctx.asyncifyStack = asyncifyStack
 	emscripten.FiberInit(
 		&ctx.fiber,
@@ -50,6 +52,11 @@ func (ctx *Context) Init(entry Entry, arg unsafe.Pointer, stackSize uintptr, all
 		asyncifySize,
 	)
 	return true
+}
+
+// StackRange reports the saved stack pointer and the logical C stack top.
+func (ctx *Context) StackRange() (start, end uintptr) {
+	return ctx.fiber.StackPointer(), uintptr(ctx.stackTop)
 }
 
 func (ctx *Context) InitCurrent(alloc func(uintptr) unsafe.Pointer) bool {

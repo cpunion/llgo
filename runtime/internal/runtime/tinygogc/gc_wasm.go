@@ -67,7 +67,17 @@ func gcMarkReachable() {
 	if afterStart < globalsEnd {
 		markRoots(afterStart, globalsEnd)
 	}
+	gcroot.VisitStackRanges(markWasmStackRange)
 	gcroot.Visit(markWasmGCRoot)
+}
+
+func markWasmStackRange(start, end uintptr, active bool) {
+	if active {
+		start = uintptr(getsp())
+	}
+	if start < end {
+		markRoots(start, end)
+	}
 }
 
 func markWasmGCRoot(root *unsafe.Pointer, _ unsafe.Pointer) {

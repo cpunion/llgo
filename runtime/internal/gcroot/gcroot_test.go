@@ -68,7 +68,38 @@ func TestRejectsInvalidContextOperations(t *testing.T) {
 	assertPanics(t, func() { Register(&ctx) })
 	assertPanics(t, func() { RegisterActive(new(Context)) })
 	assertPanics(t, func() { Switch(nil) })
+	assertPanics(t, func() { SetStackRange(nil, 0, 1) })
+	assertPanics(t, func() { SetStackRange(&ctx, 2, 1) })
 	assertPanics(t, func() { Unregister(&ctx) })
+}
+
+func TestVisitStackRanges(t *testing.T) {
+	resetForTest()
+	t.Cleanup(resetForTest)
+
+	var first, second Context
+	RegisterActive(&first)
+	Register(&second)
+	SetStackRange(&first, 0x10, 0x20)
+	SetStackRange(&second, 0x30, 0x40)
+
+	type visit struct {
+		start, end uintptr
+		active     bool
+	}
+	var visits []visit
+	VisitStackRanges(func(start, end uintptr, active bool) {
+		visits = append(visits, visit{start, end, active})
+	})
+	if len(visits) != 2 || visits[0] != (visit{0x30, 0x40, false}) ||
+		visits[1] != (visit{0x10, 0x20, true}) {
+		t.Fatalf("stack range visits = %#v", visits)
+	}
+
+	Unregister(&second)
+	if second.stackStart != 0 || second.stackEnd != 0 {
+		t.Fatal("Unregister retained a logical stack range")
+	}
 }
 
 func TestRejectsInvalidFrameMap(t *testing.T) {

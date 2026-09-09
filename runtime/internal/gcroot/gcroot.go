@@ -21,8 +21,10 @@ import "unsafe"
 
 // Context stores one suspended execution owner's compiler root chain.
 type Context struct {
-	next  *Context
-	chain unsafe.Pointer
+	next       *Context
+	chain      unsafe.Pointer
+	stackStart uintptr
+	stackEnd   uintptr
 }
 
 type frameMap struct {
@@ -86,6 +88,18 @@ func RegisterActive(ctx *Context) {
 	}
 	Register(ctx)
 	active = ctx
+}
+
+// SetStackRange records the used portion of a logical stack. An active
+// context is scanned from the collector's current stack pointer instead of
+// stackStart; stackStart is the saved pointer used while the context is
+// suspended.
+func SetStackRange(ctx *Context, start, end uintptr) {
+	if ctx == nil || start > end {
+		panic("gcroot: invalid stack range")
+	}
+	ctx.stackStart = start
+	ctx.stackEnd = end
 }
 
 // Switch saves the active chain and installs next's chain.
@@ -163,6 +177,8 @@ func Unregister(ctx *Context) {
 	*link = ctx.next
 	ctx.next = nil
 	ctx.chain = nil
+	ctx.stackStart = 0
+	ctx.stackEnd = 0
 }
 
 // Visit calls visitor for every root slot in every registered context.
@@ -176,6 +192,20 @@ func Visit(visitor func(root *unsafe.Pointer, metadata unsafe.Pointer)) {
 			chain = currentRootChain
 		}
 		visitChain(chain, visitor)
+	}
+}
+
+// VisitStackRanges calls visitor for every registered logical stack. The
+// active flag tells the collector to replace start with its current stack
+// pointer, which is more precise than the last pointer saved at suspension.
+func VisitStackRanges(visitor func(start, end uintptr, active bool)) {
+	if visitor == nil {
+		return
+	}
+	for ctx := contexts; ctx != nil; ctx = ctx.next {
+		if ctx.stackEnd != 0 {
+			visitor(ctx.stackStart, ctx.stackEnd, ctx == active)
+		}
 	}
 }
 
