@@ -24,7 +24,7 @@ func TestWasmGCMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	functions := map[string]bool{
-		"gcFindNext": true, "gcStateByteOf": true, "gcStateFromByte": true,
+		"gcFindHead": true, "gcFindNext": true, "gcStateByteOf": true, "gcStateFromByte": true,
 		"gcStateOf": true, "gcAddressOf": true, "gcPointerOf": true,
 		"gcMarkFree": true, "gcUnmark": true, "sweep": true,
 	}
@@ -92,6 +92,42 @@ func gcPanic(s string) { panic(s) }
 func memProfileFree(address uintptr) {
   profileCalls++
   profileHash = profileHash*31 + address
+}
+func TestTailScanAlignmentAndBounds(t *testing.T) {
+  const wordSize = unsafe.Sizeof(uintptr(0))
+  const wordBlocks = wordSize*blocksPerStateByte
+  for alignment := uintptr(0); alignment < wordSize; alignment++ {
+    // Leave more tails after the logical heap end. Skipping an unbounded
+    // word would then return the wrong end even inside the backing array.
+    data := make([]byte, alignment + 6*wordSize + 4)
+    metadataStart = unsafe.Pointer(&data[alignment])
+    for head := uintptr(0); head < 2*wordBlocks; head++ {
+      for span := uintptr(1); span <= 2*wordBlocks+3; span++ {
+        for _, state := range []uint8{blockStateHead, blockStateMark} {
+          for i := range data { data[i] = blockStateByteAllTails }
+          p := (*byte)(unsafe.Add(metadataStart, head/blocksPerStateByte))
+          *p = *p &^ (3 << ((head%4)*2)) | state << ((head%4)*2)
+          limit := head+span
+          for _, boundary := range []uint8{blockStateTail, blockStateFree, blockStateHead, blockStateMark} {
+            endBlock = limit
+            if boundary != blockStateTail {
+              endBlock += wordBlocks
+              p := (*byte)(unsafe.Add(metadataStart, limit/blocksPerStateByte))
+              *p = *p &^ (3 << ((limit%4)*2)) | boundary << ((limit%4)*2)
+            }
+            for block := head; block < limit; block++ {
+              if got := gcFindHead(block); got != head {
+                t.Fatalf("head: align=%d head=%d span=%d block=%d got=%d", alignment, head, span, block, got)
+              }
+              if got := gcFindNext(block); got != limit {
+                t.Fatalf("end: align=%d head=%d span=%d block=%d state=%d got=%d want=%d", alignment, head, span, block, boundary, got, limit)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
 func TestPackedStates(t *testing.T) {
   const capacity = 8
