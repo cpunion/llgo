@@ -7,12 +7,73 @@ on:
         description: CPU sampling or unchanged full-package verification
         type: choice
         default: profile
-        options: [profile, verify, unit, coverage-auth, build-trace, base-coverage, opt-trace, complex-verify, promote-trace]
+        options: [profile, verify, unit, coverage-auth, build-trace, base-coverage, reuse-base-coverage, opt-trace, complex-verify, promote-trace]
 
 permissions:
   contents: read
 
 jobs:
+  reuse-base-coverage:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'reuse-base-coverage'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify exact report extraction and failure handling
+        run: python3 -m unittest discover -s dev -p r4_extract_coverage_test.py -v
+      - name: Restore original upstream reports for the exact PR baseline
+        id: reports
+        run: |
+          set -euo pipefail
+          command -v curl zstd sha256sum awk
+          root="$RUNNER_TEMP/upstream-baseline"
+          mkdir -p "$root/raw" "$root/reports"
+          base=49bc1b5afde370e89341461844889171a52d4ecb
+          # Original main CI: https://github.com/xgo-dev/llgo/actions/runs/34326568339
+          # Four native Go jobs (3 reports each), plus the 4-report LTO job.
+          # Hashes bind these public Codecov archives to the inspected uploads.
+          while read -r upload hash count; do
+            url="https://api.codecov.io/upload/gh/xgo-dev/llgo/download?path=shelter/github/xgo-dev::::llgo/$base/$upload.txt"
+            curl --fail --location --retry 2 --max-time 60 --silent --show-error \
+              "$url" --output "$root/raw/$upload.zst"
+            printf '%s  %s\n' "$hash" "$root/raw/$upload.zst" | sha256sum --check
+            zstd -dc "$root/raw/$upload.zst" \
+              | bash dev/r4_extract_coverage.sh "$root/reports/$upload" "$count"
+            printf '%s %s %s\n' "$upload" "$hash" "$count" >> "$root/provenance.txt"
+          done <<'REPORTS'
+          a79c5cc8-2122-4f29-a500-e77d2b52540d e129f85cb5235f933be457b90dd00b81da21a49a12302a656b0b3c59a9e39fc6 3
+          6f850ab3-cbb8-46f9-bccf-f27f9d6d5408 85d3667e0c8e483810822179c7d592fec88e55efe42ed55684a6317b75ba9f97 3
+          6f78939e-02df-41e7-a292-d6a45f359d90 cb588407eb0eee52043bafb14ce00ee27595a1aa2b744a4531f81472fe67dc97 3
+          dec52694-1eb6-448a-846f-618efd645fa5 f110d6c9e6fa7f9a2847fc57cc29b12c92d88949a3ade2350ddd02194517ec12 3
+          f009c492-da61-4c15-a3e8-589c169355e5 c1c36bf6ceb3726d09f70bd0cfbefb20e0046e712b69c0ead3b0cd1436dc00ea 4
+          REPORTS
+          reports=("$root"/reports/*/coverage-*.txt)
+          test "${#reports[@]}" -eq 16
+          files=$(printf '%s,' "${reports[@]}")
+          printf 'files=%s\n' "${files%,}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          ref: 49bc1b5afde370e89341461844889171a52d4ecb
+          fetch-depth: 0
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: r4-restored-upstream-baseline-49bc1b5af
+          path: ${{ runner.temp }}/upstream-baseline
+          if-no-files-found: error
+      - uses: codecov/codecov-action@v7
+        with:
+          use_oidc: true
+          fail_ci_if_error: true
+          disable_search: true
+          files: ${{ steps.reports.outputs.files }}
+          flags: restored-upstream-baseline
+          override_commit: 49bc1b5afde370e89341461844889171a52d4ecb
+          override_branch: codex/wasm-r4-main-base-20260907
+
   promote-trace:
     if: github.repository_owner == 'cpunion' && inputs.mode == 'promote-trace'
     runs-on: ubuntu-24.04
