@@ -24,7 +24,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/xgo-dev/llgo/internal/clang"
@@ -32,13 +31,11 @@ import (
 )
 
 type wasmFuncInfoRelink struct {
-	mapPath        string
-	rootPath       string
-	staticRootPath string
-	inputs         []string
-	userMap        bool
-	stdoutMap      bool
-	gcRoots        bool
+	mapPath   string
+	rootPath  string
+	inputs    []string
+	userMap   bool
+	stdoutMap bool
 	// An opaque response file may select an unknown map path. --print-map
 	// always wins over -Map in wasm-ld, so capture only the probe's stdout
 	// and always perform a final link with the original arguments afterward.
@@ -49,10 +46,9 @@ func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs, linkArgs
 	if ctx == nil || ctx.buildConf == nil || ctx.prog == nil ||
 		ctx.buildConf.BuildMode != BuildModeExe ||
 		runtimeSiteObjectFormat(ctx) != siteObjectWasm ||
-		(!shouldEmitRuntimeEntrySites(ctx) && !ctx.prog.GCRootsEnabled()) {
+		!shouldEmitRuntimeEntrySites(ctx) {
 		return nil, nil
 	}
-	gcRoots := ctx.prog.GCRootsEnabled()
 	// A linker accepts only one map destination. Reuse an explicitly requested
 	// map instead of silently overriding -extldflags with our private probe.
 	args := ctx.linker().LinkArguments(linkArgs...)
@@ -62,7 +58,7 @@ func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs, linkArgs
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(ctx.commands.dir, path)
 		}
-		return &wasmFuncInfoRelink{mapPath: path, inputs: slices.Clone(inputs), userMap: true, gcRoots: gcRoots}, nil
+		return &wasmFuncInfoRelink{mapPath: path, inputs: slices.Clone(inputs), userMap: true}, nil
 	}
 	f, err := os.CreateTemp(filepath.Dir(outputPath), ".llgo-wasm-funcinfo-*.map")
 	if err != nil {
@@ -73,7 +69,7 @@ func prepareWasmFuncInfoRelink(ctx *context, outputPath string, inputs, linkArgs
 		_ = os.Remove(name)
 		return nil, fmt.Errorf("close WebAssembly funcinfo link map: %w", err)
 	}
-	return &wasmFuncInfoRelink{mapPath: name, inputs: slices.Clone(inputs), stdoutMap: path == "-", stdoutProbe: stdoutProbe, gcRoots: gcRoots}, nil
+	return &wasmFuncInfoRelink{mapPath: name, inputs: slices.Clone(inputs), stdoutMap: path == "-", stdoutProbe: stdoutProbe}, nil
 }
 
 // A stdout map is captured privately during the probe. Publish it only when
@@ -99,7 +95,6 @@ func (p *wasmFuncInfoRelink) cleanup() {
 			_ = os.Remove(p.mapPath)
 		}
 		_ = os.Remove(p.rootPath)
-		_ = os.Remove(p.staticRootPath)
 	}
 }
 
@@ -194,82 +189,6 @@ func (p *wasmFuncInfoRelink) liveEntryObject(ctx *context) (string, error) {
 	return p.rootPath, nil
 }
 
-func (p *wasmFuncInfoRelink) staticRootObject(ctx *context) (string, error) {
-	if p == nil || !p.gcRoots {
-		return "", nil
-	}
-	data, err := os.ReadFile(p.mapPath)
-	if err != nil {
-		return "", fmt.Errorf("read WebAssembly static-root link map: %w", err)
-	}
-	start, ok := wasmMutableDataStart(string(data))
-	if !ok {
-		return "", errors.New("WebAssembly link map has no mutable data segment")
-	}
-	f, err := os.CreateTemp("", "llgo-wasm-static-roots-*.o")
-	if err != nil {
-		return "", fmt.Errorf("create WebAssembly static-root object: %w", err)
-	}
-	p.staticRootPath = f.Name()
-	if err := f.Close(); err != nil {
-		return "", fmt.Errorf("close WebAssembly static-root object: %w", err)
-	}
-	if err := writeWasmStaticRootObject(ctx, p.staticRootPath, start); err != nil {
-		return "", err
-	}
-	return p.staticRootPath, nil
-}
-
-// wasm-ld lays out .rodata before .data and .bss. The first mutable output
-// segment is therefore the lower bound for conservative static roots. The
-// final support object contains only code; the FuncInfo retention array is in
-// the later llgo_gc_noscan segment, so the probe address remains stable across
-// the final link.
-func wasmMutableDataStart(linkMap string) (uint64, bool) {
-	for _, line := range strings.Split(linkMap, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 4 || (fields[3] != ".data" && fields[3] != ".bss") {
-			continue
-		}
-		address, err := strconv.ParseUint(fields[0], 16, 64)
-		if err == nil {
-			return address, true
-		}
-	}
-	return 0, false
-}
-
-func writeWasmStaticRootObject(ctx *context, path string, start uint64) error {
-	llvmCtx := gllvm.NewContext()
-	defer llvmCtx.Dispose()
-	mod := llvmCtx.NewModule("llgo.wasm.static.roots")
-	defer mod.Dispose()
-	mod.SetDataLayout(ctx.prog.DataLayout())
-	mod.SetTarget(ctx.prog.Target().Spec().Triple)
-
-	wordType := llvmCtx.Int32Type()
-	if ctx.prog.PointerSize() == 8 {
-		wordType = llvmCtx.Int64Type()
-	}
-	functionType := gllvm.FunctionType(wordType, nil, false)
-	function := gllvm.AddFunction(mod, "llgo_gc_globals_start", functionType)
-	entry := llvmCtx.AddBasicBlock(function, "entry")
-	builder := llvmCtx.NewBuilder()
-	builder.SetInsertPointAtEnd(entry)
-	builder.CreateRet(gllvm.ConstInt(wordType, start, false))
-	builder.Dispose()
-
-	buf, err := ctx.prog.TargetMachine().EmitToMemoryBuffer(mod, gllvm.ObjectFile)
-	if err != nil {
-		return fmt.Errorf("emit WebAssembly static-root object: %w", err)
-	}
-	defer buf.Dispose()
-	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
-		return fmt.Errorf("write WebAssembly static-root object: %w", err)
-	}
-	return nil
-}
-
 // wasmLinkMapOutput follows the linker's last-option-wins rule after unwrapping
 // the two Clang driver spellings. Keep paths (including spaces) intact.
 func wasmLinkMapOutput(args []string) string {
@@ -318,7 +237,6 @@ func writeWasmFuncInfoRootObject(ctx *context, path string, roots []string) erro
 	registry.SetInitializer(init)
 	registry.SetLinkage(gllvm.InternalLinkage)
 	registry.SetGlobalConstant(true)
-	registry.SetSection("llgo_gc_noscan")
 	appendLLVMUsed(mod, []gllvm.Value{registry})
 
 	buf, err := ctx.prog.TargetMachine().EmitToMemoryBuffer(mod, gllvm.ObjectFile)

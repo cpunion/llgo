@@ -594,6 +594,12 @@ jobs:
             | tee "$RUNNER_TEMP/evidence/coverage.txt"
           go test ./internal/build/testdata/wasm-test -run '^TestGuardPanicLocations$' -count=1
           go test ./internal/build -run '^TestWasmCallerStoreUpdates$' -v -count=1 -timeout=2m
+      - name: Static-root layout and extracted collector regressions
+        run: |
+          set -o pipefail
+          go test ./internal/build -v -count=1 -timeout=3m \
+            -run 'TestPrepareWasmStaticRootMarker|TestWasmFuncInfoNoScanLinking|TestGC(Independent|Finalizer)Arena' \
+            2>&1 | tee "$RUNNER_TEMP/evidence/gc-unit.log"
       - uses: actions/upload-artifact@v7
         if: always()
         with:

@@ -43,6 +43,42 @@ func TestFuncInfoNoScanSections(t *testing.T) {
 	}
 }
 
+func TestPrepareWasmStaticRootMarker(t *testing.T) {
+	path, cleanup, err := prepareWasmStaticRootMarker(nil, filepath.Join(t.TempDir(), "app.wasm"))
+	if err != nil || path != "" || cleanup == nil {
+		t.Fatalf("nil context marker = %q/%v, cleanup nil=%t", path, err, cleanup == nil)
+	}
+	cleanup()
+
+	prog := llssa.NewProgram(&llssa.Target{
+		GOOS: "wasip1", GOARCH: "wasm", LLVMTarget: "wasm32-unknown-unknown",
+	})
+	defer prog.Dispose()
+	ctx := &context{prog: prog, buildConf: &Config{Goos: "wasip1", Goarch: "wasm", BuildMode: BuildModeExe}}
+	dir := t.TempDir()
+	path, cleanup, err = prepareWasmStaticRootMarker(ctx, filepath.Join(dir, "app.wasm"))
+	if err != nil || path != "" || cleanup == nil {
+		t.Fatalf("disabled GC marker = %q/%v, cleanup nil=%t", path, err, cleanup == nil)
+	}
+	cleanup()
+
+	prog.EnableGCRoots(true)
+	path, cleanup, err = prepareWasmStaticRootMarker(ctx, filepath.Join(dir, "app.wasm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path == "" || cleanup == nil {
+		t.Fatalf("enabled GC marker = %q, cleanup nil=%t", path, cleanup == nil)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("static-root marker was not written: %v", err)
+	}
+	cleanup()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("static-root marker cleanup error = %v", err)
+	}
+}
+
 func TestWasmFuncInfoNoScanLinking(t *testing.T) {
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -51,6 +87,10 @@ func TestWasmFuncInfoNoScanLinking(t *testing.T) {
 	linker, err := exec.LookPath("wasm-ld")
 	if err != nil {
 		t.Fatalf("wasm-ld is required: %v", err)
+	}
+	nm, err := exec.LookPath("llvm-nm")
+	if err != nil {
+		t.Fatalf("llvm-nm is required: %v", err)
 	}
 	for _, config := range []struct {
 		triple string
@@ -83,6 +123,14 @@ func TestWasmFuncInfoNoScanLinking(t *testing.T) {
 				t.Fatal(err)
 			}
 			dir := t.TempDir()
+			marker := filepath.Join(dir, "static-roots.o")
+			if err := writeWasmStaticRootMarkerObject(ctx, marker); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command(nm, "--defined-only", marker).CombinedOutput(); err != nil ||
+				!strings.Contains(string(out), "llgo_gc_globals_start_marker") {
+				t.Fatalf("static-root marker object is invalid: %v\n%s", err, out)
+			}
 			ir, object := filepath.Join(dir, "tables.ll"), filepath.Join(dir, "tables.o")
 			if err := os.WriteFile(ir, []byte(pkg.String()), 0600); err != nil {
 				t.Fatal(err)
@@ -104,6 +152,17 @@ func TestWasmFuncInfoNoScanLinking(t *testing.T) {
 			if out, err := exec.Command(clang, compileArgs...).CombinedOutput(); err != nil {
 				t.Fatalf("compile collector boundary: %v\n%s", err, out)
 			}
+			// A wasm c-archive is consumed by an external final link and cannot
+			// guarantee that an LLGo marker is its first input. Its weak fallback
+			// must therefore remain linkable without the generated object.
+			fallback := filepath.Join(dir, "archive-consumer.wasm")
+			fallbackArgs := []string{"--no-entry", "--gc-sections", "--export=llgo_gc_globals_start", "-o", fallback, sentinel}
+			if strings.HasPrefix(triple, "wasm64") {
+				fallbackArgs = append(fallbackArgs, "-mwasm64")
+			}
+			if out, err := exec.Command(linker, fallbackArgs...).CombinedOutput(); err != nil {
+				t.Fatalf("link c-archive fallback: %v\n%s", err, out)
+			}
 			for _, live := range []bool{false, true} {
 				name := "empty"
 				if live {
@@ -111,7 +170,7 @@ func TestWasmFuncInfoNoScanLinking(t *testing.T) {
 				}
 				linkMap := filepath.Join(dir, name+".map")
 				wasm := filepath.Join(dir, name+".wasm")
-				args := []string{"--no-entry", "--gc-sections", "--export=llgo_gc_noscan_start", "--export=llgo_gc_noscan_end", "--Map=" + linkMap, "-o", wasm, object, sentinel}
+				args := []string{"--no-entry", "--gc-sections", "--export=llgo_gc_globals_start", "--export=llgo_gc_noscan_start", "--export=llgo_gc_noscan_end", "--Map=" + linkMap, "-o", wasm, marker, object, sentinel}
 				if strings.HasPrefix(triple, "wasm64") {
 					args = append(args, "-mwasm64")
 				}
@@ -131,6 +190,27 @@ func TestWasmFuncInfoNoScanLinking(t *testing.T) {
 				}
 				if strings.Contains(contents, "dead_noscan_table") || strings.Contains(contents, "live_noscan_table") != live {
 					t.Fatalf("noscan range changed table DCE, live=%t:\n%s", live, contents)
+				}
+				dataStart, markerAddress := uint64(0), uint64(0)
+				foundData, foundMarker := false, false
+				for _, line := range strings.Split(contents, "\n") {
+					fields := strings.Fields(line)
+					if len(fields) != 4 {
+						continue
+					}
+					address, parseErr := strconv.ParseUint(fields[0], 16, 64)
+					if parseErr != nil {
+						continue
+					}
+					switch fields[3] {
+					case ".data":
+						dataStart, foundData = address, true
+					case "llgo_gc_globals_start_marker":
+						markerAddress, foundMarker = address, true
+					}
+				}
+				if !foundData || !foundMarker || dataStart != markerAddress {
+					t.Fatalf("static-root marker is not the mutable data boundary: data=%#x/%t marker=%#x/%t\n%s", dataStart, foundData, markerAddress, foundMarker, contents)
 				}
 				wantSize := 8
 				if live {

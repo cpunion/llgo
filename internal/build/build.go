@@ -2484,7 +2484,17 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 		linkOutput = app + ".exe"
 		moveExactWindowsOutput = true
 	}
+	staticRootMarker, cleanupStaticRootMarker, err := prepareWasmStaticRootMarker(ctx, linkOutput)
+	if err != nil {
+		return err
+	}
+	defer cleanupStaticRootMarker()
 	buildArgs := []string{"-o", linkOutput}
+	if staticRootMarker != "" {
+		// wasm-ld preserves input order while merging .data.* sections. Keep the
+		// marker before user objects, archives and their linker flags.
+		buildArgs = append(buildArgs, staticRootMarker)
+	}
 	buildArgs = append(buildArgs, linkArgs...)
 	siteLayoutArgs, cleanupSiteLayout, err := funcInfoSiteLayoutArgs(ctx, app)
 	if err != nil {
@@ -2553,22 +2563,15 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 		if err != nil {
 			return err
 		}
-		staticRootObject, err := funcInfoRelink.staticRootObject(ctx)
-		if err != nil {
-			return err
-		}
-		if rootObject != "" || staticRootObject != "" || funcInfoRelink.stdoutProbe {
+		if rootObject != "" || funcInfoRelink.stdoutProbe {
 			cmd = ctx.linker()
 			cmd.Verbose = printCmds
 			finalArgs := slices.Clone(buildArgs)
 			if rootObject != "" {
 				finalArgs = append(finalArgs, rootObject)
 			}
-			if staticRootObject != "" {
-				finalArgs = append(finalArgs, staticRootObject)
-			}
 			if err := cmd.Link(finalArgs...); err != nil {
-				return fmt.Errorf("relink WebAssembly support objects: %w", err)
+				return fmt.Errorf("relink WebAssembly funcinfo entries: %w", err)
 			}
 		} else if err := funcInfoRelink.publishProbeMap(cmd.Stdout); err != nil {
 			return err
