@@ -35,6 +35,7 @@ type finalizerRecord struct {
 	prev      *finalizerRecord
 	indexNext *finalizerRecord
 	readyNext *finalizerRecord
+	debugRoot uintptr
 }
 
 var (
@@ -57,6 +58,46 @@ func DebugFinalizerState() (active, ready int, worker bool) {
 	worker = finalizerWorkerRunning
 	unlock(&gcMutex)
 	return
+}
+
+// DebugFinalizerRecord returns one active record and the slot that first made
+// it reachable in the most recent ordinary root scan.
+func DebugFinalizerRecord(index int) (object, root uintptr, ok bool) {
+	lock(&gcMutex)
+	for record := finalizers; record != nil; record = record.next {
+		if index == 0 {
+			object, root, ok = ^record.object, record.debugRoot, true
+			break
+		}
+		index--
+	}
+	unlock(&gcMutex)
+	return
+}
+
+var finalizerDebugRootScan bool
+
+func beginFinalizerDebugRootScan() {
+	for record := finalizers; record != nil; record = record.next {
+		record.debugRoot = 0
+	}
+	finalizerDebugRootScan = true
+}
+
+func endFinalizerDebugRootScan() {
+	finalizerDebugRootScan = false
+}
+
+func noteFinalizerDebugRoot(source, block uintptr) {
+	if !finalizerDebugRootScan {
+		return
+	}
+	key := encodeFinalizerAddress(gcAddressOf(block))
+	for record := finalizersForObject(key); record != nil; record = record.indexNext {
+		if record.objectKey == key && record.state == finalizerActive && record.debugRoot == 0 {
+			record.debugRoot = source
+		}
+	}
 }
 
 // AddFinalizer registers callback for ptr without retaining the object. The

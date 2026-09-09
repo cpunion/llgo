@@ -3,7 +3,7 @@ package main
 import (
 	"runtime"
 	"time"
-	_ "unsafe"
+	"unsafe"
 	"weak"
 )
 
@@ -24,6 +24,9 @@ var nonCapturingEvents chan<- int
 
 //go:linkname debugTinyFinalizerState github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc.DebugFinalizerState
 func debugTinyFinalizerState() (active, ready int, worker bool)
+
+//go:linkname debugTinyFinalizerRecord github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc.DebugFinalizerRecord
+func debugTinyFinalizerRecord(index int) (object, root uintptr, ok bool)
 
 //go:linkname debugWasmFinalizerEntries runtime.debugWasmFinalizerEntries
 func debugWasmFinalizerEntries() int
@@ -237,6 +240,7 @@ func testFinalizerBatch() {
 		}
 		if cycle == 23 {
 			printFinalizerBatchState("incomplete", events)
+			printActiveFinalizerRoots()
 			panic("finalizer batch did not complete")
 		}
 	}
@@ -247,6 +251,16 @@ func testFinalizerBatch() {
 			panic("finalizer batch lost an argument or dispatched it twice")
 		}
 		seen[id] = true
+	}
+}
+
+func printActiveFinalizerRoots() {
+	for index := 0; ; index++ {
+		object, root, ok := debugTinyFinalizerRecord(index)
+		if !ok {
+			return
+		}
+		println("active finalizer", index, "object", object, "value", *(*int)(unsafe.Pointer(object)), "root", root)
 	}
 }
 

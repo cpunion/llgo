@@ -532,9 +532,11 @@ func gc() (freeBytes uintptr) {
 
 	// Mark phase: mark all reachable objects, recursively.
 	markHeads.reset()
+	beginFinalizerDebugRootScan()
 	gcMarkReachable()
 
 	finishMark()
+	endFinalizerDebugRootScan()
 	preserveFinalizableObjects()
 	markHeads.reset()
 
@@ -604,6 +606,7 @@ func startMark(root uintptr) {
 
 			// Move to the block's head.
 			referencedBlock = gcFindHeadForMark(referencedBlock)
+			noteFinalizerDebugRoot(addr, referencedBlock)
 			noteFinalizerReference(referencedBlock)
 
 			if gcStateOf(referencedBlock) == blockStateMark {
@@ -675,6 +678,7 @@ func markRoot(addr, root uintptr) {
 			return
 		}
 		head := gcFindHeadForMark(block)
+		noteFinalizerDebugRoot(addr, head)
 
 		if gcStateOf(head) != blockStateMark {
 			startMark(head)
