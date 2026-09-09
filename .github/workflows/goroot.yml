@@ -2,13 +2,21 @@ name: GOROOT
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Focused correctness or bounded resource diagnostics
+        type: choice
+        default: correctness
+        options:
+          - correctness
+          - resource-probes
 
 permissions:
   contents: read
 
 jobs:
   diagnose:
-    if: github.repository_owner == 'cpunion'
+    if: github.repository_owner == 'cpunion' && inputs.mode != 'resource-probes'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
@@ -199,5 +207,97 @@ jobs:
         with:
           name: r4-runtime-${{ matrix.profile }}-${{ github.run_id }}
           path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 3
+
+  resource-probes:
+    if: github.repository_owner == 'cpunion' && inputs.mode == 'resource-probes'
+    name: Bounded resource probes (${{ matrix.profile }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [EC32, GWASI]
+    env:
+      GOMAXPROCS: '2'
+      BINARYEN_CORES: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        if: matrix.profile == 'EC32'
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        if: matrix.profile == 'EC32'
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        if: matrix.profile == 'GWASI'
+        with:
+          version: '39.0.1'
+      - uses: ./.github/actions/setup-go
+      - name: Build compiler and check diagnostic wrappers
+        run: |
+          python3 -m unittest discover -s dev -p 'wasm_build_diagnostics_test.py' -v
+          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+          go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
+      - name: Preserve the original recover compile and optimizer inputs
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          python3 dev/wasm_build_diagnostics.py \
+            --llgo "$RUNNER_TEMP/llgo" --runner "$RUNNER_TEMP/goroot-runner" \
+            --goroot "$(go env GOROOT)" --output "$RUNNER_TEMP/recover-probe" \
+            --profile "$PROFILE" --case '^recover\.go$' --clang-passes
+      - name: Capture bounded execution stacks of original goroutine workloads
+        if: ${{ !cancelled() && matrix.profile == 'GWASI' }}
+        run: |
+          evidence="$RUNNER_TEMP/runtime-probe"
+          mkdir "$evidence"
+          goroot="$(go env GOROOT)"
+          failed=0
+          for case_path in gcgort.go chan/goroutines.go fixedbugs/issue78081.go; do
+            case_name="${case_path//\//-}"
+            module="$evidence/$case_name.wasm"
+            cp "$goroot/test/$case_path" "$evidence/$case_name"
+            GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 \
+              /usr/bin/time -v timeout 5m "$RUNNER_TEMP/llgo" build -ldflags=-w=false \
+              -o "$module" "$goroot/test/$case_path" > "$evidence/$case_name-build.log" 2>&1 || {
+                cat "$evidence/$case_name-build.log"; failed=1; continue;
+              }
+            test -s "$module" || { failed=1; continue; }
+            # Epoch interrupts retain a named Wasm backtrace on timeout. These
+            # are diagnostic samples, not acceptance runs or a CPU percentage.
+            # Wasmtime 39 guest profiling does not flush its profile on traps.
+            for duration in 2s 8s 20s; do
+              log="$evidence/$case_name-$duration.log"
+              probe_status=0
+              WASMTIME_BACKTRACE_DETAILS=1 timeout 60s wasmtime run \
+                --dir=/ --env PWD --env PATH --env GOMAXPROCS=1 \
+                -W exceptions=y -W multi-memory=y -W max-wasm-stack=8388608 \
+                -W "timeout=$duration" "$module" > "$log" 2>&1 || probe_status=$?
+              printf '%s duration=%s status=%s (diagnostic only)\n' \
+                "$case_path" "$duration" "$probe_status" | tee -a "$evidence/verdict.txt"
+              cat "$log"
+              if [[ "$probe_status" == 124 ]]; then failed=1; fi
+            done
+          done
+          exit "$failed"
+      - name: Upload bounded resource evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: r4-resources-${{ matrix.profile }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/recover-probe/evidence
+            ${{ runner.temp }}/runtime-probe
           if-no-files-found: error
           retention-days: 3
