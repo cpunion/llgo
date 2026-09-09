@@ -9,6 +9,9 @@ on:
       - 'dev/test_wasm_exit_status.sh'
       - 'dev/test_wasi_poll.sh'
       - 'dev/test_gc_wasm.sh'
+      - 'dev/test_wasm_caller_alloc.sh'
+      - 'dev/wasm_caller_alloc_test.py'
+      - 'dev/wasm_test_env*'
       - '.github/workflows/wasm-acceptance.yml'
       - 'test/**'
       - 'runtime/**'
@@ -121,9 +124,9 @@ jobs:
           LLGO: ${{ runner.temp }}/llgo
         run: bash dev/test_wasm_caller_alloc.sh '${{ matrix.profile }}'
 
-      - name: Reject missing artifacts and false caller-allocation success
+      - name: Check Wasm harness failure and environment isolation
         if: matrix.profile == 'GJS'
-        run: python3 -m unittest discover -s dev -p wasm_caller_alloc_test.py
+        run: python3 -m unittest discover -s dev -p 'wasm_*_test.py'
 
       - name: Check typed reflection before full acceptance
         env:
@@ -159,10 +162,10 @@ jobs:
           GOMAXPROCS: '1'
         run: |
           set -o pipefail
-          timeout 10m go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
+          timeout 10m bash dev/wasm_test_env.sh go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
             -v -count=1 -timeout=60s ./internal/build/testdata/wasm-test \
             2>&1 | tee "$RUNNER_TEMP/gjs-go.log"
-          timeout 10m "$RUNNER_TEMP/llgo" test -v -count=1 -timeout=60s \
+          timeout 10m bash dev/wasm_test_env.sh "$RUNNER_TEMP/llgo" test -v -count=1 -timeout=60s \
             ./internal/build/testdata/wasm-test 2>&1 | tee "$RUNNER_TEMP/gjs-llgo.log"
           for compiler in go llgo; do
             log="$RUNNER_TEMP/gjs-$compiler.log"
@@ -186,6 +189,7 @@ jobs:
         with:
           version: '1.243.0'
       - name: Verify GC environment and automatic collection
+        id: gc-pacing
         if: ${{ matrix.profile == 'WC32' || matrix.profile == 'GJS' }}
         env:
           PROFILE: ${{ matrix.profile }}
@@ -197,7 +201,7 @@ jobs:
           bash dev/test_wasm_single_worker.sh "$suite" \
             2>&1 | tee "$RUNNER_TEMP/gc-pacing-$PROFILE.log"
       - name: Preserve GC pacing regression log
-        if: ${{ always() && (matrix.profile == 'WC32' || matrix.profile == 'GJS') }}
+        if: ${{ always() && steps.gc-pacing.outcome != 'skipped' && steps.gc-pacing.outcome != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: wasm-gc-pacing-${{ matrix.profile }}
