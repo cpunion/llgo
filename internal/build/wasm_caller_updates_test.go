@@ -28,11 +28,22 @@ func TestWasmCallerStoreUpdates(t *testing.T) {
 		"updateCurrentFrame": 1, "recordPCLocation": 2,
 	}
 	var source bytes.Buffer
-	source.WriteString(callerStoreUpdateSource)
+	source.WriteString("package caller\n")
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || functions[fn.Name.Name] == 0 {
 			continue
+		}
+		if fn.Name.Name == "recordPCLocation" && fn.Recv != nil {
+			// Count the production fallback's loop iterations, not wall time.
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				if loop, ok := node.(*ast.ForStmt); ok {
+					loop.Body.List = append([]ast.Stmt{&ast.IncDecStmt{
+						X: ast.NewIdent("linearLocationProbes"), Tok: token.INC,
+					}}, loop.Body.List...)
+				}
+				return true
+			})
 		}
 		if err := format.Node(&source, fset, fn); err != nil {
 			t.Fatal(err)
@@ -45,16 +56,23 @@ func TestWasmCallerStoreUpdates(t *testing.T) {
 			t.Fatalf("missing caller update function %s", name)
 		}
 	}
-	path := filepath.Join(t.TempDir(), "caller_test.go")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "caller.go")
 	if err := os.WriteFile(path, source.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	testPath := filepath.Join(dir, "caller_test.go")
+	if err := os.WriteFile(testPath, []byte(callerStoreUpdateSource), 0600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := stdctx.WithTimeout(stdctx.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "-timeout=20s", path)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "-timeout=20s", "-cover", path, testPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("actual caller update helpers: %v\n%s", err, output)
 	}
+	t.Logf("extracted caller update helper coverage (not whole-runtime coverage):\n%s", output)
 }
 
 const callerStoreUpdateSource = `package caller
@@ -65,10 +83,11 @@ type CallerFrame struct {
   Line, StartLine int
   captured uintptr
 }
-type callerLocationStore struct { frames, stack []CallerFrame }
+type callerLocationStore struct { frames, stack []CallerFrame; lastLocation int }
 const callerLocationLimit = 4096
 var current *callerLocationStore
 var lookups int
+var linearLocationProbes int
 func callerLocationStoreForGoroutine() *callerLocationStore {
   lookups++
   if current == nil { current = new(callerLocationStore) }
@@ -133,6 +152,51 @@ func TestPCBindingsAndEviction(t *testing.T) {
   RecordCallerLocation(7, "second", "second.go", 5)
   if len(current.frames) != 1 || current == previous || previous.frames[0] != oldestKept {
     t.Fatal("cross-goroutine update leaked")
+  }
+}
+func TestLocationHintValidity(t *testing.T) {
+  for _, hint := range []int{-1, 0, 1, 2, 1000} {
+    current = &callerLocationStore{lastLocation:hint, frames:[]CallerFrame{
+      {PC:0, Entry:7, Function:"entry"},
+      {PC:7, Entry:8, Function:"pc"},
+    }}
+    recordPCLocation(0, 7, "entry updated", "a.go", 1)
+    if current.lastLocation != 0 || current.frames[0].Function != "entry updated" || current.frames[1].Function != "pc" {
+      t.Fatalf("hint %d confused PC and entry bindings: %+v", hint, current.frames)
+    }
+    for n := 0; n < 10; n++ {
+      recordPCLocation(7, 99, "pc updated", "b.go", n+2)
+      if current.lastLocation != 1 || current.frames[1].Entry != 99 || current.frames[1].Line != n+2 {
+        t.Fatal("repeated cached PC binding did not update")
+      }
+    }
+    // A slot can shift after eviction. A still-in-range stale hint must
+    // compare the full key, rather than updating whichever record moved there.
+    current.frames[0], current.frames[1] = current.frames[1], current.frames[0]
+    recordPCLocation(7, 100, "moved", "c.go", 20)
+    if current.lastLocation != 0 || current.frames[0].Function != "moved" || current.frames[1].Function != "entry updated" {
+      t.Fatal("stale hint changed a different record")
+    }
+    current.frames = nil
+    recordPCLocation(7, 101, "reset", "d.go", 21)
+    if current.lastLocation != 0 || len(current.frames) != 1 || current.frames[0].Function != "reset" {
+      t.Fatal("empty history reused a stale location")
+    }
+  }
+}
+func TestLocationHintAvoidsLinearSearch(t *testing.T) {
+  current = &callerLocationStore{frames:make([]CallerFrame, callerLocationLimit)}
+  for i := range current.frames { current.frames[i].Entry = uintptr(i+1) }
+  linearLocationProbes = 0
+  recordPCLocation(0, callerLocationLimit, "hot", "hot.go", 1)
+  if linearLocationProbes != callerLocationLimit { t.Fatal("cold lookup did not exercise the full history") }
+  linearLocationProbes = 0
+  allocations := testing.AllocsPerRun(1000, func() {
+    recordPCLocation(0, callerLocationLimit, "hot", "hot.go", 2)
+  })
+  if linearLocationProbes != 0 || allocations != 0 || len(current.frames) != callerLocationLimit ||
+    current.frames[callerLocationLimit-1].Line != 2 {
+    t.Fatalf("cached update: linear probes=%d allocations=%g", linearLocationProbes, allocations)
   }
 }
 `
