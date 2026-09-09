@@ -603,13 +603,29 @@ func finishMark() {
 		// Re-mark all blocks.
 		markStackOverflow = false
 		for block := uintptr(0); block < endBlock; block++ {
-			if gcStateOf(block) != blockStateMark {
-				// Block is not marked, so we do not need to rescan it.
+			stateByte := gcStateByteOf(block)
+			if gcStateFromByte(block, stateByte) == blockStateMark {
+				startMark(block)
 				continue
 			}
 
-			// Re-mark the block.
-			startMark(block)
+			// Only 11 pairs identify marked heads. If none remain in this
+			// byte, skip its unmarked suffix. Try a complete aligned word
+			// for long runs of stack-buffer tails, free space or dead heads.
+			remaining := stateByte >> ((block % blocksPerStateByte) * stateBits)
+			if remaining&(remaining>>1)&0x55 == 0 {
+				const wordSize = unsafe.Sizeof(uintptr(0))
+				firstBlock := block - block%blocksPerStateByte
+				stateAddress := uintptr(metadataStart) + block/blocksPerStateByte
+				if stateByte&(stateByte>>1)&0x55 == 0 && stateAddress%wordSize == 0 && endBlock-firstBlock >= wordSize*blocksPerStateByte {
+					word := *(*uintptr)(unsafe.Add(metadataStart, block/blocksPerStateByte))
+					if word&(word>>1)&(^uintptr(0)/3) == 0 {
+						block = firstBlock + wordSize*blocksPerStateByte - 1
+						continue
+					}
+				}
+				block = firstBlock + blocksPerStateByte - 1
+			}
 		}
 	}
 }
