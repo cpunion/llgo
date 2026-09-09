@@ -13,6 +13,9 @@ permissions:
 
 jobs:
   benchmark:
+    # This diagnostic branch dispatches only the Wasm size job. Pull requests
+    # and main pushes retain the complete native benchmark matrix.
+    if: github.event_name != 'workflow_dispatch'
     name: benchmark (${{ matrix.display }})
     strategy:
       fail-fast: false
