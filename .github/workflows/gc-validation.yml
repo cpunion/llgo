@@ -1,0 +1,223 @@
+name: Independent GC validation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/gc-validation.yml'
+      - '.github/actions/setup-embed-deps/**'
+      - 'dev/test_gc_*'
+      - 'internal/build/*gc*.go'
+      - 'internal/build/build.go'
+      - 'runtime/internal/runtime/tinygogc/**'
+      - 'runtime/internal/runtime/z_gc*.go'
+      - 'runtime/internal/gcroot/**'
+      - 'runtime/internal/wasmcontext/**'
+      - 'runtime/internal/test/gc-*/**'
+      - '_demo/embed/testdata/esp32-serial/gc-runtime/**'
+      - 'targets/**'
+  workflow_call:
+    inputs:
+      scope:
+        type: string
+        default: all
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Independent collector verification scope
+        type: choice
+        default: all
+        options: [all, core, wasm, embedded, generic-ports]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gc-validation-${{ github.event.pull_request.number || github.ref }}-${{ inputs.scope || 'changed' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  core:
+    if: github.event_name == 'pull_request' || inputs.scope == 'all' || inputs.scope == 'core'
+    name: GC core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go
+      - name: Verify embedded execution witness and timeout accounting
+        if: matrix.os == 'ubuntu-24.04'
+        run: python3 -m unittest discover -s dev -p test_gc_embedded_test.py -v
+      - name: Actual collector in fixed and growing arenas
+        working-directory: internal/build
+        run: |
+          set -o pipefail
+          go test -v -count=1 -timeout=180s \
+            gc_arena_test.go wasm_gc_metadata_test.go \
+            wasm_gc_head_cache_test.go wasm_gc_pacing_test.go \
+            2>&1 | tee "$RUNNER_TEMP/gc-core.log"
+      - name: Runtime helper coverage
+        working-directory: runtime
+        run: |
+          go test -count=1 -coverprofile="$RUNNER_TEMP/gc-helpers.cover" \
+            ./internal/runtime/tinygogc ./internal/gcroot ./internal/wasmcontext
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gc-core-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/gc-core.log
+            ${{ runner.temp }}/gc-helpers.cover
+          if-no-files-found: error
+
+  wasm:
+    # Normal PRs reuse the full acceptance workflow's existing five profile
+    # jobs for these fixtures and original GOROOT cases. Dispatch this matrix
+    # only for isolated collector work, avoiding a duplicate Wasm toolchain.
+    if: inputs.scope == 'all' || inputs.scope == 'wasm'
+    name: GC Wasm (${{ matrix.profile }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [EC32, EC64, WC32, GJS, GWASI]
+    env:
+      GOMAXPROCS: '2'
+      BINARYEN_CORES: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_ROOT: ${{ github.workspace }}
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_WASI_THREADS: '0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - uses: emscripten-core/setup-emsdk@v15
+        if: matrix.profile == 'EC32' || matrix.profile == 'EC64' || matrix.profile == 'GJS'
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: '39.0.1'
+      - name: Build compiler and GC workload runner
+        run: |
+          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+          go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
+          go test ./internal/build -run '^TestConfigureWasmGC' -count=1
+      - name: Collector integration and unsupported-entry rejection
+        env:
+          LLGO: ${{ runner.temp }}/llgo
+        run: |
+          set -o pipefail
+          bash dev/test_gc_wasm.sh '${{ matrix.profile }}' "$RUNNER_TEMP/gc-wasm" \
+            2>&1 | tee "$RUNNER_TEMP/gc-integration.log"
+      - name: Original Go GC pressure workloads
+        if: ${{ !cancelled() }}
+        working-directory: test/goroot
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
+            -test.count=1 -test.timeout=22m -llgo "$RUNNER_TEMP/llgo" \
+            -goroot "$(go env GOROOT)" -wasm-profile '${{ matrix.profile }}' \
+            -directive-mode coverage -directives run,runoutput \
+            -case '^(gcgort\.go|chan/goroutines\.go|fixedbugs/(issue22781|issue27695|issue78081)\.go)$' \
+            -shard-index 0 -shard-total 1 -max-rss-mib 4096 -rss-warn-mib 1024 \
+            -build-timeout 180s -run-timeout 60s -progress 60s \
+            -report "$RUNNER_TEMP/gc-goroot.json" 2>&1 | tee "$RUNNER_TEMP/gc-goroot.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gc-wasm-${{ matrix.profile }}
+          path: |
+            ${{ runner.temp }}/gc-wasm
+            ${{ runner.temp }}/gc-integration.log
+            ${{ runner.temp }}/gc-goroot.json
+            ${{ runner.temp }}/gc-goroot.log
+          if-no-files-found: error
+
+  embedded:
+    if: github.event_name == 'pull_request' || inputs.scope == 'all' || inputs.scope == 'embedded'
+    name: GC embedded (${{ matrix.target }}, single mutator)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32c3-basic]
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_ROOT: ${{ github.workspace }}
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - uses: ./.github/actions/setup-embed-deps
+      - name: Build compiler
+        run: go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+      - name: Execute collector fixture on an embedded ISA
+        run: |
+          python3 dev/test_gc_embedded.py --llgo "$RUNNER_TEMP/llgo" \
+            --target '${{ matrix.target }}' --evidence "$RUNNER_TEMP/gc-embedded"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gc-embedded-${{ matrix.target }}
+          path: ${{ runner.temp }}/gc-embedded
+          if-no-files-found: error
+
+  generic-ports:
+    # These target descriptions do not yet provide a complete LLGo executable
+    # port (startup/libc/thread/heap symbols). Keep their diagnostic failures
+    # explicit, separate from validation of the supported ESP GC backend.
+    if: inputs.scope == 'generic-ports'
+    name: GC port diagnostic (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [cortex-m-qemu, riscv-qemu]
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_ROOT: ${{ github.workspace }}
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - name: Install emulators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm qemu-system-misc
+      - name: Build compiler
+        run: go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+      - name: Execute collector fixture on an embedded ISA
+        run: |
+          python3 dev/test_gc_embedded.py --llgo "$RUNNER_TEMP/llgo" \
+            --target '${{ matrix.target }}' --evidence "$RUNNER_TEMP/gc-embedded"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gc-embedded-${{ matrix.target }}
+          path: ${{ runner.temp }}/gc-embedded
+          if-no-files-found: error
