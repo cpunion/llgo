@@ -8,6 +8,7 @@ on:
       - 'dev/test_wasm_browser.sh'
       - 'dev/test_wasm_exit_status.sh'
       - 'dev/test_wasi_poll.sh'
+      - 'dev/test_gc_wasm.sh'
       - '.github/workflows/wasm-acceptance.yml'
       - 'test/**'
       - 'runtime/**'
@@ -62,6 +63,22 @@ jobs:
         run: |
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
           go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
+      - name: Verify single-mutator GC integration and reject unsafe entry
+        env:
+          LLGO: ${{ runner.temp }}/llgo
+        run: |
+          set -o pipefail
+          bash dev/test_gc_wasm.sh '${{ matrix.profile }}' "$RUNNER_TEMP/gc-wasm" \
+            2>&1 | tee "$RUNNER_TEMP/gc-integration.log"
+      - name: Preserve GC execution evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-gc-integration-${{ matrix.profile }}
+          path: |
+            ${{ runner.temp }}/gc-wasm
+            ${{ runner.temp }}/gc-integration.log
+          if-no-files-found: error
       - name: Exercise representative runnable cases
         env:
           PROFILE: ${{ matrix.profile }}
