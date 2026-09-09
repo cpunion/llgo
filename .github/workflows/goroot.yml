@@ -54,6 +54,7 @@ jobs:
         with:
           version: '39.0.1'
       - name: Build the exact candidate and original GOROOT runner
+        id: build
         run: |
           mkdir "$RUNNER_TEMP/evidence"
           git rev-parse HEAD | tee "$RUNNER_TEMP/evidence/source-head.txt"
@@ -72,7 +73,7 @@ jobs:
             -report "$RUNNER_TEMP/evidence/goroot.json" \
             2>&1 | tee "$RUNNER_TEMP/evidence/goroot.log"
       - name: Full GC root, pacing and lifecycle integration
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           LLGO: ${{ runner.temp }}/llgo
         run: |
