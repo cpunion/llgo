@@ -401,7 +401,6 @@ func TestRepositoryNotApplicableAcrossGoVersions(t *testing.T) {
 		{"writebarrier.go", "errorcheck", "linux/amd64"},
 		{"closure3.go", "errorcheckandrundir", "linux/amd64"},
 		{"typeparam/issue50993.go", "compile", "linux/amd64"},
-		{"asmhdr.go", "buildrundir", "darwin/arm64"},
 		{"fixedbugs/issue20014.go", "runindir", "linux/amd64"},
 	}
 	for _, tc := range cases {
@@ -421,6 +420,9 @@ func TestRepositoryNotApplicableAcrossGoVersions(t *testing.T) {
 		{"writebarrier.go", "run", "linux/amd64"},
 		{"genmeth1.go", "run", "linux/amd64"},
 		{"convert5.go", "run", "linux/amd64"},
+		{"asmhdr.go", "buildrundir", "darwin/arm64"},
+		{"deferfin.go", "run", "linux/amd64"},
+		{"fixedbugs/issue29362.go", "run", "linux/amd64"},
 	} {
 		if match, _ := cfg.Match("go1.27.0", tc.platform, testCase{RelPath: tc.path, Directive: tc.directive}); match {
 			t.Errorf("not-applicable scope broadened beyond Go version: %+v", tc)
@@ -537,9 +539,7 @@ func TestObservedNotApplicableCasesAreGlobal(t *testing.T) {
 	repo := repoRoot(t)
 	cfg := loadNotApplicableConfig(t, repo, filepath.Join("test", "goroot", "notapplicable.yaml"))
 	cases := []testCase{
-		{RelPath: "deferfin.go", Directive: "run"},
 		{RelPath: "fixedbugs/issue24491b.go", Directive: "run"},
-		{RelPath: "fixedbugs/issue29362.go", Directive: "run"},
 		{RelPath: "fixedbugs/issue45045.go", Directive: "run"},
 		{RelPath: "fixedbugs/issue54343.go", Directive: "run"},
 		{RelPath: "maymorestack.go", Directive: "run"},
@@ -570,7 +570,6 @@ func TestObservedFailuresHaveXFailClassifications(t *testing.T) {
 	}{
 		{version: "go1.27.0", platform: "linux/amd64", tc: testCase{RelPath: "rangegen.go", Directive: "runoutput"}},
 		{version: "go1.27.0", platform: "linux/amd64", tc: testCase{RelPath: "fixedbugs/issue34123.go", Directive: "run"}},
-		{version: "go1.27.0", platform: "linux/amd64", tc: testCase{RelPath: "heapsampling.go", Directive: "run"}},
 		{version: "go1.26.7", platform: "linux/amd64", tc: testCase{RelPath: "convert5.go", Directive: "run"}},
 		{version: "go1.26.7", platform: "windows-msvc/amd64", tc: testCase{RelPath: "linkmain_run.go", Directive: "run"}},
 		{version: "go1.26.7", platform: "windows-msvc/amd64", tc: testCase{RelPath: "fixedbugs/issue58300.go", Directive: "run"}},
@@ -597,6 +596,7 @@ func TestObservedPassesDoNotHaveXFailClassifications(t *testing.T) {
 		{version: "go1.27.0", platform: "windows-msvc/386", tc: testCase{RelPath: "rangegen.go", Directive: "runoutput"}},
 		{version: "go1.27.0", platform: "windows-msvc/amd64", tc: testCase{RelPath: "fixedbugs/issue34123.go", Directive: "run"}},
 		{version: "go1.27.0", platform: "darwin/arm64", tc: testCase{RelPath: "fixedbugs/issue52612.go", Directive: "run"}},
+		{version: "go1.27.0", platform: "linux/amd64", tc: testCase{RelPath: "heapsampling.go", Directive: "run"}},
 	}
 	for _, tt := range tests {
 		if match, reason := cfg.Match(tt.version, tt.platform, tt.tc); match {
