@@ -110,6 +110,28 @@ struct JSCallScope {
     ~JSCallScope() { --llgo_emval_js_call_depth; }
 };
 
+static bool llgo_emval_is_exit_status(const val& value) {
+    if (value.isUndefined() || value.isNull()) {
+        return false;
+    }
+    val name = value["name"];
+    val status = value["status"];
+    return !name.isUndefined() && !name.isNull() &&
+        name.as<std::string>() == "ExitStatus" &&
+        val::global("Number").call<bool>("isInteger", status);
+}
+
+static void llgo_emval_capture_exception(const val& jsErr, int *error) {
+    // emscripten_force_exit uses ExitStatus as control flow. In particular,
+    // os.Exit can race another Asyncify callback and unwind through an active
+    // Go-to-JavaScript call. Let the module runner consume that status instead
+    // of turning successful process termination into a syscall/js panic.
+    if (llgo_emval_is_exit_status(jsErr)) {
+        jsErr.throw_();
+    }
+    *error = 1;
+}
+
 void llgo_go_dispatch_sync(uintptr_t handle);
 
 EMSCRIPTEN_KEEPALIVE
@@ -289,8 +311,7 @@ EM_VAL llgo_emval_method_call(EM_VAL object, const char* name, EM_VAL args[], in
         ret = _emval_call_method(caller, llgo_emval_normalize(object), name, &destructors, elements.data());
 #endif
     } catch(const emscripten::val& jsErr) {
-        printf("error\n");
-        *error = 1;
+        llgo_emval_capture_exception(jsErr, error);
         return EM_VAL(internal::_EMVAL_UNDEFINED);
     }
 #if LLGO_EMVAL_INVOKER_API
@@ -337,7 +358,7 @@ EM_VAL llgo_emval_call(EM_VAL fn, EM_VAL args[], int nargs, int kind, int *error
        ret = _emval_call(caller, llgo_emval_normalize(fn), &destructors, elements.data());
 #endif
    } catch(const emscripten::val& jsErr) {
-       *error = 1;
+       llgo_emval_capture_exception(jsErr, error);
        return EM_VAL(internal::_EMVAL_UNDEFINED);
    }
 #if LLGO_EMVAL_INVOKER_API

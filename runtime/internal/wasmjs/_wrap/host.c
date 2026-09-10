@@ -150,6 +150,11 @@ EM_JS(void, llgo_js_host, (int32_t op, uint64_t *frame), {
                 store(address, result);
                 putInteger(1, 1);
             } catch (error) {
+                // Emscripten uses ExitStatus as process-control flow. Do not
+                // turn os.Exit inside a nested Go callback into syscall/js.Error.
+                if (error && error.name === "ExitStatus" && Number.isInteger(error.status)) {
+                    throw error;
+                }
                 store(address, error);
                 putInteger(1, 0);
             }

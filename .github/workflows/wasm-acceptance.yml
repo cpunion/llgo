@@ -103,6 +103,11 @@ jobs:
             # WC32 shares the Binaryen Asyncify context implementation with
             # GWASI and therefore needs the same cursor-ownership regression.
             cases='^(helloworld\.go|bom\.go|fixedbugs/issue5963\.go)$'
+          elif [[ "$PROFILE" == GJS ]]; then
+            # issue38093 exits while host timers and synchronous syscall/js
+            # calls are active. It catches ExitStatus being mistaken for an
+            # ordinary JavaScript exception at an emval boundary.
+            cases='^(helloworld\.go|bom\.go|fixedbugs/issue38093\.go)$'
           fi
           (
             cd test/goroot
@@ -269,6 +274,7 @@ jobs:
           name: wasm-exit-status-${{ matrix.profile }}
           path: |
             ${{ runner.temp }}/exit-${{ matrix.profile }}.log
+            ${{ runner.temp }}/exit-${{ matrix.profile }}-callback.log
             ${{ runner.temp }}/profile-reentry-${{ matrix.profile }}.log
           if-no-files-found: warn
 
