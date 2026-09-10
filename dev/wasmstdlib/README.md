@@ -1,5 +1,7 @@
 # R4 standard-library behavior and reference hosts
 
+The [R4 WebAssembly proposal](../../doc/wasm-r4-proposal.md) indexes the independently reviewable reflection-bridge and Emscripten-host subproposals.
+
 ## Full test audit (in progress)
 
 `-full` discovers test packages throughout `test/`, independently of build tags,
