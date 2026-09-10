@@ -95,8 +95,14 @@ jobs:
           if [[ "$PROFILE" == GWASI ]]; then
             # Original generated programs catch excessive pre-Asyncify
             # inlining, duplicated panic locations and scalar aggregate copies.
-            # Guard them once before starting the full matrix.
-            cases='^(helloworld\.go|bom\.go|fixedbugs/issue5162\.go|cmplxdivide\.go|recover\.go)$'
+            # issue5963 also terminates the logical main G through Goexit, so
+            # it catches ownership of an advanced Asyncify cursor. Guard them
+            # once before starting the full matrix.
+            cases='^(helloworld\.go|bom\.go|fixedbugs/(issue5162|issue5963)\.go|cmplxdivide\.go|recover\.go)$'
+          elif [[ "$PROFILE" == WC32 ]]; then
+            # WC32 shares the Binaryen Asyncify context implementation with
+            # GWASI and therefore needs the same cursor-ownership regression.
+            cases='^(helloworld\.go|bom\.go|fixedbugs/issue5963\.go)$'
           fi
           (
             cd test/goroot
