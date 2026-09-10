@@ -242,6 +242,26 @@ func TestFullProfileCommandsKeepLLGoAndReferenceDistinct(t *testing.T) {
 		if got, want := slices.Contains(cmd.Args, "-ldflags=-extldflags=-sSTACK_OVERFLOW_CHECK=2"), !p.Reference && p.GOOS == "js"; got != want {
 			t.Fatalf("%s stack overflow checking = %v, want %v", name, got, want)
 		}
+		if slices.Contains(cmd.Args, "-pclntab=none") {
+			t.Fatalf("%s root compatibility package lost PCLN coverage: %+v", name, cmd)
+		}
+	}
+}
+
+func TestFullCommandsRetainPCLNOnlyForMetadataConsumers(t *testing.T) {
+	p, err := fullProfile("EC64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pkg := range []string{"test", "test/go", "test/go/callercross", "test/llgoext", "test/std/runtime", "test/std/runtime/debug", "test/std/net/http/pprof", "test/std/log/slog"} {
+		if cmd := fullCommand(p, "go", "llgo", "/goroot", pkg); slices.Contains(cmd.Args, "-pclntab=none") {
+			t.Errorf("%s lost PCLN coverage: %+v", pkg, cmd)
+		}
+	}
+	for _, pkg := range []string{"test/std/encoding/ascii85", "test/std/crypto/rsa", "test/std/net", "test/syncpool"} {
+		if cmd := fullCommand(p, "go", "llgo", "/goroot", pkg); !slices.Contains(cmd.Args, "-pclntab=none") {
+			t.Errorf("%s retained unrelated PCLN link work: %+v", pkg, cmd)
+		}
 	}
 }
 

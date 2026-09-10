@@ -106,6 +106,13 @@ func fullCommand(p profile, goCmd, llgo, goRoot, pkg string) command {
 		// Exercise LLGo's external-linker flag forwarding at the same time.
 		args = append(args, "-ldflags=-extldflags=-sSTACK_OVERFLOW_CHECK=2")
 	}
+	if !p.Reference && !fullNeedsPCLN(pkg) {
+		// Embedded symbolization requires a second final link after function
+		// addresses are known. Most packages test unrelated language/library
+		// behavior; keep that costly path in the suites that inspect callers,
+		// tracebacks, profiling, or runtime function metadata.
+		args = append(args, "-pclntab=none")
+	}
 	packageArg := "./" + pkg
 	if pkg == wasmTimerStressPackage {
 		// The Go command excludes underscore directories from package patterns,
@@ -123,6 +130,21 @@ func fullCommand(p profile, goCmd, llgo, goRoot, pkg string) command {
 	}
 	// GNU timeout bounds compilation as well as execution, including children.
 	return command{"timeout", append([]string{"--kill-after=10s", "5m", program}, args...), env}
+}
+
+func fullNeedsPCLN(pkg string) bool {
+	for _, prefix := range []string{
+		"test/go",
+		"test/llgoext",
+		"test/std/runtime",
+		"test/std/net/http/pprof",
+		"test/std/log/slog",
+	} {
+		if pkg == prefix || strings.HasPrefix(pkg, prefix+"/") {
+			return true
+		}
+	}
+	return pkg == "test"
 }
 
 func fullTestTimeout(pkg string) string {
