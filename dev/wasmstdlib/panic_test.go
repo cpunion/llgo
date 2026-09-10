@@ -39,6 +39,34 @@ func TestFullPanicCommandProfiles(t *testing.T) {
 	}
 }
 
+func TestFullFinalizerInvalidCommandProfiles(t *testing.T) {
+	for _, profileName := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI", "GJS-reference", "GWASI-reference"} {
+		p, err := fullProfile(profileName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range fullFinalizerInvalidCases {
+			cmd := fullFinalizerInvalidCommand(p, "/repo", "/goroot", "/compiled-test", name)
+			if !slices.Contains(cmd.Args, "/compiled-test") || cmd.Args[len(cmd.Args)-1] != "-llgo.finalizer-invalid-case="+name {
+				t.Fatalf("%s %s did not reuse the child binary: %+v", profileName, name, cmd)
+			}
+		}
+	}
+}
+
+func TestFullBuiltinPrintCommandProfiles(t *testing.T) {
+	for _, profileName := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI", "GJS-reference", "GWASI-reference"} {
+		p, err := fullProfile(profileName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := fullBuiltinPrintCommand(p, "/repo", "/goroot", "/compiled-test")
+		if !slices.Contains(cmd.Args, "/compiled-test") || cmd.Args[len(cmd.Args)-1] != "-llgo.builtin-print-child" {
+			t.Fatalf("%s did not reuse the child binary: %+v", profileName, cmd)
+		}
+	}
+}
+
 func TestFullPanicExitHelper(t *testing.T) {
 	if os.Getenv("LLGO_FULL_PANIC_EXIT_HELPER") == "1" {
 		os.Exit(2)
@@ -71,6 +99,53 @@ func TestFullPanicValidationRejectsFalsePositives(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := validateFullPanic(root, []byte(tc.out), tc.err) == nil; got != tc.want {
+				t.Fatalf("accepted=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFullFinalizerInvalidValidationRejectsFalsePositives(t *testing.T) {
+	exitErr := fullPanicTestExit(t)
+	for _, tc := range []struct {
+		name string
+		out  string
+		err  error
+		want bool
+	}{
+		{"non-function", "fatal error: runtime.SetFinalizer: second argument is int, not a function", exitErr, true},
+		{"variadic", "fatal error: runtime.SetFinalizer: cannot pass *gotest.value to finalizer func(...*gotest.value) because dotdotdot", exitErr, true},
+		{"wrong type", "fatal error: runtime.SetFinalizer: cannot pass *gotest.value to finalizer func(*int)", exitErr, true},
+		{"successful child", "runtime.SetFinalizer: cannot pass", nil, false},
+		{"unrelated crash", "memory access out of bounds", exitErr, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := tc.name
+			if name == "successful child" || name == "unrelated crash" {
+				name = "wrong type"
+			}
+			if got := validateFullFinalizerInvalid([]byte(tc.out), tc.err, name) == nil; got != tc.want {
+				t.Fatalf("accepted=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFullBuiltinPrintValidationRejectsFalsePositives(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		err  error
+		want bool
+	}{
+		{"exact", fullBuiltinPrintWant, nil, true},
+		{"crlf", strings.ReplaceAll(fullBuiltinPrintWant, "\n", "\r\n"), nil, true},
+		{"wrong exponent", strings.Replace(fullBuiltinPrintWant, "1e+07", "1e+007", 1), nil, false},
+		{"runner noise", fullBuiltinPrintWant + "PASS\n", nil, false},
+		{"failed", fullBuiltinPrintWant, os.ErrNotExist, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validateFullBuiltinPrint([]byte(tc.out), tc.err) == nil; got != tc.want {
 				t.Fatalf("accepted=%v, want %v", got, tc.want)
 			}
 		})
@@ -141,14 +216,23 @@ func TestFullPanicIsReportedAndReusesBuild(t *testing.T) {
 				if tc.childFails {
 					return nil, os.ErrNotExist
 				}
-				return []byte("panic: acceptance-boom\ngoroutine 1 [running]:\ncallerPanicBoom\ncaller_runtime_test.go:3\ncallerPanicCaller\ncaller_runtime_test.go:4\n"), exitErr
+				if cmd.Args[len(cmd.Args)-1] == "-llgo.caller-panic-child" {
+					return []byte("panic: acceptance-boom\ngoroutine 1 [running]:\ncallerPanicBoom\ncaller_runtime_test.go:3\ncallerPanicCaller\ncaller_runtime_test.go:4\n"), exitErr
+				}
+				out := "fatal error: runtime.SetFinalizer: cannot pass *gotest.value to finalizer func(*int)"
+				if strings.Contains(cmd.Args[len(cmd.Args)-1], "non-function") {
+					out = "fatal error: runtime.SetFinalizer: second argument is int, not a function"
+				} else if strings.Contains(cmd.Args[len(cmd.Args)-1], "variadic") {
+					out += " because dotdotdot"
+				}
+				return []byte(out), exitErr
 			}
 			reportPath := filepath.Join(root, "report.json")
 			err := runFullAt(root, "WC32", reportPath, "go", "llgo", 0, 1, structured, run)
 			if (err != nil) != (tc.parentFails || tc.childFails) {
 				t.Fatalf("full audit result: %v", err)
 			}
-			if builds != 1 || children != 1 {
+			if builds != 1 || children != 1+len(fullFinalizerInvalidCases) {
 				t.Fatalf("builds/children = %d/%d", builds, children)
 			}
 			data, err := os.ReadFile(reportPath)
@@ -159,7 +243,7 @@ func TestFullPanicIsReportedAndReusesBuild(t *testing.T) {
 			if err := json.Unmarshal(data, &report); err != nil {
 				t.Fatal(err)
 			}
-			if len(report.Packages) != 1 || len(report.Packages[0].HostChecks) != 1 {
+			if len(report.Packages) != 1 || len(report.Packages[0].HostChecks) != 1+len(fullFinalizerInvalidCases) {
 				t.Fatalf("missing host check: %s", data)
 			}
 			if (report.Packages[0].HostChecks[0].Status == "fail") != tc.childFails {
@@ -169,5 +253,61 @@ func TestFullPanicIsReportedAndReusesBuild(t *testing.T) {
 				t.Fatalf("temporary binary directory retained: %v", err)
 			}
 		})
+	}
+}
+
+func TestFullBuiltinPrintIsReportedAndReusesBuild(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "test")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main_test.go"), []byte("package test\nfunc TestWitness(t *T) {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	structured := func(_ string, cmd command) ([]byte, error) {
+		if cmd.Args[0] == "env" {
+			return []byte("/goroot"), nil
+		}
+		return json.Marshal(selectedPackage{Dir: dir, TestGoFiles: []string{"main_test.go"}})
+	}
+	builds, children := 0, 0
+	var artifact string
+	run := func(_ string, cmd command) ([]byte, error) {
+		if slices.Contains(cmd.Args, "./test") {
+			builds++
+			idx := slices.Index(cmd.Args, "-o")
+			if idx < 0 {
+				t.Fatal("normal test did not retain its binary")
+			}
+			artifact = cmd.Args[idx+1]
+			return []byte("--- PASS: TestWitness (0.00s)\nPASS\n"), nil
+		}
+		children++
+		if artifact == "" || !slices.Contains(cmd.Args, artifact) || cmd.Args[len(cmd.Args)-1] != "-llgo.builtin-print-child" {
+			t.Fatalf("builtin-print child did not reuse the normal test binary: %+v", cmd)
+		}
+		return []byte(fullBuiltinPrintWant), nil
+	}
+	reportPath := filepath.Join(root, "report.json")
+	if err := runFullAt(root, "EC32", reportPath, "go", "llgo", 0, 1, structured, run); err != nil {
+		t.Fatal(err)
+	}
+	if builds != 1 || children != 1 {
+		t.Fatalf("builds/children = %d/%d", builds, children)
+	}
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct{ Packages []fullPackage }
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Packages) != 1 || len(report.Packages[0].HostChecks) != 1 || report.Packages[0].HostChecks[0].Status != "pass" {
+		t.Fatalf("missing builtin-print host check: %s", data)
+	}
+	if _, err := os.Stat(filepath.Dir(artifact)); !os.IsNotExist(err) {
+		t.Fatalf("temporary binary directory retained: %v", err)
 	}
 }

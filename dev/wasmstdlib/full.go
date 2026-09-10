@@ -317,18 +317,18 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 			}
 			fmt.Printf("%s %s\n", name, e.Package)
 			cmd := fullCommand(p, goCmd, llgo, goRoot, e.Package)
-			var panicArtifact string
-			if e.Package == "test/go" {
+			var hostArtifact string
+			if e.Package == "test/go" || e.Package == "test" {
 				dir, err := os.MkdirTemp("", "llgo-wasm-test-go-")
 				if err != nil {
 					return err
 				}
 				defer os.RemoveAll(dir)
-				panicArtifact = filepath.Join(dir, "test-go.wasm")
+				hostArtifact = filepath.Join(dir, strings.ReplaceAll(e.Package, "/", "-")+".wasm")
 				if p.GOOS == "js" && !p.Reference {
-					panicArtifact = filepath.Join(dir, "test-go.mjs")
+					hostArtifact = filepath.Join(dir, strings.ReplaceAll(e.Package, "/", "-")+".mjs")
 				}
-				cmd.Args = append(cmd.Args[:len(cmd.Args)-1], "-o", panicArtifact, cmd.Args[len(cmd.Args)-1])
+				cmd.Args = append(cmd.Args[:len(cmd.Args)-1], "-o", hostArtifact, cmd.Args[len(cmd.Args)-1])
 			}
 			out, runErr := run(root, cmd)
 			if err := os.WriteFile(filepath.Join(reportPath+".logs", strings.ReplaceAll(e.Package, "/", "_")+".log"), out, 0644); err != nil {
@@ -337,8 +337,8 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 			if runErr == nil {
 				e.Tests, runErr = validateOutput(out, witness)
 			}
-			if panicArtifact != "" {
-				childOut, childErr := run(root, fullPanicCommand(p, root, goRoot, panicArtifact))
+			if e.Package == "test/go" && hostArtifact != "" {
+				childOut, childErr := run(root, fullPanicCommand(p, root, goRoot, hostArtifact))
 				if err := os.WriteFile(filepath.Join(reportPath+".logs", "test_go_panic_child.log"), childOut, 0644); err != nil {
 					return err
 				}
@@ -347,6 +347,33 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 					check.Status, check.Reason = "fail", err.Error()
 					runErr = errors.Join(runErr, err)
 					writeFullFailureOutput(os.Stdout, name, e.Package+" panic child", childOut)
+				}
+				e.HostChecks = append(e.HostChecks, check)
+				for _, name := range fullFinalizerInvalidCases {
+					childOut, childErr = run(root, fullFinalizerInvalidCommand(p, root, goRoot, hostArtifact, name))
+					logName := "test_go_finalizer_invalid_" + strings.ReplaceAll(name, " ", "_") + ".log"
+					if err := os.WriteFile(filepath.Join(reportPath+".logs", logName), childOut, 0644); err != nil {
+						return err
+					}
+					check = fullHostCheck{Name: "SetFinalizer rejects " + name, Status: "pass"}
+					if err := validateFullFinalizerInvalid(childOut, childErr, name); err != nil {
+						check.Status, check.Reason = "fail", err.Error()
+						runErr = errors.Join(runErr, err)
+						writeFullFailureOutput(os.Stdout, name, e.Package+" finalizer child", childOut)
+					}
+					e.HostChecks = append(e.HostChecks, check)
+				}
+			}
+			if e.Package == "test" && hostArtifact != "" {
+				childOut, childErr := run(root, fullBuiltinPrintCommand(p, root, goRoot, hostArtifact))
+				if err := os.WriteFile(filepath.Join(reportPath+".logs", "test_builtin_print_child.log"), childOut, 0644); err != nil {
+					return err
+				}
+				check := fullHostCheck{Name: "Go 1.26 builtin print formatting", Status: "pass"}
+				if err := validateFullBuiltinPrint(childOut, childErr); err != nil {
+					check.Status, check.Reason = "fail", err.Error()
+					runErr = errors.Join(runErr, err)
+					writeFullFailureOutput(os.Stdout, name, e.Package+" builtin print child", childOut)
 				}
 				e.HostChecks = append(e.HostChecks, check)
 			}

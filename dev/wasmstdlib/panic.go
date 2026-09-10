@@ -10,10 +10,9 @@ import (
 	"strings"
 )
 
-// Reuse the ordinary test build: wasm guests cannot spawn the child needed by
-// TestCallerPanicTraceback, but the host can execute that exact binary twice.
-func fullPanicCommand(p profile, root, goRoot, artifact string) command {
-	const arg = "-llgo.caller-panic-child"
+// Reuse the ordinary test build: wasm guests cannot spawn the child processes
+// needed by fatal-path tests, but the host can execute that exact binary again.
+func fullChildCommand(p profile, root, goRoot, artifact, arg string) command {
 	var args []string
 	env := map[string]string{"GOMAXPROCS": "1"}
 	switch {
@@ -33,6 +32,67 @@ func fullPanicCommand(p profile, root, goRoot, artifact string) command {
 		args = []string{"node", filepath.Join(root, "targets", runner), artifact, arg}
 	}
 	return command{"timeout", append([]string{"--kill-after=10s", "30s"}, args...), env}
+}
+
+func fullPanicCommand(p profile, root, goRoot, artifact string) command {
+	return fullChildCommand(p, root, goRoot, artifact, "-llgo.caller-panic-child")
+}
+
+var fullFinalizerInvalidCases = []string{"non-function", "no parameters", "two parameters", "variadic", "wrong type"}
+
+func fullFinalizerInvalidCommand(p profile, root, goRoot, artifact, name string) command {
+	return fullChildCommand(p, root, goRoot, artifact, "-llgo.finalizer-invalid-case="+name)
+}
+
+func fullBuiltinPrintCommand(p profile, root, goRoot, artifact string) command {
+	return fullChildCommand(p, root, goRoot, artifact, "-llgo.builtin-print-child")
+}
+
+const fullBuiltinPrintWant = "" +
+	"1e+07\n" +
+	"(1e+07-1e+07i)\n" +
+	"(1.5+0i)\n" +
+	"NaN\n" +
+	"+Inf\n" +
+	"-Inf\n" +
+	"(1+NaNi)\n" +
+	"(1+Infi)\n" +
+	"(1-Infi)\n"
+
+func validateFullBuiltinPrint(out []byte, runErr error) error {
+	if runErr != nil {
+		return fmt.Errorf("builtin-print child failed: %w", runErr)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != fullBuiltinPrintWant {
+		return fmt.Errorf("builtin-print output = %q, want %q", got, fullBuiltinPrintWant)
+	}
+	return nil
+}
+
+func validateFullFinalizerInvalid(out []byte, runErr error, name string) error {
+	var exit *exec.ExitError
+	if !errors.As(runErr, &exit) || exit.ExitCode() < 1 || exit.ExitCode() > 2 {
+		return fmt.Errorf("invalid-finalizer child must exit 1 or 2, not succeed, time out, or fail to launch: %v", runErr)
+	}
+	want := "runtime.SetFinalizer:"
+	switch name {
+	case "non-function":
+		want += " second argument is"
+	case "variadic":
+		want += " cannot pass"
+		if !strings.Contains(string(out), "because dotdotdot") {
+			return fmt.Errorf("invalid-finalizer %s diagnostic is missing %q", name, "because dotdotdot")
+		}
+	case "no parameters", "two parameters", "wrong type":
+		want += " cannot pass"
+	default:
+		return fmt.Errorf("unknown invalid-finalizer case %q", name)
+	}
+	if !strings.Contains(string(out), want) {
+		return fmt.Errorf("invalid-finalizer %s diagnostic is missing %q", name, want)
+	}
+	return nil
 }
 
 func validateFullPanic(root string, out []byte, runErr error) error {
