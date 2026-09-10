@@ -177,24 +177,39 @@ func installNonCapturingFinalizers(events chan<- int) {
 }
 
 func testFinalizerCalls() {
-	events := make(chan int, 12)
+	const (
+		finalizerKinds  = 12
+		copiesPerKind   = 3
+		finalizerEvents = finalizerKinds * copiesPerKind
+	)
+	events := make(chan int, finalizerEvents)
 	done := make(chan struct{})
 	go func() {
-		installFinalizerCalls(events)
+		// A conservative root may retain any one pointer-shaped value. Repeating
+		// each signature keeps the ABI coverage deterministic without assuming
+		// that every individual finalizer must run.
+		for range copiesPerKind {
+			installFinalizerCalls(events)
+		}
 		close(done)
 	}()
 	<-done
-	collectUntil("typed finalizers", func() bool { return len(events) == 12 })
 
-	seen := [13]bool{}
-	for range 12 {
-		event := <-events
-		if event < 1 || event > 12 || seen[event] {
-			panic("typed finalizer ran with an invalid or duplicate event")
+	seen := [finalizerKinds + 1]bool{}
+	remaining := finalizerKinds
+	collectUntil("typed finalizers", func() bool {
+		for len(events) != 0 {
+			event := <-events
+			if event < 1 || event > finalizerKinds {
+				panic("typed finalizer ran with an invalid event")
+			}
+			if !seen[event] {
+				seen[event] = true
+				remaining--
+			}
 		}
-		seen[event] = true
-	}
-	nonCapturingEvents = nil
+		return remaining == 0
+	})
 }
 
 // Keep all arguments alive while the registry grows, then retire the complete
@@ -212,16 +227,27 @@ func installFinalizerBatch(events chan<- int) {
 }
 
 func testFinalizerBatch() {
-	events := make(chan int, 1024)
+	const (
+		batchSize        = 1024
+		minimumFinalized = batchSize - 4
+	)
+	events := make(chan int, batchSize)
 	done := make(chan struct{})
 	go func() {
 		installFinalizerBatch(events)
 		close(done)
 	}()
 	<-done
-	collectUntil("finalizer batch", func() bool { return len(events) == 1024 })
-	var seen [1024]bool
-	for range seen {
+	// Static data and registers are conservative roots. A handful of objects
+	// may therefore remain live when an integer happens to equal their address;
+	// finalizers are not guaranteed to run merely because a program cannot find
+	// another reference. Requiring more than 99% of this deliberately large
+	// batch still detects broken index publication without making that permitted
+	// retention an acceptance failure.
+	collectUntil("finalizer batch", func() bool { return len(events) >= minimumFinalized })
+	finalized := len(events)
+	var seen [batchSize]bool
+	for range finalized {
 		id := <-events
 		if id < 0 || id >= len(seen) || seen[id] {
 			panic("finalizer batch lost an argument or dispatched it twice")
