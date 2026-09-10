@@ -26,7 +26,7 @@ views:
           title: Wasm module
           format: bytes
         glue-bytes:
-          title: Generated JS glue
+          title: Generated JS glue and host sidecars
           format: bytes
   wasm-build:
     title: LLGo WebAssembly build measurements

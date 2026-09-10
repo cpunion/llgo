@@ -6,9 +6,12 @@ The harness builds the existing `benchmark/binary_size` examples `cprintf`,
 size, generated JavaScript glue size (zero when absent), and build time.
 These are build/size measurements, not runtime or official-Go ABI acceptance.
 
-Official Go size references cover `println` and `fmtprintf` on `js/wasm` and
-`wasip1/wasm`. There is no official-Go `cprintf` reference: that example calls
-C `printf` through LLGo's C interop, which official Go does not provide on wasm.
+The JS glue measurement includes every required browser host sidecar, including
+`wasm_fs.js`; a source revision that provides that host file must publish it or
+the benchmark fails. Official Go size references cover `println` and `fmtprintf`
+on `js/wasm` and `wasip1/wasm`. There is no official-Go `cprintf` reference:
+that example calls C `printf` through LLGo's C interop, which official Go does
+not provide on wasm.
 
 The existing unqualified metric names continue to mean `println`, preserving
 its benchmark history. New `cprintf/` and `fmtprintf/` metric prefixes identify

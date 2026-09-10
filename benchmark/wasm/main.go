@@ -222,6 +222,23 @@ func measureProfile(
 			return measurement{}, errors.New("generated empty JS glue")
 		}
 		glueBytes = glue.Size()
+		// Count the complete browser payload, not only emcc's loader. Revisions
+		// that ship the Go-compatible filesystem host must publish its sidecar
+		// next to every JS output; older merge bases do not have the source file
+		// and therefore retain their historical zero-sidecar measurement.
+		hostSource := filepath.Join(root, "targets", "wasm_fs.js")
+		if _, err := os.Stat(hostSource); err == nil {
+			host, err := os.Stat(filepath.Join(profileDir, "wasm_fs.js"))
+			if err != nil {
+				return measurement{}, fmt.Errorf("inspect JS host sidecar: %w", err)
+			}
+			if host.Size() == 0 {
+				return measurement{}, errors.New("generated empty JS host sidecar")
+			}
+			glueBytes += host.Size()
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return measurement{}, fmt.Errorf("inspect JS host source: %w", err)
+		}
 		module = output[:len(output)-len(profile.outputExt)] + ".wasm"
 	}
 	moduleBytes, err := wasmModuleSize(module)

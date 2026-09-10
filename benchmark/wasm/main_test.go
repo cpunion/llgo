@@ -198,6 +198,54 @@ func TestMeasureGoProfileReportsOutputFailures(t *testing.T) {
 	}
 }
 
+func TestMeasureProfileIncludesRequiredBrowserHost(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "targets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "targets", "wasm_fs.js"), []byte("host source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	profile := wasmProfile{name: "js", outputExt: ".mjs", hasJSGlue: true}
+	write := func(withHost bool) commandRunner {
+		return func(_ context.Context, _ string, _ []string, _ string, args ...string) error {
+			output := args[slices.Index(args, "-o")+1]
+			if err := os.WriteFile(output, []byte("glue"), 0o644); err != nil {
+				return err
+			}
+			if err := os.WriteFile(strings.TrimSuffix(output, ".mjs")+".wasm", []byte("\x00asmfixture"), 0o644); err != nil {
+				return err
+			}
+			if withHost {
+				return os.WriteFile(filepath.Join(filepath.Dir(output), "wasm_fs.js"), []byte("host"), 0o644)
+			}
+			return nil
+		}
+	}
+
+	result, err := measureProfile(context.Background(), write(true), nil, root, "fake-llgo", out, "main.go", profile, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.glueBytes != int64(len("glue")+len("host")) {
+		t.Fatalf("glue bytes = %d, want complete browser payload %d", result.glueBytes, len("glue")+len("host"))
+	}
+	if _, err := measureProfile(context.Background(), write(false), nil, root, "fake-llgo", out, "main.go", profile, 1); err == nil || !strings.Contains(err.Error(), "inspect JS host sidecar") {
+		t.Fatalf("missing-sidecar error = %v", err)
+	}
+	writeEmptyHost := func(ctx context.Context, dir string, env []string, name string, args ...string) error {
+		if err := write(false)(ctx, dir, env, name, args...); err != nil {
+			return err
+		}
+		output := args[slices.Index(args, "-o")+1]
+		return os.WriteFile(filepath.Join(filepath.Dir(output), "wasm_fs.js"), nil, 0o644)
+	}
+	if _, err := measureProfile(context.Background(), writeEmptyHost, nil, root, "fake-llgo", out, "main.go", profile, 1); err == nil || !strings.Contains(err.Error(), "empty JS host sidecar") {
+		t.Fatalf("empty-sidecar error = %v", err)
+	}
+}
+
 func TestWasmModuleSizeRejectsHostArtifact(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "host.wasm")
 	if err := os.WriteFile(path, []byte("not wasm"), 0o644); err != nil {
