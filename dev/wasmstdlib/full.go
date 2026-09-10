@@ -201,9 +201,7 @@ func fullSourceExclusion(p profile, pkg string) (string, bool) {
 	case "test/cgo":
 		return "the Go cgo frontend does not support GOARCH=wasm; Emscripten and WASI C interoperability is covered by dedicated LLGo target tests", true
 	case "test/std/runtime/cgo":
-		if p.Reference {
-			return "the official Go runtime/cgo package does not link on GOARCH=wasm; every LLGo profile executes its runtime/cgo handle implementation", true
-		}
+		return "the standard runtime/cgo package requires the unsupported GOARCH=wasm cgo frontend; LLGo handle and host-boundary behavior is covered by dedicated target tests", true
 	case "test/llgoext", "test/llgoext/localitymulti":
 		if p.Reference {
 			return "LLGo extension tests require the llgo build tag and LLGo-only runtime APIs; all LLGo profiles still execute them", true
