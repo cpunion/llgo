@@ -24,10 +24,11 @@ import (
 	gllvm "github.com/xgo-dev/llvm"
 )
 
-// prepareWasmStaticRootMarker creates the first input to wasm-ld's mutable
-// data segment. The linear collector starts its conservative global scan at
-// this marker, excluding packed immutable data that can accidentally resemble
-// a heap pointer.
+// prepareWasmStaticRootMarker creates the first input to wasm-ld's ordinary
+// mutable-data and TLS segments. The linear collector starts its conservative
+// global scan at the earlier marker, covering native TLS caches and ordinary
+// mutable data while excluding packed immutable data that can accidentally
+// resemble a heap pointer.
 func prepareWasmStaticRootMarker(ctx *context, outputPath string) (string, func(), error) {
 	noop := func() {}
 	if ctx == nil || ctx.prog == nil || ctx.buildConf == nil ||
@@ -64,10 +65,29 @@ func writeWasmStaticRootMarkerObject(ctx *context, path string) error {
 	if ctx.prog.PointerSize() == 8 {
 		wordType = llvmCtx.Int64Type()
 	}
-	marker := gllvm.AddGlobal(mod, wordType, "llgo_gc_globals_start_marker")
-	marker.SetInitializer(gllvm.ConstNull(wordType))
-	marker.SetAlignment(ctx.prog.PointerSize())
-	marker.SetSection(".data.llgo_gc_start")
+	dataMarker := gllvm.AddGlobal(mod, wordType, "llgo_gc_globals_start_marker")
+	dataMarker.SetInitializer(gllvm.ConstNull(wordType))
+	dataMarker.SetAlignment(ctx.prog.PointerSize())
+	dataMarker.SetSection(".data.llgo_gc_start")
+
+	tlsMarker := gllvm.AddGlobal(mod, wordType, "llgo_gc_tls_start_marker")
+	tlsMarker.SetInitializer(gllvm.ConstNull(wordType))
+	tlsMarker.SetAlignment(ctx.prog.PointerSize())
+	tlsMarker.SetThreadLocal(true)
+	tlsMarker.SetSection(".tdata.llgo_gc_start")
+
+	// Executables always link this object before package archives. Its strong
+	// getter replaces the collector object's weak c-archive fallback. Wasm-ld
+	// may place .data before or after TLS, so use the earlier active address.
+	getter := gllvm.AddFunction(mod, "llgo_gc_globals_start", gllvm.FunctionType(wordType, nil, false))
+	getter.AddFunctionAttr(llvmCtx.CreateStringAttribute("target-features", "+atomics"))
+	builder := llvmCtx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(gllvm.AddBasicBlock(getter, "entry"))
+	dataAddr := builder.CreatePtrToInt(dataMarker, wordType, "")
+	tlsAddr := builder.CreatePtrToInt(tlsMarker, wordType, "")
+	tlsFirst := builder.CreateICmp(gllvm.IntULT, tlsAddr, dataAddr, "")
+	builder.CreateRet(builder.CreateSelect(tlsFirst, tlsAddr, dataAddr, ""))
 
 	buf, err := ctx.prog.TargetMachine().EmitToMemoryBuffer(mod, gllvm.ObjectFile)
 	if err != nil {

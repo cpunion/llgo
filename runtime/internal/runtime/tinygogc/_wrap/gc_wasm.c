@@ -11,7 +11,6 @@ extern unsigned char __stack_high;
 extern unsigned char __data_end;
 extern unsigned char __global_base;
 extern unsigned char __heap_base;
-extern uintptr_t llgo_gc_globals_start_marker __attribute__((weak));
 
 /* Keep an empty boundary range available even when all compiler metadata is
  * discarded. This sentinel lives in the collector's object, not the metadata
@@ -23,13 +22,12 @@ extern unsigned char __stop_llgo_gc_noscan;
 
 #define LLGO_WASM_PAGE_SIZE 65536
 
+/* A c-archive has no final LLGo link at which to inject the mutable-data and
+ * TLS markers with their strong getter. Keep external consumers correct
+ * (though less selective) when they do not provide one themselves. */
+__attribute__((weak))
 uintptr_t llgo_gc_globals_start(void) {
-	/* A c-archive has no final LLGo link at which to inject the marker. Keep
-	 * external consumers correct (though less selective) when they do not
-	 * provide one themselves. */
-	if (&llgo_gc_globals_start_marker == 0)
-		return (uintptr_t)&__global_base;
-	return (uintptr_t)&llgo_gc_globals_start_marker;
+	return (uintptr_t)&__global_base;
 }
 
 uintptr_t llgo_gc_globals_end(void) {

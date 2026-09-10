@@ -128,7 +128,9 @@ func TestWasmFuncInfoNoScanLinking(t *testing.T) {
 				t.Fatal(err)
 			}
 			if out, err := exec.Command(nm, "--defined-only", marker).CombinedOutput(); err != nil ||
-				!strings.Contains(string(out), "llgo_gc_globals_start_marker") {
+				!strings.Contains(string(out), "llgo_gc_globals_start_marker") ||
+				!strings.Contains(string(out), "llgo_gc_tls_start_marker") ||
+				!strings.Contains(string(out), "llgo_gc_globals_start") {
 				t.Fatalf("static-root marker object is invalid: %v\n%s", err, out)
 			}
 			ir, object := filepath.Join(dir, "tables.ll"), filepath.Join(dir, "tables.o")
@@ -191,8 +193,10 @@ func TestWasmFuncInfoNoScanLinking(t *testing.T) {
 				if strings.Contains(contents, "dead_noscan_table") || strings.Contains(contents, "live_noscan_table") != live {
 					t.Fatalf("noscan range changed table DCE, live=%t:\n%s", live, contents)
 				}
-				dataStart, markerAddress := uint64(0), uint64(0)
-				foundData, foundMarker := false, false
+				tlsStart, dataStart := uint64(0), uint64(0)
+				dataMarkerStart, tlsMarkerStart := uint64(0), uint64(0)
+				foundTLS, foundData := false, false
+				foundDataMarker, foundTLSMarker := false, false
 				for _, line := range strings.Split(contents, "\n") {
 					fields := strings.Fields(line)
 					if len(fields) != 4 {
@@ -203,14 +207,23 @@ func TestWasmFuncInfoNoScanLinking(t *testing.T) {
 						continue
 					}
 					switch fields[3] {
+					case ".tdata":
+						tlsStart, foundTLS = address, true
 					case ".data":
 						dataStart, foundData = address, true
-					case "llgo_gc_globals_start_marker":
-						markerAddress, foundMarker = address, true
+					}
+					if strings.Contains(fields[3], "(.data.llgo_gc_start)") {
+						dataMarkerStart, foundDataMarker = address, true
+					}
+					if strings.Contains(fields[3], "(.tdata.llgo_gc_start)") {
+						tlsMarkerStart, foundTLSMarker = address, true
 					}
 				}
-				if !foundData || !foundMarker || dataStart != markerAddress {
-					t.Fatalf("static-root marker is not the mutable data boundary: data=%#x/%t marker=%#x/%t\n%s", dataStart, foundData, markerAddress, foundMarker, contents)
+				if !foundData || !foundTLS || !foundDataMarker || !foundTLSMarker ||
+					dataStart != dataMarkerStart || tlsStart != tlsMarkerStart {
+					t.Fatalf("static-root markers are not mutable segment boundaries: data=%#x/%t marker=%#x/%t tls=%#x/%t marker=%#x/%t\n%s",
+						dataStart, foundData, dataMarkerStart, foundDataMarker,
+						tlsStart, foundTLS, tlsMarkerStart, foundTLSMarker, contents)
 				}
 				wantSize := 8
 				if live {
