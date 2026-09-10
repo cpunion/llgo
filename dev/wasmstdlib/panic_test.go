@@ -67,6 +67,19 @@ func TestFullBuiltinPrintCommandProfiles(t *testing.T) {
 	}
 }
 
+func TestFullGoexitLifecycleCommandProfiles(t *testing.T) {
+	for _, profileName := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI"} {
+		p, err := fullProfile(profileName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := fullGoexitLifecycleCommand(p, "/repo", "/goroot", "/compiled-test")
+		if !slices.Contains(cmd.Args, "/compiled-test") || cmd.Args[len(cmd.Args)-1] != "-llgo.main-goexit-lifecycle-child" {
+			t.Fatalf("%s did not reuse the child binary: %+v", profileName, cmd)
+		}
+	}
+}
+
 func TestFullPanicExitHelper(t *testing.T) {
 	if os.Getenv("LLGO_FULL_PANIC_EXIT_HELPER") == "1" {
 		os.Exit(2)
@@ -146,6 +159,27 @@ func TestFullBuiltinPrintValidationRejectsFalsePositives(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := validateFullBuiltinPrint([]byte(tc.out), tc.err) == nil; got != tc.want {
+				t.Fatalf("accepted=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFullGoexitLifecycleValidationRejectsFalsePositives(t *testing.T) {
+	exitErr := fullPanicTestExit(t)
+	for _, tc := range []struct {
+		name string
+		out  string
+		err  error
+		want bool
+	}{
+		{"ordered", "WORKER_RETURNING\nfatal error: no goroutines (main called runtime.Goexit) - deadlock!", exitErr, true},
+		{"reversed", "fatal error: no goroutines (main called runtime.Goexit) - deadlock!\nWORKER_RETURNING", exitErr, false},
+		{"missing worker", "fatal error: no goroutines (main called runtime.Goexit) - deadlock!", exitErr, false},
+		{"successful", "WORKER_RETURNING\nno goroutines (main called runtime.Goexit) - deadlock!", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validateFullGoexitLifecycle([]byte(tc.out), tc.err) == nil; got != tc.want {
 				t.Fatalf("accepted=%v, want %v", got, tc.want)
 			}
 		})

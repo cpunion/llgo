@@ -340,7 +340,7 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 			fmt.Printf("%s %s\n", name, e.Package)
 			cmd := fullCommand(p, goCmd, llgo, goRoot, e.Package)
 			var hostArtifact string
-			if e.Package == "test/go" || e.Package == "test" {
+			if e.Package == "test/go" || e.Package == "test" || e.Package == "test/llgoext" {
 				dir, err := os.MkdirTemp("", "llgo-wasm-test-go-")
 				if err != nil {
 					return err
@@ -396,6 +396,19 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 					check.Status, check.Reason = "fail", err.Error()
 					runErr = errors.Join(runErr, err)
 					writeFullFailureOutput(os.Stdout, name, e.Package+" builtin print child", childOut)
+				}
+				e.HostChecks = append(e.HostChecks, check)
+			}
+			if e.Package == "test/llgoext" && hostArtifact != "" {
+				childOut, childErr := run(root, fullGoexitLifecycleCommand(p, root, goRoot, hostArtifact))
+				if err := os.WriteFile(filepath.Join(reportPath+".logs", "test_llgoext_goexit_lifecycle_child.log"), childOut, 0644); err != nil {
+					return err
+				}
+				check := fullHostCheck{Name: "main Goexit releases its logical goroutine once", Status: "pass"}
+				if err := validateFullGoexitLifecycle(childOut, childErr); err != nil {
+					check.Status, check.Reason = "fail", err.Error()
+					runErr = errors.Join(runErr, err)
+					writeFullFailureOutput(os.Stdout, name, e.Package+" Goexit child", childOut)
 				}
 				e.HostChecks = append(e.HostChecks, check)
 			}

@@ -48,6 +48,10 @@ func fullBuiltinPrintCommand(p profile, root, goRoot, artifact string) command {
 	return fullChildCommand(p, root, goRoot, artifact, "-llgo.builtin-print-child")
 }
 
+func fullGoexitLifecycleCommand(p profile, root, goRoot, artifact string) command {
+	return fullChildCommand(p, root, goRoot, artifact, "-llgo.main-goexit-lifecycle-child")
+}
+
 const fullBuiltinPrintWant = "" +
 	"1e+07\n" +
 	"(1e+07-1e+07i)\n" +
@@ -66,6 +70,19 @@ func validateFullBuiltinPrint(out []byte, runErr error) error {
 	got := strings.ReplaceAll(string(out), "\r\n", "\n")
 	if got != fullBuiltinPrintWant {
 		return fmt.Errorf("builtin-print output = %q, want %q", got, fullBuiltinPrintWant)
+	}
+	return nil
+}
+
+func validateFullGoexitLifecycle(out []byte, runErr error) error {
+	var exit *exec.ExitError
+	if !errors.As(runErr, &exit) || exit.ExitCode() < 1 || exit.ExitCode() > 2 {
+		return fmt.Errorf("Goexit lifecycle child must exit 1 or 2, not succeed, time out, or fail to launch: %v", runErr)
+	}
+	worker := strings.Index(string(out), "WORKER_RETURNING")
+	deadlock := strings.Index(string(out), "no goroutines (main called runtime.Goexit) - deadlock!")
+	if worker < 0 || deadlock < 0 || worker > deadlock {
+		return errors.New("Goexit lifecycle child did not release its worker before reporting the last-goroutine deadlock")
 	}
 	return nil
 }
