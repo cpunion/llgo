@@ -11,23 +11,11 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-func TestWasmReflectCallBridge(t *testing.T) {
+func TestWASIReflectCallBridge(t *testing.T) {
 	Initialize(InitAllTargets | InitAllTargetInfos | InitAllTargetMCs)
-	for _, target := range []*Target{
-		{GOOS: "wasip1", GOARCH: "wasm"},
-		{GOOS: "js", GOARCH: "wasm"},
-		{GOOS: "js", GOARCH: "wasm", LLVMTarget: "wasm64-unknown-emscripten"},
-	} {
-		t.Run(target.GOOS+target.LLVMTarget, func(t *testing.T) {
-			testWasmReflectCallBridge(t, target)
-		})
-	}
-}
-
-func testWasmReflectCallBridge(t *testing.T, target *Target) {
 	for _, nout := range []int{0, 1, 2} {
 		t.Run(string(rune('0'+nout))+" results", func(t *testing.T) {
-			prog := NewProgram(target)
+			prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
 			defer prog.Dispose()
 			setTestRuntime(t, prog)
 			pkg := prog.NewPackage("p", "example.com/p")

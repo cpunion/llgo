@@ -345,7 +345,7 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 			b.abiTuples(t.Params(), name+"$in"),
 			b.abiTuples(t.Results(), name+"$out"),
 		}
-		if prog.target.GOARCH == "wasm" {
+		if prog.target.GOARCH == "wasm" && prog.target.effectiveGOOS() == "wasip1" {
 			fields = append(fields, pkg.wasiReflectCallBridge(t, name).impl, pkg.wasiReflectMakeBridge(t, name).impl)
 		}
 	case *types.Struct:
@@ -562,9 +562,9 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		values = append(values, ifn)
 		values = append(values, tfn)
 		fields[i] = prog.constStructValue(ft, values)
-		if prog.target.GOARCH == "wasm" {
+		if prog.target.GOARCH == "wasm" && prog.target.effectiveGOOS() == "wasip1" {
 			// Type.Method constructs the method-expression signature at runtime.
-			// Wasm needs its typed bridge even if no source expression explicitly
+			// WASI needs its typed bridge even if no source expression explicitly
 			// materializes that function type. Retain it with the Tfn entry, not
 			// unconditionally with every receiver type and its unused methods.
 			expression := methodExprSignature(m.Type().(*types.Signature))

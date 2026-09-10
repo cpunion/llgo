@@ -1,4 +1,4 @@
-//go:build wasm
+//go:build wasm && wasip1
 
 package reflect
 
@@ -29,7 +29,7 @@ func callWasmBridge(ft *abi.FuncType, fn, env unsafe.Pointer, method bool, prefi
 		wasmMakeFuncInvoke(env, unsafe.SliceData(args), unsafe.SliceData(results))
 	} else {
 		if ft.Call_ == nil {
-			panic("reflect: missing WebAssembly call bridge for " + stringFor(&ft.Type))
+			panic("reflect: missing WASI call bridge for " + stringFor(&ft.Type))
 		}
 		entry := closure{fn: ft.Call_}
 		call := *(*func(unsafe.Pointer, unsafe.Pointer, bool, *unsafe.Pointer, *unsafe.Pointer))(unsafe.Pointer(&entry))
@@ -40,18 +40,6 @@ func callWasmBridge(ft *abi.FuncType, fn, env unsafe.Pointer, method bool, prefi
 		resolveIndirectValue(&out[i], typ)
 	}
 	return out
-}
-
-func prepareReflectClosureCall(_ unsafe.Pointer, tin []*abi.Type, args []unsafe.Pointer) ([]*abi.Type, []unsafe.Pointer, int) {
-	return tin, args, 0
-}
-
-func callFFIBridge(_ *abi.FuncType, _, _ unsafe.Pointer, _ []*abi.Type, _ int, _ []unsafe.Pointer, _ []Value) []Value {
-	return nil
-}
-
-func makeFFIFunc(_ *funcType, _ func([]Value) []Value, _ unsafe.Pointer) Value {
-	return Value{}
 }
 
 func resetWasmFuncBridge(ft *abi.FuncType) {
@@ -92,7 +80,7 @@ func makeWasmFunc(ft *abi.FuncType, fn func([]Value) []Value, recoverTo unsafe.P
 }
 
 func wasmReflectOnly() {
-	panic("reflect: dynamic function has no compiled WebAssembly entry")
+	panic("reflect: dynamic function has no compiled WASI entry")
 }
 
 func wasmMakeFuncInvoke(env unsafe.Pointer, args, results *unsafe.Pointer) {

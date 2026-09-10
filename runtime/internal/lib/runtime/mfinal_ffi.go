@@ -1,4 +1,4 @@
-//go:build (!nogc && !wasm) || windows
+//go:build !nogc || windows
 
 package runtime
 
