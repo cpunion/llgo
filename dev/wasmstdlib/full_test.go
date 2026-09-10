@@ -156,7 +156,7 @@ func TestFullAuditClassifiesHostDriverSuiteWithoutExecutingIt(t *testing.T) {
 
 func TestFullAuditAcceptsReviewedSourceExclusions(t *testing.T) {
 	root := t.TempDir()
-	reviewed := []string{"test/cgo", "test/_stress/runtime/cpuprof", "test/_stress/runtime/finalizer", "test/_stress/runtime/signal", "test/std/plugin", "test/std/runtime/cgo", "test/std/syscall", "test/windows"}
+	reviewed := []string{"test/cgo", "test/_stress/runtime/cpuprof", "test/_stress/runtime/finalizer", "test/_stress/runtime/signal", "test/std/plugin", "test/std/syscall", "test/windows"}
 	for _, pkg := range reviewed {
 		name := filepath.Join(root, pkg, "excluded_test.go")
 		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
@@ -198,16 +198,32 @@ func TestFullAuditAcceptsReviewedSourceExclusions(t *testing.T) {
 	}
 }
 
-func TestCGOExclusionsCoverEveryWasmProfile(t *testing.T) {
-	for _, name := range []string{"EC32", "EC64", "WC32", "GJS", "GWASI", "GJS-reference", "GWASI-reference"} {
+func TestCGOExclusionsMatchExecutableProfiles(t *testing.T) {
+	tests := []struct {
+		profile         string
+		cgo, runtimeCgo bool
+	}{
+		{"EC32", true, false},
+		{"EC64", true, false},
+		{"WC32", true, false},
+		{"GJS", true, false},
+		{"GWASI", true, false},
+		{"GJS-reference", true, true},
+		{"GWASI-reference", true, true},
+	}
+	for _, tt := range tests {
+		name := tt.profile
 		p, err := fullProfile(name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, pkg := range []string{"test/cgo", "test/std/runtime/cgo"} {
+		for pkg, want := range map[string]bool{
+			"test/cgo":             tt.cgo,
+			"test/std/runtime/cgo": tt.runtimeCgo,
+		} {
 			reason, excluded := fullSourceExclusion(p, pkg)
-			if !excluded || reason == "" {
-				t.Fatalf("%s %s exclusion = %q, %v", name, pkg, reason, excluded)
+			if excluded != want || excluded && reason == "" {
+				t.Fatalf("%s %s exclusion = (%v, %q), want %v", name, pkg, excluded, reason, want)
 			}
 		}
 	}

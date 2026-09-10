@@ -1,4 +1,4 @@
-//go:build llgo && (!wasm || llgo.wasm.emscripten || llgo.wasm.wasi)
+//go:build llgo && !wasm
 
 package cgo
 
