@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
+	"time"
 )
 
 type bridgeRecord struct {
@@ -105,6 +106,37 @@ func TestReflectTypedCallBridge(t *testing.T) {
 				t.Fatalf("method result = %d, want %d", got, want)
 			}
 		}
+	}
+}
+
+func TestReflectCallCanSuspend(t *testing.T) {
+	called := false
+	reflect.ValueOf(func() {
+		time.Sleep(time.Millisecond)
+		called = true
+	}).Call(nil)
+	if !called {
+		t.Fatal("reflected call did not resume after sleeping")
+	}
+}
+
+func TestReflectComplexCallBridge(t *testing.T) {
+	add := func(v complex128) complex128 { return v + complex(1, 2) }
+	got := reflect.ValueOf(add).Call([]reflect.Value{reflect.ValueOf(complex(3, 4))})
+	if len(got) != 1 || got[0].Complex() != complex(4, 6) {
+		t.Fatalf("Call(add) = %v, want [(4+6i)]", got)
+	}
+}
+
+func TestReflectComplexMakeFuncBridge(t *testing.T) {
+	typ := reflect.TypeOf((func(complex64) complex64)(nil))
+	fn := reflect.MakeFunc(typ, func(args []reflect.Value) []reflect.Value {
+		v := args[0].Complex()
+		return []reflect.Value{reflect.ValueOf(complex64(v + complex(1, 2)))}
+	})
+	got := fn.Call([]reflect.Value{reflect.ValueOf(complex64(complex(3, 4)))})
+	if len(got) != 1 || got[0].Complex() != complex(4, 6) {
+		t.Fatalf("MakeFunc(complex64) = %v, want [(4+6i)]", got)
 	}
 }
 
