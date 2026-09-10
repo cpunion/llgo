@@ -4,6 +4,23 @@ package runtime
 
 import "unsafe"
 
+// A LocalContext can live on a suspended Fiber outside the compiler's current
+// root-chain range. Publish its block head through the always-registered system
+// context so package-local pointer storage remains visible while another G
+// triggers collection. Store the value, not the slot address: rooting the slot
+// would conservatively retain and scan the complete Fiber stack allocation.
+func activateLocalBlocks(ctx *LocalContext) {
+	setWasmGCRoot(&wasmSystemGCRoot, ctx.blocks)
+}
+
+func publishLocalBlocks(ctx *LocalContext) {
+	setWasmGCRoot(&wasmSystemGCRoot, ctx.blocks)
+}
+
+func deactivateLocalBlocks(ctx *LocalContext) {
+	setWasmGCRoot(&wasmSystemGCRoot, nil)
+}
+
 // GoroutineLocalPackage returns the package-local block owned by the current
 // logical G. The process-global key identifies the package but never caches a
 // G-specific address, because one wasm worker runs many goroutines.

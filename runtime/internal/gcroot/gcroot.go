@@ -24,6 +24,7 @@ import "unsafe"
 type Context struct {
 	next       *Context
 	chain      unsafe.Pointer
+	root       unsafe.Pointer
 	stackStart uintptr
 	stackEnd   uintptr
 }
@@ -103,6 +104,16 @@ func SetStackRange(ctx *Context, start, end uintptr) {
 	ctx.stackEnd = end
 }
 
+// SetRoot attaches one runtime-owned root to ctx. Unlike compiler frames, the
+// value remains directly reachable even when its owning LocalContext lives on
+// a suspended host or Fiber stack. Passing nil removes the root.
+func SetRoot(ctx *Context, root unsafe.Pointer) {
+	if ctx == nil {
+		panic("gcroot: nil context root")
+	}
+	ctx.root = root
+}
+
 // Switch saves the active chain and installs next's chain.
 func Switch(next *Context) {
 	if next == nil {
@@ -178,6 +189,7 @@ func Unregister(ctx *Context) {
 	*link = ctx.next
 	ctx.next = nil
 	ctx.chain = nil
+	ctx.root = nil
 	ctx.stackStart = 0
 	ctx.stackEnd = 0
 }
@@ -188,6 +200,9 @@ func Visit(visitor func(root *unsafe.Pointer, metadata unsafe.Pointer)) {
 		return
 	}
 	for ctx := contexts; ctx != nil; ctx = ctx.next {
+		if ctx.root != nil {
+			visitor(&ctx.root, nil)
+		}
 		chain := ctx.chain
 		if ctx == active {
 			chain = currentRootChain

@@ -70,6 +70,7 @@ func TestRejectsInvalidContextOperations(t *testing.T) {
 	assertPanics(t, func() { Switch(nil) })
 	assertPanics(t, func() { SetStackRange(nil, 0, 1) })
 	assertPanics(t, func() { SetStackRange(&ctx, 2, 1) })
+	assertPanics(t, func() { SetRoot(nil, nil) })
 	assertPanics(t, func() { Unregister(&ctx) })
 }
 
@@ -99,6 +100,33 @@ func TestVisitStackRanges(t *testing.T) {
 	Unregister(&second)
 	if second.stackStart != 0 || second.stackEnd != 0 {
 		t.Fatal("Unregister retained a logical stack range")
+	}
+}
+
+func TestVisitContextRoot(t *testing.T) {
+	resetForTest()
+	t.Cleanup(resetForTest)
+
+	var ctx Context
+	value := unsafe.Pointer(uintptr(0x42))
+	Register(&ctx)
+	SetRoot(&ctx, value)
+
+	var values, metadata []unsafe.Pointer
+	Visit(func(root *unsafe.Pointer, meta unsafe.Pointer) {
+		values = append(values, *root)
+		metadata = append(metadata, meta)
+	})
+	if len(values) != 1 || values[0] != value {
+		t.Fatalf("Visit values = %v, want [%p]", values, value)
+	}
+	if len(metadata) != 1 || metadata[0] != nil {
+		t.Fatalf("Visit metadata = %v, want [nil]", metadata)
+	}
+
+	Unregister(&ctx)
+	if ctx.root != nil {
+		t.Fatal("Unregister retained a runtime-owned root")
 	}
 }
 

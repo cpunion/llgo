@@ -45,6 +45,7 @@ func EnterLocalContext(ctx *LocalContext) uintptr {
 			panic("runtime: nil local context")
 		}
 		currentLocalContext = uintptr(unsafe.Pointer(ctx))
+		activateLocalBlocks(ctx)
 	}
 	return previous
 }
@@ -78,6 +79,7 @@ func leaveCurrentLocalContext() {
 func releaseLocalBlocks(ctx *LocalContext) {
 	data := ctx.blocks
 	ctx.blocks = nil
+	deactivateLocalBlocks(ctx)
 	for data != nil {
 		block := localBlockHeader(data)
 		next := block.next
@@ -112,6 +114,7 @@ func LocalPackage(cacheSlot *uintptr, size, align uintptr) unsafe.Pointer {
 	data := newLocalBlock(cacheSlot, size, align)
 	localBlockHeader(data).next = ctx.blocks
 	ctx.blocks = data
+	publishLocalBlocks(ctx)
 	*cacheSlot = uintptr(data)
 	return data
 }

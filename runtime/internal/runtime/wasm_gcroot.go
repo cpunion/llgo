@@ -28,6 +28,10 @@ func setWasmGCRootStack(ctx *wasmGCRootContext, start, end uintptr) {
 	gcroot.SetStackRange(ctx, start, end)
 }
 
+func setWasmGCRoot(ctx *wasmGCRootContext, root unsafe.Pointer) {
+	gcroot.SetRoot(ctx, root)
+}
+
 func adoptWasmGCRoot(ctx *wasmGCRootContext) {
 	gcroot.AdoptCurrent(ctx)
 }

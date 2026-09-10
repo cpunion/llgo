@@ -452,6 +452,11 @@ func TestCrossPackageMixedInitializerGroup(t *testing.T) {
 	}
 	done := make(chan result)
 	go func() {
+		// Run collection after the parent Fiber has been suspended. Pointer-free
+		// TLS lives directly in Wasm .tbss, while the pointer-bearing half of this
+		// initializer uses a heap block reached through a .tbss cache slot.
+		runtime.GC()
+		runtime.GC()
 		scalar := localityscope.MixedScalar()
 		address := localityscope.MixedScalarAddress()
 		done <- result{
