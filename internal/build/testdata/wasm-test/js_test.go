@@ -72,6 +72,28 @@ func TestJSFuncCompletesBufferedChannelBeforeCallReturns(t *testing.T) {
 	}
 }
 
+func TestJSFuncReinstallPreservesNestedDispatch(t *testing.T) {
+	var callback, replacement js.Func
+	callback = js.FuncOf(func(js.Value, []js.Value) any {
+		// Releasing the last callback temporarily empties the registry. Creating
+		// its replacement must not reinstall the module bridge or reset the
+		// active Go-to-JS call depth.
+		callback.Release()
+		replacement = js.FuncOf(func(_ js.Value, args []js.Value) any {
+			return args[0].Int() + 1
+		})
+		return replacement.Invoke(40)
+	})
+
+	if got := callback.Invoke(); got.Int() != 41 {
+		t.Fatalf("nested replacement callback = %v, want 41", got)
+	}
+	defer replacement.Release()
+	if got := replacement.Invoke(41); got.Int() != 42 {
+		t.Fatalf("replacement callback after return = %v, want 42", got)
+	}
+}
+
 func TestHostCallbackCanBlock(t *testing.T) {
 	done := make(chan int, 1)
 	callback := js.FuncOf(func(js.Value, []js.Value) any {

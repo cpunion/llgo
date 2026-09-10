@@ -103,6 +103,7 @@ EM_VAL llgo_emval_get_module_property(const char *name) {
 
 static volatile uint8_t llgo_emval_invoke_pending;
 static volatile int32_t llgo_emval_js_call_depth;
+static bool llgo_emval_invoke_installed;
 
 struct JSCallScope {
     JSCallScope() { ++llgo_emval_js_call_depth; }
@@ -155,6 +156,14 @@ EM_JS(void, llgo_emval_install_invoke_js, (uint8_t *pending_flag, int32_t *js_ca
 });
 
 void llgo_emval_install_invoke(void) {
+    // FuncOf unregisters polling when the last callback is released, but the
+    // module bridge and its queue remain valid for the lifetime of the Wasm
+    // instance. Reinstalling here would discard queued host events and can
+    // reset js_call_depth while a callback releases itself.
+    if (llgo_emval_invoke_installed) {
+        return;
+    }
+    llgo_emval_invoke_installed = true;
     llgo_emval_invoke_pending = 0;
     llgo_emval_js_call_depth = 0;
     llgo_emval_install_invoke_js(
