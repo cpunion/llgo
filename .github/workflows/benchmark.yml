@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   benchmark:
+    if: github.event_name != 'workflow_dispatch'
     name: benchmark (${{ matrix.display }})
     strategy:
       fail-fast: false
@@ -254,6 +255,7 @@ jobs:
           platform-label: ${{ matrix.display }}
 
   wasm-benchmark:
+    if: github.event_name != 'workflow_dispatch'
     name: benchmark (WebAssembly)
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
     timeout-minutes: 30
@@ -406,3 +408,32 @@ jobs:
           baseline-ref: ${{ github.event.pull_request.base.ref || '' }}
           platform-id: wasm-linux
           platform-label: WebAssembly
+
+  wasm-ffi-comparison:
+    if: github.event_name == 'workflow_dispatch'
+    name: WebAssembly typed bridge vs libffi
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GOFLAGS: -tags=llvm22
+      GOMAXPROCS: "2"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: "4.0.21"
+      - uses: ./.github/actions/setup-binaryen
+      - uses: ./.github/actions/setup-go
+      - name: Compare functional reflection backends
+        run: bash dev/compare_wasm_reflect_ffi.sh 05e962ddf030f6e9e9e26035714563139e73bbec
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: wasm-ffi-comparison
+          path: ${{ runner.temp }}/llgo-wasm-ffi-comparison
+          if-no-files-found: error
