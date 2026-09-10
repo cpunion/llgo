@@ -11,6 +11,28 @@
       "sha": "02be1623c6ad0a16bed3861594d38e988c2ce3fb",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/02be1623c6ad0a16bed3861594d38e988c2ce3fb",
       "updatedAt": "2026-09-10T09:49:20.165Z"
+    },
+    {
+      "kind": "branch",
+      "id": "c3053fe8d494a9f9",
+      "label": "Branch codex/wasm-r4-stdlib-text-io-20260905",
+      "path": "series/branch/c3053fe8d494a9f9/summary.json",
+      "configPath": "series/branch/c3053fe8d494a9f9/config.json",
+      "commitPath": "commits/05e962ddf030f6e9e9e26035714563139e73bbec.json",
+      "sha": "05e962ddf030f6e9e9e26035714563139e73bbec",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/05e962ddf030f6e9e9e26035714563139e73bbec",
+      "updatedAt": "2026-09-10T10:04:04.308Z"
+    },
+    {
+      "kind": "pull",
+      "id": "235",
+      "label": "PR #235",
+      "path": "series/pull/235/summary.json",
+      "configPath": "series/pull/235/config.json",
+      "commitPath": "commits/05e962ddf030f6e9e9e26035714563139e73bbec.json",
+      "sha": "05e962ddf030f6e9e9e26035714563139e73bbec",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/05e962ddf030f6e9e9e26035714563139e73bbec",
+      "updatedAt": "2026-09-10T10:04:04.305Z"
     }
   ]
 }
