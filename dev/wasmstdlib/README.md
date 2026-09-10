@@ -187,8 +187,10 @@ Persistent `go env -w` settings are ignored; explicit process environment such a
 
 The reference rows run **Go output, not LLGo output**. Passing the same behavioral
 tests on C profiles does not establish LLGo's official-Go data model, host ABI,
-startup/import/export contract, or browser compatibility. Those remain R4 work.
-CI uses the repository-selected Go version and records it in every report.
+startup/import/export contract, or browser compatibility. The full audit above
+therefore validates separate LLGo GJS and GWASI rows, while browser execution is
+an independent required job. CI uses the repository-selected Go version and
+records it in every report.
 
 From the repository root:
 
