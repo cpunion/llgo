@@ -23,12 +23,10 @@
 package reflect
 
 import (
-	"sync"
 	"unsafe"
 
 	"github.com/xgo-dev/llgo/runtime/abi"
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	"github.com/xgo-dev/llgo/runtime/internal/ffi"
 	"github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
@@ -56,77 +54,7 @@ func makeFunc(typ Type, fn func(args []Value) (results []Value), recoverTo unsaf
 	if useWasmReflectBridges {
 		return makeWasmFunc(ftyp, fn, recoverTo)
 	}
-	ins := ftyp.In
-	sig, err := toFFISig(ins, ftyp.Out)
-	if err != nil {
-		panic(err)
-	}
-	outs := toRuntimeTypes(ftyp.Out)
-	closure := ffi.NewClosure()
-	userdata := &funcData{
-		ftyp:        ftyp,
-		fn:          fn,
-		nin:         len(ftyp.In),
-		tout:        outs,
-		recoverFrom: closure.Fn,
-		recoverTo:   recoverTo,
-	}
-
-	err = closure.Bind(sig, makeFuncCallback(len(ftyp.Out)), unsafe.Pointer(userdata))
-	if err != nil {
-		panic("libffi error: " + err.Error())
-	}
-	// keep alive for bdw-gc
-	keepMutex.Lock()
-	keepAlive = append(keepAlive, closure, sig, userdata)
-	keepMutex.Unlock()
-
-	styp := closureOf(ftyp)
-	fv := &struct {
-		fn  unsafe.Pointer
-		env unsafe.Pointer
-	}{closure.Fn, nil}
-	return Value{styp, unsafe.Pointer(fv), flagIndir | flag(Func)}
-}
-
-var (
-	keepMutex sync.Mutex
-	keepAlive []any
-)
-
-func bind0(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
-	fd := (*funcData)(userdata)
-	ins := make([]Value, fd.nin)
-	for i := 0; i < fd.nin; i++ {
-		ins[i] = ffiToValue(ffi.Index(args, uintptr(i)), fd.ftyp.In[i])
-	}
-	fd.call(ins)
-}
-
-func bind1(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
-	fd := (*funcData)(userdata)
-	ins := make([]Value, fd.nin)
-	for i := 0; i < fd.nin; i++ {
-		ins[i] = ffiToValue(ffi.Index(args, uintptr(i)), fd.ftyp.In[i])
-	}
-	out := validateMakeFuncResults(fd.call(ins), fd.ftyp, fd.tout)
-	storeMakeFuncResult(ret, out[0], fd.tout[0])
-}
-
-func bindn(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
-	fd := (*funcData)(userdata)
-	ins := make([]Value, fd.nin)
-	for i := 0; i < fd.nin; i++ {
-		ins[i] = ffiToValue(ffi.Index(args, uintptr(i)), fd.ftyp.In[i])
-	}
-	outs := validateMakeFuncResults(fd.call(ins), fd.ftyp, fd.tout)
-	var offset uintptr = 0
-	alignment := uintptr(cif.RType.Alignment)
-	for i, out := range outs {
-		typ := fd.tout[i]
-		storeMakeFuncResult(add(ret, offset, ""), out, typ)
-		offset += (typ.Size_ + alignment - 1) &^ (alignment - 1)
-	}
+	return makeFFIFunc(ftyp, fn, recoverTo)
 }
 
 // call crosses the libffi entry stub as a transparent wrapper. This mirrors

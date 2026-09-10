@@ -42,6 +42,18 @@ func callWasmBridge(ft *abi.FuncType, fn, env unsafe.Pointer, method bool, prefi
 	return out
 }
 
+func prepareReflectClosureCall(_ unsafe.Pointer, tin []*abi.Type, args []unsafe.Pointer) ([]*abi.Type, []unsafe.Pointer, int) {
+	return tin, args, 0
+}
+
+func callFFIBridge(_ *abi.FuncType, _, _ unsafe.Pointer, _ []*abi.Type, _ int, _ []unsafe.Pointer, _ []Value) []Value {
+	return nil
+}
+
+func makeFFIFunc(_ *funcType, _ func([]Value) []Value, _ unsafe.Pointer) Value {
+	return Value{}
+}
+
 func resetWasmFuncBridge(ft *abi.FuncType) {
 	ft.Call_ = nil
 	ft.Make_ = nil

@@ -50,7 +50,6 @@ runtime module also carries a copy at
 | `github.com/marcinbor85/gohex` and LLGo adaptations | `internal/gohex`, compiled CLI | [MIT](LICENSES/GoHex-MIT.txt) |
 | `github.com/blakesmith/ar` and LLGo adaptations | `xtool/ar`, source and development tools | [MIT](LICENSES/BlakeSmith-AR-MIT.txt) |
 | Hardware-vendor target support | marked files under `targets/device` and `targets/rp2040-boot-stage2.S` | [vendor notices](LICENSES/Target-Device-Notices.txt), including the [Nordic BSD license](LICENSES/Nordic-BSD-3-Clause.txt) |
-| libffi 3.7.1 WebAssembly backend | `runtime/internal/clite/ffi/_wrap/libffi` | [MIT](runtime/LICENSES/Libffi-MIT.txt) |
 
 The original file-level notices remain in the target support sources. Firmware
 distributors must reproduce the applicable notices when those sources are
@@ -125,14 +124,13 @@ upstream `COPYING` files.
 
 ## External tools and system libraries
 
-BDWGC, OpenSSL, native-target libffi, cJSON, SQLite, zlib, Python, Emscripten,
-QEMU, OpenOCD, flashing utilities, and platform SDK/system libraries are
-installed or provided separately. LLGo may link to or invoke them, but does not
-copy them into its source tree or release archives, except for LLVM-project
-components explicitly described above. The Emscripten libffi backend is the
-exception listed under “Source incorporated into LLGo.” Other upstream
-licenses apply to the separate installations and to any redistributed output
-that incorporates them; they are not relicensed by LLGo.
+BDWGC, OpenSSL, libffi, cJSON, SQLite, zlib, Python, Emscripten, QEMU,
+OpenOCD, flashing utilities, and platform SDK/system libraries are installed or
+provided separately. LLGo may link to or invoke them, but does not copy them
+into its source tree or release archives, except for LLVM-project components
+explicitly described above. Their upstream licenses therefore apply to the
+separate installations and to any redistributed output that incorporates them;
+they are not relicensed by LLGo.
 
 ## Redistribution
 
