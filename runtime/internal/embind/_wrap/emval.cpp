@@ -130,9 +130,9 @@ EM_JS(void, llgo_emval_install_invoke_js, (uint8_t *pending_flag, int32_t *js_ca
         : (Module["_llgo_dispatch_sync"] || Module["llgo_dispatch_sync"]);
     Module["llgoWasmPendingInvokes"] = pending;
     Module["_llgo_invoke"] = function(event) {
-        // A Go-initiated JS call is still on the wasm stack (syscall/js
-        // Value.Call/Invoke). Official Go runs js.FuncOf synchronously in
-        // that window; host events such as setTimeout still queue.
+        // A Go-initiated JS call is still on LLGo's Asyncify-managed wasm
+        // stack (syscall/js Value.Call/Invoke), so dispatch a nested FuncOf
+        // callback synchronously. Host events such as setTimeout still queue.
         const heap32 = typeof HEAP32 !== "undefined" ? HEAP32 : Module["HEAP32"];
         if (jsCallDepthPtr && heap32 && heap32[jsCallDepthPtr >> 2] > 0 && typeof dispatchSync === "function") {
             Module["llgoWasmSyncInvoke"] = event;

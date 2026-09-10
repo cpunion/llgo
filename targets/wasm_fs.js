@@ -17,7 +17,8 @@
   if (global.fs) return;
 
   const decoder = new TextDecoder("utf-8");
-  let outputBuf = "";
+  const maxOutputBuffer = 64 << 10;
+  const outputBuf = { 1: "", 2: "" };
   let umaskValue = 0o022;
 
   // Emscripten WASI errno numbers from struct_info_generated.json.
@@ -99,7 +100,9 @@
   }
 
   function bytesToString(buf) {
-    return decoder.decode(new Uint8Array(buf));
+    // LLGoTextDecoder already takes the one defensive copy required for a
+    // view backed by resizable Wasm memory.
+    return decoder.decode(buf);
   }
 
   function sliceBuf(buf, offset, length) {
@@ -109,13 +112,21 @@
 
   function writeSync(fd, buf) {
     const text = bytesToString(buf);
-    outputBuf += text;
-    const nl = outputBuf.lastIndexOf("\n");
+    const stream = fd === 2 ? 2 : 1;
+    const buffered = outputBuf[stream];
+    const nl = text.lastIndexOf("\n");
     if (nl !== -1) {
-      const lines = outputBuf.substring(0, nl);
-      outputBuf = outputBuf.substring(nl + 1);
-      if (fd === 2) console.error(lines);
+      const lines = buffered + text.substring(0, nl);
+      outputBuf[stream] = text.substring(nl + 1);
+      if (stream === 2) console.error(lines);
       else console.log(lines);
+    } else if (buffered.length + text.length >= maxOutputBuffer) {
+      const lines = buffered + text;
+      outputBuf[stream] = "";
+      if (stream === 2) console.error(lines);
+      else console.log(lines);
+    } else {
+      outputBuf[stream] = buffered + text;
     }
     return buf.length;
   }

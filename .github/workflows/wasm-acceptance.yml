@@ -318,6 +318,8 @@ jobs:
           node-version: '24'
       - uses: ./.github/actions/setup-binaryen
       - uses: ./.github/actions/setup-go
+      - name: Verify browser host shim
+        run: node dev/test_wasm_fs.mjs
       - name: Build LLGo
         run: go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
       - name: Exercise raw and C-profile modules in a real browser
