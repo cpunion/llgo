@@ -29,10 +29,10 @@
       "label": "Branch codex/wasm-w1-profiles-20260910",
       "path": "series/branch/884bf6490a88f507/summary.json",
       "configPath": "series/branch/884bf6490a88f507/config.json",
-      "commitPath": "commits/9547397ab98e124fdb6717003bee9fb88791aac2.json",
-      "sha": "9547397ab98e124fdb6717003bee9fb88791aac2",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/9547397ab98e124fdb6717003bee9fb88791aac2",
-      "updatedAt": "2026-09-11T02:12:53.346Z"
+      "commitPath": "commits/888967444d3fd692628a625d7641b040d6e9e62c.json",
+      "sha": "888967444d3fd692628a625d7641b040d6e9e62c",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/888967444d3fd692628a625d7641b040d6e9e62c",
+      "updatedAt": "2026-09-11T02:54:27.213Z"
     },
     {
       "kind": "pull",
@@ -51,10 +51,10 @@
       "label": "PR #246",
       "path": "series/pull/246/summary.json",
       "configPath": "series/pull/246/config.json",
-      "commitPath": "commits/9547397ab98e124fdb6717003bee9fb88791aac2.json",
-      "sha": "9547397ab98e124fdb6717003bee9fb88791aac2",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/9547397ab98e124fdb6717003bee9fb88791aac2",
-      "updatedAt": "2026-09-11T02:12:53.340Z"
+      "commitPath": "commits/888967444d3fd692628a625d7641b040d6e9e62c.json",
+      "sha": "888967444d3fd692628a625d7641b040d6e9e62c",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/888967444d3fd692628a625d7641b040d6e9e62c",
+      "updatedAt": "2026-09-11T02:54:27.204Z"
     }
   ]
 }
