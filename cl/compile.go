@@ -1634,7 +1634,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if v.Op != token.ARROW {
 			p.recordPanicSite(b, v.Pos())
 		}
-		if shouldAssertDirectNilDeref(v) {
+		if shouldAssertDirectNilDeref(v) || v.Op == token.MUL && p.needsWasmNilGuard(v.X) {
+			if p.needsWasmNilGuard(v.X) {
+				p.emitNilDerefBaseCheck(b, v.X)
+			}
 			b.AssertNilDeref(x)
 		}
 		if v.Op == token.ARROW {
@@ -2162,6 +2165,12 @@ func instructionPrecedes(before, after ssa.Instruction) bool {
 	return false
 }
 
+func (p *context) needsWasmNilGuard(addr ssa.Value) bool {
+	// Linear memory includes address zero, and WebAssembly traps do not enter
+	// Go's panic/recover machinery. Native guard-page assumptions do not apply.
+	return p.prog.Target().GOARCH == "wasm" && !isKnownNonNilAddr(addr) && !isWrapNilCheckCall(addr)
+}
+
 // assertNilDerefBase uses pointer-returning checks to rewrite p.bvals. Keep its
 // traversal in sync with emitNilDerefBaseCheck, which emits cold failure
 // branches without replacing cached addresses for delayed receiver checks.
@@ -2250,6 +2259,13 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		ptr := p.compileValue(b, va)
 		val := p.compileValue(b, v.Val)
+		if p.needsWasmNilGuard(va) {
+			p.recordPanicSite(b, v.Pos())
+			// A field assignment evaluates its RHS before faulting on a nil
+			// destination. Check the original base here, not at FieldAddr.
+			p.emitNilDerefBaseCheck(b, va)
+			b.AssertNilDeref(ptr)
+		}
 		// Windows access violations report the faulting store PC. Preserve that
 		// exact source site for the SEH fault bridge without adding one carrier
 		// record per potential pointer store to ELF and Mach-O binaries, whose
