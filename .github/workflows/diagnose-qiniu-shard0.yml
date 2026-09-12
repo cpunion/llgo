@@ -32,12 +32,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Pin the actual CI merge trees of #2575 and its dependent #2567.
+          # Revalidate only #2575 after widening the old-runtime signature from
+          # map lookup to either allocating map operation. The dependent #2567
+          # merge passed the complete job in run 34702086188.
           - trial: runtime-fix
             revision: abe30d37b322005249f42f7052198480d232faf2
-            base_revision: b07cd12ad1ace793047dcf1c12ece8c01b139565
-          - trial: panic-on-runtime-fix
-            revision: 7c9b6079842863c6ee20e1b74cac3fef6928869d
             base_revision: b07cd12ad1ace793047dcf1c12ece8c01b139565
     steps:
       - uses: actions/checkout@v7

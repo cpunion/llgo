@@ -93,7 +93,7 @@ for stack in "$DIAGNOSTIC_OUTPUT"/weak-old-stack-*.txt; do
       block = block $0 "\n"
       if ($0 ~ /llgoRegisterWeakPointer[$]1/) callbacks++
       if ($0 ~ /GC_invoke_finalizers/) collectors++
-      if ($0 ~ /MapAccess1Fast64|mapaccess1_fast64/) mapaccess = 1
+      if ($0 ~ /Map(Access1|Delete)Fast64|map(access1|delete)_fast64/) mapaccess = 1
       if ($0 ~ /pthread_mutex_lock|lll_mutex_lock|lll_lock_wait/) mutex = 1
       if ($0 ~ /weakState/) weakstate = 1
     }
