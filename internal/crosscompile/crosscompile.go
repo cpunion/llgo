@@ -226,7 +226,7 @@ func nativeDebugInfoPolicy(toolchain NativeToolchain) DebugInfoPolicy {
 var (
 	wasiSdkUrl      = "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-macos.tar.gz"
 	wasiMacosSubdir = "wasi-sdk-25.0-x86_64-macos"
-	espClangBaseUrl = "https://github.com/goplus/espressif-llvm-project-prebuilt/releases/download/" + espClangVersion
+	espClangBaseUrl = "https://github.com/xgo-dev/espressif-llvm-project-prebuilt/releases/download/" + espClangVersion
 	espClangSHA256  = map[string]string{
 		"aarch64-apple-darwin": "fcd3f70db3b05a8815ea156b09778de017a4a3f2d5ba11cbc5fbb205b1daa3fc",
 		"aarch64-linux-gnu":    "628a7f94ac8f392506ee59034525d05db8cc466c15a01f089df229a2a7c661cb",
@@ -236,10 +236,7 @@ var (
 	}
 )
 
-const (
-	espClangVersion         = "22.1.4_20260905"
-	espClangWindowsPlatform = "x86_64-w64-mingw32"
-)
+const espClangVersion = "22.1.4_20260905"
 
 // cacheRoot can be overridden for testing
 var cacheRoot = env.LLGoCacheDir
@@ -315,7 +312,7 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 			err = fmt.Errorf("missing ESP Clang checksum for %s", platformSuffix)
 			return
 		}
-		cacheClangDir := filepath.Join(cacheRoot(), "crosscompile", "esp-clang-"+espClangVersion)
+		cacheClangDir := espClangCacheDir(platformSuffix)
 		if _, err = os.Stat(cacheClangDir); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				return
@@ -331,6 +328,12 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 
 	err = fmt.Errorf("ESP Clang not found in LLGoROOT and platform %s/%s is not supported for download", runtime.GOOS, runtime.GOARCH)
 	return
+}
+
+// Include the tool host in the cache key: x64 and ARM64 LLGo installations
+// can share a Windows user cache, but cannot share a native ESP payload.
+func espClangCacheDir(platform string) string {
+	return filepath.Join(cacheDir(), "esp-clang-"+espClangVersion+"-"+platform)
 }
 
 // getESPClangPlatform returns the platform suffix for ESP Clang downloads
@@ -352,11 +355,11 @@ func getESPClangPlatform(goos, goarch string) string {
 		}
 	case "windows":
 		switch goarch {
-		case "386", "amd64", "arm64":
-			// The Windows payload is x86-64 hosted. Windows on ARM64 runs it
-			// through the system's x64 emulation layer; 32-bit LLGo hosts run
-			// it as a separate 64-bit process.
-			return espClangWindowsPlatform
+		case "386", "amd64":
+			// 32-bit LLGo hosts run the x64 tools as separate processes.
+			return "x86_64-w64-mingw32"
+		case "arm64":
+			return "aarch64-w64-mingw32"
 		}
 	}
 	return ""
