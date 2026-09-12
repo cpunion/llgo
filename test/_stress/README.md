@@ -71,7 +71,7 @@ delivered twice.
 The weak suite creates batches of weak pointers in a goroutine that exits,
 then performs bounded collections while retaining only the weak handles. It
 regresses cleanup callbacks recursively invoking another cleanup while
-allocating under the weak registry lock. Each batch must expire at least half
+allocating under the weak registry lock. Each batch must expire more than half
 its handles, and a separate helper process enforces a 60-second deadline even
 if the tested runtime deadlocks. It uses only public Go APIs and also runs with
 `go test` on Go 1.24 or newer. Use identical profiles before and after the fix;
