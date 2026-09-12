@@ -2,13 +2,13 @@
 set -euo pipefail
 
 # This harness does not change compiler code, test arguments, or GC settings.
-export DIAGNOSTIC_OUTPUT="$PWD/shard0-diagnostics"
+export DIAGNOSTIC_OUTPUT="$RUNNER_TEMP/shard0-diagnostics"
 mkdir -p "$DIAGNOSTIC_OUTPUT"
 export LLGO_ROOT=$PWD
 export LLGO_REAL="$RUNNER_TEMP/llgo-bin/llgo"
 export LLGO_TEST_LLGEN="$RUNNER_TEMP/llgo-bin/llgen"
 export CHECK_STD_SYMBOLS="$RUNNER_TEMP/llgo-bin/check_std_symbols"
-export LLGO="$PWD/diagnostic-harness/dev/diagnose_qiniu_llgo.sh"
+export LLGO="$DIAGNOSTIC_HARNESS/dev/diagnose_qiniu_llgo.sh"
 chmod +x "$LLGO"
 {
   git show -s --format='commit=%H tree=%T parents=%P'
@@ -17,6 +17,7 @@ chmod +x "$LLGO"
   lscpu
   free -h
   go version
+  go version -m "$LLGO_REAL"
   clang --version
   dpkg-query -W libgc1 libgc-dev libc6
   printf 'cache_hit=%s cache_key=%s\n' "$DIAGNOSTIC_CACHE_HIT" "$DIAGNOSTIC_CACHE_KEY"
@@ -35,7 +36,7 @@ pipeline=$!
 export DIAGNOSTIC_PIPELINE=$pipeline
 tail --pid="$pipeline" -f "$DIAGNOSTIC_OUTPUT/pipeline.log" &
 tail_pid=$!
-setsid bash diagnostic-harness/dev/diagnose_qiniu_watchdog.sh &
+setsid bash "$DIAGNOSTIC_HARNESS/dev/diagnose_qiniu_watchdog.sh" &
 watchdog=$!
 
 status=0

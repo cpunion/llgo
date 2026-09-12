@@ -30,6 +30,11 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           path: diagnostic-harness
+      - name: Keep diagnostic files outside the compiler checkout
+        run: |
+          harness_dir=$(mktemp -d "$RUNNER_TEMP/shard0-harness.XXXXXX")
+          mv diagnostic-harness "$harness_dir/source"
+          echo "DIAGNOSTIC_HARNESS=$harness_dir/source" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: '22'
@@ -57,6 +62,7 @@ jobs:
           key: ${{ steps.cache-profile.outputs.key }}
       - name: Build the unmodified failed compiler
         run: |
+          test -z "$(git status --porcelain)"
           dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
           echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
           sudo apt-get install -y gdb
@@ -71,12 +77,12 @@ jobs:
           LLGO_TEST_STD_BUILDMODES: '1'
           SHARD_INDEX: '0'
           SHARD_TOTAL: '2'
-        run: bash diagnostic-harness/dev/diagnose_qiniu_shard0.sh
+        run: bash "$DIAGNOSTIC_HARNESS/dev/diagnose_qiniu_shard0.sh"
       - name: Preserve diagnostics before the runner's one-hour deadline
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: qiniu-shard0-${{ github.run_id }}
-          path: shard0-diagnostics/
+          path: ${{ runner.temp }}/shard0-diagnostics/
           retention-days: 7
           if-no-files-found: error
