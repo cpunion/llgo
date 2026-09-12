@@ -10,10 +10,18 @@ import (
 	psync "github.com/xgo-dev/llgo/runtime/internal/sync"
 )
 
+// weakHandle supplies the GC-dependent identity used by GOROOT's weak package.
+// Go's collector removes weak registrations from spans during sweep. BDWGC
+// invokes our cleanup during allocation, so registry removal must be deferred.
+// Removing an entry releases the runtime's reference; a user-held weak.Pointer
+// must keep its dead handle alive to preserve identity.
 type weakHandle struct {
 	key  uintptr
 	live uint32
-	next unsafe.Pointer // next dead handle; never a pointer to the referent
+	// Written only by the producer before the head CAS publishes this handle;
+	// after the head Swap, only the drainer accesses the link. The head atomics
+	// order these ordinary accesses. Links retain handles, never referents.
+	next unsafe.Pointer
 }
 
 // BDWGC conservatively treats pointer-looking uintptr values as live roots.
@@ -55,9 +63,14 @@ func retireWeakHandle(h *weakHandle) {
 
 // drainWeakHandles runs during registration with weakState.mu held. Detach only
 // one batch so concurrent cleanup cannot keep a registration here indefinitely.
+// This bounds the captured work, not its size: a batch of n handles takes O(n)
+// time under the registry lock. Without another non-nil weak.Make, the last
+// dead batch and its map entries remain retained; neither Value nor GC drains
+// them. Reclaiming that idle batch requires a separately scheduled safe consumer.
 func drainWeakHandles() {
 	for h := (*weakHandle)(latomic.SwapPointer(&weakState.dead, nil)); h != nil; {
 		next := (*weakHandle)(h.next)
+		// A user-held dead weak.Pointer must not retain the rest of this batch.
 		h.next = nil
 		// The address may already belong to a new object with a new handle.
 		if weakState.m[h.key] == h {
