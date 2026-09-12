@@ -85,10 +85,6 @@ func main() {
 			panic("deferred multiply argument evaluation mismatch")
 		}
 	}()
-	order = 0
-	go multiply(arg(1), arg(2))
-	if order != 12 {
-		panic("goroutine multiply argument evaluation mismatch")
-	}
+	checkGoCall()
 	println("unsigned multiply overflow ok")
 }

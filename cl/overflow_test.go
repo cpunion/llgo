@@ -3,6 +3,7 @@
 package cl
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -74,6 +75,33 @@ func Defer64(a, b Word) { defer multiply(a, b) }
 				t.Fatal(err)
 			}
 			asm.Dispose()
+		})
+	}
+}
+
+func TestUMulOverflowInvalidDeclarations(t *testing.T) {
+	for _, tc := range []struct{ name, decl, call, want string }{
+		{"arity", "func mul(a uint) (uint, bool)", "mul(a)", "invalid arguments"},
+		{"result-count", "func mul(a, b uint) uint", "mul(a, a)", "invalid arguments"},
+		{"product-type", "func mul(a, b uint) (uint64, bool)", "mul(a, a)", "invalid arguments"},
+		{"flag-type", "func mul(a, b uint) (uint, uint)", "mul(a, a)", "invalid arguments"},
+		{"signed", "func mul(a, b int) (int, bool)", "mul(int(a), int(a))", "same unsigned integer type"},
+		{"mismatched-operands", "func mul(a uint, b uint64) (uint, bool)", "mul(a, uint64(a))", "same unsigned integer type"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "package overflow\n//llgo:link mul llgo.umulOverflow\n" + tc.decl + "\nfunc bad(a uint) { " + tc.call + " }"
+			ssapkg, _, files := buildGoSSAPkg(t, src)
+			prog := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "linux", GOARCH: "amd64"})
+			defer prog.Dispose()
+			defer func() {
+				if got := fmt.Sprint(recover()); !strings.Contains(got, tc.want) {
+					t.Fatalf("diagnostic = %q, want %q", got, tc.want)
+				}
+			}()
+			_, err := NewPackage(prog, ssapkg, files)
+			if err != nil {
+				panic(err)
+			}
 		})
 	}
 }
