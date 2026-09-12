@@ -1,0 +1,82 @@
+name: Diagnose Qiniu shard-0 timeout (temporary)
+
+# Temporary investigation in draft #2573, not a production fix. A comment
+# review allows one explicitly requested Linux diagnostic without scheduling
+# the unrelated macOS/Windows matrix for a [skip ci] diagnostic commit.
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+
+jobs:
+  shard0:
+    if: >-
+      github.repository == 'xgo-dev/llgo' &&
+      github.event.pull_request.number == 2573 &&
+      github.event.review.user.login == 'cpunion' &&
+      github.event.review.state == 'commented' &&
+      startsWith(github.event.review.body, 'diagnose-qiniu-shard0')
+    runs-on: [qiniu, ubuntu-24.04-large]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The actual merge tree checked out by all three failed attempts,
+          # not just the PR head (which lacks main's float min/max change).
+          ref: 94677096ec9981665d37c506c6d4ea09a460ca86
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: diagnostic-harness
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+      - uses: ./.github/actions/setup-embed-deps
+      - uses: ./.github/actions/setup-demo-deps
+        with:
+          install-lldb-python: 'true'
+      - uses: ./.github/actions/setup-go
+      - uses: ./.github/actions/setup-llgo-cache
+        with:
+          build-cache-mode: 'off'
+          crosscompile-cache-mode: restore
+      - name: Resolve the original first-attempt package cache
+        id: cache-profile
+        run: |
+          source dev/llgo_cache_dir.sh
+          echo "root=$(llgo_cache_dir)" >> "$GITHUB_OUTPUT"
+          clang_version="$(clang --version | sed -nE '1s/.*version ([0-9]+([.][0-9]+)+).*/\1/p')"
+          echo "key=llgo-build-v2-Linux-X64-native-native-$(go env GOVERSION)-clang-${clang_version}-daada50d2270554c2eaea8887ce2d39acbd572c9" >> "$GITHUB_OUTPUT"
+      - name: Restore the old main cache used by the failed first attempt
+        id: package-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.cache-profile.outputs.root }}/build
+          key: ${{ steps.cache-profile.outputs.key }}
+      - name: Build the unmodified failed compiler
+        run: |
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y gdb
+      - name: Replay shard 0 with original arguments and external diagnostics
+        timeout-minutes: 19
+        env:
+          DIAGNOSTIC_CACHE_HIT: ${{ steps.package-cache.outputs.cache-hit }}
+          DIAGNOSTIC_CACHE_KEY: ${{ steps.cache-profile.outputs.key }}
+          LLGO_BUILD_CACHE: '1'
+          LLGO_TEST_BENCH_GO126: '1'
+          LLGO_TEST_CHECK_SYMBOLS: '1'
+          LLGO_TEST_STD_BUILDMODES: '1'
+          SHARD_INDEX: '0'
+          SHARD_TOTAL: '2'
+        run: bash diagnostic-harness/dev/diagnose_qiniu_shard0.sh
+      - name: Preserve diagnostics before the runner's one-hour deadline
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qiniu-shard0-${{ github.run_id }}
+          path: shard0-diagnostics/
+          retention-days: 7
+          if-no-files-found: error
