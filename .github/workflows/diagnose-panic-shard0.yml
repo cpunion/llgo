@@ -1,0 +1,52 @@
+name: Diagnose the timed-out LLGo shard
+
+on:
+  push:
+    branches: [codex/diagnose-panic-shard0-20260912]
+
+permissions:
+  contents: read
+
+jobs:
+  shard0:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 7aa6c5f92f984f71a7232d7aecf3694a522715c8
+      - uses: actions/checkout@v7
+        with:
+          ref: codex/diagnose-panic-shard0-20260912
+          path: diagnostic-harness
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+      - uses: ./.github/actions/setup-embed-deps
+      - uses: ./.github/actions/setup-demo-deps
+        with:
+          install-lldb-python: 'false'
+      - uses: ./.github/actions/setup-go
+      - name: Build the exact timed-out compiler revision
+        run: |
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          sudo apt-get install -y gdb
+      - name: Run the original shard, symbols, and both build modes
+        timeout-minutes: 19
+        env:
+          LLGO_BUILD_CACHE: '1'
+          LLGO_TEST_BENCH_GO126: '1'
+          LLGO_TEST_CHECK_SYMBOLS: '1'
+          LLGO_TEST_STD_BUILDMODES: '1'
+          SHARD_INDEX: '0'
+          SHARD_TOTAL: '2'
+        run: bash diagnostic-harness/dev/diagnose_panic_shard0.sh
+      - name: Preserve logs and build traces
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: panic-shard0-diagnostics
+          path: shard0-diagnostics/
+          retention-days: 7
+          if-no-files-found: error
