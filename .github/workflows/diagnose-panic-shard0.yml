@@ -10,15 +10,26 @@ permissions:
 jobs:
   shard0:
     if: github.repository == 'cpunion/llgo'
+    name: shard0 (${{ matrix.trial }})
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - trial: original-1
+            trace: '0'
+          - trial: original-2
+            trace: '0'
+          - trial: traced
+            trace: '1'
     steps:
       - uses: actions/checkout@v7
         with:
           ref: 7aa6c5f92f984f71a7232d7aecf3694a522715c8
       - uses: actions/checkout@v7
         with:
-          ref: codex/diagnose-panic-shard0-20260912
+          ref: ${{ github.sha }}
           path: diagnostic-harness
       - uses: ./.github/actions/setup-deps
         with:
@@ -28,6 +39,11 @@ jobs:
         with:
           install-lldb-python: 'false'
       - uses: ./.github/actions/setup-go
+      - name: Restore caches as in the original CI job
+        uses: ./.github/actions/setup-llgo-cache
+        with:
+          build-cache-mode: restore
+          crosscompile-cache-mode: restore
       - name: Build the exact timed-out compiler revision
         run: |
           dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
@@ -35,6 +51,8 @@ jobs:
       - name: Run the original shard, symbols, and both build modes
         timeout-minutes: 19
         env:
+          DIAGNOSTIC_TRACE: ${{ matrix.trace }}
+          DIAGNOSTIC_TRIAL: ${{ matrix.trial }}
           LLGO_BUILD_CACHE: '1'
           LLGO_TEST_BENCH_GO126: '1'
           LLGO_TEST_CHECK_SYMBOLS: '1'
@@ -46,7 +64,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: panic-shard0-diagnostics
+          name: panic-shard0-${{ matrix.trial }}
           path: shard0-diagnostics/
           retention-days: 7
           if-no-files-found: error

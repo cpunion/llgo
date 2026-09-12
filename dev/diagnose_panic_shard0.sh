@@ -17,36 +17,29 @@ chmod +x "$LLGO"
   go version
   clang --version
   dpkg-query -W libgc1 libgc-dev libc6
+  printf 'trial=%s trace=%s\n' "${DIAGNOSTIC_TRIAL:-first}" "${DIAGNOSTIC_TRACE:-1}"
 } >"$DIAGNOSTIC_OUTPUT/environment.txt"
 
 # A dedicated process group makes the hard bound include nested test runners.
 setsid timeout --signal=TERM --kill-after=10s 18m bash dev/test_go_version.sh 1.27 >"$DIAGNOSTIC_OUTPUT/pipeline.log" 2>&1 &
 pipeline=$!
+export DIAGNOSTIC_PIPELINE=$pipeline
 tail --pid="$pipeline" -f "$DIAGNOSTIC_OUTPUT/pipeline.log" &
 tail_pid=$!
 
-# Only sample after 16 minutes, outside ordinary completion times. Sampling is
-# explicitly diagnostic, never counted as an unperturbed passing stress trial.
-(
-  sleep 960
-  if kill -0 "$pipeline" 2>/dev/null; then
-    ps -eo pid,ppid,pgid,pcpu,pmem,stat,wchan:32,etime,args --forest >"$DIAGNOSTIC_OUTPUT/processes.txt"
-    for pid in $(pgrep -g "$pipeline" || true); do
-      executable=$(readlink "/proc/$pid/exe" || true)
-      case "$executable" in
-        *llgo*|*runner-*|*.test)
-          sudo timeout -k 2s 10s gdb --batch --nx -p "$pid" -ex 'set pagination off' -ex 'thread apply all bt 25' -ex detach >"$DIAGNOSTIC_OUTPUT/stacks-$pid.txt" 2>&1 || true
-          ;;
-      esac
-    done
-  fi
-) &
+# Read-only process snapshots do not stop threads. Only the late stack sample
+# uses ptrace, and its presence is recorded so it cannot count as an ordinary
+# passing trial. A separate process group also lets cleanup reap its sleeps.
+setsid bash diagnostic-harness/dev/diagnose_shard0_watchdog.sh &
 watchdog=$!
 
 status=0
 wait "$pipeline" || status=$?
-kill "$watchdog" 2>/dev/null || true
+kill -- "-$watchdog" 2>/dev/null || true
 wait "$watchdog" 2>/dev/null || true
 wait "$tail_pid" || true
-printf 'Original shard-0 pipeline exit: %s\n' "$status" >>"$GITHUB_STEP_SUMMARY"
+printf 'Trial: %s; trace: %s; original shard-0 pipeline exit: %s\n' "${DIAGNOSTIC_TRIAL:-first}" "${DIAGNOSTIC_TRACE:-1}" "$status" >>"$GITHUB_STEP_SUMMARY"
+if [[ -f "$DIAGNOSTIC_OUTPUT/ptrace-sampled.txt" ]]; then
+  printf 'A late ptrace sample was taken; do not count this as an unperturbed passing trial.\n' >>"$GITHUB_STEP_SUMMARY"
+fi
 exit "$status"
