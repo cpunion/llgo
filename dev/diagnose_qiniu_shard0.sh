@@ -22,7 +22,7 @@ chmod +x "$LLGO"
   go version -m "$LLGO_REAL"
   clang --version
   dpkg-query -W libgc1 libgc-dev libc6
-  printf 'cache_hit=%s cache_key=%s\n' "$DIAGNOSTIC_CACHE_HIT" "$DIAGNOSTIC_CACHE_KEY"
+  printf 'cache_hit=%s cache_key=%s cache_matched_key=%s\n' "$DIAGNOSTIC_CACHE_HIT" "$DIAGNOSTIC_CACHE_KEY" "$DIAGNOSTIC_CACHE_MATCHED_KEY"
   for resource in cpu.max cpuset.cpus.effective memory.max memory.events; do
     if [[ -r "/sys/fs/cgroup/$resource" ]]; then
       printf '%s: ' "$resource"
@@ -33,7 +33,9 @@ chmod +x "$LLGO"
 
 # An external deadline still fires if the tested runtime cannot run timers.
 # Its process group includes the compiler and nested test programs.
-setsid timeout --signal=TERM --kill-after=10s 18m bash dev/test_go_version.sh 1.27 >"$DIAGNOSTIC_OUTPUT/pipeline.log" 2>&1 &
+# Keep the original per-test 20m timeout. This outer deadline also covers
+# compilation and catches a runtime that cannot service its own timeout.
+setsid timeout --signal=TERM --kill-after=10s 25m bash dev/test_go_version.sh 1.27 >"$DIAGNOSTIC_OUTPUT/pipeline.log" 2>&1 &
 pipeline=$!
 export DIAGNOSTIC_PIPELINE=$pipeline
 tail --pid="$pipeline" -f "$DIAGNOSTIC_OUTPUT/pipeline.log" &
@@ -46,6 +48,10 @@ wait "$pipeline" || status=$?
 kill -- "-$watchdog" 2>/dev/null || true
 wait "$watchdog" 2>/dev/null || true
 wait "$tail_pid" || true
+if [[ "$status" == 0 && -f "$DIAGNOSTIC_OUTPUT/ptrace-sampled.txt" ]]; then
+  echo 'A sampled trial cannot establish an unperturbed passing result.' >&2
+  status=1
+fi
 {
   printf 'Trial: %s. Exact CI merge: %s. Original arguments, Qiniu Ubuntu 24.04 large, LLVM 22, Go 1.27.\n\n' "$DIAGNOSTIC_TRIAL" "$DIAGNOSTIC_REVISION"
   printf 'Package cache hit: %s. Pipeline exit: %s.\n\n' "$DIAGNOSTIC_CACHE_HIT" "$status"

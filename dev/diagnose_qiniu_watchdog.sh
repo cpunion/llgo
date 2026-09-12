@@ -2,7 +2,7 @@
 set -euo pipefail
 
 goroot=$(go env GOROOT)
-for minute in {1..17}; do
+for minute in {1..24}; do
   sleep 60
   if ! kill -0 "$DIAGNOSTIC_PIPELINE" 2>/dev/null; then exit 0; fi
   {
@@ -18,7 +18,7 @@ for minute in {1..17}; do
   } >"$DIAGNOSTIC_OUTPUT/processes-minute-$minute.txt"
   completed=$(awk '$1 == "ok" && $2 ~ /^github.com\/xgo-dev\/llgo\/test/ {n++} END {print n+0}' "$DIAGNOSTIC_OUTPUT/pipeline.log")
   printf '[diagnostic] minute=%s completed-package-lines=%s; process snapshot saved\n' "$minute" "$completed"
-  if [[ "$minute" != 14 && "$minute" != 16 ]]; then continue; fi
+  if [[ "$minute" != 22 && "$minute" != 24 ]]; then continue; fi
 
   # ptrace can change scheduling, so sample only after the ordinary pipeline
   # should have finished and label any later success as a perturbed trial.
