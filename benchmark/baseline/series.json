@@ -68,6 +68,17 @@
     },
     {
       "kind": "branch",
+      "id": "c2c5dab1c054e6bd",
+      "label": "Branch codex/wasm-aggregate-lowering-w2-20260912",
+      "path": "series/branch/c2c5dab1c054e6bd/summary.json",
+      "configPath": "series/branch/c2c5dab1c054e6bd/config.json",
+      "commitPath": "commits/5813c3e80cbc3b58dc6c43e2dae252f63efc2564.json",
+      "sha": "5813c3e80cbc3b58dc6c43e2dae252f63efc2564",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/5813c3e80cbc3b58dc6c43e2dae252f63efc2564",
+      "updatedAt": "2026-09-12T04:41:25.717Z"
+    },
+    {
+      "kind": "branch",
       "id": "f6bb21f0f97b9d89",
       "label": "Branch codex/wasm-r0-targets-cpunion-20260901",
       "path": "series/branch/f6bb21f0f97b9d89/summary.json",
@@ -371,6 +382,17 @@
       "sha": "d11498c319d612aa41a0adfbc0d5a4f52fd47bed",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/d11498c319d612aa41a0adfbc0d5a4f52fd47bed",
       "updatedAt": "2026-09-12T03:15:50.981Z"
+    },
+    {
+      "kind": "pull",
+      "id": "252",
+      "label": "PR #252",
+      "path": "series/pull/252/summary.json",
+      "configPath": "series/pull/252/config.json",
+      "commitPath": "commits/5813c3e80cbc3b58dc6c43e2dae252f63efc2564.json",
+      "sha": "5813c3e80cbc3b58dc6c43e2dae252f63efc2564",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/5813c3e80cbc3b58dc6c43e2dae252f63efc2564",
+      "updatedAt": "2026-09-12T04:41:25.618Z"
     }
   ]
 }
