@@ -4,6 +4,7 @@ set -euo pipefail
 # This harness does not change compiler code, test arguments, or GC settings.
 export DIAGNOSTIC_OUTPUT="$RUNNER_TEMP/shard0-diagnostics"
 mkdir -p "$DIAGNOSTIC_OUTPUT"
+test "$(git rev-parse HEAD)" = "$DIAGNOSTIC_REVISION"
 export LLGO_ROOT=$PWD
 export LLGO_REAL="$RUNNER_TEMP/llgo-bin/llgo"
 export LLGO_TEST_LLGEN="$RUNNER_TEMP/llgo-bin/llgen"
@@ -13,6 +14,7 @@ chmod +x "$LLGO"
 {
   git show -s --format='commit=%H tree=%T parents=%P'
   git status --short
+  printf 'trial=%s expected_revision=%s\n' "$DIAGNOSTIC_TRIAL" "$DIAGNOSTIC_REVISION"
   uname -a
   lscpu
   free -h
@@ -45,7 +47,7 @@ kill -- "-$watchdog" 2>/dev/null || true
 wait "$watchdog" 2>/dev/null || true
 wait "$tail_pid" || true
 {
-  printf 'Exact failed merge: 94677096ec9981665d37c506c6d4ea09a460ca86. Original arguments, Qiniu Ubuntu 24.04 large, LLVM 22, Go 1.27.\n\n'
+  printf 'Trial: %s. Exact CI merge: %s. Original arguments, Qiniu Ubuntu 24.04 large, LLVM 22, Go 1.27.\n\n' "$DIAGNOSTIC_TRIAL" "$DIAGNOSTIC_REVISION"
   printf 'Package cache hit: %s. Pipeline exit: %s.\n\n' "$DIAGNOSTIC_CACHE_HIT" "$status"
   if [[ -f "$DIAGNOSTIC_OUTPUT/ptrace-sampled.txt" ]]; then
     printf 'Late ptrace diagnostics were taken: this cannot count as an unperturbed passing trial.\n\n'

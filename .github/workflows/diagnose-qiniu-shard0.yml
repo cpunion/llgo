@@ -19,13 +19,21 @@ jobs:
       github.event.review.state == 'commented' &&
       startsWith(github.event.review.body, 'diagnose-qiniu-shard0')
     runs-on: [qiniu, ubuntu-24.04-large]
+    name: shard0 (${{ matrix.trial }})
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - trial: previously-passed
+            revision: 40c7bf8f66b2836efbd306d02aa2c6c6b67255f5
+          - trial: repeatedly-timed-out
+            revision: 94677096ec9981665d37c506c6d4ea09a460ca86
     steps:
       - uses: actions/checkout@v7
         with:
-          # The actual merge tree checked out by all three failed attempts,
-          # not just the PR head (which lacks main's float min/max change).
-          ref: 94677096ec9981665d37c506c6d4ea09a460ca86
+          # Pin the actual CI merge trees, not the corresponding PR heads.
+          ref: ${{ matrix.revision }}
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -35,6 +43,8 @@ jobs:
           harness_dir=$(mktemp -d "$RUNNER_TEMP/shard0-harness.XXXXXX")
           mv diagnostic-harness "$harness_dir/source"
           echo "DIAGNOSTIC_HARNESS=$harness_dir/source" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/shard0-diagnostics"
+          git status --porcelain > "$RUNNER_TEMP/shard0-diagnostics/status-before-setup.txt"
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: '22'
@@ -60,15 +70,20 @@ jobs:
         with:
           path: ${{ steps.cache-profile.outputs.root }}/build
           key: ${{ steps.cache-profile.outputs.key }}
-      - name: Build the unmodified failed compiler
+      - name: Build the original CI compiler revision
         run: |
-          test -z "$(git status --porcelain)"
+          mkdir -p "$RUNNER_TEMP/shard0-diagnostics"
+          git status --porcelain > "$RUNNER_TEMP/shard0-diagnostics/status-before-build.txt"
+          git diff --stat > "$RUNNER_TEMP/shard0-diagnostics/diff-before-build.txt"
           dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          go version -m "$RUNNER_TEMP/llgo-bin/llgo" > "$RUNNER_TEMP/shard0-diagnostics/compiler-build-info.txt"
           echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
           sudo apt-get install -y gdb
       - name: Replay shard 0 with original arguments and external diagnostics
         timeout-minutes: 19
         env:
+          DIAGNOSTIC_TRIAL: ${{ matrix.trial }}
+          DIAGNOSTIC_REVISION: ${{ matrix.revision }}
           DIAGNOSTIC_CACHE_HIT: ${{ steps.package-cache.outputs.cache-hit }}
           DIAGNOSTIC_CACHE_KEY: ${{ steps.cache-profile.outputs.key }}
           LLGO_BUILD_CACHE: '1'
@@ -82,7 +97,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: qiniu-shard0-${{ github.run_id }}
+          name: qiniu-shard0-${{ matrix.trial }}-${{ github.run_id }}
           path: ${{ runner.temp }}/shard0-diagnostics/
           retention-days: 7
           if-no-files-found: error
