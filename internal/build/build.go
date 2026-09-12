@@ -2212,7 +2212,7 @@ func buildMainLink(ctx *context, pkg *packages.Package, preparation *mainLinkPre
 	entryPkg := genMainModule(ctx, llssa.PkgRuntime, pkg, &preparation.gen)
 	cExports := preparation.gen.cExports
 	if len(cExports) != 0 {
-		llabi.LowerLargeAggregates(ctx.prog.TargetData(), entryPkg.LPkg.Module())
+		lowerLargeAggregates(ctx.prog, entryPkg.LPkg.Module())
 		ctx.cTransformer.TransformModule(entryPkg.LPkg.Path(), entryPkg.LPkg.Module())
 	}
 	if ctx.buildConf.deadcodeDropEnabled() {
@@ -2866,6 +2866,16 @@ func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string,
 	return externs, nil
 }
 
+// lowerLargeAggregates is shared by package, export-wrapper, and translated
+// assembly modules so every late allocation follows the selected GC policy.
+func lowerLargeAggregates(prog llssa.Program, mod gllvm.Module) {
+	llabi.LowerLargeAggregates(prog.TargetData(), mod, llabi.AggregateLoweringConfig{
+		GoWordSize: prog.GoWordSize(),
+		GCRoots:    prog.GCRootsEnabled(),
+		Wasm:       prog.Target().GOARCH == "wasm",
+	})
+}
+
 // compilePackageModule applies LLVM transforms and emits package objects.
 func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbose bool) error {
 	pkg := aPkg.Package
@@ -2873,7 +2883,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	ret := aPkg.LPkg
 
 	ctx.cTransformer.SetSkipFuncs(cabiSkipFuncsForPlan9Asm(ctx, pkgPath, ret.Module()))
-	llabi.LowerLargeAggregates(ctx.prog.TargetData(), ret.Module())
+	lowerLargeAggregates(ctx.prog, ret.Module())
 	ctx.cTransformer.TransformModule(ret.Path(), ret.Module())
 	ctx.cTransformer.SetSkipFuncs(nil)
 	if ctx.buildConf.Goos == "windows" {
@@ -2885,6 +2895,11 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 			return err
 		}
 	}
+	lowerWasmAggregateCopies(ctx.buildConf.Goarch, ctx.prog.TargetData(), ret.Module(), llabi.AggregateLoweringConfig{
+		GoWordSize: ctx.prog.GoWordSize(),
+		GCRoots:    ctx.prog.GCRootsEnabled(),
+		Wasm:       true,
+	})
 	applySizeOptimizationAttributes(ret.Module(), ctx.buildConf.OptLevel)
 	printCmds := ctx.shouldPrintCommands(verbose)
 	if ctx.mode != ModeGen {
