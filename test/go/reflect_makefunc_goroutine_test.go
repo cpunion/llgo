@@ -4,7 +4,6 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
-	"time"
 )
 
 func TestReflectMakeFuncGoroutineStartup(t *testing.T) {
@@ -30,15 +29,11 @@ func testReflectMakeFuncGoroutineStartup(t *testing.T, withArg bool) {
 	go func() {
 		defer close(gcDone)
 		for {
-			// Collect at least once, even if the callbacks finish before we run.
-			runtime.GC()
 			select {
 			case <-stopGC:
 				return
 			default:
-				// Back-to-back collections can starve MakeFunc/startup allocations
-				// in BDWGC. Gosched is a no-op on LLGo's pthread backend.
-				time.Sleep(time.Millisecond)
+				runtime.GC()
 			}
 		}
 	}()
