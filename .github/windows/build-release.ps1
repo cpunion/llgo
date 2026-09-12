@@ -103,10 +103,11 @@ if ($Profile -eq 'mingw') {
 }
 
 # ESP tools match the LLGo host architecture for both MSVC and MinGW packages.
-$espVersion = '22.1.4_20260905'
+$espVersion = '22.1.4_20260912'
 $espTarget = @{ amd64 = 'x86_64-w64-mingw32'; arm64 = 'aarch64-w64-mingw32' }[$GoArch]
 $espChecksums = @{
-  amd64 = '3d32533daec8be08e608496eff817798eb7d3c25f07a02de1f1c94c0a0bbb8b3'
+  amd64 = '49ba5159967f1f3cdc11b51d902595baaf0f94bf6c73fb4b880940f30a2d6f4f'
+  arm64 = '02521d03911dadbd84ecfb27903e59dae1d9f12c45245982caea7dad6e6d4188'
 }
 $espChecksum = $espChecksums[$GoArch]
 if (-not $espChecksum) { throw "Missing pinned ESP Clang checksum for windows/$GoArch" }

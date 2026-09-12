@@ -228,15 +228,16 @@ var (
 	wasiMacosSubdir = "wasi-sdk-25.0-x86_64-macos"
 	espClangBaseUrl = "https://github.com/xgo-dev/espressif-llvm-project-prebuilt/releases/download/" + espClangVersion
 	espClangSHA256  = map[string]string{
-		"aarch64-apple-darwin": "fcd3f70db3b05a8815ea156b09778de017a4a3f2d5ba11cbc5fbb205b1daa3fc",
-		"aarch64-linux-gnu":    "628a7f94ac8f392506ee59034525d05db8cc466c15a01f089df229a2a7c661cb",
-		"x86_64-apple-darwin":  "06018f283b3af1ba38523823c633a3517f1580571c48bfb46d53f5bfc0056ff7",
-		"x86_64-linux-gnu":     "0fc09b634fcbc00f91f1a1d3d023e6491f213de941939c374590e40f69961ecc",
-		"x86_64-w64-mingw32":   "3d32533daec8be08e608496eff817798eb7d3c25f07a02de1f1c94c0a0bbb8b3",
+		"aarch64-apple-darwin": "31cb1b87c84531bd777a4d7493a5a35070e6dd860e4c600b63937f5b449c3064",
+		"aarch64-linux-gnu":    "4a88902abe7977c0cbdecb239ac1a4d24185557e451a3e1f59aebbd56371124d",
+		"aarch64-w64-mingw32":  "02521d03911dadbd84ecfb27903e59dae1d9f12c45245982caea7dad6e6d4188",
+		"x86_64-apple-darwin":  "c31d127230d87bc468e6ea5e709db20d0729ecf6407222ef33f2378e2f847416",
+		"x86_64-linux-gnu":     "735f9d343863e5693179908acd946a0e85468463246f11210f2aa690b47784ab",
+		"x86_64-w64-mingw32":   "49ba5159967f1f3cdc11b51d902595baaf0f94bf6c73fb4b880940f30a2d6f4f",
 	}
 )
 
-const espClangVersion = "22.1.4_20260905"
+const espClangVersion = "22.1.4_20260912"
 
 // cacheRoot can be overridden for testing
 var cacheRoot = env.LLGoCacheDir
