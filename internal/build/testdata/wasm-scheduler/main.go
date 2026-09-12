@@ -62,6 +62,10 @@ func checkCurrentG() {
 
 func main() {
 	checkWasmModel()
+	if schedulerPanicTracebackMode() != 0 {
+		panicTracebackCaller()
+		return
+	}
 	if schedulerMainGoexitMode() != 0 {
 		testMainGoexit()
 		return
@@ -141,9 +145,24 @@ func main() {
 	if seenGCount != len(seenG) {
 		panic("not all goroutines ran")
 	}
+	testAtomicSchedulingBoundary()
 	testGoroutineLifecycle()
 	testBlockingPrimitives()
 	println("wasm scheduler ok")
+}
+
+//go:noinline
+func panicTracebackSite() {
+	panic("wasm scheduler traceback")
+}
+
+//go:noinline
+func panicTracebackCaller() {
+	// Exercise the longjmp path before the fatal panic reaches the core
+	// traceback hook. The logical shadow stack must retain both user frames
+	// after this defer has run.
+	defer func() {}()
+	panicTracebackSite()
 }
 
 func testBlockingPrimitives() {
@@ -393,6 +412,30 @@ func testMainGoexit() {
 		println("WORKER_RETURNING")
 	}()
 	runtime.Goexit()
+}
+
+// The scheduler calls typed atomics while transitioning G state. A nosplit
+// caller must not acquire scheduling points through those wrappers. Keep a G
+// runnable for more atomic calls than the cooperative polling quantum.
+//
+//go:nosplit
+func testAtomicSchedulingBoundary() {
+	ran := false
+	done := make(chan struct{})
+	go func() {
+		ran = true
+		close(done)
+	}()
+	var counter atomic.Uint64
+	for i := uint64(0); i < 4096; i++ {
+		if counter.Add(1) != i+1 || counter.Load() != i+1 {
+			panic("unexpected atomic counter value")
+		}
+	}
+	if ran {
+		panic("typed atomic operation yielded inside a runtime scheduling boundary")
+	}
+	<-done
 }
 
 func testGoroutineLifecycle() {

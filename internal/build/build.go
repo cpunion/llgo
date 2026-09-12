@@ -603,6 +603,7 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 	prog.EnableGoGlobalDCE(conf.goGlobalDCEEnabled())
 	prog.EnableDeadcodeDrop(conf.deadcodeDropEnabled())
 	prog.EnableGCRoots(wasmGC)
+	prog.EnableLogicalGoroutineLocality(usesSingleWorkerWasmScheduler(conf))
 	prog.EnableCooperativeSafepoints(wasmGC)
 	if conf.PthreadStackSize > 0 {
 		prog.SetPthreadStackSize(uint64(conf.PthreadStackSize))
@@ -1316,6 +1317,20 @@ func configureWasmGC(conf *Config, export *crosscompile.Export) (bool, error) {
 	return enabled, nil
 }
 
+func usesSingleWorkerWasmScheduler(conf *Config) bool {
+	if conf == nil || conf.Goarch != "wasm" {
+		return false
+	}
+	switch conf.Goos {
+	case "js":
+		return true
+	case "wasip1":
+		return !IsWasiThreadsEnabled()
+	default:
+		return false
+	}
+}
+
 func applyWasmGCLinkFlags(conf *Config, export *crosscompile.Export) {
 	if conf.Goos != "js" || conf.Goarch != "wasm" ||
 		(export.WasmProfile != crosscompile.WasmProfileJ32 && export.WasmProfile != crosscompile.WasmProfileJ64) ||
@@ -1330,7 +1345,10 @@ func applyWasmGCLinkFlags(conf *Config, export *crosscompile.Export) {
 func effectiveTypeSizes(sizes types.Sizes, profile crosscompile.WasmProfile) types.Sizes {
 	switch profile {
 	case crosscompile.WasmProfileJ32, crosscompile.WasmProfileJ64, crosscompile.WasmProfileW32:
-		return &types.StdSizes{WordSize: 8, MaxAlign: 8}
+		// StdSizes omits struct tail padding. Its nested-field offsets then
+		// disagree with LLVM's physical layout, so reflected fields and unsafe
+		// constants can address padding instead of the following field.
+		return types.SizesFor("gc", "amd64")
 	default:
 		return sizes
 	}
