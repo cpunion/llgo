@@ -69,7 +69,7 @@ jobs:
             -Profile "${{ matrix.windows_abi }}" `
             -GoArch "${{ matrix.windows_arch || 'amd64' }}"
 
-      - name: Run Go 1.27 LLGo tests
+      - name: Repeat Go 1.27 LLGo tests with resource samples
         id: full
         timeout-minutes: 20
         continue-on-error: true
@@ -84,6 +84,10 @@ jobs:
         run: |
           set -euo pipefail
 
+          powershell.exe -NoLogo -NoProfile -File dev/pr2530_windows_resources.ps1 &
+          resource_monitor=$!
+          trap 'kill "$resource_monitor" 2>/dev/null || true' EXIT
+
           tool_suffix=
           if [[ "$RUNNER_OS" == Windows ]]; then
             tool_suffix=.exe
@@ -92,19 +96,23 @@ jobs:
           export LLGO="$RUNNER_TEMP/llgo-bin/llgo${tool_suffix}"
           export LLGO_TEST_LLGEN="$RUNNER_TEMP/llgo-bin/llgen${tool_suffix}"
           export CHECK_STD_SYMBOLS="$RUNNER_TEMP/llgo-bin/check_std_symbols${tool_suffix}"
-          dev/test_go_version.sh 1.27
+          for iteration in 1 2 3; do
+            echo "FULL SUITE ITERATION $iteration START"
+            dev/test_go_version.sh 1.27
 
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            # The TLS regression lives in the runtime submodule, outside test/.
-            (cd runtime && "$LLGO" test -v -run '^TestSlotGCAllocation$' -count=20 -timeout=2m ./internal/clite/tls)
-          fi
+            if [[ "$RUNNER_OS" == Windows ]]; then
+              # The TLS regression lives in the runtime submodule, outside test/.
+              (cd runtime && "$LLGO" test -v -run '^TestSlotGCAllocation$' -count=20 -timeout=2m ./internal/clite/tls)
+            fi
+            echo "FULL SUITE ITERATION $iteration PASS"
+          done
 
       - name: Record memory and toolchain after full suite
         if: always()
         shell: pwsh
         run: |
           Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize,FreePhysicalMemory,TotalVirtualMemorySize,FreeVirtualMemory
-          Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 20 Name,Id,WorkingSet64,PrivateMemorySize64,HandleCount,@{n='Threads';e={$_.Threads.Count}}
+          Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 20 Name,Id,WorkingSet64,PrivateMemorySize64,HandleCount,@{n='Threads';e={$_.Threads.Count}} | ConvertTo-Json -Compress
           go version
           go env GOOS GOARCH GOROOT CC CGO_ENABLED
           go list -export runtime/cgo
