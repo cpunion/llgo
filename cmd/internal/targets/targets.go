@@ -43,6 +43,8 @@ func runCmd(_ *base.Command, args []string) {
 }
 
 type targetInfo struct {
+	// Config.Name is intentionally omitted from JSON; expose the stable target
+	// name once at the top level of each resolved object.
 	Name string `json:"name"`
 	*targetcfg.Config
 }
@@ -59,6 +61,7 @@ func run(args []string, stdout, stderr io.Writer, resolver *targetcfg.Resolver) 
 	}
 
 	names := fs.Args()
+	explicitNames := len(names) != 0
 	if len(names) == 0 {
 		var err error
 		names, err = resolver.ListAvailableTargets()
@@ -69,8 +72,10 @@ func run(args []string, stdout, stderr io.Writer, resolver *targetcfg.Resolver) 
 	slices.Sort(names)
 	if !*jsonMode {
 		for _, name := range names {
-			if _, err := resolver.Resolve(name); err != nil {
-				return err
+			if explicitNames {
+				if _, err := resolver.Resolve(name); err != nil {
+					return err
+				}
 			}
 			if _, err := fmt.Fprintln(stdout, name); err != nil {
 				return err

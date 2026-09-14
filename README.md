@@ -434,7 +434,7 @@ A real Go executable must remain in an absolute PATH directory. If `go` is a sym
 
 ## Target configurations
 
-Use `llgo targets` to list embedded and cross-compilation target names. `llgo targets -json [name ...]` prints their fully resolved configurations, including inherited values, without downloading or building optional toolchains and libraries.
+Use `llgo targets` to list available target names. `llgo targets -json [name ...]` prints their fully resolved configurations, including inherited values, without downloading or building optional toolchains and libraries.
 
 ## Development tools
 
