@@ -18,11 +18,23 @@ func TestLoaderRejectsInvalidNamesAndCycles(t *testing.T) {
 		}
 	}
 	write("outside", `{"goos":"linux"}`)
+	write("invalid.name", `{"goos":"windows"}`)
+
+	loader := NewLoader(dir)
+	names, err := loader.ListTargets()
+	if err != nil || strings.Join(names, ",") != "outside" {
+		t.Fatalf("ListTargets with invalid filename = %q, %v", names, err)
+	}
+	configs, err := loader.LoadAll()
+	if err != nil || len(configs) != 1 || configs["outside"] == nil {
+		t.Fatalf("LoadAll with invalid filename = %#v, %v", configs, err)
+	}
+
 	write("escape", `{"inherits":["../outside"]}`)
 	write("cycle-a", `{"inherits":["cycle-b"]}`)
 	write("cycle-b", `{"inherits":["cycle-a"]}`)
 
-	loader := NewLoader(dir)
+	loader = NewLoader(dir)
 	for _, name := range []string{"", "../outside", "a/b", `a\\b`, "with.dot"} {
 		if _, err := loader.Load(name); err == nil || !strings.Contains(err.Error(), "target name") {
 			t.Errorf("Load(%q) error = %v", name, err)
