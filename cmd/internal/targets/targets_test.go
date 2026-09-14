@@ -29,13 +29,14 @@ func TestTargets(t *testing.T) {
 	}
 	write("base", `{"goos":"linux","goarch":"arm","build-tags":["baremetal"],"linker":"ld.lld"}`)
 	write("board", `{"inherits":["base"],"cpu":"cortex-m0plus","build-tags":["board"]}`)
+	write("broken", `{`)
 	resolver := targetcfg.NewResolver(dir)
 
 	var output bytes.Buffer
 	if err := run(nil, &output, &output, resolver); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.ReplaceAll(output.String(), "\r\n", "\n"); got != "base\nboard\n" {
+	if got := strings.ReplaceAll(output.String(), "\r\n", "\n"); got != "base\nboard\nbroken\n" {
 		t.Fatalf("targets = %q", got)
 	}
 
@@ -53,6 +54,9 @@ func TestTargets(t *testing.T) {
 
 	if err := run([]string{"missing"}, &output, &output, resolver); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("missing target error = %v", err)
+	}
+	if err := run([]string{"broken"}, &output, &output, resolver); err == nil || !strings.Contains(err.Error(), "parse") {
+		t.Fatalf("broken explicit target error = %v", err)
 	}
 	if err := run([]string{"-bad"}, &output, &output, resolver); err == nil {
 		t.Fatal("unknown flag succeeded")
