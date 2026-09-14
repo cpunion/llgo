@@ -39,6 +39,13 @@ func TestTargets(t *testing.T) {
 	if got := strings.ReplaceAll(output.String(), "\r\n", "\n"); got != "base\nboard\nbroken\n" {
 		t.Fatalf("targets = %q", got)
 	}
+	output.Reset()
+	if err := run([]string{"-json"}, &output, &output, resolver); err == nil || !strings.Contains(err.Error(), "parse") {
+		t.Fatalf("bulk JSON with malformed target error = %v", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("bulk JSON emitted a partial document: %q", &output)
+	}
 
 	output.Reset()
 	if err := run([]string{"-json", "board"}, &output, &output, resolver); err != nil {
