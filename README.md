@@ -432,6 +432,10 @@ Go-only queries are delegated to the underlying Go toolchain and respect its env
 
 A real Go executable must remain in an absolute PATH directory. If `go` is a symlink or hard link to `llgo`, the environment command skips that link and searches the remaining PATH entries instead of invoking itself recursively.
 
+## Target configurations
+
+Use `llgo targets` to list embedded and cross-compilation target names. `llgo targets -json [name ...]` prints their fully resolved configurations, including inherited values, without downloading or building optional toolchains and libraries.
+
 ## Development tools
 
 * [pydump](_xtool/pydump): It is the first production program compiled with `llgo` rather than `go`. It outputs symbol information (functions, variables, and constants) from a Python library in JSON format, preparing for the generation of corresponding packages in `llgo`.
