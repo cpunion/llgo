@@ -44,12 +44,26 @@ var (
 
 func DebugDumpFinalizers() {
 	println("FINALIZER_STATE", gcNumGC, finalizerWorkerRunning)
+	println("FINALIZER_GLOBAL_RANGE", globalsStart, globalsEnd, heapStart, heapEnd)
 	for record := finalizers; record != nil; record = record.next {
 		address := ^record.object
 		state := finalizerObjectState(record)
 		println("FINALIZER_REGISTERED", address, record.state, record.kind, state)
 		if state != blockStateFree {
 			println("FINALIZER_VALUE", *(*int)(unsafe.Pointer(address)))
+			if *(*int)(unsafe.Pointer(address)) == 43 {
+				for source := globalsStart; source+32 < globalsEnd; source += gcScanWordSize {
+					word := loadGCScanWord(source)
+					if word >= address && word < address+80 {
+						println("FINALIZER_GLOBAL_ROOT", source, word)
+						if source >= globalsStart+32 {
+							for offset := source - 32; offset <= source+32; offset += 8 {
+								println("FINALIZER_GLOBAL_NEIGHBOR", offset, *(*uint64)(unsafe.Pointer(offset)))
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 	for record := readyFinalizers; record != nil; record = record.readyNext {
