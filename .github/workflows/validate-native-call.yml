@@ -1,0 +1,67 @@
+name: Isolated native TLS and call benchmark
+
+on:
+  push:
+    branches: [codex/validate-native-call-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: mingw
+          windows-arch: amd64
+      - uses: ./.github/actions/setup-go
+      - name: Build identical benchmark sources with both compiler revisions
+        run: |
+          set -euo pipefail
+          probe_root="$(cygpath -m "$RUNNER_TEMP")/native-call-probe"
+          mkdir -p "$probe_root"
+          git fetch --depth=1 origin 2db247e4384848c189e94cbbe96b04462e9bc698 fcce9aaf1c2f94ba5d7442a61eba8a0b0e21ce15
+          for revision in base head; do
+            if [[ "$revision" == base ]]; then
+              sha=2db247e4384848c189e94cbbe96b04462e9bc698
+            else
+              sha=fcce9aaf1c2f94ba5d7442a61eba8a0b0e21ce15
+            fi
+            source_root="$probe_root/source-$revision"
+            compiler="$probe_root/llgo-$revision.exe"
+            git worktree add --detach "$source_root" "$sha"
+            (cd "$source_root"; LLGO_ROOT="$source_root" go build -o "$compiler" ./cmd/llgo)
+            LLGO_ROOT="$source_root" "$compiler" test -c -o "$probe_root/$revision.exe" ./benchmark/getgprobe
+            llvm-nm --print-size --size-sort --defined-only "$probe_root/$revision.exe" > "$probe_root/$revision.symbols.txt"
+            llvm-objdump --disassemble --no-show-raw-insn "$probe_root/$revision.exe" > "$probe_root/$revision.disassembly.txt"
+          done
+      - name: Interleave fresh processes in ABBA order
+        run: |
+          set -euo pipefail
+          probe_root="$(cygpath -m "$RUNNER_TEMP")/native-call-probe"
+          export GOMAXPROCS=1
+          for round in 1 2 3 4; do
+            for revision in base head head base; do
+              printf 'SAMPLE %s %s\n' "$round" "$revision" | tee -a "$probe_root/measurements.txt"
+              "$probe_root/$revision.exe" -test.run '^$' -test.bench '^Benchmark(GetG|DirectCall)$' -test.benchtime=500ms -test.count=1 | tee -a "$probe_root/measurements.txt"
+            done
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-call-probe
+          path: |
+            ${{ runner.temp }}/native-call-probe/*.exe
+            ${{ runner.temp }}/native-call-probe/*.txt
+          if-no-files-found: error
