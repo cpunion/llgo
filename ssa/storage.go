@@ -108,7 +108,7 @@ func (b Builder) fitLLVMValue(value llvm.Value, source Type, target llvm.Type) l
 				restored = llvm.CreateSExt(b.impl, truncated, value.Type())
 			}
 			overflow := llvm.CreateICmp(b.impl, llvm.IntNE, restored, value)
-			b.assertRuntimeError(overflow, "WebAssembly ABI integer conversion out of range")
+			b.InlineCall(b.Pkg.rtFunc("AssertWasmABIIntegerRange"), Expr{overflow, b.Prog.Bool()})
 			return truncated
 		}
 		t := *source
