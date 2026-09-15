@@ -1,0 +1,24 @@
+diff --git a/internal/build/run.go b/internal/build/run.go
+--- a/internal/build/run.go
++++ b/internal/build/run.go
+@@ -62,7 +62,7 @@ func runNativeTest(commands commandEnv, program testProgram, conf *Config, stdout,
+ 		return nil
+ 	}
+ 	if exitErr, ok := err.(*exec.ExitError); ok {
+-		fmt.Fprintf(stderr, "%s: exit code %d\n", program.app, exitErr.ExitCode())
++		fmt.Fprintf(stderr, "%s: %v (exit code %d)\n", program.app, exitErr, exitErr.ExitCode())
+ 	} else {
+ 		fmt.Fprintf(stderr, "failed to run test %s: %v\n", program.app, err)
+ 	}
+diff --git a/dev/test_go_version.sh b/dev/test_go_version.sh
+--- a/dev/test_go_version.sh
++++ b/dev/test_go_version.sh
+@@ -214,7 +214,7 @@ echo "LLGo: ${llgo_cmd}"
+ echo "Shard: ${shard_index}/${shard_total}; packages: ${#selected[@]}"
+ printf '  %s\n' "${selected[@]}"
+ 
+-test_flags=(-timeout="${LLGO_TEST_TIMEOUT:-20m}" -modfile="${modfile}")
++test_flags=(-v -timeout="${LLGO_TEST_TIMEOUT:-20m}" -modfile="${modfile}")
+ if [[ -n "${LLGO_TEST_JOBS:-}" ]]; then
+ 	test_flags=(-p="${LLGO_TEST_JOBS}" "${test_flags[@]}")
+ fi

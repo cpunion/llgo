@@ -1,0 +1,69 @@
+name: Diagnose W1 macOS native test exit
+
+on:
+  push:
+    branches: [codex/diagnose-w1-macos-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    if: github.repository == 'cpunion/llgo'
+    name: macOS native (${{ matrix.subject }})
+    runs-on: macos-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - subject: w1
+            revision: 6b7350457dc816c04d7c28ea64f77258b5102b64
+          - subject: base
+            revision: 51472778617535a1e53566d87511441ee0ef0339
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: xgo-dev/llgo
+          ref: ${{ matrix.revision }}
+          path: subject
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+      - uses: ./.github/actions/setup-embed-deps
+      - uses: ./.github/actions/setup-demo-deps
+        with:
+          install-lldb-python: 'true'
+      - uses: ./.github/actions/setup-go
+      - uses: ./.github/actions/setup-llgo-cache
+      - name: Build the pinned compiler with exit diagnostics only
+        shell: bash
+        run: |
+          mkdir -p evidence
+          git -C subject rev-parse HEAD | tee evidence/revision.txt
+          git -C subject apply ../dev/diagnose_w1_macos.patch
+          git -C subject diff | tee evidence/diagnostics.diff
+          subject/dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-diagnostic-bin"
+      - name: Complete the original native test phase
+        env:
+          LLGO_BUILD_CACHE: '1'
+          LLGO_TEST_BENCH_GO126: '1'
+          LLGO_TEST_CHECK_SYMBOLS: '0'
+          LLGO_TEST_STD_BUILDMODES: '0'
+          SHARD_INDEX: '0'
+          SHARD_TOTAL: '1'
+        shell: bash
+        run: |
+          export LLGO="$RUNNER_TEMP/llgo-diagnostic-bin/llgo"
+          export LLGO_TEST_LLGEN="$RUNNER_TEMP/llgo-diagnostic-bin/llgen"
+          export CHECK_STD_SYMBOLS="$RUNNER_TEMP/llgo-diagnostic-bin/check_std_symbols"
+          node dev/diagnose_w1_macos.mjs "$PWD/subject" "$PWD/evidence"
+      - name: Upload native exit evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: w1-macos-native-${{ matrix.subject }}
+          path: evidence
+          if-no-files-found: error
+          retention-days: 7
