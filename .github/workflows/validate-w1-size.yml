@@ -1,0 +1,81 @@
+name: WASM narrowing size validation
+
+on:
+  push:
+    branches: [codex/validate-w1-size-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check bounded DNS failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          wget --no-proxy -4 --retry-on-host-error --tries=3 --timeout=15 --waitretry=2 -O /dev/null https://llgo-setup-negative.invalid/key > "$RUNNER_TEMP/dns-negative.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/dns-negative.log"
+          test "$status" -eq 4
+          test "$(grep -c 'Resolving llgo-setup-negative.invalid' "$RUNNER_TEMP/dns-negative.log")" -eq 3
+          if bash --noprofile --norc -c 'set -euo pipefail; false | true'; then
+            echo 'A failed producer was masked by the pipeline' >&2
+            exit 1
+          fi
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: '39.0.1'
+      - uses: ./.github/actions/setup-go
+      - name: Build compiler and run SSA tests
+        run: |
+          go test ./ssa -count=1
+          go build -o "$RUNNER_TEMP/llgo-head" ./cmd/llgo
+      - name: Verify ABI profiles including native narrowing panic
+        env:
+          LLGO: ${{ runner.temp }}/llgo-head
+          LLGO_ROOT: ${{ github.workspace }}
+        run: dev/test_wasm_target_profiles.sh
+      - name: Compare small binaries with unmodified W1
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin cb7214ae45faca04400dcaa65733358b414b26ad
+          git worktree add --detach "$RUNNER_TEMP/size-base" FETCH_HEAD
+          (cd "$RUNNER_TEMP/size-base" && go build -o "$RUNNER_TEMP/llgo-base" ./cmd/llgo)
+          for profile in emscripten emscripten-memory64; do
+            for example in cprintf println; do
+              fixture="$GITHUB_WORKSPACE/benchmark/binary_size/$example"
+              for revision in base head; do
+                source_root="$GITHUB_WORKSPACE"
+                if [[ "$revision" == base ]]; then
+                  source_root="$RUNNER_TEMP/size-base"
+                fi
+                output="$RUNNER_TEMP/size-$revision-$profile-$example"
+                mkdir -p "$output"
+                LLGO_ROOT="$source_root" "$RUNNER_TEMP/llgo-$revision" build -target "$profile" -o "$output/program.mjs" "$fixture"
+                node "$GITHUB_WORKSPACE/targets/$profile-runner.mjs" "$output/program.mjs"
+                printf 'SIZE %s %s %s module=%s glue=%s\n' "$revision" "$profile" "$example" "$(stat -c%s "$output/program.wasm")" "$(stat -c%s "$output/program.mjs")"
+              done
+              base_size=$(stat -c%s "$RUNNER_TEMP/size-base-$profile-$example/program.wasm")
+              head_size=$(stat -c%s "$RUNNER_TEMP/size-head-$profile-$example/program.wasm")
+              test "$head_size" -le "$base_size"
+            done
+          done
