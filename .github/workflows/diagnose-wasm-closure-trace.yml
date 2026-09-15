@@ -1,0 +1,64 @@
+name: Trace Wasm allocation window
+
+on:
+  push:
+    branches: [codex/diagnose-wasm-closure-trace-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Enable tracing only inside the allocation-count window
+        env:
+          PROBE_ROOT: ${{ runner.temp }}/wasm-closure-trace
+        run: |
+          node <<'NODE'
+          const fs = require('fs'), cp = require('child_process');
+          const root = process.env.PROBE_ROOT;
+          fs.mkdirSync(root, {recursive:true});
+          const goroot = cp.execFileSync('go',['env','GOROOT'],{encoding:'utf8'}).trim();
+          let source = fs.readFileSync(goroot+'/test/closure.go','utf8');
+          const replace = (s, a, b) => { if (!s.includes(a)) throw Error('missing source marker: '+a); return s.replace(a,b); };
+          source = replace(source, 'import "runtime"', 'import ("runtime"; _ "unsafe")\n\n//go:linkname debugTraceAlloc github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc.debugTraceAlloc\nvar debugTraceAlloc bool');
+          source = replace(source, 'n0 := memstats.Mallocs', 'n0 := memstats.Mallocs\n\tdebugTraceAlloc = true');
+          source = replace(source, 'if n0 != memstats.Mallocs {', 'debugTraceAlloc = false\n\tprintln("ALLOCATION_WINDOW", n0, memstats.Mallocs)\n\tif n0 != memstats.Mallocs {');
+          fs.writeFileSync(root+'/trace.go',source);
+          NODE
+      - name: Capture allocation call stacks
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+          probe_root="$RUNNER_TEMP/wasm-closure-trace"
+          GOOS=js GOARCH=wasm "$RUNNER_TEMP/llgo" build -ldflags=-w=false -o "$probe_root/trace.mjs" "$probe_root/trace.go"
+          set +e
+          GOMAXPROCS=1 node targets/emscripten-runner.mjs --browser-only "$probe_root/trace.mjs" > "$probe_root/trace.log" 2>&1
+          status=$?
+          set -e
+          printf 'DIAGNOSTIC exit=%s\n' "$status"
+          sed -n '1,220p' "$probe_root/trace.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wasm-closure-trace
+          path: ${{ runner.temp }}/wasm-closure-trace
+          if-no-files-found: error

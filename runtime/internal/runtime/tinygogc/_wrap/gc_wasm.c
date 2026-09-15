@@ -2,10 +2,15 @@
 #include <stdint.h>
 
 #if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
 #include <emscripten/heap.h>
 #include <emscripten/stack.h>
+EM_JS(void, llgo_debug_gc_allocation, (int size), {
+	console.error("GC_ALLOC", size, new Error().stack);
+});
 #else
 extern unsigned char __stack_high;
+void llgo_debug_gc_allocation(int size) { (void)size; }
 #endif
 
 extern unsigned char __data_end;
