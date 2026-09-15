@@ -1,0 +1,81 @@
+name: W2 finalizer acceptance validation
+
+on:
+  push:
+    branches: [codex/validate-w2-finalizer-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+        with:
+          chrome-version: '153.0.8010.36'
+          install-dependencies: true
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: '39.0.1'
+      - uses: bytecodealliance/actions/wasm-tools/setup@v1
+        with:
+          version: '1.243.0'
+      - uses: ./.github/actions/setup-go
+      - name: Build clean candidate without diagnostic code
+        run: dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+      - name: Repeat lifecycle acceptance on all three memory and host combinations
+        env:
+          LLGO_ROOT: ${{ github.workspace }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/finalizers"
+          failed=0
+          for profile in emscripten emscripten-memory64 wasi; do
+            if [[ "$profile" == wasi ]]; then
+              module="$RUNNER_TEMP/finalizers/$profile.wasm"
+              runner=(wasmtime run -W exceptions=y "$module")
+            else
+              module="$RUNNER_TEMP/finalizers/$profile.mjs"
+              runner=(node "targets/$profile-runner.mjs" "$module")
+            fi
+            "$RUNNER_TEMP/llgo-bin/llgo" build -target "$profile" -o "$module" ./internal/build/testdata/wasm-lifecycle
+            for iteration in {1..200}; do
+              status=0
+              timeout 30s "${runner[@]}" > "$RUNNER_TEMP/finalizers/$profile-$iteration.log" 2>&1 || status=$?
+              printf 'LIFECYCLE %s %s exit=%s\n' "$profile" "$iteration" "$status"
+              if [[ "$status" -ne 0 ]]; then
+                cat "$RUNNER_TEMP/finalizers/$profile-$iteration.log"
+                failed=1
+              fi
+            done
+          done
+          exit "$failed"
+      - name: Complete runtime and browser integration gate
+        env:
+          CHROME: ${{ steps.chrome.outputs.chrome-path }}
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+          LLGO_ROOT: ${{ github.workspace }}
+        run: dev/test_wasm_single_worker.sh runtime
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: w2-finalizer-validation
+          path: ${{ runner.temp }}/finalizers
+          if-no-files-found: error
