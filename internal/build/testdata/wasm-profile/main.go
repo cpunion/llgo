@@ -51,7 +51,11 @@ func checkNativeNarrowing() {
 	recovered := false
 	func() {
 		defer func() {
-			recovered = recover() != nil
+			got, ok := recover().(interface {
+				RuntimeError()
+				Error() string
+			})
+			recovered = ok && got.Error() == "runtime error: WebAssembly ABI integer conversion out of range"
 		}()
 		cEchoSize(value)
 	}()

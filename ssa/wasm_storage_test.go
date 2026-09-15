@@ -140,10 +140,17 @@ func TestWasm32StorageIntegerConversions(t *testing.T) {
 	}()
 
 	ir := pkg.Module().String()
-	for _, want := range []string{"sext i32", "trunc i64", "icmp ne i64", "AssertRuntimeError"} {
+	for _, want := range []string{"sext i32", "trunc i64", "icmp ne i64", "AssertWasmABIIntegerRange"} {
 		if !strings.Contains(ir, want) {
 			t.Fatalf("J32 signed native boundary IR does not contain %q:\n%s", want, ir)
 		}
+	}
+	check := pkg.Module().NamedFunction(PkgRuntime + ".AssertWasmABIIntegerRange")
+	if check.ParamsCount() != 1 || check.Param(0).Type().IntTypeWidth() != 1 {
+		t.Fatal("native narrowing check must pass only a scalar boolean")
+	}
+	if strings.Contains(ir, "WebAssembly ABI integer conversion out of range") {
+		t.Fatal("native narrowing caller materializes the runtime error message")
 	}
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("invalid J32 signed native-boundary module: %v\n%s", err, ir)
@@ -355,7 +362,7 @@ func TestWasm32NativeBoundaryKeepsPhysicalWordWidth(t *testing.T) {
 		"trunc i64",
 		"zext i32",
 		"icmp ne i64",
-		"AssertRuntimeError",
+		"AssertWasmABIIntegerRange",
 		"call i32 @\"example.com/p.cWord\"(i32",
 		"call { i32, i32 } @\"example.com/p.cWords\"(i32",
 	} {

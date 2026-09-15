@@ -51,6 +51,14 @@ func AssertRuntimeError(b bool, msg string) {
 	}
 }
 
+// AssertWasmABIIntegerRange keeps the constant error message out of each
+// narrowing call site, which only needs to pass a scalar condition.
+func AssertWasmABIIntegerRange(b bool) {
+	if b {
+		panic(errorString("WebAssembly ABI integer conversion out of range"))
+	}
+}
+
 func AssertNegativeShift(b bool) {
 	if b {
 		panic(errorString("negative shift amount"))
