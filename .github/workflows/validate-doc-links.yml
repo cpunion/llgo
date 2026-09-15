@@ -1,0 +1,25 @@
+name: Hosted documentation network validation
+
+on:
+  push:
+    branches: [codex/validate-doc-links-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  links:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+      - name: Verify embedded README examples
+        run: |
+          npm install -g embedme
+          embedme --verify README.md
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --max-concurrency 3 --retry-wait-time 15 README.md
