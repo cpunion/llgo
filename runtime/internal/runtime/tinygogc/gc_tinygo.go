@@ -526,6 +526,7 @@ func startMark(root uintptr) {
 			}
 
 			// Mark block.
+			debugFinalizerEdge(addr, word, referencedBlock, false)
 			gcSetState(referencedBlock, blockStateMark)
 
 			if stackLen == len(stack) {
@@ -575,6 +576,7 @@ func markRoot(addr, root uintptr) {
 		head := gcFindHeadForMark(block)
 
 		if gcStateOf(head) != blockStateMark {
+			debugFinalizerEdge(addr, root, head, true)
 			startMark(head)
 		}
 	}

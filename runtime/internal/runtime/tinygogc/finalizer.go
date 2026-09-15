@@ -71,6 +71,31 @@ func DebugDumpFinalizers() {
 	}
 }
 
+func debugFinalizerEdge(source, word, head uintptr, root bool) {
+	if gcNumGC != 23 {
+		return
+	}
+	for record := finalizers; record != nil; record = record.next {
+		if record.objectKey != encodeFinalizerAddress(gcAddressOf(head)) {
+			continue
+		}
+		println("FINALIZER_EDGE", source, word, ^record.object, root, finalizerDependencyScan)
+		if isOnHeap(source) {
+			parent := gcFindHead(blockFromAddr(source))
+			start, end := gcAddressOf(parent), gcAddressOf(gcFindNext(parent))
+			println("FINALIZER_PARENT", start, end, uintptr(getsp()))
+			for at := start; at < end && at < start+64; at += gcScanWordSize {
+				println("FINALIZER_PARENT_WORD", at, loadGCScanWord(at))
+			}
+		} else {
+			println("FINALIZER_STATIC", globalsStart, globalsEnd, uintptr(getsp()))
+			for at := source - 32; at <= source+32; at += gcScanWordSize {
+				println("FINALIZER_STATIC_WORD", at, loadGCScanWord(at))
+			}
+		}
+	}
+}
+
 // AddFinalizer registers callback for ptr without retaining the object. The
 // returned function cancels a callback that has not started. Multiple callbacks
 // may be registered for one object.
