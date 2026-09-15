@@ -1,0 +1,112 @@
+name: Validate caller overhead and isolated GOROOT cases
+on:
+  push:
+    branches: [codex/validate-wasm-caller-final-20260915]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: '39.0.1'
+      - uses: bytecodealliance/actions/wasm-tools/setup@v1
+        with:
+          version: '1.243.0'
+      - name: Build clean candidate and original revision
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/caller-validation"
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          git worktree add --detach "$RUNNER_TEMP/caller-base" fcce9aaf1c2f94ba5d7442a61eba8a0b0e21ce15
+          go -C "$RUNNER_TEMP/caller-base" build -o "$RUNNER_TEMP/llgo-base" ./cmd/llgo
+      - name: The new regression must detect the original wrapper allocations
+        run: |
+          set -euo pipefail
+          cp internal/build/testdata/wasm-test/caller_alloc_test.go "$RUNNER_TEMP/caller-base/internal/build/testdata/wasm-test/"
+          status=0
+          (
+            cd "$RUNNER_TEMP/caller-base"
+            LLGO_ROOT="$PWD" GOOS=js GOARCH=wasm "$RUNNER_TEMP/llgo-base" test -v -run '^TestCallerInstrumentationAllocations$' -count=1 -timeout=30s ./internal/build/testdata/wasm-test
+          ) > "$RUNNER_TEMP/caller-validation/baseline-regression.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/caller-validation/baseline-regression.log"
+          test "$status" -ne 0
+          grep -Eq 'caller metadata wrappers allocate .* objects, underlying helpers allocate' "$RUNNER_TEMP/caller-validation/baseline-regression.log"
+      - name: Complete public test-command acceptance on every path
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+        run: |
+          set -euo pipefail
+          dev/test_wasm_single_worker.sh test-command 2>&1 | tee "$RUNNER_TEMP/caller-validation/test-command.log"
+      - name: Repeat isolated GOROOT cases with strict output validation
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          goroot="$(go env GOROOT)"
+          for case_name in closure fixedbugs/issue4667 init1; do
+            name="${case_name##*/}"
+            mkdir -p "$RUNNER_TEMP/caller-validation/sources/$name"
+            cp "$goroot/test/$case_name.go" "$RUNNER_TEMP/caller-validation/sources/$name/main.go"
+            cmp "$goroot/test/$case_name.go" "$RUNNER_TEMP/caller-validation/sources/$name/main.go"
+          done
+          failed=0
+          for profile in gojs emscripten emscripten-memory64 wasi; do
+            for name in closure issue4667 init1; do
+              source="$RUNNER_TEMP/caller-validation/sources/$name/main.go"
+              module="$RUNNER_TEMP/caller-validation/$profile-$name"
+              if [[ "$profile" == wasi ]]; then
+                module+='.wasm'
+                "$RUNNER_TEMP/llgo-bin/llgo" build -target wasi -o "$module" "$source"
+                runner=(wasmtime run -W exceptions=y "$module")
+              elif [[ "$profile" == gojs ]]; then
+                module+='.mjs'
+                GOOS=js GOARCH=wasm "$RUNNER_TEMP/llgo-bin/llgo" build -o "$module" "$source"
+                runner=(node targets/emscripten-runner.mjs --browser-only "$module")
+              else
+                module+='.mjs'
+                "$RUNNER_TEMP/llgo-bin/llgo" build -target "$profile" -o "$module" "$source"
+                runner=(node "targets/$profile-runner.mjs" "$module")
+              fi
+              iterations=30
+              if [[ "$name" == init1 ]]; then iterations=10; fi
+              for ((iteration=1; iteration<=iterations; iteration++)); do
+                log="$RUNNER_TEMP/caller-validation/$profile-$name-$iteration.log"
+                status=0
+                timeout 30s "${runner[@]}" > "$log" 2>&1 || status=$?
+                printf 'GOROOT %s %s %s exit=%s bytes=%s\n' "$profile" "$name" "$iteration" "$status" "$(stat -c %s "$log")"
+                if [[ "$status" -ne 0 ]] || [[ -s "$log" ]]; then
+                  cat "$log"
+                  failed=1
+                  break
+                fi
+              done
+            done
+          done
+          exit "$failed"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wasm-caller-isolated-validation
+          path: ${{ runner.temp }}/caller-validation
+          if-no-files-found: error
