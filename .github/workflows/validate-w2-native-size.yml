@@ -1,0 +1,58 @@
+name: W2 native fmtprintf size attribution
+
+on:
+  push:
+    branches: [codex/validate-w2-native-size-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_FULL_RPATH: 'true'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - name: Retain exact main and W2 native binaries and symbol sizes
+        run: |
+          git fetch --depth=1 origin 2db247e4384848c189e94cbbe96b04462e9bc698 fcce9aaf1c2f94ba5d7442a61eba8a0b0e21ce15
+          mkdir -p "$RUNNER_TEMP/native-fmtprintf"
+          for revision in base head; do
+            if [[ "$revision" == base ]]; then
+              sha=2db247e4384848c189e94cbbe96b04462e9bc698
+            else
+              sha=fcce9aaf1c2f94ba5d7442a61eba8a0b0e21ce15
+            fi
+            source_root="$RUNNER_TEMP/native-source-$revision"
+            compiler="$RUNNER_TEMP/native-llgo-$revision"
+            git worktree add --detach "$source_root" "$sha"
+            (cd "$source_root"; LLGO_ROOT="$source_root" go build -o "$compiler" ./cmd/llgo)
+            for mode in default lto; do
+              flags=()
+              if [[ "$mode" == lto ]]; then flags=(-lto=full); fi
+              output="$RUNNER_TEMP/native-fmtprintf/$revision-$mode"
+              mkdir -p "$output"
+              LLGO_ROOT="$source_root" "$compiler" build "${flags[@]}" -o "$output/program" "$GITHUB_WORKSPACE/benchmark/binary_size/fmtprintf/main.go"
+              "$output/program" > "$output/stdout.txt"
+              llvm-nm --print-size --size-sort --defined-only "$output/program" > "$output/symbols.txt"
+              llvm-readelf --sections --wide "$output/program" > "$output/sections.txt"
+              printf 'FMT_SIZE %s %s %s\n' "$revision" "$mode" "$(stat -c%s "$output/program")"
+            done
+          done
+          diff "$RUNNER_TEMP/native-fmtprintf/base-default/stdout.txt" "$RUNNER_TEMP/native-fmtprintf/head-default/stdout.txt"
+          diff "$RUNNER_TEMP/native-fmtprintf/base-lto/stdout.txt" "$RUNNER_TEMP/native-fmtprintf/head-lto/stdout.txt"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-fmtprintf-attribution
+          path: ${{ runner.temp }}/native-fmtprintf
+          if-no-files-found: error
