@@ -1,0 +1,73 @@
+name: Diagnose Wasm closure allocation accounting
+
+on:
+  push:
+    branches: [codex/diagnose-wasm-closure-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Preserve original case and allocation-window controls
+        env:
+          PROBE_ROOT: ${{ runner.temp }}/wasm-closure
+        run: |
+          node <<'NODE'
+          const fs = require('fs'), cp = require('child_process');
+          const root = process.env.PROBE_ROOT;
+          fs.mkdirSync(root, {recursive:true});
+          const goroot = cp.execFileSync('go',['env','GOROOT'],{encoding:'utf8'}).trim();
+          const source = fs.readFileSync(goroot+'/test/closure.go','utf8');
+          const replace = (s, a, b) => { if (!s.includes(a)) throw Error('missing source marker: '+a); return s.replace(a,b); };
+          const measured = replace(source, 'if n0 != memstats.Mallocs {', 'println("ALLOCATION_WINDOW", n0, memstats.Mallocs)\n\tif n0 != memstats.Mallocs {');
+          const control = replace(measured, 'x, y := newfunc(), newfunc()\n\tif x(1) != 1 || y(2) != 2 {', 'x, y := 1, 2\n\tif x != 1 || y != 2 {');
+          const warmed = replace(measured, 'memstats := new(runtime.MemStats)', 'if newfunc()(42) != 42 { panic("warmup") }\n\tmemstats := new(runtime.MemStats)');
+          for (const [name, text] of Object.entries({original:source, measured, control, warmed})) {
+            fs.writeFileSync(root+'/'+name+'.go',text);
+          }
+          NODE
+      - name: Build exact W3 and record fresh-process outcomes
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin fe7f99a301c344245ae6a71119dbb0795245be60
+          source_root="$RUNNER_TEMP/closure-source"
+          git worktree add --detach "$source_root" fe7f99a301c344245ae6a71119dbb0795245be60
+          compiler="$RUNNER_TEMP/closure-llgo"
+          (cd "$source_root"; go build -o "$compiler" ./cmd/llgo)
+          probe_root="$RUNNER_TEMP/wasm-closure"
+          for variant in original measured control warmed; do
+            GOOS=js GOARCH=wasm LLGO_ROOT="$source_root" "$compiler" build -o "$probe_root/$variant.mjs" "$probe_root/$variant.go"
+            failures=0
+            for iteration in $(seq 1 30); do
+              if ! GOMAXPROCS=1 node "$source_root/targets/emscripten-runner.mjs" --browser-only "$probe_root/$variant.mjs" > "$probe_root/$variant-$iteration.log" 2>&1; then
+                failures=$((failures+1))
+              fi
+            done
+            printf 'DIAGNOSTIC %s failures=%s/30\n' "$variant" "$failures"
+            head -12 "$probe_root/$variant-1.log"
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wasm-closure-accounting
+          path: ${{ runner.temp }}/wasm-closure
+          if-no-files-found: error
