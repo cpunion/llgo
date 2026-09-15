@@ -3,7 +3,7 @@ package main
 import (
 	"runtime"
 	"time"
-	_ "unsafe"
+	"unsafe"
 	"weak"
 )
 
@@ -181,16 +181,6 @@ func installNonCapturingFinalizers(events chan<- int) {
 
 func testFinalizerCalls() {
 	events := make(chan int, 12)
-	defer func() {
-		if failure := recover(); failure != nil {
-			println("FINALIZER_EVENTS", len(events))
-			for len(events) != 0 {
-				println("FINALIZER_EVENT", <-events)
-			}
-			debugDumpFinalizers()
-			panic(failure)
-		}
-	}()
 	done := make(chan struct{})
 	go func() {
 		installFinalizerCalls(events)
@@ -415,6 +405,16 @@ func collectUntil(name string, done func() bool) {
 		if done() {
 			return
 		}
+	}
+	if name == "typed finalizers" {
+		// Diagnostic-only read of the existing channel, after the original
+		// collection budget has already failed. No extra live defer frame.
+		events := *(*chan int)(unsafe.Pointer(&nonCapturingEvents))
+		println("FINALIZER_EVENTS", len(events))
+		for len(events) != 0 {
+			println("FINALIZER_EVENT", <-events)
+		}
+		debugDumpFinalizers()
 	}
 	panic(name + " did not complete")
 }

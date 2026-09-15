@@ -36,7 +36,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/finalizers"
           "$RUNNER_TEMP/llgo" build -target emscripten -o "$RUNNER_TEMP/finalizers/lifecycle.mjs" ./internal/build/testdata/wasm-lifecycle
           failed=0
-          for iteration in {1..50}; do
+          for iteration in {1..200}; do
             status=0
             node targets/emscripten-runner.mjs "$RUNNER_TEMP/finalizers/lifecycle.mjs" > "$RUNNER_TEMP/finalizers/run-$iteration.log" 2>&1 || status=$?
             printf 'LIFECYCLE %s exit=%s\n' "$iteration" "$status"
