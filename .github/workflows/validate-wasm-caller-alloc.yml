@@ -1,0 +1,179 @@
+name: Validate allocation-free Wasm caller metadata
+
+on:
+  push:
+    branches: [codex/validate-wasm-caller-alloc-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+      LLGO_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+        with:
+          chrome-version: '153.0.8010.36'
+          install-dependencies: true
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: '39.0.1'
+      - uses: bytecodealliance/actions/wasm-tools/setup@v1
+        with:
+          version: '1.243.0'
+      - name: Build clean candidate and original revision
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/caller-validation"
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          git worktree add --detach "$RUNNER_TEMP/caller-base" fcce9aaf1c2f94ba5d7442a61eba8a0b0e21ce15
+          go -C "$RUNNER_TEMP/caller-base" build -o "$RUNNER_TEMP/llgo-base" ./cmd/llgo
+      - name: Verify the new regression detects the original defect
+        run: |
+          set -euo pipefail
+          cp internal/build/testdata/wasm-test/caller_alloc_test.go "$RUNNER_TEMP/caller-base/internal/build/testdata/wasm-test/"
+          status=0
+          (
+            cd "$RUNNER_TEMP/caller-base"
+            LLGO_ROOT="$PWD" GOOS=js GOARCH=wasm "$RUNNER_TEMP/llgo-base" test -v -run '^TestCallerInstrumentationAllocations$' -count=1 -timeout=30s ./internal/build/testdata/wasm-test
+          ) > "$RUNNER_TEMP/caller-validation/baseline-regression.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/caller-validation/baseline-regression.log"
+          test "$status" -ne 0
+          grep -Eq 'caller metadata updates allocate .* objects, want 0' "$RUNNER_TEMP/caller-validation/baseline-regression.log"
+      - name: All public test-command paths including the allocation regression
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+        run: |
+          set -euo pipefail
+          dev/test_wasm_single_worker.sh test-command 2>&1 | tee "$RUNNER_TEMP/caller-validation/test-command.log"
+      - name: Original GOROOT allocation checks across four providers
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          goroot="$(go env GOROOT)"
+          failed=0
+          for profile in gojs emscripten emscripten-memory64 wasi; do
+            for case_name in closure fixedbugs/issue4667; do
+              name="${case_name##*/}"
+              module="$RUNNER_TEMP/caller-validation/$profile-$name"
+              if [[ "$profile" == wasi ]]; then
+                module+='.wasm'
+                "$RUNNER_TEMP/llgo-bin/llgo" build -target wasi -o "$module" "$goroot/test/$case_name.go"
+                runner=(wasmtime run -W exceptions=y "$module")
+              elif [[ "$profile" == gojs ]]; then
+                module+='.mjs'
+                GOOS=js GOARCH=wasm "$RUNNER_TEMP/llgo-bin/llgo" build -o "$module" "$goroot/test/$case_name.go"
+                runner=(node targets/emscripten-runner.mjs --browser-only "$module")
+              else
+                module+='.mjs'
+                "$RUNNER_TEMP/llgo-bin/llgo" build -target "$profile" -o "$module" "$goroot/test/$case_name.go"
+                runner=(node "targets/$profile-runner.mjs" "$module")
+              fi
+              for iteration in {1..30}; do
+                log="$RUNNER_TEMP/caller-validation/$profile-$name-$iteration.log"
+                status=0
+                timeout 30s "${runner[@]}" > "$log" 2>&1 || status=$?
+                printf 'GOROOT %s %s %s exit=%s\n' "$profile" "$case_name" "$iteration" "$status"
+                if [[ "$status" -ne 0 ]]; then cat "$log"; failed=1; fi
+              done
+            done
+          done
+          exit "$failed"
+      - name: Recheck lifecycle acceptance after the code layout change
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for profile in emscripten emscripten-memory64 wasi; do
+            module="$RUNNER_TEMP/caller-validation/$profile-lifecycle"
+            if [[ "$profile" == wasi ]]; then
+              module+='.wasm'
+              runner=(wasmtime run -W exceptions=y "$module")
+            else
+              module+='.mjs'
+              runner=(node "targets/$profile-runner.mjs" "$module")
+            fi
+            "$RUNNER_TEMP/llgo-bin/llgo" build -target "$profile" -o "$module" ./internal/build/testdata/wasm-lifecycle
+            for iteration in {1..100}; do
+              log="$RUNNER_TEMP/caller-validation/$profile-lifecycle-$iteration.log"
+              status=0
+              timeout 30s "${runner[@]}" > "$log" 2>&1 || status=$?
+              printf 'LIFECYCLE %s %s exit=%s\n' "$profile" "$iteration" "$status"
+              if [[ "$status" -ne 0 ]] || ! grep -Fq 'wasm lifecycle ok' "$log"; then cat "$log"; failed=1; fi
+            done
+          done
+          exit "$failed"
+      - name: Complete runtime and real browser gate
+        if: ${{ !cancelled() }}
+        env:
+          CHROME: ${{ steps.chrome.outputs.chrome-path }}
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+        run: |
+          set -euo pipefail
+          dev/test_wasm_single_worker.sh runtime 2>&1 | tee "$RUNNER_TEMP/caller-validation/runtime.log"
+      - name: Paired Wasm size and output check
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          for revision in base head; do
+            if [[ "$revision" == base ]]; then
+              compiler="$RUNNER_TEMP/llgo-base"
+              compiler_root="$RUNNER_TEMP/caller-base"
+            else
+              compiler="$RUNNER_TEMP/llgo-bin/llgo"
+              compiler_root="$GITHUB_WORKSPACE"
+            fi
+            mkdir -p "$RUNNER_TEMP/caller-validation/$revision"
+            for profile in gojs emscripten emscripten-memory64 wasi; do
+              for example in cprintf println fmtprintf; do
+                module="$RUNNER_TEMP/caller-validation/$profile-$example"
+                source="benchmark/binary_size/$example/main.go"
+                if [[ "$profile" == wasi ]]; then
+                  module+='.wasm'
+                  LLGO_ROOT="$compiler_root" "$compiler" build -target wasi -o "$module" "$source"
+                  runner=(wasmtime run -W exceptions=y "$module")
+                elif [[ "$profile" == gojs ]]; then
+                  module+='.mjs'
+                  LLGO_ROOT="$compiler_root" GOOS=js GOARCH=wasm "$compiler" build -o "$module" "$source"
+                  runner=(node targets/emscripten-runner.mjs --browser-only "$module")
+                else
+                  module+='.mjs'
+                  LLGO_ROOT="$compiler_root" "$compiler" build -target "$profile" -o "$module" "$source"
+                  runner=(node "targets/$profile-runner.mjs" "$module")
+                fi
+                timeout 30s "${runner[@]}" 2>&1 | tee "$RUNNER_TEMP/caller-validation/$revision/$profile-$example.out"
+                grep -Fq 'Hello, world' "$RUNNER_TEMP/caller-validation/$revision/$profile-$example.out"
+                wasm="${module%.mjs}"
+                if [[ "$module" == *.mjs ]]; then wasm+='.wasm'; fi
+                printf 'SIZE %s %s %s %s\n' "$revision" "$profile" "$example" "$(stat -c %s "$wasm")" | tee -a "$RUNNER_TEMP/caller-validation/sizes.txt"
+                cp "$wasm" "$RUNNER_TEMP/caller-validation/$revision/"
+              done
+            done
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wasm-caller-allocation-validation
+          path: ${{ runner.temp }}/caller-validation
+          if-no-files-found: error
