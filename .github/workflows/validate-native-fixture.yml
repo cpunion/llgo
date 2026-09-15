@@ -1,4 +1,4 @@
-name: Native ARM64 fixture control
+name: Native x86 fixture control
 
 on:
   push:
@@ -9,8 +9,8 @@ permissions:
 
 jobs:
   compare:
-    runs-on: windows-11-arm
-    timeout-minutes: 35
+    runs-on: windows-2022
+    timeout-minutes: 40
     env:
       GOMAXPROCS: '2'
       GOFLAGS: -tags=llvm22
@@ -24,15 +24,11 @@ jobs:
         with:
           llvm-version: 22
           windows-abi: mingw
-          windows-arch: arm64
+          windows-arch: '386'
       - uses: ./.github/actions/setup-go
         with:
-          architecture: arm64
-      - uses: ./.github/actions/activate-windows-target
-        with:
-          windows-abi: mingw
-          windows-arch: arm64
-      - name: Build three controlled variants of the full test package
+          architecture: x64
+      - name: Build host compilers before activating the x86 target
         run: |
           set -euo pipefail
           probe_root="$(cygpath -m "$RUNNER_TEMP")/native-fixture-probe"
@@ -49,6 +45,17 @@ jobs:
             git worktree add --detach "$source_root" "$sha"
             (cd "$source_root"; LLGO_ROOT="$source_root" go build -p=1 -o "$compiler" ./cmd/llgo)
           done
+          # The activation action places this host compiler's DLL closure next
+          # to both compilers before it puts x86 runtime DLLs first on PATH.
+          echo "LLGO_TEST_LLGO=$probe_root/llgo-head.exe" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: mingw
+          windows-arch: '386'
+      - name: Build three controlled variants of the full test package
+        run: |
+          set -euo pipefail
+          probe_root="$(cygpath -m "$RUNNER_TEMP")/native-fixture-probe"
           for variant in base head-fixed head-current; do
             revision='head'
             fixture='base'
@@ -77,7 +84,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: native-fixture-probe
+          name: native-x86-fixture-probe
           path: |
             ${{ runner.temp }}/native-fixture-probe/base.exe
             ${{ runner.temp }}/native-fixture-probe/head-fixed.exe
