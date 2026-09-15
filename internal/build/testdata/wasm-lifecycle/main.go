@@ -3,8 +3,12 @@ package main
 import (
 	"runtime"
 	"time"
+	_ "unsafe"
 	"weak"
 )
+
+//go:linkname debugDumpFinalizers github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc.DebugDumpFinalizers
+func debugDumpFinalizers()
 
 type object struct {
 	value int
@@ -177,6 +181,16 @@ func installNonCapturingFinalizers(events chan<- int) {
 
 func testFinalizerCalls() {
 	events := make(chan int, 12)
+	defer func() {
+		if failure := recover(); failure != nil {
+			println("FINALIZER_EVENTS", len(events))
+			for len(events) != 0 {
+				println("FINALIZER_EVENT", <-events)
+			}
+			debugDumpFinalizers()
+			panic(failure)
+		}
+	}()
 	done := make(chan struct{})
 	go func() {
 		installFinalizerCalls(events)

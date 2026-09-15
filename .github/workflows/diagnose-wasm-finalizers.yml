@@ -1,0 +1,54 @@
+name: WASM finalizer state diagnosis
+
+on:
+  push:
+    branches: [codex/diagnose-wasm-finalizers-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: ./.github/actions/setup-go
+      - name: Repeat the published runtime with diagnostic state on failure
+        env:
+          LLGO_ROOT: ${{ github.workspace }}
+        run: |
+          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+          mkdir -p "$RUNNER_TEMP/finalizers"
+          "$RUNNER_TEMP/llgo" build -target emscripten -o "$RUNNER_TEMP/finalizers/lifecycle.mjs" ./internal/build/testdata/wasm-lifecycle
+          failed=0
+          for iteration in {1..50}; do
+            status=0
+            node targets/emscripten-runner.mjs "$RUNNER_TEMP/finalizers/lifecycle.mjs" > "$RUNNER_TEMP/finalizers/run-$iteration.log" 2>&1 || status=$?
+            printf 'LIFECYCLE %s exit=%s\n' "$iteration" "$status"
+            if [[ "$status" -ne 0 ]]; then
+              cat "$RUNNER_TEMP/finalizers/run-$iteration.log"
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wasm-finalizer-state
+          path: ${{ runner.temp }}/finalizers
+          if-no-files-found: error

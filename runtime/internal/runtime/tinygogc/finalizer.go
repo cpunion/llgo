@@ -42,6 +42,21 @@ var (
 	finalizerDependencyScan bool
 )
 
+func DebugDumpFinalizers() {
+	println("FINALIZER_STATE", gcNumGC, finalizerWorkerRunning)
+	for record := finalizers; record != nil; record = record.next {
+		address := ^record.object
+		state := finalizerObjectState(record)
+		println("FINALIZER_REGISTERED", address, record.state, record.kind, state)
+		if state != blockStateFree {
+			println("FINALIZER_VALUE", *(*int)(unsafe.Pointer(address)))
+		}
+	}
+	for record := readyFinalizers; record != nil; record = record.readyNext {
+		println("FINALIZER_READY", ^record.object, record.state, record.kind)
+	}
+}
+
 // AddFinalizer registers callback for ptr without retaining the object. The
 // returned function cancels a callback that has not started. Multiple callbacks
 // may be registered for one object.
