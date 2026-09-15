@@ -1,0 +1,86 @@
+name: Native ARM64 fixture control
+
+on:
+  push:
+    branches: [codex/validate-native-fixture-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: windows-11-arm
+    timeout-minutes: 35
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: mingw
+          windows-arch: arm64
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: arm64
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: mingw
+          windows-arch: arm64
+      - name: Build three controlled variants of the full test package
+        run: |
+          set -euo pipefail
+          probe_root="$(cygpath -m "$RUNNER_TEMP")/native-fixture-probe"
+          mkdir -p "$probe_root"
+          git fetch --depth=1 origin 2db247e4384848c189e94cbbe96b04462e9bc698 3b3a5e599051110cb7df306c000fbb1092073465
+          for revision in base head; do
+            if [[ "$revision" == base ]]; then
+              sha=2db247e4384848c189e94cbbe96b04462e9bc698
+            else
+              sha=3b3a5e599051110cb7df306c000fbb1092073465
+            fi
+            source_root="$probe_root/source-$revision"
+            compiler="$probe_root/llgo-$revision.exe"
+            git worktree add --detach "$source_root" "$sha"
+            (cd "$source_root"; LLGO_ROOT="$source_root" go build -p=1 -o "$compiler" ./cmd/llgo)
+          done
+          for variant in base head-fixed head-current; do
+            revision='head'
+            fixture='base'
+            if [[ "$variant" == base ]]; then revision='base'; fi
+            if [[ "$variant" == head-current ]]; then fixture='head'; fi
+            source_root="$probe_root/source-$revision"
+            compiler="$probe_root/llgo-$revision.exe"
+            (
+              cd "$probe_root/source-$fixture"
+              LLGO_ROOT="$source_root" "$compiler" test -c -o "$probe_root/$variant.exe" ./test/llgoext
+            )
+            llvm-nm --print-size --size-sort --defined-only "$probe_root/$variant.exe" > "$probe_root/$variant.symbols.txt"
+            llvm-objdump --disassemble --no-show-raw-insn "$probe_root/$variant.exe" > "$probe_root/$variant.disassembly.txt"
+          done
+      - name: Interleave all three variants symmetrically
+        run: |
+          set -euo pipefail
+          probe_root="$(cygpath -m "$RUNNER_TEMP")/native-fixture-probe"
+          export GOMAXPROCS=1
+          for round in 1 2 3 4; do
+            for variant in base head-fixed head-current head-current head-fixed base; do
+              printf 'SAMPLE %s %s\n' "$round" "$variant" | tee -a "$probe_root/measurements.txt"
+              "$probe_root/$variant.exe" -test.run '^$' -test.bench '^Benchmark(RuntimeGetG|DirectCall|GlobalWrite|ChannelHandoff)$' -test.benchtime=500ms -test.count=1 | tee -a "$probe_root/measurements.txt"
+            done
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-fixture-probe
+          path: |
+            ${{ runner.temp }}/native-fixture-probe/base.exe
+            ${{ runner.temp }}/native-fixture-probe/head-fixed.exe
+            ${{ runner.temp }}/native-fixture-probe/head-current.exe
+            ${{ runner.temp }}/native-fixture-probe/*.txt
+          if-no-files-found: error
