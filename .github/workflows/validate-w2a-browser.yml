@@ -1,4 +1,4 @@
-name: W2-A browser validation
+name: WASM runtime and size validation
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   runtime:
-    name: Focused W2-A runtime and Chrome
+    name: Focused W2 runtime, Chrome, and small binaries
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -36,7 +36,7 @@ jobs:
         with:
           version: '1.243.0'
       - uses: ./.github/actions/setup-go
-      - name: Build exact W2-A candidate
+      - name: Build exact W2 candidate
         run: dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
       - name: Execute complete runtime gate including both real browser providers
         env:
@@ -45,3 +45,40 @@ jobs:
           LLGO_ROOT: ${{ github.workspace }}
           LLGO_BUILD_CACHE: '1'
         run: dev/test_wasm_single_worker.sh runtime
+      - name: Compare cprintf and println with the pre-optimization W2 code
+        env:
+          GOMAXPROCS: '2'
+          GOFLAGS: -tags=llvm22
+          LLGO_BUILD_CACHE: 'on'
+        run: |
+          git fetch --depth=1 origin cd3809af47a594ec5119cedbc0cb33ffb56f7521
+          git worktree add --detach "$RUNNER_TEMP/size-base" FETCH_HEAD
+          (
+            cd "$RUNNER_TEMP/size-base"
+            go build -o "$RUNNER_TEMP/size-base-llgo" ./cmd/llgo
+          )
+          for profile in emscripten emscripten-memory64; do
+            for example in cprintf println; do
+              fixture="$GITHUB_WORKSPACE/benchmark/binary_size/$example"
+              for revision in base head; do
+                if [[ "$revision" == base ]]; then
+                  source_root="$RUNNER_TEMP/size-base"
+                  compiler="$RUNNER_TEMP/size-base-llgo"
+                else
+                  source_root="$GITHUB_WORKSPACE"
+                  compiler="$RUNNER_TEMP/llgo-bin/llgo"
+                fi
+                output="$RUNNER_TEMP/size-$revision-$profile-$example"
+                mkdir -p "$output"
+                LLGO_ROOT="$source_root" "$compiler" build -target "$profile" -o "$output/program.mjs" "$fixture"
+                node "$GITHUB_WORKSPACE/targets/$profile-runner.mjs" "$output/program.mjs"
+                printf 'SIZE %s %s %s module=%s glue=%s\n' "$revision" "$profile" "$example" "$(stat -c%s "$output/program.wasm")" "$(stat -c%s "$output/program.mjs")"
+              done
+              base_size=$(stat -c%s "$RUNNER_TEMP/size-base-$profile-$example/program.wasm")
+              head_size=$(stat -c%s "$RUNNER_TEMP/size-head-$profile-$example/program.wasm")
+              if (( head_size > base_size )); then
+                echo "caller literal optimization increased $profile/$example module size" >&2
+                exit 1
+              fi
+            done
+          done
