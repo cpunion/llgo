@@ -1,0 +1,40 @@
+name: Compare Wasm caller helper allocations
+on:
+  push:
+    branches: [codex/diagnose-caller-helpers-20260915]
+permissions:
+  contents: read
+jobs:
+  trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: -tags=llvm22
+      LLGO_ROOT: ${{ github.workspace }}
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: ./.github/actions/setup-go
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Trace wrapped and underlying helpers after warm-up
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/caller-trace"
+          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+          GOOS=js GOARCH=wasm "$RUNNER_TEMP/llgo" build -ldflags=-w=false -o "$RUNNER_TEMP/caller-trace/probe.mjs" ./internal/build/testdata/caller-allocation-probe
+          node targets/emscripten-runner.mjs --browser-only "$RUNNER_TEMP/caller-trace/probe.mjs" 2>&1 | tee "$RUNNER_TEMP/caller-trace/probe.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: caller-helper-allocation-trace
+          path: ${{ runner.temp }}/caller-trace
+          if-no-files-found: error

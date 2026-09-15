@@ -41,6 +41,11 @@ import (
 
 const gcDebug = false
 
+var debugTraceAlloc bool
+
+//go:linkname debugTraceAllocation C.llgo_debug_gc_allocation
+func debugTraceAllocation(size c.Int)
+
 // blockState stores the four states in which a block can be. It is two bits in
 // size.
 const (
@@ -280,6 +285,9 @@ func Alloc(size uintptr) unsafe.Pointer {
 
 	gcTotalAlloc += uint64(size)
 	gcMallocs++
+	if debugTraceAlloc {
+		debugTraceAllocation(c.Int(size))
+	}
 
 	neededBlocks := (size + (bytesPerBlock - 1)) / bytesPerBlock
 	gcTotalBlocks += uint64(neededBlocks)
