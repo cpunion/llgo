@@ -45,13 +45,13 @@ jobs:
           LLGO_ROOT: ${{ github.workspace }}
           LLGO_BUILD_CACHE: '1'
         run: dev/test_wasm_single_worker.sh runtime
-      - name: Compare cprintf and println with the pre-optimization W2 code
+      - name: Compare cprintf and println with the published W2 code
         env:
           GOMAXPROCS: '2'
           GOFLAGS: -tags=llvm22
           LLGO_BUILD_CACHE: 'on'
         run: |
-          git fetch --depth=1 origin cd3809af47a594ec5119cedbc0cb33ffb56f7521
+          git fetch --depth=1 origin 291adee7373a582c85f18245c2874f25f601b48c
           git worktree add --detach "$RUNNER_TEMP/size-base" FETCH_HEAD
           (
             cd "$RUNNER_TEMP/size-base"
@@ -77,7 +77,7 @@ jobs:
               base_size=$(stat -c%s "$RUNNER_TEMP/size-base-$profile-$example/program.wasm")
               head_size=$(stat -c%s "$RUNNER_TEMP/size-head-$profile-$example/program.wasm")
               if (( head_size > base_size )); then
-                echo "caller literal optimization increased $profile/$example module size" >&2
+                echo "narrowing check optimization increased $profile/$example module size" >&2
                 exit 1
               fi
             done
