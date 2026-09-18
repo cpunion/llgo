@@ -25,7 +25,7 @@ concurrency:
 jobs:
   stdlib-slice:
     name: W2 stdlib slice (${{ matrix.profile }})
-    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout || 25 }}
     env:
       GOFLAGS: -tags=llvm22

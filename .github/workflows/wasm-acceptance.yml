@@ -57,13 +57,9 @@ jobs:
         run: dev/test_wasm_browser.sh
 
   goroot-smoke:
-    name: wasm GOROOT sentinels (${{ matrix.profile }})
-    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [J32-GoJS, J32-Emscripten, J64-Emscripten, W32-WASI]
+    name: wasm GOROOT sentinels
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: 'on'
@@ -73,16 +69,13 @@ jobs:
         with:
           llvm-version: 22
       - uses: emscripten-core/setup-emsdk@v15
-        if: ${{ matrix.profile == 'J32-GoJS' || matrix.profile == 'J32-Emscripten' || matrix.profile == 'J64-Emscripten' }}
         with:
           version: '4.0.21'
       - uses: actions/setup-node@v7
-        if: ${{ matrix.profile != 'W32-WASI' }}
         with:
           node-version: '24'
       - uses: ./.github/actions/setup-binaryen
       - uses: bytecodealliance/actions/wasmtime/setup@v1
-        if: ${{ matrix.profile == 'W32-WASI' }}
         with:
           version: '39.0.1'
       - uses: ./.github/actions/setup-go
@@ -91,36 +84,47 @@ jobs:
           go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
           go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
       - name: Exercise representative runnable cases
-        env:
-          PROFILE: ${{ matrix.profile }}
         run: |
           set -o pipefail
           target_goroot="$(go env GOROOT)"
-          (
-            cd test/goroot
-            "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
-              -test.count=1 -test.timeout=40m \
-              -goroot "$target_goroot" -llgo "$RUNNER_TEMP/llgo" \
-              -wasm-profile "$PROFILE" -directive-mode ci \
-              -case '^(helloworld\.go|bom\.go)$' \
-              -max-rss-mib 4096 -rss-warn-mib 1024 \
-              -min-memory-free-percent 15 -min-swap-free-mib 512
-          ) 2>&1 | tee "$RUNNER_TEMP/goroot-$PROFILE.log"
-      - name: Preserve sentinel log
+          status=0
+          for profile in J32-GoJS J32-Emscripten J64-Emscripten W32-WASI; do
+            echo "::group::Exercise representative runnable cases ($profile)"
+            if ! (
+              cd test/goroot
+              "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
+                -test.count=1 -test.timeout=10m \
+                -goroot "$target_goroot" -llgo "$RUNNER_TEMP/llgo" \
+                -wasm-profile "$profile" -directive-mode ci \
+                -case '^(helloworld\.go|bom\.go)$' \
+                -max-rss-mib 4096 -rss-warn-mib 1024 \
+                -min-memory-free-percent 15 -min-swap-free-mib 512
+            ) 2>&1 | tee "$RUNNER_TEMP/goroot-$profile.log"; then
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+      - name: Preserve sentinel logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: wasm-goroot-sentinel-${{ matrix.profile }}
-          path: ${{ runner.temp }}/goroot-${{ matrix.profile }}.log
+          name: wasm-goroot-sentinels
+          path: ${{ runner.temp }}/goroot-*.log
           if-no-files-found: error
 
   goroot:
     name: wasm GOROOT (J32-GoJS, ${{ matrix.shard }}/9)
-    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
-    timeout-minutes: 90
+    needs: goroot-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
+        # Seven shards took up to 51 minutes of measured case execution, and
+        # other runners disconnected after over an hour without uploading logs.
+        # Replaying all 2,316 case times across nine shards estimates at most
+        # 41 minutes, leaving more setup and runner-variance headroom.
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8]
     env:
       GOFLAGS: -tags=llvm22
@@ -152,7 +156,7 @@ jobs:
           (
             cd test/goroot
             "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
-              -test.count=1 -test.timeout=85m \
+              -test.count=1 -test.timeout=175m \
               -goroot "$target_goroot" -llgo "$RUNNER_TEMP/llgo" \
               -wasm-profile "$PROFILE" -directive-mode coverage \
               -progress 60s -shard-index "$SHARD" -shard-total 9 \
@@ -186,23 +190,22 @@ jobs:
           if-no-files-found: error
 
   packages:
-    name: wasm test acceptance (${{ matrix.profile }}, ${{ matrix.shard }}/${{ matrix.profile == 'W32-WASI' && 8 || 4 }})
-    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
-    timeout-minutes: 90
+    name: wasm test acceptance (${{ matrix.profile }}, ${{ matrix.shard }}/${{ matrix.profile == 'W32-WASI' && 5 || 3 }})
+    needs: goroot-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         profile: [J32-GoJS, J32-Emscripten, J64-Emscripten, W32-WASI]
-        shard: [0, 1, 2, 3]
+        # Three shards keep the JavaScript providers below an hour. WASI's
+        # Binaryen/Asyncify links need five without multiplying its corpus.
+        shard: [0, 1, 2]
         include:
           - profile: W32-WASI
+            shard: 3
+          - profile: W32-WASI
             shard: 4
-          - profile: W32-WASI
-            shard: 5
-          - profile: W32-WASI
-            shard: 6
-          - profile: W32-WASI
-            shard: 7
     env:
       GOFLAGS: -tags=llvm22
     steps:
@@ -232,11 +235,36 @@ jobs:
         env:
           PROFILE: ${{ matrix.profile }}
           SHARD: ${{ matrix.shard }}
-          SHARDS: ${{ matrix.profile == 'W32-WASI' && 8 || 4 }}
+          SHARDS: ${{ matrix.profile == 'W32-WASI' && 5 || 3 }}
         run: |
           go run ./dev/wasmstdlib -full -profile "$PROFILE" \
             -shard "$SHARD" -shards "$SHARDS" -llgo "$RUNNER_TEMP/llgo" \
             -report "$RUNNER_TEMP/acceptance.json"
+      - name: Summarize acceptance shard
+        if: always()
+        shell: bash
+        run: |
+          report="${{ runner.temp }}/acceptance.json"
+          if [[ -f "$report" ]]; then
+            jq -r '
+              "### wasm test acceptance (" + .profile + ") · shard " + (.shard|tostring) + "/" + (.shards|tostring) + "\n\n" +
+              "| Total | Passed | Not-Applicable | Failed / Unresolved |\n" +
+              "|---:|---:|---:|---:|\n" +
+              "| " + (.packages | length | tostring) +
+              " | " + ([.packages[] | select(.status == "pass")] | length | tostring) +
+              " | " + ([.packages[] | select(.status == "not-applicable" or .status == "separate-suite" or .status == "other-shard")] | length | tostring) +
+              " | " + ([.packages[] | select(.status != "pass" and .status != "not-applicable" and .status != "separate-suite" and .status != "other-shard")] | length | tostring) +
+              " |" +
+              (
+                [.packages[] | select(.status != "pass" and .status != "not-applicable" and .status != "separate-suite" and .status != "other-shard")] as $failed |
+                if ($failed | length) > 0 then
+                  "\n\n**Failed packages**\n\n" + ($failed | map("- `" + .package + "`: " + .reason) | join("\n"))
+                else
+                  ""
+                end
+              )
+            ' "$report" >>"$GITHUB_STEP_SUMMARY"
+          fi
       - name: Preserve all results and individual package logs
         if: always()
         uses: actions/upload-artifact@v7
