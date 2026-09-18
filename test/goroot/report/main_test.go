@@ -42,7 +42,7 @@ func TestRenderReportIncludesOnlyMismatchCasesWithAllLanes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"| Case | 🍎🦾⁶⁴<br>1.26 | 🍎🦾⁶⁴<br>1.27 | 🐧💻⁶⁴<br>1.26 | 🐧💻⁶⁴<br>1.27 |",
+		"| Case | 🍎 🦾<br>1.26 | 🍎 🦾<br>1.27 | 🐧 🖥️<br>1.26 | 🐧 🖥️<br>1.27 |",
 		"| `fixedbugs/regression.go` | ✅ | ✅ | ✅ | ❌ |",
 		"| `fixedbugs/stale.go` | ⚠️ | 🟡 | 🟡 | 🔀❌ |",
 		"[Workflow run](https://example.com/run)",
@@ -90,5 +90,32 @@ func TestRenderReportRejectsDuplicateLaneResult(t *testing.T) {
 	_, err := renderReport([]caseResult{result, result}, []string{"linux/amd64"}, []string{"1.27.0"}, "")
 	if err == nil || !strings.Contains(err.Error(), "duplicate result") {
 		t.Fatalf("renderReport error = %v, want duplicate result", err)
+	}
+}
+
+func TestRenderReportWasmPlatformLabels(t *testing.T) {
+	results := []caseResult{
+		{
+			lane:      lane{platform: "js/wasm", version: "1.27.0"},
+			shard:     "0",
+			casePath:  "wasm_test.go",
+			directive: "run",
+			result:    "unexpected-fail",
+		},
+		{
+			lane:      lane{platform: "wasip1/wasm", version: "1.27.0"},
+			shard:     "0",
+			casePath:  "wasm_test.go",
+			directive: "run",
+			result:    "pass",
+		},
+	}
+	report, err := renderReport(results, []string{"js/wasm", "wasip1/wasm"}, []string{"1.27.0"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHeader := "| Case | 🕸️ 📜 JS<br>1.27 | 🕸️ 🔌 WASI<br>1.27 |"
+	if !strings.Contains(report, wantHeader) {
+		t.Fatalf("report does not contain wasm header %q:\n%s", wantHeader, report)
 	}
 }

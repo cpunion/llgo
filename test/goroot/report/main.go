@@ -41,14 +41,16 @@ var knownResults = map[string]string{
 }
 
 var platformLabels = map[string]string{
-	"darwin/arm64":        "🍎🦾⁶⁴",
-	"linux/amd64":         "🐧💻⁶⁴",
-	"windows-msvc/amd64":  "🪟 MSVC 💻⁶⁴",
-	"windows-msvc/arm64":  "🪟 MSVC 🦾⁶⁴",
-	"windows-msvc/386":    "🪟 MSVC 💻³²",
-	"windows-mingw/amd64": "🪟 GNU 💻⁶⁴",
-	"windows-mingw/arm64": "🪟 GNU 🦾⁶⁴",
-	"windows-mingw/386":   "🪟 GNU 💻³²",
+	"darwin/arm64":        "🍎 🦾",
+	"linux/amd64":         "🐧 🖥️",
+	"windows-msvc/amd64":  "🪟 🟦 MSVC 🖥️",
+	"windows-msvc/arm64":  "🪟 🟦 MSVC 🦾",
+	"windows-msvc/386":    "🪟 🟦 MSVC 💾",
+	"windows-mingw/amd64": "🪟 🦬 GNU 🖥️",
+	"windows-mingw/arm64": "🪟 🦬 GNU 🦾",
+	"windows-mingw/386":   "🪟 🦬 GNU 💾",
+	"js/wasm":             "🕸️ 📜 JS",
+	"wasip1/wasm":         "🕸️ 🔌 WASI",
 }
 
 var mismatches = map[string]bool{

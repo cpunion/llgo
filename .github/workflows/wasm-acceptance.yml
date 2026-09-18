@@ -26,7 +26,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      GOMAXPROCS: '2'
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: 'on'
     steps:
@@ -59,14 +58,13 @@ jobs:
 
   goroot-smoke:
     name: wasm GOROOT sentinels (${{ matrix.profile }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         profile: [J32-GoJS, J32-Emscripten, J64-Emscripten, W32-WASI]
     env:
-      GOMAXPROCS: '2'
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: 'on'
     steps:
@@ -118,19 +116,13 @@ jobs:
 
   goroot:
     name: wasm GOROOT (J32-GoJS, ${{ matrix.shard }}/9)
-    needs: goroot-smoke
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        # Seven shards took up to 51 minutes of measured case execution, and
-        # other runners disconnected after over an hour without uploading logs.
-        # Replaying all 2,316 case times across nine shards estimates at most
-        # 41 minutes, leaving more setup and runner-variance headroom.
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8]
     env:
-      GOMAXPROCS: '2'
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: 'on'
     steps:
@@ -160,13 +152,31 @@ jobs:
           (
             cd test/goroot
             "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
-              -test.count=1 -test.timeout=175m \
+              -test.count=1 -test.timeout=85m \
               -goroot "$target_goroot" -llgo "$RUNNER_TEMP/llgo" \
               -wasm-profile "$PROFILE" -directive-mode coverage \
               -progress 60s -shard-index "$SHARD" -shard-total 9 \
               -max-rss-mib 4096 -rss-warn-mib 1024 \
               -min-memory-free-percent 15 -min-swap-free-mib 512
           ) 2>&1 | tee "$RUNNER_TEMP/goroot-$PROFILE-$SHARD.log"
+      - name: Summarize GOROOT shard
+        if: always()
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/goroot-J32-GoJS-${{ matrix.shard }}.log"
+          touch "$log"
+          selected=$(sed -nE 's/.* shard=[^ ]+ cases=([0-9]+) directive_mode=.*/\1/p' "$log" | tail -1)
+          observed=$(grep -Ec -- '--- (PASS|FAIL|SKIP): TestGoRootRunCases/' "$log" || true)
+          failed=$(grep -Ec -- '--- FAIL: TestGoRootRunCases/' "$log" || true)
+          skipped=$(grep -Ec -- '--- SKIP: TestGoRootRunCases/' "$log" || true)
+          passed=$((observed - failed - skipped))
+          {
+            echo "### wasm GOROOT (J32-GoJS) · shard ${{ matrix.shard }}/9"
+            echo
+            echo '| Selected | Observed | Passed | Failed | Skipped |'
+            echo '|---:|---:|---:|---:|---:|'
+            echo "| ${selected:-?} | $observed | $passed | $failed | $skipped |"
+          } >>"$GITHUB_STEP_SUMMARY"
       - name: Preserve complete shard log
         if: always()
         uses: actions/upload-artifact@v7
@@ -176,24 +186,24 @@ jobs:
           if-no-files-found: error
 
   packages:
-    name: wasm test acceptance (${{ matrix.profile }}, ${{ matrix.shard }}/${{ matrix.profile == 'W32-WASI' && 5 || 3 }})
-    needs: goroot-smoke
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    name: wasm test acceptance (${{ matrix.profile }}, ${{ matrix.shard }}/${{ matrix.profile == 'W32-WASI' && 8 || 4 }})
+    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         profile: [J32-GoJS, J32-Emscripten, J64-Emscripten, W32-WASI]
-        # Three shards keep the JavaScript providers below an hour. WASI's
-        # Binaryen/Asyncify links need five without multiplying its corpus.
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3]
         include:
           - profile: W32-WASI
-            shard: 3
-          - profile: W32-WASI
             shard: 4
+          - profile: W32-WASI
+            shard: 5
+          - profile: W32-WASI
+            shard: 6
+          - profile: W32-WASI
+            shard: 7
     env:
-      GOMAXPROCS: '2'
       GOFLAGS: -tags=llvm22
     steps:
       - uses: actions/checkout@v7
@@ -222,7 +232,7 @@ jobs:
         env:
           PROFILE: ${{ matrix.profile }}
           SHARD: ${{ matrix.shard }}
-          SHARDS: ${{ matrix.profile == 'W32-WASI' && 5 || 3 }}
+          SHARDS: ${{ matrix.profile == 'W32-WASI' && 8 || 4 }}
         run: |
           go run ./dev/wasmstdlib -full -profile "$PROFILE" \
             -shard "$SHARD" -shards "$SHARDS" -llgo "$RUNNER_TEMP/llgo" \

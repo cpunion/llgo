@@ -25,10 +25,9 @@ concurrency:
 jobs:
   stdlib-slice:
     name: W2 stdlib slice (${{ matrix.profile }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-latest' }}
     timeout-minutes: ${{ matrix.timeout || 25 }}
     env:
-      GOMAXPROCS: "2"
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: "on"
     strategy:
