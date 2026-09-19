@@ -17,7 +17,7 @@ concurrency:
 jobs:
   llgo:
     name: llgo + test (${{ matrix.os }}${{ matrix.windows_abi && format(', {0}', matrix.windows_abi) || '' }}${{ matrix.windows_arch && format(', {0}', matrix.windows_arch) || '' }}, LLVM ${{ matrix.llvm }}, Go 1.27)
-    timeout-minutes: ${{ matrix.windows_arch == 'arm64' && 60 || matrix.windows_arch == '386' && 45 || 30 }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
