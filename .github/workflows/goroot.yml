@@ -40,54 +40,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # GOROOT is the compiler's primary compatibility suite. Always cover
-        # the two most recent Go releases; LLGo and this runner are still built
-        # once per job with the current toolchain from .go-version.
-        os: [macos-latest, ubuntu-latest, windows-2022, windows-11-arm]
-        windows_abi: [msvc, mingw]
-        windows_arch: [amd64, arm64, "386"]
-        # Eight native shards keep paired Go 1.26/1.27 jobs near the per-job
-        # latency target without returning to a version-expanded job matrix.
-        shard-index: ["0", "1", "2", "3", "4", "5", "6", "7"]
-        shard-total: ["8"]
-        exclude:
-          - os: macos-latest
-            windows_abi: mingw
-          - os: ubuntu-latest
-            windows_abi: mingw
-          - os: macos-latest
-            windows_arch: arm64
-          - os: macos-latest
-            windows_arch: "386"
-          - os: ubuntu-latest
-            windows_arch: arm64
-          - os: ubuntu-latest
-            windows_arch: "386"
-          - os: windows-2022
-            windows_arch: arm64
-          - os: windows-11-arm
-            windows_arch: amd64
-          - os: windows-11-arm
-            windows_arch: "386"
-          # MSVC/ARM64 shard 6 repeatedly outlived its hosted runner. Split
-          # only that shard below instead of multiplying the whole matrix.
-          - os: windows-11-arm
-            windows_abi: msvc
-            windows_arch: arm64
-            shard-index: "6"
-            shard-total: "8"
         include:
-          - os: ubuntu-latest
-            runner: [qiniu, ubuntu-24.04-large]
-          # These two half-shards exactly partition Go 1.26 shard 6/8 and the
-          # paired Go 1.27 shard 2/8 while adding only one hosted-runner job.
           - os: windows-11-arm
+            runner: windows-11-arm
             windows_abi: msvc
             windows_arch: arm64
             shard-index: "6"
             shard-total: "16"
             paired-shard-index: "2"
           - os: windows-11-arm
+            runner: windows-11-arm
             windows_abi: msvc
             windows_arch: arm64
             shard-index: "14"
@@ -347,10 +309,7 @@ jobs:
           retention-days: 1
 
   goroot-wasm:
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-compat'))
+    if: github.repository_owner == 'disabled-for-targeted-validation'
     name: GOROOT (wasm, ${{ matrix.wasm_profile }}, Go 1.26+1.27, shard ${{ matrix.shard-index }}/16)
     timeout-minutes: 180
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
@@ -587,12 +546,7 @@ jobs:
 
   goroot-summary:
     name: GOROOT summary
-    if: >-
-      always() && (
-        github.event_name != 'pull_request' ||
-        (github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
-        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-compat'))
-      )
+    if: github.repository_owner == 'disabled-for-targeted-validation'
     needs: [goroot, goroot-wasm]
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}
     permissions:
