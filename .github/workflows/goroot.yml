@@ -28,7 +28,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
       (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-compat'))
-    name: GOROOT (${{ matrix.os }}${{ startsWith(matrix.os, 'windows') && format(', {0}, {1}', matrix.windows_abi, matrix.windows_arch) || '' }}, Go ${{ matrix.go-version }}, shard ${{ matrix.shard-index }}/4)
+    name: GOROOT (${{ matrix.os }}${{ startsWith(matrix.os, 'windows') && format(', {0}, {1}', matrix.windows_abi, matrix.windows_arch) || '' }}, Go ${{ matrix.go-version }}, shard ${{ matrix.shard-index }}/${{ matrix.os == 'windows-11-arm' && '8' || '4' }})
     timeout-minutes: 180
     env:
       GOPROXY: https://proxy.golang.org,direct
@@ -36,6 +36,7 @@ jobs:
       # Leave thirty minutes for setup plus timeout diagnostics and artifacts.
       LLGO_GOROOT_TEST_TIMEOUT: "150m"
       LLGO_GOROOT_VERBOSE: "1"
+      LLGO_GOROOT_SHARD_TOTAL: ${{ matrix.os == 'windows-11-arm' && '8' || '4' }}
     strategy:
       fail-fast: false
       matrix:
@@ -46,7 +47,9 @@ jobs:
         go-version: ["1.26", "1.27"]
         windows_abi: [msvc, mingw]
         windows_arch: [amd64, arm64, "386"]
-        shard-index: ["0", "1", "2", "3"]
+        # GitHub's Windows ARM64 runners dropped several jobs after roughly an
+        # hour, so only that platform uses the extra four shard indices below.
+        shard-index: ["0", "1", "2", "3", "4", "5", "6", "7"]
         exclude:
           - os: macos-latest
             windows_abi: mingw
@@ -66,6 +69,30 @@ jobs:
             windows_arch: amd64
           - os: windows-11-arm
             windows_arch: "386"
+          - os: macos-latest
+            shard-index: "4"
+          - os: macos-latest
+            shard-index: "5"
+          - os: macos-latest
+            shard-index: "6"
+          - os: macos-latest
+            shard-index: "7"
+          - os: ubuntu-latest
+            shard-index: "4"
+          - os: ubuntu-latest
+            shard-index: "5"
+          - os: ubuntu-latest
+            shard-index: "6"
+          - os: ubuntu-latest
+            shard-index: "7"
+          - os: windows-2022
+            shard-index: "4"
+          - os: windows-2022
+            shard-index: "5"
+          - os: windows-2022
+            shard-index: "6"
+          - os: windows-2022
+            shard-index: "7"
         include:
           - os: ubuntu-latest
             runner: [qiniu, ubuntu-24.04-large]
@@ -185,7 +212,7 @@ jobs:
             -min-swap-free-mib "$min_swap_free_mib" \
             -progress 60s \
             -shard-index "${{ matrix.shard-index }}" \
-            -shard-total "4" 2>&1 | tee "$RUNNER_TEMP/goroot.log"
+            -shard-total "$LLGO_GOROOT_SHARD_TOTAL" 2>&1 | tee "$RUNNER_TEMP/goroot.log"
           runner_status=${PIPESTATUS[0]}
           set -e
           exit "$runner_status"
@@ -238,7 +265,7 @@ jobs:
             ' "$log" >"$report_dir/cases-$report_id.tsv"
 
           {
-            echo "### GOROOT $platform · Go $GO_VERSION · shard $SHARD_INDEX/4"
+            echo "### GOROOT $platform · Go $GO_VERSION · shard $SHARD_INDEX/$LLGO_GOROOT_SHARD_TOTAL"
             echo
             echo '| Selected | Observed | Passed | Failed | Skipped |'
             echo '|---:|---:|---:|---:|---:|'
@@ -535,7 +562,7 @@ jobs:
           {
             echo '## GOROOT run summary'
             echo
-            echo "Received $report_count/96 shard reports."
+            echo "Received $report_count/112 shard reports."
             echo
             echo '| Platform / toolchain | Shards | Selected | Observed | Passed | Failed | Skipped |'
             echo '|---|---:|---:|---:|---:|---:|---:|'
@@ -543,10 +570,10 @@ jobs:
               write_row "🍎 macOS · 🦾 ARM64 · Go $version" darwin/arm64 "$version" 4
               write_row "🐧 Linux · 🖥️ AMD64 · Go $version" linux/amd64 "$version" 4
               write_row "🪟 Windows · 🟦 MSVC · 🖥️ AMD64 · Go $version" windows-msvc/amd64 "$version" 4
-              write_row "🪟 Windows · 🟦 MSVC · 🦾 ARM64 · Go $version" windows-msvc/arm64 "$version" 4
+              write_row "🪟 Windows · 🟦 MSVC · 🦾 ARM64 · Go $version" windows-msvc/arm64 "$version" 8
               write_row "🪟 Windows · 🟦 MSVC · 💾 386 · Go $version" windows-msvc/386 "$version" 4
               write_row "🪟 Windows · 🦬 GNU · 🖥️ AMD64 · Go $version" windows-mingw/amd64 "$version" 4
-              write_row "🪟 Windows · 🦬 GNU · 🦾 ARM64 · Go $version" windows-mingw/arm64 "$version" 4
+              write_row "🪟 Windows · 🦬 GNU · 🦾 ARM64 · Go $version" windows-mingw/arm64 "$version" 8
               write_row "🪟 Windows · 🦬 GNU · 💾 386 · Go $version" windows-mingw/386 "$version" 4
               write_row "🕸️ WebAssembly · 📜 JS · Go $version" js/wasm "$version" 16
             done
@@ -602,8 +629,8 @@ jobs:
           GOROOT_RESULT: ${{ needs.goroot.result }}
           WASM_RESULT: ${{ needs.goroot-wasm.result }}
         run: |
-          if [[ "$GOROOT_REPORT_COUNT" -ne 96 ]]; then
-            echo "error: expected 96 shard reports, got $GOROOT_REPORT_COUNT" >&2
+          if [[ "$GOROOT_REPORT_COUNT" -ne 112 ]]; then
+            echo "error: expected 112 shard reports, got $GOROOT_REPORT_COUNT" >&2
             exit 1
           fi
           if [[ "$GOROOT_RESULT" != success || "$WASM_RESULT" != success ]]; then
