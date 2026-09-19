@@ -1,0 +1,358 @@
+name: Standard Library
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: std (${{ matrix.lane }}, ${{ matrix.os }}${{ matrix.windows_abi && format(', {0}', matrix.windows_abi) || '' }}${{ matrix.windows_arch && format(', {0}', matrix.windows_arch) || '' }}, Go ${{ matrix.go_version }}, shard ${{ matrix.shard_index }}/${{ matrix.shard_total }})
+    timeout-minutes: ${{ matrix.windows_arch == 'arm64' && 120 || matrix.windows_arch == '386' && 90 || 60 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runner: [qiniu, ubuntu-24.04-large]
+            llvm: 22
+            go_version: "1.20-1.26"
+            lane: compatibility
+            shard_index: "0"
+            shard_total: "1"
+            check_symbols: true
+          - os: ubuntu-latest
+            runner: [qiniu, ubuntu-24.04-large]
+            llvm: 22
+            go_version: "1.27"
+            lane: full
+            shard_index: "0"
+            shard_total: "2"
+            check_symbols: true
+            std_buildmodes: true
+          - os: ubuntu-latest
+            runner: [qiniu, ubuntu-24.04-large]
+            llvm: 22
+            go_version: "1.27"
+            lane: full
+            shard_index: "1"
+            shard_total: "2"
+            check_symbols: true
+            std_buildmodes: true
+          - os: macos-latest
+            llvm: 22
+            go_version: "1.27"
+            lane: full
+            shard_index: "0"
+            shard_total: "1"
+          - os: windows-2022
+            llvm: 22
+            windows_abi: msvc
+            windows_arch: amd64
+            host_go_arch: x64
+            go_version: "1.27"
+            lane: full
+            shard_index: "0"
+            shard_total: "1"
+          - os: windows-2022
+            llvm: 22
+            windows_abi: mingw
+            windows_arch: amd64
+            host_go_arch: x64
+            go_version: "1.27"
+            lane: full
+            shard_index: "0"
+            shard_total: "1"
+          - os: windows-11-arm
+            llvm: 22
+            windows_abi: msvc
+            windows_arch: arm64
+            host_go_arch: arm64
+            go_version: "1.27"
+            lane: full
+            shard_index: "0"
+            shard_total: "2"
+          - os: windows-11-arm
+            llvm: 22
+            windows_abi: msvc
+            windows_arch: arm64
+            host_go_arch: arm64
+            go_version: "1.27"
+            lane: full
+            shard_index: "1"
+            shard_total: "2"
+          - os: windows-11-arm
+            llvm: 22
+            windows_abi: mingw
+            windows_arch: arm64
+            host_go_arch: arm64
+            go_version: "1.27"
+            lane: full
+            shard_index: "0"
+            shard_total: "1"
+          - os: windows-2022
+            llvm: 22
+            windows_abi: msvc
+            windows_arch: "386"
+            host_go_arch: x64
+            go_version: "1.27"
+            lane: full
+            shard_index: "0"
+            shard_total: "1"
+          - os: windows-2022
+            llvm: 22
+            windows_abi: mingw
+            windows_arch: "386"
+            host_go_arch: x64
+            go_version: "1.27"
+            lane: full
+            shard_index: "0"
+            shard_total: "1"
+    runs-on: ${{ github.repository_owner == 'xgo-dev' && matrix.runner || matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: ${{ matrix.llvm }}
+          windows-abi: ${{ matrix.windows_abi || 'msvc' }}
+          windows-arch: ${{ matrix.windows_arch || 'amd64' }}
+
+      - name: Set up Go for build
+        uses: ./.github/actions/setup-go
+        with:
+          architecture: ${{ matrix.host_go_arch || '' }}
+
+      - name: Restore LLGo cache
+        uses: ./.github/actions/setup-llgo-cache
+
+      - name: Build LLGo and test tools
+        shell: bash
+        run: |
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Activate native Windows target
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: ${{ matrix.windows_abi }}
+          windows-arch: ${{ matrix.windows_arch }}
+
+      - name: Run standard library tests
+        env:
+          LLGO_BUILD_CACHE: "1"
+          LLGO_TEST_BENCH_GO126: "1"
+          LLGO_TEST_CHECK_SYMBOLS: ${{ matrix.check_symbols && '1' || '0' }}
+          LLGO_TEST_STD_BUILDMODES: ${{ matrix.std_buildmodes && '1' || '0' }}
+          LLGO_TEST_SUITE: "std"
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_TOTAL: ${{ matrix.shard_total }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tool_suffix=
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            tool_suffix=.exe
+            export LLGO_STDIO_NOBUF=1
+          fi
+          export LLGO="$RUNNER_TEMP/llgo-bin/llgo${tool_suffix}"
+          export LLGO_TEST_LLGEN="$RUNNER_TEMP/llgo-bin/llgen${tool_suffix}"
+          export CHECK_STD_SYMBOLS="$RUNNER_TEMP/llgo-bin/check_std_symbols${tool_suffix}"
+          if [[ "${{ matrix.lane }}" == compatibility ]]; then
+            dev/test_go_versions.sh 1.20 1.21 1.22 1.23 1.24 1.25 1.26
+          else
+            dev/test_go_version.sh "${{ matrix.go_version }}"
+          fi
+
+      - name: Check std symbol coverage
+        if: runner.os == 'Windows' && matrix.windows_arch != 'amd64' && (matrix.shard_total == '1' || matrix.shard_index == '1')
+        shell: bash
+        run: bash doc/_readme/scripts/check_std_cover.sh
+
+  wasm-std:
+    name: wasm std acceptance (${{ matrix.profile }}, ${{ matrix.shard }}/${{ matrix.profile == 'W32-WASI' && 5 || 3 }})
+    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [J32-GoJS, J32-Emscripten, J64-Emscripten, W32-WASI]
+        shard: [0, 1, 2]
+        include:
+          - profile: W32-WASI
+            shard: 3
+          - profile: W32-WASI
+            shard: 4
+    env:
+      GOFLAGS: -tags=llvm22
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        if: ${{ matrix.profile == 'J32-GoJS' || matrix.profile == 'J32-Emscripten' || matrix.profile == 'J64-Emscripten' }}
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        if: ${{ matrix.profile != 'W32-WASI' }}
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        if: ${{ matrix.profile == 'W32-WASI' }}
+        with:
+          version: '39.0.1'
+      - uses: ./.github/actions/setup-go
+      - name: Check acceptance accounting
+        run: go test ./dev/wasmstdlib -count=1
+      - name: Build LLGo
+        run: go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+      - name: Execute every discovered test package in this shard
+        env:
+          PROFILE: ${{ matrix.profile }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.profile == 'W32-WASI' && 5 || 3 }}
+        run: |
+          go run ./dev/wasmstdlib -full -profile "$PROFILE" \
+            -shard "$SHARD" -shards "$SHARDS" -llgo "$RUNNER_TEMP/llgo" \
+            -report "$RUNNER_TEMP/acceptance.json"
+      - name: Summarize acceptance shard
+        if: always()
+        shell: bash
+        run: |
+          report="${{ runner.temp }}/acceptance.json"
+          if [[ -f "$report" ]]; then
+            jq -r '
+              "### wasm test acceptance (" + .profile + ") · shard " + (.shard|tostring) + "/" + (.shards|tostring) + "\n\n" +
+              "| Total | Passed | Not-Applicable | Failed / Unresolved |\n" +
+              "|---:|---:|---:|---:|\n" +
+              "| " + (.packages | length | tostring) +
+              " | " + ([.packages[] | select(.status == "pass")] | length | tostring) +
+              " | " + ([.packages[] | select(.status == "not-applicable" or .status == "separate-suite" or .status == "other-shard")] | length | tostring) +
+              " | " + ([.packages[] | select(.status != "pass" and .status != "not-applicable" and .status != "separate-suite" and .status != "other-shard")] | length | tostring) +
+              " |" +
+              (
+                [.packages[] | select(.status != "pass" and .status != "not-applicable" and .status != "separate-suite" and .status != "other-shard")] as $failed |
+                if ($failed | length) > 0 then
+                  "\n\n**Failed packages**\n\n" + ($failed | map("- `" + .package + "`: " + .reason) | join("\n"))
+                else
+                  ""
+                end
+              )
+            ' "$report" >>"$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve all results and individual package logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-acceptance-${{ matrix.profile }}-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/acceptance.json
+            ${{ runner.temp }}/acceptance.json.logs/
+          if-no-files-found: error
+
+  wasm-browser:
+    name: real-browser GoJS callback
+    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    env:
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: ./.github/actions/setup-go
+      - name: Set up Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          install-dependencies: true
+      - name: Require the hosted browser
+        env:
+          BROWSER_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: |
+          test -x "$BROWSER_BIN"
+          "$BROWSER_BIN" --version
+      - name: Build LLGo
+        run: go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+      - name: Run the GoJS artifact in Chrome
+        env:
+          BROWSER_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+          LLGO: ${{ runner.temp }}/llgo
+        run: dev/test_wasm_browser.sh
+
+  wasm-sentinels:
+    name: wasm GOROOT sentinels
+    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    env:
+      GOFLAGS: -tags=llvm22
+      LLGO_BUILD_CACHE: 'on'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '4.0.21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: '39.0.1'
+      - uses: ./.github/actions/setup-go
+      - name: Build LLGo and host-side GOROOT runner
+        run: |
+          go build -o "$RUNNER_TEMP/llgo" ./cmd/llgo
+          go test -c -o "$RUNNER_TEMP/goroot-runner" ./test/goroot
+      - name: Exercise representative runnable cases
+        run: |
+          set -o pipefail
+          target_goroot="$(go env GOROOT)"
+          status=0
+          for profile in J32-GoJS J32-Emscripten J64-Emscripten W32-WASI; do
+            echo "::group::Exercise representative runnable cases ($profile)"
+            if ! (
+              cd test/goroot
+              "$RUNNER_TEMP/goroot-runner" -test.v -test.run '^TestGoRootRunCases$' \
+                -test.count=1 -test.timeout=10m \
+                -goroot "$target_goroot" -llgo "$RUNNER_TEMP/llgo" \
+                -wasm-profile "$profile" -directive-mode ci \
+                -case '^(helloworld\.go|bom\.go)$' \
+                -max-rss-mib 4096 -rss-warn-mib 1024 \
+                -min-memory-free-percent 15 -min-swap-free-mib 512
+            ) 2>&1 | tee "$RUNNER_TEMP/goroot-$profile.log"; then
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+      - name: Preserve sentinel logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-goroot-sentinels
+          path: ${{ runner.temp }}/goroot-*.log
+          if-no-files-found: error

@@ -259,7 +259,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.label.name == 'go-test-compat'
     name: GOROOT (wasm, ${{ matrix.wasm_profile }}, Go ${{ matrix.go-version }}, shard ${{ matrix.shard-index }}/4)
     timeout-minutes: 180
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
     env:
       GOPROXY: https://proxy.golang.org,direct
       LLGO_GOROOT_HEARTBEAT_SECONDS: "60"
