@@ -58,7 +58,8 @@ run_with_heartbeat() {
 	return "$status"
 }
 
-for goroot in "${goroots[@]}"; do
+run_goroot() {
+	local goroot=$1
 	go_bin="$goroot/bin/go"
 	if [[ "${OS:-}" == "Windows_NT" ]]; then
 		go_bin+=".exe"
@@ -71,6 +72,11 @@ for goroot in "${goroots[@]}"; do
 	echo "==== $version ($goroot) ===="
 	(
 		cd "$repo_root"
+		if [[ -n "${LLGO_GOROOT_CACHE_DIR:-}" ]]; then
+			version_cache_dir="${LLGO_GOROOT_CACHE_DIR}/${version}"
+			mkdir -p "$version_cache_dir"
+			export XDG_CACHE_HOME="$version_cache_dir"
+		fi
 		goroot_gomaxprocs="${LLGO_GOROOT_GOMAXPROCS:-${GOMAXPROCS:-2}}"
 		# CI sets this below the enclosing job timeout so the Go runner can
 		# print its timeout diagnostics and the workflow can upload its report.
@@ -94,4 +100,53 @@ for goroot in "${goroots[@]}"; do
 				-count=1 -timeout "$goroot_test_timeout" -args -goroot "$goroot" "${runner_args[@]}"
 		fi
 	)
+}
+
+if [[ "${LLGO_GOROOT_PARALLEL:-0}" != "0" && ${#goroots[@]} -gt 1 ]]; then
+	if [[ "${LLGO_GOROOT_PARALLEL}" != "1" ]]; then
+		echo "error: LLGO_GOROOT_PARALLEL must be 0 or 1" >&2
+		exit 2
+	fi
+	log_dir="${LLGO_GOROOT_LOG_DIR:-}"
+	if [[ -n "$log_dir" ]]; then
+		mkdir -p "$log_dir"
+	fi
+	pids=()
+	for goroot in "${goroots[@]}"; do
+		go_bin="$goroot/bin/go"
+		if [[ "${OS:-}" == "Windows_NT" ]]; then
+			go_bin+=".exe"
+		fi
+		if [[ ! -x "$go_bin" ]]; then
+			echo "error: missing go binary: $go_bin" >&2
+			exit 2
+		fi
+		version="$("$go_bin" env GOVERSION)"
+		(
+			if [[ -z "$log_dir" ]]; then
+				run_goroot "$goroot"
+				exit
+			fi
+			set +e
+			run_goroot "$goroot" 2>&1 | tee "$log_dir/${version}.log"
+			pipe_status=("${PIPESTATUS[@]}")
+			set -e
+			if [[ ${pipe_status[0]} -ne 0 ]]; then
+				exit "${pipe_status[0]}"
+			fi
+			exit "${pipe_status[1]}"
+		) &
+		pids+=("$!")
+	done
+	status=0
+	for pid in "${pids[@]}"; do
+		if ! wait "$pid"; then
+			status=1
+		fi
+	done
+	exit "$status"
+fi
+
+for goroot in "${goroots[@]}"; do
+	run_goroot "$goroot"
 done

@@ -28,8 +28,11 @@ toolchain-specific mechanism under test and why the corresponding behavior is
 not an LLGo compatibility goal.
 
 The GOROOT workflow builds LLGo and this runner with the repository toolchain,
-then runs the `ci` directive set from the two most recent Go releases. Every run
-publishes the expectation-mismatch table in its Actions summary. The scheduled
+then runs the `ci` directive set from the two most recent Go releases. Each
+platform/shard job runs those releases concurrently with isolated LLGo caches,
+so the workflow publishes 112 logical shard reports from 56 test jobs without
+duplicating toolchain setup. Every run publishes the expectation-mismatch table
+in its Actions summary. The scheduled
 run in `xgo-dev/llgo` (every 3 days) also replaces the previous `[GOROOT periodic] YYYY-MM-DD`
 issue; if expectation mismatches occur, `@fennoai` is automatically mentioned for triage.
 A manual dispatch or adding the existing `go-test-compat` label to a pull request

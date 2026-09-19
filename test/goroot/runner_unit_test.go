@@ -524,7 +524,7 @@ func TestWindowsIssue25897aIsFlakyWithTimeout(t *testing.T) {
 	cfg := loadXFailConfig(t, repo, filepath.Join("test", "goroot", "xfail.yaml"))
 	tc := testCase{RelPath: "fixedbugs/issue25897a.go", Directive: "run"}
 	for _, version := range []string{"go1.26.7", "go1.27.0"} {
-		for _, platform := range []string{"windows-msvc/386", "windows-mingw/386", "windows-msvc/amd64", "windows-mingw/amd64"} {
+		for _, platform := range []string{"windows-msvc/386", "windows-mingw/386", "windows-msvc/amd64", "windows-mingw/amd64", "windows-msvc/arm64", "windows-mingw/arm64"} {
 			if match, _ := cfg.MatchFlaky(version, platform, tc); !match {
 				t.Errorf("%s did not match flake for %s/%s", tc.RelPath, version, platform)
 			}
