@@ -3,7 +3,7 @@ name: GOROOT
 on:
   workflow_dispatch:
   pull_request:
-    types: [labeled]
+    types: [labeled, synchronize]
   schedule:
     # 02:00 Asia/Shanghai (18:00 UTC on the previous day), every 3 days.
     - cron: "0 18 */3 * *"
@@ -12,12 +12,21 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{
+      (github.event_name == 'pull_request' &&
+       !((github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
+         (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-compat'))))
+      && format('-skip-{0}', github.run_id) || ''
+    }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   goroot:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'go-test-compat'
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-compat'))
     name: GOROOT (${{ matrix.os }}${{ startsWith(matrix.os, 'windows') && format(', {0}, {1}', matrix.windows_abi, matrix.windows_arch) || '' }}, Go ${{ matrix.go-version }}, shard ${{ matrix.shard-index }}/4)
     timeout-minutes: 180
     env:
@@ -256,7 +265,10 @@ jobs:
           retention-days: 1
 
   goroot-wasm:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'go-test-compat'
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-compat'))
     name: GOROOT (wasm, ${{ matrix.wasm_profile }}, Go ${{ matrix.go-version }}, shard ${{ matrix.shard-index }}/4)
     timeout-minutes: 180
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
@@ -436,7 +448,12 @@ jobs:
 
   goroot-summary:
     name: GOROOT summary
-    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'go-test-compat')
+    if: >-
+      always() && (
+        github.event_name != 'pull_request' ||
+        (github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-compat'))
+      )
     needs: [goroot, goroot-wasm]
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}
     permissions:

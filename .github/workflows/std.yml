@@ -3,13 +3,19 @@ name: Standard Library
 on:
   workflow_dispatch:
   pull_request:
-    types: [labeled]
+    types: [labeled, synchronize]
   schedule:
     # 03:00 Asia/Shanghai (19:00 UTC on the previous day).
     - cron: "0 19 * * *"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{
+      (github.event_name == 'pull_request' &&
+       !((github.event.action == 'labeled' && github.event.label.name == 'go-test-std') ||
+         (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-std'))))
+      && format('-skip-{0}', github.run_id) || ''
+    }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -17,7 +23,10 @@ permissions:
 
 jobs:
   native:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'go-test-std'
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'go-test-std') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-std'))
     name: std (${{ matrix.lane }}, ${{ matrix.os }}${{ matrix.windows_abi && format(', {0}', matrix.windows_abi) || '' }}${{ matrix.windows_arch && format(', {0}', matrix.windows_arch) || '' }}, Go ${{ matrix.go_version }}, shard ${{ matrix.shard_index }}/${{ matrix.shard_total }})
     timeout-minutes: ${{ matrix.windows_arch == 'arm64' && 120 || matrix.windows_arch == '386' && 90 || 60 }}
     strategy:
@@ -219,7 +228,10 @@ jobs:
           retention-days: 1
 
   wasm-std:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'go-test-std'
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'go-test-std') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-std'))
     name: wasm std acceptance (${{ matrix.profile }}, ${{ matrix.shard }}/${{ matrix.profile == 'W32-WASI' && 5 || 3 }})
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
     timeout-minutes: 180
@@ -303,7 +315,10 @@ jobs:
           if-no-files-found: error
 
   wasm-browser:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'go-test-std'
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'go-test-std') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-std'))
     name: real-browser GoJS callback
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
     timeout-minutes: 30
@@ -339,7 +354,10 @@ jobs:
         run: dev/test_wasm_browser.sh
 
   wasm-sentinels:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'go-test-std'
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'go-test-std') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-std'))
     name: wasm GOROOT sentinels
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
     timeout-minutes: 30
@@ -398,7 +416,12 @@ jobs:
 
   std-summary:
     name: Standard Library summary
-    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'go-test-std')
+    if: >-
+      always() && (
+        github.event_name != 'pull_request' ||
+        (github.event.action == 'labeled' && github.event.label.name == 'go-test-std') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-std'))
+      )
     needs: [native, wasm-std, wasm-browser, wasm-sentinels]
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04"]') || 'ubuntu-24.04' }}
     permissions:
