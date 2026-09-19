@@ -115,7 +115,6 @@ jobs:
 
   packages:
     name: wasm test acceptance (${{ matrix.profile }}, ${{ matrix.shard }}/${{ matrix.profile == 'W32-WASI' && 5 || 3 }})
-    needs: goroot-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
