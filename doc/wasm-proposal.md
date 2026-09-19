@@ -91,7 +91,7 @@ LLGo's Core Wasm C ABI is unrelated to the WIT Canonical ABI. Future WASI Previe
 
 ## Acceptance
 
-A feature is implemented only when CI executes it on every applicable path. The minimum hosted matrix contains four paths: J32/GoJS, J32/Emscripten, J64/Emscripten Memory64, and W32/WASI. Tests use real Node, browser, and Wasmtime execution where applicable and cover `llgo build/run/test`, artifacts, host callbacks and exit, C boundaries, reflection, GC and suspension, `test/**`, `test/std`, and every applicable GOROOT case. The complete GOROOT corpus runs on the canonical Go-compatible J32/GoJS path, while all four paths run GOROOT sentinels and the complete applicable repository package suite; this avoids multiplying more than two thousand compiler conformance cases by provider paths whose differences are covered by target integration tests. Only reviewed `xfail` and `notapplicable` classifications may be excluded. Each W-stage PR carries focused executable CI; compile-only coverage does not count. Final acceptance also checks compiler coverage, `cprintf`/`println`/`fmtprintf` and reflection size, runtime benchmarks, native and embedded regressions, and removal of diagnostic or superseded changes.
+A feature is implemented only when CI executes it on every applicable path. The minimum hosted matrix contains four paths: J32/GoJS, J32/Emscripten, J64/Emscripten Memory64, and W32/WASI. Tests use real Node, browser, and the selected WASI runtime where applicable and cover `llgo build/run/test`, artifacts, host callbacks and exit, C boundaries, reflection, GC and suspension, `test/**`, `test/std`, and every applicable GOROOT case. The complete GOROOT corpus runs on the canonical Go-compatible J32/GoJS path, while all four paths run GOROOT sentinels and the complete applicable repository package suite; this avoids multiplying more than two thousand compiler conformance cases by provider paths whose differences are covered by target integration tests. Only reviewed `xfail` and `notapplicable` classifications may be excluded. Each W-stage PR carries focused executable CI; compile-only coverage does not count. Final acceptance also checks compiler coverage, `cprintf`/`println`/`fmtprintf` and reflection size, runtime benchmarks, native and embedded regressions, and removal of diagnostic or superseded changes.
 
 ## Remaining PR plan: W1-W3
 
@@ -101,7 +101,7 @@ Replace the five-profile split with J32/J64/W32 while preserving stable target i
 
 ### W2: host, reflection, and standard-library completeness
 
-Complete the GoJS, Emscripten, and WASI providers; consolidate output/FS behavior with [#2539](https://github.com/xgo-dev/llgo/pull/2539); preserve synchronous nested callbacks, external events, memory growth, and exit status; select the measured reflection backend; and close applicable standard-library gaps. Run Node, browser, Wasmtime, reflection, GC/suspension, and focused `test/std` CI in this PR.
+Complete the GoJS, Emscripten, and WASI providers; consolidate output/FS behavior with [#2539](https://github.com/xgo-dev/llgo/pull/2539); preserve synchronous nested callbacks, external events, memory growth, and exit status; select the measured reflection backend; and close applicable standard-library gaps. Run Node, browser, the selected WASI runtime, reflection, GC/suspension, and focused `test/std` CI in this PR.
 
 ### W3: full compatibility acceptance and consolidation
 
@@ -110,6 +110,8 @@ Run and classify the full applicable `test/**` suite on all four paths, the comp
 ## Deferred work
 
 W64, WASI Preview 2 and WIT components, threads and Atomics, WasmGC, Exception Handling, JSPI and Stack Switching, multiple workers, and parallel goroutines are later capability work. Unsupported environments continue to use the single-worker scheduler and LLGo linear-memory GC.
+
+The execution backend for this capability work, including removal of single-thread WASI, is defined by the follow-up [WebAssembly execution proposal](wasm-execution-proposal.md). It supersedes the backend choices in this document without changing the W1-W3 profile and data-model scope.
 
 ---
 
@@ -206,7 +208,7 @@ LLGo Core Wasm C ABI 与 WIT Canonical ABI 无关。未来 WASI Preview 2 将在
 
 ## 验收
 
-功能只有在 CI 对所有适用路径实际执行后才算完成。最小 hosted 矩阵包含四条路径：J32/GoJS、J32/Emscripten、J64/Emscripten Memory64、W32/WASI。测试按适用范围在真实 Node、浏览器和 Wasmtime 中运行，覆盖 `llgo build/run/test`、产物、host 回调与退出、C 边界、反射、GC 与挂起、`test/**`、`test/std` 以及全部适用 GOROOT case。完整 GOROOT corpus 在规范性的 Go 兼容 J32/GoJS 路径运行，四条路径都运行 GOROOT sentinel 和完整的适用仓库 package suite；这样无需把两千多个编译器一致性 case 机械乘以 host provider，而 provider 差异由 target 集成测试覆盖。只允许排除经过审查的 `xfail` 和 `notapplicable`。每个 W 阶段 PR 自带聚焦的可执行 CI，compile-only 不算覆盖。最终验收还检查编译器覆盖率、`cprintf`/`println`/`fmtprintf` 与反射体积、runtime benchmark、native/embedded 回归，以及诊断和被取代变更的清理。
+功能只有在 CI 对所有适用路径实际执行后才算完成。最小 hosted 矩阵包含四条路径：J32/GoJS、J32/Emscripten、J64/Emscripten Memory64、W32/WASI。测试按适用范围在真实 Node、浏览器和所选 WASI runtime 中运行，覆盖 `llgo build/run/test`、产物、host 回调与退出、C 边界、反射、GC 与挂起、`test/**`、`test/std` 以及全部适用 GOROOT case。完整 GOROOT corpus 在规范性的 Go 兼容 J32/GoJS 路径运行，四条路径都运行 GOROOT sentinel 和完整的适用仓库 package suite；这样无需把两千多个编译器一致性 case 机械乘以 host provider，而 provider 差异由 target 集成测试覆盖。只允许排除经过审查的 `xfail` 和 `notapplicable`。每个 W 阶段 PR 自带聚焦的可执行 CI，compile-only 不算覆盖。最终验收还检查编译器覆盖率、`cprintf`/`println`/`fmtprintf` 与反射体积、runtime benchmark、native/embedded 回归，以及诊断和被取代变更的清理。
 
 ## 后续 PR 规划：W1-W3
 
@@ -216,7 +218,7 @@ LLGo Core Wasm C ABI 与 WIT Canonical ABI 无关。未来 WASI Preview 2 将在
 
 ### W2：Host、反射与标准库完整性
 
-完成 GoJS、Emscripten 和 WASI provider；结合 [#2539](https://github.com/xgo-dev/llgo/pull/2539) 统一输出与 FS；保证同步嵌套回调、外部事件、内存增长和退出状态；根据测量选择反射后端；补齐适用标准库缺口。本 PR 运行 Node、浏览器、Wasmtime、反射、GC/挂起和聚焦的 `test/std` CI。
+完成 GoJS、Emscripten 和 WASI provider；结合 [#2539](https://github.com/xgo-dev/llgo/pull/2539) 统一输出与 FS；保证同步嵌套回调、外部事件、内存增长和退出状态；根据测量选择反射后端；补齐适用标准库缺口。本 PR 运行 Node、浏览器、所选 WASI runtime、反射、GC/挂起和聚焦的 `test/std` CI。
 
 ### W3：完整兼容验收与收敛
 
@@ -225,3 +227,5 @@ LLGo Core Wasm C ABI 与 WIT Canonical ABI 无关。未来 WASI Preview 2 将在
 ## 延期范围
 
 W64、WASI Preview 2/WIT component、threads/Atomics、WasmGC、Exception Handling、JSPI/Stack Switching、多 worker 和并行 goroutine 都是后续 capability 工作。不支持这些能力的环境继续使用单 worker 调度和 LLGo 线性内存 GC。
+
+这些能力的执行后端以及移除单线程 WASI 的计划，由后续的 [WebAssembly 执行架构提案](wasm-execution-proposal.md) 定义。该提案替代本文的执行后端选择，但不改变 W1-W3 的 profile 与数据模型范围。
