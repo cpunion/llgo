@@ -457,7 +457,7 @@ func TestWasmObservedResourceExceptions(t *testing.T) {
 		{testCase{RelPath: "winbatch.go", Directive: "run"}, 4 * time.Minute, 0},
 		{testCase{RelPath: "fixedbugs/issue78081.go", Directive: "run"}, 6 * time.Minute, 0},
 		{testCase{RelPath: "fixedbugs/issue79186.go", Directive: "run"}, 2 * time.Minute, 90 * time.Second},
-		{testCase{RelPath: "fixedbugs/issue5162.go", Directive: "runoutput"}, 5 * time.Minute, 0},
+		{testCase{RelPath: "fixedbugs/issue5162.go", Directive: "runoutput"}, 7 * time.Minute, 0},
 	} {
 		tc := tt.tc
 		timeout, _, match := cfg.MatchTimeout("go1.27.0", "js/wasm", tc)

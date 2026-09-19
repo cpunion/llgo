@@ -28,7 +28,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
       (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-compat'))
-    name: GOROOT (${{ matrix.os }}${{ startsWith(matrix.os, 'windows') && format(', {0}, {1}', matrix.windows_abi, matrix.windows_arch) || '' }}, Go 1.26+1.27, shard ${{ matrix.shard-index }}/${{ matrix.os == 'windows-11-arm' && '8' || '4' }})
+    name: GOROOT (${{ matrix.os }}${{ startsWith(matrix.os, 'windows') && format(', {0}, {1}', matrix.windows_abi, matrix.windows_arch) || '' }}, Go 1.26+1.27, shard ${{ matrix.shard-index }}/8)
     timeout-minutes: 180
     env:
       GOPROXY: https://proxy.golang.org,direct
@@ -36,7 +36,7 @@ jobs:
       # Leave thirty minutes for setup plus timeout diagnostics and artifacts.
       LLGO_GOROOT_TEST_TIMEOUT: "150m"
       LLGO_GOROOT_VERBOSE: "1"
-      LLGO_GOROOT_SHARD_TOTAL: ${{ matrix.os == 'windows-11-arm' && '8' || '4' }}
+      LLGO_GOROOT_SHARD_TOTAL: "8"
     strategy:
       fail-fast: false
       matrix:
@@ -46,8 +46,8 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-2022, windows-11-arm]
         windows_abi: [msvc, mingw]
         windows_arch: [amd64, arm64, "386"]
-        # GitHub's Windows ARM64 runners dropped several jobs after roughly an
-        # hour, so only that platform uses the extra four shard indices below.
+        # Eight native shards keep paired Go 1.26/1.27 jobs near the per-job
+        # latency target without returning to a version-expanded job matrix.
         shard-index: ["0", "1", "2", "3", "4", "5", "6", "7"]
         exclude:
           - os: macos-latest
@@ -68,30 +68,6 @@ jobs:
             windows_arch: amd64
           - os: windows-11-arm
             windows_arch: "386"
-          - os: macos-latest
-            shard-index: "4"
-          - os: macos-latest
-            shard-index: "5"
-          - os: macos-latest
-            shard-index: "6"
-          - os: macos-latest
-            shard-index: "7"
-          - os: ubuntu-latest
-            shard-index: "4"
-          - os: ubuntu-latest
-            shard-index: "5"
-          - os: ubuntu-latest
-            shard-index: "6"
-          - os: ubuntu-latest
-            shard-index: "7"
-          - os: windows-2022
-            shard-index: "4"
-          - os: windows-2022
-            shard-index: "5"
-          - os: windows-2022
-            shard-index: "6"
-          - os: windows-2022
-            shard-index: "7"
         include:
           - os: ubuntu-latest
             runner: [qiniu, ubuntu-24.04-large]
@@ -154,6 +130,7 @@ jobs:
         with:
           go-version: ${{ steps.target-go.outputs.go126 }}
           architecture: ${{ matrix.os == 'windows-11-arm' && 'arm64' || startsWith(matrix.os, 'windows') && 'x64' || '' }}
+          cache: false
 
       - name: Select Go 1.26 GOROOT
         id: go126
@@ -180,6 +157,7 @@ jobs:
         with:
           go-version: ${{ steps.target-go.outputs.go127 }}
           architecture: ${{ matrix.os == 'windows-11-arm' && 'arm64' || startsWith(matrix.os, 'windows') && 'x64' || '' }}
+          cache: false
 
       - name: Select Go 1.27 GOROOT
         id: go127
@@ -245,6 +223,9 @@ jobs:
           export LLGO_GOROOT_PARALLEL=1
           export LLGO_GOROOT_LOG_DIR="$RUNNER_TEMP/goroot-logs"
           export LLGO_GOROOT_CACHE_DIR="$RUNNER_TEMP/goroot-cache"
+          shard_index=${{ matrix.shard-index }}
+          paired_shard_index=$(((shard_index + LLGO_GOROOT_SHARD_TOTAL / 2) % LLGO_GOROOT_SHARD_TOTAL))
+          export LLGO_GOROOT_SHARD_INDEXES="$shard_index:$paired_shard_index"
           bash dev/test_goroot.sh "$GO126_GOROOT" "$GO127_GOROOT" -- \
             -directive-mode ci \
             -min-swap-free-mib "$min_swap_free_mib" \
@@ -278,8 +259,12 @@ jobs:
           summarize_log() {
             local go_version=$1
             local log="$RUNNER_TEMP/goroot-logs/go${go_version}.log"
-            local selected observed failed skipped passed report_id
+            local selected observed failed skipped passed report_id shard_info actual_shard shard_total
             touch "$log"
+            shard_info=$(sed -nE 's/.* shard=([0-9]+)\/([0-9]+) cases=.*/\1 \2/p' "$log" | tail -1)
+            read -r actual_shard shard_total <<<"$shard_info"
+            actual_shard=${actual_shard:-$SHARD_INDEX}
+            shard_total=${shard_total:-$LLGO_GOROOT_SHARD_TOTAL}
             selected=$(sed -nE 's/.* shard=[^ ]+ cases=([0-9]+) directive_mode=.*/\1/p' "$log" | tail -1)
             observed=$(grep -Ec -- '--- (PASS|FAIL|SKIP): TestGoRootRunCases/' "$log" || true)
             failed=$(grep -Ec -- '--- FAIL: TestGoRootRunCases/' "$log" || true)
@@ -289,21 +274,21 @@ jobs:
               selected='?'
             fi
 
-            report_id="${platform//\//-}-${go_version}-${SHARD_INDEX}"
+            report_id="${platform//\//-}-${go_version}-${actual_shard}"
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-              "$platform" "$go_version" "$SHARD_INDEX" "$selected" \
+              "$platform" "$go_version" "$actual_shard" "$selected" \
               "$observed" "$passed" "$failed" "$skipped" \
               >"$report_dir/summary-$report_id.tsv"
             awk -F '\t' \
               -v platform="$platform" \
               -v version="$go_version" \
-              -v shard="$SHARD_INDEX" '
+              -v shard="$actual_shard" '
                 $1 == "GOROOT_CASE_RESULT" {
                   printf "%s\t%s\t%s\t%s\t%s\t%s\n", platform, version, shard, $2, $3, $4
                 }
               ' "$log" >"$report_dir/cases-$report_id.tsv"
 
-            echo "### GOROOT $platform · Go $go_version · shard $SHARD_INDEX/$LLGO_GOROOT_SHARD_TOTAL"
+            echo "### GOROOT $platform · Go $go_version · shard $actual_shard/$shard_total"
             echo
             echo '| Selected | Observed | Passed | Failed | Skipped |'
             echo '|---:|---:|---:|---:|---:|'
@@ -352,6 +337,7 @@ jobs:
       # Leave thirty minutes for setup plus timeout diagnostics and artifacts.
       LLGO_GOROOT_TEST_TIMEOUT: "150m"
       LLGO_GOROOT_VERBOSE: "1"
+      LLGO_GOROOT_SHARD_TOTAL: "16"
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: 'on'
     strategy:
@@ -416,6 +402,7 @@ jobs:
         uses: ./.github/actions/setup-go
         with:
           go-version: ${{ steps.target-go.outputs.go126 }}
+          cache: false
 
       - name: Select Go 1.26 GOROOT
         id: go126
@@ -441,6 +428,7 @@ jobs:
         uses: ./.github/actions/setup-go
         with:
           go-version: ${{ steps.target-go.outputs.go127 }}
+          cache: false
 
       - name: Select Go 1.27 GOROOT
         id: go127
@@ -486,12 +474,15 @@ jobs:
           export LLGO_GOROOT_PARALLEL=1
           export LLGO_GOROOT_LOG_DIR="$RUNNER_TEMP/goroot-logs"
           export LLGO_GOROOT_CACHE_DIR="$RUNNER_TEMP/goroot-cache"
+          shard_index=${{ matrix.shard-index }}
+          paired_shard_index=$(((shard_index + LLGO_GOROOT_SHARD_TOTAL / 2) % LLGO_GOROOT_SHARD_TOTAL))
+          export LLGO_GOROOT_SHARD_INDEXES="$shard_index:$paired_shard_index"
           bash dev/test_goroot.sh "$GO126_GOROOT" "$GO127_GOROOT" -- \
             -directive-mode ci \
             -wasm-profile "${{ matrix.wasm_profile }}" \
             -progress 60s \
             -shard-index "${{ matrix.shard-index }}" \
-            -shard-total "16"
+            -shard-total "$LLGO_GOROOT_SHARD_TOTAL"
 
       - name: Summarize GOROOT shard
         if: always()
@@ -509,8 +500,12 @@ jobs:
           summarize_log() {
             local go_version=$1
             local log="$RUNNER_TEMP/goroot-logs/go${go_version}.log"
-            local selected observed failed skipped passed report_id
+            local selected observed failed skipped passed report_id shard_info actual_shard shard_total
             touch "$log"
+            shard_info=$(sed -nE 's/.* shard=([0-9]+)\/([0-9]+) cases=.*/\1 \2/p' "$log" | tail -1)
+            read -r actual_shard shard_total <<<"$shard_info"
+            actual_shard=${actual_shard:-$SHARD_INDEX}
+            shard_total=${shard_total:-$LLGO_GOROOT_SHARD_TOTAL}
             selected=$(sed -nE 's/.* shard=[^ ]+ cases=([0-9]+) directive_mode=.*/\1/p' "$log" | tail -1)
             observed=$(grep -Ec -- '--- (PASS|FAIL|SKIP): TestGoRootRunCases/' "$log" || true)
             failed=$(grep -Ec -- '--- FAIL: TestGoRootRunCases/' "$log" || true)
@@ -520,21 +515,21 @@ jobs:
               selected='?'
             fi
 
-            report_id="${platform//\//-}-${go_version}-${SHARD_INDEX}"
+            report_id="${platform//\//-}-${go_version}-${actual_shard}"
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-              "$platform" "$go_version" "$SHARD_INDEX" "$selected" \
+              "$platform" "$go_version" "$actual_shard" "$selected" \
               "$observed" "$passed" "$failed" "$skipped" \
               >"$report_dir/summary-$report_id.tsv"
             awk -F '\t' \
               -v platform="$platform" \
               -v version="$go_version" \
-              -v shard="$SHARD_INDEX" '
+              -v shard="$actual_shard" '
                 $1 == "GOROOT_CASE_RESULT" {
                   printf "%s\t%s\t%s\t%s\t%s\t%s\n", platform, version, shard, $2, $3, $4
                 }
               ' "$log" >"$report_dir/cases-$report_id.tsv"
 
-            echo "### GOROOT $platform (${{ matrix.wasm_profile }}) · Go $go_version · shard $SHARD_INDEX/16"
+            echo "### GOROOT $platform (${{ matrix.wasm_profile }}) · Go $go_version · shard $actual_shard/$shard_total"
             echo
             echo '| Selected | Observed | Passed | Failed | Skipped |'
             echo '|---:|---:|---:|---:|---:|'
@@ -648,19 +643,19 @@ jobs:
           {
             echo '## GOROOT run summary'
             echo
-            echo "Received $report_count/112 shard reports."
+            echo "Received $report_count/160 shard reports."
             echo
             echo '| Platform / toolchain | Shards | Selected | Observed | Passed | Failed | Skipped |'
             echo '|---|---:|---:|---:|---:|---:|---:|'
             for version in "$go126" "$go127"; do
-              write_row "🍎 macOS · 🦾 ARM64 · Go $version" darwin/arm64 "$version" 4
-              write_row "🐧 Linux · 🖥️ AMD64 · Go $version" linux/amd64 "$version" 4
-              write_row "🪟 Windows · 🟦 MSVC · 🖥️ AMD64 · Go $version" windows-msvc/amd64 "$version" 4
+              write_row "🍎 macOS · 🦾 ARM64 · Go $version" darwin/arm64 "$version" 8
+              write_row "🐧 Linux · 🖥️ AMD64 · Go $version" linux/amd64 "$version" 8
+              write_row "🪟 Windows · 🟦 MSVC · 🖥️ AMD64 · Go $version" windows-msvc/amd64 "$version" 8
               write_row "🪟 Windows · 🟦 MSVC · 🦾 ARM64 · Go $version" windows-msvc/arm64 "$version" 8
-              write_row "🪟 Windows · 🟦 MSVC · 💾 386 · Go $version" windows-msvc/386 "$version" 4
-              write_row "🪟 Windows · 🦬 GNU · 🖥️ AMD64 · Go $version" windows-mingw/amd64 "$version" 4
+              write_row "🪟 Windows · 🟦 MSVC · 💾 386 · Go $version" windows-msvc/386 "$version" 8
+              write_row "🪟 Windows · 🦬 GNU · 🖥️ AMD64 · Go $version" windows-mingw/amd64 "$version" 8
               write_row "🪟 Windows · 🦬 GNU · 🦾 ARM64 · Go $version" windows-mingw/arm64 "$version" 8
-              write_row "🪟 Windows · 🦬 GNU · 💾 386 · Go $version" windows-mingw/386 "$version" 4
+              write_row "🪟 Windows · 🦬 GNU · 💾 386 · Go $version" windows-mingw/386 "$version" 8
               write_row "🕸️ WebAssembly · 📜 JS · Go $version" js/wasm "$version" 16
             done
             echo
@@ -715,8 +710,8 @@ jobs:
           GOROOT_RESULT: ${{ needs.goroot.result }}
           WASM_RESULT: ${{ needs.goroot-wasm.result }}
         run: |
-          if [[ "$GOROOT_REPORT_COUNT" -ne 112 ]]; then
-            echo "error: expected 112 shard reports, got $GOROOT_REPORT_COUNT" >&2
+          if [[ "$GOROOT_REPORT_COUNT" -ne 160 ]]; then
+            echo "error: expected 160 shard reports, got $GOROOT_REPORT_COUNT" >&2
             exit 1
           fi
           if [[ "$GOROOT_RESULT" != success || "$WASM_RESULT" != success ]]; then

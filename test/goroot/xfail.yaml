@@ -49,8 +49,8 @@ timeouts:
   - platform: js/wasm
     directive: runoutput
     case: fixedbugs/issue5162.go
-    timeout: 5m
-    reason: building the 768 generated array-comparison functions took 241.8s on loaded GoJS CI, exhausting the previous 4m budget
+    timeout: 7m
+    reason: building the 768 generated array-comparison functions exhausted the 5m budget while Go 1.26 and Go 1.27 shards shared a loaded GoJS runner
   - platform: darwin/arm64
     directive: run
     case: fixedbugs/issue79186.go
