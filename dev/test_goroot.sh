@@ -72,9 +72,12 @@ for goroot in "${goroots[@]}"; do
 	(
 		cd "$repo_root"
 		goroot_gomaxprocs="${LLGO_GOROOT_GOMAXPROCS:-${GOMAXPROCS:-2}}"
+		# CI sets this below the enclosing job timeout so the Go runner can
+		# print its timeout diagnostics and the workflow can upload its report.
+		goroot_test_timeout="${LLGO_GOROOT_TEST_TIMEOUT:-180m}"
 		if [[ -n "${LLGO_GOROOT_RUNNER:-}" ]]; then
 			cd "$repo_root/test/goroot"
-			test_args=(-test.run='^TestGoRootRunCases$' -test.count=1 -test.timeout=180m)
+			test_args=(-test.run='^TestGoRootRunCases$' -test.count=1 -test.timeout="${goroot_test_timeout}")
 			if [[ "${LLGO_GOROOT_VERBOSE:-0}" != "0" ]]; then
 				test_args+=("-test.v")
 			fi
@@ -88,7 +91,7 @@ for goroot in "${goroots[@]}"; do
 			fi
 			run_with_heartbeat env GOMAXPROCS="$goroot_gomaxprocs" \
 				go test -p=1 ./test/goroot "${go_test_args[@]}" -run='^TestGoRootRunCases$' \
-				-count=1 -timeout 180m -args -goroot "$goroot" "${runner_args[@]}"
+				-count=1 -timeout "$goroot_test_timeout" -args -goroot "$goroot" "${runner_args[@]}"
 		fi
 	)
 done

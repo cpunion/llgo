@@ -1,6 +1,11 @@
 # Windows platform selectors may use windows/ARCH for both ABIs or the more
 # specific windows-msvc/ARCH and windows-mingw/ARCH forms.
 host_skips:
+  - version: go1.26
+    platform: linux/amd64
+    directive: runoutput
+    case: rangegen.go
+    reason: the Go 1.26 generator exceeds the hosted runner's 4 GiB process-group limit before LLGo is invoked; see issue #2630
   - version: go1.27
     platform: linux/amd64
     directive: runoutput

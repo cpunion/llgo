@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -63,24 +64,34 @@ type wasmProfileSummary struct {
 }
 
 func main() {
-	nativeDir := flag.String("native-reports", "", "directory containing native summary TSV files")
-	wasmDir := flag.String("wasm-reports", "", "directory containing wasm acceptance JSON files")
-	runURL := flag.String("run-url", "", "workflow run URL")
-	mention := flag.String("mention-on-failure", "", "GitHub user/team to mention on failure")
-	outputFile := flag.String("output", "-", "output markdown file path or - for stdout")
-	nativeRes := flag.String("native-result", "success", "result of native test matrix")
-	wasmRes := flag.String("wasm-result", "success", "result of wasm-std matrix")
-	browserRes := flag.String("browser-result", "success", "result of wasm-browser test")
-	sentinelsRes := flag.String("sentinels-result", "success", "result of wasm-sentinels test")
-	flag.Parse()
+	if err := run(os.Args[1:], os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "stdreport: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("stdreport", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	nativeDir := flags.String("native-reports", "", "directory containing native summary TSV files")
+	wasmDir := flags.String("wasm-reports", "", "directory containing wasm acceptance JSON files")
+	runURL := flags.String("run-url", "", "workflow run URL")
+	mention := flags.String("mention-on-failure", "", "GitHub user/team to mention on failure")
+	outputFile := flags.String("output", "-", "output markdown file path or - for stdout")
+	nativeRes := flags.String("native-result", "success", "result of native test matrix")
+	wasmRes := flags.String("wasm-result", "success", "result of wasm-std matrix")
+	browserRes := flags.String("browser-result", "success", "result of wasm-browser test")
+	sentinelsRes := flags.String("sentinels-result", "success", "result of wasm-sentinels test")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
 
 	var nativeShards []nativeShard
 	if *nativeDir != "" {
 		var err error
 		nativeShards, err = loadNativeShards(*nativeDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "stdreport: load native shards: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("load native shards: %w", err)
 		}
 	}
 
@@ -89,8 +100,7 @@ func main() {
 		var err error
 		wasmSummaries, err = loadWasmReports(*wasmDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "stdreport: load wasm reports: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("load wasm reports: %w", err)
 		}
 	}
 
@@ -106,13 +116,14 @@ func main() {
 	)
 
 	if *outputFile == "-" || *outputFile == "" {
-		fmt.Print(report)
+		_, err := fmt.Fprint(stdout, report)
+		return err
 	} else {
 		if err := os.WriteFile(*outputFile, []byte(report), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "stdreport: write output: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("write output: %w", err)
 		}
 	}
+	return nil
 }
 
 func loadNativeShards(dir string) ([]nativeShard, error) {

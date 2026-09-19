@@ -9,8 +9,9 @@ on:
     - cron: "0 19 * * *"
 
 concurrency:
+  # PR updates may cancel only an older run of the same PR; periodic runs must finish.
   group: >-
-    ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{
+    ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}${{
       (github.event_name == 'pull_request' &&
        !((github.event.action == 'labeled' && github.event.label.name == 'go-test-std') ||
          (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-std'))))

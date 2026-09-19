@@ -444,11 +444,10 @@ func TestWasmObservedResourceExceptions(t *testing.T) {
 	cfg := loadXFailConfig(t, repo, filepath.Join("test", "goroot", "xfail.yaml"))
 	notApplicable := loadNotApplicableConfig(t, repo, filepath.Join("test", "goroot", "notapplicable.yaml"))
 	rangegen := testCase{RelPath: "rangegen.go", Directive: "runoutput"}
-	if match, _ := cfg.MatchHostSkip("go1.27.0", "linux/amd64", rangegen); !match {
-		t.Fatal("Go 1.27 linux/amd64 rangegen did not match its host resource skip")
-	}
-	if match, reason := cfg.MatchHostSkip("go1.26.7", "linux/amd64", rangegen); match {
-		t.Fatalf("Go 1.26 linux/amd64 rangegen unexpectedly matched host skip: %s", reason)
+	for _, version := range []string{"go1.26.7", "go1.27.0"} {
+		if match, _ := cfg.MatchHostSkip(version, "linux/amd64", rangegen); !match {
+			t.Errorf("%s linux/amd64 rangegen did not match its host resource skip", version)
+		}
 	}
 	for _, tt := range []struct {
 		tc            testCase

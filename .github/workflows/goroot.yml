@@ -12,8 +12,9 @@ permissions:
   contents: read
 
 concurrency:
+  # PR updates may cancel only an older run of the same PR; periodic runs must finish.
   group: >-
-    ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{
+    ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}${{
       (github.event_name == 'pull_request' &&
        !((github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
          (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-compat'))))
@@ -32,6 +33,8 @@ jobs:
     env:
       GOPROXY: https://proxy.golang.org,direct
       LLGO_GOROOT_HEARTBEAT_SECONDS: "60"
+      # Leave thirty minutes for setup plus timeout diagnostics and artifacts.
+      LLGO_GOROOT_TEST_TIMEOUT: "150m"
       LLGO_GOROOT_VERBOSE: "1"
     strategy:
       fail-fast: false
@@ -269,12 +272,14 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.action == 'labeled' && github.event.label.name == 'go-test-compat') ||
       (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'go-test-compat'))
-    name: GOROOT (wasm, ${{ matrix.wasm_profile }}, Go ${{ matrix.go-version }}, shard ${{ matrix.shard-index }}/4)
+    name: GOROOT (wasm, ${{ matrix.wasm_profile }}, Go ${{ matrix.go-version }}, shard ${{ matrix.shard-index }}/16)
     timeout-minutes: 180
     runs-on: ${{ github.repository_owner == 'xgo-dev' && fromJSON('["qiniu", "ubuntu-24.04-large"]') || 'ubuntu-24.04' }}
     env:
       GOPROXY: https://proxy.golang.org,direct
       LLGO_GOROOT_HEARTBEAT_SECONDS: "60"
+      # Leave thirty minutes for setup plus timeout diagnostics and artifacts.
+      LLGO_GOROOT_TEST_TIMEOUT: "150m"
       LLGO_GOROOT_VERBOSE: "1"
       GOFLAGS: -tags=llvm22
       LLGO_BUILD_CACHE: 'on'
@@ -283,7 +288,10 @@ jobs:
       matrix:
         wasm_profile: [J32-GoJS]
         go-version: ["1.26", "1.27"]
-        shard-index: ["0", "1", "2", "3"]
+        # Wasm cases are substantially slower than native cases. These shards
+        # run on Ubuntu capacity and keep each runner near the 25-minute target
+        # without consuming additional macOS or Windows runners.
+        shard-index: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
     steps:
       - uses: actions/checkout@v7
 
@@ -376,7 +384,7 @@ jobs:
             -wasm-profile "${{ matrix.wasm_profile }}" \
             -progress 60s \
             -shard-index "${{ matrix.shard-index }}" \
-            -shard-total "4" 2>&1 | tee "$RUNNER_TEMP/goroot.log"
+            -shard-total "16" 2>&1 | tee "$RUNNER_TEMP/goroot.log"
           runner_status=${PIPESTATUS[0]}
           set -e
           exit "$runner_status"
@@ -419,7 +427,7 @@ jobs:
             ' "$log" >"$report_dir/cases-$report_id.tsv"
 
           {
-            echo "### GOROOT $platform (${{ matrix.wasm_profile }}) · Go $GO_VERSION · shard $SHARD_INDEX/4"
+            echo "### GOROOT $platform (${{ matrix.wasm_profile }}) · Go $GO_VERSION · shard $SHARD_INDEX/16"
             echo
             echo '| Selected | Observed | Passed | Failed | Skipped |'
             echo '|---:|---:|---:|---:|---:|'
@@ -527,7 +535,7 @@ jobs:
           {
             echo '## GOROOT run summary'
             echo
-            echo "Received $report_count/72 shard reports."
+            echo "Received $report_count/96 shard reports."
             echo
             echo '| Platform / toolchain | Shards | Selected | Observed | Passed | Failed | Skipped |'
             echo '|---|---:|---:|---:|---:|---:|---:|'
@@ -540,7 +548,7 @@ jobs:
               write_row "🪟 Windows · 🦬 GNU · 🖥️ AMD64 · Go $version" windows-mingw/amd64 "$version" 4
               write_row "🪟 Windows · 🦬 GNU · 🦾 ARM64 · Go $version" windows-mingw/arm64 "$version" 4
               write_row "🪟 Windows · 🦬 GNU · 💾 386 · Go $version" windows-mingw/386 "$version" 4
-              write_row "🕸️ WebAssembly · 📜 JS · Go $version" js/wasm "$version" 4
+              write_row "🕸️ WebAssembly · 📜 JS · Go $version" js/wasm "$version" 16
             done
             echo
             echo '_Passed means the runner classification succeeded; expected failures, not-applicable skips, host skips, and classified flakes do not count as Failed._'
@@ -566,20 +574,20 @@ jobs:
           path: ${{ runner.temp }}/goroot-report.md
           if-no-files-found: error
 
-      - name: Replace the daily GOROOT report issue
+      - name: Replace the periodic GOROOT report issue
         if: always() && steps.report.outcome == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && github.repository == 'xgo-dev/llgo'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           report_date="$(TZ=Asia/Shanghai date +%F)"
-          title="[GOROOT daily] $report_date"
+          title="[GOROOT periodic] $report_date"
           gh issue list \
             --repo "$GITHUB_REPOSITORY" \
             --state open \
-            --search 'in:title "[GOROOT daily]"' \
+            --search 'in:title "[GOROOT"' \
             --limit 100 \
             --json number,title \
-            --jq '.[] | select(.title | test("^\\[GOROOT daily\\] [0-9]{4}-[0-9]{2}-[0-9]{2}$")) | .number' |
+            --jq '.[] | select(.title | test("^\\[GOROOT (daily|periodic)\\] [0-9]{4}-[0-9]{2}-[0-9]{2}$")) | .number' |
             while IFS= read -r issue_number; do
               gh issue close "$issue_number" --repo "$GITHUB_REPOSITORY"
             done
@@ -594,8 +602,8 @@ jobs:
           GOROOT_RESULT: ${{ needs.goroot.result }}
           WASM_RESULT: ${{ needs.goroot-wasm.result }}
         run: |
-          if [[ "$GOROOT_REPORT_COUNT" -ne 72 ]]; then
-            echo "error: expected 72 shard reports, got $GOROOT_REPORT_COUNT" >&2
+          if [[ "$GOROOT_REPORT_COUNT" -ne 96 ]]; then
+            echo "error: expected 96 shard reports, got $GOROOT_REPORT_COUNT" >&2
             exit 1
           fi
           if [[ "$GOROOT_RESULT" != success || "$WASM_RESULT" != success ]]; then
