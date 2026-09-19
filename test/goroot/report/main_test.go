@@ -37,7 +37,7 @@ func TestRenderReportIncludesOnlyMismatchCasesWithAllLanes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := renderReport(results, []string{"darwin/arm64", "linux/amd64"}, []string{"1.26.7", "1.27.0"}, "https://example.com/run")
+	report, err := renderReport(results, []string{"darwin/arm64", "linux/amd64"}, []string{"1.26.7", "1.27.0"}, "https://example.com/run", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestRenderReportShowsUnavailableLane(t *testing.T) {
 		directive: "run",
 		result:    "unexpected-fail",
 	}}
-	report, err := renderReport(results, []string{"linux/amd64"}, []string{"1.26.7", "1.27.0"}, "")
+	report, err := renderReport(results, []string{"linux/amd64"}, []string{"1.26.7", "1.27.0"}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestRenderReportRejectsDuplicateLaneResult(t *testing.T) {
 		directive: "run",
 		result:    "pass",
 	}
-	_, err := renderReport([]caseResult{result, result}, []string{"linux/amd64"}, []string{"1.27.0"}, "")
+	_, err := renderReport([]caseResult{result, result}, []string{"linux/amd64"}, []string{"1.27.0"}, "", "")
 	if err == nil || !strings.Contains(err.Error(), "duplicate result") {
 		t.Fatalf("renderReport error = %v, want duplicate result", err)
 	}
@@ -110,12 +110,48 @@ func TestRenderReportWasmPlatformLabels(t *testing.T) {
 			result:    "pass",
 		},
 	}
-	report, err := renderReport(results, []string{"js/wasm", "wasip1/wasm"}, []string{"1.27.0"}, "")
+	report, err := renderReport(results, []string{"js/wasm", "wasip1/wasm"}, []string{"1.27.0"}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantHeader := "| Case | 🕸️ 📜 JS<br>1.27 | 🕸️ 🔌 WASI<br>1.27 |"
 	if !strings.Contains(report, wantHeader) {
 		t.Fatalf("report does not contain wasm header %q:\n%s", wantHeader, report)
+	}
+}
+
+func TestRenderReportMentionOnMismatch(t *testing.T) {
+	mismatchResults := []caseResult{
+		{
+			lane:      lane{platform: "linux/amd64", version: "1.27.0"},
+			shard:     "0",
+			casePath:  "fail.go",
+			directive: "run",
+			result:    "unexpected-fail",
+		},
+	}
+	reportWithMention, err := renderReport(mismatchResults, []string{"linux/amd64"}, []string{"1.27.0"}, "", "fennoai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reportWithMention, "@fennoai") || !strings.Contains(reportWithMention, "PR") {
+		t.Fatalf("expected mention @fennoai with PR triage instruction, got:\n%s", reportWithMention)
+	}
+
+	passResults := []caseResult{
+		{
+			lane:      lane{platform: "linux/amd64", version: "1.27.0"},
+			shard:     "0",
+			casePath:  "ok.go",
+			directive: "run",
+			result:    "pass",
+		},
+	}
+	reportNoMismatch, err := renderReport(passResults, []string{"linux/amd64"}, []string{"1.27.0"}, "", "fennoai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(reportNoMismatch, "@fennoai") {
+		t.Fatalf("unexpected mention when no mismatches:\n%s", reportNoMismatch)
 	}
 }

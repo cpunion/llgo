@@ -239,8 +239,24 @@ packages=()
 while IFS= read -r package; do
 	if [[ "${LLGO_TEST_SUITE:-}" == "core" ]]; then
 		case "${package}" in
-			github.com/xgo-dev/llgo/test/std|github.com/xgo-dev/llgo/test/std/*|\
 			github.com/xgo-dev/llgo/test/goroot|github.com/xgo-dev/llgo/test/goroot/*)
+				continue
+				;;
+			github.com/xgo-dev/llgo/test/std/bufio|\
+			github.com/xgo-dev/llgo/test/std/bytes|\
+			github.com/xgo-dev/llgo/test/std/encoding/binary|\
+			github.com/xgo-dev/llgo/test/std/encoding/json|\
+			github.com/xgo-dev/llgo/test/std/errors|\
+			github.com/xgo-dev/llgo/test/std/fmt|\
+			github.com/xgo-dev/llgo/test/std/io|\
+			github.com/xgo-dev/llgo/test/std/math/bits|\
+			github.com/xgo-dev/llgo/test/std/sort|\
+			github.com/xgo-dev/llgo/test/std/strconv|\
+			github.com/xgo-dev/llgo/test/std/strings|\
+			github.com/xgo-dev/llgo/test/std/sync|\
+			github.com/xgo-dev/llgo/test/std/sync/*)
+				;;
+			github.com/xgo-dev/llgo/test/std|github.com/xgo-dev/llgo/test/std/*)
 				continue
 				;;
 		esac

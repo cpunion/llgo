@@ -5,8 +5,8 @@ on:
   pull_request:
     types: [labeled]
   schedule:
-    # 02:00 Asia/Shanghai (18:00 UTC on the previous day).
-    - cron: "0 18 * * *"
+    # 02:00 Asia/Shanghai (18:00 UTC on the previous day), every 3 days.
+    - cron: "0 18 */3 * *"
 
 permissions:
   contents: read
@@ -535,13 +535,22 @@ jobs:
             -platforms darwin/arm64,linux/amd64,windows-msvc/amd64,windows-msvc/arm64,windows-msvc/386,windows-mingw/amd64,windows-mingw/arm64,windows-mingw/386,js/wasm \
             -versions "$go126,$go127" \
             -run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            -mention-on-mismatch "fennoai" \
             >>"$report_md"
           cat "$report_md" >>"$GITHUB_STEP_SUMMARY"
           echo "GOROOT_REPORT=$report_md" >>"$GITHUB_ENV"
           echo "GOROOT_REPORT_COUNT=$report_count" >>"$GITHUB_ENV"
 
+      - name: Preserve GOROOT summary report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: goroot-summary-report
+          path: ${{ runner.temp }}/goroot-report.md
+          if-no-files-found: error
+
       - name: Replace the daily GOROOT report issue
-        if: always() && steps.report.outcome == 'success' && github.event_name == 'schedule' && github.repository == 'xgo-dev/llgo'
+        if: always() && steps.report.outcome == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && github.repository == 'xgo-dev/llgo'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

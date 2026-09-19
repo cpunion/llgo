@@ -30,9 +30,10 @@ not an LLGo compatibility goal.
 The GOROOT workflow builds LLGo and this runner with the repository toolchain,
 then runs the `ci` directive set from the two most recent Go releases. Every run
 publishes the expectation-mismatch table in its Actions summary. The scheduled
-run in `xgo-dev/llgo` also replaces the previous `[GOROOT daily] YYYY-MM-DD`
-issue. A manual dispatch or adding the existing `go-test-compat` label to a
-pull request runs the same matrix without modifying issues.
+run in `xgo-dev/llgo` (every 3 days) also replaces the previous `[GOROOT daily] YYYY-MM-DD`
+issue; if expectation mismatches occur, `@fennoai` is automatically mentioned for triage.
+A manual dispatch or adding the existing `go-test-compat` label to a pull request
+runs the same matrix.
 
 Basic usage:
 
