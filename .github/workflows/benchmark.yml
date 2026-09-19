@@ -241,7 +241,10 @@ jobs:
           # workflow_run trusts the target branch configuration. Use the same
           # snapshot for pull request artifacts so selector changes take effect
           # after merge without invalidating the introducing pull request.
-          config: .github/llgo-benchmark.yml
+          config: >-
+            ${{ github.event_name == 'pull_request' &&
+                '.benchmark/base-benchmark.yml' ||
+                '.github/llgo-benchmark.yml' }}
           benchmark-file: .benchmark/results/benchmark.txt
           baseline-benchmark-file: >-
             ${{ github.event_name == 'pull_request' &&
@@ -389,7 +392,10 @@ jobs:
           steps.wasm-merge-base.outputs.trusted-config == 'true'
         uses: xgo-dev/setup-benchmark-go-action@v1.0.6
         with:
-          config: .github/llgo-wasm-benchmark.yml
+          config: >-
+            ${{ github.event_name == 'pull_request' &&
+                '.benchmark/wasm-base-benchmark.yml' ||
+                '.github/llgo-wasm-benchmark.yml' }}
           benchmark-file: .benchmark/wasm-results/benchmark.txt
           baseline-benchmark-file: >-
             ${{ github.event_name == 'pull_request' &&
