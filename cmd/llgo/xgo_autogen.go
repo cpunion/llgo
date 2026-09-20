@@ -64,6 +64,7 @@ type Cmd_run struct {
 type Cmd_targets struct {
 	xcmd.Command
 	*App
+	JSON bool `flag:"json, usage: print resolved target configurations as JSON"`
 }
 type Cmd_test struct {
 	xcmd.Command
@@ -274,19 +275,17 @@ func (this *Cmd_run) Classfname() string {
 	return "run"
 }
 
-//line cmd/llgo/targets_cmd.gox:16
+//line cmd/llgo/targets_cmd.gox:18
 func (this *Cmd_targets) Main(_xgo_arg0 string) {
 	this.Command.Main(_xgo_arg0)
-//line cmd/llgo/targets_cmd.gox:16:1
-	this.Use("targets [-json] [name ...]")
 //line cmd/llgo/targets_cmd.gox:18:1
-	this.Short("List and inspect LLGo target configurations")
+	this.Use("targets [name ...]")
 //line cmd/llgo/targets_cmd.gox:20:1
-	this.FlagOff()
+	this.Short("List and inspect LLGo target configurations")
 //line cmd/llgo/targets_cmd.gox:22:1
 	this.Run__1(func(args []string) {
 //line cmd/llgo/targets_cmd.gox:23:1
-		targets.Cmd.Run(targets.Cmd, args)
+		targets.Main(args, this.JSON)
 	})
 }
 func (this *Cmd_targets) Classfname() string {

@@ -33,14 +33,14 @@ func TestTargets(t *testing.T) {
 	resolver := targetcfg.NewResolver(dir)
 
 	var output bytes.Buffer
-	if err := run(nil, &output, &output, resolver); err != nil {
+	if err := run(nil, false, &output, resolver); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.ReplaceAll(output.String(), "\r\n", "\n"); got != "base\nboard\nbroken\n" {
 		t.Fatalf("targets = %q", got)
 	}
 	output.Reset()
-	if err := run([]string{"-json"}, &output, &output, resolver); err == nil || !strings.Contains(err.Error(), "parse") {
+	if err := run(nil, true, &output, resolver); err == nil || !strings.Contains(err.Error(), "parse") {
 		t.Fatalf("bulk JSON with malformed target error = %v", err)
 	}
 	if output.Len() != 0 {
@@ -48,7 +48,7 @@ func TestTargets(t *testing.T) {
 	}
 
 	output.Reset()
-	if err := run([]string{"-json", "board"}, &output, &output, resolver); err != nil {
+	if err := run([]string{"board"}, true, &output, resolver); err != nil {
 		t.Fatal(err)
 	}
 	var got []targetInfo
@@ -59,17 +59,11 @@ func TestTargets(t *testing.T) {
 		t.Fatalf("resolved target = %#v", got)
 	}
 
-	if err := run([]string{"missing"}, &output, &output, resolver); err == nil || !strings.Contains(err.Error(), "missing") {
+	if err := run([]string{"missing"}, false, &output, resolver); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("missing target error = %v", err)
 	}
-	if err := run([]string{"broken"}, &output, &output, resolver); err == nil || !strings.Contains(err.Error(), "parse") {
+	if err := run([]string{"broken"}, false, &output, resolver); err == nil || !strings.Contains(err.Error(), "parse") {
 		t.Fatalf("broken explicit target error = %v", err)
-	}
-	if err := run([]string{"-bad"}, &output, &output, resolver); err == nil {
-		t.Fatal("unknown flag succeeded")
-	}
-	if err := run([]string{"-h"}, &output, &output, resolver); err != nil {
-		t.Fatalf("help: %v", err)
 	}
 }
 
@@ -92,7 +86,7 @@ func TestTargetsDoesNotCreateCache(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cache)
 	t.Setenv("LOCALAPPDATA", cache)
 	var output bytes.Buffer
-	if err := run([]string{"-json"}, &output, &output, targetcfg.NewDefaultResolver()); err != nil {
+	if err := run(nil, true, &output, targetcfg.NewDefaultResolver()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(cache); !errors.Is(err, os.ErrNotExist) {
@@ -106,17 +100,17 @@ func TestTargetsErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolver := targetcfg.NewResolver(dir)
-	for _, args := range [][]string{{"board"}, {"-json", "board"}} {
-		if err := run(args, failingWriter{}, failingWriter{}, resolver); err == nil || !strings.Contains(err.Error(), "write failed") {
-			t.Errorf("targets %q write error = %v", args, err)
+	for _, jsonMode := range []bool{false, true} {
+		if err := run([]string{"board"}, jsonMode, failingWriter{}, resolver); err == nil || !strings.Contains(err.Error(), "write failed") {
+			t.Errorf("targets json=%v write error = %v", jsonMode, err)
 		}
 	}
-	if err := run(nil, failingWriter{}, failingWriter{}, targetcfg.NewResolver(filepath.Join(dir, "missing"))); err == nil || !strings.Contains(err.Error(), "read targets directory") {
+	if err := run(nil, false, failingWriter{}, targetcfg.NewResolver(filepath.Join(dir, "missing"))); err == nil || !strings.Contains(err.Error(), "read targets directory") {
 		t.Fatalf("missing directory error = %v", err)
 	}
 }
 
-func TestRunCmdFailure(t *testing.T) {
+func TestMainFailure(t *testing.T) {
 	t.Setenv("LLGO_ROOT", t.TempDir())
 	mockable.EnableMock()
 	defer mockable.DisableMock()
@@ -125,5 +119,5 @@ func TestRunCmdFailure(t *testing.T) {
 			t.Errorf("exit = %v, %d", got, mockable.ExitCode())
 		}
 	}()
-	Cmd.Run(Cmd, []string{"missing"})
+	Main([]string{"missing"}, false)
 }

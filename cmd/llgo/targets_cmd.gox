@@ -13,12 +13,12 @@
 
 import self "github.com/xgo-dev/llgo/cmd/internal/targets"
 
-use "targets [-json] [name ...]"
+var JSON bool `flag:"json, usage: print resolved target configurations as JSON"`
+
+use "targets [name ...]"
 
 short "List and inspect LLGo target configurations"
 
-flagOff
-
 run args => {
-	self.Cmd.Run self.Cmd, args
+	self.Main args, JSON
 }

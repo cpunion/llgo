@@ -17,26 +17,18 @@ package targets
 
 import (
 	"encoding/json"
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"slices"
 
-	"github.com/xgo-dev/llgo/cmd/internal/base"
 	"github.com/xgo-dev/llgo/internal/mockable"
 	targetcfg "github.com/xgo-dev/llgo/internal/targets"
 )
 
-var Cmd = &base.Command{
-	UsageLine: "llgo targets [-json] [name ...]",
-	Short:     "List and inspect LLGo target configurations",
-	Run:       runCmd,
-}
-
-func runCmd(_ *base.Command, args []string) {
-	if err := run(args, os.Stdout, os.Stderr, targetcfg.NewDefaultResolver()); err != nil {
+// Main runs the targets command after Cobra has parsed its flags.
+func Main(names []string, jsonMode bool) {
+	if err := run(names, jsonMode, os.Stdout, targetcfg.NewDefaultResolver()); err != nil {
 		fmt.Fprintln(os.Stderr, "llgo targets:", err)
 		mockable.Exit(1)
 	}
@@ -49,18 +41,7 @@ type targetInfo struct {
 	*targetcfg.Config
 }
 
-func run(args []string, stdout, stderr io.Writer, resolver *targetcfg.Resolver) error {
-	fs := flag.NewFlagSet("llgo targets", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	jsonMode := fs.Bool("json", false, "print resolved target configurations as JSON")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	}
-
-	names := fs.Args()
+func run(names []string, jsonMode bool, stdout io.Writer, resolver *targetcfg.Resolver) error {
 	explicitNames := len(names) != 0
 	if len(names) == 0 {
 		var err error
@@ -70,7 +51,7 @@ func run(args []string, stdout, stderr io.Writer, resolver *targetcfg.Resolver) 
 		}
 	}
 	slices.Sort(names)
-	if !*jsonMode {
+	if !jsonMode {
 		for _, name := range names {
 			if explicitNames {
 				if _, err := resolver.Resolve(name); err != nil {
