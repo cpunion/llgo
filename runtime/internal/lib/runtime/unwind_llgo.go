@@ -27,9 +27,10 @@ func init() {
 // builds that do not consume memory profiles can omit the complete setup and
 // capture path without changing runtime APIs.
 func installMemProfileHooks() {
-	// Table initialization may allocate. Complete it before installing the
-	// allocator hook so the first sample never initializes it from AllocZ/U.
-	initRuntimeFuncPCFrames()
+	// Keep the frame table lazy. Building it at startup makes every test binary
+	// pay the cost even if it never takes a sample (especially on Windows).
+	// The sampler's recursion guard suppresses allocations made while the
+	// first stack capture initializes the table.
 	rtdebug.MemProfileStackCapture = captureMemProfileStack
 	rtdebug.MemProfileRatePtr = &MemProfileRate
 }
