@@ -301,6 +301,28 @@ func TestPostLinkWasmReportsMissingTool(t *testing.T) {
 	}
 }
 
+func TestResolveWasmOptUsesEmscriptenBinaryenRoot(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := writeWasmOptTestTool(t, bin)
+	t.Setenv("EM_BINARYEN_ROOT", root)
+	t.Setenv("WASMOPT", "")
+	got, err := resolveWasmOpt()
+	if err != nil || got != want {
+		t.Fatalf("resolveWasmOpt() = %q, %v; want %q", got, err, want)
+	}
+
+	override := writeWasmOptTestTool(t, t.TempDir())
+	t.Setenv("WASMOPT", override)
+	got, err = resolveWasmOpt()
+	if err != nil || got != override {
+		t.Fatalf("resolveWasmOpt() with WASMOPT = %q, %v; want %q", got, err, override)
+	}
+}
+
 func TestPostLinkWasmReportsInvalidOutputDirectory(t *testing.T) {
 	dir := t.TempDir()
 	tool := writeWasmOptTestTool(t, dir)

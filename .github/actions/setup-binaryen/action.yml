@@ -38,7 +38,12 @@ runs:
           shasum -a 256 --check "${archive}.sha256"
         fi
         tar -xzf "$archive" -C "$RUNNER_TEMP"
-        echo "$RUNNER_TEMP/binaryen-version_${version}/bin" >> "$GITHUB_PATH"
+        binaryen_root="$RUNNER_TEMP/binaryen-version_${version}"
+        test -x "$binaryen_root/bin/wasm-opt"
+        test -x "$binaryen_root/bin/wasm-emscripten-finalize"
+        echo "EM_BINARYEN_ROOT=$binaryen_root" >> "$GITHUB_ENV"
+        echo "WASMOPT=$binaryen_root/bin/wasm-opt" >> "$GITHUB_ENV"
+        echo "$binaryen_root/bin" >> "$GITHUB_PATH"
 
     - name: Install Binaryen on Windows
       if: runner.os == 'Windows'
@@ -66,4 +71,13 @@ runs:
         }
         & tar.exe -xzf $archivePath -C $env:RUNNER_TEMP
         if ($LASTEXITCODE -ne 0) { throw "Extracting Binaryen failed with exit code $LASTEXITCODE" }
-        Add-Content -Encoding utf8 $env:GITHUB_PATH (Join-Path $env:RUNNER_TEMP "binaryen-version_$version\bin")
+        $binaryenRoot = Join-Path $env:RUNNER_TEMP "binaryen-version_$version"
+        $binaryenBin = Join-Path $binaryenRoot "bin"
+        $wasmOpt = Join-Path $binaryenBin "wasm-opt.exe"
+        $finalize = Join-Path $binaryenBin "wasm-emscripten-finalize.exe"
+        if (-not (Test-Path $wasmOpt) -or -not (Test-Path $finalize)) {
+          throw "Binaryen archive is missing wasm-opt or wasm-emscripten-finalize in $binaryenBin"
+        }
+        Add-Content -Encoding utf8 $env:GITHUB_ENV "EM_BINARYEN_ROOT=$binaryenRoot"
+        Add-Content -Encoding utf8 $env:GITHUB_ENV "WASMOPT=$wasmOpt"
+        Add-Content -Encoding utf8 $env:GITHUB_PATH $binaryenBin
