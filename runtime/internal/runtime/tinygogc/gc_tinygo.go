@@ -371,10 +371,11 @@ func Realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
 	}
 	lock(&gcMutex)
 	lazyInit()
-	unlock(&gcMutex)
-
+	// Keep the heap metadata stable while finding the old allocation's end.
+	// A future threaded collector may grow or sweep the heap on another M.
 	ptrAddress := uintptr(ptr)
 	endOfTailAddress := gcAddressOf(gcFindNext(blockFromAddr(ptrAddress)))
+	unlock(&gcMutex)
 
 	// this might be a few bytes longer than the original size of
 	// ptr, because we align to full blocks of size bytesPerBlock
