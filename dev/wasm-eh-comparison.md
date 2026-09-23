@@ -11,7 +11,8 @@ also runs Binaryen's `--translate-to-exnref` pass on the legacy module. Each
 variant is validated, checked for the expected EH instruction family and valid
 DWARF structure, then executed with Node at `-O0` and `-O2`.
 
-Local result on 2026-09-23 (Emscripten 6.0.8-git, patched Binaryen 132,
+Local result on 2026-09-23 (Emscripten 6.0.8-git,
+[LLGo Binaryen `llgo-v132.2`](https://github.com/xgo-dev/binaryen/releases/tag/llgo-v132.2),
 Node 26.8.1, wasm-tools 1.258.0, LLVM 22.1.8):
 
 | Optimization | Legacy EH | Direct exnref | Binaryen translation |
