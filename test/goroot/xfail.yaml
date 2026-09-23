@@ -93,7 +93,7 @@ timeouts:
     directive: run
     case: fixedbugs/issue16037_run.go
     timeout: 3m
-    reason: the test generates and builds 5000 methods at runtime; its LLGo artifact exceeded the default one-minute run limit on a loaded Windows MSVC/386 runner
+    reason: the test builds generated source with 5000 fields and getter methods at runtime; its LLGo artifact exceeded the default one-minute run limit on a loaded Windows MSVC/386 runner
   - platform: windows/amd64
     directive: run
     case: fixedbugs/issue25897a.go

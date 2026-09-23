@@ -518,7 +518,7 @@ func TestIssue16037WindowsMSVC386Timeout(t *testing.T) {
 	} {
 		got, _, matched := cfg.MatchTimeout(test.version, test.platform, tc)
 		if got != test.want || matched != (test.want != 0) {
-			t.Errorf("%s/%s timeout = %s, matched=%v; want %s", test.version, test.platform, got, matched, test.want)
+			t.Errorf("%s/%s timeout = %s, matched=%v; want %s, matched=%v", test.version, test.platform, got, matched, test.want, test.want != 0)
 		}
 	}
 }
