@@ -25,3 +25,13 @@ comparison, not a performance result. They do not yet test an exception
 crossing the Go/C++/JavaScript boundary, stack unwinding through a suspended
 goroutine, or browser compatibility. Those must pass before selecting an EH
 translation policy for LLGo output.
+
+An exploratory LLGo build of a Go caller and an `LLGoFiles` C++ wrapper that
+throws and catches internally did not link with this Emscripten version.
+Without C++ link mode, `emcc` reported missing `__cxa_allocate_exception`
+and `__cxa_throw`. Adding `-sDEFAULT_TO_CXX` instead left LLGo runtime entry
+symbols and Asyncify's `malloc`/`free` unresolved. Adding
+`-fwasm-exceptions` also produced Emscripten's Asyncify incompatibility
+warning. The standalone C++ results above therefore do not establish that
+the current LLGo browser link can use C++ EH; the Go/C++ boundary is an
+explicit integration task.
