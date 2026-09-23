@@ -84,6 +84,23 @@ func TestMemoryProfileLibraryModeSelection(t *testing.T) {
 	}
 }
 
+func TestMemoryProfileTestFlags(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{args: []string{"-test.run=TestOnly"}},
+		{args: []string{"-test.memprofile="}},
+		{args: []string{"-test.memprofilerate=0"}},
+		{args: []string{"-test.memprofile=heap.out"}, want: true},
+		{args: []string{"-test.memprofilerate=1"}, want: true},
+	} {
+		if got := testMemoryProfileRequested(tc.args); got != tc.want {
+			t.Errorf("testMemoryProfileRequested(%q) = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+}
+
 type memoryProfileProviders struct {
 	allocator     string
 	publicRuntime string
