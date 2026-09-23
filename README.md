@@ -321,19 +321,37 @@ llgo run .
 
 Follow these steps to install the `llgo` command, whose usage is similar to the `go` command:
 
-### with Nix (development)
+### with Pixi (development)
 
-The [Nix flake](flake.nix) provides Go 1.27, LLVM/Clang/LLD 22, and LLGo's
-native build dependencies. Enable Nix's `nix-command` and `flakes` features if
-your installation requires it. From the repository root:
+[Pixi](https://pixi.sh/latest/installation/) is a single executable; it
+installs the versions pinned in [the development lock file](dev/pixi.lock)
+without a separate Conda installation. From the repository root:
 
 ```sh
-nix develop
+pixi shell --manifest-path dev/pixi.toml
 go build ./cmd/llgo
 ./llgo version
 ```
 
-The lock file pins the package versions so the same development environment can
+Pixi runs natively on Linux x86-64/ARM64, macOS Intel/ARM64, and Windows
+x86-64. On Windows, run `llgo.exe version` in PowerShell. It provides the
+compiler toolchain and common native libraries; specialized C packages such as
+cJSON are outside the default environment. See [development tooling](dev/README.md)
+for the platform matrix and CI checks.
+
+### with Nix (development)
+
+The [Nix flake](dev/flake.nix) provides Go 1.27, LLVM/Clang/LLD 22, and LLGo's
+native build dependencies. Enable Nix's `nix-command` and `flakes` features if
+your installation requires it. From the repository root:
+
+```sh
+nix develop ./dev
+go build ./cmd/llgo
+./llgo version
+```
+
+The lock file in `dev/` pins the package versions so the same development environment can
 be recreated later. Intel macOS uses the Nixpkgs 26.05 Darwin branch, which is
 supported through the end of 2026; newer Nixpkgs no longer supports that
 platform. The shell uses the LLVM bindings' `byollvm` build tag to find

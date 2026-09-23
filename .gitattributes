@@ -4,4 +4,6 @@
 *.sh text eol=lf
 *.nix text eol=lf
 flake.lock text eol=lf
+pixi.lock text eol=lf
+dev/activate_pixi.bat text eol=crlf
 _demo/go/export/libexport.h.want text eol=lf

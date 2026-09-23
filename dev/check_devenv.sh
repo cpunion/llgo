@@ -6,6 +6,7 @@ test "${GOFLAGS:-}" = '-tags=byollvm'
 [[ "$(llvm-config --version)" == 22.* ]]
 [[ -f "$LLGO_ROOT/runtime/go.mod" ]]
 
+cd "$LLGO_ROOT"
 go build ./cmd/llgo
 ./llgo version
 
@@ -16,6 +17,6 @@ package main
 
 import "fmt"
 
-func main() { fmt.Println("Nix shell works") }
+func main() { fmt.Println("LLGo dev shell works") }
 EOF
-[[ "$(./llgo run "$smoke_dir/main.go")" == 'Nix shell works' ]]
+[[ "$(./llgo run "$smoke_dir/main.go")" == 'LLGo dev shell works' ]]

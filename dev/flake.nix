@@ -1,11 +1,11 @@
 {
   description = "LLGo development environment";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-  # x86_64-darwin was removed from nixpkgs unstable after 26.05.
-  inputs.nixpkgsDarwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
+  # Nix develop obtains Bash from the nixpkgs input. Intel macOS needs 26.05.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
+  inputs.nixpkgsUnstable.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
-  outputs = { nixpkgs, nixpkgsDarwin, ... }:
+  outputs = { nixpkgs, nixpkgsUnstable, ... }:
     let
       systems = [
         "x86_64-linux"
@@ -14,7 +14,7 @@
         "aarch64-darwin"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system:
-        f (import (if system == "x86_64-darwin" then nixpkgsDarwin else nixpkgs) { inherit system; }));
+        f (import (if system == "x86_64-darwin" then nixpkgs else nixpkgsUnstable) { inherit system; }));
     in
     {
       devShells = forAllSystems (pkgs:
