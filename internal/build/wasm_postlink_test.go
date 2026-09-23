@@ -240,6 +240,9 @@ func TestPostLinkWasmReportsToolFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "wasm-opt Asyncify failed") {
 		t.Fatalf("postLinkWasm() error = %v", err)
 	}
+	if !strings.Contains(err.Error(), tool) || !strings.Contains(err.Error(), "wasm-opt version 132 (test helper)") {
+		t.Fatalf("postLinkWasm() error omits selected Binaryen tool: %v", err)
+	}
 	if data, err := os.ReadFile(output); err != nil || string(data) != "old" {
 		t.Fatalf("failed post-link changed final output: %q, %v", data, err)
 	}
@@ -262,6 +265,9 @@ func TestPostLinkWasmReportsPreAsyncifyFailure(t *testing.T) {
 	err := postLinkWasm(wasmPostLinkTestContext(), input, output, false)
 	if err == nil || !strings.Contains(err.Error(), "wasm-opt pre-Asyncify optimization failed") {
 		t.Fatalf("postLinkWasm() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), tool) || !strings.Contains(err.Error(), "wasm-opt version 132 (test helper)") {
+		t.Fatalf("postLinkWasm() error omits selected Binaryen tool: %v", err)
 	}
 	if data, err := os.ReadFile(output); err != nil || string(data) != "old" {
 		t.Fatalf("failed pre-optimization changed final output: %q, %v", data, err)

@@ -41,6 +41,9 @@ runs:
         binaryen_root="$RUNNER_TEMP/binaryen-version_${version}"
         test -x "$binaryen_root/bin/wasm-opt"
         test -x "$binaryen_root/bin/wasm-emscripten-finalize"
+        echo "Binaryen root: $binaryen_root"
+        "$binaryen_root/bin/wasm-opt" --version
+        "$binaryen_root/bin/wasm-emscripten-finalize" --version
         echo "EM_BINARYEN_ROOT=$binaryen_root" >> "$GITHUB_ENV"
         echo "WASMOPT=$binaryen_root/bin/wasm-opt" >> "$GITHUB_ENV"
         echo "$binaryen_root/bin" >> "$GITHUB_PATH"
@@ -78,6 +81,11 @@ runs:
         if (-not (Test-Path $wasmOpt) -or -not (Test-Path $finalize)) {
           throw "Binaryen archive is missing wasm-opt or wasm-emscripten-finalize in $binaryenBin"
         }
+        Write-Host "Binaryen root: $binaryenRoot"
+        & $wasmOpt --version
+        if ($LASTEXITCODE -ne 0) { throw "wasm-opt --version failed with exit code $LASTEXITCODE" }
+        & $finalize --version
+        if ($LASTEXITCODE -ne 0) { throw "wasm-emscripten-finalize --version failed with exit code $LASTEXITCODE" }
         Add-Content -Encoding utf8 $env:GITHUB_ENV "EM_BINARYEN_ROOT=$binaryenRoot"
         Add-Content -Encoding utf8 $env:GITHUB_ENV "WASMOPT=$wasmOpt"
         Add-Content -Encoding utf8 $env:GITHUB_PATH $binaryenBin

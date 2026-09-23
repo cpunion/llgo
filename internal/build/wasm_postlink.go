@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
 	"github.com/xgo-dev/llgo/internal/optlevel"
@@ -115,7 +116,7 @@ func postLinkWasm(ctx *context, input, output string, verbose bool) error {
 	)
 	if preAsyncifyArgs != nil {
 		if err := runWasmOpt(resolved, preAsyncifyArgs, verbose, ctx); err != nil {
-			return fmt.Errorf("wasm-opt pre-Asyncify optimization failed: %w", err)
+			return fmt.Errorf("wasm-opt pre-Asyncify optimization failed using %s: %w", wasmOptIdentity(resolved), err)
 		}
 	}
 
@@ -136,7 +137,7 @@ func postLinkWasm(ctx *context, input, output string, verbose bool) error {
 		ctx.buildConf.OptLevel,
 	)
 	if err := runWasmOpt(resolved, args, verbose, ctx); err != nil {
-		return fmt.Errorf("wasm-opt Asyncify failed: %w", err)
+		return fmt.Errorf("wasm-opt Asyncify failed using %s: %w", wasmOptIdentity(resolved), err)
 	}
 	if err := os.Rename(tmpName, output); err != nil {
 		return err
@@ -158,6 +159,15 @@ func resolveWasmOpt() (string, error) {
 		}
 	}
 	return exec.LookPath(wasmOpt)
+}
+
+func wasmOptIdentity(path string) string {
+	output, err := exec.Command(path, "--version").CombinedOutput()
+	version := strings.TrimSpace(string(output))
+	if err != nil || version == "" {
+		return path + " (version unavailable)"
+	}
+	return path + " (" + version + ")"
 }
 
 func runWasmOpt(resolved string, args []string, verbose bool, ctx *context) error {
