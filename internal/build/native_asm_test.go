@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/internal/lto"
+	"github.com/xgo-dev/llgo/internal/optlevel"
 	"github.com/xgo-dev/llgo/internal/packages"
 	llssa "github.com/xgo-dev/llgo/ssa"
 	llvm "github.com/xgo-dev/llvm"
@@ -68,14 +70,22 @@ DATA ·cfEntry(SB)/8, $cftramp<>(SB)
 		}
 	}
 	t.Chdir(dir)
+	for _, mode := range []lto.Mode{lto.Off, lto.Thin, lto.Full} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			conf := NewDefaultConf(ModeBuild)
+			conf.OptLevel = optlevel.O2
+			conf.LTO = mode
+			conf.OutFile = filepath.Join(dir, "probe-"+fmt.Sprint(mode))
+			if _, err := Do([]string{"."}, conf); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command(conf.OutFile).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "ok" {
+				t.Fatalf("run: %v\n%s", err, out)
+			}
+		})
+	}
 	conf := NewDefaultConf(ModeBuild)
-	conf.OutFile = filepath.Join(dir, "probe")
-	if _, err := Do([]string{"."}, conf); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(conf.OutFile).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "ok" {
-		t.Fatalf("run: %v\n%s", err, out)
-	}
+	conf.OutFile = filepath.Join(dir, "invalid")
 	t.Run("reject mismatched DATA", func(t *testing.T) {
 		bad := strings.ReplaceAll(files["callback.s"], "GLOBL ·entry(SB), RODATA, $8", "GLOBL ·entry(SB), RODATA, $16")
 		if err := os.WriteFile(filepath.Join(dir, "callback.s"), []byte(bad), 0600); err != nil {
@@ -101,8 +111,8 @@ func TestForeignARM64SelectionAndErrors(t *testing.T) {
 		{name: "conflicting import", goos: "darwin", decl: imports + "//go:cgo_import_dynamic imported other\n", asm: valid, want: "conflicting dynamic import", handled: true},
 		{name: "invalid instruction", goos: "darwin", decl: imports, asm: valid + "NOT_AN_INSTRUCTION\n", want: "unsupported native instruction", handled: true},
 		{name: "undeclared import", goos: "darwin", decl: imports, asm: strings.ReplaceAll(valid, "JMP imported", "JMP undeclared"), want: "undeclared foreign symbol", handled: true},
-		{name: "compiler failure", goos: "darwin", decl: imports, asm: valid, want: "missing-clang", handled: true},
-		{name: "temporary directory failure", goos: "darwin", decl: imports, asm: valid, want: "missing", handled: true, badTemp: true},
+		{name: "no native compiler needed", goos: "darwin", decl: imports, asm: valid, handled: true},
+		{name: "no temporary files needed", goos: "darwin", decl: imports, asm: valid, handled: true, badTemp: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,10 +125,13 @@ func TestForeignARM64SelectionAndErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx := &context{buildConf: &Config{Goos: tc.goos, Goarch: "arm64"}, commands: commandEnv{environ: os.Environ()}}
+			prog := llssa.NewProgram(&llssa.Target{GOOS: "darwin", GOARCH: "arm64"})
+			defer prog.Dispose()
+			ctx := &context{prog: prog, buildConf: &Config{Goos: tc.goos, Goarch: "arm64"}, commands: commandEnv{environ: os.Environ()}}
 			ctx.crossCompile = crosscompile.Export{CC: filepath.Join(t.TempDir(), "missing-clang")}
 			pkg := &packages.Package{PkgPath: "probe", Types: types.NewPackage("probe", "p"), Syntax: []*ast.File{file}}
-			_, handled, err := compileForeignNativeAsm(ctx, nil, pkg, "callback.s", []byte(tc.asm))
+			apkg := &aPackage{Package: pkg, LPkg: prog.NewPackage("p", "probe")}
+			handled, err := compileForeignNativeAsm(ctx, apkg, pkg, []byte(tc.asm))
 			if handled != tc.handled {
 				t.Fatalf("handled=%v, want %v", handled, tc.handled)
 			}
@@ -133,9 +146,8 @@ func TestForeignARM64SelectionAndErrors(t *testing.T) {
 	}
 }
 
-// Object generation and DATA binding need no Darwin SDK or execution host.
-// Exercise the real assembly driver on every CI host; only TestForeignARM64Callback
-// needs native darwin/arm64 execution.
+// Native translation merges IR/data without external tools. Cross-emit the
+// resulting package module to check target relocations on every LLVM host.
 func TestForeignNativeCrossCompileObject(t *testing.T) {
 	for _, target := range []struct{ goos, goarch, triple string }{{"darwin", "arm64", "arm64-apple-darwin"}, {"linux", "amd64", "x86_64-unknown-linux-gnu"}, {"linux", "arm64", "aarch64-unknown-linux-gnu"}} {
 		t.Run(target.goos+"/"+target.goarch, func(t *testing.T) {
@@ -164,8 +176,8 @@ DATA ·entry(SB)/8, $callback<>(SB)
 					global := llvm.AddGlobal(mod, mod.Context().Int64Type(), "probe.entry")
 					global.SetInitializer(llvm.ConstNull(global.GlobalValueType()))
 					ctx := &context{prog: prog, buildConf: &Config{Goos: target.goos, Goarch: target.goarch}, commands: commandEnv{environ: os.Environ()}, crossCompile: crosscompile.Export{CC: "clang", CCFLAGS: []string{"--target=" + target.triple}}, plan9asmReady: true, plan9asmMode: plan9asmEnvAll}
-					// This driver must use only the native compiler, never go tool asm
-					// or a Go object reader. An unusable Go toolchain must not affect it.
+					// Translation/linking needs neither a native compiler nor go tool asm.
+					ctx.crossCompile.CC = filepath.Join(dir, "missing-clang")
 					ctx.commands.environ = withEnv(ctx.commands.environ, "GOROOT="+filepath.Join(dir, "missing-goroot"))
 					objects, err := compilePkgSFiles(ctx, apkg, pkg, false)
 					for _, object := range objects {
@@ -183,14 +195,29 @@ DATA ·entry(SB)/8, $callback<>(SB)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if len(objects) != 1 {
+					if len(objects) != 0 {
 						t.Fatalf("objects=%v", objects)
 					}
-					if !global.IsDeclaration() || global.Linkage() != llvm.ExternalLinkage {
+					global = mod.NamedGlobal("probe.entry")
+					if global.IsDeclaration() || !global.IsGlobalConstant() {
 						t.Fatal("Go global did not bind to native DATA")
 					}
+					if !strings.Contains(mod.String(), "naked noinline") || strings.Contains(mod.String(), "module asm") {
+						t.Fatal("missing naked function carrier")
+					}
+					if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+						t.Fatal(err)
+					}
+					ll := filepath.Join(dir, "native.ll")
+					if err := os.WriteFile(ll, []byte(mod.String()), 0600); err != nil {
+						t.Fatal(err)
+					}
+					object := filepath.Join(dir, "native.o")
+					if b, err := exec.Command("clang", "--target="+target.triple, "-c", ll, "-o", object).CombinedOutput(); err != nil {
+						t.Fatalf("codegen: %v\n%s", err, b)
+					}
 					if target.goos == "linux" {
-						obj, err := elf.Open(objects[0])
+						obj, err := elf.Open(object)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -217,7 +244,7 @@ DATA ·entry(SB)/8, $callback<>(SB)
 						}
 						return
 					}
-					obj, err := macho.Open(objects[0])
+					obj, err := macho.Open(object)
 					if err != nil {
 						t.Fatal(err)
 					}

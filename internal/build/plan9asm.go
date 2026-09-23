@@ -68,11 +68,10 @@ func compilePkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Package, verbo
 		if shouldSkipDarwinDynimportTrampolineAsm(skipDarwinDynimportTrampolines, sfile, src) {
 			continue
 		}
-		if obj, handled, err := compileForeignNativeAsm(ctx, aPkg, pkg, sfile, src); handled {
+		if handled, err := compileForeignNativeAsm(ctx, aPkg, pkg, src); handled {
 			if err != nil {
 				return nil, fmt.Errorf("%s: native assembly %s: %w", pkg.PkgPath, sfile, err)
 			}
-			objFiles = append(objFiles, obj)
 			continue
 		}
 		tr, err := llplan9asm.TranslateSourceModuleForPkgWithOptions(pkg, sfile, src, ctx.buildConf.Goos, ctx.buildConf.Goarch, plan9asmTranslateOptions(ctx.buildConf))

@@ -2,8 +2,6 @@ package build
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/xgo-dev/llgo/internal/packages"
 	"github.com/xgo-dev/llgo/ssa/abi"
@@ -11,59 +9,39 @@ import (
 	extplan9asm "github.com/xgo-dev/plan9asm"
 )
 
-func compileForeignNativeAsm(ctx *context, aPkg *aPackage, pkg *packages.Package, sfile string, src []byte) (string, bool, error) {
+func compileForeignNativeAsm(ctx *context, aPkg *aPackage, pkg *packages.Package, src []byte) (bool, error) {
 	if !extplan9asm.SupportsNativeTarget(ctx.buildConf.Goos, ctx.buildConf.Goarch) {
-		return "", false, nil
+		return false, nil
 	}
 	_, decls := collectGoCgoPragmas(pkg.Syntax)
 	if len(decls) == 0 {
-		return "", false, nil
+		return false, nil
 	}
 	funcs := extplan9asm.ForeignNativeFunctions(src, ctx.buildConf.Goarch)
 	if len(funcs) == 0 {
-		return "", false, nil
+		return false, nil
 	}
 	imports := make(map[string]string)
 	for _, d := range decls {
 		if prev, ok := imports[d.local]; ok && prev != d.alias {
-			return "", true, fmt.Errorf("conflicting dynamic import %s", d.local)
+			return true, fmt.Errorf("conflicting dynamic import %s", d.local)
 		}
 		imports[d.local] = d.alias
 	}
 	pkgPath := abi.PathOf(pkg.Types)
-	assembly, data, err := extplan9asm.TranslateNativeSource(src, extplan9asm.NativeOptions{GOOS: ctx.buildConf.Goos, GOARCH: ctx.buildConf.Goarch, PackagePath: pkgPath, Imports: imports})
+
+	goMod := aPkg.LPkg.Module()
+	mod, err := extplan9asm.TranslateNativeModule(goMod.Context(), src, extplan9asm.NativeOptions{GOOS: ctx.buildConf.Goos, GOARCH: ctx.buildConf.Goarch, PackagePath: pkgPath, Imports: imports})
 	if err != nil {
-		return "", true, err
+		return true, err
 	}
-	dir, err := os.MkdirTemp("", "llgo-native-asm-")
-	if err != nil {
-		return "", true, err
+	mod.SetTarget(ctx.prog.Target().Spec().Triple)
+	mod.SetDataLayout(ctx.prog.DataLayout())
+	if err = externalizePlan9DataGlobals(goMod, mod, ctx.prog.TargetData()); err != nil {
+		mod.Dispose()
+		return true, err
 	}
-	defer os.RemoveAll(dir)
-	gas := filepath.Join(dir, "native.s")
-	if err = os.WriteFile(gas, []byte(assembly), 0600); err != nil {
-		return "", true, err
-	}
-	output, err := os.CreateTemp("", "llgo-native-asm-*.o")
-	if err != nil {
-		return "", true, err
-	}
-	outpath := output.Name()
-	output.Close()
-	if err = ctx.irCompiler().Compile("-c", gas, "-o", outpath); err != nil {
-		os.Remove(outpath)
-		return "", true, err
-	}
-	// Reuse the normal DATA binding checks before changing the Go definitions.
-	mod := aPkg.LPkg.Module().Context().NewModule("native-data")
-	defer mod.Dispose()
-	for _, d := range data {
-		g := llvm.AddGlobal(mod, llvm.ArrayType(mod.Context().Int8Type(), int(d.Size)), d.Name)
-		g.SetInitializer(llvm.ConstNull(g.GlobalValueType()))
-	}
-	if err = externalizePlan9DataGlobals(aPkg.LPkg.Module(), mod, ctx.prog.TargetData()); err != nil {
-		os.Remove(outpath)
-		return "", true, err
-	}
-	return outpath, true, nil
+	// LinkModules consumes mod. Native functions/data now follow the package's
+	// normal optimization, bitcode/LTO and object-emission pipeline.
+	return true, llvm.LinkModules(goMod, mod)
 }
