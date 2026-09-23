@@ -60,7 +60,7 @@ func captureMemProfileStack(pcs []uintptr) int {
 	if latomic.LoadUint32(&runtimeFuncPCInitState) == runtimeFuncInfoInitBusy {
 		return 0
 	}
-	return fpCallers(0, pcs)
+	return fpProfileCallers(pcs)
 }
 
 const maxPanicSpliceFrames = 4096
