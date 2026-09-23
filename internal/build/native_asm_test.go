@@ -98,7 +98,7 @@ func TestForeignARM64SelectionAndErrors(t *testing.T) {
 		{name: "no imports", goos: "darwin", asm: valid},
 		{name: "Go ABI", goos: "darwin", decl: imports, asm: "TEXT ·f(SB), NOSPLIT, $0\nRET\n"},
 		{name: "conflicting import", goos: "darwin", decl: imports + "//go:cgo_import_dynamic imported other\n", asm: valid, want: "conflicting dynamic import", handled: true},
-		{name: "invalid instruction", goos: "darwin", decl: imports, asm: valid + "NOT_AN_INSTRUCTION\n", want: "assemble foreign ABI code", handled: true},
+		{name: "invalid instruction", goos: "darwin", decl: imports, asm: valid + "NOT_AN_INSTRUCTION\n", want: "unsupported native instruction", handled: true},
 		{name: "undeclared import", goos: "darwin", decl: imports, asm: strings.ReplaceAll(valid, "JMP imported", "JMP undeclared"), want: "undeclared foreign symbol", handled: true},
 		{name: "compiler failure", goos: "darwin", decl: imports, asm: valid, want: "missing-clang", handled: true},
 		{name: "temporary directory failure", goos: "darwin", decl: imports, asm: valid, want: "missing", handled: true, badTemp: true},
@@ -161,6 +161,9 @@ DATA ·entry(SB)/8, $callback<>(SB)
 			global := llvm.AddGlobal(mod, mod.Context().Int64Type(), "probe.entry")
 			global.SetInitializer(llvm.ConstNull(global.GlobalValueType()))
 			ctx := &context{prog: prog, buildConf: &Config{Goos: "darwin", Goarch: "arm64"}, commands: commandEnv{environ: os.Environ()}, crossCompile: crosscompile.Export{CC: "clang", CCFLAGS: []string{"--target=arm64-apple-darwin"}}, plan9asmReady: true, plan9asmMode: plan9asmEnvAll}
+			// This driver must use only the native compiler, never go tool asm
+			// or a Go object reader. An unusable Go toolchain must not affect it.
+			ctx.commands.environ = withEnv(ctx.commands.environ, "GOROOT="+filepath.Join(dir, "missing-goroot"))
 			objects, err := compilePkgSFiles(ctx, apkg, pkg, false)
 			for _, object := range objects {
 				defer os.Remove(object)

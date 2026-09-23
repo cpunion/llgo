@@ -3,10 +3,8 @@ package build
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
-	"github.com/xgo-dev/llgo/internal/env"
 	"github.com/xgo-dev/llgo/internal/packages"
 	"github.com/xgo-dev/llgo/ssa/abi"
 	llvm "github.com/xgo-dev/llvm"
@@ -32,7 +30,8 @@ func compileForeignARM64Asm(ctx *context, aPkg *aPackage, pkg *packages.Package,
 		}
 		imports[d.local] = d.alias
 	}
-	root, _, err := env.GOROOTAndGOVERSIONWithEnv(ctx.commands.environ)
+	pkgPath := abi.PathOf(pkg.Types)
+	assembly, data, err := extplan9asm.TranslateNativeARM64Source(src, imports, pkgPath)
 	if err != nil {
 		return "", true, err
 	}
@@ -41,25 +40,6 @@ func compileForeignARM64Asm(ctx *context, aPkg *aPackage, pkg *packages.Package,
 		return "", true, err
 	}
 	defer os.RemoveAll(dir)
-	input := filepath.Join(dir, "input.s")
-	if err = os.WriteFile(input, src, 0600); err != nil {
-		return "", true, err
-	}
-	obj := filepath.Join(dir, "input.o")
-	pkgPath := abi.PathOf(pkg.Types)
-	cmd := exec.Command(filepath.Join(root, "bin", "go"), "tool", "asm", "-p", pkgPath, "-I", filepath.Join(root, "pkg", "include"), "-I", filepath.Dir(sfile), "-o", obj, input)
-	cmd.Env = withEnv(ctx.commands.environ, "GOOS=darwin", "GOARCH=arm64", "GOROOT="+root)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", true, fmt.Errorf("assemble foreign ABI code: %w\n%s", err, out)
-	}
-	object, err := os.ReadFile(obj)
-	if err != nil {
-		return "", true, err
-	}
-	assembly, data, err := extplan9asm.TranslateNativeARM64Object(object, funcs, imports, pkgPath)
-	if err != nil {
-		return "", true, err
-	}
 	gas := filepath.Join(dir, "native.s")
 	if err = os.WriteFile(gas, []byte(assembly), 0600); err != nil {
 		return "", true, err
