@@ -18,6 +18,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CPP = ROOT / "dev/testdata/wasm-eh/exception.cpp"
 GO = ROOT / "internal/build/testdata/wasm-runtime"
+GO_CPP = ROOT / "dev/testdata/wasm-eh/go-cpp-boundary"
 EXPECTED = "cpp catch and sjlj ok"
 
 
@@ -100,6 +101,23 @@ def run_go_baseline(directory, llgo, node, env):
     print("Go panic/recover baseline: passed")
 
 
+def run_go_cpp_boundary(directory, llgo, node, env):
+    go_env = env.copy()
+    go_env["LLGO_ROOT"] = str(ROOT)
+    # LLGoFiles expands one env-provided compiler argument. Keep C++ EH
+    # inside the wrapper and use JS EH only for that C++ translation unit.
+    go_env["LLGO_EH_CFLAGS"] = "-fexceptions"
+    for level in (0, 2):
+        script = directory / f"go-cpp-boundary-O{level}.mjs"
+        run([llgo, "build", f"-O={level}", "-target", "emscripten", "-o",
+             str(script), str(GO_CPP)], env=go_env)
+        output = run([node, str(ROOT / "targets/emscripten-runner.mjs"),
+                      str(script)], env=go_env)
+        if "go cpp boundary ok" not in output.splitlines():
+            raise RuntimeError(f"Go/C++ wrapper at O{level} failed:\n{output}")
+    print("Go/C++ catch-status-panic wrapper: passed at O0 and O2")
+
+
 def main():
     emxx = tool("em++", "EMXX")
     node = tool("node", "NODE")
@@ -117,6 +135,7 @@ def main():
                                        wasm_tools, dwarfdump, node, env)
         if llgo := os.environ.get("LLGO"):
             run_go_baseline(directory, llgo, node, env)
+            run_go_cpp_boundary(directory, llgo, node, env)
 
 
 if __name__ == "__main__":

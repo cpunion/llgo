@@ -16,8 +16,8 @@ Node 26.8.1, wasm-tools 1.258.0, LLVM 22.1.8):
 
 | Optimization | Legacy EH | Direct exnref | Binaryen translation |
 | --- | ---: | ---: | ---: |
-| `-O0` | 1,104,085 B | 1,106,840 B | 1,145,283 B |
-| `-O2` | 238,188 B | 238,903 B | 238,176 B |
+| `-O0` | 1,104,113 B | 1,106,868 B | 1,145,311 B |
+| `-O2` | 238,216 B | 238,931 B | 238,204 B |
 
 All six variants passed validation, DWARF verification, and execution. The
 separate Go panic/recover baseline passed. These measurements are a smoke
@@ -26,12 +26,15 @@ crossing the Go/C++/JavaScript boundary, stack unwinding through a suspended
 goroutine, or browser compatibility. Those must pass before selecting an EH
 translation policy for LLGo output.
 
-An exploratory LLGo build of a Go caller and an `LLGoFiles` C++ wrapper that
-throws and catches internally did not link with this Emscripten version.
-Without C++ link mode, `emcc` reported missing `__cxa_allocate_exception`
-and `__cxa_throw`. Adding `-sDEFAULT_TO_CXX` instead left LLGo runtime entry
-symbols and Asyncify's `malloc`/`free` unresolved. Adding
-`-fwasm-exceptions` also produced Emscripten's Asyncify incompatibility
-warning. The standalone C++ results above therefore do not establish that
-the current LLGo browser link can use C++ EH; the Go/C++ boundary is an
-explicit integration task.
+The optional LLGo boundary fixture additionally passed at O0 and O2: Go
+calls a C++ wrapper, the wrapper throws and catches internally, returns a C
+ABI status, and Go translates that status into a panic and recovers it. The
+wrapper uses Emscripten's JS exception mode (`-sDEFAULT_TO_CXX` and
+`-sDISABLE_EXCEPTION_CATCHING=0`) with `-fexceptions` on its C++ source.
+Placing the native file under `_wrap/` is necessary here: if a `.cpp` file
+also sits in the Go package directory, automatic C++ source collection and
+`LLGoFiles` compile it twice, and the linker may select the object lacking
+the requested EH flags. This wrapper result establishes a safe status
+translation boundary with the current Asyncify backend. It does not establish
+that a C++ exception can unwind through Go or that direct Wasm EH can be
+enabled for the whole LLGo browser link.
