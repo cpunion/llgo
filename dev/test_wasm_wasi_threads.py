@@ -39,7 +39,11 @@ def main():
         )
         print(result.stdout, end="")
         print(result.stderr, end="")
-        if result.returncode != 0 or "wasi threads ok" not in result.stdout + result.stderr:
+        marker = "wasi threads ok"
+        if result.returncode != 0 or (
+            marker not in result.stdout.splitlines()
+            and marker not in result.stderr.splitlines()
+        ):
             raise SystemExit(f"WAMR WASI pthread probe failed with exit code {result.returncode}")
 
 

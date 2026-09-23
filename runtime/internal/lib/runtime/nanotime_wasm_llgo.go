@@ -1,4 +1,4 @@
-//go:build wasm && !baremetal
+//go:build wasm && !baremetal && !(wasip1 && llgo.wasi_threads)
 
 package runtime
 
@@ -17,9 +17,7 @@ const wasmClockMonotonic = ct.ClockidT(1)
 func nanotime1() int64 {
 	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
 	if ct.ClockGettime(wasmClockMonotonic, tv) != 0 {
-		// WAMR 2.4.5 exposes CLOCK_REALTIME, but its WASI pthread workers
-		// cannot read CLOCK_MONOTONIC. The main thread's monotonic clock uses
-		// the same epoch there, so the realtime fallback keeps timers moving.
+		// Keep a fallback for single-worker hosts without CLOCK_MONOTONIC.
 		if ct.ClockGettime(ct.CLOCK_REALTIME, tv) != 0 {
 			return 0
 		}

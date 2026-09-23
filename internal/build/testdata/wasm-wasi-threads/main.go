@@ -17,10 +17,15 @@ func main() {
 	if !linked {
 		panic("main G/M/P is not linked")
 	}
+	// Start the timer service before measuring G retirement. It is a
+	// persistent goroutine, so its count is part of the baseline.
+	time.Sleep(time.Millisecond)
+	baseline, _ := gStateForTesting()
 
 	const workers = 4
 	var wait sync.WaitGroup
 	ids := make(chan int64, workers)
+	release := make(chan struct{})
 	for i := 0; i < workers; i++ {
 		wait.Add(1)
 		go func() {
@@ -30,18 +35,20 @@ func main() {
 				panic("worker G/M/P is not linked")
 			}
 			ids <- mid
+			<-release
+			time.Sleep(time.Millisecond)
 		}()
 	}
-	wait.Wait()
-	close(ids)
-
 	seen := map[int64]bool{mainMID: true}
-	for mid := range ids {
+	for i := 0; i < workers; i++ {
+		mid := <-ids
 		if seen[mid] {
 			panic("goroutines reused a host M")
 		}
 		seen[mid] = true
 	}
+	close(release)
+	wait.Wait()
 	if len(seen) != workers+1 {
 		panic("not all WASI pthreads ran")
 	}
@@ -49,7 +56,7 @@ func main() {
 	// WaitGroup completion precedes mexit. Wait for the host threads to leave
 	// before starting the next batch, so the probe also exercises retirement
 	// and reuse within WAMR's bounded thread limit.
-	waitForMainThreadOnly()
+	waitForBaseline(baseline)
 	for round := 0; round < 12; round++ {
 		var batch sync.WaitGroup
 		values := make(chan *threadValue, workers)
@@ -75,7 +82,7 @@ func main() {
 				panic("missing cross-thread pointer handoff")
 			}
 		}
-		waitForMainThreadOnly()
+		waitForBaseline(baseline)
 	}
 	println("wasi threads ok")
 }
@@ -85,15 +92,16 @@ type threadValue struct {
 	next  *threadValue
 }
 
-func waitForMainThreadOnly() {
+func waitForBaseline(baseline uint64) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		count, exited := gStateForTesting()
-		if count == 1 && !exited {
+		if count == baseline && !exited {
 			return
 		}
 		if time.Now().After(deadline) {
 			panic("WASI pthreads did not retire")
 		}
+		time.Sleep(time.Millisecond)
 	}
 }

@@ -44,6 +44,16 @@ uint32_t llgo_test_gc_c_pointer_size(void) {
 }
 
 int llgo_test_gc_realloc(void) {
+	unsigned char *from_zero = realloc(malloc(0), 8);
+	if (from_zero == NULL) {
+		return 0;
+	}
+	from_zero[0] = 0x5a;
+	if (from_zero[0] != 0x5a) {
+		return 0;
+	}
+	free(from_zero);
+
 	unsigned char *bytes = malloc(17);
 	if (bytes == NULL) {
 		return 0;

@@ -14,7 +14,7 @@ int llgo_timer_cond_init(pthread_cond_t *condition)
 #if defined(__APPLE__)
     return pthread_cond_init(condition, 0);
 #elif defined(__wasi__)
-    /* WAMR's WASI pthread workers cannot read CLOCK_MONOTONIC. */
+    /* WAMR 2.4.5's WASI pthread workers cannot read CLOCK_MONOTONIC. */
     return pthread_cond_init(condition, 0);
 #else
     pthread_condattr_t attributes;
