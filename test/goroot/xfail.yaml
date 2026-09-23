@@ -88,6 +88,12 @@ timeouts:
     case: index0.go
     timeout: 90s
     reason: the generated index stress program can exceed the default timeout on loaded Windows 386 runners
+  - version: go1.26
+    platform: windows-msvc/386
+    directive: run
+    case: fixedbugs/issue16037_run.go
+    timeout: 3m
+    reason: the test generates and builds 5000 methods at runtime; its LLGo artifact exceeded the default one-minute run limit on a loaded Windows MSVC/386 runner
   - platform: windows/amd64
     directive: run
     case: fixedbugs/issue25897a.go
