@@ -54,6 +54,9 @@
               export CGO_CXXFLAGS="-std=c++17"
               export CGO_LDFLAGS="$($LLVM_CONFIG --ldflags --link-shared --libs all --system-libs)"
               export LLGO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+            '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              # LLGo's generated programs can load libatomic through LLVM at runtime.
+              export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             '';
           };
         });
