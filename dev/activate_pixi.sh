@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+export GOFLAGS=-tags=byollvm
+export CGO_ENABLED=1
+export CC=clang
+export CXX=clang++
+LLVM_CONFIG="$(command -v llvm-config)"
+export LLVM_CONFIG
+CGO_CPPFLAGS="$($LLVM_CONFIG --cppflags)"
+export CGO_CPPFLAGS
+export CGO_CXXFLAGS=-std=c++17
+CGO_LDFLAGS="$($LLVM_CONFIG --ldflags --link-shared --libs all --system-libs)"
+LLGO_ROOT="$(cd "$PIXI_PROJECT_ROOT/.." && pwd)"
+export LLGO_ROOT
+
+# The compiled compiler must find Pixi's shared LLVM library on later runs.
+export CGO_LDFLAGS="$CGO_LDFLAGS -Wl,-rpath,$CONDA_PREFIX/lib"
