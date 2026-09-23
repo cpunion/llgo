@@ -34,7 +34,7 @@ jobs:
     if: needs.prepare.outputs.run_code_ci == 'true'
     needs: prepare
     name: llgo + test (${{ matrix.os }}${{ matrix.windows_abi && format(', {0}', matrix.windows_abi) || '' }}${{ matrix.windows_arch && format(', {0}', matrix.windows_arch) || '' }}, LLVM ${{ matrix.llvm }}, Go 1.27)
-    timeout-minutes: 60
+    timeout-minutes: ${{ startsWith(matrix.os, 'windows-') && 25 || 60 }}
     strategy:
       fail-fast: false
       matrix:
@@ -141,6 +141,7 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then
             tool_suffix=.exe
             export LLGO_STDIO_NOBUF=1
+            export LLGO_TEST_PRINT_COMMANDS=1
           fi
           export LLGO="$RUNNER_TEMP/llgo-bin/llgo${tool_suffix}"
           export LLGO_TEST_LLGEN="$RUNNER_TEMP/llgo-bin/llgen${tool_suffix}"
