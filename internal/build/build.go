@@ -207,6 +207,10 @@ type Config struct {
 	// for float-to-integer conversions.
 	SaturatingFloatToInt bool
 
+	// memoryProfiling is derived from whole-program SSA before package cache
+	// lookup. Library build modes set it conservatively.
+	memoryProfiling bool
+
 	// PthreadStackSize sets a custom stack size, in bytes, for native and Wasm
 	// goroutines. A zero value keeps the backend's default.
 	PthreadStackSize int64
@@ -896,6 +900,14 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	}
 	buildSSAPkgs(ctx, append(append(altEntries, pkgEntries...), depEntries...))
 	recordPackageSSAInstructions(ctx)
+	memProfileConsumer := cl.MemProfileConsumer(progSSA.AllPackages())
+	conf.memoryProfiling = enableMemoryProfiling(conf.BuildMode, memProfileConsumer)
+	prog.EnableMemoryProfiling(conf.memoryProfiling)
+	// Wasm and bare-metal still report size classes, not sampled stacks. They
+	// need no profile-specific frame pinning (which also deepens wasm calls).
+	profileStacks := conf.memoryProfiling && target.GOARCH != "wasm" &&
+		!slices.Contains(parseSourcePatchBuildTags(goBuildFlags), "baremetal")
+	ctx.callerTracking.SetMemoryProfileAttribution(profileStacks)
 	callerSpan := buildTrace.startCoordinator("precompute caller tracking", nil)
 	ctx.callerTracking.Precompute(ctx.progSSA.AllPackages())
 	callerSpan.done()
@@ -1329,6 +1341,10 @@ func parseNativeToolchainInput(commands commandEnv, options LinkOptions, resolve
 		*setting.out = args
 	}
 	return input, nil
+}
+
+func enableMemoryProfiling(mode BuildMode, consumer string) bool {
+	return mode != BuildModeExe || consumer != ""
 }
 
 // cHeaderPackages excludes the patched standard runtime implementation. Its
