@@ -3,7 +3,8 @@
 Run `python3 dev/compare_wasm_eh.py` with Emscripten, Node, `wasm-tools`,
 `llvm-dwarfdump`, and the selected Binaryen installation on `PATH`. Set
 `EM_BINARYEN_ROOT` to select a complete Binaryen installation; optionally set
-`LLGO` to include the existing Go panic/recover smoke test.
+`LLGO` to include the existing Go panic/recover smoke test. Pass `--browser`
+to execute all six C++ variants and both Go/C++ wrappers in Chrome as well.
 
 The script compiles the same C++ `throw`/`catch` and `setjmp`/`longjmp` fixture
 with Emscripten's legacy EH mode and its direct standard `exnref` mode. It
@@ -22,10 +23,10 @@ Node 26.8.1, wasm-tools 1.258.0, LLVM 22.1.8):
 
 All six variants passed validation, DWARF verification, and execution. The
 separate Go panic/recover baseline passed. These measurements are a smoke
-comparison, not a performance result. They do not yet test an exception
-crossing the Go/C++/JavaScript boundary, stack unwinding through a suspended
-goroutine, or browser compatibility. Those must pass before selecting an EH
-translation policy for LLGo output.
+comparison, not a performance result. A second run with `--browser` passed
+all six C++ variants and both Go/C++ wrappers in Chrome 153.0.8010.53.
+Neither run permits a foreign exception to unwind through a Go frame or a
+suspended goroutine.
 
 The optional LLGo boundary fixture additionally passed at O0 and O2: Go
 calls a C++ wrapper, the wrapper throws and catches internally, returns a C
@@ -39,3 +40,15 @@ the requested EH flags. This wrapper result establishes a safe status
 translation boundary with the current Asyncify backend. It does not establish
 that a C++ exception can unwind through Go or that direct Wasm EH can be
 enabled for the whole LLGo browser link.
+
+## Supported EH boundary
+
+Keep the current validated Emscripten/LLGo EH encoding for browser builds.
+C++ exceptions are caught inside a C++ wrapper; the wrapper returns a C ABI
+status that Go may translate to a panic. Do not enable direct `exnref` or a
+post-link translation for the whole LLGo module based on the isolated C++
+comparison. Both remain compatible candidates for a later full-link test,
+provided panic/recover, Asyncify suspension, Go/C/JS callbacks, final DWARF,
+and the chosen runtime all pass together. [WAMR's documented EH support](https://github.com/bytecodealliance/wasm-micro-runtime/blob/main/doc/build_wamr.md)
+is currently limited to legacy EH in its classic interpreter, so the browser
+comparison alone does not change the W32/WAMR execution contract.

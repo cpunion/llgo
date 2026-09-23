@@ -8,6 +8,7 @@ to exercise a specific complete Binaryen installation. Set LLGO to add the
 current Go panic/recover baseline; it is not translated by this comparison.
 """
 
+import argparse
 import os
 import pathlib
 import shutil
@@ -55,7 +56,14 @@ def run_cpp(module, node):
         raise RuntimeError(f"unexpected C++ result from {module}:\n{output}")
 
 
-def compare_optimization_level(directory, level, emxx, wasm_opt, wasm_tools, dwarfdump, node, env):
+def run_browser(script, expected, node, env):
+    output = run([node, str(ROOT / "dev/test_wasm_browser.mjs"),
+                  str(script), expected], env=env, timeout=90)
+    if expected not in output:
+        raise RuntimeError(f"browser did not report {expected!r} from {script}:\n{output}")
+
+
+def compare_optimization_level(directory, level, emxx, wasm_opt, wasm_tools, dwarfdump, node, env, browser):
     variants = {}
     for name, legacy in (("legacy", "1"), ("direct", "0")):
         script = directory / f"{name}-O{level}.mjs"
@@ -86,6 +94,8 @@ def compare_optimization_level(directory, level, emxx, wasm_opt, wasm_tools, dwa
         if ("try_table" in wat) != (name != "legacy"):
             raise RuntimeError(f"{name} emitted the wrong EH instruction family")
         run_cpp(script, node)
+        if browser:
+            run_browser(script, EXPECTED, node, env)
         sizes[name] = module.stat().st_size
     print(f"O{level}: " + ", ".join(f"{name}={size} bytes" for name, size in sizes.items()))
 
@@ -101,7 +111,7 @@ def run_go_baseline(directory, llgo, node, env):
     print("Go panic/recover baseline: passed")
 
 
-def run_go_cpp_boundary(directory, llgo, node, env):
+def run_go_cpp_boundary(directory, llgo, node, env, browser):
     go_env = env.copy()
     go_env["LLGO_ROOT"] = str(ROOT)
     # LLGoFiles expands one env-provided compiler argument. Keep C++ EH
@@ -115,10 +125,16 @@ def run_go_cpp_boundary(directory, llgo, node, env):
                       str(script)], env=go_env)
         if "go cpp boundary ok" not in output.splitlines():
             raise RuntimeError(f"Go/C++ wrapper at O{level} failed:\n{output}")
+        if browser:
+            run_browser(script, "go cpp boundary ok", node, go_env)
     print("Go/C++ catch-status-panic wrapper: passed at O0 and O2")
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--browser", action="store_true",
+                        help="also execute every EH variant and Go/C++ wrapper in Chrome")
+    args = parser.parse_args()
     emxx = tool("em++", "EMXX")
     node = tool("node", "NODE")
     wasm_tools = tool("wasm-tools", "WASM_TOOLS")
@@ -132,10 +148,10 @@ def main():
         directory = pathlib.Path(temporary)
         for level in (0, 2):
             compare_optimization_level(directory, level, emxx, wasm_opt,
-                                       wasm_tools, dwarfdump, node, env)
+                                       wasm_tools, dwarfdump, node, env, args.browser)
         if llgo := os.environ.get("LLGO"):
             run_go_baseline(directory, llgo, node, env)
-            run_go_cpp_boundary(directory, llgo, node, env)
+            run_go_cpp_boundary(directory, llgo, node, env, args.browser)
 
 
 if __name__ == "__main__":
