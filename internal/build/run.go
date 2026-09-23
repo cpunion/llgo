@@ -39,6 +39,7 @@ type testProgram struct {
 	temporaryOutputs *OutFmtDetails
 	runner           string
 	runnerEnv        map[string]string
+	profile          string
 }
 
 type testRunResult struct {
@@ -161,7 +162,7 @@ func runNativeTest(commands commandEnv, program testProgram, conf *Config, stdou
 			commands.environ = withEnv(commands.environ, "PWD="+program.pkgDir)
 		}
 		return runEmuCmdTo(commands, program.runnerEnv, program.runner, conf.RunArgs, false, conf.PrintCommands,
-			runnerDetails{phase: "test", target: conf.Target, profile: conf.Goos, artifact: program.app, packageName: program.pkgName},
+			runnerDetails{phase: "test", target: conf.Target, profile: program.profile, artifact: program.app, packageName: program.pkgName, timeout: conf.RunnerTimeout},
 			stdout, stderr)
 	}
 	if conf.PrintCommands {

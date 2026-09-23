@@ -223,6 +223,23 @@ func TestRunNativeTest(t *testing.T) {
 		}
 	})
 
+	t.Run("Go-compatible wasm runner timeout", func(t *testing.T) {
+		program := testProgram{
+			app:       "program.wasm",
+			pkgDir:    t.TempDir(),
+			pkgName:   "wasm",
+			runner:    fmt.Sprintf("%q -test.run=^TestRunNativeTestHelper$ -- hang %q", executable, "{}"),
+			runnerEnv: map[string]string{"": "program.wasm"},
+			profile:   "j32",
+		}
+		err := runNativeTest(commands, program, &Config{RunnerTimeout: 50 * time.Millisecond}, io.Discard, io.Discard)
+		var runnerErr *runnerFailure
+		if !errors.As(err, &runnerErr) || runnerErr.status != runnerStatusTimeout || runnerErr.profile != "j32" ||
+			!errors.Is(err, stdcontext.DeadlineExceeded) {
+			t.Fatalf("Go-compatible wasm runner timeout = %v, want j32 timeout", err)
+		}
+	})
+
 	t.Run("exit error", func(t *testing.T) {
 		var stderr bytes.Buffer
 		conf := &Config{RunArgs: append(args, "exit")}

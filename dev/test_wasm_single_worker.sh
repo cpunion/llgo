@@ -434,7 +434,7 @@ expect_failure "main.repanicTracebackOrigin" \
 # isolation. The other public run calls below cover successful EC32, EC64,
 # WC32, and alias execution through the same path.
 wasm_ci_run_case EC32/emscripten public-runner-exit 1 1 0 0 0 \
-	expect_llgo_runner_failure emscripten emscripten node "${scheduler_fixture}"
+expect_llgo_runner_failure emscripten j32 node "${scheduler_fixture}"
 wasm_ci_run_case EC32/emscripten public-runner-timeout 1 0 1 0 0 \
 	expect_llgo_runner_timeout emscripten emscripten node "${scheduler_fixture}"
 
