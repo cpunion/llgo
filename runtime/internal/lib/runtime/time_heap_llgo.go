@@ -1,4 +1,4 @@
-//go:build !baremetal && !wasm
+//go:build !baremetal && (!wasm || (wasip1 && llgo.wasi_threads))
 
 // Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license.

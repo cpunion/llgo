@@ -1409,6 +1409,9 @@ func configureWasmGC(conf *Config, export *crosscompile.Export) (bool, error) {
 			if explicit {
 				return false, errors.New("llgo.wasm.gc.linear requires single-worker WASI (set LLGO_WASI_THREADS=0)")
 			}
+			if !slices.Contains(splitSourcePatchBuildTags(conf.Tags), "nogc") {
+				return false, errors.New("WASI threads currently require -tags nogc until a threaded collector is available")
+			}
 			return false, nil
 		}
 		defaultEnabled = true

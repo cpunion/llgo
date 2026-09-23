@@ -13,6 +13,9 @@ int llgo_timer_cond_init(pthread_cond_t *condition)
 {
 #if defined(__APPLE__)
     return pthread_cond_init(condition, 0);
+#elif defined(__wasi__)
+    /* WAMR's WASI pthread workers cannot read CLOCK_MONOTONIC. */
+    return pthread_cond_init(condition, 0);
 #else
     pthread_condattr_t attributes;
     int result = pthread_condattr_init(&attributes);
@@ -42,7 +45,11 @@ int llgo_timer_cond_timedwait(pthread_cond_t *condition,
     deadline.tv_nsec = (long)(wait_nanos % 1000000000LL);
     return pthread_cond_timedwait_relative_np(condition, mutex, &deadline);
 #else
+#if defined(__wasi__)
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
+#else
     if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+#endif
         return -1;
     deadline.tv_sec += (time_t)(wait_nanos / 1000000000LL);
     deadline.tv_nsec += (long)(wait_nanos % 1000000000LL);
