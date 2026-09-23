@@ -506,6 +506,11 @@ func TestGenericLocalTypeColdAndHotPackageCache(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		for _, pkg := range pkgs {
+			if pkg.LPkg != nil && pkg.LPkg.Prog.MemoryProfilingEnabled() {
+				t.Fatal("ordinary test binary enabled memory profiling through testdeps")
+			}
+		}
 		switch phase := os.Getenv(cachePhaseEnv); phase {
 		case "cold":
 			for _, pkg := range pkgs {

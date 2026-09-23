@@ -1439,7 +1439,7 @@ func (c *CallerTracking) Precompute(pkgs []*ssa.Package) {
 	}
 	profileEnabled := c.memoryProfileAttribution
 	if !c.memoryProfileConfigured {
-		profileEnabled = MemProfileConsumer(pkgs) != ""
+		profileEnabled = MemProfileConsumer(pkgs, false) != ""
 	}
 	var profileFrames map[*ssa.Function]bool
 	if profileEnabled {
@@ -1617,9 +1617,30 @@ func packageReadsMemProfile(funcs map[*ssa.Function]bool) bool {
 // recording necessary, or an empty string when it is provably unused.
 // It runs after Go SSA construction but before backend compilation, so the
 // same decision applies to runtime and every dependency. Loading runtime/pprof
-// itself is a consumer even though its runtime call uses go:linkname rather
-// than a normal public-runtime reference.
-func MemProfileConsumer(pkgs []*ssa.Package) string {
+// is a consumer unless it is only the test harness's unused, optional import;
+// its runtime call uses go:linkname rather than a public-runtime reference.
+func MemProfileConsumer(pkgs []*ssa.Package, ignoreImplicitTestProfile bool) string {
+	// Every test binary imports runtime/pprof through testdeps, and testing
+	// references MemProfileRate for its optional command-line flag. Neither
+	// means an ordinary test actually reads a heap profile. The build driver
+	// keeps both when -memprofile or -memprofilerate was requested.
+	implicitPprofOnly := ignoreImplicitTestProfile
+	if implicitPprofOnly {
+		for _, pkg := range pkgs {
+			if pkg == nil || pkg.Pkg == nil || pkg.Pkg.Path() == "testing/internal/testdeps" {
+				continue
+			}
+			for _, imp := range pkg.Pkg.Imports() {
+				if imp.Path() == "runtime/pprof" {
+					implicitPprofOnly = false
+					break
+				}
+			}
+			if !implicitPprofOnly {
+				break
+			}
+		}
+	}
 	for _, pkg := range pkgs {
 		if pkg == nil || pkg.Pkg == nil {
 			continue
@@ -1630,7 +1651,13 @@ func MemProfileConsumer(pkgs []*ssa.Package) string {
 		if isPublicRuntimePath(pkg.Pkg.Path()) {
 			continue
 		}
+		if ignoreImplicitTestProfile && (pkg.Pkg.Path() == "testing" || pkg.Pkg.Path() == "testing/internal/testdeps") {
+			continue
+		}
 		if pkg.Pkg.Path() == "runtime/pprof" {
+			if implicitPprofOnly {
+				continue
+			}
 			return pkg.Pkg.Path()
 		}
 		// Collecting method bodies is expensive. Most packages cannot refer

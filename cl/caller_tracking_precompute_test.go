@@ -19,12 +19,33 @@
 package cl
 
 import (
+	"go/types"
 	"reflect"
 	"sync"
 	"testing"
 
 	gossa "golang.org/x/tools/go/ssa"
 )
+
+func TestMemProfileConsumerIgnoresUnusedTestdeps(t *testing.T) {
+	pprof := types.NewPackage("runtime/pprof", "pprof")
+	testdeps := types.NewPackage("testing/internal/testdeps", "testdeps")
+	testdeps.SetImports([]*types.Package{pprof})
+	pkgs := []*gossa.Package{{Pkg: pprof}, {Pkg: testdeps}}
+	if got := MemProfileConsumer(pkgs, true); got != "" {
+		t.Fatalf("unused testdeps enabled profiling: %s", got)
+	}
+	if got := MemProfileConsumer(pkgs, false); got != "runtime/pprof" {
+		t.Fatalf("requested test profile consumer = %q", got)
+	}
+
+	user := types.NewPackage("example.com/user", "user")
+	user.SetImports([]*types.Package{pprof})
+	pkgs = append(pkgs, &gossa.Package{Pkg: user})
+	if got := MemProfileConsumer(pkgs, true); got != "runtime/pprof" {
+		t.Fatalf("explicit pprof import consumer = %q", got)
+	}
+}
 
 func TestCallerTrackingPrecomputeSupportsConcurrentReads(t *testing.T) {
 	var nilTracking *CallerTracking

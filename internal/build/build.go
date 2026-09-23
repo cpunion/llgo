@@ -900,7 +900,8 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	}
 	buildSSAPkgs(ctx, append(append(altEntries, pkgEntries...), depEntries...))
 	recordPackageSSAInstructions(ctx)
-	memProfileConsumer := cl.MemProfileConsumer(progSSA.AllPackages())
+	ignoreImplicitTestProfile := ctx.mode == ModeTest && !testMemoryProfileRequested(conf.RunArgs)
+	memProfileConsumer := cl.MemProfileConsumer(progSSA.AllPackages(), ignoreImplicitTestProfile)
 	conf.memoryProfiling = enableMemoryProfiling(conf.BuildMode, memProfileConsumer)
 	prog.EnableMemoryProfiling(conf.memoryProfiling)
 	// Wasm and bare-metal still report size classes, not sampled stacks. They
@@ -912,9 +913,9 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	ctx.callerTracking.Precompute(ctx.progSSA.AllPackages())
 	callerSpan.done()
 	ctx.frontendOptions.ReceiverNilChecks = collectReceiverNilChecks(initial, altPkgs)
-	if features == nil {
-		if target.GOARCH == "wasm" {
-			groups = groupInitialBuilds(ctx, altPkgs)
+	if features == nil || (ctx.mode == ModeTest && conf.memoryProfiling) {
+		if target.GOARCH == "wasm" || (ctx.mode == ModeTest && conf.memoryProfiling) {
+			groups = groupInitialBuildsWithProfiles(ctx, altPkgs, conf.memoryProfiling)
 		}
 		if len(groups) > 1 {
 			// Rebuild each group's frontend deliberately: sharing the parent's
@@ -925,7 +926,7 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 			plan.finishTrace = finishTrace
 			return nil, nil
 		}
-		if len(groups) == 1 {
+		if features == nil && len(groups) == 1 {
 			features = &groups[0].features
 		}
 	}
@@ -1345,6 +1346,18 @@ func parseNativeToolchainInput(commands commandEnv, options LinkOptions, resolve
 
 func enableMemoryProfiling(mode BuildMode, consumer string) bool {
 	return mode != BuildModeExe || consumer != ""
+}
+
+func testMemoryProfileRequested(args []string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-test.memprofile=") && len(arg) > len("-test.memprofile=") {
+			return true
+		}
+		if strings.HasPrefix(arg, "-test.memprofilerate=") && arg != "-test.memprofilerate=0" {
+			return true
+		}
+	}
+	return false
 }
 
 // cHeaderPackages excludes the patched standard runtime implementation. Its
