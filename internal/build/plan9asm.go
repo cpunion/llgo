@@ -68,7 +68,7 @@ func compilePkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Package, verbo
 		if shouldSkipDarwinDynimportTrampolineAsm(skipDarwinDynimportTrampolines, sfile, src) {
 			continue
 		}
-		if obj, handled, err := compileForeignARM64Asm(ctx, aPkg, pkg, sfile, src); handled {
+		if obj, handled, err := compileForeignNativeAsm(ctx, aPkg, pkg, sfile, src); handled {
 			if err != nil {
 				return nil, fmt.Errorf("%s: native assembly %s: %w", pkg.PkgPath, sfile, err)
 			}

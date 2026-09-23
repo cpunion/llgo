@@ -11,15 +11,15 @@ import (
 	extplan9asm "github.com/xgo-dev/plan9asm"
 )
 
-func compileForeignARM64Asm(ctx *context, aPkg *aPackage, pkg *packages.Package, sfile string, src []byte) (string, bool, error) {
-	if ctx.buildConf.Goos != "darwin" || ctx.buildConf.Goarch != "arm64" {
+func compileForeignNativeAsm(ctx *context, aPkg *aPackage, pkg *packages.Package, sfile string, src []byte) (string, bool, error) {
+	if !extplan9asm.SupportsNativeTarget(ctx.buildConf.Goos, ctx.buildConf.Goarch) {
 		return "", false, nil
 	}
 	_, decls := collectGoCgoPragmas(pkg.Syntax)
 	if len(decls) == 0 {
 		return "", false, nil
 	}
-	funcs := extplan9asm.ForeignARM64Functions(src)
+	funcs := extplan9asm.ForeignNativeFunctions(src, ctx.buildConf.Goarch)
 	if len(funcs) == 0 {
 		return "", false, nil
 	}
@@ -31,7 +31,7 @@ func compileForeignARM64Asm(ctx *context, aPkg *aPackage, pkg *packages.Package,
 		imports[d.local] = d.alias
 	}
 	pkgPath := abi.PathOf(pkg.Types)
-	assembly, data, err := extplan9asm.TranslateNativeARM64Source(src, imports, pkgPath)
+	assembly, data, err := extplan9asm.TranslateNativeSource(src, extplan9asm.NativeOptions{GOOS: ctx.buildConf.Goos, GOARCH: ctx.buildConf.Goarch, PackagePath: pkgPath, Imports: imports})
 	if err != nil {
 		return "", true, err
 	}

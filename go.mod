@@ -28,4 +28,4 @@ require (
 replace github.com/xgo-dev/llgo/runtime => ./runtime
 
 // Pending https://github.com/xgo-dev/plan9asm/pull/42; pin the source-native backend.
-replace github.com/xgo-dev/plan9asm => github.com/zhouguangyuan0718/plan9asm v0.2.2-0.20260923081806-217011737355
+replace github.com/xgo-dev/plan9asm => github.com/zhouguangyuan0718/plan9asm v0.2.2-0.20260923143659-5246d1dfa1ca

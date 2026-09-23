@@ -3,6 +3,7 @@
 package build
 
 import (
+	"debug/elf"
 	"debug/macho"
 	"fmt"
 	"go/ast"
@@ -94,7 +95,7 @@ func TestForeignARM64SelectionAndErrors(t *testing.T) {
 		handled                     bool
 		badTemp                     bool
 	}{
-		{name: "other target", goos: "linux"},
+		{name: "other target", goos: "windows"},
 		{name: "no imports", goos: "darwin", asm: valid},
 		{name: "Go ABI", goos: "darwin", decl: imports, asm: "TEXT ·f(SB), NOSPLIT, $0\nRET\n"},
 		{name: "conflicting import", goos: "darwin", decl: imports + "//go:cgo_import_dynamic imported other\n", asm: valid, want: "conflicting dynamic import", handled: true},
@@ -117,7 +118,7 @@ func TestForeignARM64SelectionAndErrors(t *testing.T) {
 			ctx := &context{buildConf: &Config{Goos: tc.goos, Goarch: "arm64"}, commands: commandEnv{environ: os.Environ()}}
 			ctx.crossCompile = crosscompile.Export{CC: filepath.Join(t.TempDir(), "missing-clang")}
 			pkg := &packages.Package{PkgPath: "probe", Types: types.NewPackage("probe", "p"), Syntax: []*ast.File{file}}
-			_, handled, err := compileForeignARM64Asm(ctx, nil, pkg, "callback.s", []byte(tc.asm))
+			_, handled, err := compileForeignNativeAsm(ctx, nil, pkg, "callback.s", []byte(tc.asm))
 			if handled != tc.handled {
 				t.Fatalf("handled=%v, want %v", handled, tc.handled)
 			}
@@ -135,75 +136,108 @@ func TestForeignARM64SelectionAndErrors(t *testing.T) {
 // Object generation and DATA binding need no Darwin SDK or execution host.
 // Exercise the real assembly driver on every CI host; only TestForeignARM64Callback
 // needs native darwin/arm64 execution.
-func TestForeignARM64CrossCompileObject(t *testing.T) {
-	for _, size := range []int{8, 16} {
-		t.Run(fmt.Sprint(size), func(t *testing.T) {
-			dir := t.TempDir()
-			src := fmt.Sprintf(`#include "textflag.h"
+func TestForeignNativeCrossCompileObject(t *testing.T) {
+	for _, target := range []struct{ goos, goarch, triple string }{{"darwin", "arm64", "arm64-apple-darwin"}, {"linux", "amd64", "x86_64-unknown-linux-gnu"}, {"linux", "arm64", "aarch64-unknown-linux-gnu"}} {
+		t.Run(target.goos+"/"+target.goarch, func(t *testing.T) {
+			for _, size := range []int{8, 16} {
+				t.Run(fmt.Sprint(size), func(t *testing.T) {
+					dir := t.TempDir()
+					src := fmt.Sprintf(`#include "textflag.h"
 TEXT callback<>(SB), NOSPLIT, $0
  JMP imported(SB)
 GLOBL ·entry(SB), RODATA, $%d
 DATA ·entry(SB)/8, $callback<>(SB)
 `, size)
-			sfile := filepath.Join(dir, "callback.s")
-			if err := os.WriteFile(sfile, []byte(src), 0600); err != nil {
-				t.Fatal(err)
+					sfile := filepath.Join(dir, "callback.s")
+					if err := os.WriteFile(sfile, []byte(src), 0600); err != nil {
+						t.Fatal(err)
+					}
+					file, err := parser.ParseFile(token.NewFileSet(), "imports.go", "package p\n//go:cgo_import_dynamic imported strlen\n", parser.ParseComments)
+					if err != nil {
+						t.Fatal(err)
+					}
+					prog := llssa.NewProgram(&llssa.Target{GOOS: target.goos, GOARCH: target.goarch})
+					defer prog.Dispose()
+					pkg := &packages.Package{ID: "probe", PkgPath: "probe", Dir: dir, Types: types.NewPackage("probe", "p"), Syntax: []*ast.File{file}, OtherFiles: []string{sfile}}
+					apkg := &aPackage{Package: pkg, LPkg: prog.NewPackage("p", "probe")}
+					mod := apkg.LPkg.Module()
+					global := llvm.AddGlobal(mod, mod.Context().Int64Type(), "probe.entry")
+					global.SetInitializer(llvm.ConstNull(global.GlobalValueType()))
+					ctx := &context{prog: prog, buildConf: &Config{Goos: target.goos, Goarch: target.goarch}, commands: commandEnv{environ: os.Environ()}, crossCompile: crosscompile.Export{CC: "clang", CCFLAGS: []string{"--target=" + target.triple}}, plan9asmReady: true, plan9asmMode: plan9asmEnvAll}
+					// This driver must use only the native compiler, never go tool asm
+					// or a Go object reader. An unusable Go toolchain must not affect it.
+					ctx.commands.environ = withEnv(ctx.commands.environ, "GOROOT="+filepath.Join(dir, "missing-goroot"))
+					objects, err := compilePkgSFiles(ctx, apkg, pkg, false)
+					for _, object := range objects {
+						defer os.Remove(object)
+					}
+					if size != 8 {
+						if err == nil || !strings.Contains(err.Error(), "Go size 8 but DATA size 16") {
+							t.Fatalf("invalid DATA: %v", err)
+						}
+						if global.IsDeclaration() {
+							t.Fatal("invalid DATA changed Go global")
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(objects) != 1 {
+						t.Fatalf("objects=%v", objects)
+					}
+					if !global.IsDeclaration() || global.Linkage() != llvm.ExternalLinkage {
+						t.Fatal("Go global did not bind to native DATA")
+					}
+					if target.goos == "linux" {
+						obj, err := elf.Open(objects[0])
+						if err != nil {
+							t.Fatal(err)
+						}
+						defer obj.Close()
+						machine := elf.EM_X86_64
+						if target.goarch == "arm64" {
+							machine = elf.EM_AARCH64
+						}
+						if obj.Machine != machine || obj.Type != elf.ET_REL {
+							t.Fatal(obj.FileHeader)
+						}
+						syms, err := obj.Symbols()
+						if err != nil {
+							t.Fatal(err)
+						}
+						found := false
+						for _, sym := range syms {
+							if sym.Name == "probe.entry" {
+								found = true
+							}
+						}
+						if !found {
+							t.Fatal("native ELF missing DATA symbol")
+						}
+						return
+					}
+					obj, err := macho.Open(objects[0])
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer obj.Close()
+					if obj.Cpu != macho.CpuArm64 || obj.Type != macho.TypeObj {
+						t.Fatalf("unexpected object header: %+v", obj.FileHeader)
+					}
+					found := false
+					for _, sym := range obj.Symtab.Syms {
+						// debug/macho strips the leading underscore from Go symbol names.
+						if sym.Name == "probe.entry" {
+							found = true
+						}
+					}
+					if !found {
+						t.Fatal("native object missing DATA symbol")
+					}
+				})
 			}
-			file, err := parser.ParseFile(token.NewFileSet(), "imports.go", "package p\n//go:cgo_import_dynamic imported strlen\n", parser.ParseComments)
-			if err != nil {
-				t.Fatal(err)
-			}
-			prog := llssa.NewProgram(&llssa.Target{GOOS: "darwin", GOARCH: "arm64"})
-			defer prog.Dispose()
-			pkg := &packages.Package{ID: "probe", PkgPath: "probe", Dir: dir, Types: types.NewPackage("probe", "p"), Syntax: []*ast.File{file}, OtherFiles: []string{sfile}}
-			apkg := &aPackage{Package: pkg, LPkg: prog.NewPackage("p", "probe")}
-			mod := apkg.LPkg.Module()
-			global := llvm.AddGlobal(mod, mod.Context().Int64Type(), "probe.entry")
-			global.SetInitializer(llvm.ConstNull(global.GlobalValueType()))
-			ctx := &context{prog: prog, buildConf: &Config{Goos: "darwin", Goarch: "arm64"}, commands: commandEnv{environ: os.Environ()}, crossCompile: crosscompile.Export{CC: "clang", CCFLAGS: []string{"--target=arm64-apple-darwin"}}, plan9asmReady: true, plan9asmMode: plan9asmEnvAll}
-			// This driver must use only the native compiler, never go tool asm
-			// or a Go object reader. An unusable Go toolchain must not affect it.
-			ctx.commands.environ = withEnv(ctx.commands.environ, "GOROOT="+filepath.Join(dir, "missing-goroot"))
-			objects, err := compilePkgSFiles(ctx, apkg, pkg, false)
-			for _, object := range objects {
-				defer os.Remove(object)
-			}
-			if size != 8 {
-				if err == nil || !strings.Contains(err.Error(), "Go size 8 but DATA size 16") {
-					t.Fatalf("invalid DATA: %v", err)
-				}
-				if global.IsDeclaration() {
-					t.Fatal("invalid DATA changed Go global")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(objects) != 1 {
-				t.Fatalf("objects=%v", objects)
-			}
-			if !global.IsDeclaration() || global.Linkage() != llvm.ExternalLinkage {
-				t.Fatal("Go global did not bind to native DATA")
-			}
-			obj, err := macho.Open(objects[0])
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer obj.Close()
-			if obj.Cpu != macho.CpuArm64 || obj.Type != macho.TypeObj {
-				t.Fatalf("unexpected object header: %+v", obj.FileHeader)
-			}
-			found := false
-			for _, sym := range obj.Symtab.Syms {
-				// debug/macho strips the leading underscore from Go symbol names.
-				if sym.Name == "probe.entry" {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatal("native object missing DATA symbol")
-			}
+
 		})
 	}
 }
