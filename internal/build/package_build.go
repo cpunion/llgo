@@ -18,7 +18,6 @@ package build
 
 import (
 	"fmt"
-	"os"
 	"slices"
 	"sync"
 
@@ -181,10 +180,6 @@ func preparePackageGroup(ctx *context, tasks []*packageBuildTask, verbose bool) 
 }
 
 func tracePackageBuild(ctx *context, task *packageBuildTask, verbose, isolated, worker bool) (err error) {
-	if ctx.shouldPrintCommands(false) {
-		fmt.Fprintf(os.Stderr, "# backend+publish start %s\n", task.pkg.PkgPath)
-		defer fmt.Fprintf(os.Stderr, "# backend+publish end %s\n", task.pkg.PkgPath)
-	}
 	class := "coordinator"
 	var traceSpan *buildTraceSpan
 	if worker {
