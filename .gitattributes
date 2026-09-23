@@ -2,4 +2,6 @@
 **/out.txt text eol=lf
 *.ll text eol=lf
 *.sh text eol=lf
+*.nix text eol=lf
+flake.lock text eol=lf
 _demo/go/export/libexport.h.want text eol=lf
