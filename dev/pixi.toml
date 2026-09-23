@@ -7,6 +7,7 @@ platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64", "win-64"]
 go = ">=1.27,<1.28"
 llvmdev = ">=22,<23"
 clang = ">=22,<23"
+clangxx = ">=22,<23"
 lld = ">=22,<23"
 pkg-config = ">=0.29"
 bdw-gc = ">=8"
