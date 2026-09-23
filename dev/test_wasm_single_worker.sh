@@ -436,7 +436,7 @@ expect_failure "main.repanicTracebackOrigin" \
 wasm_ci_run_case EC32/emscripten public-runner-exit 1 1 0 0 0 \
 expect_llgo_runner_failure emscripten j32 node "${scheduler_fixture}"
 wasm_ci_run_case EC32/emscripten public-runner-timeout 1 0 1 0 0 \
-	expect_llgo_runner_timeout emscripten emscripten node "${scheduler_fixture}"
+	expect_llgo_runner_timeout emscripten j32 node "${scheduler_fixture}"
 
 # Timers share the Go-derived heap but use different host-wait backends.
 wasm_ci_run_case EC32/emscripten timers 1 0 0 0 0 \
