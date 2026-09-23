@@ -2,8 +2,17 @@
 
 export GOFLAGS=-tags=byollvm
 export CGO_ENABLED=1
-export CC=clang
-export CXX=clang++
+case "$(uname -s)" in
+  Linux)
+    target="$(uname -m)-conda-linux-gnu"
+    export CC="${target}-clang"
+    export CXX="${target}-clang++"
+    ;;
+  Darwin)
+    export CC=clang
+    export CXX=clang++
+    ;;
+esac
 LLVM_CONFIG="$(command -v llvm-config)"
 export LLVM_CONFIG
 CGO_CPPFLAGS="$($LLVM_CONFIG --cppflags)"
