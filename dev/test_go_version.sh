@@ -295,9 +295,6 @@ echo "Shard: ${shard_index}/${shard_total}; packages: ${#selected[@]}"
 printf '  %s\n' "${selected[@]}"
 
 test_flags=(-timeout="${LLGO_TEST_TIMEOUT:-20m}" -modfile="${modfile}")
-if [[ "${LLGO_TEST_PRINT_COMMANDS:-}" == 1 ]]; then
-	test_flags+=(-x)
-fi
 if [[ -n "${LLGO_TEST_JOBS:-}" ]]; then
 	test_flags=(-p="${LLGO_TEST_JOBS}" "${test_flags[@]}")
 fi
