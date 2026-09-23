@@ -327,6 +327,22 @@ func TestResolveWasmOptUsesEmscriptenBinaryenRoot(t *testing.T) {
 	if err != nil || got != override {
 		t.Fatalf("resolveWasmOpt() with WASMOPT = %q, %v; want %q", got, err, override)
 	}
+
+	t.Setenv("EM_BINARYEN_ROOT", "")
+	t.Setenv("WASMOPT", "")
+	t.Setenv("PATH", bin)
+	got, err = resolveWasmOpt()
+	if err != nil || got != want {
+		t.Fatalf("resolveWasmOpt() from PATH = %q, %v; want %q", got, err, want)
+	}
+}
+
+func TestWasmOptIdentityWhenVersionUnavailable(t *testing.T) {
+	tool := writeWasmOptTestTool(t, t.TempDir())
+	t.Setenv("LLGO_TEST_WASM_OPT_HELPER", "fail-version")
+	if got, want := wasmOptIdentity(tool), tool+" (version unavailable)"; got != want {
+		t.Fatalf("wasmOptIdentity() = %q; want %q", got, want)
+	}
 }
 
 func TestPostLinkWasmReportsInvalidOutputDirectory(t *testing.T) {
