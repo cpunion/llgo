@@ -7,6 +7,7 @@ case "$(uname -s)" in
     target="$(uname -m)-conda-linux-gnu"
     export CC="${target}-clang"
     export CXX="${target}-clang++"
+    export PATH="$PIXI_PROJECT_ROOT/pixi-tools:$PATH"
     ;;
   Darwin)
     export CC=clang
