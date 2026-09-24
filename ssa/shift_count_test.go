@@ -49,8 +49,10 @@ func TestShiftCountCheckedBeforeNarrowing(t *testing.T) {
 			body := fn.MakeBody(1)
 			body.Return(body.BinOp(tt.op, fn.Param(0), fn.Param(1)))
 			ir := fn.impl.String()
-			if !strings.Contains(ir, "icmp uge i64") || !strings.Contains(ir, "trunc i64") {
-				t.Fatalf("shift count must be compared as i64 before narrowing to i32:\n%s", ir)
+			compareAt := strings.Index(ir, "icmp uge i64 %1, 32")
+			truncateAt := strings.Index(ir, "trunc i64 %1 to i32")
+			if compareAt < 0 || truncateAt < 0 || compareAt >= truncateAt {
+				t.Fatalf("shift count %%1 must be compared as i64 before narrowing to i32:\n%s", ir)
 			}
 		})
 	}

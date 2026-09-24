@@ -648,8 +648,8 @@ func (b Builder) BinOp(op token.Token, x, y Expr) Expr {
 				b.InlineCall(b.Pkg.rtFunc("AssertNegativeShift"), check)
 			}
 			xsize, ysize := b.Prog.SizeOf(x.Type), b.Prog.SizeOf(y.Type)
-			// Compare before narrowing the count: on 386, uint64(1)<<32
-			// would otherwise become zero and shift instead of overflowing.
+			// Compare before narrowing the count: on 386, a count of 1<<32
+			// would truncate to zero and be treated as a zero-width shift.
 			overflows := llvm.CreateICmp(b.impl, llvm.IntUGE, y.impl, llvm.ConstInt(y.ll, xsize*8, false))
 			if xsize != ysize {
 				y = b.Convert(x.Type, y)
