@@ -103,8 +103,9 @@ func runCmdEx(cmd *base.Command, args []string, mode build.Mode, goBuildFlags *b
 	}
 	_, err = build.Do(args, conf)
 	if err != nil {
-		// Preserve the program's exit status after Build has run its cleanup.
-		if mode == build.ModeRun {
+		// Preserve a directly executed native program's exit status after
+		// Build cleanup. A Wasm runner error keeps LLGo's classified status 1.
+		if mode == build.ModeRun && conf.Target == "" && conf.Goarch != "wasm" {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) && exitErr.ExitCode() > 0 {
 				mockable.Exit(exitErr.ExitCode())
