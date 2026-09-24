@@ -152,7 +152,7 @@ func TestForeignARM64SelectionAndErrors(t *testing.T) {
 // Native assembly shares the ordinary Plan 9 .ll output and object compiler.
 // Check saved IR, DATA binding and target relocations on every LLVM host.
 func TestForeignNativeCrossCompileObject(t *testing.T) {
-	for _, target := range []struct{ goos, goarch, triple string }{{"darwin", "arm64", "arm64-apple-darwin"}, {"linux", "amd64", "x86_64-unknown-linux-gnu"}, {"linux", "arm64", "aarch64-unknown-linux-gnu"}} {
+	for _, target := range []struct{ goos, goarch, triple string }{{"darwin", "amd64", "x86_64-apple-darwin"}, {"darwin", "arm64", "arm64-apple-darwin"}, {"linux", "amd64", "x86_64-unknown-linux-gnu"}, {"linux", "arm64", "aarch64-unknown-linux-gnu"}} {
 		t.Run(target.goos+"/"+target.goarch, func(t *testing.T) {
 			for _, size := range []int{8, 16} {
 				t.Run(fmt.Sprint(size), func(t *testing.T) {
@@ -251,7 +251,11 @@ DATA ·entry(SB)/8, $callback<>(SB)
 						t.Fatal(err)
 					}
 					defer obj.Close()
-					if obj.Cpu != macho.CpuArm64 || obj.Type != macho.TypeObj {
+					cpu := macho.CpuArm64
+					if target.goarch == "amd64" {
+						cpu = macho.CpuAmd64
+					}
+					if obj.Cpu != cpu || obj.Type != macho.TypeObj {
 						t.Fatalf("unexpected object header: %+v", obj.FileHeader)
 					}
 					found := false
@@ -267,6 +271,93 @@ DATA ·entry(SB)/8, $callback<>(SB)
 				})
 			}
 
+		})
+	}
+}
+
+// Run on each native backend pair: linux/{amd64,arm64} and darwin/{amd64,arm64}.
+// The library directive must be sufficient to link; no cgo package supplies -l.
+func TestForeignNativeSharedLibrary(t *testing.T) {
+	if (runtime.GOOS != "linux" && runtime.GOOS != "darwin") || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skip("native ELF/Mach-O backend")
+	}
+	dir := t.TempDir()
+	libDir := filepath.Join(dir, "library with spaces")
+	appDir := filepath.Join(dir, "app")
+	for _, path := range []string{libDir, appDir} {
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lib := filepath.Join(libDir, "libprobe.so.1")
+	args := []string{"-shared", "-fPIC"}
+	if runtime.GOOS == "darwin" {
+		lib = filepath.Join(libDir, "libprobe.dylib")
+		args = []string{"-dynamiclib", "-fPIC", "-Wl,-install_name," + lib}
+	} else {
+		args = append(args, "-Wl,-soname,"+filepath.Base(lib))
+	}
+	cfile := filepath.Join(libDir, "probe.c")
+	if err := os.WriteFile(cfile, []byte(`long long answer(long long x) { return x + 7; }
+long long invoke(long long (*fn)(long long), long long x) { return fn(x); }
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args = append(args, cfile, "-o", lib)
+	if out, err := exec.Command("clang", args...).CombinedOutput(); err != nil {
+		t.Fatalf("shared library: %v\n%s", err, out)
+	}
+	files := map[string]string{
+		"go.mod": "module example.com/native-shared-library\n\ngo 1.20\n",
+		"bridge.s": `#include "textflag.h"
+TEXT bridge<>(SB), NOSPLIT, $0
+ JMP imported(SB)
+GLOBL ·entry(SB), RODATA, $8
+DATA ·entry(SB)/8, $bridge<>(SB)
+`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(appDir, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(appDir)
+	t.Setenv("LIBRARY_PATH", libDir)
+	libraries := []string{lib}
+	if runtime.GOOS == "linux" {
+		libraries = append(libraries, filepath.Base(lib))
+	}
+	for _, library := range libraries {
+		t.Run(library, func(t *testing.T) {
+			source := fmt.Sprintf(`package main
+import _ "unsafe"
+//go:cgo_import_dynamic imported answer %q
+var entry uintptr
+//go:linkname invoke C.invoke
+func invoke(fn uintptr, x int64) int64
+func main() {
+ if invoke(entry, 35) != 42 || invoke(entry, -9) != -2 { panic("native argument/result") }
+ println("ok")
+}
+`, library)
+			if err := os.WriteFile(filepath.Join(appDir, "main.go"), []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, mode := range []lto.Mode{lto.Off, lto.Thin, lto.Full} {
+				t.Run(fmt.Sprint(mode), func(t *testing.T) {
+					conf := NewDefaultConf(ModeBuild)
+					conf.OptLevel, conf.LTO = optlevel.O2, mode
+					conf.OutFile = filepath.Join(dir, "probe-"+fmt.Sprint(mode))
+					if _, err := Do([]string{"."}, conf); err != nil {
+						t.Fatal(err)
+					}
+					cmd := exec.Command(conf.OutFile)
+					cmd.Env = withEnv(os.Environ(), "LD_LIBRARY_PATH="+libDir)
+					if out, err := cmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "ok" {
+						t.Fatalf("run: %v\n%s", err, out)
+					}
+				})
+			}
 		})
 	}
 }

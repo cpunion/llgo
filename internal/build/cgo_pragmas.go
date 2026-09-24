@@ -71,7 +71,7 @@ func collectGoCgoPragmas(files []*ast.File) (ldflags []string, dynimports []cgoI
 
 func goCgoLinkArgs(files []*ast.File, goos string) ([]string, error) {
 	ldflags, imports := collectGoCgoPragmas(files)
-	if goos != "darwin" {
+	if goos != "darwin" && goos != "linux" {
 		return ldflags, nil
 	}
 	seen := make(map[string]bool)
@@ -86,6 +86,16 @@ func goCgoLinkArgs(files []*ast.File, goos string) ([]string, error) {
 			return nil, fmt.Errorf("invalid go:cgo_import_dynamic library %q: expected a library path", lib)
 		}
 		seen[lib] = true
+		if goos == "linux" {
+			// A bare ELF library name (including a versioned SONAME) is
+			// searched in the linker's library paths. Preserve explicit paths.
+			if !strings.Contains(lib, "/") {
+				ldflags = append(ldflags, "-l:"+lib)
+			} else {
+				ldflags = append(ldflags, lib)
+			}
+			continue
+		}
 		// System libraries may exist only in dyld's shared cache. Let the native
 		// compiler resolve their SDK stubs instead of opening the runtime path.
 		if strings.HasPrefix(lib, "/System/Library/Frameworks/") {

@@ -15,6 +15,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  native-assembly:
+    name: Native assembly (${{ matrix.os }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15-intel, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+      - name: Test native shared-library links and calls
+        shell: bash
+        env:
+          LLGO_ROOT: ${{ github.workspace }}
+        run: |
+          go test ./internal/build -count=1 -v -timeout=20m \
+            -run '^(TestForeignNativeSharedLibrary|TestForeignNativeCrossCompileObject|TestForeignARM64Callback|TestDarwinDynamicImportLinkArgs|TestLinuxDynamicImportLinkArgs|TestDynamicImportLibraryPath)$'
+
   test:
     permissions:
       contents: read
