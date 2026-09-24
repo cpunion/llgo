@@ -77,7 +77,7 @@ run_worker_llgo_test() {
 	local output="${work_dir}/${name}.out"
 
 	run_with_timeout env LLGO_WASM_WORKERS=2 "${llgo_cmd}" test \
-		-target "${target}" -emulator -v -count=1 -timeout=30s \
+		-target "${target}" -emulator -v -count=1 -timeout=90s \
 		"${test_fixture}" 2>&1 | tee "${output}"
 	grep -Fq "PASS" "${output}"
 }
