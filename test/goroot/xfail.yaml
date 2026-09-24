@@ -242,10 +242,6 @@ xfails:
     reason: the Go baseline cannot build this case in the Windows 386 target environment
   - platform: windows/386
     directive: run
-    case: fixedbugs/bug356.go
-    reason: LLGo emits unexpected runtime output for this interface conversion test on Windows 386
-  - platform: windows/386
-    directive: run
     case: gcgort.go
     reason: LLGo fails the concurrent GC stress test on Windows 386
   - platform: windows/386
