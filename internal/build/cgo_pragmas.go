@@ -69,16 +69,21 @@ func collectGoCgoPragmas(files []*ast.File) (ldflags []string, dynimports []cgoI
 	return
 }
 
-func goCgoLinkArgs(files []*ast.File, goos string) []string {
+func goCgoLinkArgs(files []*ast.File, goos string) ([]string, error) {
 	ldflags, imports := collectGoCgoPragmas(files)
 	if goos != "darwin" {
-		return ldflags
+		return ldflags, nil
 	}
 	seen := make(map[string]bool)
 	for _, imp := range imports {
 		lib := imp.library
 		if lib == "" || seen[lib] {
 			continue
+		}
+		// This field names a library, not a compiler/linker option or response
+		// file. Keep relative paths and SDK-resolved libraries valid.
+		if strings.HasPrefix(lib, "-") || strings.HasPrefix(lib, "@") {
+			return nil, fmt.Errorf("invalid go:cgo_import_dynamic library %q: expected a library path", lib)
 		}
 		seen[lib] = true
 		// System libraries may exist only in dyld's shared cache. Let the native
@@ -97,7 +102,7 @@ func goCgoLinkArgs(files []*ast.File, goos string) []string {
 			ldflags = append(ldflags, lib)
 		}
 	}
-	return ldflags
+	return ldflags, nil
 }
 
 // lowerWindowsCgoImportPointers connects pointer variables emitted for

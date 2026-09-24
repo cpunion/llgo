@@ -3,10 +3,12 @@
 package build
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -25,12 +27,12 @@ func TestDarwinDynamicImportLinkArgs(t *testing.T) {
 	}
 	files := []*ast.File{f}
 	want := []string{"-pthread", "-framework", "CoreFoundation", "-lSystem.B", "/custom/libfoo.dylib"}
-	if got := goCgoLinkArgs(files, "darwin"); !reflect.DeepEqual(got, want) {
-		t.Fatalf("link args = %q, want %q", got, want)
+	if got, err := goCgoLinkArgs(files, "darwin"); err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("link args = %q, %v; want %q", got, err, want)
 	}
 	for _, goos := range []string{"linux", "windows"} {
-		if got := goCgoLinkArgs(files, goos); !reflect.DeepEqual(got, []string{"-pthread"}) {
-			t.Fatalf("%s args = %q", goos, got)
+		if got, err := goCgoLinkArgs(files, goos); err != nil || !reflect.DeepEqual(got, []string{"-pthread"}) {
+			t.Fatalf("%s args = %q, %v", goos, got, err)
 		}
 	}
 }
@@ -60,5 +62,25 @@ func TestSingleTokenDynamicImport(t *testing.T) {
 	want := []cgoImportDynamicDecl{{local: "strlen", alias: "strlen"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("imports=%v, want %v", got, want)
+	}
+}
+
+func TestDarwinDynamicImportLibraryPath(t *testing.T) {
+	for _, lib := range []string{"-Wl,-force_load,other.a", "@linker.rsp", "relative/libfoo.dylib", "./@literal.a", "/custom/path with spaces/libfoo.tbd"} {
+		t.Run(lib, func(t *testing.T) {
+			src := fmt.Sprintf("package p\n//go:cgo_import_dynamic local remote %q\n", lib)
+			f, err := parser.ParseFile(token.NewFileSet(), "imports.go", src, parser.ParseComments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := goCgoLinkArgs([]*ast.File{f}, "darwin")
+			if lib[0] == '-' || lib[0] == '@' {
+				if err == nil || !strings.Contains(err.Error(), "expected a library path") || got != nil {
+					t.Fatalf("accepted linker option as library: %q, %v", got, err)
+				}
+			} else if err != nil || !reflect.DeepEqual(got, []string{lib}) {
+				t.Fatalf("library args = %q, %v; want %q", got, err, lib)
+			}
+		})
 	}
 }
