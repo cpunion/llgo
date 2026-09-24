@@ -6,6 +6,11 @@ import (
 	_ "unsafe"
 )
 
+const LLGoFiles = "_wrap/stack.c"
+
+//go:linkname workerStackBounds C.llgo_wasi_worker_stack_bounds
+func workerStackBounds() int32
+
 //go:linkname gmpForTesting github.com/xgo-dev/llgo/runtime/internal/runtime.GMPForTesting
 func gmpForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, pstatus uint32, linked bool)
 
@@ -30,6 +35,9 @@ func main() {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
+			if workerStackBounds() != 1 {
+				panic("WAMR pthread C stack bounds unavailable")
+			}
 			_, _, mid, _, _, _, linked := gmpForTesting()
 			if !linked {
 				panic("worker G/M/P is not linked")
