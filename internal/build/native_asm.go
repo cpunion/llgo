@@ -9,22 +9,24 @@ import (
 	extplan9asm "github.com/xgo-dev/plan9asm"
 )
 
-func compileForeignNativeAsm(ctx *context, aPkg *aPackage, pkg *packages.Package, src []byte) (bool, error) {
+// translateForeignNativeAsm returns an owned standalone module for the shared
+// Plan 9 .ll compilation path. Native entries retain their register-level ABI.
+func translateForeignNativeAsm(ctx *context, aPkg *aPackage, pkg *packages.Package, src []byte) (llvm.Module, bool, error) {
 	if !extplan9asm.SupportsNativeTarget(ctx.buildConf.Goos, ctx.buildConf.Goarch) {
-		return false, nil
+		return llvm.Module{}, false, nil
 	}
 	_, decls := collectGoCgoPragmas(pkg.Syntax)
 	if len(decls) == 0 {
-		return false, nil
+		return llvm.Module{}, false, nil
 	}
 	funcs := extplan9asm.ForeignNativeFunctions(src, ctx.buildConf.Goarch)
 	if len(funcs) == 0 {
-		return false, nil
+		return llvm.Module{}, false, nil
 	}
 	imports := make(map[string]string)
 	for _, d := range decls {
 		if prev, ok := imports[d.local]; ok && prev != d.alias {
-			return true, fmt.Errorf("conflicting dynamic import %s", d.local)
+			return llvm.Module{}, true, fmt.Errorf("conflicting dynamic import %s", d.local)
 		}
 		imports[d.local] = d.alias
 	}
@@ -33,15 +35,9 @@ func compileForeignNativeAsm(ctx *context, aPkg *aPackage, pkg *packages.Package
 	goMod := aPkg.LPkg.Module()
 	mod, err := extplan9asm.TranslateNativeModule(goMod.Context(), src, extplan9asm.NativeOptions{GOOS: ctx.buildConf.Goos, GOARCH: ctx.buildConf.Goarch, PackagePath: pkgPath, Imports: imports})
 	if err != nil {
-		return true, err
+		return llvm.Module{}, true, err
 	}
 	mod.SetTarget(ctx.prog.Target().Spec().Triple)
 	mod.SetDataLayout(ctx.prog.DataLayout())
-	if err = externalizePlan9DataGlobals(goMod, mod, ctx.prog.TargetData()); err != nil {
-		mod.Dispose()
-		return true, err
-	}
-	// LinkModules consumes mod. Native functions/data now follow the package's
-	// normal optimization, bitcode/LTO and object-emission pipeline.
-	return true, llvm.LinkModules(goMod, mod)
+	return mod, true, nil
 }

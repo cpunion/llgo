@@ -131,7 +131,10 @@ func TestForeignARM64SelectionAndErrors(t *testing.T) {
 			ctx.crossCompile = crosscompile.Export{CC: filepath.Join(t.TempDir(), "missing-clang")}
 			pkg := &packages.Package{PkgPath: "probe", Types: types.NewPackage("probe", "p"), Syntax: []*ast.File{file}}
 			apkg := &aPackage{Package: pkg, LPkg: prog.NewPackage("p", "probe")}
-			handled, err := compileForeignNativeAsm(ctx, apkg, pkg, []byte(tc.asm))
+			mod, handled, err := translateForeignNativeAsm(ctx, apkg, pkg, []byte(tc.asm))
+			if !mod.IsNil() {
+				defer mod.Dispose()
+			}
 			if handled != tc.handled {
 				t.Fatalf("handled=%v, want %v", handled, tc.handled)
 			}
@@ -146,8 +149,8 @@ func TestForeignARM64SelectionAndErrors(t *testing.T) {
 	}
 }
 
-// Native translation merges IR/data without external tools. Cross-emit the
-// resulting package module to check target relocations on every LLVM host.
+// Native assembly shares the ordinary Plan 9 .ll output and object compiler.
+// Check saved IR, DATA binding and target relocations on every LLVM host.
 func TestForeignNativeCrossCompileObject(t *testing.T) {
 	for _, target := range []struct{ goos, goarch, triple string }{{"darwin", "arm64", "arm64-apple-darwin"}, {"linux", "amd64", "x86_64-unknown-linux-gnu"}, {"linux", "arm64", "aarch64-unknown-linux-gnu"}} {
 		t.Run(target.goos+"/"+target.goarch, func(t *testing.T) {
@@ -172,12 +175,12 @@ DATA ·entry(SB)/8, $callback<>(SB)
 					defer prog.Dispose()
 					pkg := &packages.Package{ID: "probe", PkgPath: "probe", Dir: dir, Types: types.NewPackage("probe", "p"), Syntax: []*ast.File{file}, OtherFiles: []string{sfile}}
 					apkg := &aPackage{Package: pkg, LPkg: prog.NewPackage("p", "probe")}
+					apkg.ExportFile = filepath.Join(dir, "probe.a")
 					mod := apkg.LPkg.Module()
 					global := llvm.AddGlobal(mod, mod.Context().Int64Type(), "probe.entry")
 					global.SetInitializer(llvm.ConstNull(global.GlobalValueType()))
-					ctx := &context{prog: prog, buildConf: &Config{Goos: target.goos, Goarch: target.goarch}, commands: commandEnv{environ: os.Environ()}, crossCompile: crosscompile.Export{CC: "clang", CCFLAGS: []string{"--target=" + target.triple}}, plan9asmReady: true, plan9asmMode: plan9asmEnvAll}
-					// Translation/linking needs neither a native compiler nor go tool asm.
-					ctx.crossCompile.CC = filepath.Join(dir, "missing-clang")
+					ctx := &context{prog: prog, buildConf: &Config{Goos: target.goos, Goarch: target.goarch, GenLL: true}, commands: commandEnv{environ: os.Environ()}, crossCompile: crosscompile.Export{CC: "clang", CCFLAGS: []string{"--target=" + target.triple}}, plan9asmReady: true, plan9asmMode: plan9asmEnvAll}
+					// No Go assembler or Go object reader is needed.
 					ctx.commands.environ = withEnv(ctx.commands.environ, "GOROOT="+filepath.Join(dir, "missing-goroot"))
 					objects, err := compilePkgSFiles(ctx, apkg, pkg, false)
 					for _, object := range objects {
@@ -195,27 +198,26 @@ DATA ·entry(SB)/8, $callback<>(SB)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if len(objects) != 0 {
+					if len(objects) != 1 {
 						t.Fatalf("objects=%v", objects)
 					}
-					global = mod.NamedGlobal("probe.entry")
-					if global.IsDeclaration() || !global.IsGlobalConstant() {
-						t.Fatal("Go global did not bind to native DATA")
+					if !global.IsDeclaration() {
+						t.Fatal("Go global must refer to the separate native DATA definition")
 					}
-					if !strings.Contains(mod.String(), "naked noinline") || strings.Contains(mod.String(), "module asm") {
-						t.Fatal("missing naked function carrier")
+					if strings.Contains(mod.String(), "asm sideeffect") {
+						t.Fatal("native carrier was merged into the Go module")
+					}
+					ll, err := os.ReadFile(apkg.ExportFile + filepath.Base(sfile) + ".ll")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !strings.Contains(string(ll), "naked noinline") || !strings.Contains(string(ll), "asm sideeffect") || strings.Contains(string(ll), "module asm") {
+						t.Fatalf("missing naked function carrier in saved IR:\n%s", ll)
 					}
 					if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 						t.Fatal(err)
 					}
-					ll := filepath.Join(dir, "native.ll")
-					if err := os.WriteFile(ll, []byte(mod.String()), 0600); err != nil {
-						t.Fatal(err)
-					}
-					object := filepath.Join(dir, "native.o")
-					if b, err := exec.Command("clang", "--target="+target.triple, "-c", ll, "-o", object).CombinedOutput(); err != nil {
-						t.Fatalf("codegen: %v\n%s", err, b)
-					}
+					object := objects[0]
 					if target.goos == "linux" {
 						obj, err := elf.Open(object)
 						if err != nil {

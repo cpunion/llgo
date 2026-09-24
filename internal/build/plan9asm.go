@@ -68,28 +68,30 @@ func compilePkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Package, verbo
 		if shouldSkipDarwinDynimportTrampolineAsm(skipDarwinDynimportTrampolines, sfile, src) {
 			continue
 		}
-		if handled, err := compileForeignNativeAsm(ctx, aPkg, pkg, src); handled {
+		mod, native, err := translateForeignNativeAsm(ctx, aPkg, pkg, src)
+		if native {
 			if err != nil {
 				return nil, fmt.Errorf("%s: native assembly %s: %w", pkg.PkgPath, sfile, err)
 			}
-			continue
-		}
-		tr, err := llplan9asm.TranslateSourceModuleForPkgWithOptions(pkg, sfile, src, ctx.buildConf.Goos, ctx.buildConf.Goarch, plan9asmTranslateOptions(ctx.buildConf))
-		if err != nil {
-			// Some stdlib .s files are comment-only placeholders (e.g. internal/cpu/cpu.s).
-			// Skip those silently.
-			if strings.Contains(err.Error(), "no TEXT directive found") {
-				continue
+		} else {
+			tr, err := llplan9asm.TranslateSourceModuleForPkgWithOptions(pkg, sfile, src, ctx.buildConf.Goos, ctx.buildConf.Goarch, plan9asmTranslateOptions(ctx.buildConf))
+			if err != nil {
+				// Some stdlib .s files are comment-only placeholders (e.g. internal/cpu/cpu.s).
+				// Skip those silently.
+				if strings.Contains(err.Error(), "no TEXT directive found") {
+					continue
+				}
+				return nil, fmt.Errorf("%s: translate %s: %w", pkg.PkgPath, sfile, err)
 			}
-			return nil, fmt.Errorf("%s: translate %s: %w", pkg.PkgPath, sfile, err)
+			mod = tr.Module
 		}
-		mod := tr.Module
 
 		// Apply cabi rewrites to translated asm modules for declaration-driven
 		// aggregates (slice/string/interface headers).
 		// runtime asm uses hand-written calling conventions and must stay on
-		// original Go ABI semantics.
-		if pkg.PkgPath != "runtime" {
+		// original Go ABI semantics. Native carriers use physical registers and
+		// must not acquire signature-based ABI rewrites.
+		if !native && pkg.PkgPath != "runtime" {
 			lowerLargeAggregates(ctx.prog, mod)
 			ctx.cTransformer.TransformModule(pkg.PkgPath, mod)
 		}
