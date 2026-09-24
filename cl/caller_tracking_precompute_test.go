@@ -47,6 +47,58 @@ func TestMemProfileConsumerIgnoresUnusedTestdeps(t *testing.T) {
 	}
 }
 
+func TestMemProfileConsumerDistinguishesCPUAndHeapUse(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source string
+		want   bool
+	}{
+		{name: "rate only", source: `package root
+import "runtime"
+func Use() int { runtime.MemProfileRate = 4096; return runtime.MemProfileRate }
+`},
+		{name: "CPU only", source: `package root
+import (
+	"io"
+	"runtime/pprof"
+)
+func Use() { _ = pprof.StartCPUProfile(io.Discard); pprof.StopCPUProfile() }
+`},
+		{name: "blank pprof import", source: `package root
+import _ "runtime/pprof"
+func Use() {}
+`, want: true},
+		{name: "heap lookup", source: `package root
+import "runtime/pprof"
+func Use() { _ = pprof.Lookup("heap") }
+`, want: true},
+		{name: "indirect heap lookup", source: `package root
+import "runtime/pprof"
+func Use() func(string) *pprof.Profile { return pprof.Lookup }
+`, want: true},
+		{name: "heap writer", source: `package root
+import (
+	"io"
+	"runtime/pprof"
+)
+func Use() { _ = pprof.WriteHeapProfile(io.Discard) }
+`, want: true},
+		{name: "runtime reader", source: `package root
+import "runtime"
+func Use() { runtime.MemProfile(nil, false) }
+`, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, root := buildCallerFrameSSAProgram(t,
+				"example.com/dep", "package dep\nfunc Dummy() {}",
+				"example.com/root", tc.source)
+			if got := MemProfileConsumer([]*gossa.Package{root}, false) != ""; got != tc.want {
+				t.Errorf("MemProfileConsumer = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCallerTrackingPrecomputeSupportsConcurrentReads(t *testing.T) {
 	var nilTracking *CallerTracking
 	nilTracking.Precompute(nil)

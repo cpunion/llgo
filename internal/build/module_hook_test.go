@@ -57,6 +57,23 @@ func main() { println(runtime.GOOS) }
 	if hasMemProfileHookInstall(plain.publicRuntime) {
 		t.Fatalf("plain executable runtime installed memory-profile hooks:\n%s", plain.publicRuntime)
 	}
+	rateOnly := memoryProfileProviderIR(t, `package main
+import "runtime"
+func main() { runtime.MemProfileRate = 4096; println(runtime.MemProfileRate) }
+`)
+	if strings.Contains(rateOnly.allocator, "recordMemProfileAlloc") || hasMemProfileHookInstall(rateOnly.publicRuntime) {
+		t.Fatal("setting MemProfileRate without reading a heap profile enabled sampling")
+	}
+	cpuOnly := memoryProfileProviderIR(t, `package main
+import (
+	"io"
+	"runtime/pprof"
+)
+func main() { _ = pprof.StartCPUProfile(io.Discard); pprof.StopCPUProfile() }
+`)
+	if strings.Contains(cpuOnly.allocator, "recordMemProfileAlloc") || hasMemProfileHookInstall(cpuOnly.publicRuntime) {
+		t.Fatal("CPU-only pprof use enabled heap sampling")
+	}
 
 	profiled := memoryProfileProviderIR(t, `package main
 import "runtime"
@@ -67,6 +84,23 @@ func main() { runtime.MemProfile(nil, false) }
 	}
 	if !hasMemProfileHookInstall(profiled.publicRuntime) {
 		t.Fatalf("memory-profile consumer runtime lost hook installation:\n%s", profiled.publicRuntime)
+	}
+	heapProfile := memoryProfileProviderIR(t, `package main
+import (
+	"io"
+	"runtime/pprof"
+)
+func main() { _ = pprof.WriteHeapProfile(io.Discard) }
+`)
+	if !strings.Contains(heapProfile.allocator, "recordMemProfileAlloc") || !hasMemProfileHookInstall(heapProfile.publicRuntime) {
+		t.Fatal("runtime/pprof heap reader lost sampling")
+	}
+	httpProfile := memoryProfileProviderIR(t, `package main
+import _ "net/http/pprof"
+func main() {}
+`)
+	if !strings.Contains(httpProfile.allocator, "recordMemProfileAlloc") || !hasMemProfileHookInstall(httpProfile.publicRuntime) {
+		t.Fatal("net/http/pprof heap endpoint lost sampling")
 	}
 }
 
@@ -98,6 +132,12 @@ func TestMemoryProfileTestFlags(t *testing.T) {
 		if got := testMemoryProfileRequested(tc.args); got != tc.want {
 			t.Errorf("testMemoryProfileRequested(%q) = %v, want %v", tc.args, got, tc.want)
 		}
+	}
+	if !testMemoryProfileRequired(ModeTest, &Config{CompileOnly: true}) {
+		t.Fatal("compiled test binary lost support for later -test.memprofile")
+	}
+	if testMemoryProfileRequired(ModeBuild, &Config{CompileOnly: true}) {
+		t.Fatal("compile-only non-test build enabled profiling")
 	}
 }
 

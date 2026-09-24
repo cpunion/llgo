@@ -1016,7 +1016,7 @@ func callerTrackingFuncSetsForPackage(c *CallerTracking, pkg *ssa.Package) calle
 	base := runtimeCallerBaseSet(c, pkg)
 	funcs, trackable := collectRuntimeCallerFunctions(pkg)
 	var profileFrames map[*ssa.Function]bool
-	if packageReadsMemProfile(trackable) {
+	if _, consumer := packageReadsMemProfile(trackable); consumer {
 		profileFrames = memoryProfileAllocationFrames(trackable)
 	}
 	sets := computeRuntimeCallerFuncSets(c.recoverAnalysis(), pkg, funcs, base, trackable, profileFrames, func(dep *ssa.Package) map[*ssa.Function]bool {
@@ -1561,34 +1561,64 @@ func isPublicRuntimePath(path string) bool {
 		path == llabi.PatchPathPrefix+"runtime"
 }
 
-func packageReadsMemProfile(funcs map[*ssa.Function]bool) bool {
+func nonHeapPprofFunction(name string) bool {
+	switch name {
+	case "StartCPUProfile", "StopCPUProfile", "WithLabels", "Labels", "Label", "ForLabels", "SetGoroutineLabels", "Do":
+		return true
+	}
+	return false
+}
+
+func memProfileFunctionUse(fn *ssa.Function) (pprofRef, consumer bool) {
+	if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
+		return false, false
+	}
+	path := fn.Pkg.Pkg.Path()
+	if isPublicRuntimePath(path) {
+		return false, fn.Name() == "MemProfile"
+	}
+	if path == "runtime/pprof" {
+		if fn.Name() == "init" {
+			// Import initialization is not evidence that any profile API is
+			// used. A blank import stays conservative in the caller.
+			return false, false
+		}
+		return true, !nonHeapPprofFunction(fn.Name())
+	}
+	return false, false
+}
+
+// packageReadsMemProfile reports whether a package references pprof at all
+// and whether one of its references can read a heap profile. The first result
+// lets callers retain profiling for an import with no visible SSA references
+// (for example, an import kept for a linkname user).
+func packageReadsMemProfile(funcs map[*ssa.Function]bool) (pprofRef, consumer bool) {
 	// Cheap import pre-filter: scanning every instruction of every
 	// function costs real compile time across thousands of small
-	// packages (goroot shards); a package that never imports the public
-	// runtime cannot reference MemProfile.
+	// packages (goroot shards).
 	imported := false
 	for fn := range funcs {
 		if fn.Pkg == nil || fn.Pkg.Pkg == nil {
 			continue
 		}
 		for _, imp := range fn.Pkg.Pkg.Imports() {
-			if isPublicRuntimePath(imp.Path()) {
+			if isPublicRuntimePath(imp.Path()) || imp.Path() == "runtime/pprof" {
 				imported = true
 			}
 		}
 		break
 	}
 	if !imported {
-		return false
+		return false, false
 	}
 	for fn := range funcs {
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
 				if call, ok := instr.(ssa.CallInstruction); ok {
-					if callee := call.Common().StaticCallee(); callee != nil &&
-						callee.Pkg != nil && isPublicRuntimePath(callee.Pkg.Pkg.Path()) &&
-						callee.Name() == "MemProfile" {
-						return true
+					ref, reads := memProfileFunctionUse(call.Common().StaticCallee())
+					pprofRef = pprofRef || ref
+					if reads {
+						return pprofRef, true
 					}
 				}
 				rands := instr.Operands(nil)
@@ -1596,51 +1626,32 @@ func packageReadsMemProfile(funcs map[*ssa.Function]bool) bool {
 					if rand == nil {
 						continue
 					}
-					switch value := (*rand).(type) {
-					case *ssa.Global:
-						if value.Pkg != nil && isPublicRuntimePath(value.Pkg.Pkg.Path()) && value.Name() == "MemProfileRate" {
-							return true
-						}
-					case *ssa.Function:
-						if value.Pkg != nil && isPublicRuntimePath(value.Pkg.Pkg.Path()) && value.Name() == "MemProfile" {
-							return true
+					if value, ok := (*rand).(*ssa.Function); ok {
+						ref, reads := memProfileFunctionUse(value)
+						pprofRef = pprofRef || ref
+						if reads {
+							return pprofRef, true
 						}
 					}
 				}
 			}
 		}
 	}
-	return false
+	return pprofRef, false
 }
 
 // MemProfileConsumer returns the package that made whole-program allocation
 // recording necessary, or an empty string when it is provably unused.
 // It runs after Go SSA construction but before backend compilation, so the
-// same decision applies to runtime and every dependency. Loading runtime/pprof
-// is a consumer unless it is only the test harness's unused, optional import;
-// its runtime call uses go:linkname rather than a public-runtime reference.
+// same decision applies to runtime and every dependency. Known CPU-only pprof
+// functions do not need heap sampling; other pprof uses remain conservative
+// because its heap reader reaches runtime through go:linkname. Reading or
+// writing MemProfileRate alone cannot consume collected samples.
 func MemProfileConsumer(pkgs []*ssa.Package, ignoreImplicitTestProfile bool) string {
 	// Every test binary imports runtime/pprof through testdeps, and testing
 	// references MemProfileRate for its optional command-line flag. Neither
-	// means an ordinary test actually reads a heap profile. The build driver
-	// keeps both when -memprofile or -memprofilerate was requested.
-	implicitPprofOnly := ignoreImplicitTestProfile
-	if implicitPprofOnly {
-		for _, pkg := range pkgs {
-			if pkg == nil || pkg.Pkg == nil || pkg.Pkg.Path() == "testing/internal/testdeps" {
-				continue
-			}
-			for _, imp := range pkg.Pkg.Imports() {
-				if imp.Path() == "runtime/pprof" {
-					implicitPprofOnly = false
-					break
-				}
-			}
-			if !implicitPprofOnly {
-				break
-			}
-		}
-	}
+	// means an ordinary test reads a heap profile. Explicit profile flags are
+	// handled by the build driver.
 	for _, pkg := range pkgs {
 		if pkg == nil || pkg.Pkg == nil {
 			continue
@@ -1655,26 +1666,31 @@ func MemProfileConsumer(pkgs []*ssa.Package, ignoreImplicitTestProfile bool) str
 			continue
 		}
 		if pkg.Pkg.Path() == "runtime/pprof" {
-			if implicitPprofOnly {
-				continue
-			}
-			return pkg.Pkg.Path()
+			// Its heap-reader bodies exist even in CPU-only programs, but are
+			// not necessarily called. Check importers instead.
+			continue
 		}
 		// Collecting method bodies is expensive. Most packages cannot refer
 		// to the public runtime profile API at all.
 		importsRuntime := false
+		importsPprof := false
 		for _, imp := range pkg.Pkg.Imports() {
 			if isPublicRuntimePath(imp.Path()) {
 				importsRuntime = true
-				break
+			} else if imp.Path() == "runtime/pprof" {
+				importsPprof = true
 			}
 		}
-		if !importsRuntime {
+		if !importsRuntime && !importsPprof {
 			continue
 		}
 		_, funcs := collectRuntimeCallerFunctions(pkg)
-		if packageReadsMemProfile(funcs) {
+		pprofRef, consumer := packageReadsMemProfile(funcs)
+		if consumer {
 			return pkg.Pkg.Path()
+		}
+		if importsPprof && !pprofRef {
+			return "runtime/pprof"
 		}
 	}
 	return ""
