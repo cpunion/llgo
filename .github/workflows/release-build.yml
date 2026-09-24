@@ -412,6 +412,9 @@ jobs:
         with:
           mod-version: ${{ matrix.go-mod-version }}
 
+      - name: Test native assembly shared-library calls
+        run: bash dev/test_native_asm.sh
+
   release:
     permissions:
       contents: write
