@@ -154,23 +154,23 @@ func TestManifestBuilder_DisableBoundsChecks(t *testing.T) {
 	}
 }
 
-func TestManifestBuilder_SaturatingFloatToUint32(t *testing.T) {
+func TestManifestBuilder_SaturatingFloatToInt(t *testing.T) {
 	legacy := newManifestBuilder()
 	saturating := newManifestBuilder()
-	saturating.common.SaturatingFloatToUint32 = true
+	saturating.common.SaturatingFloatToInt = true
 
 	if saturating.common.empty() {
-		t.Fatal("saturating float-to-uint32 conversions did not make the common section non-empty")
+		t.Fatal("saturating float-to-integer conversions did not make the common section non-empty")
 	}
 	if legacy.Fingerprint() == saturating.Fingerprint() {
-		t.Fatal("saturating float-to-uint32 conversions did not change the build fingerprint")
+		t.Fatal("saturating float-to-integer conversions did not change the build fingerprint")
 	}
 	data, err := decodeManifest(saturating.Build())
 	if err != nil {
 		t.Fatalf("decodeManifest: %v", err)
 	}
-	if data.Common == nil || !data.Common.SaturatingFloatToUint32 {
-		t.Fatalf("decoded common section = %#v, want saturating float-to-uint32 conversions", data.Common)
+	if data.Common == nil || !data.Common.SaturatingFloatToInt {
+		t.Fatalf("decoded common section = %#v, want saturating float-to-integer conversions", data.Common)
 	}
 }
 

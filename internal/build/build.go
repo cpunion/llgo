@@ -203,9 +203,9 @@ type Config struct {
 	// DisableBoundsChecks disables index, slice, and slice-to-array conversion
 	// bounds checks while retaining required integer conversions and nil checks.
 	DisableBoundsChecks bool
-	// SaturatingFloatToUint32 enables Go's experimental converthash behavior
-	// for float-to-uint32 conversions.
-	SaturatingFloatToUint32 bool
+	// SaturatingFloatToInt enables Go's experimental converthash behavior
+	// for float-to-integer conversions.
+	SaturatingFloatToInt bool
 
 	// PthreadStackSize sets a custom stack size, in bytes, for pthread-backed
 	// goroutines. A zero value keeps the platform pthread default.
@@ -585,18 +585,18 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	verbose := conf.Verbose
 	patterns := slices.Clone(inv.Args)
 	target := &llssa.Target{
-		GOOS:                    conf.Goos,
-		GOARCH:                  conf.Goarch,
-		GO386:                   conf.GO386,
-		GOAMD64:                 conf.GOAMD64,
-		GOARM:                   conf.GOARM,
-		GOARM64:                 conf.GOARM64,
-		Target:                  conf.Target,
-		LLVMTarget:              export.LLVMTarget,
-		WasmProfile:             string(export.WasmProfile),
-		WasmProvider:            string(export.WasmProvider),
-		OptLevel:                conf.OptLevel,
-		SaturatingFloatToUint32: conf.SaturatingFloatToUint32,
+		GOOS:                 conf.Goos,
+		GOARCH:               conf.Goarch,
+		GO386:                conf.GO386,
+		GOAMD64:              conf.GOAMD64,
+		GOARM:                conf.GOARM,
+		GOARM64:              conf.GOARM64,
+		Target:               conf.Target,
+		LLVMTarget:           export.LLVMTarget,
+		WasmProfile:          string(export.WasmProfile),
+		WasmProvider:         string(export.WasmProvider),
+		OptLevel:             conf.OptLevel,
+		SaturatingFloatToInt: conf.SaturatingFloatToInt,
 	}
 	tags := DefaultBuildTags()
 	tags += "," + target.ClosureEnvBuildTag()
