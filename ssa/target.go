@@ -42,7 +42,7 @@ type Target struct {
 	WasmReflectBridges   bool   // emit statically typed reflection bridges for this program
 	WasmFuncInfoEntries  bool   // emit table-index symbolization records for this program
 	OptLevel             optlevel.Level
-	SaturatingFloatToInt bool
+	SaturatingFloatToInt bool // enable Go's experimental converthash behavior
 }
 
 // IsRuntimeSupportPackage reports whether path is part of the selected Go or
