@@ -1,4 +1,4 @@
-//go:build llgo && wasm && llgo.wasm.gc.linear && !llgo.wasm.workers
+//go:build llgo && wasm && llgo.wasm.gc.linear && !llgo.wasm.workers && !llgo.wasi_threads
 
 package gcroot
 
