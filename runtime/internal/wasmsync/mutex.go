@@ -9,6 +9,8 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/wasmworkers"
 )
 
+// A bounded wait lets a contending worker revisit yield for a GC stop even if
+// the lock holder cannot unlock until that worker acknowledges the stop.
 const mutexWaitNanoseconds = int64(1_000_000)
 
 // Mutex is a zero-value-ready lock for worker-shared runtime state.
@@ -30,7 +32,8 @@ func (m *Mutex) Lock(yield func()) {
 	}
 }
 
-// Unlock releases m and wakes all waiters.
+// Unlock releases m and wakes one waiter. Each succeeding unlock hands the
+// lock to another contender.
 func (m *Mutex) Unlock() {
 	atomic.Store(&m.state, uint32(0))
 	wasmworkers.Wake(&m.state)

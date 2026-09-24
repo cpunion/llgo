@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/xgo-dev/llgo/cmd/internal/base"
@@ -102,6 +103,13 @@ func runCmdEx(cmd *base.Command, args []string, mode build.Mode, goBuildFlags *b
 	}
 	_, err = build.Do(args, conf)
 	if err != nil {
+		// Preserve the program's exit status after Build has run its cleanup.
+		if mode == build.ModeRun {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() > 0 {
+				mockable.Exit(exitErr.ExitCode())
+			}
+		}
 		fmt.Fprintln(os.Stderr, err)
 		mockable.Exit(1)
 	}

@@ -99,6 +99,5 @@ __attribute__((noreturn)) void llgo_wasm_worker_suspend(void) {
 }
 
 int llgo_wasm_worker_wake(uint32_t *address) {
-  return (int)emscripten_atomic_notify(
-      address, EMSCRIPTEN_NOTIFY_ALL_WAITERS);
+  return (int)emscripten_atomic_notify(address, 1);
 }
