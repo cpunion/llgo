@@ -25,7 +25,7 @@ esac
 # built with the current WASI threads and pthread options.
 IWASM_BUILD_ID=$(
     printf '%s\n' "${WAMR_VERSION}" "$(uname -s)" "$(uname -m)" \
-        "${LLGO_WINDOWS_ABI:-}" "${CC:-}" "${CXX:-}" \
+        "${LLGO_WINDOWS_ABI:-}" "${MINGW_PREFIX:-}" "${CC:-}" "${CXX:-}" \
         "$(git hash-object "${SCRIPT_DIR}/build_iwasm.sh")" \
         "$(git hash-object "${SCRIPT_DIR}/patches/wamr-2.4.5-mingw.patch")" \
         | git hash-object --stdin
