@@ -620,8 +620,7 @@ jobs:
         env:
           LLGO: ${{ runner.temp }}/llgo-bin/llgo
           LLGO_BUILD_CACHE: "1"
-        # J64 joins this gate when xgo-dev/binaryen#4 is in the pinned release.
-        run: python3 dev/test_wasm_debug_info.py --profile j32 --profile w32
+        run: python3 dev/test_wasm_debug_info.py --profile j32 --profile j64 --profile w32
 
       - name: Build standard runtime for wasm
         if: matrix.suite == 'runtime'
