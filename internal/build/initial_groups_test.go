@@ -53,6 +53,15 @@ func TestGroupInitialTestsByMemoryProfile(t *testing.T) {
 		!slices.Equal(groups[1].pkgs, []*packages.Package{profiled}) {
 		t.Fatalf("profiled and ordinary tests shared a build group: %+v", groups)
 	}
+	ctx.buildConf.RunArgs = []string{"-test.memprofile=heap.out"}
+	if !initialUsesMemoryProfile(ctx, plain) {
+		t.Fatal("explicit -test.memprofile did not enable profiling")
+	}
+	ctx.buildConf.RunArgs = nil
+	ctx.buildConf.CompileOnly = true
+	if !initialUsesMemoryProfile(ctx, plain) {
+		t.Fatal("go test -c binary cannot accept a later -test.memprofile flag")
+	}
 }
 
 func TestGroupInitialBuilds(t *testing.T) {

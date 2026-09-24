@@ -81,8 +81,8 @@ func initialUsesMemoryProfile(ctx *context, root *packages.Package) bool {
 		}
 		return true
 	}, nil)
-	ignoreImplicit := !testMemoryProfileRequested(ctx.buildConf.RunArgs)
-	return cl.MemProfileConsumer(deps, ignoreImplicit) != ""
+	return testMemoryProfileRequired(ctx.mode, ctx.buildConf) ||
+		cl.MemProfileConsumer(deps, true) != ""
 }
 
 func initialGroupInvocations(inv Invocation, ctx *context, groups []initialBuildGroup) []Invocation {

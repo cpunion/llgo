@@ -900,9 +900,10 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	}
 	buildSSAPkgs(ctx, append(append(altEntries, pkgEntries...), depEntries...))
 	recordPackageSSAInstructions(ctx)
-	ignoreImplicitTestProfile := ctx.mode == ModeTest && !testMemoryProfileRequested(conf.RunArgs)
+	ignoreImplicitTestProfile := ctx.mode == ModeTest
 	memProfileConsumer := cl.MemProfileConsumer(progSSA.AllPackages(), ignoreImplicitTestProfile)
-	conf.memoryProfiling = enableMemoryProfiling(conf.BuildMode, memProfileConsumer)
+	conf.memoryProfiling = enableMemoryProfiling(conf.BuildMode, memProfileConsumer) ||
+		testMemoryProfileRequired(ctx.mode, conf)
 	prog.EnableMemoryProfiling(conf.memoryProfiling)
 	// Wasm and bare-metal still report size classes, not sampled stacks. They
 	// need no profile-specific frame pinning (which also deepens wasm calls).
@@ -1346,6 +1347,11 @@ func parseNativeToolchainInput(commands commandEnv, options LinkOptions, resolve
 
 func enableMemoryProfiling(mode BuildMode, consumer string) bool {
 	return mode != BuildModeExe || consumer != ""
+}
+
+// A compiled test binary may receive -test.memprofile only when run later.
+func testMemoryProfileRequired(mode Mode, conf *Config) bool {
+	return mode == ModeTest && (conf.CompileOnly || testMemoryProfileRequested(conf.RunArgs))
 }
 
 func testMemoryProfileRequested(args []string) bool {
