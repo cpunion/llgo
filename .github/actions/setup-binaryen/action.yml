@@ -4,7 +4,7 @@ inputs:
   version:
     description: "LLGo Binaryen release tag; update checksums.txt together"
     required: false
-    default: "llgo-v132.2"
+    default: "llgo-v132.3"
 
 runs:
   using: "composite"
