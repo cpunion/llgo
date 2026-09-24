@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -41,6 +42,39 @@ def matrix_size(job):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_windows_exception_overlay_reaches_compiler_and_language_tests(self):
+        step = next(step for step in load("go.yml")["jobs"]["test"]["steps"]
+                    if step.get("id") == "test_coverage")
+        script = step["run"].replace("${{ matrix.windows_abi }}", "msvc")
+        for runner, overlay in (("Linux", ""), ("Windows", ""),
+                                ("Windows", "C:/runner temp/runtime-overlay.json")):
+            with self.subTest(runner=runner, overlay=overlay), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                log = root / "commands.jsonl"
+                fake_go = root / "go"
+                fake_go.write_text(f"#!{sys.executable}\n" + """
+import json, os, sys
+if sys.argv[1] == 'list':
+    print('github.com/xgo-dev/llgo/internal/build')
+else:
+    with open(os.environ['TEST_GO_LOG'], 'a') as stream:
+        stream.write(json.dumps(sys.argv[1:]) + '\\n')
+""")
+                fake_go.chmod(0o755)
+                (root / "dev").mkdir()
+                (root / "dev/go_test_windows.sh").write_text('exec "$@"\n')
+                subprocess.run(["bash", "-c", script], cwd=root, check=True,
+                               capture_output=True, text=True, env={**os.environ,
+                                   "PATH": directory + os.pathsep + os.environ["PATH"],
+                                   "RUNNER_OS": runner, "LLGO_GO_TEST_OVERLAY": overlay,
+                                   "TEST_GO_LOG": str(log)})
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(len(calls), 3)
+                for package in ("./cl", "./test/go"):
+                    args = next(args for args in calls if package in args)
+                    self.assertEqual([arg for arg in args if arg.startswith("-overlay=")],
+                                     [f"-overlay={overlay}"] if overlay else [])
+
     def test_code_and_document_jobs_consume_the_shared_decision(self):
         for filename in [*CODE_WORKFLOWS, "doc-link-checker.yml", "model-demo.yml"]:
             workflow = load(filename)
