@@ -20,10 +20,20 @@ case "$(uname -s)" in
         ;;
 esac
 
-# CI restores this versioned output before invoking the helper. The cache key
-# includes this script and its pinned patch, so an existing binary is already
-# the exact build requested here and does not need another clone and rebuild.
-if [ -f "${IWASM_BIN_DIR}/${IWASM_NAME}" ]; then
+# CI keys its cache by this script and patch. Local caches persist across
+# checkout updates, so a binary's existence alone cannot prove that it was
+# built with the current WASI threads and pthread options.
+IWASM_BUILD_ID=$(
+    printf '%s\n' "${WAMR_VERSION}" "$(uname -s)" "$(uname -m)" \
+        "${LLGO_WINDOWS_ABI:-}" "${CC:-}" "${CXX:-}" \
+        "$(git hash-object "${SCRIPT_DIR}/build_iwasm.sh")" \
+        "$(git hash-object "${SCRIPT_DIR}/patches/wamr-2.4.5-mingw.patch")" \
+        | git hash-object --stdin
+)
+IWASM_BUILD_ID_FILE="${IWASM_BIN_DIR}/${IWASM_NAME}.llgo-build-id"
+if [ -f "${IWASM_BIN_DIR}/${IWASM_NAME}" ] && \
+    [ -f "${IWASM_BUILD_ID_FILE}" ] && \
+    [ "$(cat "${IWASM_BUILD_ID_FILE}")" = "${IWASM_BUILD_ID}" ]; then
     echo "Using cached iwasm at ${IWASM_BIN_DIR}/${IWASM_NAME}"
     if [ -n "${GITHUB_PATH:-}" ]; then
         printf '%s\n' "${IWASM_BIN_DIR}" >> "${GITHUB_PATH}"
@@ -143,6 +153,7 @@ cmake --build . --parallel "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null
 # Copy iwasm to cache directory
 echo "Installing iwasm to ${IWASM_BIN_DIR}..."
 cp "${IWASM_NAME}" "${IWASM_BIN_DIR}/"
+printf '%s\n' "${IWASM_BUILD_ID}" > "${IWASM_BUILD_ID_FILE}"
 
 if [ -n "${GITHUB_PATH:-}" ]; then
     printf '%s\n' "${IWASM_BIN_DIR}" >> "${GITHUB_PATH}"
