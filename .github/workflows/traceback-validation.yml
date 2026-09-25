@@ -44,3 +44,7 @@ jobs:
       - name: Windows FFI smoke
         shell: pwsh
         run: ./.github/workflows/test_windows_runtime.ps1 -LLGo "$env:RUNNER_TEMP/traceback-bin/llgo.exe" -GoArch ${{ matrix.arch }}
+      - name: Windows Go SSA IR snapshots
+        if: matrix.arch == 'amd64'
+        shell: bash
+        run: go test ./ssa -run '^(TestClosureNoCtxValue|TestClosureFuncPtrValue|TestIfaceMethodClosureCallIR|TestConst|TestDeclFunc|TestBasicFunc|TestFuncParam|TestFuncCall|TestFuncMultiRet|TestJump|TestIf|TestPrintf|TestBinOp|TestUnOp|TestCompareSelect|TestWindowsUnwindTablesForNoUnwindFunctions)$' -count=1
