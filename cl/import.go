@@ -66,6 +66,9 @@ func (p *pkgSymInfo) addSym(fset *token.FileSet, pos token.Pos, fullName, inPkgN
 			}
 		}
 		p.syms[inPkgName] = symInfo{file, fullName, isVar}
+		if alias := parenthesizedMethodName(inPkgName); alias != "" {
+			p.syms[alias] = symInfo{file, fullName, isVar}
+		}
 	}
 }
 
@@ -321,14 +324,14 @@ func collectDeclarationDirectivesWithOptions(prog llssa.Program, fset *token.Fil
 				if len(fields) < 2 {
 					return false, fmt.Errorf("%s: //llgo:link requires a local name and a target", fset.Position(item.Pos))
 				}
-				if fields[0] != inPkgName {
+				if fields[0] != inPkgName && fields[0] != parenthesizedMethodName(inPkgName) {
 					return false, fmt.Errorf("%s: //llgo:link local name %q does not match declaration %q", fset.Position(item.Pos), fields[0], inPkgName)
 				}
 			}
 			if linkCollected {
 				continue
 			}
-			if len(fields) >= 2 && fields[0] == inPkgName {
+			if len(fields) >= 2 && (fields[0] == inPkgName || fields[0] == parenthesizedMethodName(inPkgName)) {
 				prog.SetLinkname(fullName, strings.Join(fields[1:], " "))
 				linkCollected = true
 			}
@@ -361,6 +364,15 @@ func collectDeclarationDirectivesWithOptions(prog llssa.Program, fset *token.Fil
 		prog.SetClosureEnvDirective(fset, fullName, funcPos)
 	}
 	return linkCollected, nil
+}
+
+// A value receiver can be written either T.M or (T).M in a link directive.
+// This also applies when T is an alias for a pointer type.
+func parenthesizedMethodName(name string) string {
+	if i := strings.IndexByte(name, '.'); i > 0 && name[0] != '(' {
+		return "(" + name[:i] + ")" + name[i:]
+	}
+	return ""
 }
 
 // collectPackageLinknames follows cmd/compile's package-scoped go:linkname
@@ -992,6 +1004,9 @@ func ParsePkgSyntaxWithOptions(prog llssa.Program, fset *token.FileSet, pkg *typ
 				}
 				fullName, inPkgName := astFuncName(pkgPath, decl, aliases)
 				syms[inPkgName] = fullName
+				if alias := parenthesizedMethodName(inPkgName); alias != "" {
+					syms[alias] = fullName
+				}
 				linkDocs[decl.Doc] = true
 				hasLinkname, err := collectDeclarationDirectivesWithOptions(prog, fset, decl.Doc, fullName, inPkgName, decl.Pos(), options)
 				if err != nil {

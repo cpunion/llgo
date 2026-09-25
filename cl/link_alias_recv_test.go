@@ -30,18 +30,22 @@ func linkedAliasReceiverCases(t *testing.T, test func(*testing.T, string, string
 		{"Ptr", "(*Data).Cursor"},
 		{"Chain", "(*Data).Cursor"},
 	} {
-		for _, directive := range []string{"go:linkname", "llgo:link", " llgo:link", "go:linkname-after"} {
-			t.Run(recv.name+"/"+directive, func(t *testing.T) {
-				method := recv.name + ".Cursor"
-				if strings.HasPrefix(recv.name, "*") {
-					method = "(" + recv.name + ").Cursor"
-				}
-				comment := fmt.Sprintf("//%s %s C.test_cursor", strings.TrimSuffix(directive, "-after"), method)
-				after := ""
-				if strings.HasSuffix(directive, "-after") {
-					comment, after = "", comment
-				}
-				source := fmt.Sprintf(`package p
+		method := recv.name + ".Cursor"
+		methods := []string{method}
+		if strings.HasPrefix(recv.name, "*") {
+			methods[0] = "(" + recv.name + ").Cursor"
+		} else {
+			methods = append(methods, "("+recv.name+").Cursor")
+		}
+		for _, method := range methods {
+			for _, directive := range []string{"go:linkname", "llgo:link", " llgo:link", "go:linkname-after"} {
+				t.Run(method+"/"+directive, func(t *testing.T) {
+					comment := fmt.Sprintf("//%s %s C.test_cursor", strings.TrimSuffix(directive, "-after"), method)
+					after := ""
+					if strings.HasSuffix(directive, "-after") {
+						comment, after = "", comment
+					}
+					source := fmt.Sprintf(`package p
 import _ "unsafe"
 const LLGoPackage = "decl"
 type Data struct{}
@@ -53,8 +57,9 @@ func (%s) Cursor() int32 { return -1 }
 func Call(p *Data) int32 { return p.Cursor() }
 %s
 `, comment, recv.name, after)
-				test(t, source, "p."+recv.want)
-			})
+					test(t, source, "p."+recv.want)
+				})
+			}
 		}
 	}
 }
@@ -173,6 +178,7 @@ func TestLinkDirectiveErrors(t *testing.T) {
 	}{
 		{"wrong receiver", "//llgo:link Wrong.Cursor C.test_cursor\nfunc (Ptr) Cursor() int32 { return -1 }", `local name "Wrong.Cursor" does not match declaration "Ptr.Cursor"`},
 		{"wrong method", "// llgo:link Ptr.Curosr C.test_cursor\nfunc (Ptr) Cursor() int32 { return -1 }", `local name "Ptr.Curosr" does not match declaration "Ptr.Cursor"`},
+		{"wrong parenthesized method", "// llgo:link (Ptr).Curosr C.test_cursor\nfunc (Ptr) Cursor() int32 { return -1 }", `local name "(Ptr).Curosr" does not match declaration "Ptr.Cursor"`},
 		{"wrong function", "//llgo:link Other C.test_cursor\nfunc Cursor() int32 { return -1 }", `local name "Other" does not match declaration "Cursor"`},
 		{"missing target", "//llgo:link Ptr.Cursor\nfunc (Ptr) Cursor() int32 { return -1 }", "requires a local name and a target"},
 		{"missing names", "// llgo:link\nfunc (Ptr) Cursor() int32 { return -1 }", "requires a local name and a target"},

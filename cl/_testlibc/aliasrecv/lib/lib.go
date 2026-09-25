@@ -12,7 +12,7 @@ type Chain = String
 // llgo:link String.Compare C.strcmp
 func (String) Compare(other *byte) int32 { return -1 }
 
-//llgo:link Chain.CompareChain C.strcmp
+//llgo:link (Chain).CompareChain C.strcmp
 func (Chain) CompareChain(other *byte) int32 { return -1 }
 
 type Number int32
