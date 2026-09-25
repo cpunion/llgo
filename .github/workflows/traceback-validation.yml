@@ -47,4 +47,4 @@ jobs:
       - name: Windows Go SSA IR snapshots
         if: matrix.arch == 'amd64'
         shell: bash
-        run: go test ./ssa -run '^(TestClosureNoCtxValue|TestClosureFuncPtrValue|TestIfaceMethodClosureCallIR|TestConst|TestDeclFunc|TestBasicFunc|TestFuncParam|TestFuncCall|TestFuncMultiRet|TestJump|TestIf|TestPrintf|TestBinOp|TestUnOp|TestCompareSelect|TestWindowsUnwindTablesForNoUnwindFunctions)$' -count=1
+        run: CC="$LLGO_WINDOWS_HOST_CC" CXX="$LLGO_WINDOWS_HOST_CXX" go test ./ssa -run '^(TestClosureNoCtxValue|TestClosureFuncPtrValue|TestIfaceMethodClosureCallIR|TestConst|TestDeclFunc|TestBasicFunc|TestFuncParam|TestFuncCall|TestFuncMultiRet|TestJump|TestIf|TestPrintf|TestBinOp|TestUnOp|TestCompareSelect|TestWindowsUnwindTablesForNoUnwindFunctions)$' -count=1
