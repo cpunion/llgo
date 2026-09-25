@@ -165,7 +165,7 @@ try {
   if ($Profile -eq "msvc") {
     . (Join-Path $env:GITHUB_WORKSPACE ".github\windows\msvc-target.ps1")
     $target = Get-LLGoWindowsMSVCTarget -GoArch $GoArch
-    $installPath = Find-LLGoVisualStudio2022 -GoArch $GoArch
+    $installPath = Find-LLGoVisualStudio -GoArch $GoArch
     $vsDevCmd = Join-Path $installPath "Common7\Tools\VsDevCmd.bat"
     $vsDevExe = Join-Path $sourceDir "vsdev.exe"
     # VsDevCmd prepends Visual Studio's optional bundled Clang. That compiler

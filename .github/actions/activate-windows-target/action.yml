@@ -75,7 +75,7 @@ runs:
       run: |
         $ErrorActionPreference = "Stop"
         . (Join-Path $env:GITHUB_WORKSPACE ".github\windows\msvc-target.ps1")
-        $target = Enter-LLGoVisualStudio2022 -GoArch "${{ inputs.windows-arch }}"
+        $target = Enter-LLGoVisualStudio -GoArch "${{ inputs.windows-arch }}"
 
         if ($env:LLGO_WINDOWS_TARGET_TRIPLE -ne $target.Triple) {
           throw "Configured target $env:LLGO_WINDOWS_TARGET_TRIPLE does not match $($target.Triple)"

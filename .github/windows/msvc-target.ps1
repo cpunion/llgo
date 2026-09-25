@@ -33,7 +33,7 @@ function Get-LLGoWindowsMSVCTarget {
   }
 }
 
-function Find-LLGoVisualStudio2022 {
+function Find-LLGoVisualStudio {
   param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("386", "amd64", "arm64")]
@@ -45,10 +45,13 @@ function Find-LLGoVisualStudio2022 {
   if ($GoArch -eq "arm64") {
     $components += "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
   }
+  # The Windows ARM64 hosted image is moving from VS 2022 to VS 2026. Accept
+  # either version during the rollout, but keep the Windows 2022 x64 image on 17.x.
+  $versionRange = if ($env:RUNNER_ARCH -eq "ARM64") { "[17.0,19.0)" } else { "[17.0,18.0)" }
   $arguments = @(
     "-latest",
     "-products", "*",
-    "-version", "[17.0,18.0)",
+    "-version", $versionRange,
     "-property", "installationPath"
   )
   foreach ($component in $components) {
@@ -56,12 +59,12 @@ function Find-LLGoVisualStudio2022 {
   }
   $installPath = & $vswhere @arguments
   if (-not $installPath) {
-    throw "Visual Studio 2022 C++ tools for windows/$GoArch were not found"
+    throw "Visual Studio C++ tools for windows/$GoArch (version $versionRange) were not found"
   }
   return $installPath
 }
 
-function Enter-LLGoVisualStudio2022 {
+function Enter-LLGoVisualStudio {
   param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("386", "amd64", "arm64")]
@@ -69,7 +72,7 @@ function Enter-LLGoVisualStudio2022 {
   )
 
   $target = Get-LLGoWindowsMSVCTarget -GoArch $GoArch
-  $installPath = Find-LLGoVisualStudio2022 -GoArch $GoArch
+  $installPath = Find-LLGoVisualStudio -GoArch $GoArch
   Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
   $hostArch = if ($env:RUNNER_ARCH -eq "ARM64") { "arm64" } else { "x64" }
   Enter-VsDevShell -VsInstallPath $installPath `
