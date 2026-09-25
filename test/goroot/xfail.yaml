@@ -228,14 +228,6 @@ xfails:
   - directive: run
     case: genmeth1.go
     reason: the current go/types and x/tools SSA path panics while instantiating the new generic-method test
-  - platform: linux/amd64
-    directive: run
-    case: convert5.go
-    reason: LLGo does not match linux/amd64 saturation results for out-of-range floating-point conversions
-  - platform: windows/amd64
-    directive: run
-    case: convert5.go
-    reason: LLGo does not match Windows amd64 saturation results for out-of-range floating-point conversions
   - platform: windows/amd64
     directive: run
     case: inline_literal.go

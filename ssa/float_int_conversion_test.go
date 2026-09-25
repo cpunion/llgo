@@ -119,11 +119,14 @@ func Test386FloatToIntegerConversionIR(t *testing.T) {
 // Check the conversion width as well as signedness: directly saturating to a
 // narrow Go type would change the required wide-conversion-then-truncation.
 func TestSaturatingFloatToIntegerConversionIR(t *testing.T) {
-	for _, arch := range []string{"arm64", "riscv64", "wasm"} {
+	for _, arch := range []string{"amd64", "386", "arm64", "riscv64", "wasm"} {
 		t.Run(arch, func(t *testing.T) {
 			target := &Target{GOOS: "linux", GOARCH: arch}
 			if arch == "wasm" {
 				target.GOOS = "wasip1"
+			}
+			if arch == "amd64" || arch == "386" {
+				target.SaturatingFloatToInt = true
 			}
 			prog := NewProgram(target)
 			defer prog.Dispose()
@@ -157,9 +160,13 @@ func TestSaturatingFloatToIntegerConversionIR(t *testing.T) {
 						b := fn.MakeBody(1)
 						b.Return(b.Convert(prog.Type(dst.typ, InGo), fn.Param(0)))
 						ir := fn.impl.String()
-						want := "@llvm." + dst.intrinsic + "." + src.suffix + "("
-						if !strings.Contains(ir, want) || !strings.Contains(ir, dst.trunc) {
-							t.Fatalf("conversion IR missing %q or %q:\n%s", want, dst.trunc, ir)
+						intrinsic, trunc := dst.intrinsic, dst.trunc
+						if dst.typ == types.Typ[types.Uint32] && target.SaturatingFloatToInt {
+							intrinsic, trunc = "fptoui.sat.i32", ""
+						}
+						want := "@llvm." + intrinsic + "." + src.suffix + "("
+						if !strings.Contains(ir, want) || !strings.Contains(ir, trunc) {
+							t.Fatalf("conversion IR missing %q or %q:\n%s", want, trunc, ir)
 						}
 						if strings.Contains(ir, "fcmp") || strings.Contains(ir, "select") {
 							t.Fatalf("conversion still emits manual saturation guards:\n%s", ir)
