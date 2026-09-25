@@ -327,22 +327,26 @@ func testSyscallCallbacks() {
 }
 
 func main() {
+	println("ffi stage: integer")
 	base := int64(40)
 	integer := func(value int64) int64 { return base + value }
 	if got := reflect.ValueOf(integer).Call([]reflect.Value{reflect.ValueOf(int64(2))})[0].Int(); got != 42 {
 		panic("Windows reflect FFI corrupted an integer call")
 	}
 	floating := func(value float64) float64 { return value + 1.5 }
+	println("ffi stage: float")
 	if got := reflect.ValueOf(floating).Call([]reflect.Value{reflect.ValueOf(2.25)})[0].Float(); got != 3.75 {
 		panic("Windows reflect FFI corrupted a floating-point call")
 	}
 	aggregate := func(value pair) pair {
 		return pair{Integer: value.Integer + 1, Float: value.Float + 2}
 	}
+	println("ffi stage: aggregate")
 	if got := reflect.ValueOf(aggregate).Call([]reflect.Value{reflect.ValueOf(pair{3, 4})})[0].Interface().(pair); got != (pair{4, 6}) {
 		panic("Windows reflect FFI corrupted an aggregate call")
 	}
 	complexValue := func(value complex128) complex128 { return value + complex(1, -2) }
+	println("ffi stage: complex")
 	if got := reflect.ValueOf(complexValue).Call([]reflect.Value{reflect.ValueOf(complex(3.5, 0.75))})[0].Complex(); got != complex(4.5, -1.25) {
 		panic("Windows reflect FFI corrupted a complex call")
 	}
@@ -359,6 +363,7 @@ func main() {
 		reflect.ValueOf(pair{Integer: 11, Float: 4}),
 	}
 	checkMixed("dynamic", reflect.ValueOf(dynamic).Call(args))
+	println("ffi stage: makefunc")
 
 	typ := reflect.TypeOf(mixedFunc(nil))
 	made := reflect.MakeFunc(typ, func(args []reflect.Value) []reflect.Value {
@@ -370,11 +375,14 @@ func main() {
 		panic("Windows libffi closure corrupted a direct call")
 	}
 	checkMixed("MakeFunc", reflect.ValueOf(made).Call(args))
+	println("ffi stage: foreign callback")
 
 	for attempt := 0; attempt < 4; attempt++ {
+		println("ffi stage: foreign callback attempt", attempt)
 		finalized := make(chan uintptr, 2)
 		checkForeignCallback(finalized)
 	}
+	println("ffi stage: syscall callbacks")
 	testSyscallCallbacks()
 
 	println("windows FFI smoke: ok")
