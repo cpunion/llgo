@@ -1,0 +1,46 @@
+# Temporary validation on the contributor fork; removed before the PR.
+name: Traceback validation
+on:
+  push:
+    branches: [codex/panic-test-stack-20260925]
+permissions:
+  contents: read
+jobs:
+  traceback:
+    if: github.repository == 'cpunion/llgo'
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            arch: amd64
+          - os: windows-2022
+            arch: '386'
+          - os: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+          windows-arch: ${{ matrix.arch || 'amd64' }}
+      - uses: ./.github/actions/setup-go
+      - name: Build compiler and host integration tests
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/traceback-bin"
+          suffix=
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          go build -o "$RUNNER_TEMP/traceback-bin/llgo$suffix" ./cmd/llgo
+          go test -c -o "$RUNNER_TEMP/traceback-bin/build.test$suffix" ./internal/build
+          echo "$RUNNER_TEMP/traceback-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/activate-windows-target
+        if: runner.os == 'Windows'
+        with:
+          windows-arch: ${{ matrix.arch }}
+      - name: Windows FFI smoke
+        shell: pwsh
+        run: ./.github/workflows/test_windows_runtime.ps1 -LLGo "$env:RUNNER_TEMP/traceback-bin/llgo.exe" -GoArch ${{ matrix.arch }}
