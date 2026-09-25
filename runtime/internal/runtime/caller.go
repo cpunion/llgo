@@ -407,6 +407,9 @@ func bindCallerLocationPC(pc uintptr, frame CallerFrame) {
 }
 
 func FrameForPC(pc uintptr) (CallerFrame, bool) {
+	if !callerLocationAvailable() {
+		return CallerFrame{}, false
+	}
 	if pc&callerPCMask != 0 {
 		if frame, ok := syntheticFrameForPC(pc); ok {
 			return frame, true
