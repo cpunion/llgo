@@ -234,6 +234,26 @@ func TestAstAndTypesFuncNameCoverage(t *testing.T) {
 	}
 }
 
+func TestDeclarationFuncNameWithoutObject(t *testing.T) {
+	pkg := types.NewPackage("example.com/p", "p")
+	tObj := types.NewTypeName(token.NoPos, pkg, "T", nil)
+	named := types.NewNamed(tObj, types.NewStruct(nil, nil), nil)
+	aliasObj := types.NewTypeName(token.NoPos, pkg, "Alias", nil)
+	alias := types.NewAlias(aliasObj, types.NewPointer(named))
+	decl := &ast.FuncDecl{
+		Name: ast.NewIdent("M"),
+		Recv: &ast.FieldList{List: []*ast.Field{{Type: ast.NewIdent("Alias")}}},
+	}
+	recv := types.NewVar(token.NoPos, pkg, "", alias)
+	if got, want := declarationFuncName(pkg.Path(), decl, nil, recv), "example.com/p.(*T).M"; got != want {
+		t.Fatalf("declarationFuncName without object = %q, want %q", got, want)
+	}
+	decl.Recv = nil
+	if got, want := declarationFuncName(pkg.Path(), decl, nil, nil), "example.com/p.M"; got != want {
+		t.Fatalf("declarationFuncName without receiver = %q, want %q", got, want)
+	}
+}
+
 func TestParsePkgSyntaxCollectsLinknames(t *testing.T) {
 	cases := []struct {
 		name      string

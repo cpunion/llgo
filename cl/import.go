@@ -401,7 +401,7 @@ func collectPackageLinknames(prog llssa.Program, fset *token.FileSet, files []*a
 					if linkDocs[group] {
 						continue
 					}
-					return fmt.Errorf("%s: //llgo:link local name %q must name the attached declaration", fset.Position(item.Pos), fields[0])
+					return fmt.Errorf("%s: //llgo:link local name %q is not attached to a declaration", fset.Position(item.Pos), fields[0])
 				}
 				if len(fields) < 2 {
 					continue // Single-name go:linkname is a valid export annotation.
@@ -562,7 +562,7 @@ func astFuncName(pkgPath string, fn *ast.FuncDecl, aliases map[string]ast.Expr) 
 			}
 			ident, ok := rhs.(*ast.Ident)
 			if !ok {
-				break // Not a local receiver type; go/types will reject it.
+				break // Stop local alias resolution; go/types handles this type.
 			}
 			canonical, canonicalPtr = ident.Name, canonicalPtr || isPtr
 		}
@@ -617,6 +617,21 @@ func typesFuncName(pkgPath string, fn *types.Func) (fullName, inPkgName string) 
 		return pkgPath + "." + canonical + "." + name, source + "." + name
 	}
 	return pkgPath + "." + name, name
+}
+
+// An SSA function with declaration syntax may lack a types.Func object. Use
+// its receiver type when available so an alias still has its canonical name.
+func declarationFuncName(pkgPath string, decl *ast.FuncDecl, obj types.Object, recv *types.Var) string {
+	if fn, ok := obj.(*types.Func); ok {
+		fullName, _ := typesFuncName(pkgPath, fn)
+		return fullName
+	}
+	if recv != nil && recvNamedOk(recv.Type()) != nil {
+		canonical, _ := typesRecvName(recv.Type())
+		return pkgPath + "." + canonical + "." + decl.Name.Name
+	}
+	fullName, _ := astFuncName(pkgPath, decl, nil)
+	return fullName
 }
 
 // TODO(xsw): may can use typesFuncName
@@ -1007,7 +1022,9 @@ func ParsePkgSyntaxWithOptions(prog llssa.Program, fset *token.FileSet, pkg *typ
 				if alias := parenthesizedMethodName(inPkgName); alias != "" {
 					syms[alias] = fullName
 				}
-				linkDocs[decl.Doc] = true
+				if decl.Doc != nil {
+					linkDocs[decl.Doc] = true
+				}
 				hasLinkname, err := collectDeclarationDirectivesWithOptions(prog, fset, decl.Doc, fullName, inPkgName, decl.Pos(), options)
 				if err != nil {
 					return err
@@ -1028,7 +1045,9 @@ func ParsePkgSyntaxWithOptions(prog llssa.Program, fset *token.FileSet, pkg *typ
 					if len(decl.Specs) == 1 {
 						if names := decl.Specs[0].(*ast.ValueSpec).Names; len(names) == 1 {
 							inPkgName := names[0].Name
-							linkDocs[decl.Doc] = true
+							if decl.Doc != nil {
+								linkDocs[decl.Doc] = true
+							}
 							if _, err := collectDeclarationDirectivesWithOptions(prog, fset, decl.Doc, pkgPath+"."+inPkgName, inPkgName, token.NoPos, options); err != nil {
 								return err
 							}

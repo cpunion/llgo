@@ -182,7 +182,7 @@ func TestLinkDirectiveErrors(t *testing.T) {
 		{"wrong function", "//llgo:link Other C.test_cursor\nfunc Cursor() int32 { return -1 }", `local name "Other" does not match declaration "Cursor"`},
 		{"missing target", "//llgo:link Ptr.Cursor\nfunc (Ptr) Cursor() int32 { return -1 }", "requires a local name and a target"},
 		{"missing names", "// llgo:link\nfunc (Ptr) Cursor() int32 { return -1 }", "requires a local name and a target"},
-		{"detached", "func (Ptr) Cursor() int32 { return -1 }\n//llgo:link Ptr.Cursor C.test_cursor", "must name the attached declaration"},
+		{"detached", "func (Ptr) Cursor() int32 { return -1 }\n//llgo:link Ptr.Cursor C.test_cursor", "is not attached to a declaration"},
 		{"detached missing target", "func (Ptr) Cursor() int32 { return -1 }\n//llgo:link Ptr.Cursor", "requires a local name and a target"},
 		{"invalid go method", "//go:linkname Ptr.Curosr C.test_cursor\nfunc (Ptr) Cursor() int32 { return -1 }", `local method "Ptr.Curosr" not found`},
 		{"detached invalid go method", "func (Ptr) Cursor() int32 { return -1 }\n//go:linkname Wrong.Cursor C.test_cursor", `local method "Wrong.Cursor" not found`},
