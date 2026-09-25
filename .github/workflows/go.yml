@@ -169,7 +169,7 @@ jobs:
             fi
             export LLGO_STDIO_NOBUF=1
             # Keep the main batch's existing narrow fatal-signature quarantine.
-            # The separate ./test/go invocation below uses a measured runtime
+            # The separate cl and test/go invocations use a measured runtime
             # overlay to reserve enough stack for hardware exception recovery.
             main_go_test=(bash dev/go_test_windows.sh "${go_test[@]}")
           else
@@ -186,19 +186,20 @@ jobs:
             | xargs "${main_go_test[@]}" -timeout 45m -coverprofile="coverage-main.txt" -covermode=atomic \
                 -bench '^BenchmarkGo126' -benchtime=1x
 
-          # Compiler fixtures owned by cl exercise ssa in-process. Instrument
-          # both packages in this single test binary so coverage follows those
-          # calls without restoring duplicate fixture tests under ssa.
-          "${go_test[@]}" -timeout 45m \
-            -coverpkg=github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
-            -coverprofile="coverage-compiler.txt" -covermode=atomic \
-            -bench '^BenchmarkGo126' -benchtime=1x ./cl
-          # The direct language tests recover hardware faults. Some Windows
-          # hosts need more exception stack than stock Go reserves (golang/go#81238).
-          # Apply the measured workaround only to this host Go test binary.
+          # cl's error-path tests (e.g. TestErrInitLinkname) also recover nil
+          # dereferences. Apply the measured Windows exception-stack reserve
+          # before both cl and test/go (golang/go#81238).
           if [[ -n "$LLGO_GO_TEST_OVERLAY" ]]; then
             go_test+=("-overlay=$LLGO_GO_TEST_OVERLAY")
           fi
+
+          # Compiler fixtures owned by cl exercise ssa in-process. Instrument
+          # both packages in this single test binary so coverage follows those
+          # calls without restoring duplicate fixture tests under ssa.
+          "${go_test[@]}" -v -timeout 45m \
+            -coverpkg=github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
+            -coverprofile="coverage-compiler.txt" -covermode=atomic \
+            -bench '^BenchmarkGo126' -benchtime=1x ./cl
           "${go_test[@]}" -timeout 45m ./test/go
 
       - name: Test with embedded emulator env
