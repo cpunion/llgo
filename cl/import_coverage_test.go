@@ -191,7 +191,7 @@ func TestPkgSymInfoAddSymAndInitLinknamesCoverage(t *testing.T) {
 }
 
 func TestAstAndTypesFuncNameCoverage(t *testing.T) {
-	full, inPkg := astFuncName("example.com/p", &ast.FuncDecl{Name: &ast.Ident{Name: "F"}})
+	full, inPkg := astFuncName("example.com/p", &ast.FuncDecl{Name: &ast.Ident{Name: "F"}}, nil)
 	if full != "example.com/p.F" || inPkg != "F" {
 		t.Fatalf("astFuncName(func)=(%q,%q), want (%q,%q)", full, inPkg, "example.com/p.F", "F")
 	}
@@ -202,7 +202,7 @@ func TestAstAndTypesFuncNameCoverage(t *testing.T) {
 			{Type: &ast.StarExpr{X: &ast.ParenExpr{X: &ast.Ident{Name: "T"}}}},
 		}},
 	}
-	full, inPkg = astFuncName("example.com/p", ptrRecv)
+	full, inPkg = astFuncName("example.com/p", ptrRecv, nil)
 	if full != "example.com/p.(*T).M" || inPkg != "(*T).M" {
 		t.Fatalf("astFuncName(method ptr)=(%q,%q), want (%q,%q)", full, inPkg, "example.com/p.(*T).M", "(*T).M")
 	}
@@ -321,7 +321,7 @@ func plain() {}
 	want := map[string]bool{"env": true, "spaced": true, "plain": false}
 	for _, node := range file.Decls {
 		decl := node.(*ast.FuncDecl)
-		fullName, _ := astFuncName(pkg.Path(), decl)
+		fullName, _ := astFuncName(pkg.Path(), decl, nil)
 		got := prog.HasClosureEnvDirective(fset, fullName, decl.Pos())
 		if got != want[decl.Name.Name] {
 			t.Fatalf("HasClosureEnvDirective(%s) = %v, want %v", decl.Name.Name, got, want[decl.Name.Name])
