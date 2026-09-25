@@ -54,11 +54,13 @@ func checkMixed(label string, got []reflect.Value) {
 }
 
 func makeForeignCallback(finalized chan uintptr, deferred, recovered *bool) func(uintptr) uintptr {
+	println("ffi stage: make foreign callback")
 	probe := &foreignGCProbe{value: 100}
 	runtime.SetFinalizer(probe, func(value *foreignGCProbe) {
 		finalized <- value.value
 	})
 	return reflect.MakeFunc(reflect.TypeOf((func(uintptr) uintptr)(nil)), func(args []reflect.Value) []reflect.Value {
+		println("ffi stage: foreign callback entered")
 		defer func() { *deferred = true }()
 		func() {
 			defer func() {
@@ -69,10 +71,12 @@ func makeForeignCallback(finalized chan uintptr, deferred, recovered *bool) func
 			panic("Windows foreign callback panic")
 		}()
 		stackProbe := &foreignGCProbe{value: 7}
+		println("ffi stage: foreign callback before GC")
 		runtime.SetFinalizer(stackProbe, func(value *foreignGCProbe) {
 			finalized <- value.value
 		})
 		runtime.GC()
+		println("ffi stage: foreign callback after GC")
 		select {
 		case <-finalized:
 			panic("Windows foreign-thread callback lost a live GC root")
@@ -91,10 +95,13 @@ func checkForeignCallback(finalized chan uintptr) {
 	deferred := false
 	recovered := false
 	foreign := makeForeignCallback(finalized, &deferred, &recovered)
+	println("ffi stage: foreign callback made")
 	var result uintptr
+	println("ffi stage: foreign thread call")
 	if errno := callOnForeignThread(reflect.ValueOf(foreign).Pointer(), 23, &result); errno != 0 || result != 123 {
 		panic("Windows foreign-thread callback failed")
 	}
+	println("ffi stage: foreign thread returned")
 	runtime.KeepAlive(foreign)
 	if !deferred || !recovered {
 		panic("Windows foreign-thread callback lost defer or panic/recover state")
