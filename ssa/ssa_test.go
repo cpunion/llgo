@@ -2595,11 +2595,22 @@ func TestPrintf(t *testing.T) {
 	rets := types.NewTuple(types.NewVar(0, nil, "", types.Typ[types.Int32]))
 	sig := types.NewSignatureType(nil, nil, nil, params, rets, true)
 	pkg.NewFunc("printf", sig, InC)
-	assertPkg(t, pkg, `; ModuleID = 'foo/bar'
+	expected := `; ModuleID = 'foo/bar'
 source_filename = "foo/bar"
 
 declare i32 @printf(ptr, ...)
-`)
+`
+	if target := prog.Target(); target.GOOS == "windows" && (target.GOARCH == "amd64" || target.GOARCH == "arm64") {
+		expected = `; ModuleID = 'foo/bar'
+source_filename = "foo/bar"
+
+; Function Attrs: uwtable
+declare i32 @printf(ptr, ...) #0
+
+attributes #0 = { uwtable }
+`
+	}
+	assertPkg(t, pkg, expected)
 }
 
 func TestBinOp(t *testing.T) {
