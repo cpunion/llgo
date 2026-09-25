@@ -429,6 +429,8 @@ func TestObservedPassesDoNotHaveXFailClassifications(t *testing.T) {
 		{version: "go1.26.7", platform: "linux/amd64", tc: testCase{RelPath: "convert5.go", Directive: "run"}},
 		{version: "go1.27.0", platform: "windows-msvc/amd64", tc: testCase{RelPath: "convert5.go", Directive: "run"}},
 		{version: "go1.27.0", platform: "windows-mingw/amd64", tc: testCase{RelPath: "convert5.go", Directive: "run"}},
+		{version: "go1.27.0", platform: "windows-msvc/386", tc: testCase{RelPath: "fixedbugs/bug356.go", Directive: "run"}},
+		{version: "go1.27.0", platform: "windows-mingw/386", tc: testCase{RelPath: "fixedbugs/bug356.go", Directive: "run"}},
 		{version: "go1.27.0", platform: "darwin/arm64", tc: testCase{RelPath: "fixedbugs/issue52612.go", Directive: "run"}},
 		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "typeparam/dictionaryCapture-noinline.go", Directive: "run"}},
 		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "fixedbugs/issue68525.go", Directive: "run"}},
