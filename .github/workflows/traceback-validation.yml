@@ -26,3 +26,6 @@ jobs:
       - name: Windows Go SSA package
         shell: bash
         run: CC="$LLGO_WINDOWS_HOST_CC" CXX="$LLGO_WINDOWS_HOST_CXX" go test ./ssa -count=1
+      - name: Windows compiler IR snapshots
+        shell: bash
+        run: CC="$LLGO_WINDOWS_HOST_CC" CXX="$LLGO_WINDOWS_HOST_CXX" go test ./cl -run '^(TestVar|TestBasicFunc|TestIntrinsicBoolToUint8)$' -count=1
