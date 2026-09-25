@@ -503,6 +503,26 @@ func TestWasmObservedResourceExceptions(t *testing.T) {
 	}
 }
 
+func TestIssue16037WindowsMSVC386Timeout(t *testing.T) {
+	cfg := loadXFailConfig(t, repoRoot(t), filepath.Join("test", "goroot", "xfail.yaml"))
+	tc := testCase{RelPath: "fixedbugs/issue16037_run.go", Directive: "run"}
+	for _, test := range []struct {
+		version  string
+		platform string
+		want     time.Duration
+	}{
+		{"go1.26.7", "windows-msvc/386", 3 * time.Minute},
+		{"go1.27.0", "windows-msvc/386", 0},
+		{"go1.26.7", "windows-mingw/386", 0},
+		{"go1.26.7", "windows-msvc/amd64", 0},
+	} {
+		got, _, matched := cfg.MatchTimeout(test.version, test.platform, tc)
+		if got != test.want || matched != (test.want != 0) {
+			t.Errorf("%s/%s timeout = %s, matched=%v; want %s, matched=%v", test.version, test.platform, got, matched, test.want, test.want != 0)
+		}
+	}
+}
+
 func TestBoundedCaseEnv(t *testing.T) {
 	rangegen := testCase{RelPath: "rangegen.go", Directive: "runoutput"}
 	for _, tt := range []struct {
