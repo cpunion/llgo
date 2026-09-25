@@ -2273,6 +2273,12 @@ func assertPkg(t *testing.T, p Package, expected string) {
 	t.Helper()
 	got := StripModuleTarget(p.String())
 	want := StripModuleTarget(expected)
+	if target := p.Prog.Target(); target.GOOS == "windows" && (target.GOARCH == "amd64" || target.GOARCH == "arm64") {
+		// Win64 functions carry unwind tables even when LLVM marks them
+		// nounwind. Keep the IR expectations shared across host platforms;
+		// TestWindowsUnwindTablesForNoUnwindFunctions checks the actual COFF.
+		want = strings.ReplaceAll(want, "null_pointer_is_valid", "null_pointer_is_valid uwtable")
+	}
 	if got != want {
 		t.Fatalf("\n==> got:\n%s\n==> expected:\n%s\n", got, want)
 	}
