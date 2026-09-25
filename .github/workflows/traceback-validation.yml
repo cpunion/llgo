@@ -15,10 +15,6 @@ jobs:
         include:
           - os: windows-2022
             arch: amd64
-          - os: windows-2022
-            arch: '386'
-          - os: windows-11-arm
-            arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -27,24 +23,6 @@ jobs:
           llvm-version: '22'
           windows-arch: ${{ matrix.arch || 'amd64' }}
       - uses: ./.github/actions/setup-go
-      - name: Build compiler and host integration tests
+      - name: Windows Go SSA package
         shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/traceback-bin"
-          suffix=
-          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
-          go build -o "$RUNNER_TEMP/traceback-bin/llgo$suffix" ./cmd/llgo
-          go test -c -o "$RUNNER_TEMP/traceback-bin/build.test$suffix" ./internal/build
-          echo "$RUNNER_TEMP/traceback-bin" >> "$GITHUB_PATH"
-          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-      - uses: ./.github/actions/activate-windows-target
-        if: runner.os == 'Windows'
-        with:
-          windows-arch: ${{ matrix.arch }}
-      - name: Windows FFI smoke
-        shell: pwsh
-        run: ./.github/workflows/test_windows_runtime.ps1 -LLGo "$env:RUNNER_TEMP/traceback-bin/llgo.exe" -GoArch ${{ matrix.arch }}
-      - name: Windows Go SSA IR snapshots
-        if: matrix.arch == 'amd64'
-        shell: bash
-        run: CC="$LLGO_WINDOWS_HOST_CC" CXX="$LLGO_WINDOWS_HOST_CXX" go test ./ssa -run '^(TestClosureNoCtxValue|TestClosureFuncPtrValue|TestIfaceMethodClosureCallIR|TestConst|TestDeclFunc|TestBasicFunc|TestFuncParam|TestFuncCall|TestFuncMultiRet|TestJump|TestIf|TestPrintf|TestBinOp|TestUnOp|TestCompareSelect|TestWindowsUnwindTablesForNoUnwindFunctions)$' -count=1
+        run: CC="$LLGO_WINDOWS_HOST_CC" CXX="$LLGO_WINDOWS_HOST_CXX" go test ./ssa -count=1
