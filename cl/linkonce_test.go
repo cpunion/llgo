@@ -111,3 +111,34 @@ func (Box[T]) M() {}
 		t.Fatalf("generic method instance %s should need linkonce", fn)
 	}
 }
+
+// Regression for golang.org/x/tools/go/ssa MethodValue canonicalizing a
+// receiver-bearing method signature as a generic function signature.
+func TestMethodValueDoesNotCorruptGenericFunctionSignature(t *testing.T) {
+	ssapkg := buildLinkOnceSSAPackage(t, `package p
+
+type Set[T comparable] map[T]struct{}
+
+func New[T comparable](items ...T) Set[T] { return nil }
+func (s Set[T]) Insert(items ...T) Set[T] { return s }
+func (s Set[T]) Difference(other Set[T]) Set[T] {
+	result := New[T]()
+	return result.Insert()
+}
+`)
+	set := ssapkg.Pkg.Scope().Lookup("Set").(*types.TypeName).Type().(*types.Named)
+	setAny, err := types.Instantiate(nil, set, []types.Type{types.Universe.Lookup("any").Type()}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mset := ssapkg.Prog.MethodSets.MethodSet(setAny)
+	for _, name := range []string{"Insert", "Difference"} {
+		sel := mset.Lookup(nil, name)
+		if sel == nil {
+			t.Fatalf("Set[any] has no %s method", name)
+		}
+		if fn := ssapkg.Prog.MethodValue(sel); fn == nil {
+			t.Fatalf("MethodValue(Set[any].%s) returned nil", name)
+		}
+	}
+}
