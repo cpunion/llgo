@@ -39,6 +39,8 @@ func TestTracebackConfiguration(t *testing.T) {
 		{name: "invalid", env: "invalid"},
 		{name: "set_all", env: "none", set: "all", current: true, other: true},
 		{name: "set_system", env: "none", set: "system", current: true, other: true, system: true},
+		{name: "set_higher_than_env", env: "single", set: "system", current: true, other: true, system: true},
+		{name: "env_higher_than_set", env: "system", set: "single", current: true, other: true, system: true},
 		{name: "environment_floor", env: "all", set: "none", current: true, other: true},
 		{name: "stack_ignores_none", env: "none", stack: "single", current: true},
 		{name: "stack_ignores_system", env: "system", stack: "single", current: true},

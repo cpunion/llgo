@@ -42,6 +42,9 @@ static thread_node *threads;
 static _Thread_local thread_node *current;
 static _Thread_local uintptr_t *fault_buffer;
 
+/* Preserve the old stack-copy limit independently of the PC-buffer limit. */
+#define LLGO_TRACEBACK_COPY_MAX (1u << 23)
+
 void llgo_traceback_set_unwinder(llgo_traceback_unwinder walk,
                                 llgo_traceback_thread_init init)
 {
@@ -254,7 +257,7 @@ static size_t unwind_copy(void *ctx, uintptr_t *pcs, uintptr_t low,
     return count;
 }
 
-static size_t capture_thread(HANDLE thread, uintptr_t *pcs, void *copy)
+static size_t capture_thread(HANDLE thread, uintptr_t *pcs)
 {
     _Alignas(16) unsigned char ctx[CTX_SIZE];
     memset(ctx, 0, sizeof(ctx));
@@ -262,37 +265,42 @@ static size_t capture_thread(HANDLE thread, uintptr_t *pcs, void *copy)
     if (SuspendThread(thread) == (DWORD)-1) return 0;
     size_t size = 0;
     uintptr_t sp = 0;
+    void *copy = 0;
     memory_info info;
     if (GetThreadContext(thread, ctx)) {
         sp = word(ctx, SP_OFFSET);
         if (VirtualQuery((void *)sp, &info, sizeof(info)) == sizeof(info) &&
             info.state == 0x1000 && !(info.protect & (0x100|1))) {
             size = (uintptr_t)info.base+info.region_size-sp;
-            if (size > LLGO_TRACEBACK_MAX*sizeof(uintptr_t))
-                size = LLGO_TRACEBACK_MAX*sizeof(uintptr_t);
-            size_t read = 0;
-            if (!ReadProcessMemory((HANDLE)(intptr_t)-1, (void *)sp, copy, size, &read) || read != size)
-                size = 0;
+            if (size > LLGO_TRACEBACK_COPY_MAX)
+                size = LLGO_TRACEBACK_COPY_MAX;
+            /* Allocate only the live portion, not an 8 MiB copy per capture. */
+            copy = VirtualAlloc(0, size, 0x3000, 4);
+            if (copy) {
+                size_t read = 0;
+                if (!ReadProcessMemory((HANDLE)(intptr_t)-1, (void *)sp, copy, size, &read) || read != size)
+                    size = 0;
+            }
         }
     }
     ResumeThread(thread);
-    if (size < 2*sizeof(uintptr_t)) return 0;
-    return unwind_copy(ctx, pcs, sp, sp+size, (uintptr_t)copy, size);
+    size_t count = size >= 2*sizeof(uintptr_t) && copy
+                 ? unwind_copy(ctx, pcs, sp, sp+size, (uintptr_t)copy, size) : 0;
+    if (copy) VirtualFree(copy, 0, 0x8000);
+    return count;
 }
 
 llgo_traceback_snapshot *llgo_traceback_capture(uint64_t except)
 {
     uintptr_t *scratch = VirtualAlloc(0, LLGO_TRACEBACK_MAX*sizeof(uintptr_t), 0x3000, 4);
     if (!scratch) return 0;
-    void *copy = VirtualAlloc(0, LLGO_TRACEBACK_MAX*sizeof(uintptr_t), 0x3000, 4);
-    if (!copy) { VirtualFree(scratch, 0, 0x8000); return 0; }
     llgo_traceback_snapshot *head = 0, **tail = &head;
     AcquireSRWLockExclusive(&registry_lock);
     for (thread_node *n = threads; n; n = n->next) {
         uint32_t state = __atomic_load_n(&n->state, __ATOMIC_ACQUIRE);
         if (n->id == except || state == 6 || n->thread_id == GetCurrentThreadId())
             continue;
-        size_t count = n->thread ? capture_thread(n->thread, scratch, copy) : 0;
+        size_t count = n->thread ? capture_thread(n->thread, scratch) : 0;
         llgo_traceback_snapshot *s = calloc(1, sizeof(*s)+count*sizeof(uintptr_t));
         if (!s) break;
         s->id = n->id; s->parent = n->parent; s->created = n->created;
@@ -301,7 +309,6 @@ llgo_traceback_snapshot *llgo_traceback_capture(uint64_t except)
         *tail = s; tail = &s->next;
     }
     ReleaseSRWLockExclusive(&registry_lock);
-    VirtualFree(copy, 0, 0x8000);
     VirtualFree(scratch, 0, 0x8000);
     return head;
 }

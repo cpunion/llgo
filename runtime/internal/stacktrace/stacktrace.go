@@ -41,4 +41,6 @@ func FaultBuffer() *uintptr
 //go:linkname ReleaseFaultBuffer C.llgo_traceback_release_fault_buffer
 func ReleaseFaultBuffer()
 
-const MaxFrames = 1 << 20
+// A bounded native scratch buffer also limits per-thread address space use.
+// Keep this in sync with LLGO_TRACEBACK_MAX in _wrap/traceback.h.
+const MaxFrames = 1 << 16

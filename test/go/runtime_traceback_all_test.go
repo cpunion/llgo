@@ -43,7 +43,15 @@ func TestRuntimeStackAll(t *testing.T) {
 	var all string
 	for {
 		all = string(buf[:runtime.Stack(buf, true)])
-		if strings.Contains(all, ".tracebackBlocked(") && strings.Contains(all, ".tracebackBusy(") {
+		blockedState := false
+		for _, stack := range strings.Split(all, "\ngoroutine ") {
+			if strings.Contains(stack, ".tracebackBlocked(") &&
+				strings.Contains(strings.SplitN(stack, "\n", 2)[0], "[chan receive]") {
+				blockedState = true
+				break
+			}
+		}
+		if blockedState && strings.Contains(all, ".tracebackBusy(") {
 			break
 		}
 		if time.Now().After(deadline) {

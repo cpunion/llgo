@@ -28,3 +28,26 @@ func TestParse(t *testing.T) {
 		t.Fatalf("Windows wer = %#x, level %d", got, Level(got))
 	}
 }
+
+func TestCombine(t *testing.T) {
+	for _, tc := range []struct {
+		name, environment, setting string
+		windows                    bool
+		want                       uint64
+	}{
+		{"higher setting", "single", "system", false, 10},
+		{"higher environment", "system", "single", false, 10},
+		{"independent flags", "all", "crash", false, 11},
+		{"numeric levels", "1", "2", false, 10},
+		{"windows WER floor", "wer", "all", true, 11 | WER},
+		{"windows WER setting", "single", "wer", true, 11 | WER},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			environment := Parse(tc.environment, tc.windows)
+			setting := Parse(tc.setting, tc.windows)
+			if got := Combine(environment, setting); got != tc.want {
+				t.Fatalf("Combine(%#x, %#x) = %#x, want %#x", environment, setting, got, tc.want)
+			}
+		})
+	}
+}

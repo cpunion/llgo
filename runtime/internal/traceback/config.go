@@ -66,3 +66,13 @@ func Parse(level string, windows bool) uint64 {
 }
 
 func Level(setting uint64) uint32 { return uint32(setting) >> Shift }
+
+// Combine keeps the higher traceback detail level while preserving independent
+// flags from both the environment and the program setting.
+func Combine(environment, setting uint64) uint64 {
+	level := Level(environment)
+	if requested := Level(setting); requested > level {
+		level = requested
+	}
+	return uint64(level)<<Shift | (environment|setting)&(Crash|All|WER)
+}

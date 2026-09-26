@@ -3,7 +3,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define LLGO_TRACEBACK_MAX (1u << 20)
+/* Keep this in sync with MaxFrames in stacktrace.go. */
+#define LLGO_TRACEBACK_MAX (1u << 16)
 typedef struct llgo_traceback_snapshot {
     struct llgo_traceback_snapshot *next;
     uint64_t id, parent;
@@ -27,16 +28,7 @@ void llgo_traceback_free(llgo_traceback_snapshot *);
 uintptr_t *llgo_traceback_fault_buffer(void);
 void llgo_traceback_release_fault_buffer(void);
 
-llgo_traceback_snapshot *llgo_traceback_next(llgo_traceback_snapshot *s)
-{
-    return s->next;
-}
-uintptr_t *llgo_traceback_info(llgo_traceback_snapshot *s, uint64_t *id,
-                              uint64_t *parent, uintptr_t *created,
-                              uintptr_t *count, uint32_t *state)
-{
-    *id = s->id; *parent = s->parent; *created = s->created;
-    *count = s->count; *state = s->state;
-    return s->pcs;
-}
+llgo_traceback_snapshot *llgo_traceback_next(llgo_traceback_snapshot *);
+uintptr_t *llgo_traceback_info(llgo_traceback_snapshot *, uint64_t *,
+                               uint64_t *, uintptr_t *, uintptr_t *, uint32_t *);
 #endif

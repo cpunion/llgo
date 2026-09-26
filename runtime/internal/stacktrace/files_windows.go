@@ -2,4 +2,4 @@
 
 package stacktrace
 
-const LLGoFiles = "_wrap/traceback_windows.c"
+const LLGoFiles = "_wrap/traceback_windows.c; _wrap/traceback_accessors.c"

@@ -75,7 +75,13 @@ func appendOtherTracebacks(out []byte, system bool, limit int) []byte {
 		}
 		// Native blocking primitives do not use Go's scheduler waitreason
 		// enumeration. Their saved Go call chain supplies the public reason.
-		for _, pc := range pcs {
+		// They are near the innermost end; avoid symbolizing a deep stack
+		// twice just to determine the status.
+		statusPCs := pcs
+		if len(statusPCs) > 32 {
+			statusPCs = statusPCs[:32]
+		}
+		for _, pc := range statusPCs {
 			switch frameSymbol(pc - 1).function {
 			case "runtime.timeSleep":
 				status = "sleep"

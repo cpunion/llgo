@@ -41,7 +41,7 @@ func SetTraceback(level string) {
 	// cannot reduce it. Changes to the environment after startup do not count.
 	setting := traceback.Parse(level, tracebackWindows)
 	tracebackPlatformConfig(false, setting&traceback.WER != 0)
-	atomic.Store(&tracebackSetting, setting|tracebackEnvironment)
+	atomic.Store(&tracebackSetting, traceback.Combine(tracebackEnvironment, setting))
 }
 
 func crashAfterPanic() {
