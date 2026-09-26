@@ -31,7 +31,9 @@ def main():
             timeout=180,
         )
         result = subprocess.run(
-            [IWASM, "--max-threads=8", "--stack-size=1048576",
+            # 52 probe workers, main, and the timer service can overlap while
+            # WAMR retires their host slots. Go's live-G count is not a join.
+            [IWASM, "--max-threads=64", "--stack-size=1048576",
              "--heap-size=67108864", str(module)],
             capture_output=True,
             text=True,

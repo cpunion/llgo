@@ -11,6 +11,15 @@ const LLGoFiles = "_wrap/stack.c"
 //go:linkname workerStackBounds C.llgo_wasi_worker_stack_bounds
 func workerStackBounds() int32
 
+//go:linkname monotonicClock C.llgo_probe_monotonic_clock
+func monotonicClock() int64
+
+//go:linkname timerClock C.llgo_probe_timer_clock
+func timerClock() int32
+
+//go:linkname runtimeNanotime time.runtimeNano
+func runtimeNanotime() int64
+
 //go:linkname gmpForTesting github.com/xgo-dev/llgo/runtime/internal/runtime.GMPForTesting
 func gmpForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, pstatus uint32, linked bool)
 
@@ -18,6 +27,7 @@ func gmpForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, ps
 func gStateForTesting() (count uint64, mainExited bool)
 
 func main() {
+	checkClocks()
 	_, _, mainMID, _, _, _, linked := gmpForTesting()
 	if !linked {
 		panic("main G/M/P is not linked")
@@ -35,6 +45,7 @@ func main() {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
+			checkClocks()
 			if workerStackBounds() != 1 {
 				panic("WAMR pthread C stack bounds unavailable")
 			}
@@ -61,9 +72,8 @@ func main() {
 		panic("not all WASI pthreads ran")
 	}
 
-	// WaitGroup completion precedes mexit. Wait for the host threads to leave
-	// before starting the next batch, so the probe also exercises retirement
-	// and reuse within WAMR's bounded thread limit.
+	// This checks Go bookkeeping only. WAMR releases host thread slots after
+	// mexit; the runner reserves slots for every thread created by this probe.
 	waitForBaseline(baseline)
 	for round := 0; round < 12; round++ {
 		var batch sync.WaitGroup
@@ -108,8 +118,25 @@ func waitForBaseline(baseline uint64) {
 			return
 		}
 		if time.Now().After(deadline) {
-			panic("WASI pthreads did not retire")
+			panic("WASI goroutine count did not return to baseline")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func checkClocks() {
+	before := monotonicClock()
+	now := runtimeNanotime()
+	after := monotonicClock()
+	if before < 0 || now < before || now > after {
+		panic("runtime nanotime does not use the WASI monotonic clock")
+	}
+	if timerClock() != 1 {
+		panic("timer condition does not use the monotonic clock")
+	}
+	start := time.Now()
+	time.Sleep(2 * time.Millisecond)
+	if elapsed := monotonicClock() - after; elapsed < int64(2*time.Millisecond) || time.Since(start) < 2*time.Millisecond {
+		panic("WASI monotonic timer returned early")
 	}
 }

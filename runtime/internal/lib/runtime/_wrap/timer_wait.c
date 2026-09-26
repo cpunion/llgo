@@ -9,12 +9,19 @@
 
 #define LLGO_TIMER_MAX_WAIT_NANOS INT64_C(86400000000000)
 
+#if defined(__wasi__)
+int64_t llgo_wasi_monotonic_time(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    return (int64_t)now.tv_sec * INT64_C(1000000000) + now.tv_nsec;
+}
+#endif
+
 int llgo_timer_cond_init(pthread_cond_t *condition)
 {
 #if defined(__APPLE__)
-    return pthread_cond_init(condition, 0);
-#elif defined(__wasi__)
-    /* WAMR 2.4.5's WASI pthread workers cannot read CLOCK_MONOTONIC. */
     return pthread_cond_init(condition, 0);
 #else
     pthread_condattr_t attributes;
@@ -45,11 +52,7 @@ int llgo_timer_cond_timedwait(pthread_cond_t *condition,
     deadline.tv_nsec = (long)(wait_nanos % 1000000000LL);
     return pthread_cond_timedwait_relative_np(condition, mutex, &deadline);
 #else
-#if defined(__wasi__)
-    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
-#else
     if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
-#endif
         return -1;
     deadline.tv_sec += (time_t)(wait_nanos / 1000000000LL);
     deadline.tv_nsec += (long)(wait_nanos % 1000000000LL);
