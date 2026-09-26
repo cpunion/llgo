@@ -3,9 +3,10 @@
 """Compare legacy EH, direct exnref EH, and Binaryen EH translation.
 
 Requires an Emscripten SDK supporting WASM_LEGACY_EXCEPTIONS=0, Node,
-wasm-tools, llvm-dwarfdump, and a Binaryen wasm-opt. Set EM_BINARYEN_ROOT
-to exercise a specific complete Binaryen installation. Set LLGO to add the
-current Go panic/recover baseline; it is not translated by this comparison.
+wasm-tools, llvm-dwarfdump, and a Binaryen wasm-opt. Override individual
+tools with EMXX, NODE, WASM_TOOLS, LLVM_DWARFDUMP, or WASMOPT; alternatively
+set EM_BINARYEN_ROOT to select a complete Binaryen installation. Set LLGO to
+add the current Go panic/recover baseline; it is not translated here.
 """
 
 import argparse
@@ -27,7 +28,7 @@ def tool(name, variable):
     value = os.environ.get(variable, name)
     resolved = shutil.which(value)
     if resolved is None:
-        raise SystemExit(f"missing {variable or name}: {value}")
+        raise SystemExit(f"missing {variable}: {value}")
     return resolved
 
 
@@ -80,6 +81,7 @@ def compare_optimization_level(directory, level, emxx, wasm_opt, wasm_tools, dwa
          "--enable-multivalue", "-g",
          "-o", str(translated_module)], env=env)
     legacy_source = variants["legacy"].read_text()
+    # Emscripten glue refers to its companion Wasm module by bare filename.
     translated_source = legacy_source.replace(legacy_module.name, translated_module.name)
     if translated_source == legacy_source:
         raise RuntimeError("Emscripten glue did not name its companion wasm module")

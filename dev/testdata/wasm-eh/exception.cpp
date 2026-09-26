@@ -2,14 +2,20 @@
 #include <cstdio>
 
 static std::jmp_buf checkpoint;
+static int jump_count;
 
 static void jump_back() {
+    ++jump_count;
     std::longjmp(checkpoint, 1);
 }
 
 int main() {
     if (setjmp(checkpoint) == 0) {
         jump_back();
+    }
+    if (jump_count != 1) {
+        std::puts("sjlj wrong");
+        return 1;
     }
     try {
         throw 7;

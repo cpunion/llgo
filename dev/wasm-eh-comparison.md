@@ -5,6 +5,9 @@ Run `python3 dev/compare_wasm_eh.py` with Emscripten, Node, `wasm-tools`,
 `EM_BINARYEN_ROOT` to select a complete Binaryen installation; optionally set
 `LLGO` to include the existing Go panic/recover smoke test. Pass `--browser`
 to execute all six C++ variants and both Go/C++ wrappers in Chrome as well.
+Individual tool paths can be set with `EMXX`, `NODE`, `WASM_TOOLS`,
+`LLVM_DWARFDUMP`, and `WASMOPT`; `WASMOPT` takes precedence over
+`EM_BINARYEN_ROOT`.
 
 The script compiles the same C++ `throw`/`catch` and `setjmp`/`longjmp` fixture
 with Emscripten's legacy EH mode and its direct standard `exnref` mode. It
