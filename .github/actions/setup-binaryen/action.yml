@@ -2,9 +2,9 @@ name: "Setup Binaryen"
 description: "Install a pinned Binaryen release"
 inputs:
   version:
-    description: "Binaryen release version"
+    description: "LLGo Binaryen release tag; update checksums.txt together"
     required: false
-    default: "132"
+    default: "llgo-v132.3"
 
 runs:
   using: "composite"
@@ -27,18 +27,30 @@ runs:
             ;;
         esac
 
-        archive="binaryen-version_${version}-${platform}.tar.gz"
-        base_url="https://github.com/WebAssembly/binaryen/releases/download/version_${version}"
+        archive="binaryen-${version}-${platform}.tar.gz"
+        base_url="https://github.com/xgo-dev/binaryen/releases/download/${version}"
+        expected="$(awk -v platform="$platform" '$1 == platform { print $2 }' "$GITHUB_ACTION_PATH/checksums.txt")"
+        if [[ ! "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+          echo "Missing or invalid pinned Binaryen checksum for $platform" >&2
+          exit 1
+        fi
         cd "$RUNNER_TEMP"
         curl --retry 3 --retry-all-errors -fsSLO "${base_url}/${archive}"
-        curl --retry 3 --retry-all-errors -fsSLO "${base_url}/${archive}.sha256"
         if command -v sha256sum >/dev/null; then
-          sha256sum --check "${archive}.sha256"
+          printf '%s  %s\n' "$expected" "$archive" | sha256sum --check -
         else
-          shasum -a 256 --check "${archive}.sha256"
+          printf '%s  %s\n' "$expected" "$archive" | shasum -a 256 --check -
         fi
         tar -xzf "$archive" -C "$RUNNER_TEMP"
-        echo "$RUNNER_TEMP/binaryen-version_${version}/bin" >> "$GITHUB_PATH"
+        binaryen_root="$RUNNER_TEMP/binaryen-${version}"
+        test -x "$binaryen_root/bin/wasm-opt"
+        test -x "$binaryen_root/bin/wasm-emscripten-finalize"
+        echo "Binaryen root: $binaryen_root"
+        "$binaryen_root/bin/wasm-opt" --version
+        "$binaryen_root/bin/wasm-emscripten-finalize" --version
+        echo "EM_BINARYEN_ROOT=$binaryen_root" >> "$GITHUB_ENV"
+        echo "WASMOPT=$binaryen_root/bin/wasm-opt" >> "$GITHUB_ENV"
+        echo "$binaryen_root/bin" >> "$GITHUB_PATH"
 
     - name: Install Binaryen on Windows
       if: runner.os == 'Windows'
@@ -51,19 +63,34 @@ runs:
           "ARM64" { "arm64-windows" }
           default { throw "Unsupported Binaryen Windows host: $env:PROCESSOR_ARCHITECTURE" }
         }
-        $archive = "binaryen-version_$version-$platform.tar.gz"
-        $baseUrl = "https://github.com/WebAssembly/binaryen/releases/download/version_$version"
+        $archive = "binaryen-$version-$platform.tar.gz"
+        $baseUrl = "https://github.com/xgo-dev/binaryen/releases/download/$version"
         $archivePath = Join-Path $env:RUNNER_TEMP $archive
-        $checksumPath = "$archivePath.sha256"
+        $checksumRows = @(Get-Content -LiteralPath (Join-Path $env:GITHUB_ACTION_PATH "checksums.txt") |
+          Where-Object { ($_ -split '\s+')[0] -eq $platform })
+        if ($checksumRows.Count -ne 1) { throw "Missing pinned Binaryen checksum for $platform" }
+        $expected = ($checksumRows[0] -split '\s+')[1]
+        if ($expected -notmatch '^[0-9a-fA-F]{64}$') { throw "Invalid pinned Binaryen checksum for $platform" }
         & curl.exe --fail --location --retry 3 --retry-all-errors --output $archivePath "$baseUrl/$archive"
         if ($LASTEXITCODE -ne 0) { throw "Downloading Binaryen failed with exit code $LASTEXITCODE" }
-        & curl.exe --fail --location --retry 3 --retry-all-errors --output $checksumPath "$baseUrl/$archive.sha256"
-        if ($LASTEXITCODE -ne 0) { throw "Downloading the Binaryen checksum failed with exit code $LASTEXITCODE" }
-        $expected = ((Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+')[0]
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash
         if (-not $actual.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
           throw "Binaryen archive SHA-256 is $actual, want $expected"
         }
         & tar.exe -xzf $archivePath -C $env:RUNNER_TEMP
         if ($LASTEXITCODE -ne 0) { throw "Extracting Binaryen failed with exit code $LASTEXITCODE" }
-        Add-Content -Encoding utf8 $env:GITHUB_PATH (Join-Path $env:RUNNER_TEMP "binaryen-version_$version\bin")
+        $binaryenRoot = Join-Path $env:RUNNER_TEMP "binaryen-$version"
+        $binaryenBin = Join-Path $binaryenRoot "bin"
+        $wasmOpt = Join-Path $binaryenBin "wasm-opt.exe"
+        $finalize = Join-Path $binaryenBin "wasm-emscripten-finalize.exe"
+        if (-not (Test-Path $wasmOpt) -or -not (Test-Path $finalize)) {
+          throw "Binaryen archive is missing wasm-opt or wasm-emscripten-finalize in $binaryenBin"
+        }
+        Write-Host "Binaryen root: $binaryenRoot"
+        & $wasmOpt --version
+        if ($LASTEXITCODE -ne 0) { throw "wasm-opt --version failed with exit code $LASTEXITCODE" }
+        & $finalize --version
+        if ($LASTEXITCODE -ne 0) { throw "wasm-emscripten-finalize --version failed with exit code $LASTEXITCODE" }
+        Add-Content -Encoding utf8 $env:GITHUB_ENV "EM_BINARYEN_ROOT=$binaryenRoot"
+        Add-Content -Encoding utf8 $env:GITHUB_ENV "WASMOPT=$wasmOpt"
+        Add-Content -Encoding utf8 $env:GITHUB_PATH $binaryenBin

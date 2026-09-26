@@ -240,6 +240,9 @@ func TestPostLinkWasmReportsToolFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "wasm-opt Asyncify failed") {
 		t.Fatalf("postLinkWasm() error = %v", err)
 	}
+	if !strings.Contains(err.Error(), tool) || !strings.Contains(err.Error(), "wasm-opt version 132 (test helper)") {
+		t.Fatalf("postLinkWasm() error omits selected Binaryen tool: %v", err)
+	}
 	if data, err := os.ReadFile(output); err != nil || string(data) != "old" {
 		t.Fatalf("failed post-link changed final output: %q, %v", data, err)
 	}
@@ -262,6 +265,9 @@ func TestPostLinkWasmReportsPreAsyncifyFailure(t *testing.T) {
 	err := postLinkWasm(wasmPostLinkTestContext(), input, output, false)
 	if err == nil || !strings.Contains(err.Error(), "wasm-opt pre-Asyncify optimization failed") {
 		t.Fatalf("postLinkWasm() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), tool) || !strings.Contains(err.Error(), "wasm-opt version 132 (test helper)") {
+		t.Fatalf("postLinkWasm() error omits selected Binaryen tool: %v", err)
 	}
 	if data, err := os.ReadFile(output); err != nil || string(data) != "old" {
 		t.Fatalf("failed pre-optimization changed final output: %q, %v", data, err)
@@ -298,6 +304,44 @@ func TestPostLinkWasmReportsMissingTool(t *testing.T) {
 	err := postLinkWasm(ctx, "input", filepath.Join(t.TempDir(), "output"), false)
 	if err == nil || !strings.Contains(err.Error(), "install Binaryen or set WASMOPT") {
 		t.Fatalf("postLinkWasm() error = %v", err)
+	}
+}
+
+func TestResolveWasmOptUsesEmscriptenBinaryenRoot(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := writeWasmOptTestTool(t, bin)
+	t.Setenv("EM_BINARYEN_ROOT", root)
+	t.Setenv("WASMOPT", "")
+	got, err := resolveWasmOpt()
+	if err != nil || got != want {
+		t.Fatalf("resolveWasmOpt() = %q, %v; want %q", got, err, want)
+	}
+
+	override := writeWasmOptTestTool(t, t.TempDir())
+	t.Setenv("WASMOPT", override)
+	got, err = resolveWasmOpt()
+	if err != nil || got != override {
+		t.Fatalf("resolveWasmOpt() with WASMOPT = %q, %v; want %q", got, err, override)
+	}
+
+	t.Setenv("EM_BINARYEN_ROOT", "")
+	t.Setenv("WASMOPT", "")
+	t.Setenv("PATH", bin)
+	got, err = resolveWasmOpt()
+	if err != nil || got != want {
+		t.Fatalf("resolveWasmOpt() from PATH = %q, %v; want %q", got, err, want)
+	}
+}
+
+func TestWasmOptIdentityWhenVersionUnavailable(t *testing.T) {
+	tool := writeWasmOptTestTool(t, t.TempDir())
+	t.Setenv("LLGO_TEST_WASM_OPT_HELPER", "fail-version")
+	if got, want := wasmOptIdentity(tool), tool+" (version unavailable)"; got != want {
+		t.Fatalf("wasmOptIdentity() = %q; want %q", got, want)
 	}
 }
 

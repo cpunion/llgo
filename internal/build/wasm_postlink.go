@@ -23,6 +23,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
 	"github.com/xgo-dev/llgo/internal/optlevel"
@@ -101,13 +103,9 @@ func createClosedTemp(dir, pattern string) (string, error) {
 }
 
 func postLinkWasm(ctx *context, input, output string, verbose bool) error {
-	wasmOpt := os.Getenv("WASMOPT")
-	if wasmOpt == "" {
-		wasmOpt = "wasm-opt"
-	}
-	resolved, err := exec.LookPath(wasmOpt)
+	resolved, err := resolveWasmOpt()
 	if err != nil {
-		return fmt.Errorf("WebAssembly Asyncify requires wasm-opt; install Binaryen or set WASMOPT: %w", err)
+		return fmt.Errorf("WebAssembly Asyncify requires wasm-opt; install Binaryen or set WASMOPT or EM_BINARYEN_ROOT: %w", err)
 	}
 
 	preAsyncifyArgs := wasmPreAsyncifyArgs(
@@ -118,7 +116,7 @@ func postLinkWasm(ctx *context, input, output string, verbose bool) error {
 	)
 	if preAsyncifyArgs != nil {
 		if err := runWasmOpt(resolved, preAsyncifyArgs, verbose, ctx); err != nil {
-			return fmt.Errorf("wasm-opt pre-Asyncify optimization failed: %w", err)
+			return fmt.Errorf("wasm-opt pre-Asyncify optimization failed using %s: %w", wasmOptIdentity(resolved), err)
 		}
 	}
 
@@ -139,12 +137,37 @@ func postLinkWasm(ctx *context, input, output string, verbose bool) error {
 		ctx.buildConf.OptLevel,
 	)
 	if err := runWasmOpt(resolved, args, verbose, ctx); err != nil {
-		return fmt.Errorf("wasm-opt Asyncify failed: %w", err)
+		return fmt.Errorf("wasm-opt Asyncify failed using %s: %w", wasmOptIdentity(resolved), err)
 	}
 	if err := os.Rename(tmpName, output); err != nil {
 		return err
 	}
 	return nil
+}
+
+func resolveWasmOpt() (string, error) {
+	wasmOpt := os.Getenv("WASMOPT")
+	if wasmOpt == "" {
+		if root := os.Getenv("EM_BINARYEN_ROOT"); root != "" {
+			name := "wasm-opt"
+			if runtime.GOOS == "windows" {
+				name += ".exe"
+			}
+			wasmOpt = filepath.Join(root, "bin", name)
+		} else {
+			wasmOpt = "wasm-opt"
+		}
+	}
+	return exec.LookPath(wasmOpt)
+}
+
+func wasmOptIdentity(path string) string {
+	output, err := exec.Command(path, "--version").CombinedOutput()
+	version := strings.TrimSpace(string(output))
+	if err != nil || version == "" {
+		return path + " (version unavailable)"
+	}
+	return path + " (" + version + ")"
 }
 
 func runWasmOpt(resolved string, args []string, verbose bool, ctx *context) error {

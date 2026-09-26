@@ -41,6 +41,13 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if mode := os.Getenv("LLGO_TEST_WASM_OPT_HELPER"); mode != "" {
+		if len(os.Args) == 2 && os.Args[1] == "--version" {
+			if mode == "fail-version" {
+				os.Exit(7)
+			}
+			fmt.Println("wasm-opt version 132 (test helper)")
+			os.Exit(0)
+		}
 		if argsFile := os.Getenv("ARGS_FILE"); argsFile != "" {
 			file, err := os.OpenFile(argsFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
 			if err == nil {

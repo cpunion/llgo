@@ -1,6 +1,8 @@
 # LLGo WebAssembly Proposal
 
-Status: draft. Tracking issue: [xgo-dev/llgo#2152](https://github.com/xgo-dev/llgo/issues/2152).
+Status: active. Profile and source-compatibility work is tracked in [xgo-dev/llgo#2152](https://github.com/xgo-dev/llgo/issues/2152); the supported execution and toolchain decisions are tracked in [#2632](https://github.com/xgo-dev/llgo/issues/2632).
+
+The supported build uses the LLGo-patched Binaryen release. Browser execution keeps Emscripten Fiber/Asyncify and advances to a bounded Web Worker pool. W32 advances to WASI threads on WAMR; single-thread WASI is retired only after threaded GC passes. These execution milestones proceed alongside W1-W3 rather than waiting for W3 to finish.
 
 R1 through R3, including R2.1, are merged and remain the delivered foundation of this proposal. W1-W3 build on that foundation to complete the supported WebAssembly profiles before advanced engine features are added.
 
@@ -109,13 +111,15 @@ Run and classify the full applicable `test/**` suite on all four paths, the comp
 
 ## Deferred work
 
-W64, WASI Preview 2 and WIT components, threads and Atomics, WasmGC, Exception Handling, JSPI and Stack Switching, multiple workers, and parallel goroutines are later capability work. Unsupported environments continue to use the single-worker scheduler and LLGo linear-memory GC.
+W64, WASI Preview 2 and WIT components, a WasmGC heap, and JSPI/stackless execution remain later research. EH encoding is selected through the comparison in [#2632](https://github.com/xgo-dev/llgo/issues/2632); existing validated EH behavior remains supported during that work. Browser multi-worker execution and W32 WASI threads are required milestones of #2632, with the single-worker browser mode retained.
 
 ---
 
 # LLGo WebAssembly 提案
 
-状态：草案。跟踪 issue：[xgo-dev/llgo#2152](https://github.com/xgo-dev/llgo/issues/2152)。
+状态：推进中。Profile 与源码兼容性由 [xgo-dev/llgo#2152](https://github.com/xgo-dev/llgo/issues/2152) 跟踪；正式执行架构与工具链决定由 [#2632](https://github.com/xgo-dev/llgo/issues/2632) 跟踪。
+
+正式构建使用 LLGo 打补丁的 Binaryen 版本。浏览器保留 Emscripten Fiber/Asyncify，并推进到有上限的 Web Worker 池。W32 以 WAMR 上的 WASI threads 为目标；只有在线程 GC 验收通过后才移除单线程 WASI。这些运行时工作与 W1-W3 并行推进，不等待 W3 结束。
 
 R1 至 R3（包括 R2.1）已经合并，作为本提案已交付的基础继续保留。W1-W3 在此基础上完成当前支持的 WebAssembly profile，再推进高级引擎特性。
 
@@ -224,4 +228,4 @@ LLGo Core Wasm C ABI 与 WIT Canonical ABI 无关。未来 WASI Preview 2 将在
 
 ## 延期范围
 
-W64、WASI Preview 2/WIT component、threads/Atomics、WasmGC、Exception Handling、JSPI/Stack Switching、多 worker 和并行 goroutine 都是后续 capability 工作。不支持这些能力的环境继续使用单 worker 调度和 LLGo 线性内存 GC。
+W64、WASI Preview 2/WIT component、WasmGC 堆以及 JSPI/stackless 执行仍属于后续研究。EH 编码按照 [#2632](https://github.com/xgo-dev/llgo/issues/2632) 的对比结果确定；期间保留已验证的 EH 行为。浏览器多 worker 和 W32 WASI threads 是 #2632 的必需里程碑，浏览器仍保留单 worker 模式。

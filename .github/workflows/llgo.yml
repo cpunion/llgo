@@ -566,12 +566,10 @@ jobs:
       - name: Set up Emscripten
         uses: emscripten-core/setup-emsdk@v15
         with:
-          version: "4.0.21"
+          version: "6.0.8"
 
       - name: Set up Node for Emscripten Memory64
-        # Emscripten 4.0.21's Memory64 glue rejects Node versions older than
-        # 23. setup-emsdk currently bundles Node 22, so select an active LTS
-        # runtime explicitly for execution without changing emcc itself.
+        # Keep memory64 JavaScript execution on the pinned Node LTS runtime.
         uses: actions/setup-node@v7
         with:
           node-version: "24"
