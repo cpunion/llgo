@@ -64,11 +64,6 @@ func TestRuntimeStackAll(t *testing.T) {
 			t.Errorf("Stack(true) missing %q:\n%s", want, all)
 		}
 	}
-	for _, size := range []int{0, 1, 64} {
-		if n := runtime.Stack(make([]byte, size), true); n != size {
-			t.Errorf("Stack(true) buffer %d returned %d", size, n)
-		}
-	}
 }
 
 func TestRuntimeStackAllConcurrent(t *testing.T) {

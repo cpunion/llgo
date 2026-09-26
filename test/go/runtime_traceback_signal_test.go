@@ -31,10 +31,16 @@ func TestRuntimeStackAllCPUProfile(t *testing.T) {
 	defer func() { atomic.StoreInt32(&stop, 1); <-done }()
 	buf := make([]byte, 128<<10)
 	deadline := time.Now().Add(200 * time.Millisecond)
+	sawWorker := false
 	for time.Now().Before(deadline) {
-		if n := runtime.Stack(buf, true); n == 0 {
+		n := runtime.Stack(buf, true)
+		if n == 0 {
 			t.Fatal("empty traceback while CPU profiling")
 		}
+		sawWorker = sawWorker || strings.Contains(string(buf[:n]), ".tracebackBusy(")
+	}
+	if !sawWorker {
+		t.Fatal("CPU profiling prevented other-thread stack capture")
 	}
 }
 

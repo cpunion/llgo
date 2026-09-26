@@ -45,10 +45,9 @@
 #include <ucontext.h>
 #include <unistd.h>
 
-#define DYNUNW_MAX (1u << 20)
+#include "../../../stacktrace/_wrap/traceback.h"
+
 #define DYNUNW_NAMES 64
-extern uintptr_t *llgo_traceback_fault_buffer(void);
-extern void llgo_traceback_set_unwinder(size_t (*)(void *, uintptr_t *, size_t, uintptr_t *), void (*)(void));
 #define DYNUNW_NAME_LEN 64
 
 /* Results of the last fault-time unwind; read by the Go side. */
@@ -308,7 +307,7 @@ void llgo_dynunwind_capture(void *uctx)
         return;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     dynunw_capturing = 1;
-    dynunw_count = dynunw_run(uctx, dynunw_pcs, DYNUNW_MAX, 1, &dynunw_end_fp);
+    dynunw_count = dynunw_run(uctx, dynunw_pcs, LLGO_TRACEBACK_MAX, 1, &dynunw_end_fp);
     dynunw_capturing = 0;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     dynunw_ns = (long long)(t1.tv_sec - t0.tv_sec) * 1000000000LL +
