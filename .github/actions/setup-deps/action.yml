@@ -314,7 +314,7 @@ runs:
         # LLGo itself and the LLVM Go bindings are host programs even when
         # this job will later execute ARM64 or 386 output. Target SDK variables
         # are activated only after the host compiler has been installed.
-        $null = Enter-LLGoVisualStudio2022 -GoArch $hostGoArch
+        $null = Enter-LLGoVisualStudio -GoArch $hostGoArch
 
         # Clang emits the MSVC ABI but uses the SDK/UCRT selected by the
         # Visual Studio developer environment. Persist the host search

@@ -171,7 +171,7 @@ runs:
           # SDK only inside this process when producing the target cargs
           # archive; the shared target environment is activated afterwards.
           . (Join-Path $env:GITHUB_WORKSPACE ".github\windows\msvc-target.ps1")
-          $null = Enter-LLGoVisualStudio2022 -GoArch "${{ inputs.windows-arch }}"
+          $null = Enter-LLGoVisualStudio -GoArch "${{ inputs.windows-arch }}"
         }
         $compiler = (Get-Command clang.exe).Source
         if ("${{ inputs.windows-abi }}" -eq "mingw" -and "${{ inputs.windows-arch }}" -eq "386") {

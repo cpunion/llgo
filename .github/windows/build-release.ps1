@@ -59,7 +59,7 @@ $env:CGO_CPPFLAGS = (Invoke-ReleaseCapture $llvmConfig @('--cflags')).Trim().Rep
 $env:CGO_CXXFLAGS = '-std=c++17'
 if ($Profile -eq 'msvc') {
   . (Join-Path $PSScriptRoot 'msvc-target.ps1')
-  $target = Enter-LLGoVisualStudio2022 -GoArch $GoArch
+  $target = Enter-LLGoVisualStudio -GoArch $GoArch
   # Keep the bootstrap driver from setup-deps; the developer shell can put a
   # different Visual Studio Clang first on PATH.
   $bootstrapBin = Split-Path $readObj
