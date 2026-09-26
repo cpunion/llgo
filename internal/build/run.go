@@ -426,8 +426,10 @@ func runRunnerCommand(commands commandEnv, name string, args []string, details r
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	err := cmd.Run()
-	if errors.Is(err, exec.ErrWaitDelay) && cmd.Cancel != nil {
-		// The runner exited, but a descendant still owns an output pipe.
+	if err != nil && details.timeout > 0 && cmd.Process != nil && cmd.Cancel != nil {
+		// A failed runner can leave descendants holding output pipes. Wait
+		// preserves a nonzero exit status over ErrWaitDelay, so clean up after
+		// either result while keeping the original failure for diagnostics.
 		_ = cmd.Cancel()
 	}
 	if err != nil {

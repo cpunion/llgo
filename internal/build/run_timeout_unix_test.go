@@ -87,17 +87,28 @@ func TestRunnerBoundsInheritedOutputPipes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	t.Cleanup(func() { killTimeoutHelper(dir) })
-	started := time.Now()
-	err = runRunnerCommand(timeoutHelperCommands(dir, "exit-with-child"), executable,
-		[]string{"-test.run=^TestRunnerTimeoutHelper$"}, runnerDetails{timeout: 30 * time.Second}, io.Discard, io.Discard)
-	var failure *runnerFailure
-	if !errors.As(err, &failure) || failure.status != runnerStatusOutputTimeout || !errors.Is(err, exec.ErrWaitDelay) {
-		t.Fatalf("error = %v, want inherited output pipe timeout", err)
+	for _, mode := range []string{"exit-with-child", "fail-with-child"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Cleanup(func() { killTimeoutHelper(dir) })
+			started := time.Now()
+			err := runRunnerCommand(timeoutHelperCommands(dir, mode), executable,
+				[]string{"-test.run=^TestRunnerTimeoutHelper$"}, runnerDetails{timeout: 30 * time.Second}, io.Discard, io.Discard)
+			var failure *runnerFailure
+			if !errors.As(err, &failure) {
+				t.Fatalf("error = %v, want classified runner failure", err)
+			}
+			if mode == "exit-with-child" {
+				if failure.status != runnerStatusOutputTimeout || !errors.Is(err, exec.ErrWaitDelay) {
+					t.Fatalf("error = %v, want inherited output pipe timeout", err)
+				}
+			} else if failure.status != runnerStatusExit || failure.exitCode != 1 {
+				t.Fatalf("error = %v, want preserved exit code 1", err)
+			}
+			if elapsed := time.Since(started); elapsed > 5*time.Second {
+				t.Fatalf("output pipes blocked for %s", elapsed)
+			}
+			assertTimeoutHelperStopped(t, dir)
+		})
 	}
-	if elapsed := time.Since(started); elapsed > 5*time.Second {
-		t.Fatalf("output pipes blocked for %s", elapsed)
-	}
-	assertTimeoutHelperStopped(t, dir)
 }

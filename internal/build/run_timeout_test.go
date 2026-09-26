@@ -169,6 +169,9 @@ func TestRunnerTimeoutHelper(t *testing.T) {
 	if mode == "exit-with-child" {
 		return
 	}
+	if mode == "fail-with-child" {
+		t.Fatal("runner failed while its child is still running")
+	}
 	if err := cmd.Wait(); err != nil {
 		t.Fatal(err)
 	}
