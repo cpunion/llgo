@@ -29,16 +29,17 @@ def run(command, *, env=None, timeout=180):
 def check_source_lines(module, debug_line, addr2line):
     # DWARF line tables use code-section offsets. The Wasm symbol table uses
     # different offsets, so resolve actual line-table rows, not symbol values.
+    tables = re.split(r"(?=^debug_line\[)", debug_line, flags=re.MULTILINE)
     for filename, line in SOURCE_LINES.items():
         matches = []
-        for table in re.split(r"(?=^debug_line\[)", debug_line, flags=re.MULTILINE):
+        line_pattern = re.compile(
+            rf"^0x([0-9a-fA-F]+)\s+{line}\s+\d+\s+1\s",
+            re.MULTILINE,
+        )
+        for table in tables:
             if f'name: "{filename}"' not in table:
                 continue
-            for match in re.finditer(
-                r"^0x([0-9a-fA-F]+)\s+" + str(line) + r"\s+\d+\s+1\s",
-                table,
-                re.MULTILINE,
-            ):
+            for match in line_pattern.finditer(table):
                 matches.append(match.group(1))
         for address in matches:
             location = run([addr2line, "-e", str(module), "-f", f"0x{address}"])
