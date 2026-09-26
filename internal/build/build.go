@@ -3678,7 +3678,7 @@ func buildSSAPkgs(ctx *context, entries []ssaBuildEntry) {
 	repairSpan := ctx.buildTrace.startCoordinator("repair SSA order", nil)
 	for _, entry := range unique {
 		if entry.fixOrder {
-			fixSSAOrder(entry.pkg, entry.syntax)
+			fixSSAOrder(entry.pkg)
 		}
 	}
 	repairSpan.done()
