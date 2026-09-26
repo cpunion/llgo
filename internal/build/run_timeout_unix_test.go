@@ -1,0 +1,103 @@
+//go:build !llgo && unix
+
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package build
+
+import (
+	stdcontext "context"
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"testing"
+	"time"
+)
+
+func TestRunnerPreservesTerminalInput(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is needed to create a controlling terminal")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const script = `
+import errno, os, pty, select, sys, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], [sys.argv[1], '-test.run=^TestRunnerTimeoutHelper$'])
+output = b''
+restored = False
+try:
+    os.write(fd, b'child-input\n')
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if not select.select([fd], [], [], 0.1)[0]:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError as err:
+            if err.errno == errno.EIO:
+                break
+            raise
+        if not chunk:
+            break
+        output += chunk
+        if b'terminal read: child-input' in output and not restored:
+            os.write(fd, b'parent-input\n')
+            restored = True
+        if b'terminal restored: parent-input' in output:
+            break
+    assert b'terminal restored: parent-input' in output, output
+finally:
+    os.close(fd)
+    try:
+        os.kill(pid, 9)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+`
+	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, python, "-c", script, executable)
+	cmd.Env = timeoutHelperCommands(t.TempDir(), "terminal-runner").environ
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("terminal runner: %v\n%s", err, output)
+	}
+}
+
+func TestRunnerBoundsInheritedOutputPipes(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	t.Cleanup(func() { killTimeoutHelper(dir) })
+	started := time.Now()
+	err = runRunnerCommand(timeoutHelperCommands(dir, "exit-with-child"), executable,
+		[]string{"-test.run=^TestRunnerTimeoutHelper$"}, runnerDetails{timeout: 30 * time.Second}, io.Discard, io.Discard)
+	var failure *runnerFailure
+	if !errors.As(err, &failure) || failure.status != runnerStatusOutputTimeout || !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("error = %v, want inherited output pipe timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("output pipes blocked for %s", elapsed)
+	}
+	assertTimeoutHelperStopped(t, dir)
+}

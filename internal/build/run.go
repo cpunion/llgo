@@ -60,6 +60,7 @@ const (
 	runnerStatusExit           = "exit"
 	runnerStatusStart          = "start-error"
 	runnerStatusTimeout        = "timeout"
+	runnerStatusOutputTimeout  = "output-timeout"
 )
 
 // runnerDetails identifies the command boundary that owns a host process.
@@ -297,6 +298,7 @@ func runNative(ctx *context, app, pkgDir, pkgName string, conf *Config, mode Mod
 
 	switch mode {
 	case ModeRun:
+		details := runnerDetails{phase: "run", target: conf.Target, artifact: app, packageName: pkgName, timeout: conf.RunnerTimeout}
 		args := make([]string, 0, len(conf.RunArgs)+1)
 		if isWasmTarget(conf.Goos) {
 			wasmer := os.ExpandEnv(WasmRuntime())
@@ -322,17 +324,7 @@ func runNative(ctx *context, app, pkgDir, pkgName string, conf *Config, mode Mod
 		if conf.PrintCommands {
 			fmt.Fprintf(os.Stderr, "%s %s\n", app, strings.Join(args, " "))
 		}
-		cmd := exec.Command(app, args...)
-		ctx.commands.configure(cmd)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err := cmd.Run()
-		if err != nil {
-			return err
-		}
-		// A nil Run error already means exit status zero. Return through Build so
-		// caller-owned artifact cleanup and tracing defers can complete.
+		return runRunnerCommand(ctx.commands, app, args, details, os.Stdout, os.Stderr)
 	case ModeCmpTest:
 		cmpTest(ctx.commands, pkgDir, pkgName, app, conf.GenExpect, conf.RunArgs)
 	}
@@ -362,9 +354,7 @@ func runInEmulator(commands commandEnv, emulator, profile string, envMap map[str
 	}
 
 	switch mode {
-	case ModeRun:
-		return runEmuCmd(commands, envMap, emulator, conf.RunArgs, verbose, conf.PrintCommands, details)
-	case ModeTest:
+	case ModeRun, ModeTest:
 		return runEmuCmd(commands, envMap, emulator, conf.RunArgs, verbose, conf.PrintCommands, details)
 	case ModeCmpTest:
 		cmpTest(commands, pkgDir, pkgName, envMap["out"], conf.GenExpect, conf.RunArgs)
@@ -412,7 +402,11 @@ func runEmuCmdTo(commands commandEnv, envMap map[string]string, emulatorTemplate
 		fmt.Fprintf(stderr, "%s %s\n", cmdParts[0], strings.Join(cmdParts[1:], " "))
 	}
 
-	// Execute the emulator command. The test binary owns its Go-level timeout;
+	return runRunnerCommand(commands, cmdParts[0], cmdParts[1:], details, stdout, stderr)
+}
+
+func runRunnerCommand(commands commandEnv, name string, args []string, details runnerDetails, stdout, stderr io.Writer) error {
+	// The test binary owns its Go-level timeout;
 	// this outer deadline also covers a host runner that stops forwarding exit
 	// or otherwise hangs after the guest should have terminated.
 	var runContext stdcontext.Context = stdcontext.Background()
@@ -421,12 +415,21 @@ func runEmuCmdTo(commands commandEnv, envMap map[string]string, emulatorTemplate
 		runContext, cancel = stdcontext.WithTimeout(runContext, details.timeout)
 	}
 	defer cancel()
-	cmd := exec.CommandContext(runContext, cmdParts[0], cmdParts[1:]...)
+	cmd := exec.CommandContext(runContext, name, args...)
 	commands.configure(cmd)
 	cmd.Stdin = os.Stdin
+	if details.timeout > 0 {
+		restore := configureRunnerCancellation(cmd)
+		defer restore()
+		cmd.WaitDelay = time.Second
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	err = cmd.Run()
+	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.Cancel != nil {
+		// The runner exited, but a descendant still owns an output pipe.
+		_ = cmd.Cancel()
+	}
 	if err != nil {
 		status := runnerStatusStart
 		exitCode := -1
@@ -435,13 +438,15 @@ func runEmuCmdTo(commands commandEnv, envMap map[string]string, emulatorTemplate
 		case errors.Is(runContext.Err(), stdcontext.DeadlineExceeded):
 			status = runnerStatusTimeout
 			err = fmt.Errorf("runner exceeded %s: %w", details.timeout, stdcontext.DeadlineExceeded)
+		case errors.Is(err, exec.ErrWaitDelay):
+			status = runnerStatusOutputTimeout
 		case errors.As(err, &exitErr):
 			status = runnerStatusExit
 			exitCode = exitErr.ExitCode()
 		case errors.Is(err, exec.ErrNotFound), errors.Is(err, os.ErrNotExist):
 			status = runnerStatusUnavailable
 		}
-		return newRunnerFailure(details, cmdParts[0], status, exitCode, err)
+		return newRunnerFailure(details, name, status, exitCode, err)
 	}
 	// Returning normally keeps cleanup of implicit modules and target sidecars reachable.
 	return nil
