@@ -22,5 +22,8 @@ func testCGlobalRootWordOffset() uint32
 //go:linkname testCPointerSize C.llgo_test_gc_c_pointer_size
 func testCPointerSize() uint32
 
+//go:linkname testCRealloc C.llgo_test_gc_realloc
+func testCRealloc() int32
+
 //go:linkname testClobberCStack C.llgo_test_gc_clobber_c_stack
 func testClobberCStack(depth uint32)

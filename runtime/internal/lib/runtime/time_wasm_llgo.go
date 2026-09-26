@@ -1,4 +1,4 @@
-//go:build wasm && !baremetal
+//go:build wasm && !baremetal && !(wasip1 && llgo.wasi_threads)
 
 package runtime
 

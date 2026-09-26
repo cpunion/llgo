@@ -43,6 +43,46 @@ uint32_t llgo_test_gc_c_pointer_size(void) {
 	return sizeof(void *);
 }
 
+int llgo_test_gc_realloc(void) {
+	unsigned char *from_zero = realloc(malloc(0), 8);
+	if (from_zero == NULL) {
+		return 0;
+	}
+	from_zero[0] = 0x5a;
+	if (from_zero[0] != 0x5a) {
+		return 0;
+	}
+	free(from_zero);
+
+	unsigned char *bytes = malloc(17);
+	if (bytes == NULL) {
+		return 0;
+	}
+	for (unsigned i = 0; i < 17; i++) {
+		bytes[i] = (unsigned char)(i + 1);
+	}
+	unsigned char *grown = realloc(bytes, 257);
+	if (grown == NULL) {
+		return 0;
+	}
+	for (unsigned i = 0; i < 17; i++) {
+		if (grown[i] != (unsigned char)(i + 1)) {
+			return 0;
+		}
+	}
+	unsigned char *shrunk = realloc(grown, 8);
+	if (shrunk == NULL) {
+		return 0;
+	}
+	for (unsigned i = 0; i < 8; i++) {
+		if (shrunk[i] != (unsigned char)(i + 1)) {
+			return 0;
+		}
+	}
+	free(shrunk);
+	return 1;
+}
+
 __attribute__((noinline)) void llgo_test_gc_clobber_c_stack(unsigned depth) {
 	volatile uintptr_t words[64];
 	for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i++) {

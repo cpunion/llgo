@@ -507,6 +507,10 @@ jobs:
 
           iwasm --stack-size=819200000 --heap-size=800000000 hello.wasm
 
+      - name: Test WASI pthread backend (WAMR)
+        shell: bash
+        run: python3 dev/test_wasm_wasi_threads.py
+
   windows-gnu-cross:
     if: needs.prepare.outputs.run_code_ci == 'true'
     needs: prepare

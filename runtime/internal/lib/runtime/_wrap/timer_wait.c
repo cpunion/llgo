@@ -9,6 +9,16 @@
 
 #define LLGO_TIMER_MAX_WAIT_NANOS INT64_C(86400000000000)
 
+#if defined(__wasi__)
+int64_t llgo_wasi_monotonic_time(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    return (int64_t)now.tv_sec * INT64_C(1000000000) + now.tv_nsec;
+}
+#endif
+
 int llgo_timer_cond_init(pthread_cond_t *condition)
 {
 #if defined(__APPLE__)

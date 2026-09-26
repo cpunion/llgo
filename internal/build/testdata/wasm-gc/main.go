@@ -23,6 +23,9 @@ func main() {
 	if testAlignedAlloc() == 0 {
 		panic("aligned allocation failed")
 	}
+	if testCRealloc() == 0 {
+		panic("C realloc did not retain data")
+	}
 	testCGlobalRoot()
 	testRoots()
 	testUintptrEscapesRoots()

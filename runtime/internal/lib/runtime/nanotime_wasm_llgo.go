@@ -1,4 +1,4 @@
-//go:build wasm && !baremetal
+//go:build wasm && !baremetal && !(wasip1 && llgo.wasi_threads)
 
 package runtime
 
@@ -17,7 +17,10 @@ const wasmClockMonotonic = ct.ClockidT(1)
 func nanotime1() int64 {
 	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
 	if ct.ClockGettime(wasmClockMonotonic, tv) != 0 {
-		return 0
+		// Keep a fallback for single-worker hosts without CLOCK_MONOTONIC.
+		if ct.ClockGettime(ct.CLOCK_REALTIME, tv) != 0 {
+			return 0
+		}
 	}
 	return int64(tv.Sec)*1e9 + int64(tv.Nsec)
 }

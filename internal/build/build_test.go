@@ -844,6 +844,14 @@ func TestConfigureWasmGCRejectsWASIThreads(t *testing.T) {
 	if _, err := configureWasmGC(&conf, &crosscompile.Export{WasmProfile: crosscompile.WasmProfileW32}); err == nil {
 		t.Fatal("expected llgo.wasm.gc.linear with WASI threads to fail")
 	}
+	conf.Tags = ""
+	if _, err := configureWasmGC(&conf, &crosscompile.Export{WasmProfile: crosscompile.WasmProfileW32}); err == nil || !strings.Contains(err.Error(), "-tags nogc") {
+		t.Fatalf("WASI threads without a collector returned %v, want an actionable error", err)
+	}
+	conf.Tags = "nogc"
+	if enabled, err := configureWasmGC(&conf, &crosscompile.Export{WasmProfile: crosscompile.WasmProfileW32}); err != nil || enabled {
+		t.Fatalf("experimental WASI threads with nogc = %v, %v; want false, nil", enabled, err)
+	}
 }
 
 func TestNeedStartWASITargetAliases(t *testing.T) {

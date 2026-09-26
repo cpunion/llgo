@@ -366,15 +366,16 @@ func Alloc(size uintptr) unsafe.Pointer {
 }
 
 func Realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
-	if ptr == nil {
+	if ptr == nil || ptr == unsafe.Pointer(&zeroSizedAlloc) {
 		return Alloc(size)
 	}
 	lock(&gcMutex)
 	lazyInit()
-	unlock(&gcMutex)
-
+	// Keep the metadata read within the allocator lock. A threaded collector
+	// must also coordinate the subsequent copy and release with sweeping.
 	ptrAddress := uintptr(ptr)
 	endOfTailAddress := gcAddressOf(gcFindNext(blockFromAddr(ptrAddress)))
+	unlock(&gcMutex)
 
 	// this might be a few bytes longer than the original size of
 	// ptr, because we align to full blocks of size bytesPerBlock
