@@ -177,7 +177,7 @@ func TestFixSSAOrderCryptoX509ParseOID(t *testing.T) {
 	prog, ssaPackages := ssautil.Packages(loaded, mode)
 	prog.Build()
 	pkg := ssaPackages[0]
-	fixSSAOrder(pkg, loaded[0].Syntax)
+	fixSSAOrder(pkg)
 	checkReturnLoadAfterMutation(t, pkg.Func("ParseOID"), "unmarshalOIDText")
 }
 
@@ -348,7 +348,7 @@ func buildSSAOrderTestPackageMode(t *testing.T, src string, mode ssa.BuilderMode
 	if err != nil {
 		t.Fatalf("BuildPackage: %v", err)
 	}
-	fixSSAOrder(ssapkg, files)
+	fixSSAOrder(ssapkg)
 	fn, ok := ssapkg.Members["f"].(*ssa.Function)
 	if !ok {
 		t.Fatalf("missing function f")
