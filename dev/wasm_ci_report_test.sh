@@ -52,18 +52,11 @@ for expected in \
 done
 
 github_summary="${test_dir}/github-summary.md"
-# This test is about the report written when the first Wasm case fails. The
-# acceptance script runs host Go probes before that case; stub those probes so
-# an unrelated host toolchain failure cannot hide the report assertion.
-cat >"${test_dir}/go" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-chmod +x "${test_dir}/go"
+# The test-command suite starts with a recorded case. Runtime-only preflight
+# checks run before its first recorded case and would obscure this assertion.
 set +e
-integration_output="$(PATH="${test_dir}:${PATH}" GITHUB_STEP_SUMMARY="${github_summary}" \
-	LLGO="${test_dir}/missing-llgo" \
-	"${repo_root}/dev/test_wasm_single_worker.sh" 2>&1)"
+integration_output="$(GITHUB_STEP_SUMMARY="${github_summary}" LLGO="${test_dir}/missing-llgo" \
+	"${repo_root}/dev/test_wasm_single_worker.sh" test-command 2>&1)"
 integration_status=$?
 set -e
 if [[ ! -f "${github_summary}" ]]; then
@@ -78,7 +71,7 @@ github_output="$(cat "${github_summary}")"
 for expected in \
 	'| EC32/emscripten | 1 | 0 | 0 | 0 | 1 | 0 | 0 |' \
 	'Suite result: fail' \
-	"Unexpected failure: \`EC32/emscripten/scheduler\`"; do
+	"Unexpected failure: \`EC32/emscripten/public-test\`"; do
 	assert_contains "${expected}" "${integration_output}"
 	assert_contains "${expected}" "${github_output}"
 done
