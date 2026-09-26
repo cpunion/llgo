@@ -34,31 +34,53 @@ if [[ -e "${test_dir}/continued" ]]; then
 fi
 
 summary="$(wasm_ci_render_report "${report_file}" 1)"
+assert_contains() {
+	local expected="$1"
+	local actual="$2"
+	if ! grep -Fq "${expected}" <<<"${actual}"; then
+		printf 'missing report entry %q in:\n%s\n' "${expected}" "${actual}" >&2
+		exit 1
+	fi
+}
 for expected in \
 	'| emscripten | 3 | 3 | 1 | 0 | 1 | 0 | 0 |' \
 	'| wasi | 2 | 1 | 0 | 1 | 0 | 1 | 2 |' \
 	'| **Total** | **5** | **4** | **1** | **1** | **1** | **1** | **2** |' \
 	'Suite result: fail (exit status 1).' \
 	"Unexpected failure: \`emscripten/broken\`"; do
-	grep -Fq "${expected}" <<<"${summary}"
+	assert_contains "${expected}" "${summary}"
 done
 
 github_summary="${test_dir}/github-summary.md"
+# This test is about the report written when the first Wasm case fails. The
+# acceptance script runs host Go probes before that case; stub those probes so
+# an unrelated host toolchain failure cannot hide the report assertion.
+cat >"${test_dir}/go" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "${test_dir}/go"
 set +e
-integration_output="$(GITHUB_STEP_SUMMARY="${github_summary}" LLGO="${test_dir}/missing-llgo" \
+integration_output="$(PATH="${test_dir}:${PATH}" GITHUB_STEP_SUMMARY="${github_summary}" \
+	LLGO="${test_dir}/missing-llgo" \
 	"${repo_root}/dev/test_wasm_single_worker.sh" 2>&1)"
 integration_status=$?
 set -e
+if [[ ! -f "${github_summary}" ]]; then
+	printf 'single-worker report missing (exit %s):\n%s\n' "${integration_status}" "${integration_output}" >&2
+	exit 1
+fi
 if [[ ${integration_status} -eq 0 ]]; then
 	echo "single-worker suite with a missing compiler returned success" >&2
 	exit 1
 fi
+github_output="$(cat "${github_summary}")"
 for expected in \
 	'| EC32/emscripten | 1 | 0 | 0 | 0 | 1 | 0 | 0 |' \
 	'Suite result: fail' \
 	"Unexpected failure: \`EC32/emscripten/scheduler\`"; do
-	grep -Fq "${expected}" <<<"${integration_output}"
-	grep -Fq "${expected}" "${github_summary}"
+	assert_contains "${expected}" "${integration_output}"
+	assert_contains "${expected}" "${github_output}"
 done
 
 echo "WebAssembly CI report checks passed"

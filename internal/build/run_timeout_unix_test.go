@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,7 +42,7 @@ func TestRunnerPreservesTerminalInput(t *testing.T) {
 import errno, os, pty, select, sys, time
 pid, fd = pty.fork()
 if pid == 0:
-    os.execv(sys.argv[1], [sys.argv[1], '-test.run=^TestRunnerTimeoutHelper$'])
+    os.execv(sys.argv[1], [sys.argv[1], '-test.run=^TestRunnerTimeoutHelper$', *sys.argv[2:]])
 output = b''
 restored = False
 try:
@@ -65,17 +66,37 @@ try:
         if b'terminal restored: parent-input' in output:
             break
     assert b'terminal restored: parent-input' in output, output
+    # Let the test binary exit normally. Killing it immediately after the
+    # marker loses its coverage data and can hide a late process error.
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        completed, status = os.waitpid(pid, os.WNOHANG)
+        if completed == pid:
+            pid = None
+            assert os.waitstatus_to_exitcode(status) == 0, output
+            break
+        time.sleep(0.02)
+    assert pid is None, output
 finally:
     os.close(fd)
-    try:
-        os.kill(pid, 9)
-    except ProcessLookupError:
-        pass
-    os.waitpid(pid, 0)
+    if pid is not None:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+        os.waitpid(pid, 0)
 `
+	args := []string{"-c", script, executable}
+	for _, arg := range os.Args {
+		if strings.HasPrefix(arg, "-test.gocoverdir=") {
+			// The terminal runner is a child test binary; include its exercised
+			// process-group path in go test's coverage data.
+			args = append(args, arg)
+		}
+	}
 	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, python, "-c", script, executable)
+	cmd := exec.CommandContext(ctx, python, args...)
 	cmd.Env = timeoutHelperCommands(t.TempDir(), "terminal-runner").environ
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("terminal runner: %v\n%s", err, output)
