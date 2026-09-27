@@ -1,8 +1,8 @@
 @echo off
 set "GOFLAGS=-tags=byollvm"
 set "CGO_ENABLED=1"
-set "CC=clang"
-set "CXX=clang++"
+set "CC=clang -fuse-ld=lld"
+set "CXX=clang++ -fuse-ld=lld"
 set "LLVM_CONFIG=llvm-config"
 set "CGO_CXXFLAGS=-std=c++17"
 set "LLGO_ROOT=%PIXI_PROJECT_ROOT%\.."
