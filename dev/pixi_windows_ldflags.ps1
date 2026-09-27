@@ -21,4 +21,4 @@ $flags = $libraries | ForEach-Object {
   }
   '-l' + [IO.Path]::GetFileNameWithoutExtension($_)
 }
-'-L"' + $libraryDirectory + '" ' + ($flags -join ' ')
+'"-L' + $libraryDirectory + '" ' + ($flags -join ' ')
