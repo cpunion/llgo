@@ -14,11 +14,14 @@ if ($LASTEXITCODE -ne 0) {
   throw 'llvm-config failed to report the system libraries'
 }
 
-$libraries = ($libraryNames, $systemNames) -split '\s+' | Where-Object { $_ }
+$libraries = ($libraryNames, $systemNames) -split '\s+' | Where-Object {
+  $_ -and $_ -notin @('libxml2s.lib', 'xml2s.lib', 'xml2.lib')
+}
 $flags = $libraries | ForEach-Object {
   if (-not $_.EndsWith('.lib', [StringComparison]::OrdinalIgnoreCase)) {
     throw "llvm-config reported an unsupported library: $_"
   }
-  '-l' + [IO.Path]::GetFileNameWithoutExtension($_)
+  $name = [IO.Path]::GetFileNameWithoutExtension($_) -replace '\.dll$', ''
+  '-l' + $name
 }
 '"-L' + $libraryDirectory + '" ' + ($flags -join ' ')
