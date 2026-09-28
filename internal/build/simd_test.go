@@ -21,11 +21,19 @@ import "simd/archsimd"
 func add(x, y archsimd.Float32x4) archsimd.Float32x4 { return x.Add(y) }
 //go:noinline
 func lane(x archsimd.Float32x4, i uint8) float32 { return x.GetElem(i) }
+//go:noinline
+func indirect(f func(archsimd.Float32x4, archsimd.Float32x4) archsimd.Float32x4, x, y archsimd.Float32x4) archsimd.Float32x4 { return f(x, y) }
 func main() {
  var x, y archsimd.Float32x4
  x = x.SetElem(0, 1.5).SetElem(3, -2)
  y = y.SetElem(0, 2.5).SetElem(3, 5)
  z := add(x, y)
+ viaExpr := indirect(archsimd.Float32x4.Add, x, y)
+ if viaExpr.GetElem(0) != 4 { panic("method expression") }
+ go z.Add(y)
+ done := make(chan float32, 1)
+ go func(f func(uint8) float32) { done <- f(0) }(z.GetElem)
+ if <-done != 4 { panic("goroutine method value") }
  if lane(z, 0) != 4 || lane(z, 1) != 0 || lane(z, 3) != 3 { panic("float add") }
  sub := z.Sub
  z = sub(y)
