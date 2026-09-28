@@ -346,7 +346,7 @@ Pixi runs natively on Linux x86-64/ARM64, macOS Intel/ARM64, and Windows
 x86-64. On Windows, run `llgo.exe version` in PowerShell. It provides the
 compiler toolchain and common native libraries; specialized C packages such as
 cJSON are outside the default environment. See [development tooling](dev/README.md)
-for the platform matrix and CI checks.
+for the platform matrix, CI checks, and Windows PowerShell/shared-worktree setup.
 
 ### with Nix (development)
 
