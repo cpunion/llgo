@@ -20,6 +20,29 @@ cJSON, Python, and LLDB are not part of Pixi's default environment.
 CI builds LLGo and runs a small compiled program in each environment on all
 listed platforms; the Nix CI also checks Windows through WSL2.
 
+On Windows, `pixi shell` starts a temporary PowerShell script. If PowerShell's
+execution policy is `Restricted`, allow local scripts for the current session
+before starting the shell (this does not change the user or machine policy):
+
+```powershell
+Set-ExecutionPolicy -Scope Process RemoteSigned
+pixi shell --manifest-path .\dev\pixi.toml
+```
+
+If the same worktree is shared with macOS over a mapped Windows drive, keep
+Windows' Pixi environment on the local disk so it does not reuse macOS's
+`dev/.pixi/envs/default`. Pixi resolves mapped shares to UNC paths, where its
+automatic Windows batch activation is unreliable. From the repository root on
+the mapped drive, use a CMD shell with explicit activation instead:
+
+```powershell
+pixi config set --global detached-environments true
+pixi run --manifest-path .\dev\pixi.toml --frozen cmd /k "call dev\activate_pixi.bat"
+```
+
+The first command is a one-time setting for the Windows user. `exit` leaves the
+CMD shell. The mapped drive must be available in the session running Pixi.
+
 ## Containers and scripts
 
 ## Prerequisites
