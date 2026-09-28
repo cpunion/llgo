@@ -79,11 +79,17 @@ else:
                                    "RUNNER_OS": runner, "LLGO_GO_TEST_OVERLAY": overlay,
                                    "TEST_GO_LOG": str(log)})
                 calls = [json.loads(line) for line in log.read_text().splitlines()]
-                self.assertEqual(len(calls), 3)
-                for package in ("./cl", "./test/go"):
+                self.assertEqual(len(calls), 4)
+                for package in ("./cl", "./internal/build", "./test/go"):
                     args = next(args for args in calls if package in args)
                     self.assertEqual([arg for arg in args if arg.startswith("-overlay=")],
                                      [f"-overlay={overlay}"] if overlay else [])
+                simd = next(args for args in calls if "./internal/build" in args)
+                self.assertIn("^TestSIMD", simd)
+                self.assertIn("-coverprofile=coverage-simd.txt", simd)
+                self.assertIn(
+                    "-coverpkg=github.com/xgo-dev/llgo/internal/build,"
+                    "github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa", simd)
 
     def test_code_and_document_jobs_consume_the_shared_decision(self):
         for filename in [*CODE_WORKFLOWS, "doc-link-checker.yml", "model-demo.yml"]:
