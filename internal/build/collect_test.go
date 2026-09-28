@@ -280,7 +280,7 @@ func TestWasmFuncInfoEntriesParticipateInFingerprint(t *testing.T) {
 		t.Fatal("function-entry programs reused a package fingerprint without entries")
 	}
 	other, otherFingerprint := fingerprint(true, "second-method-set")
-	if withEntries.WasmFuncInfoScope != "first-method-set" || other.WasmFuncInfoScope != "second-method-set" {
+	if withEntries.ReachabilityScope != "first-method-set" || other.ReachabilityScope != "second-method-set" {
 		t.Fatal("function metadata scope was omitted from the manifest")
 	}
 	if entriesFingerprint == otherFingerprint {

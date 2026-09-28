@@ -149,10 +149,10 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 	if c.prog != nil && c.prog.Target() != nil {
 		m.common.WasmReflectBridges = c.prog.Target().WasmReflectBridges
 		m.common.WasmFuncInfoEntries = c.prog.Target().WasmFuncInfoEntries
-		// Method metadata varies with executable reachability, even for an
-		// otherwise identical dependency package. Keep those cache entries apart.
-		if m.common.WasmFuncInfoEntries && c.buildConf.BuildMode == BuildModeExe {
-			m.common.WasmFuncInfoScope = wasmProgramUseFor(c).funcInfoKey
+		// Method metadata and COFF SIMD bodies depend on executable reachability.
+		// Keep otherwise identical dependencies from different programs apart.
+		if (m.common.WasmFuncInfoEntries && c.buildConf.BuildMode == BuildModeExe) || windowsSIMDReachability(c) {
+			m.common.ReachabilityScope = wasmProgramUseFor(c).funcInfoKey
 		}
 	}
 	m.common.PlatformABI = string(c.crossCompile.Toolchain.ABI)

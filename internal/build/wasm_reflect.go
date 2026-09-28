@@ -342,3 +342,33 @@ func (use *wasmProgramUse) keepsFuncInfo(fn *ssa.Function) bool {
 	}
 	return use.liveObjects[obj]
 }
+
+// COFF resolves relocations before section GC. Even dead archsimd helpers can
+// therefore cause undefined-symbol errors for unimplemented intrinsics. Reuse
+// executable reachability to remove only dead bodies, retaining symbol identity
+// for address metadata. A reachable unsupported operation remains a link error.
+func windowsSIMDReachability(ctx *context) bool {
+	if ctx.buildConf.Goos != "windows" || ctx.buildConf.BuildMode != BuildModeExe || ctx.progSSA == nil {
+		return false
+	}
+	for _, pkg := range ctx.progSSA.AllPackages() {
+		if pkg.Pkg.Path() == "simd/archsimd" {
+			return true
+		}
+	}
+	return false
+}
+
+func (use *wasmProgramUse) keepsSIMDBody(fn *ssa.Function) bool {
+	if use == nil || !use.rooted {
+		return true
+	}
+	obj := fn.Object()
+	if obj == nil || obj.Pkg() == nil || obj.Pkg().Path() != "simd/archsimd" {
+		return true
+	}
+	if _, ok := use.reachable[fn]; ok {
+		return true
+	}
+	return use.liveObjects[obj]
+}

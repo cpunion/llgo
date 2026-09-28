@@ -948,6 +948,10 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 		configureWasmFuncInfoEntries(ctx)
 	}
 
+	if windowsSIMDReachability(ctx) {
+		wasmProgramUseFor(ctx) // Prepare once before parallel backend tasks.
+	}
+
 	allPkgs := append([]*aPackage{}, pkgs...)
 	allPkgs = append(allPkgs, depPkgs...)
 	var nativeTestRoots []*packages.Package
@@ -3060,6 +3064,12 @@ func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string,
 		use := wasmProgramUseFor(ctx)
 		if use != nil && use.rooted {
 			options.FuncInfoFilter = use.keepsFuncInfo
+		}
+	}
+	if windowsSIMDReachability(ctx) && pkgPath == "simd/archsimd" {
+		use := wasmProgramUseFor(ctx)
+		if use.rooted {
+			options.FuncBodyFilter = use.keepsSIMDBody
 		}
 	}
 	// Library exports use final-link wrappers to register foreign caller threads
