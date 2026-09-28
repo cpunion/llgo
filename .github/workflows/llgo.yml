@@ -679,13 +679,8 @@ jobs:
         run: |
           GOOS=wasip1 GOARCH=wasm go test -exec=wasmtime -count=1 -timeout=2m ./test/simd/...
           # The unoptimized testing framework exceeds Wasmtime's locals limit.
-          "$RUNNER_TEMP/llgo-bin/llgo" test -O2 -target wasi -c \
-            -o "$RUNNER_TEMP/simd.test.wasm" ./test/simd
-          # Reflection retains methods outside the implemented SIMD subset.
-          # Any actual call to an unresolved method must trap, never succeed.
-          wasmtime run -W exceptions=y -W multi-memory=y \
-            -W max-wasm-stack=8388608 -W unknown-imports-trap=y \
-            "$RUNNER_TEMP/simd.test.wasm" -test.v -test.count=1 -test.timeout=2m
+          "$RUNNER_TEMP/llgo-bin/llgo" test -O2 -target wasi -emulator \
+            -v -count=1 -timeout=2m ./test/simd/...
 
       - name: Compare JavaScript call semantics with Go
         if: matrix.suite == 'test-command'

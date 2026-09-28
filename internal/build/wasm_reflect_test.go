@@ -265,7 +265,7 @@ func TestProgramUsesWasmReflectBridgesReachability(t *testing.T) {
 func buildWasmReflectTestProgram(t *testing.T, src string) *ssa.Package {
 	t.Helper()
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "p.go", src, 0)
+	file, err := parser.ParseFile(fset, "p.go", src, parser.ParseComments)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,4 +279,47 @@ func buildWasmReflectTestProgram(t *testing.T, src string) *ssa.Package {
 		t.Fatal(err)
 	}
 	return pkg
+}
+
+func TestWasmMetadataReachability(t *testing.T) {
+	const source = `package main
+ type Live struct{}
+ func (Live) Keep() int { return 1 }
+ type Dead struct{}
+ func (Dead) Drop() int { return 2 }
+ type Host struct{}
+ func (Host) Callback() int { return 3 }
+ func sink(any)
+ //export hostCallback
+ func hostCallback() { sink(Host{}); Host{}.Callback() }
+ func main() { sink(Live{}); Live{}.Keep() }
+ `
+	pkg := buildWasmReflectTestProgram(t, source)
+	use := analyzeWasmProgramUse(pkg.Prog, []*ssa.Function{pkg.Func("main")})
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{{"Live", true}, {"Dead", false}, {"Host", true}} {
+		typ := pkg.Pkg.Scope().Lookup(tc.name).Type().(*types.Named)
+		fn := pkg.Prog.FuncValue(typ.Method(0))
+		if got := use.keepsFuncInfo(fn); got != tc.want {
+			t.Errorf("method %s = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if !use.keepsFuncInfo(&ssa.Function{}) {
+		t.Fatal("unknown compiler-generated function was dropped")
+	}
+	conservative := analyzeWasmProgramUse(pkg.Prog, nil)
+	if !conservative.keepsFuncInfo(pkg.Prog.FuncValue(pkg.Pkg.Scope().Lookup("Dead").Type().(*types.Named).Method(0))) {
+		t.Fatal("library method was filtered without executable roots")
+	}
+	again := buildWasmReflectTestProgram(t, source)
+	repeated := analyzeWasmProgramUse(again.Prog, []*ssa.Function{again.Func("main")})
+	if use.funcInfoKey == "" || use.funcInfoKey != repeated.funcInfoKey {
+		t.Fatal("reachability cache key is not deterministic")
+	}
+	changed := analyzeWasmProgramUse(pkg.Prog, []*ssa.Function{pkg.Func("main"), pkg.Prog.FuncValue(pkg.Pkg.Scope().Lookup("Dead").Type().(*types.Named).Method(0))})
+	if use.funcInfoKey == changed.funcInfoKey {
+		t.Fatal("different live methods share a metadata cache key")
+	}
 }

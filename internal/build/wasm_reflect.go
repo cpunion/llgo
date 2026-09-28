@@ -17,9 +17,14 @@
 package build
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"go/ast"
 	"go/types"
+	"slices"
 	"strings"
 
+	"github.com/xgo-dev/llgo/internal/directive"
 	"golang.org/x/tools/go/callgraph/rta"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
@@ -64,9 +69,11 @@ func configureWasmFuncInfoEntries(ctx *context) {
 }
 
 type wasmProgramUse struct {
-	rooted    bool
-	reachable map[*ssa.Function]struct{ AddrTaken bool }
-	all       map[*ssa.Function]bool
+	liveObjects map[types.Object]bool
+	funcInfoKey string
+	rooted      bool
+	reachable   map[*ssa.Function]struct{ AddrTaken bool }
+	all         map[*ssa.Function]bool
 }
 
 func wasmProgramUseFor(ctx *context) *wasmProgramUse {
@@ -74,7 +81,9 @@ func wasmProgramUseFor(ctx *context) *wasmProgramUse {
 		return nil
 	}
 	ctx.wasmProgramUseOnce.Do(func() {
-		ctx.wasmProgramUse = analyzeWasmProgramUse(ctx.progSSA, wasmReflectRoots(ctx))
+		if ctx.wasmProgramUse == nil {
+			ctx.wasmProgramUse = analyzeWasmProgramUse(ctx.progSSA, wasmReflectRoots(ctx))
+		}
 	})
 	return ctx.wasmProgramUse
 }
@@ -85,7 +94,29 @@ func analyzeWasmProgramUse(prog *ssa.Program, roots []*ssa.Function) *wasmProgra
 		return use
 	}
 	if use.rooted {
-		use.reachable = rta.Analyze(roots, false).Reachable
+		// Host exports are additional entry points, even when Go never calls them.
+		for fn := range ssautil.AllFunctions(prog) {
+			if decl, ok := fn.Syntax().(*ast.FuncDecl); ok && decl.Doc != nil {
+				for _, comment := range decl.Doc.List {
+					if d, ok := directive.Parse(comment); ok && (d.Name == "export" || d.Name == "go:wasmexport") {
+						roots = append(roots, fn)
+						break
+					}
+				}
+			}
+		}
+		result := rta.Analyze(roots, false)
+		use.reachable = result.Reachable
+		use.liveObjects = make(map[types.Object]bool)
+		var identities []string
+		for fn := range result.Reachable {
+			if obj := fn.Object(); obj != nil && obj.Pkg() != nil && !use.liveObjects[obj] {
+				use.liveObjects[obj] = true
+				identities = append(identities, obj.Pkg().Path()+":"+obj.String())
+			}
+		}
+		slices.Sort(identities)
+		use.funcInfoKey = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(identities, "\n"))))
 	} else {
 		use.all = ssautil.AllFunctions(prog)
 	}
@@ -293,4 +324,21 @@ func ssaFunctionPackagePath(fn *ssa.Function) string {
 		}
 	}
 	return ""
+}
+
+// Ordinary functions and synthetic functions without a declaration remain
+// conservative. Declared methods and their wrappers must be reachable through
+// calls, interfaces, reflection, or a host export before metadata can root them.
+func (use *wasmProgramUse) keepsFuncInfo(fn *ssa.Function) bool {
+	if use == nil || !use.rooted {
+		return true
+	}
+	if _, ok := use.reachable[fn]; ok {
+		return true
+	}
+	obj, ok := fn.Object().(*types.Func)
+	if !ok || obj.Type().(*types.Signature).Recv() == nil {
+		return true
+	}
+	return use.liveObjects[obj]
 }

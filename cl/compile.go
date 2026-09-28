@@ -64,6 +64,9 @@ type Options struct {
 	DebugSymbols bool
 	Trace        bool
 	ExportRename bool
+	// FuncInfoFilter may omit proven-unreachable function metadata. Nil keeps
+	// all records. Wasm uses this to avoid address tables rooting dead methods.
+	FuncInfoFilter func(*ssa.Function) bool
 	// AllowInternalDirectives permits directives reserved for LLGo's runtime.
 	// Package loaders set it only for verified Go standard-library sources.
 	AllowInternalDirectives bool
@@ -676,7 +679,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	p.funcs[f] = fn
 	isCgo := isCgoExternSymbol(f)
 	if nblk := len(f.Blocks); nblk > 0 {
-		if p.prog.FuncInfoMetadataEnabled() {
+		if p.prog.FuncInfoMetadataEnabled() && (p.options.FuncInfoFilter == nil || p.options.FuncInfoFilter(f)) {
 			goName := fn.Name()
 			if pkgTypes != nil {
 				goName = funcName(pkgTypes, f, false)

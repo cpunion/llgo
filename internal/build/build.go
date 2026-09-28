@@ -3056,6 +3056,12 @@ func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string,
 		return nil, fmt.Errorf("load go:embed directives for %s failed: %w", pkgPath, err)
 	}
 	options := ctx.frontendOptions
+	if ctx.buildConf.Goarch == "wasm" && ctx.buildConf.BuildMode == BuildModeExe && ctx.prog.Target().WasmFuncInfoEntries {
+		use := wasmProgramUseFor(ctx)
+		if use != nil && use.rooted {
+			options.FuncInfoFilter = use.keepsFuncInfo
+		}
+	}
 	// Library exports use final-link wrappers to register foreign caller threads
 	// with the collector; Windows shared libraries also initialize lazily. Only
 	// the command package needs alternate export symbols, and command packages

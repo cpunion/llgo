@@ -254,29 +254,37 @@ func TestWasmReflectBridgesParticipateInFingerprint(t *testing.T) {
 }
 
 func TestWasmFuncInfoEntriesParticipateInFingerprint(t *testing.T) {
-	fingerprint := func(enabled bool) (*commonSection, string) {
+	fingerprint := func(enabled bool, scope string) (*commonSection, string) {
 		prog := llssa.NewProgram(&llssa.Target{
 			GOOS: "js", GOARCH: "wasm", WasmProfile: "j32", WasmProvider: "gojs",
 			WasmFuncInfoEntries: enabled,
 		})
 		defer prog.Dispose()
 		ctx := &context{
-			buildConf:    &Config{Goos: "js", Goarch: "wasm"},
-			crossCompile: crosscompile.Export{WasmProfile: crosscompile.WasmProfileJ32, WasmProvider: crosscompile.WasmProviderGoJS},
-			prog:         prog,
+			buildConf:      &Config{Goos: "js", Goarch: "wasm", BuildMode: BuildModeExe},
+			crossCompile:   crosscompile.Export{WasmProfile: crosscompile.WasmProfileJ32, WasmProvider: crosscompile.WasmProviderGoJS},
+			prog:           prog,
+			wasmProgramUse: &wasmProgramUse{rooted: true, funcInfoKey: scope},
 		}
 		manifest := newManifestBuilder()
 		ctx.collectCommonInputs(manifest)
 		return &manifest.common, manifest.Fingerprint()
 	}
 
-	plain, plainFingerprint := fingerprint(false)
-	withEntries, entriesFingerprint := fingerprint(true)
+	plain, plainFingerprint := fingerprint(false, "")
+	withEntries, entriesFingerprint := fingerprint(true, "first-method-set")
 	if plain.WasmFuncInfoEntries || !withEntries.WasmFuncInfoEntries {
 		t.Fatalf("WASM_FUNCINFO_ENTRIES fields = %v, %v", plain.WasmFuncInfoEntries, withEntries.WasmFuncInfoEntries)
 	}
 	if plainFingerprint == entriesFingerprint {
 		t.Fatal("function-entry programs reused a package fingerprint without entries")
+	}
+	other, otherFingerprint := fingerprint(true, "second-method-set")
+	if withEntries.WasmFuncInfoScope != "first-method-set" || other.WasmFuncInfoScope != "second-method-set" {
+		t.Fatal("function metadata scope was omitted from the manifest")
+	}
+	if entriesFingerprint == otherFingerprint {
+		t.Fatal("different live methods reused a package fingerprint")
 	}
 }
 
