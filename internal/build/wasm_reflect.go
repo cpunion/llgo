@@ -17,15 +17,9 @@
 package build
 
 import (
-	"crypto/sha256"
-	"fmt"
-	"go/ast"
 	"go/types"
-	"slices"
 	"strings"
 
-	"github.com/xgo-dev/llgo/internal/directive"
-	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/callgraph/rta"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
@@ -70,11 +64,9 @@ func configureWasmFuncInfoEntries(ctx *context) {
 }
 
 type wasmProgramUse struct {
-	liveObjects map[types.Object]bool
-	funcInfoKey string
-	rooted      bool
-	reachable   map[*ssa.Function]struct{ AddrTaken bool }
-	all         map[*ssa.Function]bool
+	rooted    bool
+	reachable map[*ssa.Function]struct{ AddrTaken bool }
+	all       map[*ssa.Function]bool
 }
 
 func wasmProgramUseFor(ctx *context) *wasmProgramUse {
@@ -82,82 +74,18 @@ func wasmProgramUseFor(ctx *context) *wasmProgramUse {
 		return nil
 	}
 	ctx.wasmProgramUseOnce.Do(func() {
-		if ctx.wasmProgramUse == nil {
-			ctx.wasmProgramUse = analyzeWasmProgramUseWithLinknames(ctx.progSSA, wasmReflectRoots(ctx), ctx.prog)
-		}
+		ctx.wasmProgramUse = analyzeWasmProgramUse(ctx.progSSA, wasmReflectRoots(ctx))
 	})
 	return ctx.wasmProgramUse
 }
 
 func analyzeWasmProgramUse(prog *ssa.Program, roots []*ssa.Function) *wasmProgramUse {
-	return analyzeWasmProgramUseWithLinknames(prog, roots, nil)
-}
-
-func analyzeWasmProgramUseWithLinknames(prog *ssa.Program, roots []*ssa.Function, backend llssa.Program) *wasmProgramUse {
 	use := &wasmProgramUse{rooted: len(roots) != 0}
 	if prog == nil {
 		return use
 	}
 	if use.rooted {
-		// Host exports are additional entry points, even when Go never calls them.
-		for fn := range ssautil.AllFunctions(prog) {
-			if decl, ok := fn.Syntax().(*ast.FuncDecl); ok && decl.Doc != nil {
-				for _, comment := range decl.Doc.List {
-					if d, ok := directive.Parse(comment); ok && (d.Name == "export" || d.Name == "go:wasmexport") {
-						roots = append(roots, fn)
-						break
-					}
-				}
-			}
-		}
-		// RTA sees the Go declaration, whereas the linker calls its aliased
-		// definition. Include those edges and rerun RTA to retain transitive callees,
-		// including indirect calls discovered by the newly reachable definitions.
-		definitions := make(map[string][]*ssa.Function)
-		symbols := make(map[*ssa.Function]string)
-		if backend != nil {
-			for fn := range ssautil.AllFunctions(prog) {
-				obj, ok := fn.Object().(*types.Func)
-				if !ok || obj.Pkg() == nil || fn.Origin() != nil || fn.Signature.TypeParams().Len() != 0 || fn.Signature.RecvTypeParams().Len() != 0 || !types.Identical(fn.Signature, obj.Type()) {
-					continue
-				}
-				symbol := llssa.FuncName(obj.Pkg(), obj.Name(), obj.Type().(*types.Signature).Recv(), false)
-				if alias, ok := backend.Linkname(symbol); ok {
-					symbol = alias
-				}
-				symbols[fn] = symbol
-				definitions[symbol] = append(definitions[symbol], fn)
-			}
-		}
-		result := rta.Analyze(roots, false)
-		for {
-			var added []*ssa.Function
-			seen := make(map[*ssa.Function]bool)
-			for fn := range result.Reachable {
-				for _, target := range definitions[symbols[fn]] {
-					if _, live := result.Reachable[target]; !live && !seen[target] {
-						added = append(added, target)
-						seen[target] = true
-					}
-				}
-			}
-			if len(added) == 0 {
-				break
-			}
-			roots = append(roots, added...)
-			result = rta.Analyze(roots, false)
-		}
-		use.reachable = result.Reachable
-		use.liveObjects = make(map[types.Object]bool)
-		var identities []string
-		for fn := range result.Reachable {
-			if obj := fn.Object(); obj != nil && obj.Pkg() != nil && !use.liveObjects[obj] {
-				use.liveObjects[obj] = true
-				identities = append(identities, obj.Pkg().Path()+":"+obj.String())
-			}
-		}
-		slices.Sort(identities)
-		use.funcInfoKey = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(identities, "\n"))))
+		use.reachable = rta.Analyze(roots, false).Reachable
 	} else {
 		use.all = ssautil.AllFunctions(prog)
 	}
@@ -167,7 +95,7 @@ func analyzeWasmProgramUseWithLinknames(prog *ssa.Program, roots []*ssa.Function
 // analyzeWasmInitialUse keeps feature analysis local to one initial package.
 // Executables use RTA from init/main. Entry-less packages have no whole-program
 // roots, so start RTA from their own functions rather than the union SSA program.
-func analyzeWasmInitialUse(prog *ssa.Program, pkg *types.Package, backend llssa.Program) *wasmProgramUse {
+func analyzeWasmInitialUse(prog *ssa.Program, pkg *types.Package) *wasmProgramUse {
 	use := &wasmProgramUse{all: make(map[*ssa.Function]bool)}
 	if prog == nil || pkg == nil {
 		return use
@@ -181,7 +109,7 @@ func analyzeWasmInitialUse(prog *ssa.Program, pkg *types.Package, backend llssa.
 		if init := ssaPkg.Func("init"); init != nil {
 			roots = append(roots, init)
 		}
-		return analyzeWasmProgramUseWithLinknames(prog, roots, backend)
+		return analyzeWasmProgramUse(prog, roots)
 	}
 	var roots []*ssa.Function
 	for fn := range ssautil.AllFunctions(prog) {
@@ -190,7 +118,7 @@ func analyzeWasmInitialUse(prog *ssa.Program, pkg *types.Package, backend llssa.
 		}
 	}
 	if len(roots) != 0 {
-		return analyzeWasmProgramUseWithLinknames(prog, roots, backend)
+		return analyzeWasmProgramUse(prog, roots)
 	}
 	return use
 }
@@ -365,51 +293,4 @@ func ssaFunctionPackagePath(fn *ssa.Function) string {
 		}
 	}
 	return ""
-}
-
-// Ordinary functions and synthetic functions without a declaration remain
-// conservative. Declared methods and their wrappers must be reachable through
-// calls, interfaces, reflection, or a host export before metadata can root them.
-func (use *wasmProgramUse) keepsFuncInfo(fn *ssa.Function) bool {
-	if use == nil || !use.rooted {
-		return true
-	}
-	if _, ok := use.reachable[fn]; ok {
-		return true
-	}
-	obj, ok := fn.Object().(*types.Func)
-	if !ok || obj.Type().(*types.Signature).Recv() == nil {
-		return true
-	}
-	return use.liveObjects[obj]
-}
-
-// COFF resolves relocations before section GC. Even dead archsimd helpers can
-// therefore cause undefined-symbol errors for unimplemented intrinsics. Reuse
-// executable reachability to remove only dead bodies, retaining symbol identity
-// for address metadata. A reachable unsupported operation remains a link error.
-func windowsSIMDReachability(ctx *context) bool {
-	if ctx.buildConf.Goos != "windows" || ctx.buildConf.BuildMode != BuildModeExe || ctx.progSSA == nil {
-		return false
-	}
-	for _, pkg := range ctx.progSSA.AllPackages() {
-		if pkg.Pkg.Path() == "simd/archsimd" {
-			return true
-		}
-	}
-	return false
-}
-
-func (use *wasmProgramUse) keepsSIMDBody(fn *ssa.Function) bool {
-	if use == nil || !use.rooted {
-		return true
-	}
-	obj := fn.Object()
-	if obj == nil || obj.Pkg() == nil || obj.Pkg().Path() != "simd/archsimd" {
-		return true
-	}
-	if _, ok := use.reachable[fn]; ok {
-		return true
-	}
-	return use.liveObjects[obj]
 }

@@ -44,7 +44,7 @@ func callWasmBridge(ft *abi.FuncType, fn, env unsafe.Pointer, method bool, prefi
 		}
 		entry := closure{fn: code}
 		call := *(*func(unsafe.Pointer, unsafe.Pointer, bool, *unsafe.Pointer, *unsafe.Pointer))(unsafe.Pointer(&entry))
-		call(fn, env, method || env != nil, unsafe.SliceData(args), unsafe.SliceData(results))
+		call(fn, env, method, unsafe.SliceData(args), unsafe.SliceData(results))
 	}
 	for i, typ := range tout {
 		out[i] = NewAt(toType(typ), results[i]).Elem()

@@ -235,3 +235,8 @@ func printanycustomtype(i any) {
 func PanicSIMDImmediate() {
 	panic(errorString("out-of-range immediate for simd intrinsic"))
 }
+
+// PanicSIMDUnimplemented identifies an intrinsic without an LLGo implementation.
+func PanicSIMDUnimplemented(name string) {
+	panic(errorString("unimplemented SIMD intrinsic: " + name))
+}

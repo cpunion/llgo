@@ -64,12 +64,6 @@ type Options struct {
 	DebugSymbols bool
 	Trace        bool
 	ExportRename bool
-	// FuncInfoFilter may omit proven-unreachable function metadata. Nil keeps
-	// all records. Wasm uses this to avoid address tables rooting dead methods.
-	FuncInfoFilter func(*ssa.Function) bool
-	// FuncBodyFilter preserves function identity but replaces proven-unreachable
-	// bodies with LLVM unreachable. Nil compiles every body.
-	FuncBodyFilter func(*ssa.Function) bool
 	// AllowInternalDirectives permits directives reserved for LLGo's runtime.
 	// Package loaders set it only for verified Go standard-library sources.
 	AllowInternalDirectives bool
@@ -589,6 +583,16 @@ func hasInstantiatedRecv(recv *types.Var) bool {
 
 func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Function, llssa.PyObjRef, int) {
 	pkgTypes, name, ftype := p.funcName(f)
+	simd, simdDecl := lookupSIMD(f, p.prog.Target().GOARCH)
+	simdDecl = simdDecl && f.Pkg == p.goPkg
+	if simdDecl {
+		// Intrinsics also need real symbols for reflection and linker aliases.
+		// Ordinary direct calls still use the same table to inline their lowering.
+		obj := f.Object().(*types.Func)
+		pkgTypes = obj.Pkg()
+		name = llssa.FuncName(pkgTypes, obj.Name(), f.Signature.Recv(), false)
+		ftype = goFunc
+	}
 	if ftype != goFunc {
 		return nil, nil, ignoredFunc
 	}
@@ -681,25 +685,39 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	}
 	p.funcs[f] = fn
 	isCgo := isCgoExternSymbol(f)
-	if p.options.FuncBodyFilter != nil && !p.options.FuncBodyFilter(f) {
+	if (len(f.Blocks) != 0 || simdDecl) && p.prog.FuncInfoMetadataEnabled() {
+		goName := fn.Name()
+		if pkgTypes != nil {
+			goName = funcName(pkgTypes, f, false)
+		}
+		pos := p.funcInfoPosition(f)
+		if p.prog.Target().GOOS == "windows" && isRecoverTransparentWrapper(f) {
+			pkg.EmitFuncInfoFlags(fn.Name(), funcInfoDisplayName(goName), pos.Filename, pos.Line, pos.Column, llssa.FuncInfoFlagWrapper)
+		} else {
+			pkg.EmitFuncInfo(fn.Name(), funcInfoDisplayName(goName), pos.Filename, pos.Line, pos.Column)
+		}
+	}
+	if simdDecl {
 		b := fn.MakeBody(1)
-		b.Unreachable()
+		if simd.op == llssa.SIMDUnimplemented {
+			b.SIMD(simd.op, b.Str(name))
+			b.Unreachable()
+		} else {
+			n := sig.Params().Len()
+			if sig.Recv() != nil {
+				n++
+			}
+			args := make([]llssa.Expr, n)
+			for i := range args {
+				args[i] = fn.Param(i)
+			}
+			b.Return(b.SIMD(simd.op, args...))
+		}
 		b.EndBuild()
+		b.Dispose()
 		return fn, nil, goFunc
 	}
 	if nblk := len(f.Blocks); nblk > 0 {
-		if p.prog.FuncInfoMetadataEnabled() && (p.options.FuncInfoFilter == nil || p.options.FuncInfoFilter(f)) {
-			goName := fn.Name()
-			if pkgTypes != nil {
-				goName = funcName(pkgTypes, f, false)
-			}
-			pos := p.funcInfoPosition(f)
-			if p.prog.Target().GOOS == "windows" && isRecoverTransparentWrapper(f) {
-				pkg.EmitFuncInfoFlags(fn.Name(), funcInfoDisplayName(goName), pos.Filename, pos.Line, pos.Column, llssa.FuncInfoFlagWrapper)
-			} else {
-				pkg.EmitFuncInfo(fn.Name(), funcInfoDisplayName(goName), pos.Filename, pos.Line, pos.Column)
-			}
-		}
 		var childInits []func()
 		if len(f.AnonFuncs) > 0 {
 			parentInits := p.inits

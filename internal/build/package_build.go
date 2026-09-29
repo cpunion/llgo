@@ -376,7 +376,6 @@ func (ctx *context) newBackendTask(session backendSession) *context {
 	return &context{
 		conf:            ctx.conf,
 		progSSA:         ctx.progSSA,
-		wasmProgramUse:  ctx.wasmProgramUse,
 		prog:            session.prog,
 		dedup:           ctx.dedup,
 		patches:         ctx.patches,

@@ -19,6 +19,7 @@ const (
 	SIMDXor
 	SIMDExtractLane
 	SIMDInsertLane
+	SIMDUnimplemented
 )
 
 // SIMDNumericShape validates the official numeric aggregate representation.
@@ -80,6 +81,9 @@ func simdLanes(typ types.Type) *types.Array {
 // These seven implementations need only baseline native instructions; wasm
 // requires SIMD128. Future feature-specific implementations extend this entry.
 func (b Builder) SIMD(op SIMDOp, args ...Expr) Expr {
+	if op == SIMDUnimplemented {
+		return b.Call(b.Pkg.rtFunc("PanicSIMDUnimplemented"), args...)
+	}
 	b.simdFeatures(op)
 	switch op {
 	case SIMDExtractLane:
@@ -171,6 +175,9 @@ func (b Builder) simdBinary(op SIMDOp, x, y Expr) Expr {
 
 func (b Builder) simd128Index(x, index Expr) llvm.Value {
 	lanes := simdLanes(x.RawType()).Len()
+	if c := index.impl.IsAConstantInt(); !c.IsNil() && c.ZExtValue() < uint64(lanes) {
+		return llvm.ConstInt(b.Prog.tyInt32(), c.ZExtValue(), false)
+	}
 	// Check even when ordinary slice bounds checks are disabled: an invalid
 	// immediate is an intrinsic error and must never become LLVM poison.
 	bad := Expr{llvm.CreateICmp(b.impl, llvm.IntUGE, index.impl, llvm.ConstInt(index.ll, uint64(lanes), false)), b.Prog.Bool()}
@@ -184,7 +191,8 @@ func (b Builder) simd128Index(x, index Expr) llvm.Value {
 	return b.impl.CreateZExt(index.impl, b.Prog.tyInt32(), "")
 }
 
-// simdGetElem and simdSetElem also support dynamic uint8 indices.
+// Lane indices are uint8 at the Go API boundary. Valid constants need no
+// runtime check; dynamic and out-of-range indices retain the panic check.
 func (b Builder) simdGetElem(x, index Expr) Expr {
 	i := b.simd128Index(x, index)
 	v := b.impl.CreateExtractElement(x.impl, i, "")

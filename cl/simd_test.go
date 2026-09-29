@@ -10,6 +10,7 @@ import (
 
 	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 func TestSIMDOperationIdentity(t *testing.T) {
@@ -74,5 +75,42 @@ func TestSIMDOperationIdentity(t *testing.T) {
 				t.Fatalf("unexpected operation %v", desc.op)
 			}
 		})
+	}
+}
+
+func TestSIMDFallbackDeclarations(t *testing.T) {
+	const source = `package archsimd
+ type Mask struct{ bits uint16 }
+ func Missing()
+ func (Mask) Not() Mask
+ func Helper() int { return 7 }
+ type v128 struct { _ [0]func() }
+ type Float32x4 struct { tag v128; vals [4]float32 }
+ func (x Float32x4) Add(y Float32x4) Float32x4 { return x }
+ `
+	fs := token.NewFileSet()
+	file, err := parser.ParseFile(fs, "simd.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, _, err := ssautil.BuildPackage(&types.Config{}, fs, types.NewPackage("simd/archsimd", "archsimd"), []*ast.File{file}, ssa.SanityCheckFunctions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mask := pkg.Pkg.Scope().Lookup("Mask").Type().(*types.Named)
+	vector := pkg.Pkg.Scope().Lookup("Float32x4").Type().(*types.Named)
+	for _, tc := range []struct {
+		fn   *ssa.Function
+		want bool
+	}{
+		{pkg.Func("Missing"), true},
+		{pkg.Prog.FuncValue(mask.Method(0)), true},
+		{pkg.Func("Helper"), false},
+		{pkg.Prog.FuncValue(vector.Method(0)), false},
+	} {
+		op, ok := lookupSIMD(tc.fn, "amd64")
+		if ok != tc.want || ok && op.op != llssa.SIMDUnimplemented {
+			t.Errorf("%s: fallback=%v op=%v", tc.fn, ok, op.op)
+		}
 	}
 }

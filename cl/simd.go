@@ -1,6 +1,7 @@
 package cl
 
 import (
+	"go/ast"
 	"go/types"
 
 	llssa "github.com/xgo-dev/llgo/ssa"
@@ -16,6 +17,7 @@ const (
 	simdBinary simdSignature = iota
 	simdExtract
 	simdInsert
+	simdUnsupported
 )
 
 type simdOperation struct {
@@ -24,7 +26,11 @@ type simdOperation struct {
 	integerOnly bool
 }
 
+// The default entry gives not-yet-implemented intrinsic declarations a defined,
+// recoverable failure. Adding an implementation replaces this fallback for that
+// operation; functions with Go bodies continue through normal compilation.
 var simdOperations = map[simdKey]simdOperation{
+	{"*", "*"}:             {llssa.SIMDUnimplemented, simdUnsupported, false},
 	{"numeric", "Add"}:     {llssa.SIMDAdd, simdBinary, false},
 	{"numeric", "Sub"}:     {llssa.SIMDSub, simdBinary, false},
 	{"numeric", "And"}:     {llssa.SIMDAnd, simdBinary, true},
@@ -50,12 +56,23 @@ func lookupSIMD(fn *ssa.Function, arch string) (simdOperation, bool) {
 	if !types.Identical(sig, obj.Type()) {
 		return simdOperation{}, false
 	}
+	fallback := func() (simdOperation, bool) {
+		// Imported declarations and synthetic wrappers are not definitions. Emit
+		// the fallback only for a source intrinsic declaration in archsimd.
+		if decl, ok := fn.Syntax().(*ast.FuncDecl); ok && decl.Body == nil {
+			return simdOperations[simdKey{"*", "*"}], true
+		}
+		return simdOperation{}, false
+	}
+	if decl, ok := fn.Syntax().(*ast.FuncDecl); ok && decl.Body != nil {
+		return simdOperation{}, false
+	}
 	key := simdKey{name: obj.Name()}
 	var vector types.Type
 	if recv := sig.Recv(); recv != nil {
 		vector = recv.Type()
 		if _, ok := llssa.SIMDNumericShape(vector); !ok {
-			return simdOperation{}, false
+			return fallback()
 		}
 		key.receiver = "numeric"
 	} else if sig.Results().Len() == 1 {
@@ -63,7 +80,7 @@ func lookupSIMD(fn *ssa.Function, arch string) (simdOperation, bool) {
 	}
 	desc, ok := simdOperations[key]
 	if !ok || !desc.matches(sig, vector) {
-		return simdOperation{}, false
+		return fallback()
 	}
 	return desc, true
 }
@@ -106,7 +123,8 @@ func (d simdOperation) matches(sig *types.Signature, vector types.Type) bool {
 }
 
 func (p *context) simdOperation(fn *ssa.Function) (simdOperation, bool) {
-	return lookupSIMD(fn, p.prog.Target().GOARCH)
+	desc, ok := lookupSIMD(fn, p.prog.Target().GOARCH)
+	return desc, ok && desc.op != llssa.SIMDUnimplemented
 }
 
 func (p *context) simdCall(b llssa.Builder, fn *ssa.Function, args []ssa.Value) llssa.Expr {
