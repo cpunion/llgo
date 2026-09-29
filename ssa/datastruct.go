@@ -46,7 +46,7 @@ func (b Builder) FieldAddr(x Expr, idx int) Expr {
 	tstruc := prog.Elem(x.Type)
 	telem := prog.Field(tstruc, idx)
 	pt := prog.Pointer(telem)
-	return Expr{llvm.CreateStructGEP(b.impl, tstruc.ll, x.impl, idx), pt}
+	return Expr{llvm.CreateStructGEP(b.impl, prog.storageType(tstruc), x.impl, idx), pt}
 }
 
 // The Field instruction yields the value of Field of struct X.
@@ -56,6 +56,10 @@ func (b Builder) Field(x Expr, idx int) Expr {
 }
 
 func (b Builder) getField(x Expr, idx int) Expr {
+	if x.kind == vkSIMD {
+		storage := b.Prog.rawType(x.RawType().Underlying())
+		return b.getField(Expr{b.simdToStorage(x.impl, x.Type), storage}, idx)
+	}
 	tfld := b.Prog.Field(x.Type, idx)
 	fld := llvm.CreateExtractValue(b.impl, x.impl, idx)
 	fld = b.unwrapStructField(x.Type, idx, fld)

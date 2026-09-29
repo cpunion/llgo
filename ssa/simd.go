@@ -62,6 +62,9 @@ func SIMDNumericShape(typ types.Type) (*types.Array, bool) {
 	if !ok || tag.Obj().Pkg() != named.Obj().Pkg() || tag.Obj().Name() != "v128" {
 		return nil, false
 	}
+	if (&types.StdSizes{WordSize: 8, MaxAlign: 8}).Sizeof(tag) != 0 {
+		return nil, false
+	}
 	return lanes, true
 }
 
@@ -94,6 +97,10 @@ func (b Builder) simdFeatures(op SIMDOp) {
 	default:
 		panic("unsupported SIMD operation")
 	}
+	b.requireSIMDFeatures()
+}
+
+func (b Builder) requireSIMDFeatures() {
 	if b.Prog.Target().GOARCH == "wasm" {
 		features := "+simd128"
 		for _, attr := range b.Func.impl.GetFunctionAttributes() {
@@ -108,32 +115,33 @@ func (b Builder) simdFeatures(op SIMDOp) {
 	}
 }
 
-// Computation uses LLVM vectors; storage and call carriers remain Go aggregates.
-func (b Builder) simd128Vector(x Expr) llvm.Value {
-	lanes := simdLanes(x.RawType())
-	elem := b.Prog.toType(lanes.Elem())
-	vec := llvm.Undef(llvm.VectorType(elem.ll, int(lanes.Len())))
-	values := b.impl.CreateExtractValue(x.impl, 1, "")
+// SIMD values stay vectors. Aggregate conversion is restricted to Go storage
+// and source-level access to the underlying fields inside archsimd.
+func (b Builder) simdFromStorage(value llvm.Value, typ Type) llvm.Value {
+	lanes := simdLanes(typ.RawType())
+	array := b.impl.CreateExtractValue(value, 1, "")
+	vec := llvm.Undef(typ.ll)
 	for i := 0; i < int(lanes.Len()); i++ {
-		lane := b.impl.CreateExtractValue(values, i, "")
+		lane := b.impl.CreateExtractValue(array, i, "")
 		vec = b.impl.CreateInsertElement(vec, lane, llvm.ConstInt(b.Prog.tyInt32(), uint64(i), false), "")
 	}
 	return vec
 }
 
-func (b Builder) simd128Storage(vec llvm.Value, typ Type) Expr {
+func (b Builder) simdToStorage(value llvm.Value, typ Type) llvm.Value {
+	storage := b.Prog.storageType(typ)
 	lanes := simdLanes(typ.RawType())
-	array := llvm.Undef(b.Prog.toType(lanes).ll)
+	array := llvm.Undef(b.Prog.rawType(lanes).ll)
 	for i := 0; i < int(lanes.Len()); i++ {
-		lane := b.impl.CreateExtractElement(vec, llvm.ConstInt(b.Prog.tyInt32(), uint64(i), false), "")
+		lane := b.impl.CreateExtractElement(value, llvm.ConstInt(b.Prog.tyInt32(), uint64(i), false), "")
 		array = b.impl.CreateInsertValue(array, lane, i, "")
 	}
-	return Expr{b.impl.CreateInsertValue(llvm.ConstNull(typ.ll), array, 1, ""), typ}
+	return b.impl.CreateInsertValue(llvm.ConstNull(storage), array, 1, "")
 }
 
 // simdBinary uses the actual element type for integer and floating arithmetic.
 func (b Builder) simdBinary(op SIMDOp, x, y Expr) Expr {
-	a, c := b.simd128Vector(x), b.simd128Vector(y)
+	a, c := x.impl, y.impl
 	floating := simdLanes(x.RawType()).Elem().Underlying().(*types.Basic).Info()&types.IsFloat != 0
 	var v llvm.Value
 	switch op {
@@ -158,7 +166,7 @@ func (b Builder) simdBinary(op SIMDOp, x, y Expr) Expr {
 	default:
 		panic("invalid SIMD128 binary operation")
 	}
-	return b.simd128Storage(v, x.Type)
+	return Expr{v, x.Type}
 }
 
 func (b Builder) simd128Index(x, index Expr) llvm.Value {
@@ -179,13 +187,87 @@ func (b Builder) simd128Index(x, index Expr) llvm.Value {
 // simdGetElem and simdSetElem also support dynamic uint8 indices.
 func (b Builder) simdGetElem(x, index Expr) Expr {
 	i := b.simd128Index(x, index)
-	v := b.impl.CreateExtractElement(b.simd128Vector(x), i, "")
+	v := b.impl.CreateExtractElement(x.impl, i, "")
 	elem := simdLanes(x.RawType()).Elem()
 	return Expr{v, b.Prog.toType(elem)}
 }
 
 func (b Builder) simdSetElem(x, index, value Expr) Expr {
 	i := b.simd128Index(x, index)
-	v := b.impl.CreateInsertElement(b.simd128Vector(x), value.impl, i, "")
-	return b.simd128Storage(v, x.Type)
+	v := b.impl.CreateInsertElement(x.impl, value.impl, i, "")
+	return Expr{v, x.Type}
+}
+
+// A vector ABI also needs SIMD when a function only forwards values, without
+// invoking an intrinsic. Inspect the completed IR so wrappers and reflection
+// bridges receive the same feature requirement as arithmetic functions.
+func (b Builder) finishSIMDFeatures() {
+	if b.Prog.Target().GOARCH != "wasm" {
+		return
+	}
+	if llvmTypeHasVector(b.Func.ll) {
+		b.requireSIMDFeatures()
+		return
+	}
+	for block := b.Func.impl.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+		for inst := block.FirstInstruction(); !inst.IsNil(); inst = llvm.NextInstruction(inst) {
+			if llvmTypeHasVector(inst.Type()) {
+				b.requireSIMDFeatures()
+				return
+			}
+			for i := 0; i < inst.OperandsCount(); i++ {
+				if llvmTypeHasVector(inst.Operand(i).Type()) {
+					b.requireSIMDFeatures()
+					return
+				}
+			}
+		}
+	}
+}
+
+func llvmTypeHasVector(t llvm.Type) bool {
+	switch t.TypeKind() {
+	case llvm.VectorTypeKind:
+		return true
+	case llvm.ArrayTypeKind:
+		return llvmTypeHasVector(t.ElementType())
+	case llvm.StructTypeKind:
+		for _, elem := range t.StructElementTypes() {
+			if llvmTypeHasVector(elem) {
+				return true
+			}
+		}
+	case llvm.FunctionTypeKind:
+		if llvmTypeHasVector(t.ReturnType()) {
+			return true
+		}
+		for _, param := range t.ParamTypes() {
+			if llvmTypeHasVector(param) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Native libffi classifies source structs rather than LLVM vectors. Reuse the
+// typed reflection bridge for signatures whose native ABI contains SIMD values.
+func (p Program) simdReflectSignature(sig *types.Signature) bool {
+	arch := p.Target().effectiveGOARCH()
+	if arch != "amd64" && arch != "arm64" {
+		return false
+	}
+	if recv := sig.Recv(); recv != nil {
+		if _, ok := SIMDNumericShape(recv.Type()); ok {
+			return true
+		}
+	}
+	for _, tuple := range []*types.Tuple{sig.Params(), sig.Results()} {
+		for i := 0; i < tuple.Len(); i++ {
+			if _, ok := SIMDNumericShape(tuple.At(i).Type()); ok {
+				return true
+			}
+		}
+	}
+	return false
 }

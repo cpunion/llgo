@@ -42,7 +42,7 @@ func groupInitialBuilds(ctx *context, alts []*packages.Package) []initialBuildGr
 			localContext: ctx.prog.NeedsLocalContextForPackages(activeLocalityPackages([]*packages.Package{pkg}, alts)),
 		}
 		if target.GOARCH == "wasm" {
-			use := analyzeWasmInitialUse(ctx.progSSA, pkg.Types)
+			use := analyzeWasmInitialUse(ctx.progSSA, pkg.Types, ctx.prog)
 			features.reflectBridges = target.WasmProvider == "wasi" && use.usesWasmReflectBridges()
 			features.funcInfoEntries = ctx.buildConf.BuildMode != BuildModeExe || use.usesRuntimeFuncForPC()
 		}

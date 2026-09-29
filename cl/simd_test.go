@@ -44,6 +44,7 @@ func TestSIMDOperationIdentity(t *testing.T) {
 		{"aggregate lanes", "simd/archsimd", "amd64", strings.Replace(source, "[4]float32", "[4]struct{}", 1), false},
 
 		{"wrong lanes", "simd/archsimd", "arm64", strings.ReplaceAll(source, "[4]float32", "[2]float32"), false},
+		{"nonzero marker", "simd/archsimd", "arm64", strings.ReplaceAll(source, "type v128 struct { _ [0]func() }", "type v128 struct{x int}"), false},
 		{"wrong marker", "simd/archsimd", "arm64", strings.ReplaceAll(source, "tag v128", "tag int"), false},
 		{"float bitwise", "simd/archsimd", "arm64", strings.ReplaceAll(source, "Add", "And"), false},
 	} {

@@ -1,4 +1,4 @@
-//go:build !llgo || !wasm || !wasip1
+//go:build !llgo || ((!wasm || !wasip1) && (!goexperiment.simd || (!amd64 && !arm64)))
 
 package reflect
 
@@ -17,3 +17,9 @@ func callWasmBridge(ft *abi.FuncType, fn, env unsafe.Pointer, method bool, prefi
 func resetWasmFuncBridge(ft *abi.FuncType) {}
 
 func copyWasmFuncBridge(dst, src *abi.FuncType) {}
+
+func hasTypedCallBridge(ft *abi.FuncType) bool { return false }
+
+func makeProviderFunc(ft *funcType, fn func([]Value) []Value, recoverTo unsafe.Pointer) Value {
+	return makeFallbackFunc(ft, fn, recoverTo)
+}

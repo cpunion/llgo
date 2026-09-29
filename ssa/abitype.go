@@ -348,7 +348,7 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 			b.abiTuples(t.Params(), name+"$in"),
 			b.abiTuples(t.Results(), name+"$out"),
 		}
-		if prog.target.usesWasmReflectBridges() {
+		if prog.target.usesWasmReflectBridges() || prog.simdReflectSignature(t) {
 			bridges := pkg.wasmReflectBridge(t)
 			fields = append(fields, bridges.call.impl, bridges.make.impl)
 		}
@@ -566,7 +566,7 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		values = append(values, ifn)
 		values = append(values, tfn)
 		fields[i] = prog.constStructValue(ft, values)
-		if prog.target.usesWasmReflectBridges() {
+		if prog.target.usesWasmReflectBridges() || prog.simdReflectSignature(m.Type().(*types.Signature)) {
 			// Type.Method constructs a method-expression signature at runtime.
 			// Retain that descriptor with the method wrapper only when reflection
 			// can expose it.

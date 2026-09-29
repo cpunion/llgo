@@ -5,6 +5,7 @@ package simd_test
 import (
 	"simd/archsimd"
 	"testing"
+	"unsafe"
 )
 
 //go:noinline
@@ -98,5 +99,56 @@ func TestLaneBounds(t *testing.T) {
 			}
 			lane(z, 4)
 		})
+	}
+}
+
+//go:noinline
+func vectorIdentity(x archsimd.Float32x4) archsimd.Float32x4 { return x }
+
+//go:noinline
+func vectorPair(x archsimd.Float32x4, n int) (archsimd.Float32x4, int) {
+	for i := 0; i < n; i++ {
+		x = x.Add(x)
+	}
+	return x, n
+}
+
+type vectorRecord struct {
+	Prefix byte
+	Value  archsimd.Float32x4
+	Suffix byte
+}
+
+type storedVector archsimd.Float32x4
+
+//go:noinline
+func vectorConvert(x storedVector) archsimd.Float32x4 { return archsimd.Float32x4(x) }
+
+//go:noinline
+func vectorAndPointer(x archsimd.Float32x4, p *byte) (archsimd.Float32x4, *byte) { return x, p }
+
+var vectorGlobal vectorRecord
+
+func TestVectorValuesAndStorage(t *testing.T) {
+	var x archsimd.Float32x4
+	x = x.SetElem(0, 3).SetElem(3, -2)
+	x, n := vectorPair(vectorIdentity(vectorConvert(storedVector(x))), 3)
+	if x.GetElem(0) != 24 || x.GetElem(3) != -16 || n != 3 {
+		t.Fatal("loop or multiple results")
+	}
+	records := []vectorRecord{{Prefix: 17, Value: x, Suffix: 29}, {Prefix: 31}}
+	vectorGlobal = records[0]
+	returned, ptr := vectorAndPointer(x, &records[0].Prefix)
+	if *ptr != 17 || returned.GetElem(0) != 24 {
+		t.Fatal("vector and pointer results")
+	}
+	a := [2]archsimd.Float32x4{x, x.Sub(x)}
+	if vectorGlobal.Value.GetElem(3) != -16 || a[0].GetElem(0) != 24 || a[1].GetElem(0) != 0 {
+		t.Fatal("aggregate storage")
+	}
+	lanes := (*[4]float32)(unsafe.Pointer(&records[0].Value))
+	lanes[1] = 7
+	if records[0].Value.GetElem(1) != 7 || records[0].Prefix != 17 || records[0].Suffix != 29 || records[1].Prefix != 31 {
+		t.Fatal("memory layout")
 	}
 }

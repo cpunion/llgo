@@ -88,6 +88,7 @@ func (b Builder) EndBuild() {
 	b.Func.endGCRoots(b)
 	b.preserveNilCheckCondition()
 	b.Func.disposeAllocaBuilder()
+	b.finishSIMDFeatures()
 }
 
 // Dispose disposes of the builder.

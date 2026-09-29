@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/xgo-dev/llgo/internal/directive"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/callgraph/rta"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
@@ -82,13 +83,17 @@ func wasmProgramUseFor(ctx *context) *wasmProgramUse {
 	}
 	ctx.wasmProgramUseOnce.Do(func() {
 		if ctx.wasmProgramUse == nil {
-			ctx.wasmProgramUse = analyzeWasmProgramUse(ctx.progSSA, wasmReflectRoots(ctx))
+			ctx.wasmProgramUse = analyzeWasmProgramUseWithLinknames(ctx.progSSA, wasmReflectRoots(ctx), ctx.prog)
 		}
 	})
 	return ctx.wasmProgramUse
 }
 
 func analyzeWasmProgramUse(prog *ssa.Program, roots []*ssa.Function) *wasmProgramUse {
+	return analyzeWasmProgramUseWithLinknames(prog, roots, nil)
+}
+
+func analyzeWasmProgramUseWithLinknames(prog *ssa.Program, roots []*ssa.Function, backend llssa.Program) *wasmProgramUse {
 	use := &wasmProgramUse{rooted: len(roots) != 0}
 	if prog == nil {
 		return use
@@ -105,7 +110,43 @@ func analyzeWasmProgramUse(prog *ssa.Program, roots []*ssa.Function) *wasmProgra
 				}
 			}
 		}
+		// RTA sees the Go declaration, whereas the linker calls its aliased
+		// definition. Include those edges and rerun RTA to retain transitive callees,
+		// including indirect calls discovered by the newly reachable definitions.
+		definitions := make(map[string][]*ssa.Function)
+		symbols := make(map[*ssa.Function]string)
+		if backend != nil {
+			for fn := range ssautil.AllFunctions(prog) {
+				obj, ok := fn.Object().(*types.Func)
+				if !ok || obj.Pkg() == nil || fn.Origin() != nil || fn.Signature.TypeParams().Len() != 0 || fn.Signature.RecvTypeParams().Len() != 0 || !types.Identical(fn.Signature, obj.Type()) {
+					continue
+				}
+				symbol := llssa.FuncName(obj.Pkg(), obj.Name(), obj.Type().(*types.Signature).Recv(), false)
+				if alias, ok := backend.Linkname(symbol); ok {
+					symbol = alias
+				}
+				symbols[fn] = symbol
+				definitions[symbol] = append(definitions[symbol], fn)
+			}
+		}
 		result := rta.Analyze(roots, false)
+		for {
+			var added []*ssa.Function
+			seen := make(map[*ssa.Function]bool)
+			for fn := range result.Reachable {
+				for _, target := range definitions[symbols[fn]] {
+					if _, live := result.Reachable[target]; !live && !seen[target] {
+						added = append(added, target)
+						seen[target] = true
+					}
+				}
+			}
+			if len(added) == 0 {
+				break
+			}
+			roots = append(roots, added...)
+			result = rta.Analyze(roots, false)
+		}
 		use.reachable = result.Reachable
 		use.liveObjects = make(map[types.Object]bool)
 		var identities []string
@@ -126,7 +167,7 @@ func analyzeWasmProgramUse(prog *ssa.Program, roots []*ssa.Function) *wasmProgra
 // analyzeWasmInitialUse keeps feature analysis local to one initial package.
 // Executables use RTA from init/main. Entry-less packages have no whole-program
 // roots, so start RTA from their own functions rather than the union SSA program.
-func analyzeWasmInitialUse(prog *ssa.Program, pkg *types.Package) *wasmProgramUse {
+func analyzeWasmInitialUse(prog *ssa.Program, pkg *types.Package, backend llssa.Program) *wasmProgramUse {
 	use := &wasmProgramUse{all: make(map[*ssa.Function]bool)}
 	if prog == nil || pkg == nil {
 		return use
@@ -140,7 +181,7 @@ func analyzeWasmInitialUse(prog *ssa.Program, pkg *types.Package) *wasmProgramUs
 		if init := ssaPkg.Func("init"); init != nil {
 			roots = append(roots, init)
 		}
-		return analyzeWasmProgramUse(prog, roots)
+		return analyzeWasmProgramUseWithLinknames(prog, roots, backend)
 	}
 	var roots []*ssa.Function
 	for fn := range ssautil.AllFunctions(prog) {
@@ -149,7 +190,7 @@ func analyzeWasmInitialUse(prog *ssa.Program, pkg *types.Package) *wasmProgramUs
 		}
 	}
 	if len(roots) != 0 {
-		return analyzeWasmProgramUse(prog, roots)
+		return analyzeWasmProgramUseWithLinknames(prog, roots, backend)
 	}
 	return use
 }

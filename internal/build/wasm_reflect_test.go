@@ -193,7 +193,7 @@ func main() {
 }
 
 func TestProgramUsesWasmReflectBridges(t *testing.T) {
-	if use := analyzeWasmInitialUse(nil, nil); use.rooted || len(use.all) != 0 {
+	if use := analyzeWasmInitialUse(nil, nil, nil); use.rooted || len(use.all) != 0 {
 		t.Fatalf("nil initial analysis = %+v", use)
 	}
 	if programUsesWasmReflectBridges(nil, nil) {

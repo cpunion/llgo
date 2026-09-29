@@ -31,11 +31,22 @@ func bits(x, y archsimd.Uint64x2, i uint8) uint64 {
  z := x.Add(y).Sub(y).And(y).Or(x).Xor(y)
  return z.SetElem(i, x.GetElem(i)).GetElem(i)
 }
+type storedVector archsimd.Float32x4
+func convert(x storedVector) archsimd.Float32x4 { return archsimd.Float32x4(x) }
+//go:noinline
+func identity(x archsimd.Float32x4) archsimd.Float32x4 { return x }
+//go:noinline
+func loop(x archsimd.Float32x4, n int) (archsimd.Float32x4, int) {
+ for i := 0; i < n; i++ { x = x.Add(x) }
+ return x, n
+}
+func boxed(x any) archsimd.Float32x4 { return x.(archsimd.Float32x4) }
 func invoke(x, y archsimd.Float32x4) { defer x.Add(y); go x.Sub(y) }
 func main() {
  _ = runtime.FuncForPC(0)
  var x archsimd.Float32x4
  _ = add(x, x)
+ x, _ = loop(identity(convert(storedVector(x))), 2)
  invoke(x, x)
  var y archsimd.Uint64x2
  _ = bits(y, y, 0)
@@ -75,6 +86,28 @@ func TestSIMD128LLVM(t *testing.T) {
 			if fn.IsNil() || !strings.Contains(fn.String(), "fadd <4 x float>") {
 				t.Fatal("Float32x4.Add did not lower to vector fadd")
 			}
+			if strings.Contains(fn.String(), "extractvalue") || strings.Contains(fn.String(), "insertelement") || strings.Contains(fn.String(), "extractelement") {
+				t.Fatalf("arithmetic repacks vectors:\n%s", fn.String())
+			}
+			identity := mod.NamedFunction("main.identity")
+			if identity.GlobalValueType().ReturnType().TypeKind() != llvm.VectorTypeKind || identity.GlobalValueType().ParamTypes()[0].TypeKind() != llvm.VectorTypeKind {
+				t.Fatalf("identity does not use a vector ABI:\n%s", identity.String())
+			}
+			if !strings.Contains(mod.NamedFunction("main.loop").String(), "phi <4 x float>") {
+				t.Fatal("missing vector phi")
+			}
+			if target.arch == "wasm" {
+				// Attributes are printed separately by LLVM; inspect the function itself.
+				found := false
+				for _, attr := range identity.GetFunctionAttributes() {
+					if attr.IsString() && attr.GetStringKind() == "target-features" && strings.Contains(attr.GetStringValue(), "+simd128") {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("identity lacks wasm SIMD feature")
+				}
+			}
 			prog := pkgs[0].LPkg.Prog
 			mod.SetDataLayout(prog.DataLayout())
 			mod.SetTarget(prog.Target().Spec().Triple)
@@ -105,11 +138,13 @@ func TestSIMDWindowsDeadBodies(t *testing.T) {
  func Missing()
  func Dead() { Missing() }
  func Live() {}
+ //go:linkname Alias simd/archsimd.Dead
+ func Alias()
  `
-	for _, live := range []string{"Live", "Dead"} {
+	for _, live := range []string{"Live", "Dead", "Alias"} {
 		t.Run(live, func(t *testing.T) {
 			fs := token.NewFileSet()
-			file, err := parser.ParseFile(fs, "simd.go", src, 0)
+			file, err := parser.ParseFile(fs, "simd.go", src, parser.ParseComments)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -117,12 +152,15 @@ func TestSIMDWindowsDeadBodies(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			use := analyzeWasmProgramUse(pkg.Prog, []*ssa.Function{pkg.Func(live)})
+			prog := llssa.NewProgram(&llssa.Target{GOOS: "windows", GOARCH: "amd64"})
+			defer prog.Dispose()
+			if err := cl.ParsePkgSyntax(prog, fs, pkg.Pkg, []*ast.File{file}); err != nil {
+				t.Fatal(err)
+			}
+			use := analyzeWasmProgramUseWithLinknames(pkg.Prog, []*ssa.Function{pkg.Func(live)}, prog)
 			if !analyzeWasmProgramUse(pkg.Prog, nil).keepsSIMDBody(pkg.Func("Dead")) {
 				t.Fatal("unrooted analysis discarded a body")
 			}
-			prog := llssa.NewProgram(&llssa.Target{GOOS: "windows", GOARCH: "amd64"})
-			defer prog.Dispose()
 			out, _, err := cl.NewPackageExWithEmbedMetaOptions(prog, nil, nil, nil, pkg, []*ast.File{file}, nil, false, cl.Options{FuncBodyFilter: use.keepsSIMDBody})
 			if err != nil {
 				t.Fatal(err)
@@ -175,7 +213,7 @@ func TestSIMDWindowsDeadBodies(t *testing.T) {
 			if live == "Live" && err != nil {
 				t.Fatalf("dead SIMD references prevented COFF linking: %v\n%s", err, output)
 			}
-			if live == "Dead" && (err == nil || !strings.Contains(string(output), "undefined symbol: simd/archsimd.Missing")) {
+			if live != "Live" && (err == nil || !strings.Contains(string(output), "undefined symbol: simd/archsimd.Missing")) {
 				t.Fatalf("reachable unsupported SIMD did not fail linking: %v\n%s", err, output)
 			}
 
@@ -215,4 +253,41 @@ func TestSIMDWindowsPackage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSIMDWindowsLinkname(t *testing.T) {
+	dir := simdTestDir(t)
+	const source = `package main
+import "simd/archsimd"
+import _ "unsafe"
+//go:linkname broadcast simd/archsimd.BroadcastFloat32x4
+func broadcast(float32) archsimd.Float32x4
+func main() { println(broadcast(1).GetElem(0)) }
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	conf := NewDefaultConf(ModeGen)
+	conf.Goos, conf.Goarch, conf.GOEXPERIMENT = "windows", "amd64", "simd"
+	pkgs, err := Build(Invocation{Args: []string{".", "simd/archsimd"}, Config: conf, Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pkgs[0].LPkg.Prog.Dispose()
+	for _, pkg := range pkgs {
+		if pkg.PkgPath != "simd/archsimd" {
+			continue
+		}
+		mod := pkg.LPkg.Module()
+		fn := mod.NamedFunction("simd/archsimd.BroadcastFloat32x4")
+		if fn.IsNil() || !strings.Contains(fn.String(), "broadcast1To4") {
+			t.Fatal("linkname target body was discarded")
+		}
+		callee := mod.NamedFunction("simd/archsimd.Float32x4.broadcast1To4")
+		if callee.IsNil() || !callee.IsDeclaration() {
+			t.Fatal("transitive unsupported intrinsic was hidden")
+		}
+		return
+	}
+	t.Fatal("missing archsimd package")
 }
