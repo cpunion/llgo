@@ -144,7 +144,8 @@ EM_JS(void, llgo_emval_install_invoke_js, (uint8_t *pending_flag, uintptr_t call
 });
 #endif
 
-static bool llgo_emval_invoke_installed;
+// Module and its callback bridge are private to each JavaScript worker realm.
+static _Thread_local bool llgo_emval_invoke_installed;
 
 void llgo_emval_install_invoke(void (*callback)(EM_VAL)) {
     if (llgo_emval_invoke_installed) {

@@ -11,7 +11,7 @@ import (
 	"syscall/js"
 	"testing"
 	"time"
-	_ "unsafe"
+	"unsafe"
 
 	"github.com/xgo-dev/llgo/runtime/_test/workerlocality"
 	"github.com/xgo-dev/llgo/runtime/wasmworkers"
@@ -29,6 +29,13 @@ type workerCallbackResult struct {
 type workerFinalizerBarrier struct {
 	padding [128]uintptr
 }
+
+const workerFinalizerBarriers = 8
+
+// The linear collector scans globals conservatively, including uintptr data.
+// Keep one barrier alive this way to verify that one false root cannot make
+// the finalizer-progress check fail.
+var workerFinalizerFalseRoot uintptr
 
 func TestWorkerJSRealmInheritance(t *testing.T) {
 	object := js.ValueOf(map[string]any{"value": 42})
@@ -48,6 +55,33 @@ func TestWorkerJSRealmInheritance(t *testing.T) {
 	}()
 	if got := <-result; got.err != nil {
 		t.Fatal(got.err)
+	}
+}
+
+func TestWorkerJSCallbacksPerRealm(t *testing.T) {
+	const goroutines = 8
+	results := make(chan workerCallbackResult, goroutines)
+	for range goroutines {
+		wasmworkers.GoIndependent(func() {
+			owner := schedulerProcID()
+			callback := js.FuncOf(func(js.Value, []js.Value) any {
+				return schedulerProcID()
+			})
+			got := callback.Invoke().Int()
+			callback.Release()
+			results <- workerCallbackResult{origin: owner, callback: got}
+		})
+	}
+	owners := make(map[int]bool)
+	for range goroutines {
+		result := <-results
+		if result.callback != result.origin {
+			t.Fatalf("callback ran on worker %d, want %d", result.callback, result.origin)
+		}
+		owners[result.origin] = true
+	}
+	if len(owners) < 2 {
+		t.Fatalf("callbacks ran on %d worker, want at least 2", len(owners))
 	}
 }
 
@@ -92,14 +126,17 @@ func TestWorkerEmvalFinalizersStayInRealm(t *testing.T) {
 		t.Fatalf("JavaScript values were created on %d worker, want at least 2", len(owners))
 	}
 
-	finalizersDone := make(chan struct{})
-	installWorkerFinalizerBarrier(finalizersDone)
+	finalizersDone := make(chan bool, workerFinalizerBarriers)
+	installWorkerFinalizerBarriers(finalizersDone)
+	defer func() { workerFinalizerFalseRoot = 0 }()
 	for range 24 {
 		clobberWorkerStack(16, 1)
 		runtime.GC()
 		select {
-		case <-finalizersDone:
-			goto finalizersComplete
+		case unrooted := <-finalizersDone:
+			if unrooted {
+				goto finalizersComplete
+			}
 		default:
 			time.Sleep(time.Millisecond)
 		}
@@ -136,9 +173,14 @@ finalizersComplete:
 }
 
 //go:noinline
-func installWorkerFinalizerBarrier(done chan<- struct{}) {
-	barrier := &workerFinalizerBarrier{}
-	runtime.SetFinalizer(barrier, func(*workerFinalizerBarrier) { close(done) })
+func installWorkerFinalizerBarriers(done chan<- bool) {
+	for i := range workerFinalizerBarriers {
+		barrier := &workerFinalizerBarrier{}
+		if i == 0 {
+			workerFinalizerFalseRoot = uintptr(unsafe.Pointer(barrier))
+		}
+		runtime.SetFinalizer(barrier, func(*workerFinalizerBarrier) { done <- i != 0 })
+	}
 }
 
 //go:noinline
