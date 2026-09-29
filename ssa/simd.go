@@ -257,25 +257,3 @@ func llvmTypeHasVector(t llvm.Type) bool {
 	}
 	return false
 }
-
-// Native libffi classifies source structs rather than LLVM vectors. Reuse the
-// typed reflection bridge for signatures whose native ABI contains SIMD values.
-func (p Program) simdReflectSignature(sig *types.Signature) bool {
-	arch := p.Target().effectiveGOARCH()
-	if arch != "amd64" && arch != "arm64" {
-		return false
-	}
-	if recv := sig.Recv(); recv != nil {
-		if _, ok := SIMDNumericShape(recv.Type()); ok {
-			return true
-		}
-	}
-	for _, tuple := range []*types.Tuple{sig.Params(), sig.Results()} {
-		for i := 0; i < tuple.Len(); i++ {
-			if _, ok := SIMDNumericShape(tuple.At(i).Type()); ok {
-				return true
-			}
-		}
-	}
-	return false
-}

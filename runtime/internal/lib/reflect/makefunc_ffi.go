@@ -9,7 +9,7 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/ffi"
 )
 
-func makeFallbackFunc(ftyp *funcType, fn func([]Value) []Value, recoverTo unsafe.Pointer) Value {
+func makeProviderFunc(ftyp *funcType, fn func([]Value) []Value, recoverTo unsafe.Pointer) Value {
 	sig, err := toFFISig(ftyp.In, ftyp.Out)
 	if err != nil {
 		panic(err)

@@ -44,9 +44,6 @@ func TestReflectCallAndMethod(t *testing.T) {
 	if !ok {
 		t.Fatal("missing reflected method")
 	}
-	if fn := runtime.FuncForPC(method.Func.Pointer()); fn == nil || fn.Name() == "" {
-		t.Fatal("missing function metadata for reflected method")
-	}
 	got := method.Func.Call([]reflect.Value{reflect.ValueOf(captured), reflect.ValueOf(int64(5))})
 	if len(got) != 1 || got[0].Int() != 22 {
 		t.Fatalf("method expression result = %v, want 22", got)

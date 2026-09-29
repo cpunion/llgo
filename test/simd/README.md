@@ -22,8 +22,7 @@ CI runs the native suite on amd64/arm64 and the WASI suite in the existing wasm
 test-command job. Native LLGo runs at O0 and O2; WASI runs at O2 because the unoptimized
 standard testing framework exceeds Wasmtime's local-variable limit. The shared suite covers implemented SIMD128 operations.
 `unimplemented_llgo_test.go` checks that remaining intrinsic declarations panic
-with their symbol name, including indirect, deferred, reflected, and linkname
-calls. It also exercises the typed vector reflection ABI; the current official
-Go arm64 toolchain does not pass the added vector `reflect.Call` probe. As
-operations are implemented, move their behavior cases into the shared suite and
-replace the corresponding fallback assertions.
+with their symbol name, including indirect, deferred, and linkname calls.
+SIMD reflection is outside this stage's scope, matching the Go 1.27 support
+boundary. As operations are implemented, move their behavior cases into the
+shared suite and replace the corresponding fallback assertions.

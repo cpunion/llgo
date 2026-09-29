@@ -586,7 +586,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	simd, simdDecl := lookupSIMD(f, p.prog.Target().GOARCH)
 	simdDecl = simdDecl && f.Pkg == p.goPkg
 	if simdDecl {
-		// Intrinsics also need real symbols for reflection and linker aliases.
+		// Intrinsics also need real symbols for indirect calls and linker aliases.
 		// Ordinary direct calls still use the same table to inline their lowering.
 		obj := f.Object().(*types.Func)
 		pkgTypes = obj.Pkg()

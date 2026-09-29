@@ -191,15 +191,15 @@ func (p Program) appendWasmRootShape(shape *strings.Builder, typ Type) {
 }
 
 // newWasmReflectCallBridge adapts arrays of addresses to the exact lowered
-// LLVM signature. Interface method receivers are ordinary leading arguments;
-// closure environments use the target-specific closure calling convention.
+// LLVM signature. A closure or interface method has an explicit environment
+// parameter, so both indirect-call forms are emitted.
 func (p Package) newWasmReflectCallBridge(rawSig *types.Signature, name string) Function {
 	ptr := types.Typ[types.UnsafePointer]
 	ptrs := types.NewPointer(ptr)
 	params := types.NewTuple(
 		types.NewParam(token.NoPos, nil, "fn", ptr),
 		types.NewParam(token.NoPos, nil, "env", ptr),
-		types.NewParam(token.NoPos, nil, "method", types.Typ[types.Bool]),
+		types.NewParam(token.NoPos, nil, "prefix", types.Typ[types.Bool]),
 		types.NewParam(token.NoPos, nil, "args", ptrs),
 		types.NewParam(token.NoPos, nil, "results", ptrs),
 	)
@@ -222,13 +222,8 @@ func (p Package) newWasmReflectCallBridge(rawSig *types.Signature, name string) 
 			block = 1
 		}
 		b.SetBlock(fn.Block(block))
-		var ret Expr
-		if prefix {
-			entry := Expr{fn.Param(0).impl, prog.FuncDecl(entrySig, InC)}
-			ret = b.Call(entry, callArgs...)
-		} else {
-			ret = b.callClosure(fn.Param(0), fn.Param(1), rawSig, args)
-		}
+		entry := Expr{fn.Param(0).impl, prog.FuncDecl(entrySig, InC)}
+		ret := b.Call(entry, callArgs...)
 		for i := 0; i < rawSig.Results().Len(); i++ {
 			value := ret
 			if rawSig.Results().Len() > 1 {

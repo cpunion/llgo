@@ -88,13 +88,6 @@ func TestSIMDValueAndStorageLayout(t *testing.T) {
 			if constant.Type() != prog.storageType(typ) {
 				t.Fatal("wrong global storage constant")
 			}
-			if prog.simdReflectSignature(sig) != (target.GOARCH != "wasm") || prog.simdReflectSignature(NoArgsNoRet) {
-				t.Fatal("incorrect native SIMD reflection selection")
-			}
-			bridges := pkg.wasmReflectBridge(sig)
-			if !strings.Contains(bridges.call.impl.String(), "call <4 x float>") || bridges.make.ll.ReturnType().TypeKind() != llvm.VectorTypeKind {
-				t.Fatal("reflection bridge uses aggregate ABI")
-			}
 			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 				t.Fatal(err)
 			}

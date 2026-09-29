@@ -2574,7 +2574,7 @@ func (v Value) call(op string, in []Value) (out []Value) {
 	if nin != len(ft.In) {
 		panic("reflect.Value.Call: wrong argument count")
 	}
-	if hasTypedCallBridge(ft) {
+	if useWasmReflectBridges {
 		return callWasmBridge(ft, fn, env, v.flag&flagMethod != 0, args, in)
 	}
 

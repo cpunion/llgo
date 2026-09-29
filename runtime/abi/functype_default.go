@@ -1,4 +1,4 @@
-//go:build !llgo || ((!wasm || !wasip1) && (!goexperiment.simd || (!amd64 && !arm64)))
+//go:build !llgo || !wasm || !wasip1
 
 package abi
 

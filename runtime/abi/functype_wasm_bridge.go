@@ -1,11 +1,12 @@
-//go:build llgo && ((wasm && wasip1) || (goexperiment.simd && (amd64 || arm64)))
+//go:build llgo && wasm && wasip1
 
 package abi
 
 import "unsafe"
 
-// FuncType carries typed entries for WASI indirect calls and native SIMD
-// signatures, whose vector ABI cannot be described by libffi struct types.
+// FuncType carries compiler-generated entries because the WASI host cannot
+// supply libffi closures or dynamically typed indirect calls. JavaScript and
+// Emscripten profiles retain the smaller libffi descriptor layout.
 type FuncType struct {
 	Type
 	In    []*Type
