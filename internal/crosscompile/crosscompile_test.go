@@ -338,6 +338,7 @@ func TestUseTarget(t *testing.T) {
 		expectLLVM  string
 		expectCPU   string
 		expectMarch string
+		expectGDB   []string
 	}{
 		// FIXME(MeteorsLiu): wasi in useTarget
 		// {
@@ -353,6 +354,7 @@ func TestUseTarget(t *testing.T) {
 			expectError: false,
 			expectLLVM:  "thumbv6m-unknown-unknown-eabi",
 			expectCPU:   "cortex-m0plus",
+			expectGDB:   []string{"gdb-multiarch", "arm-none-eabi-gdb", "gdb"},
 		},
 		{
 			name:        "Cortex-M Target",
@@ -412,12 +414,22 @@ func TestUseTarget(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Unexpected error for target %s: %v", tc.targetName, err)
 			}
-			if !export.DebugInfo.AlwaysOmit {
-				t.Fatalf("target %s debug-info policy = %+v, want AlwaysOmit", tc.targetName, export.DebugInfo)
+			if !export.DebugInfo.CanRetain() {
+				t.Fatalf("target %s debug-info policy = %+v, want retainable ELF DWARF", tc.targetName, export.DebugInfo)
 			}
-			if !slices.Contains(export.LDFLAGS, "-S") {
-				t.Fatalf("target %s declares AlwaysOmit without linker -S: %v", tc.targetName, export.LDFLAGS)
+			if slices.Contains(export.LDFLAGS, "-S") {
+				t.Fatalf("target %s unconditionally strips DWARF: %v", tc.targetName, export.LDFLAGS)
 			}
+			if !slices.Equal(export.DebugInfo.OmitLinkFlags, []string{"-S"}) {
+				t.Fatalf("target %s debug omission flags = %v, want [-S]", tc.targetName, export.DebugInfo.OmitLinkFlags)
+			}
+			if len(export.DebugInfo.PreserveDriverFlags) != 0 {
+				t.Fatalf("direct linker received compiler-driver flags: %v", export.DebugInfo.PreserveDriverFlags)
+			}
+			if tc.expectGDB != nil && !slices.Equal(export.GDB, tc.expectGDB) {
+				t.Fatalf("target %s GDB candidates = %v, want %v", tc.targetName, export.GDB, tc.expectGDB)
+			}
+
 			// Check if LLVM target is in CCFLAGS
 			if tc.expectLLVM != "" {
 				found := false
@@ -505,6 +517,9 @@ func TestEmscriptenTargetProfiles(t *testing.T) {
 				t.Fatalf("export = profile/provider %q/%q, LLVM %q, %s/%s, CC %q",
 					export.WasmProfile, export.WasmProvider, export.LLVMTarget, export.GOOS, export.GOARCH, export.CC)
 			}
+			if !slices.Equal(export.DebugInfo.PreserveDriverFlags, []string{"-gdwarf-4"}) {
+				t.Fatalf("Emscripten must retain linked DWARF: %+v", export.DebugInfo)
+			}
 			for _, tag := range test.wantTags {
 				if !slices.Contains(export.BuildTags, tag) {
 					t.Errorf("build tags %v do not contain %q", export.BuildTags, tag)
@@ -587,6 +602,9 @@ func TestWASIProfileTarget(t *testing.T) {
 			}
 			if !slices.Contains(export.BuildTags, "llgo.wasm.wasi") {
 				t.Errorf("build tags %v do not contain llgo.wasm.wasi", export.BuildTags)
+			}
+			if !slices.Equal(export.DebugInfo.PreserveDriverFlags, []string{"-gdwarf-4"}) {
+				t.Fatalf("WASI driver must retain linked DWARF: %+v", export.DebugInfo)
 			}
 			if !slices.Contains(export.LDFLAGS, "-Wl,--import-memory") {
 				t.Fatalf("WASI threads must import shared memory: %v", export.LDFLAGS)
@@ -961,7 +979,7 @@ func TestUseWithTarget(t *testing.T) {
 		t.Error("Expected LDFLAGS to be set for native build")
 	}
 	wantDebugInfo := nativeDebugInfoPolicy(export.Toolchain)
-	if export.DebugInfo.AlwaysOmit != wantDebugInfo.AlwaysOmit ||
+	if export.DebugInfo.Capability != wantDebugInfo.Capability ||
 		!slices.Equal(export.DebugInfo.OmitLinkFlags, wantDebugInfo.OmitLinkFlags) ||
 		!slices.Equal(export.DebugInfo.PreserveLinkFlags, wantDebugInfo.PreserveLinkFlags) {
 		t.Fatalf("native debug-info policy = %+v, want %+v", export.DebugInfo, wantDebugInfo)
@@ -1001,8 +1019,32 @@ func TestNativeDebugInfoPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.goos, func(t *testing.T) {
 			policy := nativeDebugInfoPolicy(nativeToolchain(tt.goos))
-			if policy.AlwaysOmit || !slices.Equal(policy.OmitLinkFlags, tt.omit) || !slices.Equal(policy.PreserveLinkFlags, tt.preserve) {
+			if !policy.CanRetain() || !slices.Equal(policy.OmitLinkFlags, tt.omit) || !slices.Equal(policy.PreserveLinkFlags, tt.preserve) {
 				t.Fatalf("nativeDebugInfoPolicy(%q) = %+v, want omit=%v preserve=%v", tt.goos, policy, tt.omit, tt.preserve)
+			}
+		})
+	}
+}
+
+func TestTargetDebugInfoPolicy(t *testing.T) {
+	tests := []struct {
+		name      string
+		linker    string
+		target    string
+		canRetain bool
+		omitFlags []string
+	}{
+		{name: "ELF lld", linker: "ld.lld", target: "thumbv7em-none-unknown-eabi", canRetain: true, omitFlags: []string{"-S"}},
+		{name: "Wasm lld", linker: "wasm-ld", target: "wasm32-unknown-unknown", canRetain: true, omitFlags: []string{"-S"}},
+		{name: "mismatched ELF linker", linker: "ld.lld", target: "wasm32-unknown-unknown"},
+		{name: "mismatched Wasm linker", linker: "wasm-ld", target: "thumbv7em-none-unknown-eabi"},
+		{name: "unknown linker", linker: "custom-ld", target: "thumbv7em-none-unknown-eabi"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := targetDebugInfoPolicy(tt.linker, tt.target)
+			if got.CanRetain() != tt.canRetain || !slices.Equal(got.OmitLinkFlags, tt.omitFlags) {
+				t.Fatalf("targetDebugInfoPolicy(%q, %q) = %+v, want retain=%v flags=%v", tt.linker, tt.target, got, tt.canRetain, tt.omitFlags)
 			}
 		})
 	}
