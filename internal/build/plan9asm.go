@@ -138,7 +138,13 @@ func compilePkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Package, verbo
 			return nil, fmt.Errorf("%s: create temp .o for %s: %w", pkg.PkgPath, sfile, err)
 		}
 		objPath := objFile.Name()
-		objFile.Close()
+		// Register process-private objects immediately, not only after every
+		// selected source has compiled. A later file can fail before this
+		// function returns its object list to the package/archive caller.
+		aPkg.tempObjFiles = append(aPkg.tempObjFiles, objPath)
+		if err := objFile.Close(); err != nil {
+			return nil, fmt.Errorf("%s: close temp .o for %s: %w", pkg.PkgPath, sfile, err)
+		}
 
 		args := []string{"-o", objPath, "-c", llPath, "-Wno-override-module"}
 		if ctx.shouldPrintCommands(verbose) {
