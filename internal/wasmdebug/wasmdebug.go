@@ -353,3 +353,23 @@ func ExternalURL(module []byte) (string, bool, error) {
 	}
 	return url, found, nil
 }
+
+// DWARFSections returns the unique embedded DWARF custom sections keyed by
+// their standard section names. Returned contents do not alias module.
+func DWARFSections(module []byte) (map[string][]byte, error) {
+	sections, err := parse(module)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string][]byte)
+	for _, section := range sections {
+		if section.id != 0 || !isDWARFSection(section.name) {
+			continue
+		}
+		if _, exists := result[section.name]; exists {
+			return nil, fmt.Errorf("multiple %s WebAssembly custom sections", section.name)
+		}
+		result[section.name] = bytes.Clone(section.content)
+	}
+	return result, nil
+}
