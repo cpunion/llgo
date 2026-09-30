@@ -49,9 +49,9 @@ func TestResolveDebugArtifactMode(t *testing.T) {
 		{name: "safe default", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, OmitDWARFByDefault: true}, target: native, wantMode: DebugArtifactNone},
 		{name: "native explicit preserve overrides safe default", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, OmitDWARFByDefault: true, LinkOptions: LinkOptions{DWARF: DWARFPreserve}}, target: native, wantMode: DebugArtifactEmbedded, wantDWARF: DWARFPreserve},
 		{name: "native default with DWARF", conf: base(), target: native, wantMode: DebugArtifactEmbedded},
-		{name: "fixed default with DWARF", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, Target: "rp2040"}, target: fixed, wantMode: DebugArtifactHost},
+		{name: "derived host when DWARF requested", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, Target: "rp2040", LinkOptions: LinkOptions{DWARF: DWARFPreserve}}, target: fixed, wantMode: DebugArtifactHost, wantDWARF: DWARFPreserve},
 		{name: "fixed explicit preserve overrides safe default", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, Target: "rp2040", OmitDWARFByDefault: true, LinkOptions: LinkOptions{DWARF: DWARFPreserve}}, target: fixed, wantMode: DebugArtifactHost, wantDWARF: DWARFPreserve},
-		{name: "wasm default with DWARF", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, Target: "wasi", Goarch: "wasm"}, target: wasm, wantMode: DebugArtifactEmbedded},
+		{name: "derived embedded when DWARF requested", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, Target: "wasi", Goarch: "wasm", LinkOptions: LinkOptions{DWARF: DWARFPreserve}}, target: wasm, wantMode: DebugArtifactEmbedded, wantDWARF: DWARFPreserve},
 		{name: "explicit none", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, DebugArtifactMode: DebugArtifactNone, DebugArtifactModeSet: true}, target: native, wantMode: DebugArtifactNone, wantDWARF: DWARFOmit},
 		{name: "none conflicts preserve", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, DebugArtifactMode: DebugArtifactNone, DebugArtifactModeSet: true, LinkOptions: LinkOptions{DWARF: DWARFPreserve}}, target: native, wantErr: true},
 		{name: "embedded native", conf: Config{Mode: ModeBuild, BuildMode: BuildModeExe, DebugArtifactMode: DebugArtifactEmbedded, DebugArtifactModeSet: true}, target: native, wantMode: DebugArtifactEmbedded, wantDWARF: DWARFPreserve},
@@ -79,6 +79,29 @@ func TestResolveDebugArtifactMode(t *testing.T) {
 			}
 			if conf.DebugArtifactMode != tt.wantMode || conf.LinkOptions.DWARF != tt.wantDWARF {
 				t.Fatalf("resolved mode/options = %v/%v, want %v/%v", conf.DebugArtifactMode, conf.LinkOptions.DWARF, tt.wantMode, tt.wantDWARF)
+			}
+		})
+	}
+}
+
+func TestDebugArtifactTargetDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		goarch string
+		triple string
+	}{
+		{name: "rp2040", goarch: "arm", triple: "thumbv6m-none-unknown-eabi"},
+		{name: "wasi", goarch: "wasm", triple: "wasm32-wasip1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := NewDefaultConf(ModeBuild)
+			conf.Target = tc.name
+			conf.Goarch = tc.goarch
+			if err := resolveDebugArtifactMode(conf, &crosscompile.Export{LLVMTarget: tc.triple}); err != nil {
+				t.Fatal(err)
+			}
+			if conf.DebugArtifactMode != DebugArtifactNone || conf.LinkOptions.DWARF != DWARFDefault {
+				t.Fatalf("target defaults resolved to %v/%v, want none/default", conf.DebugArtifactMode, conf.LinkOptions.DWARF)
 			}
 		})
 	}
