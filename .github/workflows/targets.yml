@@ -54,14 +54,14 @@ jobs:
       - name: Install
         run: |
           go install ./...
-          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
       - name: Build targets (${{ matrix.test_dir }})
         working-directory: _demo/embed/targetsbuild
         run: bash build.sh "${{ matrix.test_dir }}"
 
       - name: Test embedded debugger transports
-        if: matrix.test_dir == \'empty\'
+        if: matrix.test_dir == 'empty'
         run: bash cmd/llgo/debugtest/embedded/runtest.sh
 
       - name: Test physical-probe opt-in guard
