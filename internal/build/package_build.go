@@ -211,7 +211,19 @@ func buildPackage(ctx *context, task *packageBuildTask, verbose, isolated bool) 
 	if err != nil {
 		return err
 	}
-	return finalizePackageBuild(ctx, task, verbose)
+	if err := finalizePackageBuild(ctx, task, verbose); err != nil {
+		return err
+	}
+	// Ordinary executable links consume package snapshots and archives. Let
+	// later packages reuse each isolated backend's memory instead of retaining
+	// every LLVM context until the final link. Deadcode overrides and C export
+	// wrappers still inspect live modules, so retain those backends.
+	if isolated && ctx.mode == ModeBuild && !ctx.buildConf.deadcodeDropEnabled() &&
+		task.pkg.LPkg != nil && !hasLocalCExports(task.pkg.LPkg) {
+		ctx.snapshotBackendPackage(task.pkg)
+		ctx.disposeBackendPackage(task.pkg)
+	}
+	return nil
 }
 
 func runBoundedPackageJobs(parallelism int, indexes []int, run func(index int) error) error {

@@ -3123,3 +3123,29 @@ func TestFormatPackageError(t *testing.T) {
 		})
 	}
 }
+
+func TestLinkExecutionKeepsSitePolicyAfterBackendDisposal(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		prog := llssa.NewProgram(nil)
+		prog.EnableFuncInfoSites(enabled)
+		ctx := &context{
+			prog:      prog,
+			buildConf: &Config{Mode: ModeBuild, BuildMode: BuildModeExe, Goos: "linux", Goarch: "amd64"},
+			initial:   []*packages.Package{{}},
+		}
+		plan := &mainLinkPlan{runtimeSites: shouldEmitRuntimeSites(ctx)}
+		ctx.releaseSingleExecutableBackend()
+		if ctx.prog != nil {
+			t.Fatal("released context still exposes the backend Program")
+		}
+		linkCtx := newLinkExecutionContext(ctx, plan)
+		args, cleanup, err := funcInfoSiteLayoutArgs(linkCtx, filepath.Join(t.TempDir(), "app"))
+		cleanup()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (len(args) != 0) != enabled {
+			t.Fatalf("sites enabled=%v: linker args = %v", enabled, args)
+		}
+	}
+}

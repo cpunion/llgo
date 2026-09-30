@@ -718,6 +718,9 @@ func shouldEmitRuntimeWasmSites(ctx *context) bool {
 // debug builds keep the funcinfo tables but drop the body-embedded site records
 // (see Program.EnableFuncInfoSites).
 func shouldEmitRuntimeSites(ctx *context) bool {
+	if ctx != nil && ctx.linkRuntimeSites != nil {
+		return *ctx.linkRuntimeSites
+	}
 	if ctx == nil || ctx.prog == nil || !ctx.prog.FuncInfoSitesEnabled() {
 		return false
 	}
