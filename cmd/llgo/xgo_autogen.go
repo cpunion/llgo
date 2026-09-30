@@ -9,6 +9,7 @@ import (
 	"github.com/xgo-dev/llgo/cmd/internal/build"
 	"github.com/xgo-dev/llgo/cmd/internal/clean"
 	"github.com/xgo-dev/llgo/cmd/internal/compile"
+	"github.com/xgo-dev/llgo/cmd/internal/debug"
 	"github.com/xgo-dev/llgo/cmd/internal/env"
 	"github.com/xgo-dev/llgo/cmd/internal/gdb"
 	"github.com/xgo-dev/llgo/cmd/internal/get"
@@ -35,6 +36,10 @@ type Cmd_clean struct {
 	*App
 }
 type Cmd_cmptest struct {
+	xcmd.Command
+	*App
+}
+type Cmd_debug struct {
 	xcmd.Command
 	*App
 }
@@ -141,7 +146,8 @@ func (this *App) Main() {
 	_xgo_obj18 := &Cmd_vet{App: this}
 	_xgo_obj19 := &Cmd_work{App: this}
 	_xgo_obj20 := &Cmd_gdb{App: this}
-	xcmd.Gopt_App_Main(this, _xgo_obj0, _xgo_obj1, _xgo_obj2, _xgo_obj3, _xgo_obj4, _xgo_obj5, _xgo_obj6, _xgo_obj7, _xgo_obj8, _xgo_obj9, _xgo_obj10, _xgo_obj11, _xgo_obj12, _xgo_obj13, _xgo_obj14, _xgo_obj15, _xgo_obj16, _xgo_obj17, _xgo_obj18, _xgo_obj19, _xgo_obj20)
+	_xgo_debug := &Cmd_debug{App: this}
+	xcmd.Gopt_App_Main(this, _xgo_debug, _xgo_obj0, _xgo_obj1, _xgo_obj2, _xgo_obj3, _xgo_obj4, _xgo_obj5, _xgo_obj6, _xgo_obj7, _xgo_obj8, _xgo_obj9, _xgo_obj10, _xgo_obj11, _xgo_obj12, _xgo_obj13, _xgo_obj14, _xgo_obj15, _xgo_obj16, _xgo_obj17, _xgo_obj18, _xgo_obj19, _xgo_obj20)
 }
 
 //line cmd/llgo/build_cmd.gox:20
@@ -199,6 +205,25 @@ func (this *Cmd_cmptest) Main(_xgo_arg0 string) {
 }
 func (this *Cmd_cmptest) Classfname() string {
 	return "cmptest"
+}
+
+//line cmd/llgo/debug_cmd.gox:20
+func (this *Cmd_debug) Main(_xgo_arg0 string) {
+	this.Command.Main(_xgo_arg0)
+//line cmd/llgo/debug_cmd.gox:20:1
+	this.Use("debug [-backend auto|lldb|gdb|wasmtime|browser] [-target platform] [build flags] [package] [-- debugger arguments...]")
+//line cmd/llgo/debug_cmd.gox:22:1
+	this.Short("Build and debug an LLGo program")
+//line cmd/llgo/debug_cmd.gox:24:1
+	this.FlagOff()
+//line cmd/llgo/debug_cmd.gox:26:1
+	this.Run__1(func(args []string) {
+//line cmd/llgo/debug_cmd.gox:27:1
+		debug.Cmd.Run(debug.Cmd, args)
+	})
+}
+func (this *Cmd_debug) Classfname() string {
+	return "debug"
 }
 
 //line cmd/llgo/env_cmd.gox:16
