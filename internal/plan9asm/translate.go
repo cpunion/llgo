@@ -204,11 +204,28 @@ func StripABISuffix(sym string) string {
 }
 
 func extraAsmSigsAndDeclMap(pkgPath string, goarch string) map[string]extplan9asm.FuncSig {
+	wordSize := int64(8)
+	uintptrType := extplan9asm.I64
+	switch goarch {
+	case "386", "arm", "wasm":
+		wordSize = 4
+		uintptrType = extplan9asm.I32
+	}
+
 	manual := map[string]extplan9asm.FuncSig{
 		"runtime.memmove": {
 			Name: "memmove",
-			Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.I64},
-			Ret:  extplan9asm.Ptr,
+			Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.Ptr, uintptrType},
+			Ret:  extplan9asm.Void,
+			// Plain Go assembly calls memmove through ABI0. Its outgoing
+			// stack arguments must be loaded before invoking the C symbol;
+			// the unused C return value is deliberately discarded. Explicit
+			// <ABIInternal> calls still select the register argument path.
+			Frame: extplan9asm.FrameLayout{Params: []extplan9asm.FrameSlot{
+				{Offset: 0, Type: extplan9asm.Ptr, Index: 0, Field: -1},
+				{Offset: wordSize, Type: extplan9asm.Ptr, Index: 1, Field: -1},
+				{Offset: 2 * wordSize, Type: uintptrType, Index: 2, Field: -1},
+			}},
 		},
 	}
 	if pkgPath == "internal/bytealg" {
