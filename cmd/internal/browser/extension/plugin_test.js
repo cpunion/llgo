@@ -423,6 +423,48 @@ test('DWARF frame bases retain J64 addresses and Wasm float and signed local val
 });
 
 
+test('direct Wasm pointers use unsigned target width without changing signed integers', async () => {
+  for (const pointerSize of [4, 8]) {
+    const index = fixtureIndex();
+    index.record.pointer_size = pointerSize;
+    index.types.push({id: 'pointer', name: '*int32', kind: 'pointer', size: pointerSize,
+                      elem: 'int32', complete: true});
+    index.variables = [
+      {name: 'pointer', scope: 'LOCAL', type: 'pointer', depth: 2, locations: [{expression: 'ed00009f'}]},
+      {name: 'integer', scope: 'LOCAL', type: 'int32', depth: 2, locations: [{expression: 'ed00019f'}]},
+    ];
+    const reads = [];
+    const services = {
+      getWasmLocal: async id => id === 0 && pointerSize === 8 ? {type: 'i64', value: 0x100000050n} :
+                                                              {type: 'i32', value: -2147483648},
+      getWasmLinearMemory: async (offset, length) => {
+        reads.push([offset, length]);
+        const memory = new ArrayBuffer(length);
+        new DataView(memory).setInt32(0, 42, true);
+        return memory;
+      },
+    };
+    const fetcher = async url => {
+      if (String(url).endsWith('/__llgo/debug-index.json')) return response(index);
+      if (String(url).endsWith('/__llgo/debug-schema.json')) return response(schema);
+      if (String(url).endsWith('/__llgo/plugin-ready')) return new Response(null, {status: 204});
+      throw new Error(`unexpected URL ${url}`);
+    };
+    const plugin = new LLGoLanguageExtensionPlugin(services, fetcher);
+    await plugin.addRawModule('pointers', undefined, {
+      url: 'http://127.0.0.1:1234/program.wasm', code: moduleBytes({pointerSize}).buffer,
+    });
+    const context = {rawModuleId: 'pointers', codeOffset: 12};
+    const pointer = await plugin.evaluate('pointer', context, 'stop');
+    const expectedAddress = pointerSize === 4 ? 0x80000000 : 0x100000050;
+    assert.equal(pointer.description, `0x${expectedAddress.toString(16)}`);
+    assert.equal(pointer.linearMemoryAddress, expectedAddress);
+    assert.equal((await plugin.getProperties(pointer.objectId))[0].value.value, 42);
+    assert.deepEqual(reads, [[expectedAddress, 4]]);
+    assert.equal((await plugin.evaluate('integer', context, 'stop')).value, -2147483648);
+  }
+});
+
 test('unsupported DWARF constant encodings remain unavailable instead of becoming zero', async () => {
   const index = fixtureIndex();
   index.variables = [

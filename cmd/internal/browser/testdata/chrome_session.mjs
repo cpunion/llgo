@@ -120,7 +120,7 @@ try {
   let evaluations;
   try {
     await until(async () => {
-      evaluations = JSON.parse(await extension('JSON.stringify(globalThis.__llgoEvaluations, (_, value) => typeof value === "bigint" ? String(value) : value)')); 
+      evaluations = JSON.parse(await extension('JSON.stringify(globalThis.__llgoEvaluations, (_, value) => typeof value === "bigint" ? String(value) : value)'));
       return evaluations.some(e => e.name === expectedName && e.result?.value === expectedValue);
     }, `real paused ${expectedName}=${expectedValue}`);
   } catch (error) {

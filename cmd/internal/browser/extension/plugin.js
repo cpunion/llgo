@@ -445,7 +445,7 @@
         return this.channelRemote(module, originalType, type, located, stopId, channelSpec);
       }
       if (type.kind === 'pointer') {
-        const pointer = located.kind === 'value' ? address : await this.readUnsigned(address, type.size, stopId);
+        const pointer = await this.runtimePointerValue(module, type, located, stopId);
         const object = this.storeObject(module, type, pointer, stopId, 'pointer');
         return {
           type: 'object', className: originalType.name || type.name,
@@ -635,7 +635,9 @@
     }
 
     async runtimePointerValue(module, type, located, stopId) {
-      if (located.kind === 'value') return located.value;
+      if (located.kind === 'value') {
+        return BigInt.asUintN(module.record.pointer_size * 8, BigInt(located.value));
+      }
       return type.kind === 'pointer' ?
         this.readUnsigned(located.value, Math.max(1, type.size || module.record.pointer_size), stopId) : located.value;
     }
