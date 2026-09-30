@@ -29,6 +29,8 @@ import (
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
 	"github.com/xgo-dev/llgo/internal/firmware"
+	"github.com/xgo-dev/llgo/internal/lto"
+	"github.com/xgo-dev/llgo/internal/optlevel"
 	"github.com/xgo-dev/llgo/xtool/env/llvm"
 )
 
@@ -285,7 +287,17 @@ func TestDwarfLinkerArgsSuppressNativeInputDWARF(t *testing.T) {
 }
 
 func TestTargetDWARFDoesNotChangeLoadableELF(t *testing.T) {
-	dir := t.TempDir()
+	// Use the embedded target's toolchain and policy. In particular, MSYS2's
+	// host ld.lld defaults to MinGW rather than the ELF driver used by LLGo's
+	// bundled ESP Clang; looking up the host linker would test another backend.
+	target, err := crosscompile.UseTarget("cortex-m-qemu", optlevel.O0, lto.Off)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "Cortex-M fixture")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	source := filepath.Join(dir, "main.c")
 	object := filepath.Join(dir, "main.o")
 	debugELF := filepath.Join(dir, "debug.elf")
@@ -295,28 +307,25 @@ func TestTargetDWARFDoesNotChangeLoadableELF(t *testing.T) {
 	if err := os.WriteFile(source, []byte("volatile int value = 41; void Reset_Handler(void) { value++; for (;;) {} }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	clang, err := exec.LookPath("clang")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(clang, "--target=thumbv7em-none-unknown-eabi", "-g", "-ffreestanding", "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "-c", "-o", object, source).CombinedOutput(); err != nil {
+	compileArgs := append([]string{}, target.CCFLAGS...)
+	compileArgs = append(compileArgs, target.CFLAGS...)
+	compileArgs = append(compileArgs, "-x", "c", "-g", "-ffreestanding", "-c", "-o", object, source)
+	if out, err := exec.Command(target.CC, compileArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("compile Cortex-M DWARF fixture: %v\n%s", err, out)
-	}
-	linker, err := exec.LookPath("ld.lld")
-	if err != nil {
-		t.Fatal(err)
 	}
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	linkerScript := filepath.Join(repoRoot, "targets", "lm3s6965.ld")
 	link := func(path string, opts LinkOptions) {
 		t.Helper()
-		conf := &Config{Target: "cortex-m", BuildMode: BuildModeExe, LinkOptions: opts}
-		target := targetDebugInfo()
-		args := append(debugInfoLinkerArgs(conf, &target), "-T", linkerScript, "-L", repoRoot, "-o", path, object)
-		if out, err := exec.Command(linker, args...).CombinedOutput(); err != nil {
+		conf := &Config{Target: "cortex-m-qemu", BuildMode: BuildModeExe, LinkOptions: opts}
+		args := append([]string{}, target.LDFLAGS...)
+		args = append(args, debugInfoLinkerArgs(conf, &target)...)
+		args = append(args, "-o", path, object)
+		cmd := exec.Command(target.Linker, args...)
+		cmd.Dir = repoRoot
+		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("link Cortex-M fixture: %v\n%s", err, out)
 		}
 	}
