@@ -1,6 +1,7 @@
 package plan9asm
 
 import (
+	"go/types"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,10 +16,9 @@ func TestRuntimeMemmoveABI0Frame(t *testing.T) {
 	for _, arch := range []string{"amd64", "arm64", "386", "arm", "wasm"} {
 		t.Run(arch, func(t *testing.T) {
 			sig := extraAsmSigsAndDeclMap("example.com/copy", arch)["runtime.memmove"]
-			word := int64(8)
+			word := types.SizesFor("gc", arch).Sizeof(types.Typ[types.Uintptr])
 			lengthType := extplan9asm.I64
-			if arch == "386" || arch == "arm" || arch == "wasm" {
-				word = 4
+			if word == 4 {
 				lengthType = extplan9asm.I32
 			}
 			if len(sig.Args) != 3 || sig.Args[2] != lengthType {

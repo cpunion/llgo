@@ -205,10 +205,13 @@ func StripABISuffix(sym string) string {
 
 func extraAsmSigsAndDeclMap(pkgPath string, goarch string) map[string]extplan9asm.FuncSig {
 	wordSize := int64(8)
+	if sizes := types.SizesFor("gc", goarch); sizes != nil {
+		// Go's wasm ABI has 8-byte words even when its linear-memory
+		// addresses are physically 32 bits. Match the source frame layout.
+		wordSize = sizes.Sizeof(types.Typ[types.Uintptr])
+	}
 	uintptrType := extplan9asm.I64
-	switch goarch {
-	case "386", "arm", "wasm":
-		wordSize = 4
+	if wordSize == 4 {
 		uintptrType = extplan9asm.I32
 	}
 
