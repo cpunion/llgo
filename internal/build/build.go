@@ -120,13 +120,14 @@ type OutFmts struct {
 
 // OutFmtDetails contains detailed output file paths for each format
 type OutFmtDetails struct {
-	Out  string // Base output file path
-	PCLN string // PCLN sidecar output file path (.pclntab)
-	Bin  string // Binary output file path (.bin)
-	Hex  string // Intel hex output file path (.hex)
-	Img  string // Image output file path (.img)
-	Uf2  string // UF2 output file path (.uf2)
-	Zip  string // ZIP/DFU output file path (.zip)
+	Out   string // Base output file path
+	DWARF string // External debugger-owned DWARF container (.debug.wasm)
+	PCLN  string // PCLN sidecar output file path (.pclntab)
+	Bin   string // Binary output file path (.bin)
+	Hex   string // Intel hex output file path (.hex)
+	Img   string // Image output file path (.img)
+	Uf2   string // UF2 output file path (.uf2)
+	Zip   string // ZIP/DFU output file path (.zip)
 
 	tempDir string // LLGo-owned directory removed with implicit test outputs
 }
@@ -196,8 +197,12 @@ type Config struct {
 	// TestFailFast stops launching test binaries after the first failure.
 	TestFailFast bool
 	// TestJSON suppresses parent-generated plain-text success summaries.
-	TestJSON    bool
-	LinkOptions LinkOptions
+	TestJSON          bool
+	LinkOptions       LinkOptions
+	DebugArtifactMode DebugArtifactMode
+	// DebugArtifactModeSet distinguishes an explicit mode from the build default.
+	DebugArtifactModeSet bool
+	debugPointerSize     uint8
 	// OmitDWARFByDefault controls linked builds only when -w was not
 	// explicitly specified. Explicit -w and -w=false always win.
 	OmitDWARFByDefault bool
@@ -605,6 +610,9 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 		conf.AppExt = defaultAppExt(conf)
 	}
 	applyBuildModeCompileFlags(conf.BuildMode, export.Toolchain, &export)
+	if err := resolveDebugArtifactMode(conf, &export); err != nil {
+		return nil, err
+	}
 	if err := validateLinkOptions(conf, &export); err != nil {
 		return nil, err
 	}
@@ -1200,6 +1208,9 @@ func executeInitialPackageLink(ctx *context, link *initialPackageLink, verbose, 
 		if err := finalizeRuntimePCLN(linkCtx, link.outFmts, verbose); err != nil {
 			return err
 		}
+		if err := finalizeDebugArtifact(link.conf, link.outFmts, verbose); err != nil {
+			return err
+		}
 		return finalizeDarwinSizeExecutable(linkCtx, link.outFmts.Out, verbose)
 	}()
 	if err != nil {
@@ -1213,7 +1224,10 @@ func executeInitialPackageLink(ctx *context, link *initialPackageLink, verbose, 
 	if linkCtx.buildConf.BuildMode == BuildModeCArchive || linkCtx.buildConf.BuildMode == BuildModeCShared {
 		libname := strings.TrimSuffix(filepath.Base(link.outFmts.Out), link.conf.AppExt)
 		headerPath := filepath.Join(filepath.Dir(link.outFmts.Out), libname) + ".h"
-		return nil, header.GenHeaderFile(linkCtx.prog, cHeaderPackages(link.allPkgs), libname, headerPath, verbose)
+		if err := header.GenHeaderFile(linkCtx.prog, cHeaderPackages(link.allPkgs), libname, headerPath, verbose); err != nil {
+			return nil, err
+		}
+		return nil, reportBuildArtifacts(link.conf, link.outFmts, os.Stderr)
 	}
 
 	envMap := link.outFmts.ToEnvMap()
@@ -1221,6 +1235,9 @@ func executeInitialPackageLink(ctx *context, link *initialPackageLink, verbose, 
 		if err := firmware.ConvertFormats(linkCtx.crossCompile.BinaryFormat, linkCtx.crossCompile.FormatDetail, envMap); err != nil {
 			return nil, err
 		}
+	}
+	if err := reportBuildArtifacts(link.conf, link.outFmts, os.Stderr); err != nil {
+		return nil, err
 	}
 	switch link.conf.Mode {
 	case ModeInstall:
@@ -2704,7 +2721,7 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	}
 
 	if shouldEmitDebugInfo(ctx.buildConf, &ctx.crossCompile) {
-		buildArgs = append(buildArgs, "-gdwarf-4")
+		buildArgs = append(buildArgs, ctx.crossCompile.DebugInfo.PreserveDriverFlags...)
 	}
 
 	if ctx.buildConf.GenLL {

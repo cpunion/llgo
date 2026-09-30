@@ -224,6 +224,7 @@ func AddBuildFlags(fs *flag.FlagSet) {
 	AddLTOFlag(fs)
 	AddGlobalDCEFlag(fs)
 	addPCLNFlag(fs)
+	addDebugArtifactFlag(fs)
 	fs.StringVar(&Tags, "tags", "", "Build tags")
 	fs.StringVar(&BuildEnv, "buildenv", "", "Build environment")
 	fs.Var(&PthreadStackSize, "goroutine-stack-size", "Stack size for native threads and WebAssembly goroutines, e.g. 2MB (0 uses the platform default)")
@@ -417,6 +418,10 @@ func UpdateConfig(conf *build.Config) error {
 	if PCLN.Specified {
 		conf.PCLNMode = PCLN.Mode
 		conf.PCLNModeSet = true
+	}
+	if DebugArtifact.Specified {
+		conf.DebugArtifactMode = DebugArtifact.Mode
+		conf.DebugArtifactModeSet = true
 	}
 	if LTOPluginPath != "" {
 		if conf.LTO != lto.Full {
