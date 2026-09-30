@@ -710,6 +710,43 @@ jobs:
           llgo: ${{ runner.temp }}/llgo-host
           windows-arch: ${{ matrix.windows_arch }}
 
+  wasm-browser-debug:
+    if: needs.prepare.outputs.run_code_ci == 'true'
+    needs: prepare
+    name: wasm-browser-debug
+    timeout-minutes: 20
+    runs-on: ${{ fromJSON(needs.prepare.outputs.linux_large_runner) }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - name: Set up Emscripten
+        uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: "6.0.8"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Set up Chrome for Testing
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: "152.0.7977.54"
+          install-dependencies: true
+      - uses: ./.github/actions/setup-binaryen
+      - uses: ./.github/actions/setup-go
+      - name: Install llgo
+        run: dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+      - name: Test real browser source breakpoints and paused variables
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+          LLGO_BUILD_CACHE: "1"
+          LLGO_BROWSER_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+          LLGO_BROWSER_CHROME_NO_SANDBOX: "1"
+        run: python3 dev/test_wasm_browser_debug.py
+
   wasm-runtime:
     if: needs.prepare.outputs.run_code_ci == 'true'
     needs: prepare

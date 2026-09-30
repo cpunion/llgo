@@ -33,6 +33,7 @@ import (
 	"testing"
 
 	"github.com/xgo-dev/llgo/cmd/internal/flags"
+	"github.com/xgo-dev/llgo/internal/browserdebug"
 	"github.com/xgo-dev/llgo/internal/build"
 	"github.com/xgo-dev/llgo/internal/optlevel"
 	"github.com/xgo-dev/llgo/internal/targets"
@@ -49,6 +50,9 @@ func TestBackendRouting(t *testing.T) {
 		{name: "embedded", conf: build.Config{Target: "board"}, target: &targets.Config{LLVMTarget: "thumbv7m-none-eabi"}, want: backendGDB},
 		{name: "WASI", conf: build.Config{Target: "wasip1"}, target: &targets.Config{GOOS: "wasip1", GOARCH: "wasm", LLVMTarget: "wasm32-unknown-wasi"}, want: backendWasmtime},
 		{name: "browser", conf: build.Config{Target: "wasm"}, target: &targets.Config{GOOS: "js", GOARCH: "wasm", LLVMTarget: "wasm32-unknown-wasi"}, want: backendBrowser},
+		{name: "raw js source mode", conf: build.Config{Goos: "js", Goarch: "wasm"}, want: backendBrowser},
+		{name: "memory64 inherited profile", conf: build.Config{Target: "custom"}, target: &targets.Config{GOOS: "js", GOARCH: "wasm", LLVMTarget: "wasm64-unknown-emscripten", WasmProfile: "j64"}, want: backendBrowser},
+		{name: "target names do not override host ABI", conf: build.Config{Target: "wasm-custom"}, target: &targets.Config{GOOS: "wasip1", GOARCH: "wasm", LLVMTarget: "wasm32-unknown-wasip1"}, want: backendWasmtime},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -64,6 +68,55 @@ func TestBackendRouting(t *testing.T) {
 	}
 	if err := (options{backend: "unknown"}).validate(); err == nil {
 		t.Fatal("unknown backend was accepted")
+	}
+}
+
+func TestBrowserAndWASISessionBoundaries(t *testing.T) {
+	conf := &build.Config{Goos: "js", Goarch: "wasm"}
+	if err := validateSessionTarget(conf, nil, backendBrowser, options{}); err != nil {
+		t.Fatalf("browser source mode must not require a native remote: %v", err)
+	}
+	if err := validateSessionTarget(conf, nil, backendLLDB, options{}); err == nil {
+		t.Fatal("native cross-host launch accepted without remote")
+	}
+	for _, opts := range []options{{remote: ":3333"}, {server: "must-not-execute"}} {
+		err := runSession(session{backend: backendBrowser, options: opts}, nil, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "-remote and -server") {
+			t.Fatalf("browser accepted native transport: %v", err)
+		}
+	}
+	err := runSession(session{backend: backendWasmtime, target: &targets.Config{DebugServer: "must-not-execute"}}, nil, nil, nil)
+	for _, requirement := range []string{"W32 pthread", "env.memory", "wasi.thread-spawn", "env.pthread_exit", "WAMR"} {
+		if err == nil || !strings.Contains(err.Error(), requirement) {
+			t.Fatalf("WASI diagnostic must identify %q: %v", requirement, err)
+		}
+	}
+}
+
+func TestSourceMapFlagsAndBrowserOutputs(t *testing.T) {
+	var mappings sourceMapsFlag
+	if err := mappings.Set("/build/src=/local/src"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mappings.Set("/build/src/vendor=/local/vendor"); err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 2 || mappings[0] != (browserdebug.PathMapping{From: filepath.Clean("/build/src"), To: filepath.Clean("/local/src")}) {
+		t.Fatalf("repeated source mappings lost: %+v", mappings)
+	}
+	if err := mappings.Set("missing-destination"); err == nil || len(mappings) != 2 {
+		t.Fatal("invalid source mapping changed accepted mappings")
+	}
+	for _, ext := range []string{".wasm", ".mjs", ".js", ".html"} {
+		conf := &build.Config{Goos: "js", Goarch: "wasm", Target: "emscripten-memory64", OutFile: filepath.Join(t.TempDir(), "app"+ext)}
+		cleanup, artifact, err := prepareArtifact(conf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cleanup()
+		if !strings.HasSuffix(artifact, "app"+ext) || !strings.HasSuffix(browserModulePath(artifact), "app.wasm") || conf.Target != "emscripten-memory64" {
+			t.Fatalf("browser output/profile changed: %+v, %q", conf, artifact)
+		}
 	}
 }
 
