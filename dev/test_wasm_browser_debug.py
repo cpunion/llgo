@@ -27,6 +27,11 @@ def main():
     llgo = env.get("LLGO", "llgo")
     with tempfile.TemporaryDirectory(prefix="llgo-browser-debug-") as directory:
         for profile, target in (("j32", "wasm"), ("j64", "emscripten-memory64")):
+            runtime_stem = Path(directory) / f"{profile}-runtime"
+            run([llgo, "build", "-target", target, "-O0",
+                 "-debug-artifact=embedded", "-o", str(runtime_stem.with_suffix(".mjs")),
+                 "./internal/browserdebug/testdata/runtime"], env)
+            env["LLGO_BROWSER_DEBUG_RUNTIME_ARTIFACT"] = str(runtime_stem.with_suffix(".wasm"))
             for mode in ("embedded", "external"):
                 stem = Path(directory) / f"{profile}-{mode}"
                 run([llgo, "build", "-target", target, "-O0",
