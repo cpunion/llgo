@@ -184,6 +184,9 @@ type Config struct {
 	// go/packages. Callers use internal/goflags to parse supported compiler and
 	// linker semantics into typed Config fields before calling Do.
 	GoBuildFlags []string
+	// NativeASMPackages opts exact external import paths into native Go
+	// assembly source selection without changing stdlib/runtime build tags.
+	NativeASMPackages []string
 	// BuildParallelism is the package-build, test-link, and test-run concurrency
 	// requested by Go's -p build flag. Zero uses the Go default, GOMAXPROCS.
 	BuildParallelism int
@@ -269,6 +272,7 @@ func (c *Config) clone() *Config {
 	}
 	cloned.RunArgs = slices.Clone(c.RunArgs)
 	cloned.GoBuildFlags = slices.Clone(c.GoBuildFlags)
+	cloned.NativeASMPackages = slices.Clone(c.NativeASMPackages)
 	cloned.toolTags = slices.Clone(c.toolTags)
 	cloned.Overlay = cloneOverlay(c.Overlay)
 	if c.coverage != nil && c.coverage.inputOverlaySet {
@@ -755,6 +759,21 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 		return nil, err
 	}
 	dedup.SetLLGoFiles(llgoFiles)
+	asmOverlay, err := nativeASMSelectionOverlay(commandEnv{dir: cfg.Dir, environ: cfg.Env}, conf, cfg.BuildFlags, sourcePatchGOROOT)
+	if err != nil {
+		return nil, err
+	}
+	if len(asmOverlay) != 0 {
+		if conf.Overlay == nil {
+			conf.Overlay = make(map[string][]byte)
+		}
+		for filename, data := range asmOverlay {
+			conf.Overlay[filename] = data
+		}
+		// Pass only the external build-constraint overlay to the Go driver.
+		// Runtime source patches remain LLGo parser overlays as before.
+		cfg.Overlay = asmOverlay
+	}
 	cfg.ParseFile = func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
 		if data, ok := conf.Overlay[filename]; ok {
 			src = data
