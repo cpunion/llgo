@@ -274,14 +274,25 @@ func nativeToolchain(goos string) NativeToolchain {
 	}
 }
 
+// driverDebugInfoPolicy describes invocation through a compiler driver, including
+// hosted Wasm builds whose driver ultimately invokes wasm-ld. Direct linker
+// invocation instead uses targetDebugInfoPolicy and must not receive driver flags.
+func driverDebugInfoPolicy() DebugInfoPolicy {
+	return DebugInfoPolicy{
+		OmitLinkFlags:       []string{"-Wl,-S"},
+		PreserveDriverFlags: []string{"-gdwarf-4"},
+	}
+}
+
 func nativeDebugInfoPolicy(toolchain NativeToolchain) DebugInfoPolicy {
-	policy := DebugInfoPolicy{PreserveDriverFlags: []string{"-gdwarf-4"}}
+	policy := driverDebugInfoPolicy()
 	switch toolchain.Linker {
 	case LinkerFlavorMachO, LinkerFlavorELFLLD, LinkerFlavorMinGWLLD:
-		policy.OmitLinkFlags = []string{"-Wl,-S"}
 	case LinkerFlavorCOFFLLD:
 		policy.OmitLinkFlags = []string{"-Wl,/debug:none"}
 		policy.PreserveLinkFlags = []string{"-Wl,/debug:dwarf"}
+	default:
+		policy.OmitLinkFlags = nil
 	}
 	return policy
 }
@@ -290,6 +301,9 @@ func (p DebugInfoPolicy) CanRetain() bool {
 	return p.Capability == DebugInfoRetainable
 }
 
+// targetDebugInfoPolicy covers direct linker invocations from UseTarget. Normal
+// hosted Wasm/WASI builds route through useWithGOARMAndToolchain and the driver
+// policy; the wasm-ld case also supports direct target-policy callers.
 func targetDebugInfoPolicy(linker, llvmTarget string) DebugInfoPolicy {
 	switch linker {
 	case "ld.lld":
@@ -301,6 +315,8 @@ func targetDebugInfoPolicy(linker, llvmTarget string) DebugInfoPolicy {
 			return DebugInfoPolicy{OmitLinkFlags: []string{"-S"}}
 		}
 	}
+	// Unknown or mismatched linker/target pairs intentionally omit DWARF until
+	// retention has been validated for that direct-linker path.
 	return DebugInfoPolicy{Capability: DebugInfoUnavailable}
 }
 
@@ -720,8 +736,7 @@ func useWithGOARMAndToolchain(goos, goarch, goarm string, forceEspClang bool, le
 	if wasmProvider == WasmProviderWASI {
 		export.BuildTags = appendUniqueStrings(export.BuildTags, "llgo.wasm.wasi")
 	}
-	export.DebugInfo.OmitLinkFlags = []string{"-Wl,-S"}
-	export.DebugInfo.PreserveDriverFlags = []string{"-gdwarf-4"}
+	export.DebugInfo = driverDebugInfoPolicy()
 
 	// Configure based on GOOS
 	switch goos {

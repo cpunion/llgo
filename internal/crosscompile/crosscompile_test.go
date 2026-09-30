@@ -1022,6 +1022,9 @@ func TestNativeDebugInfoPolicy(t *testing.T) {
 			if !policy.CanRetain() || !slices.Equal(policy.OmitLinkFlags, tt.omit) || !slices.Equal(policy.PreserveLinkFlags, tt.preserve) {
 				t.Fatalf("nativeDebugInfoPolicy(%q) = %+v, want omit=%v preserve=%v", tt.goos, policy, tt.omit, tt.preserve)
 			}
+			if !slices.Equal(policy.PreserveDriverFlags, []string{"-gdwarf-4"}) {
+				t.Fatalf("native compiler-driver DWARF flags = %v, want -gdwarf-4", policy.PreserveDriverFlags)
+			}
 		})
 	}
 }
