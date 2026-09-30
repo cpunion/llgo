@@ -1915,6 +1915,9 @@ func TestExecuteInitialPackageLinkCompileOnlyNamedTargetDoesNotExecute(t *testin
 		Goos:        runtime.GOOS,
 		Goarch:      runtime.GOARCH,
 		PCLNMode:    PCLNNone,
+		// This post-link test bypasses config resolution. Its linker helper
+		// writes an opaque fixture, so use the resolved no-DWARF artifact mode.
+		DebugArtifactMode: DebugArtifactNone,
 	}
 	ctx := &context{
 		mode:      ModeTest,
