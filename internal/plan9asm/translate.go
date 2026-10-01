@@ -3,7 +3,6 @@ package plan9asm
 import (
 	"fmt"
 	"go/types"
-	"os"
 	"regexp"
 	"strings"
 
@@ -183,13 +182,10 @@ func resolveSymFuncForTarget(pkgPath, goos, goarch string) func(sym string) stri
 	}
 }
 
+// ReadFileWithOverlay reads an assembly source within the 64 MiB inventory bound.
+// Overlay bytes are checked directly; file bytes are bounded during reading.
 func ReadFileWithOverlay(overlay map[string][]byte, path string) ([]byte, error) {
-	if overlay != nil {
-		if b, ok := overlay[path]; ok {
-			return b, nil
-		}
-	}
-	return os.ReadFile(path)
+	return readAssemblyFileBounded(overlay, path, assemblySourceByteLimit)
 }
 
 func HasAnyTextAsm(overlay map[string][]byte, files []string) (bool, error) {

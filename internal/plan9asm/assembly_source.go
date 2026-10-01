@@ -18,6 +18,8 @@ const assemblySourceByteLimit = 64 << 20
 // ReadAssemblyFileWithIncludes preprocesses actual selected source and headers.
 // The search stays fixed at the package directory and selected GOROOT/pkg/include;
 // nested headers do not change it. Only the P9 state machine opens active headers.
+// File reads enforce the shared 64 MiB source/include quota while reading; overlay
+// bytes are checked before preprocessing. Expanded output is also bounded.
 func ReadAssemblyFileWithIncludes(pkg *packages.Package, file string, overlay map[string][]byte, goos, goarch string, opt TranslateOptions) ([]byte, error) {
 	source, err := ReadFileWithOverlay(overlay, file)
 	if err != nil {
@@ -27,11 +29,18 @@ func ReadAssemblyFileWithIncludes(pkg *packages.Package, file string, overlay ma
 }
 
 func preprocessAssemblyForPkg(pkg *packages.Package, file string, source []byte, overlay map[string][]byte, goos, goarch string, opt TranslateOptions) ([]byte, error) {
+	return preprocessAssemblyForPkgWithLimit(pkg, file, source, overlay, goos, goarch, opt, assemblySourceByteLimit)
+}
+
+func preprocessAssemblyForPkgWithLimit(pkg *packages.Package, file string, source []byte, overlay map[string][]byte, goos, goarch string, opt TranslateOptions, limit int) ([]byte, error) {
 	if pkg == nil {
 		return nil, fmt.Errorf("assembly preprocessing requires a package context")
 	}
-	if len(source) > assemblySourceByteLimit {
-		return nil, fmt.Errorf("assembly source exceeds %d-byte inventory bound", assemblySourceByteLimit)
+	if err := validateAssemblyReadLimit(limit); err != nil {
+		return nil, err
+	}
+	if len(source) > limit {
+		return nil, fmt.Errorf("assembly source exceeds %d-byte inventory bound", limit)
 	}
 	defines := opt.AssemblyDefines
 	if defines == nil {
@@ -78,23 +87,23 @@ func preprocessAssemblyForPkg(pkg *packages.Package, file string, source []byte,
 				return "", nil, fmt.Errorf("assembly include %q escapes through a symlink", name)
 			}
 			if !overlaid {
-				body, err = os.ReadFile(resolved)
+				body, err = readAssemblyFileBounded(nil, resolved, limit-consumedBytes)
 				if err != nil {
-					return "", nil, err
+					return "", nil, fmt.Errorf("assembly include %q: %w", name, err)
 				}
 			}
-			consumedBytes += len(body)
-			if consumedBytes > assemblySourceByteLimit {
-				return "", nil, fmt.Errorf("assembly include graph exceeds %d-byte inventory bound", assemblySourceByteLimit)
+			if len(body) > limit-consumedBytes {
+				return "", nil, fmt.Errorf("assembly include graph exceeds %d-byte inventory bound", limit)
 			}
+			consumedBytes += len(body)
 			return resolved, body, nil
 		}
 		if name == "go_asm.h" {
 			body, err := extplan9asm.GoAssemblyHeader(extplan9asm.GoPackage{Path: pkg.PkgPath, Types: pkg.Types}, goarch)
-			consumedBytes += len(body)
-			if consumedBytes > assemblySourceByteLimit {
+			if len(body) > limit-consumedBytes {
 				return "", nil, fmt.Errorf("generated assembly header exceeds inventory bound")
 			}
+			consumedBytes += len(body)
 			return "<generated-go_asm.h:" + pkg.PkgPath + ">", body, err
 		}
 		return "", nil, fmt.Errorf("assembly include %q not found for %s", name, parent)
@@ -105,8 +114,8 @@ func preprocessAssemblyForPkg(pkg *packages.Package, file string, source []byte,
 	if err != nil {
 		return nil, err
 	}
-	if len(expanded) > assemblySourceByteLimit {
-		return nil, fmt.Errorf("expanded assembly exceeds %d-byte inventory bound", assemblySourceByteLimit)
+	if len(expanded) > limit {
+		return nil, fmt.Errorf("expanded assembly exceeds %d-byte inventory bound", limit)
 	}
 	// These are header macros, not instructions. The legacy parser accepts
 	// NO_LOCAL_POINTERS permissively; actual source must define and expand it.
