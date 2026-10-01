@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/xgo-dev/llgo/cmd/internal/compilerhash"
+	"github.com/xgo-dev/llgo/internal/asmselect"
 	"github.com/xgo-dev/llgo/internal/build"
 	"github.com/xgo-dev/llgo/internal/buildenv"
 	"github.com/xgo-dev/llgo/internal/lto"
@@ -34,6 +35,7 @@ var CompilerVerbose bool
 var BuildEnv string
 var BuildMode string
 var Tags string
+var NativeASMPackages string
 var Target string
 var Emulator bool
 var Port string
@@ -225,6 +227,7 @@ func AddBuildFlags(fs *flag.FlagSet) {
 	AddGlobalDCEFlag(fs)
 	addPCLNFlag(fs)
 	fs.StringVar(&Tags, "tags", "", "Build tags")
+	fs.StringVar(&NativeASMPackages, "native-asm-pkgs", "", "Native Go assembly selection for exact external import paths (comma-separated; stdlib/runtime unchanged)")
 	fs.StringVar(&BuildEnv, "buildenv", "", "Build environment")
 	fs.Var(&PthreadStackSize, "goroutine-stack-size", "Stack size for native threads and WebAssembly goroutines, e.g. 2MB (0 uses the platform default)")
 	fs.Var(&PthreadStackSize, "pthread-stack-size", "Alias for -goroutine-stack-size")
@@ -386,6 +389,11 @@ func AddCmpTestFlags(fs *flag.FlagSet) {
 func UpdateConfig(conf *build.Config) error {
 	conf.CompilerHash = compilerhash.Value()
 	conf.Tags = Tags
+	nativeASM, err := asmselect.ParsePackages(NativeASMPackages)
+	if err != nil {
+		return err
+	}
+	conf.NativeASMPackages = nativeASM
 	conf.Verbose = Verbose
 	conf.PrintPackages = false
 	switch conf.Mode {

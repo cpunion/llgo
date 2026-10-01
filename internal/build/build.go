@@ -184,6 +184,9 @@ type Config struct {
 	// go/packages. Callers use internal/goflags to parse supported compiler and
 	// linker semantics into typed Config fields before calling Do.
 	GoBuildFlags []string
+	// NativeASMPackages opts exact external import paths into native Go
+	// assembly source selection without changing stdlib/runtime build tags.
+	NativeASMPackages []string
 	// BuildParallelism is the package-build, test-link, and test-run concurrency
 	// requested by Go's -p build flag. Zero uses the Go default, GOMAXPROCS.
 	BuildParallelism int
@@ -247,6 +250,7 @@ type Config struct {
 
 	// Resolved once per invocation, independently of the Go version that built LLGo.
 	sourceGoVersion string
+	sourceGoRoot    string
 	toolTags        []string
 }
 
@@ -269,6 +273,7 @@ func (c *Config) clone() *Config {
 	}
 	cloned.RunArgs = slices.Clone(c.RunArgs)
 	cloned.GoBuildFlags = slices.Clone(c.GoBuildFlags)
+	cloned.NativeASMPackages = slices.Clone(c.NativeASMPackages)
 	cloned.toolTags = slices.Clone(c.toolTags)
 	cloned.Overlay = cloneOverlay(c.Overlay)
 	if c.coverage != nil && c.coverage.inputOverlaySet {
@@ -740,6 +745,7 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	sourcePatchGOROOT, sourcePatchGoVersion := sourceGo.GOROOT, sourceGo.GOVERSION
 	conf.GOEXPERIMENT = sourceGo.GOEXPERIMENT
 	conf.sourceGoVersion = sourceGo.GOVERSION
+	conf.sourceGoRoot = sourceGo.GOROOT
 	conf.toolTags = slices.Clone(sourceGo.toolTags)
 	cfg.Env = sourceGo.apply(cfg.Env)
 	commands.environ = sourceGo.apply(commands.environ)
@@ -755,6 +761,21 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 		return nil, err
 	}
 	dedup.SetLLGoFiles(llgoFiles)
+	asmOverlay, err := nativeASMSelectionOverlay(commandEnv{dir: cfg.Dir, environ: cfg.Env}, conf, cfg.BuildFlags, sourcePatchGOROOT)
+	if err != nil {
+		return nil, err
+	}
+	if len(asmOverlay) != 0 {
+		if conf.Overlay == nil {
+			conf.Overlay = make(map[string][]byte)
+		}
+		for filename, data := range asmOverlay {
+			conf.Overlay[filename] = data
+		}
+		// Pass only the external build-constraint overlay to the Go driver.
+		// Runtime source patches remain LLGo parser overlays as before.
+		cfg.Overlay = asmOverlay
+	}
 	cfg.ParseFile = func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
 		if data, ok := conf.Overlay[filename]; ok {
 			src = data
@@ -823,10 +844,7 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	}
 
 	altPkgPaths := altPkgs(initial, conf, llssa.PkgRuntime)
-	altCfg := *cfg
-	altCfg.Dir = env.LLGoRuntimeDir()
-	// The runtime submodule may otherwise select a different toolchain from its go.mod.
-	altCfg.Env = withResolvedGoToolchain(cfg.Env, sourcePatchGoVersion)
+	altCfg := runtimePackageLoadConfig(cfg, env.LLGoRuntimeDir(), sourcePatchGoVersion)
 	loadAltSpan := buildTrace.startCoordinator("load runtime packages", map[string]any{
 		"packages": slices.Clone(altPkgPaths),
 	})
@@ -1057,6 +1075,24 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	}
 
 	return allPkgs, errors.Join(linkErrs...)
+}
+
+func runtimePackageLoadConfig(cfg *packages.Config, runtimeDir, sourceGoVersion string) packages.Config {
+	alt := *cfg
+	alt.Dir = runtimeDir
+	// The runtime submodule may otherwise select a different toolchain from its go.mod.
+	alt.Env = withResolvedGoToolchain(cfg.Env, sourceGoVersion)
+	// -modfile belongs to the application module, not this runtime submodule.
+	// Keeping it here can silently download an older runtime instead of loading
+	// LLGO_ROOT/runtime, even though alt.Dir points to the local installation.
+	alt.BuildFlags = withoutRuntimeModFileFlags(cfg.BuildFlags)
+	for _, entry := range alt.Env {
+		if value, ok := strings.CutPrefix(entry, "GOFLAGS="); ok {
+			alt.Env = withEnv(alt.Env, "GOFLAGS="+withoutRuntimeModFileEnv(value))
+			break
+		}
+	}
+	return alt
 }
 
 func resolveTestPthreadStackSize(conf *Config) {

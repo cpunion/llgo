@@ -3,7 +3,6 @@ package plan9asm
 import (
 	"fmt"
 	"go/types"
-	"os"
 	"regexp"
 	"strings"
 
@@ -34,6 +33,12 @@ type ModuleTranslation struct {
 type TranslateOptions struct {
 	AnnotateSource bool
 	GOARM          string
+	// SourceGOROOT is the selected source toolchain, not necessarily the one
+	// that compiled LLGo. File translation uses its actual assembly headers.
+	SourceGOROOT string
+	// AssemblyDefines is the resolved Go CPU configuration. Nil uses the
+	// standalone API's environment; an explicit empty slice does not.
+	AssemblyDefines []string
 	// X87Mode controls explicit 386 x87 assembly lowering. The zero value uses
 	// the Go-compatible hardware lowering.
 	X87Mode extplan9asm.X87Mode
@@ -47,7 +52,7 @@ func TranslateFileForPkgWithOptions(pkg *packages.Package, sfile string, goos st
 	if pkg == nil {
 		return nil, fmt.Errorf("nil package")
 	}
-	src, err := ReadFileWithOverlay(overlay, sfile)
+	src, err := ReadAssemblyFileWithIncludes(pkg, sfile, overlay, goos, goarch, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +85,10 @@ func TranslateSourceModuleForPkgWithOptions(pkg *packages.Package, sfile string,
 	}
 	if pkg.Types == nil || pkg.Types.Scope() == nil {
 		return nil, fmt.Errorf("%s: missing types (needed for asm signatures)", pkg.PkgPath)
+	}
+	src, err := preprocessAssemblyForPkg(pkg, sfile, src, nil, goos, goarch, opt)
+	if err != nil {
+		return nil, fmt.Errorf("%s: preprocess %s: %w", pkg.PkgPath, sfile, err)
 	}
 
 	// Match the symbol identity used by LLGo's frontend. In particular, an
@@ -173,13 +182,10 @@ func resolveSymFuncForTarget(pkgPath, goos, goarch string) func(sym string) stri
 	}
 }
 
+// ReadFileWithOverlay reads an assembly source within the 64 MiB inventory bound.
+// Overlay bytes are checked directly; file bytes are bounded during reading.
 func ReadFileWithOverlay(overlay map[string][]byte, path string) ([]byte, error) {
-	if overlay != nil {
-		if b, ok := overlay[path]; ok {
-			return b, nil
-		}
-	}
-	return os.ReadFile(path)
+	return readAssemblyFileBounded(overlay, path, assemblySourceByteLimit)
 }
 
 func HasAnyTextAsm(overlay map[string][]byte, files []string) (bool, error) {
@@ -204,12 +210,45 @@ func StripABISuffix(sym string) string {
 }
 
 func extraAsmSigsAndDeclMap(pkgPath string, goarch string) map[string]extplan9asm.FuncSig {
+	wordSize := int64(8)
+	if sizes := types.SizesFor("gc", goarch); sizes != nil {
+		// Go's wasm ABI has 8-byte words even when its linear-memory
+		// addresses are physically 32 bits. Match the source frame layout.
+		wordSize = sizes.Sizeof(types.Typ[types.Uintptr])
+	}
+	uintptrType := extplan9asm.I64
+	if wordSize == 4 {
+		uintptrType = extplan9asm.I32
+	}
+
 	manual := map[string]extplan9asm.FuncSig{
 		"runtime.memmove": {
 			Name: "memmove",
-			Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.I64},
-			Ret:  extplan9asm.Ptr,
+			Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.Ptr, uintptrType},
+			Ret:  extplan9asm.Void,
+			// Plain Go assembly calls memmove through ABI0. Its outgoing
+			// stack arguments must be loaded before invoking the C symbol;
+			// the unused C return value is deliberately discarded. Explicit
+			// <ABIInternal> calls still select the register argument path.
+			Frame: extplan9asm.FrameLayout{Params: []extplan9asm.FrameSlot{
+				{Offset: 0, Type: extplan9asm.Ptr, Index: 0, Field: -1},
+				{Offset: wordSize, Type: extplan9asm.Ptr, Index: 1, Field: -1},
+				{Offset: 2 * wordSize, Type: uintptrType, Index: 2, Field: -1},
+			}},
 		},
+	}
+	if goarch == "arm64" {
+		// runtime/stubs.go declares memmove(unsafe.Pointer, unsafe.Pointer,
+		// uintptr) with no result. Go's ARM64 ABI assigns these scalar leaves
+		// to R0-R2, as consumed by memmove_arm64.s. Keep the separate ABI0
+		// Frame: an explicit source selector chooses the register contract.
+		sig := manual["runtime.memmove"]
+		sig.ARM64GoRegisterABI = &extplan9asm.ARM64GoRegisterABI{Params: []extplan9asm.ARM64GoRegisterValue{
+			{Index: 0, Type: extplan9asm.Ptr, Register: "R0"},
+			{Index: 1, Type: extplan9asm.Ptr, Register: "R1"},
+			{Index: 2, Type: uintptrType, Register: "R2"},
+		}}
+		manual["runtime.memmove"] = sig
 	}
 	if pkgPath == "internal/bytealg" {
 		switch goarch {
@@ -246,8 +285,11 @@ func extraAsmSigsAndDeclMap(pkgPath string, goarch string) map[string]extplan9as
 				ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2", "R5"},
 			}
 		case "arm64":
-			manual["internal/bytealg.cmpbody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.I64, extplan9asm.Ptr, extplan9asm.I64}, Ret: extplan9asm.I64}
-			manual["internal/bytealg.memeqbody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.I64}, Ret: extplan9asm.I1}
+			// These private Go source helpers use their documented physical
+			// registers, not an inferred ABI0 FP frame. cmpbody returns in R0;
+			// the old memeqbody helper likewise returns its bool in R0.
+			manual["internal/bytealg.cmpbody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.I64, extplan9asm.Ptr, extplan9asm.I64}, Ret: extplan9asm.I64, ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2", "R3"}}
+			manual["internal/bytealg.memeqbody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.I64}, Ret: extplan9asm.I1, ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2"}}
 			manual["internal/bytealg.countbytebody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.I64, extplan9asm.LLVMType("i8"), extplan9asm.Ptr}, Ret: extplan9asm.Void, ArgRegs: []extplan9asm.Reg{"R0", "R2", "R1", "R8"}}
 			manual["internal/bytealg.indexbody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.I64, extplan9asm.Ptr, extplan9asm.I64, extplan9asm.Ptr}, Ret: extplan9asm.Void, ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2", "R3", "R9"}}
 			manual["internal/bytealg.indexbytebody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.LLVMType("i8"), extplan9asm.I64, extplan9asm.Ptr}, Ret: extplan9asm.Void, ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2", "R8"}}

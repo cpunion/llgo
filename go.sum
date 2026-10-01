@@ -1,3 +1,5 @@
+github.com/cpunion/plan9asm v0.0.0-20261001201022-0dad3b634810 h1:UZSwj/B6sF9ZChOQTQoQ/9iv5tnfXsl+TiVWa9rL6E4=
+github.com/cpunion/plan9asm v0.0.0-20261001201022-0dad3b634810/go.mod h1:hQ64KHyR1FQJI3dF0jq3ReFoAF7ecDYDR80mK2wfeP4=
 github.com/creack/goselect v0.1.2 h1:2DNy14+JPjRBgPzAd1thbQp4BSIihxcBf0IXhQXDRa0=
 github.com/creack/goselect v0.1.2/go.mod h1:a/NhLweNvqIYMuxcMOuWY516Cimucms3DglDzQP3hKY=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
@@ -24,12 +26,12 @@ github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcU
 github.com/stretchr/testify v1.8.4/go.mod h1:sz/lmYIOXD/1dqDmKjjqLyZ2RngseejIcXlSw2iwfAo=
 github.com/xgo-dev/llvm v0.10.0 h1:o27kypAGI7DrLFckrsUVjWChXqHUBDAFtZbwMiDFs50=
 github.com/xgo-dev/llvm v0.10.0/go.mod h1:42vav2/cI5BAIcL543DZSMO9do8/aCK2z7JERH+AE+M=
-github.com/xgo-dev/plan9asm v0.6.1 h1:WcwHdcNKBzZnEwl/m4AQPkBQ0XO96d9kgBhanmpINuA=
-github.com/xgo-dev/plan9asm v0.6.1/go.mod h1:UTpcZz3aQXSWYruhfzOi8aK4QZTEFPIvB61YW6jHT4M=
 go.bug.st/serial v1.6.4 h1:7FmqNPgVp3pu2Jz5PoPtbZ9jJO5gnEnZIvnI1lzve8A=
 go.bug.st/serial v1.6.4/go.mod h1:nofMJxTeNVny/m6+KaafC6vJGj3miwQZ6vW4BZUGJPI=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
 go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
+golang.org/x/arch v0.14.0 h1:z9JUEZWr8x4rR0OU6c4/4t6E6jOZ8/QBS2bBYBm4tx4=
+golang.org/x/arch v0.14.0/go.mod h1:FEVrYAQjsQXMVJ1nsMoVVXPZg6p2JE2mx8psSWTDQys=
 golang.org/x/mod v0.41.0 h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c=
 golang.org/x/mod v0.41.0/go.mod h1:Ek9pY8RKWXwsWvd3rQiHYtMqkjSUV+s1Rj7j4H5Ur6o=
 golang.org/x/sync v0.23.0 h1:KameEIfc1IkluZyXWLn39Wd4tURc6GbCiISGiZm2bQk=

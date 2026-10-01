@@ -1,6 +1,7 @@
 package build
 
 import (
+	"reflect"
 	"testing"
 
 	llruntime "github.com/xgo-dev/llgo/runtime"
@@ -28,6 +29,15 @@ func TestPlan9AsmTranslateOptions(t *testing.T) {
 				t.Fatalf("X87Mode = %v, want %v", got.X87Mode, test.want)
 			}
 		})
+	}
+}
+
+func TestPlan9AsmTranslateOptionsBindResolvedSourceInputs(t *testing.T) {
+	t.Setenv("GOAMD64", "v1")
+	conf := &Config{Goos: "linux", Goarch: "amd64", GOAMD64: "v3", sourceGoRoot: "selected-source-toolchain"}
+	got := plan9asmTranslateOptions(conf)
+	if got.SourceGOROOT != conf.sourceGoRoot || !reflect.DeepEqual(got.AssemblyDefines, []string{"GOOS_linux", "GOARCH_amd64", "GOAMD64_v3"}) {
+		t.Fatalf("assembly selected inputs use process/build toolchain instead of resolved source: %+v", got)
 	}
 }
 

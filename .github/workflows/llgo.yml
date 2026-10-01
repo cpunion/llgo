@@ -27,6 +27,130 @@ jobs:
       - name: Verify CI preparation succeeded
         run: test "${{ needs.prepare.result }}" = "success"
 
+  assembly-regressions:
+    needs: prepare
+    if: needs.prepare.outputs.run_code_ci == 'true'
+    name: exact assembly regressions (${{ matrix.os }}, LLVM 22, Go 1.27.1)
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ startsWith(matrix.os, 'ubuntu') && fromJSON(needs.prepare.outputs.linux_large_runner) || matrix.os }}
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+      LLGO_ROOT: ${{ github.workspace }}
+      LLGO_PLAN9ASM_PKGS: ''
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install LLVM 22 dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+
+      - name: Set up the current external-library toolchain
+        uses: ./.github/actions/setup-go
+        with:
+          go-version: '1.27.1'
+
+      - name: Install pinned ARM64 execution tools
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          exec > >(tee "$RUNNER_TEMP/assembly-qemu-install.log") 2>&1
+          test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = linux/amd64
+          go mod download github.com/xgo-dev/plan9asm
+          plan9asm_source="$(go list -m -f '{{if .Replace}}{{.Replace.Dir}}{{else}}{{.Dir}}{{end}}' github.com/xgo-dev/plan9asm)"
+          if [[ -z "$plan9asm_source" || ! -d "$plan9asm_source" ||
+                ! -f "$plan9asm_source/scripts/install-ci-qemu.sh" ]]; then
+            echo "Resolved plan9asm dependency has no execution-tool installer: $plan9asm_source" >&2
+            exit 1
+          fi
+
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          bash "$plan9asm_source/scripts/install-ci-qemu.sh" "$RUNNER_TEMP/assembly-qemu"
+
+      - name: Execute required ARM64 memmove counterpart
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          PLAN9ASM_CROSS_EXEC: '1'
+        run: |
+          set -euo pipefail
+          go test -count=1 -run '^TestRuntimeMemmove' ./internal/plan9asm
+
+      - name: Build the checkout compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/assembly-bin"
+          go build -o "$RUNNER_TEMP/assembly-bin/llgo" ./cmd/llgo
+
+          LLVM_CONFIG=${LLVM_CONFIG:-llvm-config}
+          llvm_version="$("$LLVM_CONFIG" --version)"
+          [[ "$llvm_version" == 22.* ]]
+          llvm_bindir="$("$LLVM_CONFIG" --bindir)"
+          {
+            git rev-parse HEAD
+            go version
+            go env GOVERSION GOHOSTOS GOHOSTARCH
+            go list -m -json github.com/xgo-dev/plan9asm
+            "$LLVM_CONFIG" --version
+            "$llvm_bindir/llc" --version
+            "$RUNNER_TEMP/assembly-bin/llgo" version
+            go version -m "$RUNNER_TEMP/assembly-bin/llgo"
+            shasum -a 256 "$RUNNER_TEMP/assembly-bin/llgo"
+          } | tee "$RUNNER_TEMP/assembly-toolchain.log"
+
+      # test/asm has its own go.mod. Neither root ./test/... nor the
+      # language-version matrix traverses it. Run source-applicable tests
+      # here without treating compile-only objects as executed regressions.
+      - name: Native Go assembly baselines
+        working-directory: test/asm
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v -count=1 -timeout=15m ./... | tee "$RUNNER_TEMP/assembly-go.log"
+
+      - name: LLGo assembly compile, link and execute
+        working-directory: test/asm
+        shell: bash
+        env:
+          # Reuse only this fresh job's builds, not another revision's
+          # restored compiler/runtime cache, across the package invocations.
+          LLGO_BUILD_CACHE: 'on'
+          XDG_CACHE_HOME: ${{ runner.temp }}/assembly-build-cache
+        run: |
+          set -euo pipefail
+
+          packages="$(go list ./...)"
+          test -n "$packages"
+          failed=0
+          while IFS= read -r package; do
+            if "$RUNNER_TEMP/assembly-bin/llgo" test -v -count=1 -timeout=15m "$package" 2>&1 | tee -a "$RUNNER_TEMP/assembly-llgo.log"; then
+              echo "Assembly regression passed: $package"
+            else
+              failed=1
+              echo "Assembly regression failed: $package" >&2
+            fi
+          done <<< "$packages"
+          exit "$failed"
+
+      - name: Preserve assembly regression logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: assembly-regressions-${{ matrix.os }}
+          path: ${{ runner.temp }}/assembly-*.log
+          if-no-files-found: error
+          retention-days: 7
+
   self-host:
     needs: prepare
     if: needs.prepare.outputs.run_code_ci == 'true'

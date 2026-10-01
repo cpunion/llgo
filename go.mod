@@ -22,7 +22,10 @@ require (
 require (
 	github.com/creack/goselect v0.1.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	golang.org/x/arch v0.14.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 )
 
 replace github.com/xgo-dev/llgo/runtime => ./runtime
+
+replace github.com/xgo-dev/plan9asm => github.com/cpunion/plan9asm v0.0.0-20261001201022-0dad3b634810
