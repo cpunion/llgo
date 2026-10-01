@@ -118,6 +118,9 @@ func run(packageArgs, debuggerArgs []string, opts options, stdin io.Reader, stdo
 		(conf.DebugArtifactModeSet && conf.DebugArtifactMode == build.DebugArtifactNone) {
 		return errors.New("llgo debug: debug information is required; remove -ldflags=-w or -debug-artifact=none")
 	}
+	// Debug sessions require DWARF even when the selected target omits it by
+	// default. Keep explicit stripping requests above as user-facing errors.
+	conf.LinkOptions.DWARF = build.DWARFPreserve
 	if conf.OptLevel == optlevel.Unset {
 		conf.OptLevel = optlevel.O0
 	}

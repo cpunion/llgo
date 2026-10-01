@@ -20,6 +20,8 @@ package debug
 
 import (
 	"bytes"
+	"debug/dwarf"
+	"debug/elf"
 	"fmt"
 	"net"
 	"os"
@@ -338,6 +340,76 @@ func TestRunBuildsAndLaunchesNativeDebugger(t *testing.T) {
 		t.Fatalf("run(-ldflags=-s) error = %v", err)
 	}
 	goBuildFlags.Args = nil
+}
+
+func TestRunBuildsEmbeddedDWARF(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell")
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLGO_ROOT", repoRoot)
+	t.Setenv("LLGO_DEBUG_GDB_CAPTURE", filepath.Join(t.TempDir(), "gdb-arguments"))
+	oldTarget, oldOutput, oldOpt, oldBuildFlags := flags.Target, flags.OutputFile, flags.OptLevel, goBuildFlags.Args
+	t.Cleanup(func() {
+		flags.Target, flags.OutputFile, flags.OptLevel, goBuildFlags.Args = oldTarget, oldOutput, oldOpt, oldBuildFlags
+	})
+	flags.Target = "cortex-m-qemu"
+	flags.OutputFile = filepath.Join(t.TempDir(), "embedded-debug.elf")
+	flags.OptLevel = optlevel.Unset
+	goBuildFlags.Args = nil
+	var stdout, stderr bytes.Buffer
+	fixture := filepath.Join(repoRoot, "test", "debug", "embedded")
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(fixture); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(oldDir) })
+	if err := run([]string{"."}, []string{"--batch"}, options{
+		backend: backendGDB, gdb: writeFakeGDB(t), remote: "127.0.0.1:1234",
+	}, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatalf("run() error: %v; stderr=%s", err, stderr.String())
+	}
+	image, err := elf.Open(flags.OutputFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer image.Close()
+	info, err := image.DWARF()
+	if err != nil {
+		t.Fatalf("embedded debug image has no DWARF: %v", err)
+	}
+	reader := info.Reader()
+	for {
+		entry, err := reader.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry == nil {
+			break
+		}
+		if entry.Tag != dwarf.TagCompileUnit {
+			continue
+		}
+		lines, err := info.LineReader(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lines == nil {
+			continue
+		}
+		for _, file := range lines.Files() {
+			if file != nil && filepath.Base(file.Name) == "c.go" {
+				return
+			}
+		}
+	}
+	t.Fatal("embedded debug image has no fixture source line table")
 }
 
 func writeFakeGDB(t *testing.T) string {

@@ -26,9 +26,16 @@ def tool(description, override, *candidates):
 
 
 def run(args, **kwargs):
-    result = subprocess.run([str(arg) for arg in args], text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            timeout=180, **kwargs)
+    try:
+        result = subprocess.run([str(arg) for arg in args], text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=180, **kwargs)
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or b""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        print(output, end="", flush=True)
+        raise
     print(result.stdout, end="", flush=True)
     result.check_returncode()
     return result.stdout
