@@ -250,6 +250,7 @@ type Config struct {
 
 	// Resolved once per invocation, independently of the Go version that built LLGo.
 	sourceGoVersion string
+	sourceGoRoot    string
 	toolTags        []string
 }
 
@@ -744,6 +745,7 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	sourcePatchGOROOT, sourcePatchGoVersion := sourceGo.GOROOT, sourceGo.GOVERSION
 	conf.GOEXPERIMENT = sourceGo.GOEXPERIMENT
 	conf.sourceGoVersion = sourceGo.GOVERSION
+	conf.sourceGoRoot = sourceGo.GOROOT
 	conf.toolTags = slices.Clone(sourceGo.toolTags)
 	cfg.Env = sourceGo.apply(cfg.Env)
 	commands.environ = sourceGo.apply(commands.environ)

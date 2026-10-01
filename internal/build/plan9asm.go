@@ -15,7 +15,12 @@ import (
 )
 
 func plan9asmTranslateOptions(conf *Config) llplan9asm.TranslateOptions {
-	opt := llplan9asm.TranslateOptions{GOARM: conf.GOARM}
+	opt := llplan9asm.TranslateOptions{
+		GOARM: conf.GOARM, SourceGOROOT: conf.sourceGoRoot,
+		AssemblyDefines: extplan9asm.GoAssemblerDefinesWithEnv(conf.Goos, conf.Goarch, map[string]string{
+			"GO386": conf.GO386, "GOAMD64": conf.GOAMD64, "GOARM": conf.GOARM, "GOARM64": conf.GOARM64,
+		}),
+	}
 	if conf.Goarch == "386" && conf.GO386 == "softfloat" {
 		opt.X87Mode = extplan9asm.X87Software
 	}
@@ -74,6 +79,10 @@ func compilePkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Package, verbo
 				return nil, fmt.Errorf("%s: native assembly %s: %w", pkg.PkgPath, sfile, err)
 			}
 		} else {
+			src, err = llplan9asm.ReadAssemblyFileWithIncludes(pkg, sfile, ctx.buildConf.Overlay, ctx.buildConf.Goos, ctx.buildConf.Goarch, plan9asmTranslateOptions(ctx.buildConf))
+			if err != nil {
+				return nil, fmt.Errorf("%s: assembly headers %s: %w", pkg.PkgPath, sfile, err)
+			}
 			tr, err := llplan9asm.TranslateSourceModuleForPkgWithOptions(pkg, sfile, src, ctx.buildConf.Goos, ctx.buildConf.Goarch, plan9asmTranslateOptions(ctx.buildConf))
 			if err != nil {
 				// Some stdlib .s files are comment-only placeholders (e.g. internal/cpu/cpu.s).
@@ -307,7 +316,7 @@ func plan9asmSigsForPkg(ctx *context, pkgPath string) (map[string]struct{}, erro
 		return nil, err
 	}
 	for _, sfile := range sfiles {
-		src, err := llplan9asm.ReadFileWithOverlay(ctx.buildConf.Overlay, sfile)
+		src, err := llplan9asm.ReadAssemblyFileWithIncludes(pkg, sfile, ctx.buildConf.Overlay, ctx.buildConf.Goos, ctx.buildConf.Goarch, plan9asmTranslateOptions(ctx.buildConf))
 		if err != nil {
 			return nil, fmt.Errorf("%s: read %s: %w", pkg.PkgPath, sfile, err)
 		}

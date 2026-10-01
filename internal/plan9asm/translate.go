@@ -34,6 +34,12 @@ type ModuleTranslation struct {
 type TranslateOptions struct {
 	AnnotateSource bool
 	GOARM          string
+	// SourceGOROOT is the selected source toolchain, not necessarily the one
+	// that compiled LLGo. File translation uses its actual assembly headers.
+	SourceGOROOT string
+	// AssemblyDefines is the resolved Go CPU configuration. Nil uses the
+	// standalone API's environment; an explicit empty slice does not.
+	AssemblyDefines []string
 	// X87Mode controls explicit 386 x87 assembly lowering. The zero value uses
 	// the Go-compatible hardware lowering.
 	X87Mode extplan9asm.X87Mode
@@ -47,7 +53,7 @@ func TranslateFileForPkgWithOptions(pkg *packages.Package, sfile string, goos st
 	if pkg == nil {
 		return nil, fmt.Errorf("nil package")
 	}
-	src, err := ReadFileWithOverlay(overlay, sfile)
+	src, err := ReadAssemblyFileWithIncludes(pkg, sfile, overlay, goos, goarch, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +86,10 @@ func TranslateSourceModuleForPkgWithOptions(pkg *packages.Package, sfile string,
 	}
 	if pkg.Types == nil || pkg.Types.Scope() == nil {
 		return nil, fmt.Errorf("%s: missing types (needed for asm signatures)", pkg.PkgPath)
+	}
+	src, err := preprocessAssemblyForPkg(pkg, sfile, src, nil, goos, goarch, opt)
+	if err != nil {
+		return nil, fmt.Errorf("%s: preprocess %s: %w", pkg.PkgPath, sfile, err)
 	}
 
 	// Match the symbol identity used by LLGo's frontend. In particular, an
