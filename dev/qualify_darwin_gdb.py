@@ -21,7 +21,7 @@ subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-da
                 "-subj", "/CN=LLGo CI GDB", "-addext", "extendedKeyUsage=codeSigning",
                 "-keyout", str(key), "-out", str(certificate)], check=True)
 subprocess.run(["openssl", "pkcs12", "-export", "-inkey", str(key), "-in", str(certificate),
-                "-out", str(p12), "-passout", "pass:", "-legacy"], check=True)
+                "-out", str(p12), "-passout", "pass:"], check=True)
 subprocess.run(["security", "create-keychain", "-p", "", str(keychain)], check=True)
 subprocess.run(["security", "unlock-keychain", "-p", "", str(keychain)], check=True)
 subprocess.run(["security", "import", str(p12), "-k", str(keychain), "-P", "", "-T", "/usr/bin/codesign"], check=True)
