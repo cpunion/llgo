@@ -55,6 +55,7 @@ func TestRuntimeMemmoveStackAndRegisterCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	clang := filepath.Join(strings.TrimSpace(string(bindir)), "clang")
+	arm64Runner := runtimeMemmoveARM64CrossTools(t)
 
 	for _, arch := range []string{"amd64", "arm64"} {
 		t.Run(arch, func(t *testing.T) {
@@ -184,7 +185,11 @@ TEXT InternalCopy(SB),NOSPLIT,$24-24
 			if output, err := exec.Command(clang, "-target", triple, "-O2", "-c", ll, "-o", object).CombinedOutput(); err != nil {
 				t.Fatalf("compile %s with LLVM 22: %s\n%v", arch, output, err)
 			}
-			if arch != runtime.GOARCH {
+			var runner []string
+			if arch == "arm64" {
+				runner = arm64Runner
+			}
+			if arch != runtime.GOARCH && len(runner) == 0 {
 				t.Logf("LLVM 22 %s object compiled only; no execution on this host", arch)
 				return
 			}
@@ -196,10 +201,18 @@ TEXT InternalCopy(SB),NOSPLIT,$24-24
 			if runtime.GOOS == "windows" {
 				binary += ".exe"
 			}
-			if output, err := exec.Command(clang, driver, object, "-o", binary).CombinedOutput(); err != nil {
+			compiler := clang
+			if len(runner) != 0 {
+				compiler = "aarch64-linux-gnu-gcc"
+			}
+			if output, err := exec.Command(compiler, driver, object, "-o", binary).CombinedOutput(); err != nil {
 				t.Fatalf("link native helper regression: %s\n%v", output, err)
 			}
-			if output, err := exec.Command(binary).CombinedOutput(); err != nil {
+			command := exec.Command(binary)
+			if len(runner) != 0 {
+				command = exec.Command(runner[0], append(runner[1:], binary)...)
+			}
+			if output, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("run native stack/register helper regression: %s\n%v", output, err)
 			}
 		})

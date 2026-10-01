@@ -237,6 +237,19 @@ func extraAsmSigsAndDeclMap(pkgPath string, goarch string) map[string]extplan9as
 			}},
 		},
 	}
+	if goarch == "arm64" {
+		// runtime/stubs.go declares memmove(unsafe.Pointer, unsafe.Pointer,
+		// uintptr) with no result. Go's ARM64 ABI assigns these scalar leaves
+		// to R0-R2, as consumed by memmove_arm64.s. Keep the separate ABI0
+		// Frame: an explicit source selector chooses the register contract.
+		sig := manual["runtime.memmove"]
+		sig.ARM64GoRegisterABI = &extplan9asm.ARM64GoRegisterABI{Params: []extplan9asm.ARM64GoRegisterValue{
+			{Index: 0, Type: extplan9asm.Ptr, Register: "R0"},
+			{Index: 1, Type: extplan9asm.Ptr, Register: "R1"},
+			{Index: 2, Type: uintptrType, Register: "R2"},
+		}}
+		manual["runtime.memmove"] = sig
+	}
 	if pkgPath == "internal/bytealg" {
 		switch goarch {
 		case "386":
