@@ -19,4 +19,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: darwin-gdb-evidence
-          path: debugger-evidence/
+          path: |
+            debugger-evidence/*.log
+            debugger-evidence/probe*
