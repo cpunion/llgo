@@ -1,0 +1,57 @@
+name: Debugger Windows qualification
+on:
+  push:
+    branches: [codex/debug-windows-qualification-20261001]
+permissions:
+  contents: read
+jobs:
+  gdb:
+    name: GDB (${{ matrix.arch }}, ${{ matrix.abi }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [msvc, mingw]
+        include:
+          - arch: amd64
+            os: windows-2022
+            host: x64
+          - arch: '386'
+            os: windows-2022
+            host: x64
+          - arch: arm64
+            os: windows-11-arm
+            host: arm64
+        arch: [amd64, '386', arm64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: ${{ matrix.arch }}
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: ${{ matrix.host }}
+      - name: Build compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/debug-bin"
+          go build -o "$RUNNER_TEMP/debug-bin/llgo.exe" ./cmd/llgo
+          echo "$RUNNER_TEMP/debug-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: ${{ matrix.arch }}
+      - uses: ./.github/actions/setup-gdb
+      - name: Actual GDB acceptance
+        shell: pwsh
+        env:
+          LLGO_GDB_INTEGRATION: '1'
+        run: |
+          Remove-Item Env:PYTHONHOME, Env:PYTHONPATH -ErrorAction SilentlyContinue
+          go test ./cmd/internal/gdb -run '^TestGDBIntegration$' -count=1 -v
+          if ($LASTEXITCODE -ne 0) { throw "GDB integration failed: $LASTEXITCODE" }
