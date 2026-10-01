@@ -399,11 +399,11 @@ def configure_target(debugger: lldb.SBDebugger) -> None:
         # Install before launch: unwound frames are cached, and changing the
         # address mask after a backtrace does not invalidate those frames.
         identity = target.GetGloballyUniqueID() if hasattr(target, "GetGloballyUniqueID") else None
-        if identity is not None and identity not in _CODE_ADDRESS_HOOK_TARGETS:
+        if identity is None or identity not in _CODE_ADDRESS_HOOK_TARGETS:
             result = lldb.SBCommandReturnObject()
             debugger.GetCommandInterpreter().HandleCommand(
                 "target stop-hook add -P llgo_plugin.WindowsARM64CodeAddressHook", result)
-            if result.Succeeded():
+            if result.Succeeded() and identity is not None:
                 _CODE_ADDRESS_HOOK_TARGETS.add(identity)
         _configure_windows_arm64_code_addresses(target, target.GetProcess())
 
@@ -411,10 +411,14 @@ def configure_target(debugger: lldb.SBDebugger) -> None:
 def _local_windows_arm64_target(target: lldb.SBTarget) -> bool:
     if sys.platform != "win32" or not target or not target.IsValid():
         return False
-    triple = (target.GetTriple() or "").lower()
-    return (triple.split("-", 1)[0] in ("arm64", "aarch64") and
-            "windows" in triple.split("-") and
-            target.GetAddressByteSize() == 8 and target.GetPlatform().IsHost())
+    try:
+        triple = (target.GetTriple() or "").lower()
+        return (triple.split("-", 1)[0] in ("arm64", "aarch64") and
+                "windows" in triple.split("-") and
+                target.GetAddressByteSize() == 8 and target.GetPlatform().IsHost())
+    except (AttributeError, TypeError):
+        # Older public APIs cannot establish whether this target is local.
+        return False
 
 
 def _windows_arm64_user_address_bits() -> Optional[int]:
@@ -449,10 +453,10 @@ def _windows_arm64_user_address_bits() -> Optional[int]:
 
 def _configure_windows_arm64_code_addresses(target: lldb.SBTarget,
                                             process: lldb.SBProcess) -> None:
-    if (not _local_windows_arm64_target(target) or not process or
-            not process.IsValid() or process.GetPluginName() != "windows"):
-        return
     try:
+        if (not _local_windows_arm64_target(target) or not process or
+                not process.IsValid() or process.GetPluginName() != "windows"):
+            return
         code = lldb.eAddressMaskTypeCode
         # Zero is an explicit mask too. Respect both API masks and a user's
         # target.process.virtual-addressable-bits setting.
