@@ -15,7 +15,7 @@ import yaml
 WORKFLOWS = Path(__file__).resolve().parents[1] / "workflows"
 PREPARE = "./.github/workflows/ci-prepare.yml"
 CODE_WORKFLOWS = {
-    "llgo.yml": 20, "go.yml": 6, "targets.yml": 2, "build-cache.yml": 4,
+    "llgo.yml": 22, "go.yml": 6, "targets.yml": 2, "build-cache.yml": 4,
     "benchmark.yml": 9, "release-build.yml": 15, "doc.yml": 6, "fmt.yml": 1,
 }
 
@@ -82,6 +82,84 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("exec sudo -n", commands)
         self.assertNotIn("continue-on-error", job)
         self.assertTrue(all("continue-on-error" not in step for step in job["steps"]))
+
+    def test_exact_assembly_regressions_execute_the_nested_module(self):
+        jobs = load("llgo.yml")["jobs"]
+        self.assertIn("assembly-regressions", jobs,
+                      "root ./test/... cannot traverse the nested test/asm module")
+        job = jobs["assembly-regressions"]
+        self.assertEqual(job["strategy"]["matrix"]["os"],
+                         ["ubuntu-24.04", "macos-latest"])
+        self.assertEqual(job["strategy"]["fail-fast"], "false")
+        self.assertNotIn("continue-on-error", job)
+        steps = job["steps"]
+        deps = next(step for step in steps
+                    if step.get("uses") == "./.github/actions/setup-deps")
+        self.assertEqual(deps["with"]["llvm-version"], "22")
+        setup = next(step for step in steps
+                     if step.get("uses") == "./.github/actions/setup-go")
+        self.assertEqual(setup["with"]["go-version"], "1.27.1")
+        build = next(step for step in steps
+                     if step.get("name") == "Build the checkout compiler")
+        self.assertIn("go build", build["run"])
+        self.assertIn("./cmd/llgo", build["run"])
+        for name, command in (("Native Go assembly baselines", "go test"),
+                              ("LLGo assembly compile, link and execute", '"$RUNNER_TEMP/assembly-bin/llgo" test')):
+            step = next(step for step in steps if step.get("name") == name)
+            self.assertEqual(step["working-directory"], "test/asm")
+            self.assertIn("set -euo pipefail", step["run"])
+            self.assertIn(command, step["run"])
+            self.assertIn("-count=1", step["run"])
+            self.assertIn("./...", step["run"])
+            self.assertNotIn("continue-on-error", step)
+            self.assertNotIn("|| true", step["run"])
+
+    def test_failed_assembly_regression_does_not_hide_sibling_packages(self):
+        steps = load("llgo.yml")["jobs"]["assembly-regressions"]["steps"]
+        step = next(step for step in steps
+                    if step.get("name") == "LLGo assembly compile, link and execute")
+        packages = ["example.invalid/first", "example.invalid/failing", "example.invalid/last"]
+        for case in ("all-pass", "one-failure", "list-failure", "empty-list"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                log = root / "calls.jsonl"
+                executable = root / "go"
+                executable.write_text(f"#!{sys.executable}\n" + """
+import os, sys
+case = os.environ['TEST_ASSEMBLY_CASE']
+if sys.argv[1:] != ['list', './...']:
+    sys.exit(3)
+if case == 'list-failure':
+    sys.exit(2)
+if case != 'empty-list':
+    print(os.environ['TEST_ASSEMBLY_PACKAGES'])
+""")
+                executable.chmod(0o755)
+                compiler = root / "assembly-bin" / "llgo"
+                compiler.parent.mkdir()
+                compiler.write_text(f"#!{sys.executable}\n" + """
+import json, os, sys
+with open(os.environ['TEST_ASSEMBLY_LOG'], 'a') as stream:
+    stream.write(json.dumps(sys.argv[1:]) + '\\n')
+if os.environ['TEST_ASSEMBLY_CASE'] == 'one-failure' and sys.argv[-1].endswith('/failing'):
+    sys.exit(1)
+""")
+                compiler.chmod(0o755)
+                result = subprocess.run(["bash", "-c", step["run"]], cwd=root,
+                                        capture_output=True, text=True, env={**os.environ,
+                                            "PATH": directory + os.pathsep + os.environ["PATH"],
+                                            "RUNNER_TEMP": directory,
+                                            "TEST_ASSEMBLY_CASE": case,
+                                            "TEST_ASSEMBLY_PACKAGES": "\n".join(packages),
+                                            "TEST_ASSEMBLY_LOG": str(log)})
+                self.assertEqual(result.returncode == 0, case == "all-pass", result.stderr)
+                calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+                if case in {"list-failure", "empty-list"}:
+                    self.assertEqual(calls, [])
+                else:
+                    self.assertEqual([args[-1] for args in calls], packages)
+                    for args in calls:
+                        self.assertEqual(args[:-1], ["test", "-v", "-count=1", "-timeout=15m"])
 
     def test_traceback_coverage_uses_bash_on_every_host(self):
         steps = load("go.yml")["jobs"]["test"]["steps"]
@@ -330,8 +408,9 @@ else:
             self.assertIn("artifacts", needs(jobs[name]))
             self.assertEqual(jobs[name]["if"], f"needs.artifacts.outputs.{suite} == 'true'")
 
-    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise github-script")
     def test_artifact_probe_handles_empty_partial_and_expired_results(self):
+        self.assertIsNotNone(shutil.which("node"),
+                             "Node is required to exercise the CI artifact probe, not an optional skip")
         script = load("benchmark-publish.yml")["jobs"]["artifacts"]["steps"][0]["with"]["script"]
         cases = [[], [{"name": "unrelated", "expired": False}],
                  [{"name": "go-benchmark-llgo-baseline-linux", "expired": True}],
