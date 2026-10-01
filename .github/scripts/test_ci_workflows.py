@@ -172,6 +172,23 @@ if os.environ['TEST_ASSEMBLY_CASE'] == 'one-failure' and sys.argv[-1].endswith('
                     for args in calls:
                         self.assertEqual(args[:-1], ["test", "-v", "-count=1", "-timeout=15m"])
 
+    def test_assembly_regressions_preserve_actual_compiler_and_dependency_provenance(self):
+        steps = load("llgo.yml")["jobs"]["assembly-regressions"]["steps"]
+        build = next(step for step in steps
+                     if step.get("name") == "Build the checkout compiler")
+        for command in ("git rev-parse HEAD", "go version", "go env GOVERSION",
+                        "go list -m -json github.com/xgo-dev/plan9asm",
+                        "go version -m", '"$LLVM_CONFIG" --version',
+                        '"$LLVM_CONFIG" --bindir', "llc", "shasum -a 256"):
+            self.assertIn(command, build["run"])
+        self.assertIn('tee "$RUNNER_TEMP/assembly-toolchain.log"', build["run"])
+        self.assertIn("22.", build["run"])
+        artifact = next(step for step in steps
+                        if step.get("name") == "Preserve assembly regression logs")
+        self.assertEqual(artifact["if"], "always()")
+        self.assertIn("assembly-*.log", artifact["with"]["path"])
+        self.assertEqual(artifact["with"]["if-no-files-found"], "error")
+
     def test_traceback_coverage_uses_bash_on_every_host(self):
         steps = load("go.yml")["jobs"]["test"]["steps"]
         step = next(step for step in steps

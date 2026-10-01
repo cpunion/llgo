@@ -83,7 +83,22 @@ jobs:
 
           mkdir -p "$RUNNER_TEMP/assembly-bin"
           go build -o "$RUNNER_TEMP/assembly-bin/llgo" ./cmd/llgo
-          "$RUNNER_TEMP/assembly-bin/llgo" version
+
+          LLVM_CONFIG=${LLVM_CONFIG:-llvm-config}
+          llvm_version="$("$LLVM_CONFIG" --version)"
+          [[ "$llvm_version" == 22.* ]]
+          llvm_bindir="$("$LLVM_CONFIG" --bindir)"
+          {
+            git rev-parse HEAD
+            go version
+            go env GOVERSION GOHOSTOS GOHOSTARCH
+            go list -m -json github.com/xgo-dev/plan9asm
+            "$LLVM_CONFIG" --version
+            "$llvm_bindir/llc" --version
+            "$RUNNER_TEMP/assembly-bin/llgo" version
+            go version -m "$RUNNER_TEMP/assembly-bin/llgo"
+            shasum -a 256 "$RUNNER_TEMP/assembly-bin/llgo"
+          } | tee "$RUNNER_TEMP/assembly-toolchain.log"
 
       # test/asm has its own go.mod. Neither root ./test/... nor the
       # language-version matrix traverses it. Run source-applicable tests
