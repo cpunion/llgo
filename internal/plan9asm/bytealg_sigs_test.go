@@ -46,8 +46,9 @@ func TestSigsForStdlibInternalBytealgArm64(t *testing.T) {
 				Ret:  extplan9asm.I64,
 			},
 			"internal/bytealg.cmpbody": {
-				Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.I64, extplan9asm.Ptr, extplan9asm.I64},
-				Ret:  extplan9asm.I64,
+				Args:    []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.I64, extplan9asm.Ptr, extplan9asm.I64},
+				Ret:     extplan9asm.I64,
+				ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2", "R3"},
 			},
 		},
 		filepath.Join(goroot, "src", "internal", "bytealg", "count_arm64.s"): {
@@ -96,8 +97,9 @@ func TestSigsForStdlibInternalBytealgArm64(t *testing.T) {
 	if src, err := os.ReadFile(filepath.Join(goroot, "src", "internal", "bytealg", "equal_arm64.s")); err == nil {
 		if string(src) != "" && containsTextSymbol(string(src), "memeqbody<>") {
 			sfiles[filepath.Join(goroot, "src", "internal", "bytealg", "equal_arm64.s")]["internal/bytealg.memeqbody"] = extplan9asm.FuncSig{
-				Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.I64},
-				Ret:  extplan9asm.I1,
+				Args:    []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.I64},
+				Ret:     extplan9asm.I1,
+				ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2"},
 			}
 		}
 	}

@@ -266,8 +266,11 @@ func extraAsmSigsAndDeclMap(pkgPath string, goarch string) map[string]extplan9as
 				ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2", "R5"},
 			}
 		case "arm64":
-			manual["internal/bytealg.cmpbody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.I64, extplan9asm.Ptr, extplan9asm.I64}, Ret: extplan9asm.I64}
-			manual["internal/bytealg.memeqbody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.I64}, Ret: extplan9asm.I1}
+			// These private Go source helpers use their documented physical
+			// registers, not an inferred ABI0 FP frame. cmpbody returns in R0;
+			// the old memeqbody helper likewise returns its bool in R0.
+			manual["internal/bytealg.cmpbody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.I64, extplan9asm.Ptr, extplan9asm.I64}, Ret: extplan9asm.I64, ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2", "R3"}}
+			manual["internal/bytealg.memeqbody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.I64}, Ret: extplan9asm.I1, ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2"}}
 			manual["internal/bytealg.countbytebody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.I64, extplan9asm.LLVMType("i8"), extplan9asm.Ptr}, Ret: extplan9asm.Void, ArgRegs: []extplan9asm.Reg{"R0", "R2", "R1", "R8"}}
 			manual["internal/bytealg.indexbody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.I64, extplan9asm.Ptr, extplan9asm.I64, extplan9asm.Ptr}, Ret: extplan9asm.Void, ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2", "R3", "R9"}}
 			manual["internal/bytealg.indexbytebody"] = extplan9asm.FuncSig{Args: []extplan9asm.LLVMType{extplan9asm.Ptr, extplan9asm.LLVMType("i8"), extplan9asm.I64, extplan9asm.Ptr}, Ret: extplan9asm.Void, ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2", "R8"}}
