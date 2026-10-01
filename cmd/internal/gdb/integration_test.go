@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -310,7 +311,12 @@ func integrationRunGDB(t *testing.T, gdbPath, dir string, args ...string) string
 			t.Errorf("restore working directory: %v", err)
 		}
 	}()
-	if err := Run(gdbPath, nil, args, strings.NewReader(""), &stdout, &stderr); err != nil {
+	var stdoutWriter, stderrWriter io.Writer = &stdout, &stderr
+	if testing.Verbose() {
+		stdoutWriter = io.MultiWriter(&stdout, os.Stdout)
+		stderrWriter = io.MultiWriter(&stderr, os.Stderr)
+	}
+	if err := Run(gdbPath, nil, args, strings.NewReader(""), stdoutWriter, stderrWriter); err != nil {
 		t.Fatalf("run GDB: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
 	output := stdout.String() + stderr.String()

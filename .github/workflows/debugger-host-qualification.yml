@@ -1,0 +1,55 @@
+name: Debugger host qualification
+on:
+  push:
+    branches: [codex/diagnose-darwin-gdb-20261002]
+permissions:
+  contents: read
+jobs:
+  native-debuggers-intel:
+    name: macOS Intel - LLDB full, GDB values and registry
+    permissions:
+      contents: read
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    env:
+      GOMAXPROCS: '4'
+      GOFLAGS: '-p=2'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install compiler dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: "22"
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+      - name: Build LLGo
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/llgo-bin"
+          go build -o "$RUNNER_TEMP/llgo-bin/llgo" ./cmd/llgo
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - name: Install GDB
+        uses: ./.github/actions/setup-gdb
+      - name: Enable native GDB on the ephemeral Intel runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Unsigned Homebrew GDB cannot obtain the inferior's task port as
+          # the runner user. Elevate only the debugger, not builds or Go tests.
+          # This does not change host trust settings or pretend Apple Silicon
+          # has the native Darwin process backend.
+          wrapper="$RUNNER_TEMP/llgo-gdb-native"
+          printf '#!/bin/bash\nexec sudo -n %q "$@"\n' "$LLGO_GDB" > "$wrapper"
+          chmod +x "$wrapper"
+          "$wrapper" --batch --nx -ex 'python import gdb; print(gdb.VERSION)'
+          echo "LLGO_GDB=$wrapper" >> "$GITHUB_ENV"
+      # GDB 17/18 cannot load dyld 17 shared libraries or unwind blocked
+      # system frames here; a plain pthread C control reproduces the failure.
+      # Keep TestGDBCompleteWorkerUnwind strict and separately runnable.
+      - name: GDB native values and registry (Intel, worker unwind unavailable)
+        timeout-minutes: 15
+        env:
+          LLGO_GDB_INTEGRATION: "1"
+        run: go test ./cmd/internal/gdb -run '^TestGDBIntegration$' -count=3 -timeout=8m -v
