@@ -1,0 +1,22 @@
+name: Debugger host qualification
+on:
+  push:
+    branches: [codex/debug-host-qualification-20261001]
+permissions:
+  contents: read
+jobs:
+  darwin-gdb:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install GDB
+        run: brew install gdb
+      - name: Exercise Darwin GDB process control
+        run: python3 dev/qualify_darwin_gdb.py
+      - name: Upload debugger evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: darwin-gdb-evidence
+          path: debugger-evidence/
