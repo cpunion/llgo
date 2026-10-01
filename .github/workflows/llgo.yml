@@ -708,6 +708,10 @@ jobs:
         shell: bash
         run: dev/wasm_ci_report_test.sh
 
+      - name: Test browser runner teardown
+        if: matrix.suite == 'runtime'
+        run: python3 dev/wasm_browser_runner_test.py
+
       - name: Test single-worker wasm schedulers
         shell: bash
         env:
