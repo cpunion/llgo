@@ -88,6 +88,14 @@ func CollectArtifacts(conf *Config, out *OutFmtDetails) ([]Artifact, error) {
 		if err := add(primaryRole, "wasm", modulePath); err != nil {
 			return nil, err
 		}
+		// emcc's HTML shell loads a separate JavaScript module. It is part
+		// of this output contract, even when unrelated glue siblings exist.
+		if filepath.Ext(out.Out) == ".html" {
+			glue := strings.TrimSuffix(out.Out, ".html") + ".js"
+			if err := add(ArtifactRoleDeployment, "javascript", glue); err != nil {
+				return nil, err
+			}
+		}
 	} else {
 		if err := add(primaryRole, primaryArtifactFormat(conf, out.Out), out.Out); err != nil {
 			return nil, err
@@ -103,6 +111,13 @@ func CollectArtifacts(conf *Config, out *OutFmtDetails) ([]Artifact, error) {
 			} else if !os.IsNotExist(err) {
 				return nil, err
 			}
+		}
+	}
+	// Use the same ownership rule as publication. Raw GoJS and native outputs
+	// must not pick up another build's wasm_fs.js from the output directory.
+	if driverOut := emscriptenDriverOutput(conf, out.Out); needsEmscriptenBrowserHost(conf, driverOut) {
+		if err := add(ArtifactRoleDeployment, "javascript", emscriptenBrowserHostSidecar(driverOut)); err != nil {
+			return nil, err
 		}
 	}
 	if err := add(ArtifactRoleDebug, "wasm-dwarf", out.DWARF); err != nil {

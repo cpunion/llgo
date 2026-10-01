@@ -230,3 +230,44 @@ func TestBuildIDExternalPair(t *testing.T) {
 		t.Fatal("truncated build ID accepted")
 	}
 }
+
+func TestMalformedCustomSectionEnvelopes(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		module []byte
+		want   string
+	}{
+		{name: "overflowing section size", module: append(bytes.Clone(wasmHeader), 0, 0xff, 0xff, 0xff, 0xff, 0x10), want: "overflows"},
+		{name: "truncated name size", module: appendSection(bytes.Clone(wasmHeader), 0, []byte{0x80}), want: "truncated WebAssembly varuint32"},
+		{name: "invalid UTF8 name", module: appendSection(bytes.Clone(wasmHeader), 0, []byte{1, 0xff}), want: "invalid UTF-8"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := HasDWARF(tt.module); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("invalid custom section accepted: %v; want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildIDAndExternalURLRejectMalformedMetadata(t *testing.T) {
+	if _, _, err := BuildID([]byte("not wasm")); err == nil {
+		t.Fatal("BuildID accepted an invalid module")
+	}
+	if _, err := SetBuildID(wasmHeader, nil); err == nil {
+		t.Fatal("SetBuildID accepted an empty ID")
+	}
+	if _, err := SetBuildID([]byte("not wasm"), []byte{1}); err == nil {
+		t.Fatal("SetBuildID accepted an invalid module")
+	}
+	truncatedID := appendCustomSection(bytes.Clone(wasmHeader), buildIDSection, []byte{0x80})
+	if _, _, err := BuildID(truncatedID); err == nil || !strings.Contains(err.Error(), "invalid WebAssembly build_id section") {
+		t.Fatalf("truncated build ID accepted: %v", err)
+	}
+	if _, _, err := ExternalURL([]byte("not wasm")); err == nil {
+		t.Fatal("ExternalURL accepted an invalid module")
+	}
+	truncatedURL := appendCustomSection(bytes.Clone(wasmHeader), externalDebugInfo, []byte{5, 'a'})
+	if _, _, err := ExternalURL(truncatedURL); err == nil || !strings.Contains(err.Error(), "invalid external_debug_info section") {
+		t.Fatalf("truncated external URL accepted: %v", err)
+	}
+}

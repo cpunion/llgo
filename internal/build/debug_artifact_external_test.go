@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
@@ -148,6 +149,101 @@ func TestFinalizeDebugArtifactRemovesStaleSidecar(t *testing.T) {
 	}
 }
 
+func wasmArtifactFixture() []byte {
+	// A valid module envelope containing one DWARF section. Packaging must
+	// preserve its bytes without needing to interpret the DWARF payload.
+	return []byte{'\x00', 'a', 's', 'm', 1, 0, 0, 0, 0, 13, 11, '.', 'd', 'e', 'b', 'u', 'g', '_', 'i', 'n', 'f', 'o', 42}
+}
+
+func TestFinalizeDebugArtifactRejectsInvalidInputWithoutPublishing(t *testing.T) {
+	// The build_id envelope is valid, but its payload promises two ID bytes
+	// and supplies only one. A stale identity must never be silently repaired.
+	badIdentity := append(wasmArtifactFixture(), 0, 11, 8, 'b', 'u', 'i', 'l', 'd', '_', 'i', 'd', 2, 42)
+	for _, mode := range []DebugArtifactMode{DebugArtifactEmbedded, DebugArtifactExternal} {
+		for _, tc := range []struct {
+			name string
+			raw  []byte
+			ptr  uint8
+			want string
+		}{
+			{name: "missing", want: "no such file"},
+			{name: "malformed module", raw: []byte("not wasm"), want: "WebAssembly"},
+			{name: "missing DWARF", raw: wasmArtifactFixture()[:8], want: "no DWARF"},
+			{name: "invalid debugger ABI", raw: wasmArtifactFixture(), ptr: 3, want: "debugger ABI record"},
+			{name: "corrupt build identity", raw: badIdentity, want: "build ID"},
+		} {
+			t.Run(mode.String()+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				module := filepath.Join(dir, "app.wasm")
+				sidecar := filepath.Join(dir, "app.debug.wasm")
+				if tc.raw != nil {
+					if err := os.WriteFile(module, tc.raw, 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				conf := &Config{Goarch: "wasm", DebugArtifactMode: mode, debugPointerSize: tc.ptr}
+				err := finalizeDebugArtifact(conf, &OutFmtDetails{Out: module, DWARF: sidecar}, false)
+				if tc.raw == nil {
+					if !os.IsNotExist(err) {
+						t.Fatalf("missing module error = %v", err)
+					}
+				} else {
+					if err == nil || !strings.Contains(err.Error(), tc.want) {
+						t.Fatalf("invalid module error = %v, want %q", err, tc.want)
+					}
+					if got, err := os.ReadFile(module); err != nil || !bytes.Equal(got, tc.raw) {
+						t.Fatalf("failed packaging changed input: %x, %v", got, err)
+					}
+				}
+				if _, err := os.Stat(sidecar); !os.IsNotExist(err) {
+					t.Fatalf("failed packaging published a sidecar: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestFinalizeExternalArtifactPublicationFailurePreservesInput(t *testing.T) {
+	for _, blocker := range []string{"parent is a file", "destination is a directory"} {
+		t.Run(blocker, func(t *testing.T) {
+			dir := t.TempDir()
+			module := filepath.Join(dir, "app.wasm")
+			raw := wasmArtifactFixture()
+			if err := os.WriteFile(module, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			blocked := filepath.Join(dir, "blocked")
+			sidecar := blocked
+			if blocker == "parent is a file" {
+				if err := os.WriteFile(blocked, []byte("keep me"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				sidecar = filepath.Join(blocked, "app.debug.wasm")
+			} else {
+				if err := os.Mkdir(blocked, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				blocked = filepath.Join(blocked, "keep")
+				if err := os.WriteFile(blocked, []byte("keep me"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			conf := &Config{Goarch: "wasm", DebugArtifactMode: DebugArtifactExternal}
+			if err := finalizeDebugArtifact(conf, &OutFmtDetails{Out: module, DWARF: sidecar}, false); err == nil {
+				t.Fatal("publication unexpectedly succeeded")
+			}
+			for path, want := range map[string][]byte{module: raw, blocked: []byte("keep me")} {
+				if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("publication failure changed %s: %q, %v", path, got, err)
+				}
+			}
+			if temps, err := filepath.Glob(filepath.Join(dir, ".*")); err != nil || len(temps) != 0 {
+				t.Fatalf("temporary artifacts leaked: %v, %v", temps, err)
+			}
+		})
+	}
+}
+
 func TestExternalEmscriptenArtifactPreservesGlue(t *testing.T) {
 	dir := t.TempDir()
 	glue := filepath.Join(dir, "app.mjs")
@@ -155,7 +251,7 @@ func TestExternalEmscriptenArtifactPreservesGlue(t *testing.T) {
 	sidecar := filepath.Join(dir, "app.debug.wasm")
 	// Minimal module with a DWARF custom section; no executable bytes need
 	// rewriting to package a sidecar or attach its debugger ABI identity.
-	raw := []byte{'\x00', 'a', 's', 'm', 1, 0, 0, 0, 0, 13, 11, '.', 'd', 'e', 'b', 'u', 'g', '_', 'i', 'n', 'f', 'o', 42}
+	raw := wasmArtifactFixture()
 	js := []byte("export default function Module() {}\n")
 	if err := os.WriteFile(glue, js, 0o644); err != nil {
 		t.Fatal(err)

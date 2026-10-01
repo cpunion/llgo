@@ -4,6 +4,7 @@
 
 import argparse
 import itertools
+import json
 import os
 from pathlib import Path
 import re
@@ -113,6 +114,30 @@ def check_module(module, *, dwarfdump, addr2line):
     check_source_lines(module, line_table, addr2line)
 
 
+def check_artifact_report(output, profile, artifact, build_log):
+    module = output.with_suffix(".wasm")
+    role = "debug+deployment" if artifact == "embedded" else "deployment"
+    expected = {module: (role, "wasm")}
+    if output != module:
+        expected[output] = ("deployment", "html" if output.suffix == ".html" else "javascript")
+    if output.suffix == ".html":
+        expected[output.with_suffix(".js")] = ("deployment", "javascript")
+    if profile != "w32":
+        expected[output.parent / "wasm_fs.js"] = ("deployment", "javascript")
+    if artifact == "external":
+        expected[output.with_suffix(".debug.wasm")] = ("debug", "wasm-dwarf")
+    entries = re.findall(
+        r'^llgo: artifact role=(\S+) format=(\S+) size=(\d+) path=(".*")$',
+        build_log, re.MULTILINE,
+    )
+    reported = {Path(json.loads(path)): (role, format_, int(size))
+                for role, format_, size, path in entries}
+    if len(entries) != len(reported) or reported != {
+        path: (*kind, path.stat().st_size) for path, kind in expected.items()
+    }:
+        raise RuntimeError(f"{output}: incomplete or inaccurate artifact report:\n{build_log}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", action="append", choices=PROFILES, dest="profiles")
@@ -133,11 +158,12 @@ def main():
             stem = Path(directory) / f"{profile}-O{opt}-{artifact}"
             module = stem.with_suffix(".wasm")
             output = module if profile == "w32" else stem.with_suffix(".mjs")
-            run(
+            build_log = run(
                 [llgo, "build", "-target", PROFILES[profile], f"-O{opt}",
                  f"-debug-artifact={artifact}", "-o", str(output), str(FIXTURE)],
                 env=env,
             )
+            check_artifact_report(output, profile, artifact, build_log)
             debug_module = module
             if artifact == "external":
                 debug_module = stem.with_suffix(".debug.wasm")
@@ -153,6 +179,18 @@ def main():
             if "wasm debug ok" not in result.splitlines():
                 raise RuntimeError(f"{profile} O{opt}: fixture did not complete:\n{result}")
             print(f"{profile} O{opt} {artifact}: final DWARF, Go/C++ source lines and runtime passed", flush=True)
+
+        # HTML has an additional owned .js loader; the regular matrix exercises
+        # .mjs. Verify this second browser packaging contract once per run.
+        if "j32" in profiles:
+            output = Path(directory) / "html-report.html"
+            build_log = run(
+                [llgo, "build", "-target", PROFILES["j32"], f"-O{opts[0]}",
+                 f"-debug-artifact={artifacts[0]}", "-o", str(output), str(FIXTURE)],
+                env=env,
+            )
+            check_artifact_report(output, "j32", artifacts[0], build_log)
+            print("j32 HTML: complete deployment artifacts and byte sizes passed", flush=True)
 
 
 if __name__ == "__main__":
