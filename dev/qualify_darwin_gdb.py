@@ -21,10 +21,11 @@ subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-da
                 "-subj", "/CN=LLGo CI GDB", "-addext", "extendedKeyUsage=codeSigning",
                 "-keyout", str(key), "-out", str(certificate)], check=True)
 subprocess.run(["openssl", "pkcs12", "-export", "-inkey", str(key), "-in", str(certificate),
-                "-out", str(p12), "-passout", "pass:"], check=True)
+                "-out", str(p12), "-passout", "pass:llgo-ci-signing", "-macalg", "sha1",
+                "-keypbe", "PBE-SHA1-3DES", "-certpbe", "PBE-SHA1-3DES"], check=True)
 subprocess.run(["security", "create-keychain", "-p", "", str(keychain)], check=True)
 subprocess.run(["security", "unlock-keychain", "-p", "", str(keychain)], check=True)
-subprocess.run(["security", "import", str(p12), "-k", str(keychain), "-P", "", "-T", "/usr/bin/codesign"], check=True)
+subprocess.run(["security", "import", str(p12), "-k", str(keychain), "-P", "llgo-ci-signing", "-T", "/usr/bin/codesign"], check=True)
 subprocess.run(["security", "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", "", str(keychain)], check=True)
 subprocess.run(["sudo", "security", "add-trusted-cert", "-d", "-r", "trustRoot", "-k",
                 "/Library/Keychains/System.keychain", str(certificate)], check=True)
