@@ -336,3 +336,26 @@ func TestBuildIDAndExternalURLRejectMalformedMetadata(t *testing.T) {
 		t.Fatalf("truncated external URL accepted: %v", err)
 	}
 }
+
+func TestDWARFSectionsOwnContentsAndRejectAmbiguity(t *testing.T) {
+	module := debugFixture()
+	sections, err := DWARFSections(module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sections) != 2 || !bytes.Equal(sections[".debug_info"], []byte{1, 2, 3}) || !bytes.Equal(sections[".debug_line"], []byte{4, 5, 6}) {
+		t.Fatalf("DWARF sections = %v", sections)
+	}
+	sections[".debug_info"][0] = 99
+	again, err := DWARFSections(module)
+	if err != nil || !bytes.Equal(again[".debug_info"], []byte{1, 2, 3}) {
+		t.Fatalf("caller mutation changed module contents: %v, %v", again, err)
+	}
+	duplicate := appendCustomSection(module, ".debug_info", []byte{7})
+	if _, err := DWARFSections(duplicate); err == nil || !strings.Contains(err.Error(), "multiple .debug_info") {
+		t.Fatalf("ambiguous DWARF accepted: %v", err)
+	}
+	if _, err := DWARFSections([]byte("not wasm")); err == nil {
+		t.Fatal("invalid module accepted")
+	}
+}
