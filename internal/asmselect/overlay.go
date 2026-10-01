@@ -34,7 +34,9 @@ func HeaderOverlay(dir string, context build.Context) (map[string][]byte, error)
 		if err != nil {
 			return nil, fmt.Errorf("match native assembly profile file %s: %w", name, err)
 		}
-		if match && (ext == ".s" || ext == ".S") && !strings.HasSuffix(name, "_test"+ext) {
+		// Unlike _test.go, test-named assembly can belong to an ordinary
+		// package. Go filename/build-constraint selection is authoritative.
+		if match && (ext == ".s" || ext == ".S") {
 			assembly++
 		}
 		filename := filepath.Join(dir, name)

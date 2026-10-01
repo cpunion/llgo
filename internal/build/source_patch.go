@@ -172,7 +172,7 @@ func applySourcePatchForPkg(base, current map[string][]byte, runtimeDir, goroot,
 				continue
 			}
 			name := entry.Name()
-			if !strings.HasSuffix(name, ".s") || strings.HasSuffix(name, "_test.s") {
+			if !strings.HasSuffix(name, ".s") {
 				continue
 			}
 			match, err := matchSourcePatchTargetFile(buildCtx, filenameCtx, srcDir, name)

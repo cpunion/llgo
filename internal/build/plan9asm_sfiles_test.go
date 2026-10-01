@@ -9,8 +9,8 @@ import (
 	"github.com/xgo-dev/llgo/internal/packages"
 )
 
-func TestSelectedSFilesSkipsTestAsm(t *testing.T) {
-	dir := "/tmp/pkg"
+func TestSelectedSFilesPreservesGoSelectedTestNamedAssembly(t *testing.T) {
+	dir := t.TempDir()
 	got := selectedSFiles([]string{
 		filepath.Join(dir, "abi_test.s"),
 		filepath.Join(dir, "stub.s"),
@@ -19,8 +19,10 @@ func TestSelectedSFilesSkipsTestAsm(t *testing.T) {
 		filepath.Join(dir, "helper.c"),
 	})
 	want := []string{
+		filepath.Join(dir, "abi_test.s"),
 		filepath.Join(dir, "stub.s"),
 		filepath.Join(dir, "helper.S"),
+		filepath.Join(dir, "compare_test.S"),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("selectedSFiles() = %#v, want %#v", got, want)
@@ -53,7 +55,7 @@ func TestShouldSkipPlan9AsmSFilesForTarget(t *testing.T) {
 
 func TestPkgSFilesUsesLoadedOtherFiles(t *testing.T) {
 	pkgDir := t.TempDir()
-	sfile := filepath.Join(pkgDir, "asm_amd64.s")
+	sfile := filepath.Join(pkgDir, "asm_test.s")
 	t.Setenv("PATH", t.TempDir()) // pkgSFiles must not invoke a second go list.
 
 	ctx := &context{

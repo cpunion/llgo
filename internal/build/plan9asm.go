@@ -489,9 +489,8 @@ func selectedSFiles(files []string) []string {
 		if !strings.HasSuffix(f, ".s") && !strings.HasSuffix(f, ".S") {
 			continue
 		}
-		if strings.HasSuffix(f, "_test.s") || strings.HasSuffix(f, "_test.S") {
-			continue
-		}
+		// OtherFiles already has the loader's actual package role. Unlike
+		// _test.go, a _test.s basename does not make assembly test-only.
 		paths = append(paths, f)
 	}
 	return paths

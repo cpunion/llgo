@@ -242,6 +242,47 @@ func TestSyncAtomicSourcePatchReplacesAsm(t *testing.T) {
 	}
 }
 
+func TestSourcePatchReplacesOrdinaryTestNamedAssembly(t *testing.T) {
+	for _, goarch := range []string{"386", "amd64", "arm", "arm64", "wasm"} {
+		t.Run(goarch, func(t *testing.T) {
+			goroot, runtimeDir := t.TempDir(), t.TempDir()
+			const pkgPath = "sync/atomic"
+			srcDir := filepath.Join(goroot, "src", filepath.FromSlash(pkgPath))
+			patchDir := filepath.Join(runtimeDir, "_patch", filepath.FromSlash(pkgPath))
+			mustWriteFile(t, filepath.Join(patchDir, "atomic.go"), "package atomic\n")
+			selected := []string{"ordinary_test.s", "ordinary_test_" + goarch + ".s"}
+			for _, name := range selected {
+				mustWriteFile(t, filepath.Join(srcDir, name), "TEXT ·Kernel(SB), $0-0\nRET\n")
+			}
+			otherArch := "arm64"
+			if goarch == otherArch {
+				otherArch = "amd64"
+			}
+			other := filepath.Join(srcDir, "other_test_"+otherArch+".s")
+			mustWriteFile(t, other, "TEXT ·Other(SB), $0-0\nRET\n")
+			goos := "linux"
+			if goarch == "wasm" {
+				goos = "js"
+			}
+			changed, overlay, _, err := applySourcePatchForPkg(nil, nil,
+				runtimeDir, goroot, pkgPath, sourcePatchBuildContext{
+					goos: goos, goarch: goarch, goversion: runtime.Version(),
+				})
+			if err != nil || !changed {
+				t.Fatalf("apply assembly source patch: changed=%v: %v", changed, err)
+			}
+			for _, name := range selected {
+				if got := string(overlay[filepath.Join(srcDir, name)]); got != "// replaced by LLGo source patch\n" {
+					t.Fatalf("Go-selected ordinary %s escaped source patch: %q", name, got)
+				}
+			}
+			if _, ok := overlay[other]; ok {
+				t.Fatal("assembly for a different architecture was overlaid")
+			}
+		})
+	}
+}
+
 func TestSyncPoolSourcePatchUsesStdlibQueue(t *testing.T) {
 	const pkgPath = "sync"
 	if !llruntime.HasSourcePatchPkg(pkgPath) {
