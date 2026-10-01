@@ -90,11 +90,21 @@ artifact without building it.
 Debug information can also be packaged without starting a debugger:
 
 ```sh
-llgo build -debug-artifact=embedded ./app
+llgo build -ldflags=-w=false ./app
+llgo build -target=emscripten -debug-artifact=embedded -o app.mjs ./app
 llgo build -target=emscripten -debug-artifact=external -o app.mjs ./app
 llgo build -target=cortex-m-qemu -debug-artifact=host -obin ./app
 llgo build -debug-artifact=none ./app
 ```
+
+Native macOS, Linux and Windows builds follow the platform toolchain's default
+DWARF packaging. Retaining DWARF does not prescribe whether it lives in the
+executable, object files or a separate debug artifact. LLGo does not add a native
+packaging step or require a standalone dSYM/debug file. On native targets,
+`-debug-artifact=embedded` only requests DWARF preservation; it does not promise
+a self-contained executable. Use `-ldflags=-w=false` when only preservation is
+needed. Explicit embedded/external packaging is defined for Wasm, while
+embedded-device builds use the host-ELF/deployment-image contract below.
 
 `external` currently applies to Wasm executables. It writes a sibling
 `app.debug.wasm`, leaves executable code/data sections and JavaScript glue

@@ -31,7 +31,9 @@ const (
 	// DebugArtifactDefault derives the effective mode from -w and the current
 	// build default. It is valid only before build configuration is resolved.
 	DebugArtifactDefault DebugArtifactMode = iota
-	// DebugArtifactEmbedded retains DWARF in the executable or Wasm module.
+	// DebugArtifactEmbedded retains DWARF in a Wasm module. Native builds only
+	// request DWARF preservation and use the platform toolchain's default
+	// packaging; a self-contained executable is not guaranteed.
 	DebugArtifactEmbedded
 	// DebugArtifactExternal writes a debugger-owned sidecar referenced by the
 	// executable or module.
