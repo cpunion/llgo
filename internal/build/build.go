@@ -842,10 +842,7 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	}
 
 	altPkgPaths := altPkgs(initial, conf, llssa.PkgRuntime)
-	altCfg := *cfg
-	altCfg.Dir = env.LLGoRuntimeDir()
-	// The runtime submodule may otherwise select a different toolchain from its go.mod.
-	altCfg.Env = withResolvedGoToolchain(cfg.Env, sourcePatchGoVersion)
+	altCfg := runtimePackageLoadConfig(cfg, env.LLGoRuntimeDir(), sourcePatchGoVersion)
 	loadAltSpan := buildTrace.startCoordinator("load runtime packages", map[string]any{
 		"packages": slices.Clone(altPkgPaths),
 	})
@@ -1076,6 +1073,24 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	}
 
 	return allPkgs, errors.Join(linkErrs...)
+}
+
+func runtimePackageLoadConfig(cfg *packages.Config, runtimeDir, sourceGoVersion string) packages.Config {
+	alt := *cfg
+	alt.Dir = runtimeDir
+	// The runtime submodule may otherwise select a different toolchain from its go.mod.
+	alt.Env = withResolvedGoToolchain(cfg.Env, sourceGoVersion)
+	// -modfile belongs to the application module, not this runtime submodule.
+	// Keeping it here can silently download an older runtime instead of loading
+	// LLGO_ROOT/runtime, even though alt.Dir points to the local installation.
+	alt.BuildFlags = withoutRuntimeModFileFlags(cfg.BuildFlags)
+	for _, entry := range alt.Env {
+		if value, ok := strings.CutPrefix(entry, "GOFLAGS="); ok {
+			alt.Env = withEnv(alt.Env, "GOFLAGS="+withoutRuntimeModFileEnv(value))
+			break
+		}
+	}
+	return alt
 }
 
 func resolveTestPthreadStackSize(conf *Config) {
