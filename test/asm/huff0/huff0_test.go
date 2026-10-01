@@ -49,7 +49,7 @@ func TestIndependentHuffmanStreams(t *testing.T) {
 			}
 			for _, offset := range []int{0, 1, 3} {
 				storage := bytes.Repeat([]byte{0xa5}, len(plain)+offset+1)
-				dst := storage[offset:offset:offset+len(plain)]
+				dst := storage[offset : offset : offset+len(plain)]
 				got, err := decoder.Decompress4X(dst, four)
 				if err != nil || !bytes.Equal(got, plain) {
 					t.Fatalf("independent 4X stream offset %d: %v, output length %d", offset, err, len(got))
