@@ -4,8 +4,10 @@ package browserdebug
 
 import (
 	"bytes"
+	"debug/dwarf"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,6 +86,9 @@ func TestLoadEmbeddedAndExternal(t *testing.T) {
 	if !errors.As(err, &missing) || missing.URL != "fixture%20debug.wasm" {
 		t.Fatalf("missing sidecar error = %T %v", err, err)
 	}
+	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), sidecar) {
+		t.Fatalf("missing sidecar lost its path or filesystem cause: %v", err)
+	}
 
 	stale, err := wasmdebug.SetBuildID(raw, bytes.Repeat([]byte{0xaa}, 32))
 	if err != nil {
@@ -104,6 +109,254 @@ func TestLoadEmbeddedAndExternal(t *testing.T) {
 	}
 	if _, err := Load(embedded, nil); err == nil || !strings.Contains(err.Error(), "record does not match") {
 		t.Fatalf("mismatched sidecar ABI error = %v", err)
+	}
+}
+
+// These helpers construct the WebAssembly custom-section envelope; the DWARF
+// used below comes from Clang so diagnostics are checked against real units.
+func appendBrowserCustomSection(module []byte, name string, contents []byte) []byte {
+	payload := binary.AppendUvarint(nil, uint64(len(name)))
+	payload = append(payload, name...)
+	payload = append(payload, contents...)
+	result := append(bytes.Clone(module), 0)
+	result = binary.AppendUvarint(result, uint64(len(payload)))
+	return append(result, payload...)
+}
+
+func browserTestIdentity(t *testing.T, module []byte) []byte {
+	t.Helper()
+	module, err := wasmdebug.SetDebuggerRecord(module, debugabi.NewRecord(4, debugabi.ByteOrderLittle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err = wasmdebug.SetBuildID(module, []byte("browser-test-build"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return module
+}
+
+func TestLoadRejectsInvalidArtifactAndSidecarContracts(t *testing.T) {
+	dir := t.TempDir()
+	header := []byte{0, 'a', 's', 'm', 1, 0, 0, 0}
+	// Container checks precede DWARF decoding; arbitrary DWARF bytes are enough
+	// to establish that these invalid artifacts never reach the decoder.
+	withDWARF := appendBrowserCustomSection(header, ".debug_info", []byte{1})
+	validIdentity := browserTestIdentity(t, withDWARF)
+	noBuildID, err := wasmdebug.SetDebuggerRecord(withDWARF, debugabi.NewRecord(4, debugabi.ByteOrderLittle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyBuildID := appendBrowserCustomSection(noBuildID, "build_id", []byte{0})
+	brokenBuildID := appendBrowserCustomSection(noBuildID, "build_id", []byte{0x80})
+	url := "symbols.wasm"
+	urlContents := append(binary.AppendUvarint(nil, uint64(len(url))), url...)
+	external, err := wasmdebug.Externalize(validIdentity, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecarNoRecord, err := wasmdebug.SetBuildID(withDWARF, []byte("browser-test-build"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, want    string
+		main, sidecar []byte
+	}{
+		{name: "unreadable artifact", want: "read browser WebAssembly artifact"},
+		{name: "invalid container", main: []byte("not wasm"), want: "invalid WebAssembly header"},
+		{name: "missing ABI record", main: withDWARF, want: "no LLGo debugger ABI record"},
+		{name: "missing build ID", main: noBuildID, want: "no build_id"},
+		{name: "empty build ID", main: emptyBuildID, want: "no build_id"},
+		{name: "corrupt build ID", main: brokenBuildID, want: "invalid WebAssembly build_id"},
+		{name: "missing DWARF", main: browserTestIdentity(t, header), want: "contains no DWARF"},
+		{name: "ambiguous DWARF", main: appendBrowserCustomSection(validIdentity, "external_debug_info", urlContents), want: "both embedded and external DWARF"},
+		{name: "corrupt external URL", main: appendBrowserCustomSection(browserTestIdentity(t, header), "external_debug_info", []byte{5, 'a'}), want: "invalid external_debug_info section"},
+		{name: "duplicate DWARF", main: appendBrowserCustomSection(validIdentity, ".debug_info", []byte{2}), want: "multiple .debug_info"},
+		{name: "corrupt sidecar", main: external, sidecar: []byte("not wasm"), want: "read external WebAssembly DWARF build ID"},
+		{name: "sidecar without build ID", main: external, sidecar: noBuildID, want: "external WebAssembly DWARF has no build_id"},
+		{name: "sidecar without ABI", main: external, sidecar: sidecarNoRecord, want: "record does not match"},
+		{name: "sidecar with corrupt ABI", main: external, sidecar: appendBrowserCustomSection(sidecarNoRecord, debugabi.WasmSectionName, []byte{1}), want: "read external WebAssembly debugger record"},
+		{name: "sidecar without DWARF", main: external, sidecar: browserTestIdentity(t, header), want: "sidecar contains no DWARF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			caseDir := filepath.Join(dir, strings.ReplaceAll(tt.name, " ", "-"))
+			if err := os.Mkdir(caseDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(caseDir, "main.wasm")
+			if tt.main != nil {
+				if err := os.WriteFile(path, tt.main, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.sidecar != nil {
+				if err := os.WriteFile(filepath.Join(caseDir, url), tt.sidecar, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bundle, err := Load(path, nil)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || bundle != nil {
+				t.Fatalf("Load returned bundle=%v, error=%v; want %q", bundle != nil, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsNonLocalExternalURLs(t *testing.T) {
+	header := []byte{0, 'a', 's', 'm', 1, 0, 0, 0}
+	module := browserTestIdentity(t, appendBrowserCustomSection(header, ".debug_info", []byte{1}))
+	for _, reference := range []string{"https://example.invalid/symbols.wasm", "//example.invalid/symbols.wasm", "symbols.wasm?version=1", "symbols.wasm#section", "symbols%ZZ.wasm", ""} {
+		t.Run(reference, func(t *testing.T) {
+			// Externalize rejects empty references; write that malformed metadata
+			// directly to exercise the reader of artifacts from other producers.
+			var main []byte
+			var err error
+			if reference != "" {
+				main, err = wasmdebug.Externalize(module, reference)
+			} else {
+				main = appendBrowserCustomSection(browserTestIdentity(t, header), "external_debug_info", []byte{0})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "main.wasm")
+			if err := os.WriteFile(path, main, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err = Load(path, nil)
+			var missing *MissingSymbolsError
+			if err == nil || errors.As(err, &missing) || !strings.Contains(err.Error(), "external WebAssembly DWARF URL") {
+				t.Fatalf("nonlocal/invalid URL %q reached symbol-file access: %v", reference, err)
+			}
+		})
+	}
+}
+
+func TestLoadReportsCorruptDWARF(t *testing.T) {
+	dir := t.TempDir()
+	source, output := filepath.Join(dir, "fixture.c"), filepath.Join(dir, "fixture.wasm")
+	if err := os.WriteFile(source, []byte("int add(int a, int b) { return a + b; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compileWasmFixture(t, source, output)
+	raw, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sections, err := wasmdebug.DWARFSections(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		section string
+		data    []byte
+		want    string
+		fatal   bool
+	}{
+		{section: ".debug_info", data: []byte{1}, want: "read WebAssembly DWARF:", fatal: true},
+		{section: ".debug_abbrev", data: []byte{0}, want: "read WebAssembly DWARF entry:", fatal: true},
+		{section: ".debug_line", data: []byte{1}, want: "read line table at"},
+	} {
+		t.Run(tt.section, func(t *testing.T) {
+			module := browserTestIdentity(t, []byte{0, 'a', 's', 'm', 1, 0, 0, 0})
+			for name, content := range sections {
+				if name == tt.section {
+					content = tt.data
+				}
+				module = appendBrowserCustomSection(module, name, content)
+			}
+			path := filepath.Join(t.TempDir(), "corrupt.wasm")
+			if err := os.WriteFile(path, module, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			bundle, err := Load(path, nil)
+			if tt.fatal {
+				if err == nil || !strings.Contains(err.Error(), tt.want) || bundle != nil {
+					t.Fatalf("corrupt DWARF returned bundle=%v, error=%v; want %q", bundle != nil, err, tt.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(strings.Join(bundle.Index.Diagnostics, "\n"), tt.want) || !hasFunction(bundle.Index.Functions, "add") {
+				t.Fatalf("corrupt line table lost its diagnostic or valid function: %+v", bundle.Index)
+			}
+		})
+	}
+}
+
+func TestInvalidLocationListsProduceDiagnostics(t *testing.T) {
+	// One wasm32 range [1,2), followed by a two-byte expression length.
+	rangeOnly := []byte{1, 0, 0, 0, 2, 0, 0, 0}
+	for _, tt := range []struct {
+		name, want string
+		data       []byte
+		offset     int64
+		width      int
+	}{
+		{name: "unsupported address width", width: 2, want: "unsupported DWARF address size"},
+		{name: "negative offset", width: 4, offset: -1, want: "outside .debug_loc"},
+		{name: "out of bounds offset", width: 4, offset: 1, want: "outside .debug_loc"},
+		{name: "truncated address", width: 4, data: rangeOnly[:3], want: "unexpected EOF"},
+		{name: "truncated expression length", width: 4, data: append(bytes.Clone(rangeOnly), 2), want: "unexpected EOF"},
+		{name: "truncated expression", width: 4, data: append(bytes.Clone(rangeOnly), 2, 0, 0x91), want: "unexpected EOF"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := indexBuilder{addressSize: tt.width, sections: map[string][]byte{".debug_loc": tt.data}}
+			if got := builder.locations(tt.offset, "localValue"); len(got) != 0 {
+				t.Fatalf("invalid location produced storage: %+v", got)
+			}
+			if len(builder.index.Diagnostics) != 1 || !strings.Contains(builder.index.Diagnostics[0], "localValue") || !strings.Contains(builder.index.Diagnostics[0], tt.want) {
+				t.Fatalf("diagnostics = %v, want variable name and %q", builder.index.Diagnostics, tt.want)
+			}
+		})
+	}
+}
+
+func TestConstantValuesPreserveKindAndBytes(t *testing.T) {
+	for _, tt := range []struct {
+		input       any
+		kind, value string
+	}{
+		{input: int64(-1), kind: "signed", value: "-1"},
+		{input: ^uint64(0), kind: "unsigned", value: "18446744073709551615"},
+		{input: "a\x00b", kind: "string", value: "a\x00b"},
+		{input: []byte{0, 0x80, 0xff}, kind: "bytes", value: "0080ff"},
+	} {
+		t.Run(fmt.Sprintf("%T", tt.input), func(t *testing.T) {
+			got := constantValue(tt.input)
+			if got == nil || got.Kind != tt.kind || got.Value != tt.value {
+				t.Fatalf("constant = %+v, want %s %q", got, tt.kind, tt.value)
+			}
+		})
+	}
+}
+
+func TestUnreadableTypePreservesVariableStorage(t *testing.T) {
+	// A valid empty DWARF4 unit with 32-bit addresses and a null DIE. The
+	// variable below refers past that unit rather than a valid type DIE.
+	info := []byte{8, 0, 0, 0, 4, 0, 0, 0, 0, 0, 4, 0}
+	data, err := dwarf.New([]byte{0}, nil, nil, info, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder := indexBuilder{data: data}
+	builder.addVariable(&dwarf.Entry{
+		Tag: dwarf.TagVariable,
+		Field: []dwarf.Field{
+			{Attr: dwarf.AttrName, Val: "brokenType"},
+			{Attr: dwarf.AttrType, Val: dwarf.Offset(0x100)},
+			{Attr: dwarf.AttrLocation, Val: []byte{0x91, 0}},
+		},
+	}, scopeState{function: true}, 1)
+	if len(builder.index.Variables) != 1 || builder.index.Variables[0].Type != "" || len(builder.index.Variables[0].Locations) != 1 {
+		t.Fatalf("unreadable type discarded readable storage or invented a type: %+v", builder.index.Variables)
+	}
+	if len(builder.index.Diagnostics) != 1 || !strings.Contains(builder.index.Diagnostics[0], "DWARF type at 0x100") {
+		t.Fatalf("missing type failure diagnostic: %v", builder.index.Diagnostics)
 	}
 }
 
@@ -150,6 +403,12 @@ func TestPathMapping(t *testing.T) {
 	}
 	if suffix, ok := pathPrefix(filepath.Join("/build/source", "pkg/main.go"), mapping.From); !ok || suffix != filepath.Join("pkg", "main.go") {
 		t.Fatalf("pathPrefix = %q, %v", suffix, ok)
+	}
+	if suffix, ok := pathPrefix(mapping.From, mapping.From); !ok || suffix != "" {
+		t.Fatalf("exact source root = %q, %v", suffix, ok)
+	}
+	if _, ok := pathPrefix(filepath.Join("/build/source-other", "main.go"), mapping.From); ok {
+		t.Fatal("source mapping matched a sibling directory")
 	}
 	if _, err := ParsePathMapping("missing-separator"); err == nil {
 		t.Fatal("invalid source mapping was accepted")

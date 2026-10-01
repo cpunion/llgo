@@ -25,6 +25,10 @@ def main():
     if not env.get("LLGO_BROWSER_CHROME"):
         raise SystemExit("LLGO_BROWSER_CHROME is required; no skipped browser acceptance")
     llgo = env.get("LLGO", "llgo")
+    coverage_dir = env.get("LLGO_BROWSER_COVERAGE_DIR")
+    if coverage_dir:
+        coverage_dir = Path(coverage_dir).resolve()
+        coverage_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="llgo-browser-debug-") as directory:
         for profile, target in (("j32", "wasm"), ("j64", "emscripten-memory64")):
             runtime_stem = Path(directory) / f"{profile}-runtime"
@@ -38,8 +42,12 @@ def main():
                      f"-debug-artifact={mode}", "-o", str(stem.with_suffix(".mjs")),
                      "./internal/build/testdata/wasm-debug"], env)
                 env["LLGO_BROWSER_DEBUG_ARTIFACT"] = str(stem.with_suffix(".wasm"))
-                run(["go", "test", "-count=1", "-timeout=3m", "-v",
-                     "./internal/browserdebug", "./cmd/internal/browser"], env)
+                test = ["go", "test", "-count=1", "-timeout=3m", "-v"]
+                if coverage_dir:
+                    test += ["-covermode=atomic",
+                             "-coverpkg=./internal/browserdebug,./internal/wasmdebug,./internal/debugabi",
+                             f"-coverprofile={coverage_dir / f'{profile}-{mode}.out'}"]
+                run(test + ["./internal/browserdebug", "./cmd/internal/browser"], env)
 
 
 if __name__ == "__main__":
