@@ -820,3 +820,29 @@ func TestPackageSchedulingHandlesNonBackendPackages(t *testing.T) {
 		t.Fatalf("nil package Plan9 asm = %v, %v; want false, nil", usesPlan9, err)
 	}
 }
+
+func TestBuildPackagePropagatesArchiveFailure(t *testing.T) {
+	conf := NewDefaultConf(ModeBuild)
+	conf.OutFile = filepath.Join(t.TempDir(), "app")
+	missing := filepath.Join(t.TempDir(), "missing-member.o")
+	var failedPkg Package
+	conf.ModuleHook = func(pkg Package) {
+		if pkg.Name == "main" {
+			failedPkg = pkg
+			pkg.ObjFiles = append(pkg.ObjFiles, missing)
+		}
+	}
+	_, err := Do([]string{"../../benchmark/binary_size/cprintf"}, conf)
+	if err == nil || !strings.Contains(err.Error(), "create archive for") || !strings.Contains(err.Error(), "missing-member.o") {
+		t.Fatalf("Do error = %v, want missing archive member", err)
+	}
+	if failedPkg == nil {
+		t.Fatal("main package was not compiled")
+	}
+	if failedPkg.ArchiveFile != "" || len(failedPkg.ObjBuffers) != 0 {
+		t.Fatal("failed archive was published or retained object buffers")
+	}
+	if _, err := os.Stat(conf.OutFile); !os.IsNotExist(err) {
+		t.Fatalf("failed package produced an executable: %v", err)
+	}
+}
