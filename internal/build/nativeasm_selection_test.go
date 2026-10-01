@@ -41,7 +41,7 @@ func TestNativeASMSelectionActualDriverKeepsStdlibTags(t *testing.T) {
 	}
 	arch := runtime.GOARCH
 	for name, data := range map[string]string{
-		"go.mod":                       "module example.com/native-asm-driver\n\ngo 1.27.1\n",
+		"go.mod":                       "module example.com/native-asm-driver\n\ngo 1.27.0\n",
 		"probe/native_" + arch + ".go": "//go:build gc && !purego && !llgo\n\npackage probe\nimport \"math/big\"\nvar Big = big.NewInt(9)\nfunc Kernel([]byte) uint64\n",
 		"probe/fallback.go":            "//go:build purego || llgo\n\npackage probe\nfunc Kernel([]byte) uint64 { return 9 }\n",
 		"probe/kernel_" + arch + ".s":  "//go:build gc && !purego && !llgo\n\nTEXT ·Kernel(SB), $0-32\nRET\n",

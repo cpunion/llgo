@@ -28,7 +28,7 @@ func TestHeaderOverlaySelectsNativeDeclarationAssemblyAndImportsTogether(t *test
 		t.Fatal(err)
 	}
 	sources := map[string]string{
-		"go.mod":                "module example.com/asm-select-test\n\ngo 1.27.1\n",
+		"go.mod":                "module example.com/asm-select-test\n\ngo 1.27.0\n",
 		"probe/native_arm64.go": "//go:build gc && !purego && !llgo\n\npackage probe\nimport \"math/big\"\nvar Big = big.NewInt(9)\nfunc Kernel([]byte) uint64\n",
 		"probe/fallback.go":     "//go:build purego || llgo\n\npackage probe\nfunc Kernel([]byte) uint64 { return 9 }\n",
 		"probe/kernel_arm64.s":  "//go:build gc && !purego && !llgo\n\nTEXT ·Kernel(SB), $0-32\nRET\n",
