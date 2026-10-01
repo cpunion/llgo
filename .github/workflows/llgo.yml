@@ -55,6 +55,27 @@ jobs:
         with:
           go-version: '1.27.1'
 
+      - name: Install pinned ARM64 execution tools
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = linux/amd64
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          plan9asm_source="$(go list -m -f '{{.Dir}}' github.com/xgo-dev/plan9asm)"
+          bash "$plan9asm_source/scripts/install-ci-qemu.sh" "$RUNNER_TEMP/assembly-qemu"
+
+      - name: Execute required ARM64 memmove counterpart
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          PLAN9ASM_CROSS_EXEC: '1'
+        run: |
+          set -euo pipefail
+          go test -count=1 -run '^TestRuntimeMemmove' ./internal/plan9asm
+
       - name: Build the checkout compiler
         shell: bash
         run: |

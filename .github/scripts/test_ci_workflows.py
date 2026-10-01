@@ -103,6 +103,17 @@ class WorkflowContractTests(unittest.TestCase):
                      if step.get("name") == "Build the checkout compiler")
         self.assertIn("go build", build["run"])
         self.assertIn("./cmd/llgo", build["run"])
+        cross = next(step for step in steps
+                     if step.get("name") == "Execute required ARM64 memmove counterpart")
+        self.assertEqual(cross["if"], "runner.os == 'Linux'")
+        self.assertEqual(cross["env"]["PLAN9ASM_CROSS_EXEC"], "1")
+        self.assertIn("./internal/plan9asm", cross["run"])
+        self.assertIn("^TestRuntimeMemmove", cross["run"])
+        install = next(step for step in steps
+                       if step.get("name") == "Install pinned ARM64 execution tools")
+        self.assertEqual(install["if"], "runner.os == 'Linux'")
+        self.assertIn("scripts/install-ci-qemu.sh", install["run"])
+        self.assertIn("aarch64-linux-gnu", install["run"])
         for name, command in (("Native Go assembly baselines", "go test"),
                               ("LLGo assembly compile, link and execute", '"$RUNNER_TEMP/assembly-bin/llgo" test')):
             step = next(step for step in steps if step.get("name") == name)
