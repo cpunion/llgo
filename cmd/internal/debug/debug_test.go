@@ -79,9 +79,9 @@ func TestBrowserAndWASISessionBoundaries(t *testing.T) {
 	if err := validateSessionTarget(conf, nil, backendLLDB, options{}); err == nil {
 		t.Fatal("native cross-host launch accepted without remote")
 	}
-	for _, opts := range []options{{remote: ":3333"}, {server: "must-not-execute"}} {
+	for _, opts := range []options{{remote: ":3333"}, {server: "must-not-execute"}, {load: true}} {
 		err := runSession(session{backend: backendBrowser, options: opts}, nil, nil, nil)
-		if err == nil || !strings.Contains(err.Error(), "-remote and -server") {
+		if err == nil || !strings.Contains(err.Error(), "-remote, -server and -load") {
 			t.Fatalf("browser accepted native transport: %v", err)
 		}
 	}
