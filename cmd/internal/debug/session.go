@@ -61,6 +61,7 @@ type options struct {
 	gdb     string
 	remote  string
 	server  string
+	load    bool
 }
 
 func (o options) validate() error {
@@ -182,15 +183,18 @@ func makeServerPlan(target *targets.Config, artifact string, opts options) (*ser
 			return nil, errors.New("llgo debug: -server requires -target")
 		}
 		if opts.remote == "" {
+			if opts.load {
+				return nil, errors.New("llgo debug: -load requires a remote debug server")
+			}
 			return nil, nil
 		}
-		return &serverPlan{address: normalizeRemoteAddress(opts.remote)}, nil
+		return &serverPlan{address: normalizeRemoteAddress(opts.remote), load: opts.load}, nil
 	}
 	if opts.remote != "" {
 		if opts.server != "" {
 			return nil, errors.New("llgo debug: -remote and -server are mutually exclusive")
 		}
-		return &serverPlan{address: normalizeRemoteAddress(opts.remote)}, nil
+		return &serverPlan{address: normalizeRemoteAddress(opts.remote), load: opts.load}, nil
 	}
 
 	port, err := freeTCPPort()
@@ -206,7 +210,7 @@ func makeServerPlan(target *targets.Config, artifact string, opts options) (*ser
 		if err != nil {
 			return nil, err
 		}
-		return &serverPlan{command: command, address: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}, nil
+		return &serverPlan{command: command, address: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), load: opts.load}, nil
 	}
 	if target.OpenOCDInterface == "" && target.OpenOCDTarget == "" {
 		return nil, fmt.Errorf("llgo debug: target %s has no debug server; use -remote or -server", target.Name)
@@ -374,13 +378,18 @@ func debuggerArguments(selected backend, artifact string, extra []string, server
 		}
 		return append(args, extra...), nil
 	case backendLLDB:
-		if server.load {
-			return nil, errors.New("llgo debug: LLDB does not yet automate OpenOCD image loading; use -backend=gdb")
-		}
 		args := []string{
 			artifact,
 			"-o", "gdb-remote " + server.address,
-			"-o", "target modules load --file " + quoteLLDBArgument(artifact) + " --slide 0",
+		}
+		load := "target modules load --file " + quoteLLDBArgument(artifact) + " --slide 0"
+		if server.load {
+			args = append(args, "-o", "process plugin packet monitor reset halt")
+			load += " --load"
+		}
+		args = append(args, "-o", load)
+		if server.load {
+			args = append(args, "-o", "process plugin packet monitor reset halt")
 		}
 		return append(args, extra...), nil
 	default:

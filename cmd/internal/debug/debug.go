@@ -47,6 +47,7 @@ var (
 	gdbPath       string
 	remoteAddress string
 	serverCommand string
+	loadImage     bool
 )
 
 func init() {
@@ -62,6 +63,7 @@ func init() {
 	Cmd.Flag.StringVar(&gdbPath, "gdb", "", "path to GDB (default $LLGO_GDB, target candidates, or auto-detect)")
 	Cmd.Flag.StringVar(&remoteAddress, "remote", "", "connect to an existing debug server at host:port")
 	Cmd.Flag.StringVar(&serverCommand, "server", "", "debug-server command template; {} is the artifact and {debug-port} is the allocated port")
+	Cmd.Flag.BoolVar(&loadImage, "load", false, "reset, load the image, and halt an existing remote or custom debug server")
 }
 
 func runCmd(cmd *base.Command, args []string) {
@@ -76,6 +78,7 @@ func runCmd(cmd *base.Command, args []string) {
 		gdb:     gdbPath,
 		remote:  remoteAddress,
 		server:  serverCommand,
+		load:    loadImage,
 	}, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		mockable.Exit(1)

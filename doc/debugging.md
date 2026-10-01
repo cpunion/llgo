@@ -35,10 +35,40 @@ and load the program, or connect to an externally managed server:
 ```sh
 llgo debug -target=rp2040 .
 llgo debug -target=rp2040 -remote=:3333 .
+llgo debug -backend=lldb -target=rp2040 .
+llgo debug -backend=lldb -target=rp2040 -remote=:3333 -load .
 ```
 
-For an external server, its device must already contain the generated host
-ELF's image unless the debugger is explicitly instructed to load it.
+Automatically started OpenOCD sessions reset, download the image, and reset
+again while halted, with either backend. An existing `-remote` or custom
+`-server` does **not** write the device by default: its device must already
+contain the generated host ELF's image. Add `-load` to explicitly request the
+same reset/download/reset sequence. This requires an OpenOCD-compatible
+`monitor reset halt` command and image-write support; arbitrary remote servers
+need not implement that contract.
+
+For LLDB the sequence uses `process plugin packet monitor reset halt`,
+`target modules load --file ... --slide 0 --load`, then another reset. Without
+`-load`, LLDB's zero-slide command only maps the ELF's addresses for debugging.
+These workflows halt the selected target; loading also changes its memory.
+
+Debugger hosts and target architectures are separate capabilities. The
+automated embedded matrix connects each of the following hosts to the same
+Cortex-M3 `lm3s6965evb` QEMU target:
+
+| Debugger host | GDB | LLDB | Target exercised |
+| --- | --- | --- | --- |
+| Linux x64 | `gdb-multiarch` | LLVM 22 | Cortex-M3, preloaded and explicit download |
+| macOS arm64 | Homebrew GDB remote | LLDB | Cortex-M3, preloaded and explicit download |
+| Windows x64 | MSYS2 `gdb-multiarch` | LLVM 22 | Cortex-M3, preloaded and explicit download |
+
+macOS arm64 **remote** GDB coverage does not imply native Darwin arm64 process
+support. Likewise, these Cortex-M tests do not establish LLDB support for every
+embedded LLVM target. Other RISC-V boards and probes require their own
+acceptance; AVR and Xtensa must use a debugger that implements those targets.
+No physical probe is exercised in ordinary CI. Browser sessions use the
+separate DevTools frontend contribution; the current threaded WASI runtime
+does not gain a source-debugger frontend from this remote-debugging matrix.
 
 `llgo lldb` remains the explicit compatibility command for opening an existing
 artifact without building it.

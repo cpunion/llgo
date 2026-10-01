@@ -11,7 +11,8 @@ entry points and their tool requirements.
 - [Runtime inspection](runtime/README.md) shares native Go and C fixtures between
   LLDB and GDB, covering variables, runtime values, goroutines, and backtraces.
 - [Embedded transports](embedded/README.md) exercises Cortex-M QEMU sessions
-  through GDB Remote and LLDB, then checks that DWARF leaves flash bytes unchanged.
+  through GDB Remote and LLDB, including explicit image download into an empty
+  simulator, then checks that DWARF leaves flash bytes unchanged.
 - [Physical probes](hardware/README.md) reuses the embedded fixture on a real
   target. It requires explicit opt-in and is not part of normal CI.
 
@@ -34,7 +35,8 @@ Run the embedded suite with QEMU, target-aware GDB, LLDB and LLVM tools installe
 bash test/debug/embedded/runtest.sh
 ```
 
-The Targets workflow runs this suite and verifies that the physical-probe
+The Targets workflow runs GDB and LLDB separately on Linux x64, macOS arm64 and
+Windows x64 hosts against the same Cortex-M3 target. It verifies that the physical-probe
 entry point refuses to halt or load a device without its documented opt-in.
 Passing QEMU acceptance does not imply a physical-probe test was performed.
 
