@@ -6,9 +6,9 @@ permissions:
   contents: read
 jobs:
   gdb:
-    name: GDB (${{ matrix.arch }}, ${{ matrix.abi }})
+    name: GDB (${{ matrix.arch }}, ${{ matrix.abi }}, ${{ matrix.arch == 'arm64' && 'basic; upstream worker unwind unavailable' || 'complete stacks' }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +47,7 @@ jobs:
           windows-abi: ${{ matrix.abi }}
           windows-arch: ${{ matrix.arch }}
       - uses: ./.github/actions/setup-gdb
-      - name: Actual GDB acceptance
+      - name: GDB values, registry and main stack
         shell: pwsh
         env:
           LLGO_GDB_INTEGRATION: '1'
@@ -55,3 +55,12 @@ jobs:
           Remove-Item Env:PYTHONHOME, Env:PYTHONPATH -ErrorAction SilentlyContinue
           go test ./cmd/internal/gdb -run '^TestGDBIntegration$' -count=1 -v
           if ($LASTEXITCODE -ne 0) { throw "GDB integration failed: $LASTEXITCODE" }
+      - name: Complete GDB worker stacks
+        if: matrix.arch != 'arm64'
+        shell: pwsh
+        env:
+          LLGO_GDB_INTEGRATION: '1'
+        run: |
+          Remove-Item Env:PYTHONHOME, Env:PYTHONPATH -ErrorAction SilentlyContinue
+          go test ./cmd/internal/gdb -run '^TestGDBCompleteWorkerUnwind$' -count=1 -v
+          if ($LASTEXITCODE -ne 0) { throw "GDB complete worker unwind failed: $LASTEXITCODE" }
