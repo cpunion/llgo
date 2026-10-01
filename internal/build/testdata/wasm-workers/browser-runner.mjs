@@ -156,9 +156,6 @@ try {
       await chromeExit;
     }
   }
-  // A browser helper may outlive Chrome and retain this pipe. Once Chrome
-  // has exited, stop waiting for diagnostic EOF so Node can terminate.
-  chrome.stderr.destroy();
   // Chrome's child processes can still flush profile files after its main
   // process exits. Node retries ENOTEMPTY for a recursive removal here.
   await rm(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
