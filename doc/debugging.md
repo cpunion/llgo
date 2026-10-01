@@ -70,6 +70,20 @@ No physical probe is exercised in ordinary CI. Browser sessions use the
 separate DevTools frontend contribution; the current threaded WASI runtime
 does not gain a source-debugger frontend from this remote-debugging matrix.
 
+Native runtime inspection has additional debugger-specific limits. Current
+GDB acceptance on the following hosts is partial; use LLDB when complete
+goroutine stack inspection is required:
+
+| Native host | GDB results with the current packaged tool | LLDB results |
+| --- | --- | --- |
+| macOS x64 with dyld image-info ABI 17 | C/Go values, runtime registry and main-thread stack pass; blocked-worker stacks are truncated because GDB's Darwin loader reader accepts image-info ABI versions only through 15. The truncation also reproduces with a pure C worker. | Complete runtime acceptance passes, including worker stacks |
+| Windows ARM64 with GDB 18 | Values, runtime registry and main-thread stack pass; blocked-worker stacks are truncated at system frames containing PAC-signed return addresses. | Complete runtime acceptance passes, including worker stacks |
+
+Passing value inspection or enumerating a goroutine does not establish that
+its full stack can be unwound. These two GDB combinations are not recorded as
+complete native runtime support, and this contribution does not bundle a
+patched GDB to remove those upstream limits.
+
 `llgo lldb` remains the explicit compatibility command for opening an existing
 artifact without building it.
 
