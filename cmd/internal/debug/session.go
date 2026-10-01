@@ -206,8 +206,8 @@ func validateBackendOptions(selected backend, opts options) error {
 	if selected == backendWasmtime {
 		return wasiDebuggerUnavailable()
 	}
-	if selected == backendBrowser && (opts.remote != "" || opts.server != "") {
-		return errors.New("llgo debug: browser sessions use their own loopback HTTP server; -remote and -server apply to native/embedded debugger transports")
+	if selected == backendBrowser && (opts.remote != "" || opts.server != "" || opts.load) {
+		return errors.New("llgo debug: browser sessions use their own loopback HTTP server; -remote, -server and -load apply to native/embedded debugger transports")
 	}
 	return nil
 }
