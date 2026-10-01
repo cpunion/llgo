@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -99,8 +100,18 @@ func TestSessionPlanning(t *testing.T) {
 			t.Fatalf("GDB arguments %q do not contain %q", joined, want)
 		}
 	}
-	if _, err := debuggerArguments(backendLLDB, "program.elf", nil, openocd); err == nil {
-		t.Fatal("LLDB unexpectedly accepted automated OpenOCD loading")
+	if remote.load {
+		t.Fatal("connecting to an existing server must not implicitly load an image")
+	}
+	loadArgs, err := debuggerArguments(backendLLDB, "dir with space/program.elf", []string{"--batch"}, openocd)
+	wantLoadArgs := []string{
+		"dir with space/program.elf", "-o", "gdb-remote " + openocd.address,
+		"-o", "process plugin packet monitor reset halt",
+		"-o", `target modules load --file "dir with space/program.elf" --slide 0 --load`,
+		"-o", "process plugin packet monitor reset halt", "--batch",
+	}
+	if err != nil || !reflect.DeepEqual(loadArgs, wantLoadArgs) {
+		t.Fatalf("LLDB image loading = %q, %v; want %q", loadArgs, err, wantLoadArgs)
 	}
 	command, err := parseServerCommand("server -kernel {} -port {debug-port}", filepath.Join("dir with space", "program.elf"), 4321)
 	if err != nil || len(command) != 5 || command[2] != filepath.Join("dir with space", "program.elf") || command[4] != "4321" {
@@ -116,6 +127,32 @@ func TestSessionPlanning(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("LLDB arguments %q do not contain %q", joined, want)
 		}
+	}
+}
+
+func TestExplicitRemoteImageLoading(t *testing.T) {
+	if _, err := makeServerPlan(nil, "app.elf", options{load: true}); err == nil {
+		t.Fatal("-load without a remote server was accepted")
+	}
+	for _, tc := range []struct {
+		name   string
+		target *targets.Config
+		opts   options
+	}{
+		{name: "existing remote", opts: options{remote: ":3333"}},
+		{name: "target remote", target: &targets.Config{Name: "board"}, opts: options{remote: ":3333"}},
+		{name: "custom server", target: &targets.Config{Name: "board"}, opts: options{server: "server --image {} --port {debug-port}"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, load := range []bool{false, true} {
+				opts := tc.opts
+				opts.load = load
+				plan, err := makeServerPlan(tc.target, "app.elf", opts)
+				if err != nil || plan.load != load {
+					t.Fatalf("server image loading = %+v, %v; want %t", plan, err, load)
+				}
+			}
+		})
 	}
 }
 
