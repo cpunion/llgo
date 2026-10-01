@@ -912,19 +912,23 @@ func TestConfigureWasmGC(t *testing.T) {
 	}
 }
 
-func TestConfigureWasmGCRejectsWASIThreads(t *testing.T) {
+func TestConfigureWasmGCWASIThreads(t *testing.T) {
 	t.Setenv("LLGO_WASI_THREADS", "1")
 	conf := Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo.wasm.gc.linear"}
-	if _, err := configureWasmGC(&conf, &crosscompile.Export{WasmProfile: crosscompile.WasmProfileW32}); err == nil {
-		t.Fatal("expected llgo.wasm.gc.linear with WASI threads to fail")
+	if enabled, err := configureWasmGC(&conf, &crosscompile.Export{WasmProfile: crosscompile.WasmProfileW32}); err != nil || !enabled {
+		t.Fatalf("explicit WASI threaded GC = %v, %v; want true, nil", enabled, err)
 	}
 	conf.Tags = ""
-	if _, err := configureWasmGC(&conf, &crosscompile.Export{WasmProfile: crosscompile.WasmProfileW32}); err == nil || !strings.Contains(err.Error(), "-tags nogc") {
-		t.Fatalf("WASI threads without a collector returned %v, want an actionable error", err)
+	if enabled, err := configureWasmGC(&conf, &crosscompile.Export{WasmProfile: crosscompile.WasmProfileW32}); err != nil || !enabled || !slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo.wasm.gc.linear") {
+		t.Fatalf("default WASI threaded GC = %v, %v, tags %q; want enabled", enabled, err, conf.Tags)
 	}
 	conf.Tags = "nogc"
 	if enabled, err := configureWasmGC(&conf, &crosscompile.Export{WasmProfile: crosscompile.WasmProfileW32}); err != nil || enabled {
-		t.Fatalf("experimental WASI threads with nogc = %v, %v; want false, nil", enabled, err)
+		t.Fatalf("WASI threads with nogc = %v, %v; want false, nil", enabled, err)
+	}
+	conf.Tags = "nogc,llgo.wasm.gc.linear"
+	if _, err := configureWasmGC(&conf, &crosscompile.Export{WasmProfile: crosscompile.WasmProfileW32}); err == nil {
+		t.Fatal("WASI threads accepted conflicting collector tags")
 	}
 }
 
@@ -944,7 +948,7 @@ func TestUsesSingleWorkerWasmScheduler(t *testing.T) {
 	}{
 		{"Emscripten", "js", "wasm", false, true},
 		{"Emscripten ignores WASI setting", "js", "wasm", true, true},
-		{"single-worker WASI", "wasip1", "wasm", false, true},
+		{"WASI always uses pthreads", "wasip1", "wasm", false, false},
 		{"WASI threads", "wasip1", "wasm", true, false},
 		{"unsupported wasm host", "plan9", "wasm", false, false},
 		{"native", "linux", "amd64", false, false},
@@ -1003,6 +1007,36 @@ func TestConfigureWasmWorkers(t *testing.T) {
 	}
 	if !slices.Contains(splitSourcePatchBuildTags(conf.Tags), "llgo.wasm.gc.linear") {
 		t.Fatalf("worker GC tag missing from %q", conf.Tags)
+	}
+}
+
+func TestConfigureWasmWorkersReportsInvalidConfiguration(t *testing.T) {
+	t.Setenv(llgoWasmWorkers, "invalid")
+	conf := &Config{Goos: "js", Goarch: "wasm"}
+	export := &crosscompile.Export{WasmProfile: crosscompile.WasmProfileJ32, WasmProvider: crosscompile.WasmProviderEmscripten}
+	if _, err := configureWasmWorkers(conf, export); err == nil {
+		t.Fatal("invalid worker count was accepted")
+	}
+	if _, err := Do(nil, conf); err == nil || !strings.Contains(err.Error(), llgoWasmWorkers) {
+		t.Fatalf("build error = %v, want invalid worker configuration", err)
+	}
+}
+
+func TestConfigureWasmWorkersReportsMissingHostShim(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, env.LLGoRuntimePkgName)
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "go.mod"), []byte("module "+env.LLGoRuntimePkg+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLGO_ROOT", root)
+	t.Setenv(llgoWasmWorkers, "2")
+	conf := &Config{Goos: "js", Goarch: "wasm"}
+	export := &crosscompile.Export{WasmProfile: crosscompile.WasmProfileJ32, WasmProvider: crosscompile.WasmProviderEmscripten}
+	if _, err := configureWasmWorkers(conf, export); err == nil || !strings.Contains(err.Error(), "worker host shim") {
+		t.Fatalf("worker configuration error = %v, want missing host shim", err)
 	}
 }
 
@@ -1178,11 +1212,6 @@ func TestWasmRuntimeBackendSelection(t *testing.T) {
 		{
 			name: "raw JS and Emscripten profiles", goos: "js", tags: []string{"llgo", "nogc"},
 			want: []string{"g_wasm.go", "os_wasm.go", "proc_wasm.go", "runqueue_wasm.go", "fatal_emscripten.go", "local_context_baremetal.go"},
-			omit: []string{"g_tls.go", "os_pthread.go", "proc_pthread.go", "fatal_default.go", "local_context_tls.go"},
-		},
-		{
-			name: "single-worker WASI", goos: "wasip1", tags: []string{"llgo", "nogc"},
-			want: []string{"g_wasm.go", "os_wasm.go", "proc_wasip1.go", "runqueue_wasm.go", "fatal_wasip1.go", "local_context_baremetal.go"},
 			omit: []string{"g_tls.go", "os_pthread.go", "proc_pthread.go", "fatal_default.go", "local_context_tls.go"},
 		},
 		{
@@ -1679,6 +1708,56 @@ func TestLinkOptionsControlDarwinDebugSymbols(t *testing.T) {
 				t.Fatalf("codesign verification with LinkOptions %+v: %v\n%s", tt.options, err, out)
 			}
 		})
+	}
+}
+
+func TestDarwinDWARFCacheUsesStableArchivePaths(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Mach-O debug-map integration test")
+	}
+
+	cacheDir := t.TempDir()
+	oldCacheRootFunc := cacheRootFunc
+	cacheRootFunc = func() string { return cacheDir }
+	t.Cleanup(func() { cacheRootFunc = oldCacheRootFunc })
+
+	binPath := filepath.Join(t.TempDir(), "ldflagsstrip")
+	buildCachedArchivePaths := func() []string {
+		cfg := &Config{
+			Mode:        ModeBuild,
+			OutFile:     binPath,
+			LinkOptions: LinkOptions{DWARF: DWARFPreserve},
+		}
+		if _, err := Do([]string{"./testdata/ldflagsstrip"}, cfg); err != nil {
+			t.Fatalf("ModeBuild with DWARF failed: %v", err)
+		}
+		f, err := macho.Open(binPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if f.Symtab == nil {
+			t.Fatal("Mach-O has no symbol table")
+		}
+
+		const nOSO = 0x66
+		cachePrefix := filepath.Join(cacheDir, cacheBuildDirName) + string(os.PathSeparator)
+		var paths []string
+		for _, sym := range f.Symtab.Syms {
+			if sym.Type == nOSO && strings.HasPrefix(sym.Name, cachePrefix) {
+				paths = append(paths, sym.Name)
+			}
+		}
+		return paths
+	}
+
+	coldPaths := buildCachedArchivePaths()
+	warmPaths := buildCachedArchivePaths()
+	if len(coldPaths) == 0 {
+		t.Fatal("cold build has no cache-backed N_OSO paths")
+	}
+	if !slices.Equal(coldPaths, warmPaths) {
+		t.Fatalf("cold and warm N_OSO paths differ:\ncold: %q\nwarm: %q", coldPaths, warmPaths)
 	}
 }
 
@@ -2189,7 +2268,7 @@ func TestExecuteMainLinkReportsWasmPostLinkError(t *testing.T) {
 	}
 }
 
-func TestShouldDisableClangImplicitWasmOptOnlyForWasmPostLinkClang(t *testing.T) {
+func TestShouldDisableClangImplicitWasmOptOnlyForWasmClang(t *testing.T) {
 	ctx := &context{
 		buildConf: &Config{Goarch: "wasm"},
 		crossCompile: crosscompile.Export{
@@ -2208,8 +2287,8 @@ func TestShouldDisableClangImplicitWasmOptOnlyForWasmPostLinkClang(t *testing.T)
 	}
 	ctx.buildConf.Goarch = "wasm"
 	ctx.crossCompile.WasmPostLink.Asyncify = false
-	if ctx.shouldDisableClangImplicitWasmOpt("clang++") {
-		t.Fatal("non-Asyncify wasm link disabled wasm-opt")
+	if !ctx.shouldDisableClangImplicitWasmOpt("clang++") {
+		t.Fatal("WASI threads clang link did not disable implicit wasm-opt")
 	}
 	ctx.crossCompile.WasmPostLink.Asyncify = true
 	ctx.crossCompile.Linker = "custom-linker"
@@ -2222,35 +2301,39 @@ func TestShouldDisableClangImplicitWasmOptOnlyForWasmPostLinkClang(t *testing.T)
 }
 
 func TestLinkerDisablesClangImplicitWasmOpt(t *testing.T) {
-	for _, driver := range []string{"clang", "clang++"} {
-		t.Run(driver, func(t *testing.T) {
-			dir := t.TempDir()
-			tool := writeBuildTestTool(t, dir, driver)
-			argsFile := filepath.Join(dir, "args")
-			output := filepath.Join(dir, "linked.wasm")
-			t.Setenv("LLGO_TEST_LINKER_HELPER", "write")
-			t.Setenv("LINK_ARGS_FILE", argsFile)
+	for _, asyncify := range []bool{false, true} {
+		t.Run(fmt.Sprintf("asyncify=%v", asyncify), func(t *testing.T) {
+			for _, driver := range []string{"clang", "clang++"} {
+				t.Run(driver, func(t *testing.T) {
+					dir := t.TempDir()
+					tool := writeBuildTestTool(t, dir, driver)
+					argsFile := filepath.Join(dir, "args")
+					output := filepath.Join(dir, "linked.wasm")
+					t.Setenv("LLGO_TEST_LINKER_HELPER", "write")
+					t.Setenv("LINK_ARGS_FILE", argsFile)
 
-			target := crosscompile.Export{
-				CC:           tool,
-				WasmPostLink: crosscompile.WasmPostLink{Asyncify: true},
-			}
-			if driver == "clang++" {
-				target.CXX = tool
-			}
-			ctx := &context{
-				buildConf:    &Config{Goarch: "wasm"},
-				crossCompile: target,
-			}
-			if err := ctx.linker().Link("-o", output); err != nil {
-				t.Fatal(err)
-			}
-			args, err := os.ReadFile(argsFile)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !slices.Contains(strings.Split(strings.TrimSpace(string(args)), "\n"), "--no-wasm-opt") {
-				t.Fatalf("%s link args did not disable implicit wasm-opt: %q", driver, args)
+					target := crosscompile.Export{
+						CC:           tool,
+						WasmPostLink: crosscompile.WasmPostLink{Asyncify: asyncify},
+					}
+					if driver == "clang++" {
+						target.CXX = tool
+					}
+					ctx := &context{
+						buildConf:    &Config{Goarch: "wasm"},
+						crossCompile: target,
+					}
+					if err := ctx.linker().Link("-o", output); err != nil {
+						t.Fatal(err)
+					}
+					args, err := os.ReadFile(argsFile)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !slices.Contains(strings.Split(strings.TrimSpace(string(args)), "\n"), "--no-wasm-opt") {
+						t.Fatalf("%s link args did not disable implicit wasm-opt: %q", driver, args)
+					}
+				})
 			}
 		})
 	}
@@ -2649,14 +2732,16 @@ func TestFullRpathArgs(t *testing.T) {
 	}
 }
 
-func TestWASIThreadsAreOptIn(t *testing.T) {
-	t.Setenv(llgoWasiThreads, "")
-	if IsWasiThreadsEnabled() {
-		t.Fatal("WASI threads are enabled by default")
-	}
-	t.Setenv(llgoWasiThreads, "1")
-	if !IsWasiThreadsEnabled() {
-		t.Fatal("WASI threads opt-in was ignored")
+func TestWASIThreadsRequired(t *testing.T) {
+	for _, value := range []string{"", "1", "true", "on", "0", "false", "off", "invalid"} {
+		t.Setenv(llgoWasiThreads, value)
+		wantError := value == "0" || value == "false" || value == "off" || value == "invalid"
+		if err := validateWASIThreads(&Config{Goos: "wasip1", Goarch: "wasm"}); (err != nil) != wantError {
+			t.Fatalf("LLGO_WASI_THREADS=%q: %v", value, err)
+		}
+		if err := validateWASIThreads(&Config{Goos: "linux", Goarch: "amd64"}); err != nil {
+			t.Fatalf("WASI setting affected native target: %v", err)
+		}
 	}
 }
 
@@ -3126,16 +3211,26 @@ func TestFormatPackageError(t *testing.T) {
 
 func TestLinkExecutionKeepsSitePolicyAfterBackendDisposal(t *testing.T) {
 	t.Setenv("LLGO_PCLNPOST", "1")
-	for _, goos := range []string{"linux", "darwin"} {
+	for _, test := range []struct {
+		goos       string
+		dwarf      bool
+		entrySites bool
+	}{
+		{goos: "linux", entrySites: true},
+		{goos: "linux", dwarf: true, entrySites: true},
+		{goos: "darwin", entrySites: true},
+		{goos: "darwin", dwarf: true},
+	} {
 		for _, enabled := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/sites=%v", goos, enabled), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/dwarf=%v/sites=%v", test.goos, test.dwarf, enabled), func(t *testing.T) {
 				prog := llssa.NewProgram(nil)
 				defer prog.Dispose()
 				prog.EnableFuncInfoSites(enabled)
 				ctx := &context{
 					prog: prog,
 					buildConf: &Config{Mode: ModeBuild, BuildMode: BuildModeExe,
-						Goos: goos, Goarch: "amd64", PCLNMode: PCLNEmbedded},
+						Goos: test.goos, Goarch: "amd64", PCLNMode: PCLNEmbedded,
+						OmitDWARFByDefault: !test.dwarf},
 					initial: []*packages.Package{{}},
 				}
 				plan := &mainLinkPlan{runtimeSites: shouldEmitRuntimeSites(ctx)}
@@ -3153,10 +3248,14 @@ func TestLinkExecutionKeepsSitePolicyAfterBackendDisposal(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if (len(args) != 0) != (enabled && goos == "linux") {
+				if (len(args) != 0) != (enabled && test.goos == "linux") {
 					t.Fatalf("sites enabled=%v: linker args = %v", enabled, args)
 				}
-				// A missing output must reach the rewriter when sites are enabled.
+				wantEntrySites := enabled && test.entrySites
+				if got := shouldEmitRuntimeEntrySites(linkCtx); got != wantEntrySites {
+					t.Fatalf("entry sites = %v, want %v", got, wantEntrySites)
+				}
+				// A missing output must reach the rewriter when entry sites are enabled.
 				// Checking the diagnostic also catches silently skipping the rewrite
 				// because the released context no longer has a Program.
 				stderr, err := os.CreateTemp(t.TempDir(), "stderr")
@@ -3174,7 +3273,7 @@ func TestLinkExecutionKeepsSitePolicyAfterBackendDisposal(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if strings.Contains(string(got), "prebuilt functab rewrite skipped:") != enabled {
+				if strings.Contains(string(got), "prebuilt functab rewrite skipped:") != wantEntrySites {
 					t.Fatalf("sites enabled=%v: rewrite diagnostic = %q", enabled, got)
 				}
 			})

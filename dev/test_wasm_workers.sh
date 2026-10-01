@@ -6,7 +6,6 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export LLGO_ROOT="${LLGO_ROOT:-${repo_root}}"
 llgo_cmd="${LLGO:-llgo}"
 node_cmd="${NODE:-node}"
-wasmtime_cmd="${WASMTIME:-wasmtime}"
 wasm_tools_cmd="${WASM_TOOLS:-wasm-tools}"
 wasm_opt_cmd="${WASMOPT:-wasm-opt}"
 worker_fixture="${repo_root}/internal/build/testdata/wasm-workers"
@@ -76,10 +75,38 @@ run_worker_llgo_test() {
 	local name="$2"
 	local output="${work_dir}/${name}.out"
 
+	# The worker test fixture runs multiple Wasm tests in one binary. Keep
+	# its Go test alarm below the outer 300s process limit but allow CI variance.
 	run_with_timeout env LLGO_WASM_WORKERS=2 "${llgo_cmd}" test \
-		-target "${target}" -emulator -v -count=1 -timeout=30s \
+		-target "${target}" -emulator -v -count=1 -timeout=180s \
 		"${test_fixture}" 2>&1 | tee "${output}"
 	grep -Fq "PASS" "${output}"
+}
+
+run_worker_pool_gc_test() {
+	local output="${work_dir}/test-pool-gc-emscripten.out"
+	run_with_timeout env LLGO_WASM_WORKERS=2 "${llgo_cmd}" test \
+		-target emscripten -emulator -v -count=1 -timeout=180s \
+		-run '^TestPoolAfterGC$' "${repo_root}/test/std/sync" 2>&1 | tee "${output}"
+	grep -Fq "PASS" "${output}"
+}
+
+run_filesystem_acceptance() {
+	local target runner workers mode module
+	for target in emscripten emscripten-memory64; do
+		runner="${target}-runner.mjs"
+		for workers in 1 2; do
+			mode=single
+			if [[ "${workers}" = 2 ]]; then mode=workers; fi
+			module="${work_dir}/fs-${mode}-${target}.mjs"
+			LLGO_WASM_WORKERS="${workers}" "${llgo_cmd}" build -target "${target}" \
+				-o "${module}" "${repo_root}/internal/build/testdata/wasm-browser-fs"
+			"${wasm_tools_cmd}" validate --features all "${module%.mjs}.wasm"
+			run_with_timeout "${node_cmd}" "${repo_root}/targets/${runner}" "${module}" "fs-${mode}" \
+				2>&1 | tee "${module}.out"
+			grep -Fxq "wasm filesystem ok" "${module}.out"
+		done
+	done
 }
 
 find_browser() {
@@ -120,7 +147,8 @@ run_browser_acceptance() {
 	curl -fsS http://127.0.0.1:8123/ >/dev/null
 
 	local module
-	for module in workers-emscripten.mjs workers-memory64.mjs hardening-workers-emscripten.mjs hardening-workers-memory64.mjs; do
+	for module in workers-emscripten.mjs workers-memory64.mjs hardening-workers-emscripten.mjs hardening-workers-memory64.mjs \
+		fs-single-emscripten.mjs fs-workers-emscripten.mjs fs-single-emscripten-memory64.mjs fs-workers-emscripten-memory64.mjs; do
 		run_with_timeout "${node_cmd}" "${worker_fixture}/browser-runner.mjs" \
 			"${browser}" "http://127.0.0.1:8123/browser.html?module=${module}"
 	done
@@ -132,7 +160,6 @@ run_browser_acceptance() {
 
 require_tool "${llgo_cmd}"
 require_tool "${node_cmd}"
-require_tool "${wasmtime_cmd}"
 require_tool "${wasm_tools_cmd}"
 require_tool "${wasm_opt_cmd}"
 require_tool curl
@@ -141,13 +168,6 @@ export WASMOPT="${wasm_opt_cmd}"
 # Preserve the single-worker R2 behavior while adding the worker backend.
 run_single_hardening emscripten emscripten-runner.mjs hardening-single-emscripten
 run_single_hardening emscripten-memory64 emscripten-memory64-runner.mjs hardening-single-memory64
-"${llgo_cmd}" build -target wasi -o "${work_dir}/hardening-single-wasi.wasm" "${hardening_fixture}"
-"${wasm_tools_cmd}" validate --features all "${work_dir}/hardening-single-wasi.wasm"
-run_with_timeout "${wasmtime_cmd}" run -W exceptions=y \
-	--env LLGO_WASM_EXPECT_ARG=hardening-single-wasi \
-	--env LLGO_WASM_BLOCKED_G=1000 \
-	"${work_dir}/hardening-single-wasi.wasm" hardening-single-wasi 2>&1 | tee "${work_dir}/hardening-single-wasi.out"
-grep -Fxq "wasm hardening ok" "${work_dir}/hardening-single-wasi.out"
 
 # EC32 and EC64 run the same scheduler, GC, C-boundary, and lifecycle probes.
 run_emscripten emscripten emscripten-runner.mjs \
@@ -164,6 +184,8 @@ run_emscripten emscripten-memory64 emscripten-memory64-runner.mjs \
 # Verify that the public test command selects and executes the worker runtime.
 run_worker_llgo_test emscripten test-workers-emscripten
 run_worker_llgo_test emscripten-memory64 test-workers-memory64
+run_worker_pool_gc_test
+run_filesystem_acceptance
 
 run_browser_acceptance "$(find_browser)"
 

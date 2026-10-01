@@ -116,6 +116,14 @@ func (p *Transformer) SetSkipFuncs(names []string) {
 }
 
 func (p *Transformer) shouldSkipFunc(name string) bool {
+	// LLVM intrinsics use LLVM's own calling convention and can carry metadata
+	// or scalable-vector parameters. Neither is a C ABI value to size or wrap.
+	// Some llvm.* declarations have IntrinsicID() == 0 (for example, an
+	// unrecognized intrinsic in a test module), so the ID checks at the ABI
+	// rewrite sites alone cannot keep them out of C ABI processing.
+	if strings.HasPrefix(name, "llvm.") {
+		return true
+	}
 	if name == "" || len(p.skipFns) == 0 {
 		return false
 	}
@@ -582,7 +590,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 				if ti.ByValAlign != 0 {
 					storageAlign = ti.ByValAlign
 				}
-				reuseParamHome(fn.Param(i), params[index], nfn.EntryBasicBlock(), ti.Align, storageAlign)
+				p.reuseParamHome(fn.Param(i), params[index], nfn.EntryBasicBlock(), ti.Align, storageAlign)
 			}
 		case AttrWidthType:
 			iptr := llvm.CreateAlloca(b, ti.Type1)
@@ -592,7 +600,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			ptr := b.CreateBitCast(iptr, llvm.PointerType(ti.nativeType(), 0), "")
 			nv = aggregateFromNative(b, ti, b.CreateLoad(ti.nativeType(), ptr, ""))
 			if p.optimize && !ti.hasNativeLayoutConversion() {
-				reuseParamHome(fn.Param(i), ptr, nfn.EntryBasicBlock(), ti.Align, storageAlign)
+				p.reuseParamHome(fn.Param(i), ptr, nfn.EntryBasicBlock(), ti.Align, storageAlign)
 			}
 		case AttrWidthType2:
 			typ := ctx.StructType([]llvm.Type{ti.Type1, ti.Type2}, false)
@@ -605,7 +613,7 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			ptr := b.CreateBitCast(iptr, llvm.PointerType(ti.nativeType(), 0), "")
 			nv = aggregateFromNative(b, ti, b.CreateLoad(ti.nativeType(), ptr, ""))
 			if p.optimize && !ti.hasNativeLayoutConversion() {
-				reuseParamHome(fn.Param(i), ptr, nfn.EntryBasicBlock(), ti.Align, storageAlign)
+				p.reuseParamHome(fn.Param(i), ptr, nfn.EntryBasicBlock(), ti.Align, storageAlign)
 			}
 		case AttrExtract:
 			nsubs := ti.nativeType().StructElementTypesCount()
@@ -864,7 +872,15 @@ func (p *Transformer) callMemcpy(_ llvm.Module, ctx llvm.Context, b llvm.Builder
 // reuseParamHome replaces at most one local copy of param with storage. The
 // incoming ABI storage can stand in for one parameter home, but independent
 // copies must remain distinct objects.
-func reuseParamHome(param, storage llvm.Value, entry llvm.BasicBlock, naturalAlign, storageAlign int) {
+func (p *Transformer) reuseParamHome(param, storage llvm.Value, entry llvm.BasicBlock, naturalAlign, storageAlign int) {
+	// Debug declarations must keep referring to the authoritative aggregate
+	// storage after assignments. Replacing it with an indirect ABI parameter
+	// can make a debugger apply an extra dereference at O0. Optimized debug
+	// information uses value tracking and must not disable this optimization
+	// merely because native builds retain DWARF by default.
+	if !p.prog.DebugInfoOptimized() && !entry.Parent().Subprogram().IsNil() {
+		return
+	}
 	seen := make(map[llvm.Value]bool)
 	for instr := entry.FirstInstruction(); !instr.IsNil(); instr = llvm.NextInstruction(instr) {
 		store := instr.IsAStoreInst()

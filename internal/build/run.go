@@ -24,10 +24,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/xgo-dev/llgo/internal/crosscompile"
 	"github.com/xgo-dev/llgo/internal/shellparse"
 )
 
@@ -327,8 +330,8 @@ func runNative(ctx *context, app, pkgDir, pkgName string, conf *Config, mode Mod
 				args = append(args, "--wasm", "multi-memory=true", app)
 				args = append(args, conf.RunArgs...)
 			case "iwasm":
-				args = append(args, "--stack-size=819200000", "--heap-size=800000000", app)
-				args = append(args, conf.RunArgs...)
+				return runEmuCmd(ctx.commands, map[string]string{"": app}, crosscompile.WASIThreadedEmulator,
+					conf.RunArgs, false, conf.PrintCommands, details)
 			default:
 				args = append(args, wasmerArgs...)
 				args = append(args, app)
@@ -411,6 +414,37 @@ func runEmuCmdTo(commands commandEnv, envMap map[string]string, emulatorTemplate
 	if len(cmdParts) == 0 {
 		return newRunnerFailure(details, "", runnerStatusInvalidCommand, -1,
 			errors.New("empty emulator command"))
+	}
+	if emulatorTemplate == crosscompile.WASIThreadedEmulator {
+		// A relative preopen can leave WAMR's guest cwd pointing at a removed
+		// temporary directory after testing.Chdir restores ".". Preopen the
+		// actual working directory so guest Getwd/Chdir stay stable.
+		cwd := commands.dir
+		if cwd == "" {
+			cwd = "."
+		}
+		cwd, err = filepath.Abs(cwd)
+		if err != nil {
+			return newRunnerFailure(details, "", runnerStatusInvalidCommand, -1,
+				fmt.Errorf("resolve WAMR working directory: %w", err))
+		}
+		for i, part := range cmdParts {
+			if part == "--dir=." {
+				cmdParts[i] = "--dir=" + cwd
+			}
+		}
+		// iwasm does not inherit host environment variables into the guest.
+		// Preserve the raw WASI run/test PWD and PATH contract without exposing
+		// every host variable. PWD follows the package directory/preopen.
+		cmdParts = slices.Insert(cmdParts, len(cmdParts)-1, "--env=PWD="+cwd)
+		if path := commands.lookup("PATH"); path != "" {
+			cmdParts = slices.Insert(cmdParts, len(cmdParts)-1, "--env=PATH="+path)
+		}
+		// Preserve the reviewed timer-stress profile used by the full audit.
+		if stress := commands.lookup("LLGO_STRESS_PROFILE"); stress != "" {
+			cmdParts = slices.Insert(cmdParts, len(cmdParts)-1,
+				"--env=LLGO_STRESS_PROFILE="+stress)
+		}
 	}
 
 	// Add run arguments to the end
