@@ -11,19 +11,9 @@ Run it with QEMU's ARM system emulator, a GDB that supports ARM, LLDB, and the
 LLVM 22 tools on `PATH`. `LLGO_GDB` and `LLGO_LLDB` can select their executables:
 
 ```sh
-bash cmd/llgo/debugtest/embedded/runtest.sh
+bash test/debug/embedded/runtest.sh
 ```
 
-For a physical target with OpenOCD configuration, `llgo debug` starts OpenOCD,
-loads the image, and connects the GDB listed by the target configuration:
-
-```sh
-llgo debug -target=rp2040 .
-```
-
-To use an externally managed OpenOCD session instead, keep the same host ELF
-and connect to its GDB port:
-
-```sh
-llgo debug -target=rp2040 -remote=:3333 .
-```
+See the [debugging guide](../../../doc/debugging.md) for user-facing session
+commands and the [physical-probe acceptance](../hardware/README.md) for opt-in
+hardware validation.
