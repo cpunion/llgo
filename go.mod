@@ -22,6 +22,7 @@ require (
 require (
 	github.com/creack/goselect v0.1.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	golang.org/x/arch v0.14.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 )
 
