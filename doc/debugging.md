@@ -119,7 +119,7 @@ WASI source sessions are explicitly rejected: current W32 modules require
 shared `env.memory`, `wasi.thread-spawn`, and `env.pthread_exit`, which the
 current Wasmtime debug backend does not implement. Use `llgo run -target=wasi`
 with WAMR for execution; retaining valid DWARF does not provide a runtime
-debugger transport. See [browser debugging](../../../dev/browser-debugging.md).
+debugger transport. See [browser debugging](../dev/browser-debugging.md).
 
 Debug information can also be packaged without starting a debugger:
 
