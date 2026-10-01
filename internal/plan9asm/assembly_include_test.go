@@ -3,6 +3,7 @@ package plan9asm
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -119,7 +120,7 @@ func TestAssemblyIncludesRejectActiveMissingCycleAndEscape(t *testing.T) {
 	for _, tc := range []struct{ include, want string }{
 		{"missing.h", "not found"}, {"cycle.h", "cycle"}, {"../outside.h", "escapes"}, {"escaped.h", "symlink"}, {outFile, "unsupported"},
 	} {
-		source := []byte("#include \"" + tc.include + "\"\nRET\n")
+		source := []byte("#include " + strconv.Quote(tc.include) + "\nRET\n")
 		_, err := preprocessAssemblyForPkg(pkg, filepath.Join(pkg.Dir, "source.s"), source, nil, "linux", "amd64", TranslateOptions{})
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("active include %q: %v; want %s", tc.include, err, tc.want)
@@ -130,5 +131,28 @@ func TestAssemblyIncludesRejectActiveMissingCycleAndEscape(t *testing.T) {
 	got, err := preprocessAssemblyForPkg(pkg, "source.s", []byte("#ifdef ABSENT\n#include unquoted\n#define LEAK 1\n#endif\n#ifdef LEAK\nBAD\n#endif\nRET\n"), nil, "linux", "amd64", TranslateOptions{SourceGOROOT: filepath.Join(pkg.Dir, "absent-toolchain")})
 	if err != nil || strings.TrimSpace(string(got)) != "RET" {
 		t.Fatalf("inactive headers/defines leaked: %q, %v", got, err)
+	}
+}
+
+func TestAssemblyAbsoluteIncludeUsesGoStringQuoting(t *testing.T) {
+	dir := t.TempDir()
+	header := filepath.Join(dir, "outside header.h")
+	if err := os.WriteFile(header, []byte("#define FLAGS 4\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte("#include " + strconv.Quote(header) + "\nTEXT ·Probe(SB),FLAGS,$0-0\nRET\n")
+	file := filepath.Join(dir, "source.s")
+	if err := os.WriteFile(file, source, 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("go", "tool", "asm", "-o", filepath.Join(dir, "original.o"), file)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("actual Go assembler rejected the quoted include: %v\n%s", err, output)
+	}
+	pkg := mustTestPackage(t, "example.org/absolute", "package absolute")
+	pkg.Dir = dir
+	_, err := preprocessAssemblyForPkg(pkg, file, source, nil, "linux", "amd64", TranslateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "unsupported bounded assembly include") {
+		t.Fatalf("valid quoted absolute include did not reach the source-root guard: %v", err)
 	}
 }

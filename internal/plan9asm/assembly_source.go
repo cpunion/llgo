@@ -210,7 +210,18 @@ func canonicalAssemblyDirectory(path string) (string, error) {
 	}
 	canonical, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", fmt.Errorf("resolve symlinks for assembly directory %q: %w", abs, err)
+		info, statErr := os.Stat(abs)
+		if statErr != nil {
+			return "", fmt.Errorf("resolve symlinks for assembly directory %q (stat: %v): %w", abs, statErr, err)
+		}
+		return "", fmt.Errorf("resolve symlinks for assembly directory %q (original name %q, mode %s): %w", abs, info.Name(), info.Mode(), err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("stat canonical assembly directory %q: %w", canonical, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("canonical assembly path %q is not a directory", canonical)
 	}
 	return canonical, nil
 }
