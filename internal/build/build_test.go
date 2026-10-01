@@ -3125,27 +3125,59 @@ func TestFormatPackageError(t *testing.T) {
 }
 
 func TestLinkExecutionKeepsSitePolicyAfterBackendDisposal(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		prog := llssa.NewProgram(nil)
-		prog.EnableFuncInfoSites(enabled)
-		ctx := &context{
-			prog:      prog,
-			buildConf: &Config{Mode: ModeBuild, BuildMode: BuildModeExe, Goos: "linux", Goarch: "amd64"},
-			initial:   []*packages.Package{{}},
-		}
-		plan := &mainLinkPlan{runtimeSites: shouldEmitRuntimeSites(ctx)}
-		ctx.releaseSingleExecutableBackend()
-		if ctx.prog != nil {
-			t.Fatal("released context still exposes the backend Program")
-		}
-		linkCtx := newLinkExecutionContext(ctx, plan)
-		args, cleanup, err := funcInfoSiteLayoutArgs(linkCtx, filepath.Join(t.TempDir(), "app"))
-		cleanup()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if (len(args) != 0) != enabled {
-			t.Fatalf("sites enabled=%v: linker args = %v", enabled, args)
+	t.Setenv("LLGO_PCLNPOST", "1")
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, enabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/sites=%v", goos, enabled), func(t *testing.T) {
+				prog := llssa.NewProgram(nil)
+				defer prog.Dispose()
+				prog.EnableFuncInfoSites(enabled)
+				ctx := &context{
+					prog: prog,
+					buildConf: &Config{Mode: ModeBuild, BuildMode: BuildModeExe,
+						Goos: goos, Goarch: "amd64", PCLNMode: PCLNEmbedded},
+					initial: []*packages.Package{{}},
+				}
+				plan := &mainLinkPlan{runtimeSites: shouldEmitRuntimeSites(ctx)}
+				ctx.releaseSingleExecutableBackend()
+				if ctx.prog != nil {
+					t.Fatal("released context still exposes the backend Program")
+				}
+				linkCtx := newLinkExecutionContext(ctx, plan)
+				if got := shouldEmitRuntimeSites(linkCtx); got != enabled {
+					t.Fatalf("runtime sites = %v, want %v", got, enabled)
+				}
+				out := filepath.Join(t.TempDir(), "missing")
+				args, cleanup, err := funcInfoSiteLayoutArgs(linkCtx, out)
+				cleanup()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (len(args) != 0) != (enabled && goos == "linux") {
+					t.Fatalf("sites enabled=%v: linker args = %v", enabled, args)
+				}
+				// A missing output must reach the rewriter when sites are enabled.
+				// Checking the diagnostic also catches silently skipping the rewrite
+				// because the released context no longer has a Program.
+				stderr, err := os.CreateTemp(t.TempDir(), "stderr")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer stderr.Close()
+				oldStderr := os.Stderr
+				func() {
+					os.Stderr = stderr
+					defer func() { os.Stderr = oldStderr }()
+					rewritePrebuiltFuncTab(linkCtx, out, true)
+				}()
+				got, err := os.ReadFile(stderr.Name())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(got), "prebuilt functab rewrite skipped:") != enabled {
+					t.Fatalf("sites enabled=%v: rewrite diagnostic = %q", enabled, got)
+				}
+			})
 		}
 	}
 }

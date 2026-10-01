@@ -562,6 +562,7 @@ func TestSnapshotBackendPackageAndConsumers(t *testing.T) {
 
 	lpkg := isolated.NewPackage("p", "example.com/p")
 	lpkg.NeedAbiInit = 3
+	lpkg.SetExport("example.com/p.Export", "Export")
 	lpkg.RecordReflectMethodByIndex("example.com/p.useIndex", 7)
 	lpkg.RecordReflectMethodByName("example.com/p.useName", "Method")
 	pkg := &aPackage{
@@ -585,7 +586,9 @@ func TestSnapshotBackendPackageAndConsumers(t *testing.T) {
 	snapshot.abiTypes = []llssa.AbiTypeInfo{{Name: "example.com/p.Type", Raw: types.Typ[types.Int]}}
 	snapshot.funcInfo = []funcInfoRecord{{symbol: "example.com/p.fn", name: "Fn"}}
 	snapshot.pcLineInfo = []pcLineRecord{{id: 1, symbol: "example.com/p.fn", line: 12}}
-	snapshot.hasLocalExports = true
+	if !snapshot.hasLocalExports {
+		t.Fatal("snapshot lost the package C export")
+	}
 	if infos := ctx.backendAbiTypes([]Package{pkg}); len(infos) != 1 || infos[0].Name != "example.com/p.Type" {
 		t.Fatalf("snapshot ABI types = %#v", infos)
 	}
@@ -604,6 +607,9 @@ func TestSnapshotBackendPackageAndConsumers(t *testing.T) {
 
 	ctx.disposeBackendPackage(pkg)
 	disposed = true
+	if !mainPackageHasExports([]*aPackage{pkg}) {
+		t.Fatal("disposed package lost its C export snapshot")
+	}
 	if pkg.LPkg != nil {
 		t.Fatal("disposed package retained LPkg")
 	}
