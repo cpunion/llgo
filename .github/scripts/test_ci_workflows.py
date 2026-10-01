@@ -15,7 +15,7 @@ import yaml
 WORKFLOWS = Path(__file__).resolve().parents[1] / "workflows"
 PREPARE = "./.github/workflows/ci-prepare.yml"
 CODE_WORKFLOWS = {
-    "llgo.yml": 19, "go.yml": 6, "targets.yml": 2, "build-cache.yml": 4,
+    "llgo.yml": 20, "go.yml": 6, "targets.yml": 2, "build-cache.yml": 4,
     "benchmark.yml": 9, "release-build.yml": 15, "doc.yml": 6, "fmt.yml": 1,
 }
 
@@ -53,7 +53,7 @@ class WorkflowContractTests(unittest.TestCase):
         install = next(step for step in steps
                        if step.get("name") == "Install Windows GDB")
         test = next(step for step in steps
-                    if step.get("name") == "GDB runtime adapter integration tests (Windows)")
+                    if step.get("name") == "GDB native values and registry (Windows)")
         self.assertEqual(install["if"], "runner.os == 'Windows'")
         self.assertEqual(test["if"], "runner.os == 'Windows'")
         self.assertNotIn("continue-on-error", test)
@@ -63,6 +63,25 @@ class WorkflowContractTests(unittest.TestCase):
         shell_tests = [index for index, step in enumerate(steps)
                        if step.get("name", "").startswith(("LLDB integration", "Test from the"))]
         self.assertGreater(steps.index(install), max(shell_tests))
+        complete = next(step for step in steps
+                        if step.get("name") == "GDB complete worker unwind (Windows amd64 and 386)")
+        self.assertEqual(complete["if"], "runner.os == 'Windows' && matrix.windows_arch != 'arm64'")
+        self.assertIn("^TestGDBCompleteWorkerUnwind$", complete["run"])
+        self.assertNotIn("continue-on-error", complete)
+        linux = next(step for step in steps
+                     if step.get("name") == "GDB values, registry and complete worker unwind (Linux)")
+        self.assertIn("^TestGDB(Integration|CompleteWorkerUnwind)$", linux["run"])
+
+    def test_intel_macos_runs_both_native_debuggers(self):
+        job = load("llgo.yml")["jobs"]["native-debuggers-intel"]
+        self.assertEqual(job["runs-on"], "macos-15-intel")
+        commands = "\n".join(step.get("run", "") for step in job["steps"])
+        self.assertIn("test/debug/runtime/runtest.sh -v", commands)
+        self.assertIn("^TestGDBIntegration$", commands)
+        self.assertNotIn("^TestGDBCompleteWorkerUnwind$", commands)
+        self.assertIn("exec sudo -n", commands)
+        self.assertNotIn("continue-on-error", job)
+        self.assertTrue(all("continue-on-error" not in step for step in job["steps"]))
 
     def test_traceback_coverage_uses_bash_on_every_host(self):
         steps = load("go.yml")["jobs"]["test"]["steps"]
