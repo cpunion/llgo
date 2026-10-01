@@ -1,11 +1,45 @@
 package plan9asm
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestAssemblyIncludesDirectoryFailureRetainsSourceAndPath(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "source.s")
+	source := []byte("#include \"textflag.h\"\nTEXT ·probe(SB),NOSPLIT,$0-0\nRET\n")
+	if err := os.WriteFile(file, source, 0600); err != nil {
+		t.Fatal(err)
+	}
+	pkg := mustTestPackage(t, "example.org/headers", "package headers")
+	pkg.Dir = filepath.Join(dir, "missing-package-directory")
+	_, err := ReadAssemblyFileWithIncludes(pkg, file, nil, "linux", "amd64", TranslateOptions{})
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid actual package directory must remain a filesystem failure: %v", err)
+	}
+	for _, detail := range []string{pkg.Dir, file} {
+		// Quoted Windows paths escape backslashes, so compare the complete
+		// diagnostic with the same quoting used for the failed directory.
+		quoted := strconv.Quote(detail)
+		if !strings.Contains(err.Error(), quoted) {
+			t.Errorf("directory failure omitted %q: %v", detail, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "resolve symlinks") {
+		t.Errorf("directory failure omitted its canonicalization stage: %v", err)
+	}
+	// An invalid package role must not fall back to the readable source's
+	// directory. The exact package-directory and source bindings are distinct.
+	pkg.Dir = dir
+	if _, err := ReadAssemblyFileWithIncludes(pkg, file, nil, "linux", "amd64", TranslateOptions{}); err != nil {
+		t.Fatalf("valid original source/package directory rejected: %v", err)
+	}
+}
 
 func TestAssemblyIncludesUseSelectedInputs(t *testing.T) {
 	dir := t.TempDir()

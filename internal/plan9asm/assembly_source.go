@@ -182,7 +182,7 @@ func assemblyIncludeDirectories(pkg *packages.Package, file, goRoot string) ([]a
 	}
 	canonicalPkgDir, err := canonicalAssemblyDirectory(pkgDir)
 	if err != nil {
-		return nil, fmt.Errorf("assembly package directory: %w", err)
+		return nil, fmt.Errorf("assembly package directory %q (source %q): %w", pkgDir, file, err)
 	}
 	sourceRoot := canonicalPkgDir
 	if pkg.Module != nil && pkg.Module.Dir != "" {
@@ -206,9 +206,13 @@ func assemblyIncludeDirectories(pkg *packages.Package, file, goRoot string) ([]a
 func canonicalAssemblyDirectory(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("absolute assembly directory %q: %w", path, err)
 	}
-	return filepath.EvalSymlinks(abs)
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve symlinks for assembly directory %q: %w", abs, err)
+	}
+	return canonical, nil
 }
 
 func assemblyWithinRoot(root, path string) bool {
