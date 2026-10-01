@@ -414,7 +414,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           echo "Test lldb with llgo plugin on ${{matrix.os}} with LLVM ${{matrix.llvm}}"
-          bash cmd/llgo/lldbtest/runtest.sh -v
+          bash test/debug/runtime/runtest.sh -v
 
       - name: GDB runtime adapter integration tests
         if: ${{ matrix.os == 'ubuntu-latest' }}
@@ -433,7 +433,7 @@ jobs:
           $env:PYTHONIOENCODING = "utf-8"
           $env:PATH = "$env:LLGO_WINDOWS_LLDB_PYTHON_HOME;$env:PATH"
           Write-Host "Test lldb with llgo plugin on ${{matrix.os}} with LLVM ${{matrix.llvm}}"
-          bash cmd/llgo/lldbtest/runtest.sh -v
+          bash test/debug/runtime/runtest.sh -v
           if ($LASTEXITCODE -ne 0) {
             throw "LLDB integration tests failed with exit code $LASTEXITCODE"
           }
@@ -445,7 +445,7 @@ jobs:
           # Git Bash prepends its own MinGW runtime DLLs to PATH. Use the
           # CLANG64 shell so the debuggee loads its ABI-matching dependencies.
           echo "Test lldb with llgo plugin on ${{matrix.os}} with LLVM ${{matrix.llvm}}"
-          bash cmd/llgo/lldbtest/runtest.sh -v
+          bash test/debug/runtime/runtest.sh -v
 
       - name: LLDB integration tests (MinGW cross-architecture)
         if: ${{ matrix.windows_abi == 'mingw' && matrix.windows_arch != 'amd64' }}
@@ -457,7 +457,7 @@ jobs:
           $env:PYTHONIOENCODING = "utf-8"
           $env:PATH = "$env:LLGO_WINDOWS_LLDB_PYTHON_HOME;$env:PATH"
           Write-Host "Test lldb with llgo plugin on ${{matrix.os}} with LLVM ${{matrix.llvm}}"
-          bash cmd/llgo/lldbtest/runtest.sh -v
+          bash test/debug/runtime/runtest.sh -v
           if ($LASTEXITCODE -ne 0) {
             throw "LLDB integration tests failed with exit code $LASTEXITCODE"
           }
