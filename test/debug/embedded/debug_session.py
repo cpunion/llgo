@@ -13,7 +13,12 @@ BREAK_LINE = next(i for i, line in enumerate(SOURCE.read_text().splitlines(), 1)
                   if "LLGO_EMBEDDED_DEBUG_BREAK" in line)
 
 
-def tool(description, *candidates):
+def tool(description, override, *candidates):
+    # An explicit selection must never silently exercise another installation.
+    if override:
+        if found := shutil.which(override):
+            return str(Path(found).resolve())
+        raise RuntimeError(f"selected {description} executable not found: {override}")
     for candidate in candidates:
         if candidate and (found := shutil.which(candidate)):
             return str(Path(found).resolve())
