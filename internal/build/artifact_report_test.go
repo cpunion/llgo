@@ -24,6 +24,9 @@ func TestCollectArtifacts(t *testing.T) {
 	}
 	main := write("app.wasm", "main")
 	glue := write("app.mjs", "javascript")
+	htmlGlue := write("app.js", "html-glue")
+	html := write("app.html", "html")
+	host := write(wasmFSScriptName, "filesystem-host")
 	elf := write("app.elf", "elf-data")
 	dwarf := write("app.debug.wasm", "debug")
 	pcln := write("app.wasm.pclntab", "pcln")
@@ -63,6 +66,36 @@ func TestCollectArtifacts(t *testing.T) {
 			},
 		},
 		{
+			name: "Emscripten explicit Wasm includes sibling glue",
+			conf: Config{Goos: "js", Goarch: "wasm", DebugArtifactMode: DebugArtifactEmbedded},
+			out:  OutFmtDetails{Out: main},
+			want: []Artifact{
+				{Role: ArtifactRoleDebugDeployment, Format: "wasm", Path: main, Size: 4},
+				{Role: ArtifactRoleDeployment, Format: "javascript", Path: glue, Size: 10},
+			},
+		},
+		{
+			name: "Emscripten HTML and sibling module",
+			conf: Config{Target: "wasm", BuildMode: BuildModeExe, Goos: "js", Goarch: "wasm", DebugArtifactMode: DebugArtifactEmbedded},
+			out:  OutFmtDetails{Out: html},
+			want: []Artifact{
+				{Role: ArtifactRoleDeployment, Format: "html", Path: html, Size: 4},
+				{Role: ArtifactRoleDebugDeployment, Format: "wasm", Path: main, Size: 4},
+				{Role: ArtifactRoleDeployment, Format: "javascript", Path: htmlGlue, Size: 9},
+				{Role: ArtifactRoleDeployment, Format: "javascript", Path: host, Size: 15},
+			},
+		},
+		{
+			name: "named Emscripten explicit Wasm owns browser host",
+			conf: Config{Target: "emscripten-memory64", BuildMode: BuildModeExe, Goos: "js", Goarch: "wasm", DebugArtifactMode: DebugArtifactEmbedded},
+			out:  OutFmtDetails{Out: main},
+			want: []Artifact{
+				{Role: ArtifactRoleDebugDeployment, Format: "wasm", Path: main, Size: 4},
+				{Role: ArtifactRoleDeployment, Format: "javascript", Path: glue, Size: 10},
+				{Role: ArtifactRoleDeployment, Format: "javascript", Path: host, Size: 15},
+			},
+		},
+		{
 			name: "host and deployment formats",
 			conf: Config{Target: "cortex-m-qemu", DebugArtifactMode: DebugArtifactHost},
 			out:  OutFmtDetails{Out: elf, Bin: bin, Hex: hex},
@@ -87,6 +120,42 @@ func TestCollectArtifacts(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("CollectArtifacts() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCollectEmscriptenArtifactsRejectsIncompleteOutputs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		output  string
+		target  string
+		files   []string
+		dirs    []string
+		wantErr string
+	}{
+		{name: "missing primary glue", output: "app.mjs", files: []string{"app.wasm"}, wantErr: "stat deployment artifact"},
+		{name: "missing HTML module", output: "app.html", files: []string{"app.html"}, wantErr: "stat debug+deployment artifact"},
+		{name: "missing HTML glue", output: "app.html", files: []string{"app.html", "app.wasm"}, wantErr: "app.js"},
+		{name: "missing named-target browser host", output: "app.mjs", target: "emscripten", files: []string{"app.mjs", "app.wasm"}, wantErr: wasmFSScriptName},
+		{name: "optional glue is a directory", output: "app.wasm", files: []string{"app.wasm"}, dirs: []string{"app.mjs"}, wantErr: "not a regular file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("fixture"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range tc.dirs {
+				if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			conf := &Config{Target: tc.target, BuildMode: BuildModeExe, Goos: "js", Goarch: "wasm", DebugArtifactMode: DebugArtifactEmbedded}
+			got, err := CollectArtifacts(conf, &OutFmtDetails{Out: filepath.Join(dir, tc.output)})
+			if got != nil || err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("incomplete output produced a report: %v, %v", got, err)
 			}
 		})
 	}
