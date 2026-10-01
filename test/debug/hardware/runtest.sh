@@ -16,7 +16,7 @@ fi
 gdb=$(command -v "$gdb")
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
-repo_root=$(cd "$script_dir/../../../.." && pwd)
+repo_root=$(cd "$script_dir/../../.." && pwd)
 fixture_dir="$script_dir/../embedded"
 source_file="$fixture_dir/C/c.go"
 break_line=$(awk '/LLGO_EMBEDDED_DEBUG_BREAK/ { print NR; exit }' "$source_file")

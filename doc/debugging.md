@@ -29,6 +29,17 @@ running server, `-remote=host:port` skips server startup. A target's
 `{debug-port}` for an automatically allocated loopback port. Targets with
 OpenOCD interface/transport/target fields need no additional command.
 
+For a physical target with OpenOCD configuration, start the configured server
+and load the program, or connect to an externally managed server:
+
+```sh
+llgo debug -target=rp2040 .
+llgo debug -target=rp2040 -remote=:3333 .
+```
+
+For an external server, its device must already contain the generated host
+ELF's image unless the debugger is explicitly instructed to load it.
+
 `llgo lldb` remains the explicit compatibility command for opening an existing
 artifact without building it.
 
@@ -48,9 +59,9 @@ unchanged, and records the same build ID and debugger ABI in both modules.
 remain deployment artifacts. Artifact reports list their separate byte sizes;
 runtime `.pclntab` sidecars retain an independent role.
 
-The automated embedded acceptance checks source breakpoints, parameters,
+The [automated embedded acceptance](../test/debug/embedded/README.md) checks source breakpoints, parameters,
 locals, globals, backtraces, server cleanup, and flash-byte invariance with
-QEMU. [Physical probe acceptance](hardware/README.md) is explicitly opt-in and
+QEMU. [Physical probe acceptance](../test/debug/hardware/README.md) is explicitly opt-in and
 is not claimed by a successful QEMU test. Wasm artifact acceptance uses
 `dev/test_wasm_debug_info.py --artifact embedded --artifact external`; it
 validates packaging and execution rather than debugger session capabilities.

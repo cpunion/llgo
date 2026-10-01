@@ -10,7 +10,7 @@ The normal path uses the target's checked-in OpenOCD and GDB configuration:
 LLGO_HARDWARE_CONFIRM=flash \
 LLGO_HARDWARE_TARGET=rp2040 \
 LLGO_HARDWARE_GDB=arm-none-eabi-gdb \
-bash cmd/llgo/debugtest/hardware/runtest.sh
+bash test/debug/hardware/runtest.sh
 ```
 
 The test builds a host-side ELF with DWARF, starts the configured probe server,

@@ -62,14 +62,14 @@ jobs:
 
       - name: Test embedded debugger transports
         if: matrix.test_dir == 'empty'
-        run: bash cmd/llgo/debugtest/embedded/runtest.sh
+        run: bash test/debug/embedded/runtest.sh
 
       - name: Test physical-probe opt-in guard
         if: matrix.test_dir == 'empty'
         shell: bash
         run: |
           set +e
-          output="$(bash cmd/llgo/debugtest/hardware/runtest.sh 2>&1)"
+          output="$(bash test/debug/hardware/runtest.sh 2>&1)"
           result=$?
           set -e
           test "${result}" -eq 2
