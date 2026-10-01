@@ -1,4 +1,4 @@
-name: Diagnose Windows ARM64 debugger
+name: Diagnose Windows ARM64 C unwind
 
 on:
   push:
@@ -26,23 +26,18 @@ jobs:
           windows-abi: mingw
           windows-arch: arm64
           install-lldb-python: "true"
-      - uses: ./.github/actions/setup-go
-        with:
-          architecture: arm64
-      - uses: ./.github/actions/setup-llgo-cache
-      - name: Build LLGo
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/llgo-bin"
-          go build -o "$RUNNER_TEMP/llgo-bin/llgo.exe" ./cmd/llgo
-          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
-          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - uses: ./.github/actions/activate-windows-target
         with:
           windows-abi: mingw
           windows-arch: arm64
-      - name: LLDB native runtime diagnostics
+      - name: Build pure C thread control
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r -a cc_command <<< "$CC"
+          "${cc_command[@]}" -gdwarf-4 -O0 -fno-omit-frame-pointer -Wall -Wextra -Werror \
+            .github/diagnostics/windows-unwind/main.c -o thread-unwind.exe -lkernel32
+      - name: LLDB native C diagnostics
         shell: pwsh
         run: |
           $env:PYTHONHOME = $env:LLGO_WINDOWS_LLDB_PYTHON_HOME
@@ -50,13 +45,15 @@ jobs:
           $env:PYTHONUTF8 = "1"
           $env:PYTHONIOENCODING = "utf-8"
           $env:PATH = "$env:LLGO_WINDOWS_LLDB_PYTHON_HOME;$env:PATH"
-          bash cmd/llgo/lldbtest/runtest.sh -v
+          & $env:LLGO_LLDB --batch -o "command script import .github/diagnostics/windows-unwind/control.py" -o "script control.run('thread-unwind.exe')"
           if ($LASTEXITCODE -ne 0) {
-            throw "LLDB integration tests failed with exit code $LASTEXITCODE"
+            throw "LLDB C diagnostics failed with exit code $LASTEXITCODE"
           }
       - name: Save debug executables
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-arm64-debug-executables
-          path: cmd/llgo/lldbtest/debug*.out
+          name: windows-arm64-c-unwind
+          path: |
+            thread-unwind.exe
+            windows-unwind.json
