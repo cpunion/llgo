@@ -61,10 +61,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          exec > >(tee "$RUNNER_TEMP/assembly-qemu-install.log") 2>&1
           test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = linux/amd64
+          go mod download github.com/xgo-dev/plan9asm
+          plan9asm_source="$(go list -m -f '{{if .Replace}}{{.Replace.Dir}}{{else}}{{.Dir}}{{end}}' github.com/xgo-dev/plan9asm)"
+          if [[ -z "$plan9asm_source" || ! -d "$plan9asm_source" ||
+                ! -f "$plan9asm_source/scripts/install-ci-qemu.sh" ]]; then
+            echo "Resolved plan9asm dependency has no execution-tool installer: $plan9asm_source" >&2
+            exit 1
+          fi
+
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-          plan9asm_source="$(go list -m -f '{{.Dir}}' github.com/xgo-dev/plan9asm)"
           bash "$plan9asm_source/scripts/install-ci-qemu.sh" "$RUNNER_TEMP/assembly-qemu"
 
       - name: Execute required ARM64 memmove counterpart

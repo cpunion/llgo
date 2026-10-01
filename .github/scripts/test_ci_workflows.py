@@ -172,6 +172,70 @@ if os.environ['TEST_ASSEMBLY_CASE'] == 'one-failure' and sys.argv[-1].endswith('
                     for args in calls:
                         self.assertEqual(args[:-1], ["test", "-v", "-count=1", "-timeout=15m"])
 
+    def test_assembly_execution_tools_resolve_downloaded_replacement(self):
+        steps = load("llgo.yml")["jobs"]["assembly-regressions"]["steps"]
+        step = next(step for step in steps
+                    if step.get("name") == "Install pinned ARM64 execution tools")
+        cases = ("original", "replacement", "download-failure", "empty-directory",
+                 "missing-directory", "missing-installer")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "resolved dependency with spaces"
+                source.mkdir()
+                script = source / "scripts" / "install-ci-qemu.sh"
+                script.parent.mkdir()
+                marker = root / "installed"
+                if case != "missing-installer":
+                    script.write_text('set -euo pipefail\n'
+                                      'printf "%s" "$1" > "$TEST_ASSEMBLY_MARKER"\n')
+                calls = root / "go-calls.jsonl"
+                go = root / "go"
+                go.write_text(f"#!{sys.executable}\n" + """
+import json, os, sys
+args = sys.argv[1:]
+case = os.environ['TEST_ASSEMBLY_CASE']
+with open(os.environ['TEST_ASSEMBLY_CALLS'], 'a') as stream:
+    stream.write(json.dumps(args) + '\\n')
+if args == ['env', 'GOHOSTOS']:
+    print('linux')
+elif args == ['env', 'GOHOSTARCH']:
+    print('amd64')
+elif args == ['mod', 'download', 'github.com/xgo-dev/plan9asm']:
+    if case == 'download-failure':
+        sys.exit(2)
+elif args[:3] == ['list', '-m', '-f'] and args[-1] == 'github.com/xgo-dev/plan9asm':
+    with open(os.environ['TEST_ASSEMBLY_CALLS']) as stream:
+        downloaded = any(json.loads(line) == ['mod', 'download', 'github.com/xgo-dev/plan9asm']
+                         for line in stream)
+    if not downloaded or case == 'empty-directory':
+        print('')
+    elif case == 'missing-directory':
+        print(os.environ['TEST_ASSEMBLY_SOURCE'] + '-missing')
+    elif case != 'replacement' or '.Replace.Dir' in args[3]:
+        print(os.environ['TEST_ASSEMBLY_SOURCE'])
+else:
+    sys.exit(3)
+""")
+                go.chmod(0o755)
+                sudo = root / "sudo"
+                sudo.write_text('#!/bin/sh\nexit 0\n')
+                sudo.chmod(0o755)
+                result = subprocess.run(["bash", "-c", step["run"]], cwd=root,
+                                        capture_output=True, text=True, env={**os.environ,
+                                            "PATH": directory + os.pathsep + os.environ["PATH"],
+                                            "RUNNER_TEMP": directory,
+                                            "TEST_ASSEMBLY_CASE": case,
+                                            "TEST_ASSEMBLY_SOURCE": str(source),
+                                            "TEST_ASSEMBLY_CALLS": str(calls),
+                                            "TEST_ASSEMBLY_MARKER": str(marker)})
+                self.assertEqual(result.returncode == 0,
+                                 case in {"original", "replacement"}, result.stderr)
+                if case in {"original", "replacement"}:
+                    self.assertEqual(marker.read_text(), str(root / "assembly-qemu"))
+                else:
+                    self.assertFalse(marker.exists())
+
     def test_assembly_regressions_preserve_actual_compiler_and_dependency_provenance(self):
         steps = load("llgo.yml")["jobs"]["assembly-regressions"]["steps"]
         build = next(step for step in steps
