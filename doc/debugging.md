@@ -26,8 +26,16 @@ Use `-backend=gdb` or `-backend=lldb` to override a native or GDB Remote
 session, and `-gdb` or `-lldb` to select a debugger executable. For an already
 running server, `-remote=host:port` skips server startup. A target's
 `debug-server` command can use `{}` or `{elf}` for the host debug artifact and
-`{debug-port}` for an automatically allocated loopback port. Targets with
-OpenOCD interface/transport/target fields need no additional command.
+`{debug-stdio}` to select the server's stdin/stdout RSP transport. LLGo retains
+an OS-assigned loopback listener and relays the debugger connection to that
+transport. The default QEMU and OpenOCD paths use this mode, without a TCP
+readiness probe or a released port reservation. OpenOCD's auxiliary TCP ports
+are disabled and its log is kept separate from the RSP stream.
+
+Legacy TCP templates can use `{debug-port}`. Their server-side allocation is
+best effort; use the stdio transport to avoid the reserve/rebind race. Their
+first connection is retained as the RSP transport, rather than discarded as
+an empty probe. Targets with OpenOCD configuration need no additional command.
 
 For a physical target with OpenOCD configuration, start the configured server
 and load the program, or connect to an externally managed server:

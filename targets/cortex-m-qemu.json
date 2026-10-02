@@ -7,5 +7,5 @@
 		"targets/cortex-m-qemu.s"
 	],
 	"emulator": "qemu-system-arm -machine lm3s6965evb -semihosting -nographic -kernel {}",
-	"debug-server": "qemu-system-arm -machine lm3s6965evb -semihosting -nographic -S -gdb tcp:127.0.0.1:{debug-port} -kernel {}"
+	"debug-server": "qemu-system-arm -machine lm3s6965evb -semihosting -nographic -serial null -monitor none -S -gdb {debug-stdio} -kernel {}"
 }

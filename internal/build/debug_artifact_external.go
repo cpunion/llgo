@@ -59,7 +59,7 @@ func finalizeDebugArtifact(conf *Config, out *OutFmtDetails, verbose bool) error
 			return fmt.Errorf("add WebAssembly debugger ABI record: %w", err)
 		}
 	}
-	raw, _, err = wasmdebug.EnsureBuildID(raw)
+	raw, _, err = wasmdebug.RefreshBuildID(raw)
 	if err != nil {
 		return fmt.Errorf("add WebAssembly build ID: %w", err)
 	}
@@ -104,7 +104,7 @@ func finalizeEmbeddedWasmDebuggerRecord(conf *Config, out *OutFmtDetails) error 
 	if err != nil {
 		return fmt.Errorf("add WebAssembly debugger ABI record: %w", err)
 	}
-	raw, _, err = wasmdebug.EnsureBuildID(raw)
+	raw, _, err = wasmdebug.RefreshBuildID(raw)
 	if err != nil {
 		return fmt.Errorf("add WebAssembly build ID: %w", err)
 	}

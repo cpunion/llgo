@@ -36,6 +36,9 @@ def main():
     parser.add_argument("--backend", choices=("gdb", "lldb", "all"), default="all")
     args = parser.parse_args()
     qemu = tool("qemu-system-arm", os.getenv("QEMU_SYSTEM_ARM"), "qemu-system-arm")
+    # Exercise the target's production server template, including on Windows
+    # where the isolated QEMU installation is selected by QEMU_SYSTEM_ARM.
+    os.environ["PATH"] += os.pathsep + str(Path(qemu).parent)
     objcopy = tool("llvm-objcopy", os.getenv("LLVM_OBJCOPY"), "llvm-objcopy", "llvm-objcopy-22")
     dwarfutil = tool("llvm-dwarfutil", os.getenv("LLVM_DWARFUTIL"), "llvm-dwarfutil", "llvm-dwarfutil-22")
     dwarfdump = tool("llvm-dwarfdump", os.getenv("LLVM_DWARFDUMP"), "llvm-dwarfdump", "llvm-dwarfdump-22")
@@ -47,9 +50,7 @@ def main():
             debugger = (tool("GDB", os.getenv("LLGO_GDB"), "gdb-multiarch", "arm-none-eabi-gdb", "gdb")
                         if backend == "gdb" else tool("LLDB", os.getenv("LLGO_LLDB"), "lldb-22", "lldb"))
             # Existing preloaded-image transport, with no reset/write permission.
-            server = shlex.join([Path(qemu).as_posix(), "-machine", "lm3s6965evb", "-semihosting",
-                                 "-nographic", "-S", "-gdb", "tcp:127.0.0.1:{debug-port}", "-kernel"]) + " {elf}"
-            session(backend, debugger, artifact, "cortex-m-qemu", ["-server", server])
+            session(backend, debugger, artifact, "cortex-m-qemu")
             # Start with NO kernel image. Reaching the fixture can only succeed
             # when the product's explicit -load path really writes the image.
             port = free_port()

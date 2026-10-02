@@ -70,9 +70,8 @@ def main():
         while True:
             with listener.accept()[0] as client:
                 first = client.recv(65536)
-                # llgo probes readiness without sending an RSP packet.
                 if not first:
-                    continue
+                    raise RuntimeError("debugger disconnected without sending RSP")
                 with socket.create_connection(("127.0.0.1", args.qemu), timeout=10) as upstream:
                     upstream.settimeout(None)
                     forward(client, upstream, first, log)

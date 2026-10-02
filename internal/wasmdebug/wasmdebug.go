@@ -207,6 +207,32 @@ func EnsureBuildID(module []byte) ([]byte, []byte, error) {
 	return result, bytes.Clone(digest[:]), nil
 }
 
+// RefreshBuildID computes a content identity after debugger metadata is added.
+// It validates an existing ID, then hashes every section except build_id so
+// repeated packaging is deterministic and ABI edits invalidate old sidecars.
+// Call it before externalization to give both artifacts the same identity.
+func RefreshBuildID(module []byte) ([]byte, []byte, error) {
+	if _, _, err := BuildID(module); err != nil {
+		return nil, nil, err
+	}
+	sections, err := parse(module)
+	if err != nil {
+		return nil, nil, err
+	}
+	content := append([]byte(nil), wasmHeader...)
+	for _, section := range sections {
+		if section.id != 0 || section.name != buildIDSection {
+			content = append(content, section.raw...)
+		}
+	}
+	digest := sha256.Sum256(content)
+	result, err := SetBuildID(content, digest[:])
+	if err != nil {
+		return nil, nil, err
+	}
+	return result, bytes.Clone(digest[:]), nil
+}
+
 // HasDWARF reports whether module contains at least one DWARF custom section.
 func HasDWARF(module []byte) (bool, error) {
 	sections, err := parse(module)

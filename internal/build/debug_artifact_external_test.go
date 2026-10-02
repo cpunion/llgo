@@ -53,7 +53,7 @@ func TestFinalizeExternalWasmDWARF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDebugModule, _, err = wasmdebug.EnsureBuildID(wantDebugModule)
+	wantDebugModule, _, err = wasmdebug.RefreshBuildID(wantDebugModule)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +153,50 @@ func wasmArtifactFixture() []byte {
 	// A valid module envelope containing one DWARF section. Packaging must
 	// preserve its bytes without needing to interpret the DWARF payload.
 	return []byte{'\x00', 'a', 's', 'm', 1, 0, 0, 0, 0, 13, 11, '.', 'd', 'e', 'b', 'u', 'g', '_', 'i', 'n', 'f', 'o', 42}
+}
+
+func TestWasmArtifactIdentityIncludesDebuggerABI(t *testing.T) {
+	for _, mode := range []DebugArtifactMode{DebugArtifactEmbedded, DebugArtifactExternal} {
+		t.Run(mode.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			module, sidecar := filepath.Join(dir, "app.wasm"), filepath.Join(dir, "app.debug.wasm")
+			original, err := wasmdebug.SetBuildID(wasmArtifactFixture(), []byte("linker identity"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var previous []byte
+			for _, pointerSize := range []uint8{4, 8} {
+				if err := os.WriteFile(module, original, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				conf := &Config{Goarch: "wasm", DebugArtifactMode: mode, debugPointerSize: pointerSize}
+				if err := finalizeDebugArtifact(conf, &OutFmtDetails{Out: module, DWARF: sidecar}, false); err != nil {
+					t.Fatal(err)
+				}
+				contents, err := os.ReadFile(module)
+				if err != nil {
+					t.Fatal(err)
+				}
+				id, ok, err := wasmdebug.BuildID(contents)
+				if err != nil || !ok || len(id) != 32 || bytes.Equal(id, previous) {
+					t.Fatalf("ABI edit did not update content identity: %x, %v", id, err)
+				}
+				if mode == DebugArtifactExternal {
+					debug, err := os.ReadFile(sidecar)
+					if err != nil {
+						t.Fatal(err)
+					}
+					pairID, ok, err := wasmdebug.BuildID(debug)
+					if err != nil || !ok || !bytes.Equal(pairID, id) {
+						t.Fatalf("sidecar identity mismatch: %x, %v", pairID, err)
+					}
+				}
+				previous = id
+			}
+			// Both the existing module and sidecar were replaced on the second
+			// pass. This runs on Windows too: os.Rename uses REPLACE_EXISTING.
+		})
+	}
 }
 
 func TestFinalizeDebugArtifactRejectsInvalidInputWithoutPublishing(t *testing.T) {

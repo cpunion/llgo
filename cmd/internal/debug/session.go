@@ -22,11 +22,9 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/xgo-dev/llgo/cmd/internal/gdb"
 	"github.com/xgo-dev/llgo/cmd/internal/lldb"
@@ -76,10 +74,16 @@ func (o options) validate() error {
 func classifyTarget(conf *build.Config, target *targets.Config) targetKind {
 	goos, goarch, llvmTarget := conf.Goos, conf.Goarch, ""
 	if target != nil {
-		goos, goarch, llvmTarget = target.GOOS, target.GOARCH, target.LLVMTarget
+		if target.GOOS != "" {
+			goos = target.GOOS
+		}
+		if target.GOARCH != "" {
+			goarch = target.GOARCH
+		}
+		llvmTarget = target.LLVMTarget
 	}
 	if goarch == "wasm" || strings.HasPrefix(llvmTarget, "wasm") {
-		if goos == "js" || strings.HasPrefix(conf.Target, "wasm") {
+		if goos == "js" || (target != nil && (target.WasmProfile == "j32" || target.WasmProfile == "j64")) {
 			return targetBrowser
 		}
 		return targetWASI
@@ -133,10 +137,6 @@ func runSession(s session, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	args, err := debuggerArguments(s.backend, s.artifact, s.debuggerArgs, plan)
-	if err != nil {
-		return err
-	}
 	var server *debugServer
 	if plan != nil {
 		server, err = startServer(*plan)
@@ -144,6 +144,13 @@ func runSession(s session, stdin io.Reader, stdout, stderr io.Writer) error {
 			return err
 		}
 		defer server.stop()
+		if server != nil {
+			plan.address = server.address
+		}
+	}
+	args, err := debuggerArguments(s.backend, s.artifact, s.debuggerArgs, plan)
+	if err != nil {
+		return err
 	}
 
 	var debugErr error
@@ -163,6 +170,16 @@ func runSession(s session, stdin io.Reader, stdout, stderr io.Writer) error {
 	default:
 		debugErr = fmt.Errorf("llgo debug: backend %s is not implemented", s.backend)
 	}
+	if server != nil {
+		select {
+		case err := <-server.done:
+			server.finished = true
+			if err != nil && debugErr == nil {
+				debugErr = fmt.Errorf("llgo debug: debug server exited: %w", err)
+			}
+		default:
+		}
+	}
 	if debugErr != nil && server != nil {
 		if output := server.logSuffix(); output != "" {
 			return fmt.Errorf("%w\ndebug server output:%s", debugErr, output)
@@ -175,6 +192,8 @@ type serverPlan struct {
 	command []string
 	address string
 	load    bool
+	stdio   bool
+	openOCD bool
 }
 
 func makeServerPlan(target *targets.Config, artifact string, opts options) (*serverPlan, error) {
@@ -197,25 +216,30 @@ func makeServerPlan(target *targets.Config, artifact string, opts options) (*ser
 		return &serverPlan{address: normalizeRemoteAddress(opts.remote), load: opts.load}, nil
 	}
 
-	port, err := freeTCPPort()
-	if err != nil {
-		return nil, fmt.Errorf("llgo debug: allocate debug-server port: %w", err)
-	}
 	serverTemplate := opts.server
 	if serverTemplate == "" {
 		serverTemplate = target.DebugServer
 	}
 	if serverTemplate != "" {
+		stdio := strings.Contains(serverTemplate, "{debug-stdio}")
+		port := 0
+		if !stdio {
+			var err error
+			port, err = freeTCPPort()
+			if err != nil {
+				return nil, fmt.Errorf("llgo debug: allocate debug-server port: %w", err)
+			}
+		}
 		command, err := parseServerCommand(serverTemplate, artifact, port)
 		if err != nil {
 			return nil, err
 		}
-		return &serverPlan{command: command, address: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), load: opts.load}, nil
+		return &serverPlan{command: command, address: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), load: opts.load, stdio: stdio}, nil
 	}
 	if target.OpenOCDInterface == "" && target.OpenOCDTarget == "" {
 		return nil, fmt.Errorf("llgo debug: target %s has no debug server; use -remote or -server", target.Name)
 	}
-	command := []string{"openocd", "-c", fmt.Sprintf("gdb_port %d", port)}
+	command := []string{"openocd", "-c", "gdb_port pipe", "-c", "tcl_port disabled", "-c", "telnet_port disabled"}
 	if target.OpenOCDInterface != "" {
 		command = append(command, "-f", "interface/"+target.OpenOCDInterface+".cfg")
 	}
@@ -227,8 +251,9 @@ func makeServerPlan(target *targets.Config, artifact string, opts options) (*ser
 	}
 	return &serverPlan{
 		command: command,
-		address: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
 		load:    true,
+		stdio:   true,
+		openOCD: true,
 	}, nil
 }
 
@@ -242,6 +267,7 @@ func normalizeRemoteAddress(address string) string {
 
 func parseServerCommand(template, artifact string, port int) ([]string, error) {
 	replacer := strings.NewReplacer(
+		"{debug-stdio}", "stdio",
 		"{debug-port}", strconv.Itoa(port),
 		"{root}", quoteServerArgument(env.LLGoROOT()),
 		"{tmpDir}", quoteServerArgument(os.TempDir()),
@@ -269,93 +295,6 @@ func freeTCPPort() (int, error) {
 	}
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port, nil
-}
-
-type debugServer struct {
-	cmd      *exec.Cmd
-	done     <-chan error
-	finished bool
-	log      *os.File
-	logPath  string
-}
-
-func startServer(plan serverPlan) (*debugServer, error) {
-	if len(plan.command) == 0 {
-		return nil, nil
-	}
-	log, err := os.CreateTemp("", "llgo-debug-server-*.log")
-	if err != nil {
-		return nil, fmt.Errorf("llgo debug: create debug-server log: %w", err)
-	}
-	command := exec.Command(plan.command[0], plan.command[1:]...)
-	command.Stdout = log
-	command.Stderr = log
-	if err := command.Start(); err != nil {
-		log.Close()
-		os.Remove(log.Name())
-		return nil, fmt.Errorf("llgo debug: start debug server %q: %w", plan.command[0], err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
-	server := &debugServer{cmd: command, done: done, log: log, logPath: log.Name()}
-	if err := server.waitReady(plan.address, 10*time.Second); err != nil {
-		server.stop()
-		return nil, err
-	}
-	return server, nil
-}
-
-func (s *debugServer) waitReady(address string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		select {
-		case err := <-s.done:
-			s.finished = true
-			return fmt.Errorf("llgo debug: debug server exited before listening at %s: %v%s", address, err, s.logSuffix())
-		default:
-		}
-		connection, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
-		if err == nil {
-			connection.Close()
-			time.Sleep(50 * time.Millisecond)
-			return nil
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	return fmt.Errorf("llgo debug: timed out waiting for debug server at %s%s", address, s.logSuffix())
-}
-
-func (s *debugServer) stop() {
-	if s == nil {
-		return
-	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-	}
-	if !s.finished {
-		select {
-		case <-s.done:
-			s.finished = true
-		case <-time.After(2 * time.Second):
-		}
-	}
-	if s.log != nil {
-		_ = s.log.Close()
-	}
-	if s.logPath != "" {
-		_ = os.Remove(s.logPath)
-	}
-}
-
-func (s *debugServer) logSuffix() string {
-	if s.log != nil {
-		_ = s.log.Sync()
-	}
-	data, err := os.ReadFile(s.logPath)
-	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
-		return ""
-	}
-	return "\n" + strings.TrimSpace(string(data))
 }
 
 func debuggerArguments(selected backend, artifact string, extra []string, server *serverPlan) ([]string, error) {

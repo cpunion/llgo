@@ -7,10 +7,13 @@ flash bytes, and runs both transports:
 - `gdb-multiarch` through GDB Remote;
 - LLDB through `gdb-remote` with an explicit zero slide.
 
-Each backend first connects to a preloaded image without requesting writes.
+Each backend first uses the production target-configured QEMU stdio server
+and its owned loopback relay, with a preloaded image and no writes requested.
 It then starts another QEMU **without a kernel image** and exercises the
 production `llgo debug -load` path. `qemu_load_proxy.py` translates OpenOCD's
-`monitor reset halt` to QEMU's `system_reset`; all memory writes, register access,
+`monitor reset halt` to QEMU's `system_reset`; its TCP server rejects empty
+connections, verifying that readiness does not discard the only stub client.
+All memory writes, register access,
 breakpoints and execution go to the real QEMU GDB stub. The test requires two
 resets with real image writes between them, then checks source location,
 parameters, aggregate/array/string locals, globals and the backtrace.

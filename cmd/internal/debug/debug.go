@@ -36,7 +36,7 @@ import (
 
 // Cmd is the llgo debug command.
 var Cmd = &base.Command{
-	UsageLine: "llgo debug [-backend auto|lldb|gdb|wasmtime|browser] [-target platform] [build flags] [package] [-- debugger arguments...]",
+	UsageLine: "llgo debug [-backend auto|lldb|gdb] [-target platform] [build flags] [package] [-- debugger arguments...]",
 	Short:     "Build and debug an LLGo program",
 }
 
@@ -58,11 +58,11 @@ func init() {
 	flags.AddBuildFlags(&Cmd.Flag)
 	flags.AddEmbeddedFlags(&Cmd.Flag)
 	flags.AddOutputFlags(&Cmd.Flag)
-	Cmd.Flag.StringVar(&backendFlag, "backend", string(backendAuto), "debug backend: auto, lldb, gdb, wasmtime, or browser")
+	Cmd.Flag.StringVar(&backendFlag, "backend", string(backendAuto), "debug backend: auto, lldb, or gdb; wasmtime and browser are reserved and unavailable")
 	Cmd.Flag.StringVar(&lldbPath, "lldb", "", "path to LLDB (default $LLGO_LLDB or auto-detect)")
 	Cmd.Flag.StringVar(&gdbPath, "gdb", "", "path to GDB (default $LLGO_GDB, target candidates, or auto-detect)")
 	Cmd.Flag.StringVar(&remoteAddress, "remote", "", "connect to an existing debug server at host:port")
-	Cmd.Flag.StringVar(&serverCommand, "server", "", "debug-server command template; {} is the artifact and {debug-port} is the allocated port")
+	Cmd.Flag.StringVar(&serverCommand, "server", "", "debug-server template: {} is the artifact, {debug-stdio} selects RSP over stdin/stdout, {debug-port} selects legacy TCP")
 	Cmd.Flag.BoolVar(&loadImage, "load", false, "reset, load the image, and halt an existing remote or custom debug server")
 }
 

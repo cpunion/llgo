@@ -49,6 +49,10 @@ func TestBackendRouting(t *testing.T) {
 		{name: "embedded", conf: build.Config{Target: "board"}, target: &targets.Config{LLVMTarget: "thumbv7m-none-eabi"}, want: backendGDB},
 		{name: "WASI", conf: build.Config{Target: "wasip1"}, target: &targets.Config{GOOS: "wasip1", GOARCH: "wasm", LLVMTarget: "wasm32-unknown-wasi"}, want: backendWasmtime},
 		{name: "browser", conf: build.Config{Target: "wasm"}, target: &targets.Config{GOOS: "js", GOARCH: "wasm", LLVMTarget: "wasm32-unknown-wasi"}, want: backendBrowser},
+		{name: "Wasm name with WASI ABI", conf: build.Config{Target: "wasm-custom"}, target: &targets.Config{GOOS: "wasip1", GOARCH: "wasm", LLVMTarget: "wasm32-unknown-wasip1"}, want: backendWasmtime},
+		{name: "raw Wasm target", conf: build.Config{Target: "wasm-unknown"}, target: &targets.Config{GOARCH: "wasm", LLVMTarget: "wasm32-unknown-unknown"}, want: backendWasmtime},
+		{name: "inherited browser OS", conf: build.Config{Goos: "js", Goarch: "wasm"}, target: &targets.Config{LLVMTarget: "wasm32-unknown-unknown"}, want: backendBrowser},
+		{name: "browser profile", target: &targets.Config{WasmProfile: "j64", LLVMTarget: "wasm64-unknown-unknown"}, want: backendBrowser},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -91,6 +95,11 @@ func TestSessionPlanning(t *testing.T) {
 	if !openocd.load {
 		t.Fatal("OpenOCD plan does not request image loading")
 	}
+	if !openocd.stdio || !strings.Contains(joined, "gdb_port pipe") {
+		t.Fatalf("OpenOCD must use pipes instead of reserving a TCP port: %+v", openocd)
+	}
+	// The loopback address is assigned by the owned relay at startup.
+	openocd.address = "127.0.0.1:1234"
 
 	gdbArgs, err := debuggerArguments(backendGDB, "program.elf", []string{"--batch"}, openocd)
 	if err != nil {
