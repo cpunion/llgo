@@ -86,7 +86,7 @@ func TestLoadEmbeddedAndExternal(t *testing.T) {
 	if !errors.As(err, &missing) || missing.URL != "fixture%20debug.wasm" {
 		t.Fatalf("missing sidecar error = %T %v", err, err)
 	}
-	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), sidecar) {
+	if !errors.Is(err, os.ErrNotExist) || missing.Path != sidecar {
 		t.Fatalf("missing sidecar lost its path or filesystem cause: %v", err)
 	}
 
@@ -313,6 +313,27 @@ func TestInvalidLocationListsProduceDiagnostics(t *testing.T) {
 				t.Fatalf("diagnostics = %v, want variable name and %q", builder.index.Diagnostics, tt.want)
 			}
 		})
+	}
+}
+
+func TestInvalidRangeListProducesDiagnostic(t *testing.T) {
+	// A DWARF4 unit whose range attribute points before .debug_ranges must
+	// not invent breakpoint addresses or make the entire index unusable.
+	info := []byte{8, 0, 0, 0, 4, 0, 0, 0, 0, 0, 4, 0}
+	data, err := dwarf.New([]byte{0}, nil, nil, info, nil, nil, []byte{0}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder := indexBuilder{data: data}
+	entry := &dwarf.Entry{
+		Offset: 11, Tag: dwarf.TagCompileUnit,
+		Field: []dwarf.Field{{Attr: dwarf.AttrRanges, Val: int64(-1)}},
+	}
+	if got := builder.ranges(entry); len(got) != 0 {
+		t.Fatalf("corrupt range list produced breakpoint addresses: %v", got)
+	}
+	if len(builder.index.Diagnostics) != 1 || !strings.Contains(builder.index.Diagnostics[0], "invalid range offset -1") {
+		t.Fatalf("corrupt range list lost its diagnostic: %v", builder.index.Diagnostics)
 	}
 }
 
@@ -599,5 +620,20 @@ func TestSidecarAndSourceSymlinkContainment(t *testing.T) {
 	}
 	if data, err := bundle.ReadSource(id); err == nil {
 		t.Fatalf("request-time symlink replacement exposed %q", data)
+	}
+	// SourceFiles is public, so reading must enforce the root boundary even
+	// if a caller accidentally inserts an untrusted path after indexing.
+	bundle.SourceFiles["outside"] = secret
+	if _, err := bundle.ReadSource("outside"); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("untrusted source read = %v, want permission error", err)
+	}
+	if _, err := bundle.ReadSource("unknown"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unknown source read = %v, want missing-file error", err)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bundle.ReadSource(id); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed source root read = %v, want missing-file error", err)
 	}
 }
