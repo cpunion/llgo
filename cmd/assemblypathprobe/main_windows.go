@@ -77,7 +77,8 @@ func probeAncestor(path string) {
 	}
 	var data syscall.Win32finddata
 	handle, findErr := syscall.FindFirstFile(wide, &data)
-	fmt.Printf("FindFirstFile=%v name=%q\n", findErr, syscall.UTF16ToString(data.FileName[:]))
+	fmt.Printf("FindFirstFile=%v name=%q attributes=%#x reparseTag=%#x\n",
+		findErr, syscall.UTF16ToString(data.FileName[:]), data.FileAttributes, data.Reserved0)
 	if findErr == nil {
 		if closeErr := syscall.FindClose(handle); closeErr != nil {
 			panic(closeErr)
