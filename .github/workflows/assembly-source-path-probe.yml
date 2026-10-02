@@ -1,0 +1,31 @@
+name: Windows assembly source path probe
+
+on:
+  push:
+    branches: [codex/pr40-windows-source-path-probe-20261002]
+
+permissions:
+  contents: read
+
+jobs:
+  original-toolchain-paths:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.27.0', '1.27.1']
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: ${{ matrix.go }}
+          cache: 'false'
+      - name: Probe original paths with the ordinary CI shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run ./cmd/assemblypathprobe
