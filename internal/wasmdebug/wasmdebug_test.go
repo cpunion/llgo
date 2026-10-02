@@ -231,6 +231,71 @@ func TestBuildIDExternalPair(t *testing.T) {
 	}
 }
 
+func TestRefreshBuildIDIncludesMetadataAndIsRepeatable(t *testing.T) {
+	original, err := SetDebuggerRecord(debugFixture(), debugabi.NewRecord(4, debugabi.ByteOrderLittle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, wantID, err := EnsureBuildID(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, linkerID := range [][]byte{nil, []byte("linker identity"), {1, 2, 3}} {
+		input := bytes.Clone(original)
+		if linkerID != nil {
+			input, err = SetBuildID(input, linkerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		before := bytes.Clone(input)
+		refreshed, id, err := RefreshBuildID(input)
+		if err != nil || !bytes.Equal(refreshed, want) || !bytes.Equal(id, wantID) {
+			t.Fatalf("linker ID %x affected content identity: id=%x, error=%v", linkerID, id, err)
+		}
+		if !bytes.Equal(input, before) {
+			t.Fatal("refresh changed the input module")
+		}
+		again, repeatedID, err := RefreshBuildID(refreshed)
+		if err != nil || !bytes.Equal(again, refreshed) || !bytes.Equal(repeatedID, id) {
+			t.Fatalf("repeated refresh changed artifact identity: %v", err)
+		}
+	}
+	changedABI, err := SetDebuggerRecord(want, debugabi.NewRecord(8, debugabi.ByteOrderLittle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedContent := appendCustomSection(want, "source", []byte("different build"))
+	for name, module := range map[string][]byte{"debugger ABI": changedABI, "module content": changedContent} {
+		_, id, err := RefreshBuildID(module)
+		if err != nil || bytes.Equal(id, wantID) {
+			t.Fatalf("%s edit retained the old content identity: %v", name, err)
+		}
+	}
+}
+
+func TestRefreshBuildIDRejectsInvalidIdentity(t *testing.T) {
+	module, _, err := EnsureBuildID(debugFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, invalid := range map[string][]byte{
+		"invalid module":     []byte("not wasm"),
+		"duplicate identity": appendCustomSection(module, buildIDSection, []byte{1, 42}),
+		"truncated identity": appendCustomSection(wasmHeader, buildIDSection, []byte{2, 42}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := bytes.Clone(invalid)
+			if refreshed, id, err := RefreshBuildID(invalid); err == nil || refreshed != nil || id != nil {
+				t.Fatalf("invalid identity was repaired: module=%x, id=%x, error=%v", refreshed, id, err)
+			}
+			if !bytes.Equal(invalid, before) {
+				t.Fatal("failed refresh changed the input module")
+			}
+		})
+	}
+}
+
 func TestMalformedCustomSectionEnvelopes(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
