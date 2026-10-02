@@ -55,11 +55,12 @@ type Export struct {
 	ClangRoot      string   // Root directory of custom clang installation
 	ClangBinPath   string   // Path to clang binary directory
 
-	LLVMTarget   string // LLVM Target
-	TargetABI    string // RISC-V Target ABI (e.g., "lp64", "lp64d")
-	BinaryFormat string // Binary format (e.g., "elf", "esp", "uf2")
-	FormatDetail string // For uf2, it's uf2FamilyID
-	Emulator     string // Emulator command template (e.g., "qemu-system-arm -M {} -kernel {}")
+	LLVMTarget   string   // LLVM Target
+	TargetABI    string   // RISC-V Target ABI (e.g., "lp64", "lp64d")
+	BinaryFormat string   // Binary format (e.g., "elf", "esp", "uf2")
+	FormatDetail string   // For uf2, it's uf2FamilyID
+	Emulator     string   // Emulator command template (e.g., "qemu-system-arm -M {} -kernel {}")
+	GDB          []string // GDB command candidates in preference order
 	DebugInfo    DebugInfoPolicy
 	WasmPostLink WasmPostLink
 	WasmRuntime  WasmRuntime
@@ -223,13 +224,26 @@ type WasmPostLink struct {
 	Asyncify bool
 }
 
+// DebugInfoCapability describes whether the selected linker and its linked
+// output format can retain DWARF. Deployment formats such as bin, hex, and uf2
+// are derived later and do not affect this capability.
+type DebugInfoCapability uint8
+
+const (
+	DebugInfoRetainable DebugInfoCapability = iota
+	DebugInfoUnavailable
+)
+
 // DebugInfoPolicy describes how a selected linker handles debug information.
 // Build orchestration consumes this typed capability instead of inferring it
 // from a target name or linker executable.
 type DebugInfoPolicy struct {
-	AlwaysOmit        bool
+	Capability        DebugInfoCapability
 	OmitLinkFlags     []string
 	PreserveLinkFlags []string
+	// PreserveDriverFlags applies only to compiler-driver invocation paths.
+	// Direct embedded linkers retain DWARF without these compiler options.
+	PreserveDriverFlags []string
 }
 
 func nativeToolchain(goos string) NativeToolchain {
@@ -260,18 +274,50 @@ func nativeToolchain(goos string) NativeToolchain {
 	}
 }
 
+// driverDebugInfoPolicy describes invocation through a compiler driver, including
+// hosted Wasm builds whose driver ultimately invokes wasm-ld. Direct linker
+// invocation instead uses targetDebugInfoPolicy and must not receive driver flags.
+func driverDebugInfoPolicy() DebugInfoPolicy {
+	return DebugInfoPolicy{
+		OmitLinkFlags:       []string{"-Wl,-S"},
+		PreserveDriverFlags: []string{"-gdwarf-4"},
+	}
+}
+
 func nativeDebugInfoPolicy(toolchain NativeToolchain) DebugInfoPolicy {
+	policy := driverDebugInfoPolicy()
 	switch toolchain.Linker {
 	case LinkerFlavorMachO, LinkerFlavorELFLLD, LinkerFlavorMinGWLLD:
-		return DebugInfoPolicy{OmitLinkFlags: []string{"-Wl,-S"}}
 	case LinkerFlavorCOFFLLD:
-		return DebugInfoPolicy{
-			OmitLinkFlags:     []string{"-Wl,/debug:none"},
-			PreserveLinkFlags: []string{"-Wl,/debug:dwarf"},
-		}
+		policy.OmitLinkFlags = []string{"-Wl,/debug:none"}
+		policy.PreserveLinkFlags = []string{"-Wl,/debug:dwarf"}
 	default:
-		return DebugInfoPolicy{}
+		policy.OmitLinkFlags = nil
 	}
+	return policy
+}
+
+func (p DebugInfoPolicy) CanRetain() bool {
+	return p.Capability == DebugInfoRetainable
+}
+
+// targetDebugInfoPolicy covers direct linker invocations from UseTarget. Normal
+// hosted Wasm/WASI builds route through useWithGOARMAndToolchain and the driver
+// policy; the wasm-ld case also supports direct target-policy callers.
+func targetDebugInfoPolicy(linker, llvmTarget string) DebugInfoPolicy {
+	switch linker {
+	case "ld.lld":
+		if !strings.HasPrefix(llvmTarget, "wasm") {
+			return DebugInfoPolicy{OmitLinkFlags: []string{"-S"}}
+		}
+	case "wasm-ld":
+		if strings.HasPrefix(llvmTarget, "wasm") {
+			return DebugInfoPolicy{OmitLinkFlags: []string{"-S"}}
+		}
+	}
+	// Unknown or mismatched linker/target pairs intentionally omit DWARF until
+	// retention has been validated for that direct-linker path.
+	return DebugInfoPolicy{Capability: DebugInfoUnavailable}
 }
 
 // URLs and configuration that can be overridden for testing
@@ -690,7 +736,7 @@ func useWithGOARMAndToolchain(goos, goarch, goarm string, forceEspClang bool, le
 	if wasmProvider == WasmProviderWASI {
 		export.BuildTags = appendUniqueStrings(export.BuildTags, "llgo.wasm.wasi")
 	}
-	export.DebugInfo.OmitLinkFlags = []string{"-Wl,-S"}
+	export.DebugInfo = driverDebugInfoPolicy()
 
 	// Configure based on GOOS
 	switch goos {
@@ -923,7 +969,8 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	export.TargetABI = config.TargetABI
 	export.BinaryFormat = config.BinaryFormat
 	export.FormatDetail = config.FormatDetail()
-	export.DebugInfo.AlwaysOmit = true
+	export.GDB = append([]string(nil), config.GDB...)
+	export.DebugInfo = targetDebugInfoPolicy(config.Linker, config.LLVMTarget)
 
 	// Set flashing/debugging configuration
 	export.Device = flash.Device{
@@ -953,7 +1000,7 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 
 	// Convert LLVMTarget, CPU, Features to CCFLAGS/LDFLAGS
 	// ICF off for Go pc-identity semantics (see the non-cross flags above).
-	ldflags := []string{"-S", "--icf=none"}
+	ldflags := []string{"--icf=none"}
 	ccflags := []string{level.Flag()}
 	cflags := []string{"-Wno-override-module", "-Qunused-arguments", "-Wno-unused-command-line-argument"}
 	clangTarget := config.LLVMTarget
