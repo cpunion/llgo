@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -88,6 +89,9 @@ func TestLoadEmbeddedAndExternal(t *testing.T) {
 	}
 	if !errors.Is(err, os.ErrNotExist) || missing.Path != sidecar {
 		t.Fatalf("missing sidecar lost its path or filesystem cause: %v", err)
+	}
+	if message := err.Error(); !strings.Contains(message, strconv.Quote(sidecar)) || !strings.Contains(message, strconv.Quote(missing.URL)) {
+		t.Fatalf("missing sidecar diagnostic omitted its quoted URL or path: %s", message)
 	}
 
 	stale, err := wasmdebug.SetBuildID(raw, bytes.Repeat([]byte{0xaa}, 32))
@@ -593,6 +597,12 @@ func TestSidecarAndSourceSymlinkContainment(t *testing.T) {
 	}
 	if _, err := localExternalPath(filepath.Join(root, "main.wasm"), "linked.wasm"); err == nil {
 		t.Fatal("sidecar symlink escaped artifact directory")
+	}
+	if err := os.Symlink("cycle.wasm", filepath.Join(root, "cycle.wasm")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := localExternalPath(filepath.Join(root, "main.wasm"), "cycle.wasm"); err == nil || os.IsNotExist(err) {
+		t.Fatalf("cyclic sidecar was accepted or reported as a missing file: %v", err)
 	}
 	canonicalRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
