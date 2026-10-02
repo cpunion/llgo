@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+
+	"github.com/xgo-dev/llgo/internal/assemblypath"
 )
 
 // This diagnostic is isolated from the LLVM-backed compiler. It checks the
@@ -33,12 +35,14 @@ func main() {
 			continue
 		}
 		info, statErr := os.Stat(absolute)
-		canonical, evalErr := filepath.EvalSymlinks(absolute)
+		lexical, evalErr := filepath.EvalSymlinks(absolute)
+		fmt.Printf("original Go symlink walk: canonical=%q error=%v\n", lexical, evalErr)
+		canonical, canonicalErr := assemblypath.Canonical(absolute)
 		canonicalInfo, canonicalStatErr := os.Stat(canonical)
 		same := statErr == nil && canonicalStatErr == nil && os.SameFile(info, canonicalInfo)
-		fmt.Printf("original identity: stat=%v canonical=%q eval=%v canonicalStat=%v sameFile=%t\n",
-			statErr, canonical, evalErr, canonicalStatErr, same)
-		if statErr != nil || evalErr != nil || !same {
+		fmt.Printf("physical original identity: stat=%v canonical=%q resolve=%v canonicalStat=%v sameFile=%t\n",
+			statErr, canonical, canonicalErr, canonicalStatErr, same)
+		if statErr != nil || canonicalErr != nil || !same {
 			failed = true
 		}
 		if statErr == nil && !info.IsDir() {
