@@ -33,6 +33,7 @@ import (
 	"github.com/xgo-dev/llgo/internal/build"
 	"github.com/xgo-dev/llgo/internal/mockable"
 	"github.com/xgo-dev/llgo/internal/optlevel"
+	"github.com/xgo-dev/llgo/internal/packages"
 	"github.com/xgo-dev/llgo/internal/targets"
 )
 
@@ -178,11 +179,13 @@ func run(packageArgs, debuggerArgs []string, opts options, stdin io.Reader, stdo
 		return err
 	}
 	defer cleanup()
-	if _, err = build.Do(packageArgs, conf); err != nil {
+	built, err := build.Do(packageArgs, conf)
+	if err != nil {
 		return err
 	}
 	if selected == backendBrowser {
 		artifact = browserModulePath(artifact)
+		opts.browser.SourceRoots = append(opts.browser.SourceRoots, builtSourceRoots(built)...)
 	}
 	if _, err = os.Stat(artifact); err != nil {
 		return fmt.Errorf("llgo debug: built artifact %q is unavailable: %w", artifact, err)
@@ -195,6 +198,37 @@ func run(packageArgs, debuggerArgs []string, opts options, stdin io.Reader, stdo
 		target:       target,
 		options:      opts,
 	}, stdin, stdout, stderr)
+}
+
+// Source trust comes from packages selected by this build, never paths claimed
+// by an artifact's DWARF. Standalone StartSession callers must supply mappings
+// or explicit roots for sources outside the artifact directory.
+func builtSourceRoots(built []build.Package) []string {
+	seen := make(map[*packages.Package]bool)
+	directories := make(map[string]bool)
+	var visit func(*packages.Package)
+	visit = func(pkg *packages.Package) {
+		if pkg == nil || seen[pkg] {
+			return
+		}
+		seen[pkg] = true
+		for _, path := range append(append([]string(nil), pkg.GoFiles...), pkg.OtherFiles...) {
+			directories[filepath.Dir(path)] = true
+		}
+		for _, dependency := range pkg.Imports {
+			visit(dependency)
+		}
+	}
+	for _, pkg := range built {
+		if pkg != nil {
+			visit(pkg.Package)
+		}
+	}
+	var roots []string
+	for directory := range directories {
+		roots = append(roots, directory)
+	}
+	return roots
 }
 
 func validateSessionTarget(conf *build.Config, target *targets.Config, selected backend, opts options) error {

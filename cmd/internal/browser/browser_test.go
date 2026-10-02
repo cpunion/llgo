@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xgo-dev/llgo/internal/browserdebug"
 	"github.com/xgo-dev/llgo/internal/debugabi"
 	"github.com/xgo-dev/llgo/internal/wasmdebug"
 )
@@ -25,7 +26,7 @@ func TestExtensionJavaScript(t *testing.T) {
 	if err != nil {
 		t.Skip("node is unavailable")
 	}
-	command := exec.Command(node, "--test", filepath.Join("extension", "plugin_test.js"))
+	command := exec.Command(node, "--test", filepath.Join("extension", "plugin_test.js"), filepath.Join("testdata", "page_test.js"))
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("language extension tests: %v\n%s", err, output)
 	}
@@ -60,7 +61,7 @@ func TestSessionServesArtifactIndexSchemaAndSources(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	session, err := StartSession(artifact, nil)
+	session, err := StartSession(artifact, nil, repoRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +122,23 @@ func TestSessionServesArtifactIndexSchemaAndSources(t *testing.T) {
 		}
 	}
 
+	for _, from := range []string{session.extensionOrigin, "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", session.extensionOrigin + "/"} {
+		request, _ := http.NewRequest(http.MethodGet, session.URL+"__llgo/debug-index.json", nil)
+		request.Header.Set("Origin", from)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if from == session.extensionOrigin {
+			if response.StatusCode != http.StatusOK || response.Header.Get("Access-Control-Allow-Origin") != from {
+				t.Fatalf("session extension rejected: status=%d headers=%v", response.StatusCode, response.Header)
+			}
+		} else if response.StatusCode != http.StatusForbidden || response.Header.Get("Access-Control-Allow-Origin") != "" {
+			t.Fatalf("foreign extension origin accepted: %q status=%d headers=%v", from, response.StatusCode, response.Header)
+		}
+	}
+
 	for id, sourcePath := range session.Bundle.SourceFiles {
 		response, err := http.Get(strings.TrimSuffix(session.URL, "/") + "/__llgo/source/" + id)
 		if err != nil {
@@ -131,7 +149,7 @@ func TestSessionServesArtifactIndexSchemaAndSources(t *testing.T) {
 		if readErr != nil || response.StatusCode != http.StatusOK {
 			t.Fatalf("GET source %q (%q) = %d, %v", id, sourcePath, response.StatusCode, readErr)
 		}
-		if sourcePath == source && !bytes.Contains(contents, []byte("return value")) {
+		if filepath.Base(sourcePath) == "fixture.c" && !bytes.Contains(contents, []byte("return value")) {
 			t.Fatalf("served fixture source = %q", contents)
 		}
 	}
@@ -139,7 +157,12 @@ func TestSessionServesArtifactIndexSchemaAndSources(t *testing.T) {
 
 func TestWriteExtensionAndChromeVersion(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "extension")
-	if err := WriteExtension(directory); err != nil {
+	key, origin, err := extensionIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &Session{extensionKey: key, extensionOrigin: origin}
+	if err := session.WriteExtension(directory); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"manifest.json", "devtools.html", "plugin.js"} {
@@ -164,7 +187,7 @@ func TestDebugPageCanSkipDevToolsHandshake(t *testing.T) {
 	for _, want := range []string{
 		"__llgoLanguageExtensionReady",
 		"llgo-devtools",
-		"setTimeout(resolve, 5000)",
+		"DevTools extension did not become ready",
 	} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("debug page does not contain %q", want)
@@ -187,7 +210,7 @@ func TestChromeLanguageExtension(t *testing.T) {
 	}
 	t.Setenv("LLGO_ROOT", repoRoot)
 	artifact := prepareBrowserArtifact(t, requestedArtifact)
-	session, err := StartSession(artifact, nil)
+	session, err := StartSession(artifact, nil, repoRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +218,7 @@ func TestChromeLanguageExtension(t *testing.T) {
 	profile := t.TempDir()
 	profileData := filepath.Join(profile, "profile")
 	extension := filepath.Join(profile, "extension")
-	if err := WriteExtension(extension); err != nil {
+	if err := session.WriteExtension(extension); err != nil {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
@@ -273,7 +296,7 @@ func TestChromeWithoutLanguageExtension(t *testing.T) {
 	}
 	t.Setenv("LLGO_ROOT", repoRoot)
 	artifact := prepareBrowserArtifact(t, "fixture")
-	session, err := StartSession(artifact, nil)
+	session, err := StartSession(artifact, nil, repoRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,5 +424,96 @@ func compileBrowserFixture(t *testing.T, source, artifact string) {
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("compile WebAssembly fixture on %s/%s: %v\n%s", runtime.GOOS, runtime.GOARCH, err, output)
+	}
+}
+
+func TestBrowserChromeOptions(t *testing.T) {
+	for _, args := range [][]string{
+		{"--user-data-dir=/real/profile"}, {"--disable-extensions-except=/other"},
+		{"--load-extension=/other"}, {"--disable-web-security"}, {"--no-sandbox"},
+		{"https://other.example"}, {"--window-size", "900,700"}, {"--", "--disable-web-security"},
+	} {
+		if err := validateChromeArgs(args); err == nil {
+			t.Fatalf("unsafe browser arguments accepted: %v", args)
+		}
+	}
+	if err := validateChromeArgs([]string{"--window-size=900,700", "--headless=new", "--start-maximized"}); err != nil {
+		t.Fatal(err)
+	}
+	environment := map[string]string{"ProgramFiles": "system64", "ProgramFiles(x86)": "system32", "LOCALAPPDATA": "user"}
+	getenv := func(key string) string { return environment[key] }
+	candidates := chromeCandidates("windows", "", getenv)
+	for _, root := range []string{"system64", "system32", "user"} {
+		for _, vendor := range []string{"Google/Chrome", "Chromium"} {
+			want := filepath.Join(root, filepath.FromSlash(vendor), "Application", "chrome.exe")
+			found := false
+			for _, candidate := range candidates {
+				found = found || candidate == want
+			}
+			if !found {
+				t.Fatalf("Windows discovery omitted %q: %v", want, candidates)
+			}
+		}
+	}
+	for _, goos := range []string{"windows", "darwin", "linux"} {
+		environment["LLGO_CHROME"] = "environment-choice"
+		if got := chromeCandidates(goos, "explicit-choice", getenv); len(got) != 1 || got[0] != "explicit-choice" {
+			t.Fatalf("explicit browser selection fell back: %v", got)
+		}
+		if got := chromeCandidates(goos, "", getenv); len(got) != 1 || got[0] != "environment-choice" {
+			t.Fatalf("environment browser selection fell back: %v", got)
+		}
+	}
+}
+
+func TestSessionRestrictsRecordedSourceFiles(t *testing.T) {
+	// Real DWARF claims a readable source outside the artifact directory.
+	sourceDir, artifactDir := t.TempDir(), t.TempDir()
+	source := filepath.Join(sourceDir, "private.c")
+	if err := os.WriteFile(source, []byte("int answer(void) { return 42; }"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(artifactDir, "fixture.wasm")
+	compileBrowserFixture(t, source, artifact)
+	raw, err := os.ReadFile(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err = wasmdebug.SetDebuggerRecord(raw, debugabi.NewRecord(4, debugabi.ByteOrderLittle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err = wasmdebug.EnsureBuildID(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mapped := range []bool{false, true} {
+		var mappings []browserdebug.PathMapping
+		if mapped {
+			mappings = []browserdebug.PathMapping{{From: sourceDir, To: sourceDir}}
+		}
+		session, err := StartSession(artifact, mappings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, indexed := range session.Bundle.Index.Sources {
+			response, err := http.Get(strings.TrimSuffix(session.URL, "/") + indexed.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			if mapped {
+				if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("return 42")) {
+					t.Fatalf("mapped source unavailable: status=%d body=%q", response.StatusCode, body)
+				}
+			} else if indexed.Local || response.StatusCode != http.StatusNotFound {
+				t.Fatalf("untrusted source exposed: %+v status=%d", indexed, response.StatusCode)
+			}
+		}
+		session.Close()
 	}
 }

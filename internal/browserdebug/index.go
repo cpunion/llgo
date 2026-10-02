@@ -156,6 +156,28 @@ type Bundle struct {
 	MainPath    string
 	SymbolsPath string
 	SourceFiles map[string]string
+	sourceRoots []string
+}
+
+// ReadSource reads an indexed source within its trusted filesystem root.
+// Root.ReadFile also prevents a symlink replacement after indexing from
+// redirecting an HTTP request outside that root.
+func (b *Bundle) ReadSource(id string) ([]byte, error) {
+	path, ok := b.SourceFiles[id]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	for _, directory := range b.sourceRoots {
+		if relative, ok := pathPrefix(path, directory); ok {
+			root, err := os.OpenRoot(directory)
+			if err != nil {
+				return nil, err
+			}
+			defer root.Close()
+			return root.ReadFile(relative)
+		}
+	}
+	return nil, os.ErrPermission
 }
 
 // MissingSymbolsError reports an unavailable external_debug_info target.
@@ -173,8 +195,9 @@ func (e *MissingSymbolsError) Unwrap() error { return e.Err }
 
 // Load reads an embedded or external LLGo WebAssembly artifact and builds its
 // browser query index. External sidecars must carry the same standard build_id
-// as the main module.
-func Load(mainPath string, mappings []PathMapping) (*Bundle, error) {
+// as the main module. Sources are exposed only within the module directory,
+// explicit mapping destinations, or sourceRoots supplied by a trusted build.
+func Load(mainPath string, mappings []PathMapping, sourceRoots ...string) (*Bundle, error) {
 	mainPath, err := filepath.Abs(mainPath)
 	if err != nil {
 		return nil, err
@@ -221,7 +244,13 @@ func Load(mainPath string, mappings []PathMapping) (*Bundle, error) {
 		if err != nil {
 			return nil, err
 		}
-		symbols, err = os.ReadFile(symbolsPath)
+		root, openErr := os.OpenRoot(filepath.Dir(mainPath))
+		if openErr != nil {
+			return nil, openErr
+		}
+		relative, _ := filepath.Rel(filepath.Dir(mainPath), symbolsPath)
+		symbols, err = root.ReadFile(relative)
+		root.Close()
 		if err != nil {
 			return nil, &MissingSymbolsError{URL: external, Path: symbolsPath, Err: err}
 		}
@@ -257,10 +286,23 @@ func Load(mainPath string, mappings []PathMapping) (*Bundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read WebAssembly DWARF: %w", err)
 	}
+	roots := append([]string{filepath.Dir(mainPath)}, sourceRoots...)
+	for _, mapping := range mappings {
+		roots = append(roots, mapping.To)
+	}
+	var trustedRoots []string
+	for _, root := range roots {
+		if canonical, err := filepath.EvalSymlinks(root); err == nil {
+			if absolute, err := filepath.Abs(canonical); err == nil {
+				trustedRoots = append(trustedRoots, absolute)
+			}
+		}
+	}
 	builder := indexBuilder{
-		data:     data,
-		sections: sections,
-		mappings: normalizeMappings(mappings),
+		sourceRoots: trustedRoots,
+		data:        data,
+		sections:    sections,
+		mappings:    normalizeMappings(mappings),
 		index: Index{
 			Sources:   []Source{},
 			Lines:     []LineRange{},
@@ -293,6 +335,7 @@ func Load(mainPath string, mappings []PathMapping) (*Bundle, error) {
 		MainPath:    mainPath,
 		SymbolsPath: symbolsPath,
 		SourceFiles: builder.sourceFiles,
+		sourceRoots: trustedRoots,
 	}, nil
 }
 
@@ -311,7 +354,28 @@ func localExternalPath(mainPath, reference string) (string, error) {
 	if decoded == "" {
 		return "", errors.New("external WebAssembly DWARF URL is empty")
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(mainPath), filepath.FromSlash(decoded))), nil
+	// URL paths use forward slashes on every host. Reject Windows separators
+	// too, so a module cannot change meaning when moved between hosts.
+	if strings.Contains(decoded, "\\") || !filepath.IsLocal(filepath.FromSlash(decoded)) {
+		return "", fmt.Errorf("external WebAssembly DWARF URL %q escapes the module directory", reference)
+	}
+	root := filepath.Dir(mainPath)
+	path := filepath.Join(root, filepath.FromSlash(decoded))
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, nil // Preserve MissingSymbolsError for a valid missing sidecar.
+		}
+		return "", err
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := pathPrefix(canonical, canonicalRoot); !ok {
+		return "", fmt.Errorf("external WebAssembly DWARF URL %q escapes the module directory", reference)
+	}
+	return path, nil
 }
 
 func dwarfData(sections map[string][]byte) (*dwarf.Data, error) {
@@ -349,6 +413,7 @@ type indexBuilder struct {
 	sections     map[string][]byte
 	mappings     []PathMapping
 	index        Index
+	sourceRoots  []string
 	sourceByPath map[string]string
 	sourceFiles  map[string]string
 	typeByKey    map[uintptr]string
@@ -494,9 +559,19 @@ func (b *indexBuilder) addSource(recorded string) string {
 		}
 		id = fmt.Sprintf("s%016x-%d", hash, suffix)
 	}
-	local := b.localSourcePath(recorded)
-	_, statErr := os.Stat(local)
-	available := statErr == nil
+	local, canonicalErr := filepath.EvalSymlinks(b.localSourcePath(recorded))
+	available := false
+	if canonicalErr == nil {
+		local, canonicalErr = filepath.Abs(local)
+		if info, err := os.Stat(local); canonicalErr == nil && err == nil && info.Mode().IsRegular() {
+			for _, root := range b.sourceRoots {
+				if _, ok := pathPrefix(local, root); ok {
+					available = true
+					break
+				}
+			}
+		}
+	}
 	b.index.Sources = append(b.index.Sources, Source{
 		ID: id, Path: recorded, URL: "/__llgo/source/" + id, Local: available,
 	})

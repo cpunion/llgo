@@ -207,7 +207,7 @@ func TestLoadRejectsInvalidArtifactAndSidecarContracts(t *testing.T) {
 func TestLoadRejectsNonLocalExternalURLs(t *testing.T) {
 	header := []byte{0, 'a', 's', 'm', 1, 0, 0, 0}
 	module := browserTestIdentity(t, appendBrowserCustomSection(header, ".debug_info", []byte{1}))
-	for _, reference := range []string{"https://example.invalid/symbols.wasm", "//example.invalid/symbols.wasm", "symbols.wasm?version=1", "symbols.wasm#section", "symbols%ZZ.wasm", ""} {
+	for _, reference := range []string{"https://example.invalid/symbols.wasm", "//example.invalid/symbols.wasm", "symbols.wasm?version=1", "symbols.wasm#section", "symbols%ZZ.wasm", "", "../secret.wasm", "%2e%2e/secret.wasm", "/secret.wasm", "%2fsecret.wasm", "..%5csecret.wasm", "C:%5csecret.wasm"} {
 		t.Run(reference, func(t *testing.T) {
 			// Externalize rejects empty references; write that malformed metadata
 			// directly to exercise the reader of artifacts from other producers.
@@ -455,7 +455,10 @@ func TestLoadUsesLongestSourcePathMapping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantSource := filepath.Join(relocatedRoot, "pkg", "fixture.c")
+	wantSource, err := filepath.EvalSymlinks(filepath.Join(relocatedRoot, "pkg", "fixture.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, indexed := range bundle.Index.Sources {
 		if indexed.Path != source {
 			continue
@@ -555,4 +558,46 @@ func hasTypePattern(types []Type, pattern string) bool {
 		}
 	}
 	return false
+}
+
+func TestSidecarAndSourceSymlinkContainment(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	secret := filepath.Join(outside, "secret.wasm")
+	if err := os.WriteFile(secret, []byte("private file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked.wasm")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := localExternalPath(filepath.Join(root, "main.wasm"), "linked.wasm"); err == nil {
+		t.Fatal("sidecar symlink escaped artifact directory")
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder := indexBuilder{sourceRoots: []string{canonicalRoot}, sourceByPath: make(map[string]string), sourceFiles: make(map[string]string)}
+	id := builder.addSource(link)
+	if builder.index.Sources[0].Local || builder.sourceFiles[id] != "" {
+		t.Fatal("source symlink escaped trusted root")
+	}
+	source := filepath.Join(root, "local.c")
+	if err := os.WriteFile(source, []byte("local source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id = builder.addSource(source)
+	bundle := Bundle{SourceFiles: builder.sourceFiles, sourceRoots: builder.sourceRoots}
+	if data, err := bundle.ReadSource(id); err != nil || string(data) != "local source" {
+		t.Fatalf("local source = %q, %v", data, err)
+	}
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, source); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := bundle.ReadSource(id); err == nil {
+		t.Fatalf("request-time symlink replacement exposed %q", data)
+	}
 }

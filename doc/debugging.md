@@ -108,7 +108,15 @@ The browser session starts a loopback HTTP server, loads an isolated Chrome
 profile with the LLGo extension, and opens DevTools. Set breakpoints in Sources
 and use the session page to run the program. `-source-map=FROM=TO` is repeatable
 and maps compiler-recorded paths to local source files; `-browser-devtools=false`
-disables automatic DevTools opening. Arguments after `--` are passed to Chrome.
+disables the extension handshake and allows execution without DevTools. Browser
+arguments after `--` are limited to `--window-size`, `--window-position`,
+`--start-maximized` and `--headless`; provide values as `--name=value`.
+Profile, extension and web security settings remain owned by the session.
+If the extension does not become ready within five seconds, the page reports
+an error before instantiation; open DevTools and reload to retry. Sources are
+served only from this build's package directories, the artifact directory, or
+explicit source-map destinations. Unmapped paths outside these roots remain
+unavailable. Each session accepts only its own extension's CORS origin.
 `-remote` and `-server` belong to native/embedded transports and are rejected for
 browser sessions. The generated Emscripten host, profile and worker settings
 are preserved; the launcher does not substitute host imports.

@@ -53,8 +53,9 @@ try {
   const devToolsMode = new URLSearchParams(location.search).get('llgo-devtools');
   if (devToolsMode !== 'disabled' && !globalThis.__llgoLanguageExtensionReady) {
     status.textContent = 'Waiting for the LLGo DevTools extension';
-    await new Promise(resolve => {
-      const timer = setTimeout(resolve, 5000);
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(
+        'LLGo DevTools extension did not become ready within 5 seconds. Open DevTools, then reload, or use -browser-devtools=false to run without it.')), 5000);
       globalThis.addEventListener('__llgoLanguageExtensionReady', () => {
         clearTimeout(timer);
         resolve();

@@ -31,11 +31,22 @@ llgo debug -target=emscripten \
 ```
 
 `-browser-devtools=false` disables automatic DevTools opening. Additional
-Chrome arguments follow `--`. Native GDB Remote options `-remote` and `-server`
+Chrome presentation arguments follow `--`: `--window-size=WIDTH,HEIGHT`,
+`--window-position=X,Y`, `--start-maximized` or `--headless=new`. Profile,
+extension and web security flags cannot be overridden. With DevTools enabled,
+a missing extension handshake fails visibly before Wasm instantiation after
+five seconds; open DevTools and reload to retry. Disabling browser DevTools
+explicitly skips the extension handshake.
+
+Source files are restricted to directories selected by the current build,
+the module directory and explicit source-map destinations. A source path in
+DWARF alone never authorizes reading an unrelated local file; symlinks cannot
+escape these roots. Loopback CORS accepts only the extension identity generated
+for this session. Native GDB Remote options `-remote` and `-server`
 do not apply to browser sessions.
 
 Embedded and external DWARF are both accepted. For external DWARF, keep the
-referenced `.debug.wasm` file beside the module: its build ID must match the
+referenced `.debug.wasm` file within the module directory: its build ID must match the
 module. The sidecar is debugger data; it does not replace the JavaScript host
 or executable module. Missing or mismatched sidecars are reported before
 starting the program.

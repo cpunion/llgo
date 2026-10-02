@@ -17,7 +17,12 @@ package browser
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +66,7 @@ type Options struct {
 	Chrome       string
 	ChromeArgs   []string
 	SourceMaps   []browserdebug.PathMapping
+	SourceRoots  []string
 	KeepProfile  bool
 	ProfilePath  string
 	DisableTools bool
@@ -69,11 +75,14 @@ type Options struct {
 // Run validates artifact, starts a loopback-only debug server, installs the
 // LLGo extension in an isolated profile, and waits for Chromium to exit.
 func Run(artifact string, options Options, stdin io.Reader, stdout, stderr io.Writer) error {
+	if err := validateChromeArgs(options.ChromeArgs); err != nil {
+		return err
+	}
 	path, version, err := Find(options.Chrome)
 	if err != nil {
 		return err
 	}
-	session, err := StartSession(artifact, options.SourceMaps)
+	session, err := StartSession(artifact, options.SourceMaps, options.SourceRoots...)
 	if err != nil {
 		return fmt.Errorf("llgo debug: %w", err)
 	}
@@ -85,11 +94,11 @@ func Run(artifact string, options Options, stdin io.Reader, stdout, stderr io.Wr
 	}
 	defer profileCleanup()
 	extensionPath := filepath.Join(profile, "llgo-extension")
-	if err := WriteExtension(extensionPath); err != nil {
+	if err := session.WriteExtension(extensionPath); err != nil {
 		return fmt.Errorf("llgo debug: prepare browser extension: %w", err)
 	}
 
-	args := []string{
+	args := append(append([]string(nil), options.ChromeArgs...), []string{
 		"--user-data-dir=" + profile,
 		"--no-first-run",
 		"--no-default-browser-check",
@@ -99,7 +108,7 @@ func Run(artifact string, options Options, stdin io.Reader, stdout, stderr io.Wr
 		"--password-store=basic",
 		"--disable-extensions-except=" + extensionPath,
 		"--load-extension=" + extensionPath,
-	}
+	}...)
 	if runtime.GOOS == "darwin" {
 		// An isolated profile must not wait for a system Keychain prompt before
 		// loading its command-line extension and first navigation.
@@ -108,7 +117,6 @@ func Run(artifact string, options Options, stdin io.Reader, stdout, stderr io.Wr
 	if !options.DisableTools {
 		args = append(args, "--auto-open-devtools-for-tabs")
 	}
-	args = append(args, options.ChromeArgs...)
 	sessionURL := session.URL
 	if options.DisableTools {
 		sessionURL += "?llgo-devtools=disabled"
@@ -149,20 +157,7 @@ func prepareProfile(options Options) (string, func(), error) {
 
 // Find resolves and validates a Chromium-family executable.
 func Find(configured string) (string, int, error) {
-	candidates := []string{configured, os.Getenv("LLGO_CHROME")}
-	switch runtime.GOOS {
-	case "darwin":
-		candidates = append(candidates,
-			"/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-			"/Applications/Chromium.app/Contents/MacOS/Chromium",
-			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-		)
-	case "windows":
-		candidates = append(candidates, "chrome.exe", "chromium.exe")
-	default:
-		candidates = append(candidates, "chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
-	}
+	candidates := chromeCandidates(runtime.GOOS, configured, os.Getenv)
 	seen := make(map[string]bool)
 	var failures []string
 	for _, candidate := range candidates {
@@ -198,13 +193,93 @@ func Find(configured string) (string, int, error) {
 	return "", 0, fmt.Errorf("llgo debug: Chromium %d or newer is required; use -chrome or LLGO_CHROME%s", MinimumChromeMajor, detail)
 }
 
+func chromeCandidates(goos, configured string, getenv func(string) string) []string {
+	// An explicitly selected executable must fail visibly rather than launch
+	// a different installed browser after a typo or unsupported version.
+	if configured != "" {
+		return []string{configured}
+	}
+	if configured = getenv("LLGO_CHROME"); configured != "" {
+		return []string{configured}
+	}
+	switch goos {
+	case "darwin":
+		return []string{
+			"/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		}
+	case "windows":
+		candidates := []string{"chrome.exe", "chromium.exe"}
+		for _, name := range []string{"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"} {
+			if root := getenv(name); root != "" {
+				candidates = append(candidates,
+					filepath.Join(root, "Google", "Chrome", "Application", "chrome.exe"),
+					filepath.Join(root, "Chromium", "Application", "chrome.exe"))
+			}
+		}
+		return candidates
+	default:
+		return []string{"chromium", "chromium-browser", "google-chrome", "google-chrome-stable"}
+	}
+}
+
+func validateChromeArgs(args []string) error {
+	for _, arg := range args {
+		name, _, hasValue := strings.Cut(arg, "=")
+		switch name {
+		case "--window-size", "--window-position":
+			if !hasValue {
+				return fmt.Errorf("llgo debug: browser argument %q requires --name=value", arg)
+			}
+		case "--start-maximized", "--headless":
+			// Presentation options cannot replace the profile, extension or
+			// web security policy. Values must be in the same argument.
+		default:
+			return fmt.Errorf("llgo debug: browser argument %q is unsupported; use --window-size, --window-position, --start-maximized or --headless", arg)
+		}
+	}
+	return nil
+}
+
+// extensionIdentity creates a fresh unpacked-extension ID for this session.
+// Only the public key is retained; it identifies the manifest, not a signing
+// credential. Chromium derives the ID from the first 128 bits of its SHA-256.
+func extensionIdentity() (key, origin string, err error) {
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", err
+	}
+	public, err := x509.MarshalPKIXPublicKey(&private.PublicKey)
+	if err != nil {
+		return "", "", err
+	}
+	hash := sha256.Sum256(public)
+	id := make([]byte, 32)
+	for index, value := range hash[:16] {
+		id[2*index] = 'a' + value>>4
+		id[2*index+1] = 'a' + value&15
+	}
+	return base64.StdEncoding.EncodeToString(public), "chrome-extension://" + string(id), nil
+}
+
 // WriteExtension materializes the embedded unpacked extension.
-func WriteExtension(directory string) error {
+func (s *Session) WriteExtension(directory string) error {
+	var manifest map[string]any
+	if err := json.Unmarshal(extensionManifest, &manifest); err != nil {
+		return err
+	}
+	manifest["key"] = s.extensionKey
+	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return err
 	}
 	for name, data := range map[string][]byte{
-		"manifest.json": extensionManifest,
+		"manifest.json": manifestJSON,
 		"devtools.html": extensionPage,
 		"plugin.js":     extensionPlugin,
 	} {
@@ -216,20 +291,22 @@ func WriteExtension(directory string) error {
 }
 
 type Session struct {
-	URL            string
-	Listener       net.Listener
-	Server         *http.Server
-	Bundle         *browserdebug.Bundle
-	pluginRequests atomic.Uint64
-	pluginReady    atomic.Uint64
-	runtimeReady   atomic.Uint64
+	URL             string
+	Listener        net.Listener
+	Server          *http.Server
+	Bundle          *browserdebug.Bundle
+	extensionKey    string
+	extensionOrigin string
+	pluginRequests  atomic.Uint64
+	pluginReady     atomic.Uint64
+	runtimeReady    atomic.Uint64
 }
 
 // StartSession starts the loopback HTTP portion of a browser debug session.
 // It is exported so headless acceptance tests can exercise exactly the same
 // artifact, sidecar, source, schema, and page routes as the interactive path.
-func StartSession(artifact string, mappings []browserdebug.PathMapping) (*Session, error) {
-	bundle, err := browserdebug.Load(artifact, mappings)
+func StartSession(artifact string, mappings []browserdebug.PathMapping, sourceRoots ...string) (*Session, error) {
+	bundle, err := browserdebug.Load(artifact, mappings, sourceRoots...)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +318,10 @@ func StartSession(artifact string, mappings []browserdebug.PathMapping) (*Sessio
 	if err != nil {
 		return nil, err
 	}
+	key, extensionOrigin, err := extensionIdentity()
+	if err != nil {
+		return nil, fmt.Errorf("create browser extension identity: %w", err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("start browser debug server: %w", err)
@@ -248,7 +329,7 @@ func StartSession(artifact string, mappings []browserdebug.PathMapping) (*Sessio
 	origin := "http://" + listener.Addr().String()
 	mainRoute := "/" + filepath.Base(bundle.MainPath)
 	mainURLPath := "/" + url.PathEscape(filepath.Base(bundle.MainPath))
-	session := &Session{URL: origin + "/", Listener: listener, Bundle: bundle}
+	session := &Session{URL: origin + "/", Listener: listener, Bundle: bundle, extensionKey: key, extensionOrigin: extensionOrigin}
 
 	files := map[string]servedFile{
 		mainRoute:      {data: main, contentType: "application/wasm"},
@@ -350,13 +431,13 @@ func StartSession(artifact string, mappings []browserdebug.PathMapping) (*Sessio
 	mux.HandleFunc("/__llgo/source/", func(response http.ResponseWriter, request *http.Request) {
 		setDebugHeaders(response)
 		id := strings.TrimPrefix(request.URL.Path, "/__llgo/source/")
-		path, ok := bundle.SourceFiles[id]
-		if !ok {
+		contents, err := bundle.ReadSource(id)
+		if err != nil {
 			http.NotFound(response, request)
 			return
 		}
 		response.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		http.ServeFile(response, request, path)
+		_, _ = response.Write(contents)
 	})
 
 	server := &http.Server{
@@ -368,8 +449,7 @@ func StartSession(artifact string, mappings []browserdebug.PathMapping) (*Sessio
 				return
 			}
 			if from := request.Header.Get("Origin"); from != "" && from != origin {
-				parsed, err := url.Parse(from)
-				if err != nil || parsed.Scheme != "chrome-extension" || parsed.Host == "" {
+				if from != session.extensionOrigin {
 					http.Error(response, "invalid session origin", http.StatusForbidden)
 					return
 				}
