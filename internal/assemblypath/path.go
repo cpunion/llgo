@@ -18,7 +18,7 @@ func Canonical(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resolved, err := filepath.EvalSymlinks(absolute)
+	resolved, err := resolveExistingPath(absolute)
 	if err != nil {
 		return "", fmt.Errorf("resolve existing assembly path %q: %w", absolute, err)
 	}

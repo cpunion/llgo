@@ -8,6 +8,7 @@ import (
 	"text/scanner"
 	"unicode"
 
+	"github.com/xgo-dev/llgo/internal/assemblypath"
 	"github.com/xgo-dev/llgo/internal/env"
 	"github.com/xgo-dev/llgo/internal/packages"
 	extplan9asm "github.com/xgo-dev/plan9asm"
@@ -69,9 +70,9 @@ func preprocessAssemblyForPkgWithLimit(pkg *packages.Package, file string, sourc
 			if !overlaid {
 				body, overlaid = overlay[candidate]
 			}
-			resolved, err := filepath.EvalSymlinks(candidate)
+			resolved, err := assemblypath.Canonical(candidate)
 			if os.IsNotExist(err) && overlaid {
-				parentDir, parentErr := filepath.EvalSymlinks(filepath.Dir(candidate))
+				parentDir, parentErr := assemblypath.Canonical(filepath.Dir(candidate))
 				if parentErr != nil {
 					return "", nil, parentErr
 				}
@@ -208,7 +209,7 @@ func canonicalAssemblyDirectory(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("absolute assembly directory %q: %w", path, err)
 	}
-	canonical, err := filepath.EvalSymlinks(abs)
+	canonical, err := assemblypath.Canonical(abs)
 	if err != nil {
 		info, statErr := os.Stat(abs)
 		if statErr != nil {

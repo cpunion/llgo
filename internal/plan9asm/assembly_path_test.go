@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/xgo-dev/llgo/internal/assemblypath"
 )
 
 func TestCanonicalAssemblyDirectoryRejectsRegularFile(t *testing.T) {
@@ -62,7 +64,7 @@ func TestAssemblyDirectoriesBindOriginalGoInstallation(t *testing.T) {
 		if err != nil || len(original) == 0 {
 			t.Fatalf("required original Go header %q: %v (bytes=%d)", path, err, len(original))
 		}
-		canonical, err := filepath.EvalSymlinks(path)
+		canonical, err := assemblypath.Canonical(path)
 		if err != nil {
 			logAssemblyPathComponents(t, path)
 			t.Fatalf("resolve original Go header %q: %v", path, err)
