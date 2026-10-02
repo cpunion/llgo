@@ -3208,3 +3208,75 @@ func TestFormatPackageError(t *testing.T) {
 		})
 	}
 }
+
+func TestLinkExecutionKeepsSitePolicyAfterBackendDisposal(t *testing.T) {
+	t.Setenv("LLGO_PCLNPOST", "1")
+	for _, test := range []struct {
+		goos       string
+		dwarf      bool
+		entrySites bool
+	}{
+		{goos: "linux", entrySites: true},
+		{goos: "linux", dwarf: true, entrySites: true},
+		{goos: "darwin", entrySites: true},
+		{goos: "darwin", dwarf: true},
+	} {
+		for _, enabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/dwarf=%v/sites=%v", test.goos, test.dwarf, enabled), func(t *testing.T) {
+				prog := llssa.NewProgram(nil)
+				defer prog.Dispose()
+				prog.EnableFuncInfoSites(enabled)
+				ctx := &context{
+					prog: prog,
+					buildConf: &Config{Mode: ModeBuild, BuildMode: BuildModeExe,
+						Goos: test.goos, Goarch: "amd64", PCLNMode: PCLNEmbedded,
+						OmitDWARFByDefault: !test.dwarf},
+					initial: []*packages.Package{{}},
+				}
+				plan := &mainLinkPlan{runtimeSites: shouldEmitRuntimeSites(ctx)}
+				ctx.releaseSingleExecutableBackend()
+				if ctx.prog != nil {
+					t.Fatal("released context still exposes the backend Program")
+				}
+				linkCtx := newLinkExecutionContext(ctx, plan)
+				if got := shouldEmitRuntimeSites(linkCtx); got != enabled {
+					t.Fatalf("runtime sites = %v, want %v", got, enabled)
+				}
+				out := filepath.Join(t.TempDir(), "missing")
+				args, cleanup, err := funcInfoSiteLayoutArgs(linkCtx, out)
+				cleanup()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (len(args) != 0) != (enabled && test.goos == "linux") {
+					t.Fatalf("sites enabled=%v: linker args = %v", enabled, args)
+				}
+				wantEntrySites := enabled && test.entrySites
+				if got := shouldEmitRuntimeEntrySites(linkCtx); got != wantEntrySites {
+					t.Fatalf("entry sites = %v, want %v", got, wantEntrySites)
+				}
+				// A missing output must reach the rewriter when entry sites are enabled.
+				// Checking the diagnostic also catches silently skipping the rewrite
+				// because the released context no longer has a Program.
+				stderr, err := os.CreateTemp(t.TempDir(), "stderr")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer stderr.Close()
+				oldStderr := os.Stderr
+				func() {
+					os.Stderr = stderr
+					defer func() { os.Stderr = oldStderr }()
+					rewritePrebuiltFuncTab(linkCtx, out, true)
+				}()
+				got, err := os.ReadFile(stderr.Name())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(got), "prebuilt functab rewrite skipped:") != wantEntrySites {
+					t.Fatalf("sites enabled=%v: rewrite diagnostic = %q", enabled, got)
+				}
+			})
+		}
+	}
+}

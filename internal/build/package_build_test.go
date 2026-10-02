@@ -562,6 +562,7 @@ func TestSnapshotBackendPackageAndConsumers(t *testing.T) {
 
 	lpkg := isolated.NewPackage("p", "example.com/p")
 	lpkg.NeedAbiInit = 3
+	lpkg.SetExport("example.com/p.Export", "Export")
 	lpkg.RecordReflectMethodByIndex("example.com/p.useIndex", 7)
 	lpkg.RecordReflectMethodByName("example.com/p.useName", "Method")
 	pkg := &aPackage{
@@ -585,7 +586,9 @@ func TestSnapshotBackendPackageAndConsumers(t *testing.T) {
 	snapshot.abiTypes = []llssa.AbiTypeInfo{{Name: "example.com/p.Type", Raw: types.Typ[types.Int]}}
 	snapshot.funcInfo = []funcInfoRecord{{symbol: "example.com/p.fn", name: "Fn"}}
 	snapshot.pcLineInfo = []pcLineRecord{{id: 1, symbol: "example.com/p.fn", line: 12}}
-	snapshot.hasLocalExports = true
+	if !snapshot.hasLocalExports {
+		t.Fatal("snapshot lost the package C export")
+	}
 	if infos := ctx.backendAbiTypes([]Package{pkg}); len(infos) != 1 || infos[0].Name != "example.com/p.Type" {
 		t.Fatalf("snapshot ABI types = %#v", infos)
 	}
@@ -604,6 +607,9 @@ func TestSnapshotBackendPackageAndConsumers(t *testing.T) {
 
 	ctx.disposeBackendPackage(pkg)
 	disposed = true
+	if !mainPackageHasExports([]*aPackage{pkg}) {
+		t.Fatal("disposed package lost its C export snapshot")
+	}
 	if pkg.LPkg != nil {
 		t.Fatal("disposed package retained LPkg")
 	}
@@ -812,5 +818,31 @@ func TestPackageSchedulingHandlesNonBackendPackages(t *testing.T) {
 	usesPlan9, err := (&context{}).packageUsesPlan9Asm(task.pkg)
 	if err != nil || usesPlan9 {
 		t.Fatalf("nil package Plan9 asm = %v, %v; want false, nil", usesPlan9, err)
+	}
+}
+
+func TestBuildPackagePropagatesArchiveFailure(t *testing.T) {
+	conf := NewDefaultConf(ModeBuild)
+	conf.OutFile = filepath.Join(t.TempDir(), "app")
+	missing := filepath.Join(t.TempDir(), "missing-member.o")
+	var failedPkg Package
+	conf.ModuleHook = func(pkg Package) {
+		if pkg.Name == "main" {
+			failedPkg = pkg
+			pkg.ObjFiles = append(pkg.ObjFiles, missing)
+		}
+	}
+	_, err := Do([]string{"../../benchmark/binary_size/cprintf"}, conf)
+	if err == nil || !strings.Contains(err.Error(), "create archive for") || !strings.Contains(err.Error(), "missing-member.o") {
+		t.Fatalf("Do error = %v, want missing archive member", err)
+	}
+	if failedPkg == nil {
+		t.Fatal("main package was not compiled")
+	}
+	if failedPkg.ArchiveFile != "" || len(failedPkg.ObjBuffers) != 0 {
+		t.Fatal("failed archive was published or retained object buffers")
+	}
+	if _, err := os.Stat(conf.OutFile); !os.IsNotExist(err) {
+		t.Fatalf("failed package produced an executable: %v", err)
 	}
 }

@@ -716,6 +716,9 @@ func shouldEmitRuntimeWasmSites(ctx *context) bool {
 // which follow the function section containing the anchor under /OPT:REF.
 // Sites are additionally gated per Program (see Program.EnableFuncInfoSites).
 func shouldEmitRuntimeSites(ctx *context) bool {
+	if ctx != nil && ctx.linkRuntimeSites != nil {
+		return *ctx.linkRuntimeSites
+	}
 	if ctx == nil || ctx.prog == nil || !ctx.prog.FuncInfoSitesEnabled() {
 		return false
 	}

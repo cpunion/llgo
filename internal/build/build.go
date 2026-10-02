@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -1096,7 +1097,30 @@ func linkInitialPackage(ctx *context, pkg *packages.Package, allPkgs []*aPackage
 	if err != nil {
 		return nil, err
 	}
+	ctx.releaseSingleExecutableBackend()
 	return executeInitialPackageLink(ctx, link, verbose, false)
+}
+
+// releaseSingleExecutableBackend runs after entry-object generation, including
+// deadcode overrides. External linking and PCLN finalization use the file-backed
+// link plan, so a single executable no longer needs LLVM modules. Keep them for
+// other roots and library headers, which still consume backend state.
+func (ctx *context) releaseSingleExecutableBackend() {
+	if ctx.buildConf.Mode != ModeBuild || ctx.buildConf.BuildMode != BuildModeExe || len(ctx.initial) != 1 {
+		return
+	}
+	ctx.disposeBackendPrograms()
+	for _, pkg := range ctx.pkgs {
+		if pkg != nil {
+			pkg.LPkg = nil
+		}
+	}
+	ctx.prog.Dispose()
+	ctx.prog = nil
+	ctx.cTransformer = nil
+	// Return unused Go heap pages before the linker/optimizer allocates its
+	// own working set. LLVM's native allocations were released above.
+	debug.FreeOSMemory()
 }
 
 func prepareInitialPackageLink(ctx *context, pkg *packages.Package, allPkgs []*aPackage, conf *Config, verbose, discardOutput bool) (*initialPackageLink, error) {
@@ -1289,6 +1313,7 @@ func newLinkExecutionContext(ctx *context, plan *mainLinkPlan) *context {
 		crossCompile:         ctx.crossCompile,
 		commands:             ctx.commands,
 		pclnExternal:         plan.pclnExternal,
+		linkRuntimeSites:     &plan.runtimeSites,
 		stripDarwinLTOLocals: plan.stripDarwinLTOLocals,
 		goVersion:            ctx.goVersion,
 	}
@@ -1662,6 +1687,9 @@ type context struct {
 	// already internalized ordinary Go symbols, but pclnpost still needs them
 	// until the runtime tables have been rewritten.
 	stripDarwinLTOLocals bool
+
+	// linkRuntimeSites snapshots the backend-dependent site policy for linking.
+	linkRuntimeSites *bool
 
 	buildTrace *buildTracer
 
@@ -2259,6 +2287,7 @@ func rewritePrebuiltFuncTab(ctx *context, out string, verbose bool) {
 }
 
 type mainLinkPlan struct {
+	runtimeSites         bool
 	outputPath           string
 	linkInputs           []string
 	linkArgs             []string
@@ -2453,6 +2482,7 @@ func buildMainLink(ctx *context, pkg *packages.Package, preparation *mainLinkPre
 	ctx.stripDarwinLTOLocals = preparation.stripDarwinLTOLocals
 
 	return &mainLinkPlan{
+		runtimeSites:         shouldEmitRuntimeSites(ctx),
 		outputPath:           outputPath,
 		linkInputs:           linkInputs,
 		linkArgs:             preparation.linkArgs,
