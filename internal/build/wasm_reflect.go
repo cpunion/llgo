@@ -274,6 +274,9 @@ func isWasmReflectBridgeFunction(fn *ssa.Function) bool {
 func isWasmReflectBridgeSignature(name string, signature *types.Signature) bool {
 	switch name {
 	case "Call", "CallSlice", "MakeFunc", "Seq", "Seq2":
+		// Indirect calls retain the conservative name-only match: an
+		// unrelated interface method can enable extra bridges, but cannot
+		// cause a required reflection bridge to be omitted.
 		return true
 	case "Method", "MethodByName":
 		// A bound Value method can escape through Interface and be invoked as
