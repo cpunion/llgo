@@ -247,6 +247,7 @@ func TestProgramUsesWasmReflectBridgesReachability(t *testing.T) {
 		{"bound method lookup", `package main; import "reflect"; func main() { lookup := reflect.Value{}.MethodByName; _ = lookup("M") }`, true},
 		{"interface method lookup", `package main; import "reflect"; type lookup interface { Method(int) reflect.Value }; func main() { var v lookup = reflect.Value{}; _ = v.Method(0) }`, true},
 		{"bound type method metadata", `package main; import "reflect"; func main() { lookup := reflect.TypeOf(0).Method; _ = lookup(0) }`, false},
+		{"named type method metadata", `package main; import "reflect"; func main() { _, _ = reflect.TypeOf(0).MethodByName("M") }`, false},
 		{"reachable call", `package main; import "reflect"; func live(v reflect.Value) { v.Call(nil) }; func main() { live(reflect.Value{}) }`, true},
 		{"function value call", `package main; import "reflect"; var call = reflect.Value.Call; func main() { call(reflect.Value{}, nil) }`, true},
 		{"bound method call", `package main; import "reflect"; func main() { call := reflect.Value{}.Call; call(nil) }`, true},
