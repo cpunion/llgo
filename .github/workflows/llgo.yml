@@ -869,6 +869,16 @@ jobs:
           python3 -m unittest discover -s dev -p test_wasm_debug_info_test.py
           python3 dev/test_wasm_debug_info.py --profile j32 --profile j64 --profile w32 --artifact embedded --artifact external
 
+      - name: Test optimized Emscripten runtime boundaries
+        if: matrix.suite == 'runtime'
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+          LLGO_BUILD_CACHE: "1"
+          CHROME: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: |
+          node --test test/wasm/optimization/asyncify-exports.test.mjs
+          python3 test/wasm/optimization/test.py --browser
+
       - name: Build standard runtime for wasm
         if: matrix.suite == 'runtime'
         shell: bash
