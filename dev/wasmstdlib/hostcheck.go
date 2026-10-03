@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -21,7 +22,11 @@ func fullChildCommand(p profile, root, goRoot, artifact, arg string) command {
 		args = []string{filepath.Join(goRoot, "lib", "wasm", "go_"+p.GOOS+"_wasm_exec"), artifact, arg}
 		env["GOWASIRUNTIME"] = "wasmtime"
 	case p.Target == "wasi":
-		args = []string{"wasmer", "run", "--cranelift", "--disable-cache", "--enable-exceptions", "--enable-simd", "--stack-size=1048576", "--volume=" + root, "--volume=/tmp", artifact, "--", arg}
+		backend := "--cranelift"
+		if runtime.GOOS == "windows" {
+			backend = "--v8"
+		}
+		args = []string{"wasmer", "run", backend, "--disable-cache", "--enable-exceptions", "--enable-simd", "--stack-size=1048576", "--volume=" + root, "--volume=/tmp", artifact, "--", arg}
 	default:
 		runner := "emscripten-runner.mjs"
 		if p.Target == "emscripten-memory64" {

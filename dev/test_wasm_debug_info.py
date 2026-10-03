@@ -170,7 +170,7 @@ def main():
                 check_external_pair(module, debug_module)
             check_module(debug_module, dwarfdump=dwarfdump, addr2line=addr2line)
             if profile == "w32":
-                command = [os.environ.get("WASMER", "wasmer"), "run", "--cranelift", "--disable-cache", "--enable-exceptions", "--enable-simd",
+                command = [os.environ.get("WASMER", "wasmer"), "run", "--v8" if os.name == "nt" else "--cranelift", "--disable-cache", "--enable-exceptions", "--enable-simd",
                            "--stack-size=1048576", str(module)]
             else:
                 runner = "emscripten-memory64-runner.mjs" if profile == "j64" else "emscripten-runner.mjs"

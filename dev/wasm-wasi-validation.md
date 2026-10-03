@@ -5,7 +5,8 @@ that backend; they do not introduce an M:N scheduler on native or WASI targets.
 
 ## Fixed failure modes
 
-- The default runner is the unmodified Wasmer 7.5.0 CLI with Cranelift,
+- The default runner is the unmodified Wasmer 7.5.0 CLI with Cranelift on Unix
+  and V8 on Windows,
   standard Wasm EH, SIMD and shared memory. LLVM emits standard EH directly
   with `-wasm-use-legacy-eh=false`, including the LTO link; no Binaryen
   translation or runtime patch is needed. WASI libc supplies pthread creation
@@ -26,9 +27,13 @@ that backend; they do not introduce an M:N scheduler on native or WASI targets.
   will never execute another Go safepoint. A worker now verifies that GC still
   advances after initial Goexit with the timer service active.
 - Repeated explicit GC must allow waiting allocations and resumed threads to
-  progress. The allocator uses the same GC-safe pthread mutex instead of
-  spinning through repeated host calls, and the next collection waits for the
-  previous rendezvous to finish. Compiler polls and runtime symbol-table
+  progress. The allocator uses a GC-safe pthread mutex instead of spinning
+  through repeated host calls, and the next collection waits for the previous
+  rendezvous to finish. After an explicit GC, a collector with pending allocator
+  waiters waits in C for another lock acquisition before returning to Go. This
+  prevents a tight GC loop from repeatedly taking the mutex ahead of woken
+  allocators; ordinary allocations retain normal pthread mutex handoff. The
+  collector publishes its roots while waiting because the next owner may GC. Compiler polls and runtime symbol-table
   initialization waiters acknowledge collection requests. Arbitrary user C
   calls can still prevent collection. The 32-thread/1000-round concurrent
   function-info test timed out at 100 seconds with the spin lock; the blocking
@@ -59,7 +64,9 @@ The installer verifies pinned release archive SHA-256 digests. Prebuilt hosts
 are macOS arm64, Linux amd64/aarch64/riscv64 and Windows amd64 (including use
 from MinGW). Wasmer 7.5.0 does not publish a macOS Intel archive; that host
 requires a source-built CLI on PATH. The Windows CLI is a standalone host
-process and does not need to match the guest compiler's C ABI.
+process and does not need to match the guest compiler's C ABI. Its official
+archive only includes the V8 backend, so Windows invocations select `--v8`;
+Unix invocations retain `--cranelift`.
 
 ## Reproducible checks
 
