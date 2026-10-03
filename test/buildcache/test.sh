@@ -68,6 +68,22 @@ capture_cache_build() {
     fi
 }
 
+# Preserve the runner's diagnostic when a cached executable fails. Successful
+# runs remain quiet so the cache snapshot output stays readable.
+capture_cache_run() {
+    local command="$1"
+    local log="$BUILD_TEMP_DIR/run.log"
+    local status
+    if eval "$command" > "$log" 2>&1; then
+        return 0
+    else
+        status=$?
+        cat "$log" >&2
+        echo "Runner exited with status $status" >&2
+        return "$status"
+    fi
+}
+
 # Helper function to compare with snapshot
 compare_snapshot() {
     local test_name="$1"
@@ -137,7 +153,7 @@ run_test_suite() {
             return 1
         fi
         if [ -n "$run_cmd" ]; then
-            if ! eval "$run_cmd" > /dev/null 2>&1; then
+            if ! capture_cache_run "$run_cmd"; then
                 echo -e "${RED}Run failed${NC}"
                 return 1
             fi
@@ -155,7 +171,7 @@ run_test_suite() {
             return 1
         fi
         if [ -n "$run_cmd" ]; then
-            if ! eval "$run_cmd" > /dev/null 2>&1; then
+            if ! capture_cache_run "$run_cmd"; then
                 echo -e "${RED}Run failed${NC}"
                 return 1
             fi
@@ -173,7 +189,7 @@ run_test_suite() {
             return 1
         fi
         if [ -n "$run_cmd" ]; then
-            if ! eval "$run_cmd" > /dev/null 2>&1; then
+            if ! capture_cache_run "$run_cmd"; then
                 echo -e "${RED}Run failed${NC}"
                 return 1
             fi
@@ -210,7 +226,7 @@ run_test_suite() {
         fi
 
         if [ -n "$run_cmd" ]; then
-            if ! eval "$run_cmd" > /dev/null 2>&1; then
+            if ! capture_cache_run "$run_cmd"; then
                 echo -e "${RED}Run failed${NC}"
                 return 1
             fi
@@ -239,7 +255,7 @@ run_test_suite() {
             return 1
         fi
         if [ -n "$run_cmd" ]; then
-            if ! eval "$run_cmd" > /dev/null 2>&1; then
+            if ! capture_cache_run "$run_cmd"; then
                 echo -e "${RED}Run failed${NC}"
                 return 1
             fi
@@ -268,7 +284,7 @@ run_test_suite() {
             return 1
         fi
         if [ -n "$run_cmd" ]; then
-            if ! eval "$run_cmd" > /dev/null 2>&1; then
+            if ! capture_cache_run "$run_cmd"; then
                 echo -e "${RED}Run failed${NC}"
                 return 1
             fi
