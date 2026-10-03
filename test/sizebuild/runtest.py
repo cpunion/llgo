@@ -55,15 +55,20 @@ def main():
 
         iwasm = env.get("IWASM", "iwasm")
         cases = (("full", "println"), ("thin", "println"),
-                 ("full", "fmtprintf"), ("full", "threaded-gc"))
+                 ("full", "fmtprintf"), ("full", "goexit-defer"),
+                 ("thin", "goexit-defer"), ("full", "threaded-gc"))
+        probes = {
+            "goexit-defer": ("./internal/build/testdata/wasm-wasi-goexit-defer",
+                             "wasi worker defer ok"),
+            "threaded-gc": ("./internal/build/testdata/wasm-wasi-threaded-gc",
+                            "wasi threaded gc ok"),
+        }
         for mode, sample in cases:
-            fixture = ("./internal/build/testdata/wasm-wasi-threaded-gc"
-                       if sample == "threaded-gc"
-                       else f"./benchmark/binary_size/{sample}")
-            expected = "wasi threaded gc ok" if sample == "threaded-gc" else "Hello, world"
-            # Reuse the full-LTO packages for the large GC probe; the smaller
+            fixture, expected = probes.get(
+                sample, (f"./benchmark/binary_size/{sample}", "Hello, world"))
+            # Reuse the LTO packages for the runtime probes; the smaller
             # samples above independently check forced and cached builds.
-            builds = (False,) if sample == "threaded-gc" else (True, False)
+            builds = (False,) if sample in probes else (True, False)
             for cold in builds:
                 output = directory / f"{sample}-{mode}.wasm"
                 flags = ["-a"] if cold else []

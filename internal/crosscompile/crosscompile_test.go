@@ -330,7 +330,12 @@ func TestUseWASILTOFlags(t *testing.T) {
 				if !slices.Contains(export.CCFLAGS, mode.ClangFlag()) {
 					t.Fatalf("CCFLAGS do not emit LTO bitcode: %v", export.CCFLAGS)
 				}
-				for _, flag := range []string{mode.ClangFlag(), "-Wl,--mllvm=-wasm-enable-sjlj", "-Wl," + ltoLinkerOptFlag(level)} {
+				for _, flag := range []string{
+					mode.ClangFlag(),
+					"-Wl,--mllvm=-wasm-enable-sjlj",
+					"-Wl,--mllvm=-exception-model=wasm",
+					"-Wl," + ltoLinkerOptFlag(level),
+				} {
 					if !slices.Contains(export.LDFLAGS, flag) {
 						t.Fatalf("LDFLAGS missing %q: %v", flag, export.LDFLAGS)
 					}

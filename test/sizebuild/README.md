@@ -12,9 +12,10 @@ Go-metadata DCE, while the separate ESP32-C3 lane uses `-deadcodedrop`; the two
 paths are not enabled together. The WASI lane requires WAMR (`iwasm`, or
 `IWASM=/path/to/iwasm`) with threads and legacy exception handling. It builds and
 runs println with full/ThinLTO and fmt.Printf with full LTO, first forcing
-compilation and then permitting package-cache reuse. A full-LTO build of the
-existing threaded-GC fixture also checks goroutines, panic/recover, C blocking,
-and arena growth.
+compilation and then permitting package-cache reuse. The existing worker-defer
+fixture checks Go panic/recover, Goexit, and C setjmp/longjmp with both full and
+ThinLTO. A full-LTO build of the threaded-GC fixture also checks goroutines,
+panic/recover during collection, C blocking, and arena growth.
 
 WAMR runs with `--max-threads=128 --stack-size=1048576 --heap-size=0`.
 
