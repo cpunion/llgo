@@ -71,6 +71,44 @@ func TestWASIHostDirectories(t *testing.T) {
 	}
 }
 
+func TestWASIRunnerIsolatesEngineLogging(t *testing.T) {
+	dir := t.TempDir()
+	// Guest stderr may itself look like an engine log. It must survive intact;
+	// the runner controls the engine's logger instead of filtering the stream.
+	guestLog := `{"level":"WARN","target":"wasmer","fields":{"message":"guest stderr"}}`
+	script := "#!/bin/sh\n" +
+		"if [ \"$RUST_LOG\" != off ]; then echo 'engine diagnostic' >&2; fi\n" +
+		"echo 'guest stdout'\n" +
+		"echo '" + guestLog + "' >&2\nexit 7\n"
+	if err := os.WriteFile(filepath.Join(dir, "wasmer"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	commands := commandEnv{dir: dir, environ: withEnv(os.Environ(), "RUST_LOG=warn")}
+	for _, phase := range []string{"test", "run"} {
+		t.Run(phase, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := runEmuCmdTo(commands, map[string]string{"": "program.wasm"},
+				crosscompile.WASIThreadedEmulator, nil, false, false,
+				runnerDetails{phase: phase}, &stdout, &stderr)
+			var failure *runnerFailure
+			if !errors.As(err, &failure) || failure.exitCode != 7 || failure.status != runnerStatusExit {
+				t.Fatalf("runner failure = %v, want exit 7", err)
+			}
+			wantErr := guestLog + "\n"
+			if phase == "run" {
+				wantErr = "engine diagnostic\n" + wantErr
+			}
+			if stdout.String() != "guest stdout\n" || stderr.String() != wantErr {
+				t.Fatalf("stdout = %q, stderr = %q; want guest output and stderr %q", stdout.String(), stderr.String(), wantErr)
+			}
+		})
+	}
+	if commands.lookup("RUST_LOG") != "warn" {
+		t.Fatal("test runner changed the caller's logging environment")
+	}
+}
+
 func TestWASIThreadedEmulatorHostContract(t *testing.T) {
 	dir := t.TempDir()
 	runner := filepath.Join(dir, "wasmer")
@@ -92,8 +130,8 @@ func TestWASIThreadedEmulatorHostContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if got, want := args[6], "--volume="+dir; got != want {
-		t.Fatalf("Wasmer working directory = %q, want %q", got, want)
+	if want := "--volume=" + dir; !slices.Contains(args, want) {
+		t.Fatalf("Wasmer arguments %q omit working directory %q", args, want)
 	}
 	for _, want := range []string{"--env=PWD=" + dir, "--env=PATH=" + dir} {
 		if !slices.Contains(args, want) {
@@ -120,8 +158,8 @@ func TestWASIThreadedEmulatorHostContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := args[6], "--volume="+cwd; got != want {
-		t.Fatalf("Wasmer default working directory = %q, want %q", got, want)
+	if want := "--volume=" + cwd; !slices.Contains(args, want) {
+		t.Fatalf("Wasmer arguments %q omit default working directory %q", args, want)
 	}
 }
 

@@ -56,9 +56,9 @@ build_wasi() {
 	"${llgo_cmd}" build -target "${target}" -o "${module}" "${fixture}"
 	assert_wasm_module "${module}"
 	if command -v timeout >/dev/null 2>&1; then
-		timeout 60s "${wasmer_cmd}" run "${wasmer_backend}" --disable-cache --enable-exceptions --enable-simd --stack-size=1048576 "${module}"
+		RUST_LOG=off timeout 60s "${wasmer_cmd}" run "${wasmer_backend}" --enable-exceptions --enable-simd --stack-size=1048576 "${module}"
 	else
-		"${wasmer_cmd}" run "${wasmer_backend}" --disable-cache --enable-exceptions --enable-simd --stack-size=1048576 "${module}"
+		RUST_LOG=off "${wasmer_cmd}" run "${wasmer_backend}" --enable-exceptions --enable-simd --stack-size=1048576 "${module}"
 	fi
 }
 
@@ -93,9 +93,9 @@ raw_wasi="${work_dir}/raw-wasip1.wasm"
 GOOS=wasip1 GOARCH=wasm "${llgo_cmd}" build -o "${raw_wasi}" "${fixture}"
 assert_wasm_module "${raw_wasi}"
 if command -v timeout >/dev/null 2>&1; then
-	timeout 60s "${wasmer_cmd}" run "${wasmer_backend}" --disable-cache --enable-exceptions --enable-simd --stack-size=1048576 "${raw_wasi}"
+	RUST_LOG=off timeout 60s "${wasmer_cmd}" run "${wasmer_backend}" --enable-exceptions --enable-simd --stack-size=1048576 "${raw_wasi}"
 else
-	"${wasmer_cmd}" run "${wasmer_backend}" --disable-cache --enable-exceptions --enable-simd --stack-size=1048576 "${raw_wasi}"
+	RUST_LOG=off "${wasmer_cmd}" run "${wasmer_backend}" --enable-exceptions --enable-simd --stack-size=1048576 "${raw_wasi}"
 fi
 
 echo "WebAssembly target profile checks passed"

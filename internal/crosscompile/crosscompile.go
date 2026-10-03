@@ -101,7 +101,7 @@ const (
 	// and SIMD. wasi-libc manages its own heap inside the module memory.
 	// The runner resolves the working-directory preopen to an absolute path
 	// before execution and also grants Go's default /tmp directory.
-	WASIThreadedEmulator = `wasmer run --cranelift --disable-cache --enable-exceptions --enable-simd --stack-size=1048576 --volume=. --volume=/tmp "{}"`
+	WASIThreadedEmulator = `wasmer run --cranelift --enable-exceptions --enable-simd --stack-size=1048576 --volume=. --volume=/tmp "{}"`
 
 	WasmProfileNone WasmProfile = ""
 	WasmProfileJ32  WasmProfile = "j32"

@@ -416,6 +416,12 @@ func runEmuCmdTo(commands commandEnv, envMap map[string]string, emulatorTemplate
 			errors.New("empty emulator command"))
 	}
 	if emulatorTemplate == crosscompile.WASIThreadedEmulator {
+		if details.phase == "test" {
+			// Wasmer tracing and guest stderr share the same stream. Disable
+			// engine tracing at its source for tests, while keeping module
+			// caching and guest output intact. Ordinary runs retain RUST_LOG.
+			commands.environ = withEnv(commands.environ, "RUST_LOG=off")
+		}
 		// Map the actual working directory so guest PWD, Getwd and Chdir
 		// agree even when a test temporarily changes its working directory.
 		cwd := commands.dir

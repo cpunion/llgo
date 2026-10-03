@@ -347,7 +347,7 @@ if [ -n "$LLGO_WASMER" ] && [ -f "$LLGO_WASMER" ]; then
     run_test_suite "wasm" \
         "GOOS=wasip1 GOARCH=wasm llgo build -o $BUILD_TEMP_DIR/buildcache.wasm -tags=nogc -compiler-verbose ." \
         "$BUILD_TEMP_DIR/buildcache.wasm" \
-        "$LLGO_WASMER run $WASMER_BACKEND --disable-cache --enable-exceptions --enable-simd --stack-size=1048576 $BUILD_TEMP_DIR/buildcache.wasm"
+        "RUST_LOG=off $LLGO_WASMER run $WASMER_BACKEND --enable-exceptions --enable-simd --stack-size=1048576 $BUILD_TEMP_DIR/buildcache.wasm"
 else
     echo ""
     echo -e "${BLUE}Skipping WASM tests (wasmer not available)${NC}"

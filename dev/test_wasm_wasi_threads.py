@@ -16,9 +16,32 @@ WASMER = os.environ.get("WASMER", "wasmer")
 
 
 def wasmer_command(module, *args):
-    return [WASMER, "run", "--v8" if os.name == "nt" else "--cranelift", "--disable-cache", "--enable-exceptions", "--enable-simd",
+    return [WASMER, "run", "--v8" if os.name == "nt" else "--cranelift", "--enable-exceptions", "--enable-simd",
             "--stack-size=1048576", "--volume=" + str(ROOT), "--volume=/tmp",
             str(module), "--", *args]
+
+
+def run_output_cache_probe(env, directory):
+    module = pathlib.Path(directory) / "runner-output.wasm"
+    cache = pathlib.Path(directory) / "runner-cache"
+    subprocess.run([os.environ.get("WASM_TOOLS", "wasm-tools"), "parse",
+                    str(ROOT / "internal/build/testdata/wasm-wasi-runner-output/main.wat"),
+                    "-o", str(module)], check=True, timeout=30)
+    command = wasmer_command(module)
+    command[2:2] = ["--cache-dir", str(cache)]
+    previous_cache = None
+    for state in ("cold", "warm"):
+        result = subprocess.run(command, env=env, capture_output=True, timeout=30)
+        expected_stderr = b'{"level":"WARN","target":"wasmer","fields":{"message":"guest stderr"}}\n'
+        if (result.returncode != 7 or result.stdout != b"guest stdout\n"
+                or result.stderr != expected_stderr):
+            raise SystemExit(f"Wasmer {state} cache changed guest output/status: {result}")
+        artifacts = {str(p.relative_to(cache)): (p.stat().st_size, p.stat().st_mtime_ns)
+                     for p in cache.rglob("*.bin")}
+        if not artifacts or (previous_cache is not None and artifacts != previous_cache):
+            raise SystemExit(f"Wasmer {state} module cache was not reused: {artifacts}")
+        previous_cache = artifacts
+    print("wasi cold/warm cache and guest stdout/stderr/exit status ok", flush=True)
 
 
 def run_probe(env, directory, name, fixture, tags, marker, timeout,
@@ -38,7 +61,7 @@ def run_probe(env, directory, name, fixture, tags, marker, timeout,
     for attempt in range(runs):
         result = subprocess.run(
             wasmer_command(module, *args),
-            capture_output=True,
+            env=env, capture_output=True,
             text=True,
             timeout=timeout,
         )
@@ -76,7 +99,7 @@ def run_arena_boundaries(env, directory):
     for size in ((32 << 20) - (128 << 10), (32 << 20) - 1,
                  32 << 20, (32 << 20) + 1, 33 << 20):
         result = subprocess.run(
-            wasmer_command(module, str(size)), capture_output=True, text=True, timeout=180,
+            wasmer_command(module, str(size)), env=env, capture_output=True, text=True, timeout=180,
         )
         print(f"Wasmer arena boundary: {size} bytes")
         print(result.stdout, end="")
@@ -93,14 +116,17 @@ def main():
 
     env = os.environ.copy()
     env["LLGO_ROOT"] = str(ROOT)
+    # Keep inherited Rust diagnostics out of guest-output assertions.
+    env["RUST_LOG"] = "off"
     env.pop("LLGO_WASI_THREADS", None)
     env["PATH"] = str(pathlib.Path(wasmer).resolve().parent) + os.pathsep + env["PATH"]
     with tempfile.TemporaryDirectory(prefix="llgo-wasi-threads-") as directory:
+        run_output_cache_probe(env, directory)
         simd = pathlib.Path(directory) / "simd-threads-eh.wasm"
         subprocess.run([os.environ.get("WASM_TOOLS", "wasm-tools"), "parse",
                         str(ROOT / "internal/build/testdata/wasm-wasi-simd/threads.wat"),
                         "-o", str(simd)], check=True, timeout=30)
-        subprocess.run(wasmer_command(simd), check=True, timeout=30)
+        subprocess.run(wasmer_command(simd), env=env, check=True, timeout=30)
         print("wasi SIMD/thread/standard-EH boundary ok", flush=True)
         run_probe(env, directory, "startup", "wasm-wasi-thread-startup", "nogc",
                   "wasi thread startup ok", 30)
@@ -129,7 +155,7 @@ def main():
         subprocess.run([os.environ.get("WASM_TOOLS", "wasm-tools"), "parse",
                         str(ROOT / "internal/build/testdata/wasm-wasi-goexit-defer/uncaught.wat"),
                         "-o", str(uncaught)], check=True, timeout=30)
-        result = subprocess.run(wasmer_command(uncaught), capture_output=True,
+        result = subprocess.run(wasmer_command(uncaught), env=env, capture_output=True,
                                 text=True, timeout=30)
         if result.returncode == 0 or "Uncaught exception with payload: [I32(42)]" not in result.stdout + result.stderr:
             raise SystemExit(f"Wasmer swallowed an escaping exception: {result}")

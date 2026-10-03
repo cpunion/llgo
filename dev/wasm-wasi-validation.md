@@ -57,8 +57,17 @@ It then runs three groups in fresh Wasmer invocations: finalizers/callback GC/
 function-info, the 20 pointer-argument startup races, and the 20 zero-argument
 startup races. Each invocation has a 300-second deadline and verbose output.
 Separate deadlines retain every case and repetition and keep first-use checks
-independent of earlier test initialization. Wasmer's compiled-module cache is
-disabled so cache diagnostics do not contaminate guest output.
+independent of earlier test initialization.
+
+Wasmer's compiled-module cache remains enabled. Wasmer tracing and guest
+stderr use the same host stream, so `llgo test` and these acceptance drivers set
+`RUST_LOG=off` for the host process. Guest stdout/stderr and runner failures are
+preserved without parsing or filtering their text. Ordinary `llgo run` retains
+the caller's logging configuration; use `RUST_LOG=warn` when diagnosing the
+engine. Wasmer 7.5.0 normally disables tracing when `RUST_LOG` is unset.
+The acceptance driver uses a fresh cache to verify cold/warm execution, unchanged
+cached artifacts, separate guest stdout/stderr, and a nonzero guest exit status.
+Guest stderr deliberately resembles an engine log to guard against text filters.
 
 The installer verifies pinned release archive SHA-256 digests. Prebuilt hosts
 are macOS arm64, Linux amd64/aarch64/riscv64 and Windows amd64 (including use
