@@ -3405,6 +3405,7 @@ func printCompletedPackage(conf *Config, pkg *aPackage) {
 
 func exportObject(ctx *context, pkgPath string, exportFile string, pkg llssa.Package) (string, error) {
 	applySizeOptimizationAttributes(pkg.Module(), ctx.buildConf.OptLevel)
+	applyEmscriptenEHFeature(ctx, pkg.Module())
 	if useInMemoryNativeCodegen(ctx) {
 		return exportObjectInMemory(ctx, pkgPath, exportFile, pkg)
 	}
@@ -3412,6 +3413,7 @@ func exportObject(ctx *context, pkgPath string, exportFile string, pkg llssa.Pac
 }
 
 func exportPackageObject(ctx *context, pkgPath string, exportFile string, pkg llssa.Package) (string, packageArchiveBuffer, error) {
+	applyEmscriptenEHFeature(ctx, pkg.Module())
 	if !useInMemoryNativeCodegen(ctx) {
 		path, err := exportObjectWithClang(ctx, pkgPath, exportFile, []byte(pkg.String()))
 		return path, packageArchiveBuffer{}, err
