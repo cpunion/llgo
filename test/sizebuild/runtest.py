@@ -12,8 +12,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 def command(args, env, timeout=300):
-    result = subprocess.run(args, cwd=ROOT, env=env, capture_output=True,
-                            text=True, timeout=timeout)
+    try:
+        result = subprocess.run(args, cwd=ROOT, env=env, capture_output=True,
+                                text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        # TimeoutExpired may hold bytes even with text=True, or None when the
+        # process did not write to a stream before the deadline.
+        output = "".join(part.decode(errors="replace") if isinstance(part, bytes)
+                         else part or "" for part in (error.stdout, error.stderr))
+        raise RuntimeError(f"{args!r} timed out after {timeout}s\n{output}") from error
     if result.returncode:
         raise RuntimeError(f"{args!r} failed ({result.returncode})\n"
                            f"{result.stdout}{result.stderr}")
@@ -46,7 +53,7 @@ def main():
             print("ESP32-C3 C-only DCE cold/warm builds passed (build-only)")
             return
 
-        iwasm = os.environ.get("IWASM", "iwasm")
+        iwasm = env.get("IWASM", "iwasm")
         cases = (("full", "println"), ("thin", "println"),
                  ("full", "fmtprintf"), ("full", "threaded-gc"))
         for mode, sample in cases:
@@ -67,7 +74,6 @@ def main():
                 if actual.strip() != expected:
                     raise RuntimeError(f"{sample}/{mode}: expected {expected!r}, got {actual!r}")
             print(f"WASI {sample}/{mode} builds and WAMR runs passed", flush=True)
-
 
 
 if __name__ == "__main__":

@@ -3445,6 +3445,9 @@ func applyWASILTOFeatures(ctx *context, mod gllvm.Module) {
 	if !ctx.buildConf.ltoEnabled() || ctx.crossCompile.WasmProfile != crosscompile.WasmProfileW32 {
 		return
 	}
+	// Keep sorted to match the merged attributes below, including when a
+	// function starts without target-features. Keep this contract in sync with
+	// the WASI compiler flags in internal/crosscompile/crosscompile.go.
 	const required = "+atomics,+bulk-memory,+exception-handling,+mutable-globals,+nontrapping-fptoint,+sign-ext"
 	attr := mod.Context().CreateStringAttribute("target-features", required)
 	requiredFeatures := strings.Split(required, ",")
