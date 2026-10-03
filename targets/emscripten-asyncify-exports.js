@@ -1,7 +1,9 @@
-// Emscripten 6.0.8's MetaDCE does not recognize the chained assignments for
-// EXPORT_ALL Asyncify exports. These functions are added after wasm-ld, so
-// EXPORTED_FUNCTIONS cannot name them. Simple bindings make the generated
-// controls visible to MetaDCE without changing the public Module exports.
+// Asyncify adds these controls after wasm-ld, so EXPORTED_FUNCTIONS cannot
+// name them. MetaDCE can miss their generated references (observed with
+// Emscripten 6.0.8's EXPORT_ALL chained assignments). Explicit reads in this
+// observable preRun check create usage edges that keep the controls alive.
+// Apply the check to every Asyncify configuration, including workers with
+// EXPORT_ALL=0, without changing the public Module exports or user hooks.
 function llgoCheckAsyncifyExports() {
 	var startUnwind = wasmExports["asyncify_start_unwind"];
 	var stopUnwind = wasmExports["asyncify_stop_unwind"];
