@@ -1,0 +1,54 @@
+name: Size fixes Windows runtime probe
+
+on:
+  push:
+    branches: [codex/probe-size-windows-gc-20261003]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-runtime:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: "22"
+          windows-abi: msvc
+          windows-arch: amd64
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: x64
+      - name: Build the reviewed compiler
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/llgo-bin"
+          go build -o "$RUNNER_TEMP/llgo-bin/llgo.exe" ./cmd/llgo
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: msvc
+          windows-arch: amd64
+      - name: Validate native runtime and FFI
+        shell: pwsh
+        run: |
+          $llgo = Join-Path $env:RUNNER_TEMP 'llgo-bin\llgo.exe'
+          .\.github\workflows\test_windows_runtime.ps1 -LLGo $llgo -Profile msvc -GoArch amd64
+      - name: Repeat the native GC and runtime probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $directory = Get-ChildItem $env:RUNNER_TEMP -Directory -Filter 'llgo-windows-runtime-*' | Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $directory) { throw 'Runtime probe artifacts were not produced' }
+          $probe = Join-Path $directory.FullName 'windows-runtime-smoke.exe'
+          for ($attempt = 1; $attempt -le 20; $attempt++) {
+            Write-Host "Native GC/runtime repetition $attempt/20"
+            & $probe
+            if ($LASTEXITCODE -ne 0) { throw "Runtime repetition $attempt failed: $LASTEXITCODE" }
+          }
