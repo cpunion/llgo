@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -190,7 +191,7 @@ func TestFinalSizeEmscriptenArtifacts(t *testing.T) {
 	}
 	conf := &Config{Mode: ModeBuild, SizeReport: true, SizeFormat: "json", Goos: "js", Goarch: "wasm", DebugArtifactMode: DebugArtifactNone}
 	var output bytes.Buffer
-	if err := reportFinalSize(conf, out, nil, &output); err != nil {
+	if err := reportBuildOutputs(conf, out, nil, &output, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	var payload struct {
@@ -209,7 +210,7 @@ func TestFinalSizeEmscriptenArtifacts(t *testing.T) {
 	if err := os.Remove(out.PCLN); err != nil {
 		t.Fatal(err)
 	}
-	if err := reportFinalSize(conf, out, nil, io.Discard); err == nil {
+	if err := reportBuildOutputs(conf, out, nil, io.Discard, io.Discard); err == nil {
 		t.Fatal("missing final artifact must fail report")
 	}
 }
@@ -257,11 +258,11 @@ func TestFinalSizeTextAndReadErrors(t *testing.T) {
 		t.Fatal("unknown report format accepted")
 	}
 	conf := &Config{Mode: ModeRun, SizeReport: true}
-	if err := reportFinalSize(conf, &OutFmtDetails{}, nil, io.Discard); err != nil {
+	if err := reportBuildOutputs(conf, &OutFmtDetails{}, nil, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	conf.Mode = ModeBuild
-	if err := reportFinalSize(conf, &OutFmtDetails{Out: filepath.Join(t.TempDir(), "missing")}, nil, io.Discard); err == nil {
+	if err := reportBuildOutputs(conf, &OutFmtDetails{Out: filepath.Join(t.TempDir(), "missing")}, nil, io.Discard, io.Discard); err == nil {
 		t.Fatal("missing binary accepted")
 	}
 	short := filepath.Join(t.TempDir(), "short")
@@ -270,6 +271,38 @@ func TestFinalSizeTextAndReadErrors(t *testing.T) {
 	}
 	if _, err := collectBinarySize(short, nil, "full"); err == nil {
 		t.Fatal("truncated header accepted")
+	}
+	if _, err := collectBinarySize(t.TempDir(), nil, "full"); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("directory size report = %v", err)
+	}
+}
+
+func TestWasmSizeReadBounds(t *testing.T) {
+	raw := sizeWasmFixture(false)
+	for _, tc := range []struct {
+		name string
+		size int64
+		bad  bool
+	}{
+		{"exact", int64(len(raw)), false},
+		{"shrunken", int64(len(raw)) + 1, true},
+		{"grown", int64(len(raw)) - 1, true},
+		{"negative", -1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := readWasmSizeBytes(bytes.NewReader(raw), tc.size)
+			if (err != nil) != tc.bad {
+				t.Fatalf("read %d bytes: %v", tc.size, err)
+			}
+			if !tc.bad && !bytes.Equal(got, raw) {
+				t.Fatal("artifact bytes changed")
+			}
+		})
+	}
+	if strconv.IntSize == 32 {
+		if _, err := readWasmSizeBytes(bytes.NewReader(raw), 1<<32); err == nil {
+			t.Fatal("file size outside host int range accepted")
+		}
 	}
 }
 

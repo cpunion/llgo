@@ -56,7 +56,7 @@ func (r *nameResolver) matchPackage(symbol string) string {
 	if symbol == "" {
 		return ""
 	}
-	if cached := r.packageMap[symbol]; cached != "" {
+	if cached, ok := r.packageMap[symbol]; ok {
 		return cached
 	}
 	for i, pkg := range r.pkgs {
@@ -72,6 +72,7 @@ func (r *nameResolver) matchPackage(symbol string) string {
 			return id
 		}
 	}
+	r.packageMap[symbol] = ""
 	return ""
 }
 
@@ -79,7 +80,7 @@ func (r *nameResolver) matchModule(symbol string) string {
 	if symbol == "" {
 		return ""
 	}
-	if cached := r.moduleMap[symbol]; cached != "" {
+	if cached, ok := r.moduleMap[symbol]; ok {
 		return cached
 	}
 	for _, pkg := range r.pkgs {
@@ -99,6 +100,7 @@ func (r *nameResolver) matchModule(symbol string) string {
 			return mod
 		}
 	}
+	r.moduleMap[symbol] = ""
 	return ""
 }
 

@@ -85,7 +85,7 @@ remain compatible with the previous report.
 
 1. Unit tests:
    ```sh
-   go test ./internal/build -run 'Test(WasmSize|ELFSize|CollectELFSize|FinalSize|SizeReport|ParseReadelfOutput)' -count=1
+   go test ./internal/build -run 'Test(WasmSize|ELFSize|CollectELFSize|FinalSize|SizeReport|BuildSizeReport|NameResolver|ModuleNameFromSymbol|ParseReadelfOutput|ReportBuildOutputs)' -count=1
    ```
 2. Real binary test:
    ```sh

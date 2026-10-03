@@ -128,18 +128,12 @@ func (r *sizeReport) add(name string, kind sectionKind, size uint64) {
 	}
 }
 
-func reportFinalSize(conf *Config, out *OutFmtDetails, pkgs []Package, w io.Writer) error {
-	if conf.Mode != ModeBuild || !conf.SizeReport {
-		return nil
-	}
+func reportFinalSize(conf *Config, out *OutFmtDetails, pkgs []Package, artifacts []Artifact, w io.Writer) error {
 	report, err := collectBinarySize(debugWasmModulePath(conf, out.Out), pkgs, conf.SizeLevel)
 	if err != nil {
 		return fmt.Errorf("size report: %w", err)
 	}
-	report.Artifacts, err = CollectArtifacts(conf, out)
-	if err != nil {
-		return fmt.Errorf("size report artifacts: %w", err)
-	}
+	report.Artifacts = artifacts
 	return writeSizeReport(w, report, conf.SizeFormat)
 }
 
@@ -167,6 +161,9 @@ func collectBinarySize(path string, pkgs []Package, level string) (*sizeReport, 
 	if err != nil {
 		return nil, err
 	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("size report input %q is not a regular file", path)
+	}
 	var magic [4]byte
 	if _, err := io.ReadFull(f, magic[:]); err != nil {
 		return nil, fmt.Errorf("read binary header: %w", err)
@@ -178,7 +175,7 @@ func collectBinarySize(path string, pkgs []Package, level string) (*sizeReport, 
 		format = "wasm"
 		if _, err = f.Seek(0, io.SeekStart); err == nil {
 			var raw []byte
-			raw, err = io.ReadAll(f)
+			raw, err = readWasmSizeBytes(f, info.Size())
 			if err == nil {
 				report, err = collectWasmSize(path, raw, pkgs, level)
 			}
@@ -195,6 +192,27 @@ func collectBinarySize(path string, pkgs []Package, level string) (*sizeReport, 
 	report.Format = format
 	report.FileSize = uint64(info.Size())
 	return report, nil
+}
+
+// Read only the stat-sized artifact and allocate its backing buffer once.
+// Growing ReadAll buffers can otherwise double peak memory for large modules.
+func readWasmSizeBytes(r io.Reader, size int64) ([]byte, error) {
+	if size < 0 || uint64(size) > uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf("WebAssembly file size %d cannot fit in memory on this host", size)
+	}
+	raw := make([]byte, int(size))
+	if _, err := io.ReadFull(r, raw); err != nil {
+		return nil, fmt.Errorf("reading WebAssembly artifact: %w", err)
+	}
+	// A changing file must not produce a report for a silently truncated prefix.
+	var extra [1]byte
+	if _, err := io.ReadFull(r, extra[:]); err != io.EOF {
+		if err != nil {
+			return nil, fmt.Errorf("checking WebAssembly artifact size: %w", err)
+		}
+		return nil, fmt.Errorf("WebAssembly artifact grew while reading its size")
+	}
+	return raw, nil
 }
 
 func collectReadelfSize(path string, pkgs []Package, level string) (*sizeReport, error) {

@@ -1248,10 +1248,7 @@ func executeInitialPackageLink(ctx *context, link *initialPackageLink, verbose, 
 		if err := header.GenHeaderFile(linkCtx.prog, cHeaderPackages(link.allPkgs), libname, headerPath, verbose); err != nil {
 			return nil, err
 		}
-		if err := reportFinalSize(link.conf, link.outFmts, link.allPkgs, os.Stdout); err != nil {
-			return nil, err
-		}
-		return nil, reportBuildArtifacts(link.conf, link.outFmts, os.Stderr)
+		return nil, reportBuildOutputs(link.conf, link.outFmts, link.allPkgs, os.Stdout, os.Stderr)
 	}
 
 	envMap := link.outFmts.ToEnvMap()
@@ -1260,10 +1257,7 @@ func executeInitialPackageLink(ctx *context, link *initialPackageLink, verbose, 
 			return nil, err
 		}
 	}
-	if err := reportFinalSize(link.conf, link.outFmts, link.allPkgs, os.Stdout); err != nil {
-		return nil, err
-	}
-	if err := reportBuildArtifacts(link.conf, link.outFmts, os.Stderr); err != nil {
+	if err := reportBuildOutputs(link.conf, link.outFmts, link.allPkgs, os.Stdout, os.Stderr); err != nil {
 		return nil, err
 	}
 	switch link.conf.Mode {
