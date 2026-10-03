@@ -1477,6 +1477,14 @@ func configureWasmWorkers(conf *Config, export *crosscompile.Export) (wasmworker
 	if err := config.ValidateTarget(conf.Goos, conf.Goarch, export.WasmProfile, export.WasmProvider); err != nil {
 		return config, err
 	}
+	// GoJS and Emscripten providers both currently use emcc+Asyncify. Bind
+	// this compatibility shim to the actual link contract, so a future JSPI
+	// or non-Emscripten provider does not require Asyncify control exports.
+	if conf.Goos == "js" && conf.Goarch == "wasm" && slices.Contains(export.LDFLAGS, "-sASYNCIFY=1") {
+		export.LDFLAGS = append(export.LDFLAGS,
+			"--pre-js", filepath.Join(env.LLGoROOT(), "targets", "emscripten-asyncify-exports.js"),
+		)
+	}
 	if conf.Goos == "js" && export.WasmProvider == crosscompile.WasmProviderEmscripten {
 		export.LDFLAGS = append(export.LDFLAGS,
 			"--pre-js", filepath.Join(env.LLGoROOT(), "targets", "wasm_fs.js"),

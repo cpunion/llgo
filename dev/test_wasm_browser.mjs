@@ -79,6 +79,8 @@ setTimeout(() => {
 
 const server = http.createServer(async (request, response) => {
 	try {
+		response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+		response.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
 		const url = new URL(request.url, "http://localhost");
 		if (url.pathname === "/__result") {
 			const status = url.searchParams.get("status");
