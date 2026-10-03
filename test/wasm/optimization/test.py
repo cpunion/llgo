@@ -27,6 +27,17 @@ def main():
         ("Oz", 2, "wasm-browser-fs", "wasm filesystem ok"),
     )
     with tempfile.TemporaryDirectory(prefix="llgo-wasm-optimization-") as directory:
+        if args.browser:
+            negative = pathlib.Path(directory) / "exit-after-marker.mjs"
+            negative.write_text(pathlib.Path(__file__).with_name(negative.name).read_text())
+            rejected = subprocess.run(
+                [node, str(ROOT / "dev/test_wasm_browser.mjs"), str(negative),
+                 "wasm deferred marker", "workers"],
+                env=dict(env, LLGO_BROWSER_REQUIRE_EXIT="1"),
+                capture_output=True, text=True, timeout=90,
+            )
+            if rejected.returncode == 0 or "exit 2: wasm deferred marker" not in rejected.stderr:
+                raise RuntimeError(f"browser accepted a failed program or lost its arguments:\n{rejected.stdout}\n{rejected.stderr}")
         for target in ("emscripten", "emscripten-memory64"):
             for level, workers, fixture, marker in cases:
                 name = f"{target}-{level}-{workers}-workers"
@@ -47,9 +58,14 @@ def main():
                     raise RuntimeError(f"{name}: exit {result.returncode}\n{result.stdout}\n{result.stderr}")
                 print(marker, flush=True)
                 if args.browser:
+                    # The FS marker is deferred and also prints on panic.
+                    # Pthread programs must actually exit successfully after
+                    # the fixture has checked that multiple Ms ran.
+                    browser_env = dict(build_env, LLGO_BROWSER_REQUIRE_EXIT="1" if workers > 1 else "0")
                     subprocess.run(
-                        [node, str(ROOT / "dev/test_wasm_browser.mjs"), str(output), marker],
-                        env=build_env, check=True, timeout=90,
+                        [node, str(ROOT / "dev/test_wasm_browser.mjs"), str(output), marker,
+                         "workers" if workers > 1 else "single"],
+                        env=browser_env, check=True, timeout=90,
                     )
         # Raw js/wasm uses the GoJS provider but shares Emscripten linking.
         output = pathlib.Path(directory) / "raw-js-Oz.mjs"
