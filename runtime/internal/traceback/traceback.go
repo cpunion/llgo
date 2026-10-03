@@ -60,8 +60,9 @@ func AppendFrame(out []byte, frame Frame) []byte {
 	}
 	out = append(out, name...)
 	out = append(out, '(')
-	// These entry and terminal functions have no arguments. Other frames
-	// lack argument metadata, so retain the elision marker for them.
+	// This formatter does not capture argument values, so it uses (...) for
+	// ordinary frames. These entry and terminal functions take no arguments,
+	// so print empty parentheses to match Go's tracebacks.
 	switch name {
 	case "main.main", "runtime.main", "runtime.goexit":
 	default:
