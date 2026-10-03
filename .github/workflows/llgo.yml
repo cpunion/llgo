@@ -683,7 +683,9 @@ jobs:
 
       - name: Test WASI size-build LTO regressions (WAMR)
         shell: bash
-        run: python3 test/sizebuild/runtest.py --target=wasi
+        run: |
+          python3 -m unittest discover -s test/sizebuild -p '*_test.py'
+          python3 test/sizebuild/runtest.py --target=wasi
 
   windows-gnu-cross:
     if: needs.prepare.outputs.run_code_ci == 'true'
