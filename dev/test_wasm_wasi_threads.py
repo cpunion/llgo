@@ -148,7 +148,7 @@ def main():
             # The second build exercises the bridge-enabled package cache.
             run_llgo(env, ["run", "-target", "wasi", "-emulator",
                            str(ROOT / "test/wasm/reflect-method-value")],
-                     "wasm reflect method value ok")
+                     "wasm reflect method values: 42 42 42 42 42")
         run_llgo(env, ["run", "-target", "wasi", "-emulator",
                        str(ROOT / "internal/build/testdata/wasm-wasi-threads")],
                  "wasi threads ok")
