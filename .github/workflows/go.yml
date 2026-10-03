@@ -200,6 +200,10 @@ jobs:
             -coverpkg=github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
             -coverprofile="coverage-compiler.txt" -covermode=atomic \
             -bench '^BenchmarkGo126' -benchtime=1x ./cl
+          # Build-level SIMD fixtures exercise cl/ssa in-process too.
+          "${go_test[@]}" ./internal/build -run '^TestSIMD' -count=1 -timeout=10m \
+            -coverpkg=github.com/xgo-dev/llgo/internal/build,github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
+            -coverprofile=coverage-simd.txt -covermode=atomic
           "${go_test[@]}" -timeout 45m ./test/go
 
       - name: Test traceback formatter with coverage
@@ -235,7 +239,7 @@ jobs:
         with:
           token: ${{secrets.CODECOV_TOKEN}}
           use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-          files: coverage-main-host.txt,coverage-compiler-host.txt,coverage-traceback.txt
+          files: coverage-main-host.txt,coverage-compiler-host.txt,coverage-traceback.txt,coverage-simd.txt
           flags: go-tests
           disable_search: true
 

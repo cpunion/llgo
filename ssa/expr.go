@@ -133,6 +133,9 @@ func pyVarExpr(mod Expr, name string) Expr {
 
 // Zero returns a zero constant expression.
 func (p Program) Zero(t Type) Expr {
+	if t.kind == vkSIMD {
+		return Expr{llvm.ConstNull(t.ll), t}
+	}
 	var ret llvm.Value
 	switch u := t.raw.Type.Underlying().(type) {
 	case *types.Basic:
@@ -1018,6 +1021,12 @@ func (b Builder) UnOp(op token.Token, x Expr) (ret Expr) {
 //
 //	t1 = changetype *int <- IntPtr (t0)
 func (b Builder) ChangeType(t Type, x Expr) (ret Expr) {
+	if t.kind == vkSIMD {
+		if x.kind == vkSIMD {
+			return Expr{x.impl, t}
+		}
+		return Expr{b.simdFromStorage(x.impl, t), t}
+	}
 	dbgInstrf("ChangeType %v, %v\n", t.RawType(), x.impl)
 	if t.kind == vkClosure {
 		if b.needsStdcallFuncval(x) {

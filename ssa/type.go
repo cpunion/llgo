@@ -59,6 +59,7 @@ const (
 	vkEface
 	vkIface
 	vkStruct
+	vkSIMD
 	vkChan
 )
 
@@ -216,7 +217,7 @@ func (p Program) AlignOf(typ Type) uint64 {
 
 // OffsetOf returns the offset of a field in a struct.
 func (p Program) OffsetOf(typ Type, i int) uint64 {
-	return p.td.ElementOffset(typ.ll, i)
+	return p.td.ElementOffset(p.storageType(typ), i)
 }
 
 // SizeOf returns the size of a type.
@@ -527,6 +528,13 @@ func (p Program) toLLVMFields(raw *types.Struct, native bool) (fields []llvm.Typ
 }
 
 func (p Program) toLLVMTuple(t *types.Tuple) llvm.Type {
+	// Tuples containing vectors are compiler values, not source Go structs.
+	// Preserve their vector components across multiple-result calls as well.
+	for i := 0; i < t.Len(); i++ {
+		if _, ok := SIMDNumericShape(t.At(i).Type()); ok {
+			return p.ctx.StructType(p.toLLVMTypes(t, t.Len()), false)
+		}
+	}
 	if p.target.effectiveGOARCH() != "386" && !(p.target.effectiveGOARCH() == "wasm" && p.target.WasmProfile != "") {
 		return p.ctx.StructType(p.toLLVMTypes(t, t.Len()), false)
 	}
@@ -670,6 +678,11 @@ func (p Program) toNamed(raw *types.Named) Type {
 			break
 		}
 	}
+	if lanes, ok := SIMDNumericShape(raw); ok {
+		typ := &aType{llvm.VectorType(p.rawType(lanes.Elem()).ll, int(lanes.Len())), rawType{raw}, vkSIMD}
+		p.named[name] = typ
+		return typ
+	}
 	switch t := raw.Underlying().(type) {
 	case *types.Struct:
 		kind := vkStruct
@@ -707,7 +720,7 @@ func namedTypeEquivalent(a, b types.Type) bool {
 }
 
 func (p Program) namedStructLayoutEquivalent(existing Type, raw *types.Named) bool {
-	if existing == nil || raw == nil {
+	if existing == nil || raw == nil || existing.ll.TypeKind() != llvm.StructTypeKind {
 		return false
 	}
 	en, ok := types.Unalias(existing.raw.Type).(*types.Named)

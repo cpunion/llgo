@@ -591,6 +591,16 @@ func hasInstantiatedRecv(recv *types.Var) bool {
 
 func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Function, llssa.PyObjRef, int) {
 	pkgTypes, name, ftype := p.funcName(f)
+	simd, simdDecl := lookupSIMD(f, p.prog.Target().GOARCH)
+	simdDecl = simdDecl && f.Pkg == p.goPkg
+	if simdDecl {
+		// Intrinsics also need real symbols for indirect calls and linker aliases.
+		// Ordinary direct calls still use the same table to inline their lowering.
+		obj := f.Object().(*types.Func)
+		pkgTypes = obj.Pkg()
+		name = llssa.FuncName(pkgTypes, obj.Name(), f.Signature.Recv(), false)
+		ftype = goFunc
+	}
 	if ftype != goFunc {
 		return nil, nil, ignoredFunc
 	}
@@ -683,19 +693,39 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	}
 	p.funcs[f] = fn
 	isCgo := isCgoExternSymbol(f)
-	if nblk := len(f.Blocks); nblk > 0 {
-		if p.prog.FuncInfoMetadataEnabled() {
-			goName := fn.Name()
-			if pkgTypes != nil {
-				goName = funcName(pkgTypes, f, false)
-			}
-			pos := p.funcInfoPosition(f)
-			if p.prog.Target().GOOS == "windows" && isRecoverTransparentWrapper(f) {
-				pkg.EmitFuncInfoFlags(fn.Name(), funcInfoDisplayName(goName), pos.Filename, pos.Line, pos.Column, llssa.FuncInfoFlagWrapper)
-			} else {
-				pkg.EmitFuncInfo(fn.Name(), funcInfoDisplayName(goName), pos.Filename, pos.Line, pos.Column)
-			}
+	if (len(f.Blocks) != 0 || simdDecl) && p.prog.FuncInfoMetadataEnabled() {
+		goName := fn.Name()
+		if pkgTypes != nil {
+			goName = funcName(pkgTypes, f, false)
 		}
+		pos := p.funcInfoPosition(f)
+		if p.prog.Target().GOOS == "windows" && isRecoverTransparentWrapper(f) {
+			pkg.EmitFuncInfoFlags(fn.Name(), funcInfoDisplayName(goName), pos.Filename, pos.Line, pos.Column, llssa.FuncInfoFlagWrapper)
+		} else {
+			pkg.EmitFuncInfo(fn.Name(), funcInfoDisplayName(goName), pos.Filename, pos.Line, pos.Column)
+		}
+	}
+	if simdDecl {
+		b := fn.MakeBody(1)
+		if simd.op == llssa.SIMDUnimplemented {
+			b.SIMD(simd.op, b.Str(name))
+			b.Unreachable()
+		} else {
+			n := sig.Params().Len()
+			if sig.Recv() != nil {
+				n++
+			}
+			args := make([]llssa.Expr, n)
+			for i := range args {
+				args[i] = fn.Param(i)
+			}
+			b.Return(b.SIMD(simd.op, args...))
+		}
+		b.EndBuild()
+		b.Dispose()
+		return fn, nil, goFunc
+	}
+	if nblk := len(f.Blocks); nblk > 0 {
 		var childInits []func()
 		if len(f.AnonFuncs) > 0 {
 			parentInits := p.inits

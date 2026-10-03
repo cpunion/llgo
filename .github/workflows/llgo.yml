@@ -290,6 +290,16 @@ jobs:
           pkg-config --libs cargs
           (cd ./_demo/c/cargs && llgo run .)
 
+      - name: Test SIMD behavior with Go and LLGo
+        if: matrix.windows_arch != '386'
+        shell: bash
+        env:
+          GOEXPERIMENT: simd
+        run: |
+          go test -count=1 -timeout=2m ./test/simd/...
+          llgo test -O0 -count=1 -timeout=2m ./test/simd/...
+          llgo test -O2 -count=1 -timeout=2m ./test/simd/...
+
       - name: Test demos
         run: bash .github/workflows/test_demo.sh
 
@@ -878,6 +888,17 @@ jobs:
           LLGO: ${{ runner.temp }}/llgo-bin/llgo
           LLGO_BUILD_CACHE: "1"
         run: dev/test_wasm_workers.sh
+
+      - name: Test SIMD behavior on WASI
+        if: matrix.suite == 'test-command'
+        shell: bash
+        env:
+          GOEXPERIMENT: simd
+        run: |
+          GOOS=wasip1 GOARCH=wasm go test -exec=wasmtime -count=1 -timeout=2m ./test/simd/...
+          # The unoptimized testing framework exceeds Wasmtime's locals limit.
+          "$RUNNER_TEMP/llgo-bin/llgo" test -O2 -target wasi -emulator \
+            -v -count=1 -timeout=2m ./test/simd/...
 
       - name: Compare JavaScript call semantics with Go
         if: matrix.suite == 'test-command'
