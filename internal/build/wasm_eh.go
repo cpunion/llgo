@@ -1,6 +1,7 @@
 package build
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
@@ -16,15 +17,25 @@ func applyEmscriptenEHFeature(ctx *context, mod llvm.Module) {
 	if profile != crosscompile.WasmProfileJ32 && profile != crosscompile.WasmProfileJ64 {
 		return
 	}
+	required := []string{"exception-handling"}
+	if slices.Contains(ctx.crossCompile.CCFLAGS, "-pthread") {
+		// Function attributes override the backend's command-line features.
+		// Preserve the capabilities selected by emcc -pthread: shared-memory
+		// objects require both, and TLS accesses require atomics lowering.
+		required = append(required, "atomics", "bulk-memory")
+	}
 	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
 		if fn.IsDeclaration() {
 			continue
 		}
-		features := []string{"+exception-handling"}
+		features := make([]string, 0, len(required))
+		for _, feature := range required {
+			features = append(features, "+"+feature)
+		}
 		for _, attr := range fn.GetFunctionAttributes() {
 			if attr.IsString() && attr.GetStringKind() == "target-features" {
 				for _, feature := range strings.Split(attr.GetStringValue(), ",") {
-					if feature != "" && feature != "+exception-handling" && feature != "-exception-handling" {
+					if feature != "" && !slices.Contains(required, strings.TrimLeft(feature, "+-")) {
 						features = append(features, feature)
 					}
 				}
