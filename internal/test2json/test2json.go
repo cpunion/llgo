@@ -104,7 +104,7 @@ var (
 // with minimal delay.
 //
 // Writes on the returned writer are expected to contain markers. Test framing
-// such as "=== RUN" and friends are expected to be prefixed with ^V (\x22).
+// such as "=== RUN" and friends are expected to be prefixed with ^V (\x16).
 // Error output is expected to be prefixed with ^O (\x0f) and suffixed with ^N
 // (\x0e). Other occurrences of these control characters (e.g. calls to T.Log)
 // must be escaped with ^[ (\x1b). Test framing will generate events such as
@@ -120,7 +120,7 @@ var (
 // describing the relative ordering of execution in all the concurrent tests.
 //
 // The mode flag adjusts the behavior of the converter.
-// Passing ModeTime includes event timestamps and elapsed times.
+// Passing Timestamp includes event timestamps and elapsed times.
 //
 // The pkg string, if present, specifies the import path to
 // report in the JSON stream.

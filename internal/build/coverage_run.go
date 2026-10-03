@@ -153,16 +153,22 @@ func runCoveredTest(commands commandEnv, program testProgram, conf *Config, stdo
 		policy = newTestOutputPolicy(conf, c.local, 1)
 	}
 	stream := policy.stream
+	var metadata testOutputMetadata
 	if stream {
 		testOutput = stdout
 		if !policy.direct {
-			testOutput = io.MultiWriter(stdout, &output)
+			if conf.TestJSON {
+				metadata.coverageLimit = 128 + len(c.options.Packages)
+				testOutput = io.MultiWriter(stdout, &metadata)
+			} else {
+				testOutput = io.MultiWriter(stdout, &output)
+			}
 		}
 	}
 	start := time.Now()
 	err = runNativeTest(commands, program, &copyConf, testOutput, testOutput)
 	elapsed := time.Since(start)
-	if output.Len() != 0 && output.Bytes()[output.Len()-1] != '\n' {
+	if metadata.written && metadata.last != '\n' || output.Len() != 0 && output.Bytes()[output.Len()-1] != '\n' {
 		fmt.Fprintln(testOutput)
 	}
 	mergeErr := c.merge(profile)
@@ -182,6 +188,9 @@ func runCoveredTest(commands commandEnv, program testProgram, conf *Config, stdo
 		fmt.Fprintf(&report, "%sFAIL\t%s\t%.3fs\n", prefix, program.pkgName, elapsed.Seconds())
 	} else {
 		suffix := ""
+		if !c.local && len(metadata.coverage) != 0 {
+			suffix = "\t" + string(metadata.coverage)
+		}
 		for _, line := range strings.Split(output.String(), "\n") {
 			if index := strings.Index(line, "coverage: "); !c.local && index >= 0 {
 				// Go 1.20 prefixes this line with the package path. Like
@@ -190,7 +199,7 @@ func runCoveredTest(commands commandEnv, program testProgram, conf *Config, stdo
 				break
 			}
 		}
-		if bytes.Contains(output.Bytes(), []byte("testing: warning: no tests to run")) {
+		if metadata.noTests || bytes.Contains(output.Bytes(), []byte(noTestsMarker)) {
 			suffix += " [no tests to run]"
 		}
 		fmt.Fprintf(&report, "ok  \t%s\t%.3fs%s\n", program.pkgName, elapsed.Seconds(), suffix)

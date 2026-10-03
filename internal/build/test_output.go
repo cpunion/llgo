@@ -101,6 +101,68 @@ func testJSONArgs(args []string) []string {
 	return append(result, "-test.v=test2json")
 }
 
+const noTestsMarker = "testing: warning: no tests to run"
+const coverageMarker = "coverage: "
+
+// testOutputMetadata retains only facts needed for the package summary. JSON
+// runs do not cache test results, so keeping their complete output is wasteful.
+type testOutputMetadata struct {
+	noTests bool
+	written bool
+	last    byte
+	tail    [len(noTestsMarker) - 1]byte
+	tailLen int
+
+	// A coverage line is bounded by the generated report and -coverpkg value,
+	// not by the amount of test output or the length of arbitrary log lines.
+	coverageLimit int
+	coverage      []byte
+	coverageDone  bool
+}
+
+func (m *testOutputMetadata) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	m.written, m.last = true, p[len(p)-1]
+	var boundary [2 * (len(noTestsMarker) - 1)]byte
+	n := copy(boundary[:], m.tail[:m.tailLen])
+	n += copy(boundary[n:], p[:min(len(p), len(m.tail))])
+	m.noTests = m.noTests || bytes.Contains(p, []byte(noTestsMarker)) || bytes.Contains(boundary[:n], []byte(noTestsMarker))
+	m.captureCoverage(p, boundary[:n])
+	if len(p) >= len(m.tail) {
+		m.tailLen = copy(m.tail[:], p[len(p)-len(m.tail):])
+	} else {
+		m.tailLen = copy(m.tail[:], boundary[max(0, n-len(m.tail)):n])
+	}
+	return len(p), nil
+}
+
+func (m *testOutputMetadata) captureCoverage(p, boundary []byte) {
+	if m.coverageLimit == 0 || m.coverageDone {
+		return
+	}
+	if m.coverage == nil {
+		if index := bytes.Index(boundary, []byte(coverageMarker)); index >= 0 && index < m.tailLen {
+			m.coverage = append(m.coverage, coverageMarker...)
+			p = p[index+len(coverageMarker)-m.tailLen:]
+		} else if index := bytes.Index(p, []byte(coverageMarker)); index >= 0 {
+			p = p[index:]
+		} else {
+			return
+		}
+	}
+	line, _, ended := bytes.Cut(p, []byte{'\n'})
+	if len(m.coverage)+len(line) > m.coverageLimit {
+		// Arbitrary test logs must not turn this small summary tracker into
+		// another unbounded buffer, even if they contain "coverage: ".
+		m.coverage, m.coverageDone = nil, true
+		return
+	}
+	m.coverage = append(m.coverage, line...)
+	m.coverageDone = ended
+}
+
 // runTestProgram selects a writer before starting the child. Streaming output
 // reaches the caller while the test is running; buffered output is returned to
 // the coordinator for printing in package order.
@@ -119,11 +181,12 @@ func runTestProgram(program testProgram, conf *Config, count int, stdout, stderr
 		}
 	}
 	var converter *test2json.Converter
+	var metadata testOutputMetadata
 	if conf.TestJSON {
 		converter = test2json.NewConverter(stdout, program.pkgName, test2json.Timestamp)
 		output = converter
-		if !policy.direct {
-			output = io.MultiWriter(converter, &buffer)
+		if !policy.direct && !program.coverage {
+			output = io.MultiWriter(converter, &metadata)
 		}
 	}
 	start := time.Now()
@@ -135,13 +198,13 @@ func runTestProgram(program testProgram, conf *Config, count int, stdout, stderr
 	}
 	if !program.coverage {
 		norun := ""
-		if bytes.Contains(buffer.Bytes(), []byte("testing: warning: no tests to run")) {
+		if metadata.noTests || bytes.Contains(buffer.Bytes(), []byte(noTestsMarker)) {
 			norun = " [no tests to run]"
 		}
 		if result.err == nil && !policy.show && !conf.TestJSON && !policy.stream {
 			buffer.Reset()
 		}
-		if buffer.Len() != 0 && buffer.Bytes()[buffer.Len()-1] != '\n' {
+		if metadata.written && metadata.last != '\n' || buffer.Len() != 0 && buffer.Bytes()[buffer.Len()-1] != '\n' {
 			fmt.Fprintln(output)
 		}
 		if result.err != nil {

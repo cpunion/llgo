@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -224,5 +225,103 @@ func TestTestResultReporterSkippedRoot(t *testing.T) {
 	report(0, nil)
 	if stdout.String() != "second\n" {
 		t.Fatalf("skipped root blocked later output: %q", stdout.String())
+	}
+}
+
+func TestTestOutputMetadata(t *testing.T) {
+	coverage := "coverage: 50.0% of statements in " + strings.Repeat("example.com/pkg,", 100)
+	output := "arbitrary log\n" + noTestsMarker + "\nexample.com/pkg\t" + coverage + "\nlast byte"
+	// Split at every position to exercise markers spanning write boundaries,
+	// including long coverage reports derived from the configured coverpkg.
+	for split := 0; split <= len(output); split++ {
+		metadata := testOutputMetadata{coverageLimit: 128 + len(coverage)}
+		metadata.Write([]byte(output[:split]))
+		metadata.Write(nil)
+		metadata.Write([]byte(output[split:]))
+		if !metadata.noTests || !metadata.written || metadata.last != 'e' || string(metadata.coverage) != coverage {
+			t.Fatalf("split %d: missing summary metadata: %+v", split, metadata)
+		}
+	}
+	// An arbitrary log line containing the coverage marker cannot grow the
+	// coverage tracker beyond the generated report's configured bound.
+	metadata := testOutputMetadata{coverageLimit: 128}
+	metadata.Write([]byte(coverageMarker))
+	chunk := bytes.Repeat([]byte{'x'}, 64<<10)
+	for i := 0; i < 256; i++ {
+		metadata.Write(chunk)
+	}
+	metadata.Write([]byte("\n" + noTestsMarker + "\n"))
+	if len(metadata.coverage) != 0 || !metadata.noTests || metadata.last != '\n' {
+		t.Fatalf("oversized coverage-like log lost bounded tracking: %+v", metadata)
+	}
+}
+
+func TestRunTestProgramJSONSummary(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure=%t", failed), func(t *testing.T) {
+			var stdout bytes.Buffer
+			result := runTestProgram(testProgram{pkgName: "pkg"}, &Config{TestJSON: true}, 2, &stdout, io.Discard,
+				func(output io.Writer) error {
+					// The warning crosses writes and has no final newline.
+					io.WriteString(output, "testing: warn")
+					io.WriteString(output, "ing: no tests to run")
+					if failed {
+						return errors.New("test failed")
+					}
+					return nil
+				})
+			if (result.err != nil) != failed || len(result.output) != 0 {
+				t.Fatalf("unexpected JSON result: %+v", result)
+			}
+			var output, action string
+			for _, line := range bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte{'\n'}) {
+				var event struct{ Action, Test, Output string }
+				if err := json.Unmarshal(line, &event); err != nil {
+					t.Fatalf("invalid JSON event: %s: %v", line, err)
+				}
+				output += event.Output
+				if event.Test == "" && (event.Action == "pass" || event.Action == "fail") {
+					action = event.Action
+				}
+			}
+			want := "ok  \tpkg\t"
+			if failed {
+				want = "FAIL\tpkg\t"
+			}
+			if !strings.Contains(output, noTestsMarker+"\n"+want) {
+				t.Fatalf("lost newline before summary: %q", output)
+			}
+			if failed && action != "fail" || !failed && (action != "pass" || !strings.Contains(output, " [no tests to run]\n")) {
+				t.Fatalf("lost package result or no-tests suffix: action=%s output=%q", action, output)
+			}
+		})
+	}
+}
+
+func TestRunTestProgramJSONMemory(t *testing.T) {
+	chunk := bytes.Repeat([]byte{'x'}, 64<<10)
+	chunk[len(chunk)-1] = '\n'
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	result := runTestProgram(testProgram{pkgName: "chatty"}, &Config{TestJSON: true}, 2, io.Discard, io.Discard,
+		func(output io.Writer) error {
+			for i := 0; i < 256; i++ {
+				if _, err := output.Write(chunk); err != nil {
+					return err
+				}
+			}
+			// Check retained memory while the process is still running, when
+			// an unnecessary full-output buffer would still hold all 16 MiB.
+			runtime.GC()
+			var after runtime.MemStats
+			runtime.ReadMemStats(&after)
+			if retained := int64(after.HeapAlloc) - int64(before.HeapAlloc); retained > 4<<20 {
+				t.Errorf("JSON output retained %d bytes after streaming 16 MiB", retained)
+			}
+			return nil
+		})
+	if result.err != nil {
+		t.Fatal(result.err)
 	}
 }
