@@ -710,6 +710,54 @@ jobs:
           llgo: ${{ runner.temp }}/llgo-host
           windows-arch: ${{ matrix.windows_arch }}
 
+  wasm-browser-debug:
+    if: needs.prepare.outputs.run_code_ci == 'true'
+    needs: prepare
+    name: wasm-browser-debug
+    timeout-minutes: 20
+    runs-on: ${{ fromJSON(needs.prepare.outputs.linux_large_runner) }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - name: Set up Emscripten
+        uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: "6.0.8"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Set up Chrome for Testing
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: "152.0.7977.54"
+          install-dependencies: true
+      - uses: ./.github/actions/setup-binaryen
+      - uses: ./.github/actions/setup-go
+      - name: Install llgo
+        run: dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+      - name: Test real browser source breakpoints and paused variables
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+          LLGO_BUILD_CACHE: "1"
+          LLGO_BROWSER_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+          LLGO_BROWSER_CHROME_NO_SANDBOX: "1"
+          LLGO_BROWSER_COVERAGE_DIR: coverage-browser
+        run: python3 dev/test_wasm_browser_debug.py
+      - name: Upload browser debugger coverage to Codecov
+        if: ${{ !cancelled() && hashFiles('coverage-browser/*.out') != '' }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          files: coverage-browser/j32-embedded.out,coverage-browser/j32-external.out,coverage-browser/j64-embedded.out,coverage-browser/j64-external.out
+          flags: go-tests
+          disable_search: true
+          fail_ci_if_error: true
+
   wasm-runtime:
     if: needs.prepare.outputs.run_code_ci == 'true'
     needs: prepare

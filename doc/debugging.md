@@ -19,8 +19,8 @@ The automatic backend depends on the selected target:
 | --- | --- | --- |
 | Native Darwin/Linux/Windows | LLDB | Local process |
 | Non-Wasm embedded | GDB | Target `debug-server`, OpenOCD, or `-remote` |
-| WASI | Reserved | Separate frontend contribution; WAMR remains the execution runtime |
-| Browser Wasm | Reserved | Separate Chrome frontend contribution |
+| WASI | Unavailable | W32 pthread execution uses WAMR; source debugging is a subsequent phase |
+| Browser Wasm | Chrome DevTools | LLGo language extension and the generated Emscripten host |
 
 Use `-backend=gdb` or `-backend=lldb` to override a native or GDB Remote
 session, and `-gdb` or `-lldb` to select a debugger executable. For an already
@@ -94,6 +94,40 @@ patched GDB to remove those upstream limits.
 
 `llgo lldb` remains the explicit compatibility command for opening an existing
 artifact without building it.
+
+For browser source debugging, use Chrome for Testing or Chromium with the
+unpacked-extension command-line flags enabled:
+
+```sh
+llgo debug -target=emscripten -chrome /path/to/chrome ./app
+llgo debug -target=emscripten-memory64 -debug-artifact=external ./app
+GOOS=js GOARCH=wasm llgo debug ./app
+```
+
+The browser session starts a loopback HTTP server, loads an isolated Chrome
+profile with the LLGo extension, and opens DevTools. Set breakpoints in Sources
+and use the session page to run the program. `-source-map=FROM=TO` is repeatable
+and maps compiler-recorded paths to local source files; `-browser-devtools=false`
+disables the extension handshake and allows execution without DevTools. Browser
+arguments after `--` are limited to `--window-size`, `--window-position`,
+`--start-maximized` and `--headless`; provide values as `--name=value`.
+Profile, extension and web security settings remain owned by the session.
+If the extension does not become ready within five seconds, the page reports
+an error before instantiation; open DevTools and reload to retry. Sources are
+served only from this build's package directories, the artifact directory, or
+explicit source-map destinations. Unmapped paths outside these roots remain
+unavailable. Each session accepts only its own extension's CORS origin.
+`-remote` and `-server` belong to native/embedded transports and are rejected for
+browser sessions. The generated Emscripten host, profile and worker settings
+are preserved; the launcher does not substitute host imports.
+
+Browser debugging currently covers the paused Wasm execution frame. Full
+goroutine views and multi-worker frame coordination remain a later phase.
+WASI source sessions are explicitly rejected: current W32 modules require
+shared `env.memory`, `wasi.thread-spawn`, and `env.pthread_exit`, which the
+current Wasmtime debug backend does not implement. Use `llgo run -target=wasi`
+with WAMR for execution; retaining valid DWARF does not provide a runtime
+debugger transport. See [browser debugging](../dev/browser-debugging.md).
 
 Debug information can also be packaged without starting a debugger:
 

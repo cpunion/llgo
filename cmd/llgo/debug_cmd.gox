@@ -17,7 +17,7 @@ import (
 	self "github.com/xgo-dev/llgo/cmd/internal/debug"
 )
 
-use "debug [-backend auto|lldb|gdb] [-target platform] [build flags] [package] [-- debugger arguments...]"
+use "debug [-backend auto|lldb|gdb|browser] [-target platform] [build flags] [package] [-- debugger arguments...]"
 
 short "Build and debug an LLGo program"
 

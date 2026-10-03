@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/xgo-dev/llgo/cmd/internal/browser"
 	"github.com/xgo-dev/llgo/cmd/internal/gdb"
 	"github.com/xgo-dev/llgo/cmd/internal/lldb"
 	"github.com/xgo-dev/llgo/internal/build"
@@ -60,6 +61,7 @@ type options struct {
 	remote  string
 	server  string
 	load    bool
+	browser browser.Options
 }
 
 func (o options) validate() error {
@@ -99,7 +101,7 @@ func selectBackend(requested backend, kind targetKind) (backend, error) {
 		switch kind {
 		case targetWASI:
 			if requested != backendWasmtime {
-				return "", fmt.Errorf("llgo debug: backend %s cannot debug a WASI target; use wasmtime", requested)
+				return "", wasiDebuggerUnavailable()
 			}
 		case targetBrowser:
 			if requested != backendBrowser {
@@ -133,6 +135,14 @@ type session struct {
 }
 
 func runSession(s session, stdin io.Reader, stdout, stderr io.Writer) error {
+	if err := validateBackendOptions(s.backend, s.options); err != nil {
+		return err
+	}
+	if s.backend == backendBrowser {
+		opts := s.options.browser
+		opts.ChromeArgs = append(append([]string(nil), opts.ChromeArgs...), s.debuggerArgs...)
+		return browser.Run(browserModulePath(s.artifact), opts, stdin, stdout, stderr)
+	}
 	plan, err := makeServerPlan(s.target, s.artifact, s.options)
 	if err != nil {
 		return err
@@ -186,6 +196,20 @@ func runSession(s session, stdin io.Reader, stdout, stderr io.Writer) error {
 		}
 	}
 	return debugErr
+}
+
+func wasiDebuggerUnavailable() error {
+	return errors.New("llgo debug: WASI source-debug sessions are unavailable for W32 pthread modules: the current Wasmtime backend does not implement shared env.memory, wasi.thread-spawn and env.pthread_exit; use llgo run -target=wasi with WAMR for execution")
+}
+
+func validateBackendOptions(selected backend, opts options) error {
+	if selected == backendWasmtime {
+		return wasiDebuggerUnavailable()
+	}
+	if selected == backendBrowser && (opts.remote != "" || opts.server != "" || opts.load) {
+		return errors.New("llgo debug: browser sessions use their own loopback HTTP server; -remote, -server and -load apply to native/embedded debugger transports")
+	}
+	return nil
 }
 
 type serverPlan struct {
