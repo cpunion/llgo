@@ -1240,15 +1240,13 @@ func executeInitialPackageLink(ctx *context, link *initialPackageLink, verbose, 
 	if err != nil {
 		return nil, err
 	}
-	if link.conf.Mode == ModeBuild && link.conf.SizeReport {
-		if err := reportBinarySize(link.outFmts.Out, link.conf.SizeFormat, link.conf.SizeLevel, link.allPkgs); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: size report failed: %v\n", err)
-		}
-	}
 	if linkCtx.buildConf.BuildMode == BuildModeCArchive || linkCtx.buildConf.BuildMode == BuildModeCShared {
 		libname := strings.TrimSuffix(filepath.Base(link.outFmts.Out), link.conf.AppExt)
 		headerPath := filepath.Join(filepath.Dir(link.outFmts.Out), libname) + ".h"
 		if err := header.GenHeaderFile(linkCtx.prog, cHeaderPackages(link.allPkgs), libname, headerPath, verbose); err != nil {
+			return nil, err
+		}
+		if err := reportFinalSize(link.conf, link.outFmts, link.allPkgs, os.Stdout); err != nil {
 			return nil, err
 		}
 		return nil, reportBuildArtifacts(link.conf, link.outFmts, os.Stderr)
@@ -1259,6 +1257,9 @@ func executeInitialPackageLink(ctx *context, link *initialPackageLink, verbose, 
 		if err := firmware.ConvertFormats(linkCtx.crossCompile.BinaryFormat, linkCtx.crossCompile.FormatDetail, envMap); err != nil {
 			return nil, err
 		}
+	}
+	if err := reportFinalSize(link.conf, link.outFmts, link.allPkgs, os.Stdout); err != nil {
+		return nil, err
 	}
 	if err := reportBuildArtifacts(link.conf, link.outFmts, os.Stderr); err != nil {
 		return nil, err
