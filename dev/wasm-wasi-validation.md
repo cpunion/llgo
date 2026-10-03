@@ -1,15 +1,17 @@
-# WAMR threads and exception validation
+# Wasmer threads, SIMD and exception validation
 
 The W32 backend keeps one goroutine per pthread. The following checks qualify
 that backend; they do not introduce an M:N scheduler on native or WASI targets.
 
 ## Fixed failure modes
 
-- WAMR 2.4.5's classic interpreter briefly broadcast thread termination while
-  propagating a catchable exception to a Wasm caller. The interpreter patch
-  keeps that propagation local. The original deferred-Goexit artifact passed
-  40/50 runs on stock WAMR and 100/100 with the patch. Escaping exceptions still
-  fail the invocation. Encoding comparisons and the supported Go/C++ boundary
+- The default runner is the unmodified Wasmer 7.5.0 CLI with Cranelift,
+  standard Wasm EH, SIMD and shared memory. LLVM emits standard EH directly
+  with `-wasm-use-legacy-eh=false`, including the LTO link; no Binaryen
+  translation or runtime patch is needed. WASI libc supplies pthread creation
+  and TLS, and the runtime maps `pthread_exit` to `wasix_32v1.thread_exit`.
+  This is a Preview 1 + WASI threads + WASIX thread-exit host contract, not a
+  portable single-thread Preview 1 binary. The earlier WAMR exception failures
   are recorded in [wasm-eh-comparison.md](wasm-eh-comparison.md).
 - A pthread condition wait can block while reacquiring a mutex held by a Go
   thread already stopped for collection. Merely polling the condition every
@@ -34,8 +36,7 @@ that backend; they do not introduce an M:N scheduler on native or WASI targets.
   macOS arm64. These are local regression timings, not cross-host benchmarks.
 - Small programs begin with a 1 MiB GC arena; subsequent arenas double up to
   32 MiB. This avoids sweeping a nearly empty 32 MiB arena on every explicit
-  collection. WAMR is built in Release mode, with the same classic interpreter,
-  exception and thread features used by the acceptance tests.
+  collection.
 - Reflection's whole-program type-name lookup compares encoded names without
   allocating a temporary string for each extra-star type. This preserves the
   existing type identity and name rules while reducing GC contention.
@@ -47,28 +48,33 @@ The host metadata regression covers all 128 segment slots, gaps, sentinels,
 metadata exclusion and preservation of marked objects during sweep.
 
 The focused `test/go` regression compiles once with a 300-second deadline.
-It then runs three groups in fresh WAMR invocations: finalizers/callback GC/
+It then runs three groups in fresh Wasmer invocations: finalizers/callback GC/
 function-info, the 20 pointer-argument startup races, and the 20 zero-argument
 startup races. Each invocation has a 300-second deadline and verbose output.
-On Linux CI the startup groups took 134 and 145 seconds in one combined run,
-while another run took 160 seconds for the pointer group and exceeded the
-combined deadline in the zero-argument group. Separate deadlines retain every
-case and repetition, distinguish slow interpreter work from a stalled test,
-and keep first-use checks independent of earlier test initialization.
+Separate deadlines retain every case and repetition and keep first-use checks
+independent of earlier test initialization. Wasmer's compiled-module cache is
+disabled so cache diagnostics do not contaminate guest output.
+
+The installer verifies pinned release archive SHA-256 digests. Prebuilt hosts
+are macOS arm64, Linux amd64/aarch64/riscv64 and Windows amd64 (including use
+from MinGW). Wasmer 7.5.0 does not publish a macOS Intel archive; that host
+requires a source-built CLI on PATH. The Windows CLI is a standalone host
+process and does not need to match the guest compiler's C ABI.
 
 ## Reproducible checks
 
 ```sh
-bash dev/build_iwasm.sh
+bash dev/install_wasmer.sh
 go test ./internal/build -run '^TestWASIGCWaitsSuspendGoAcrossMutexReacquisition$'
-LLGO="$PWD/.bin/llgo" IWASM=/path/to/patched/iwasm python3 dev/test_wasm_wasi_threads.py
+LLGO="$PWD/.bin/llgo" WASMER=/path/to/wasmer python3 dev/test_wasm_wasi_threads.py
 LLGO_WASI_THREADS=1 go run ./dev/wasmstdlib -full -profile W32-WASI \
   -shard 9 -shards 16 -llgo "$PWD/.bin/llgo" -report w32-shard9.json
 ```
 
-The pthread regression exercises both mutex waits and condition-variable
+The raw SIMD regression spawns a WASI thread and checks v128 calls and a
+v128 standard-EH payload before an atomic wakeup. The pthread regression exercises both mutex waits and condition-variable
 reacquisition, including a waiter woken while collection is still active.
-The WAMR acceptance driver covers GC/nogc exception isolation, main/init/worker
+The Wasmer acceptance driver covers GC/nogc exception isolation, main/init/worker
 Goexit, finalizers, reflection with concurrent GC, retained roots, heap growth,
 uncooperative C, timers, filesystems, selected standard-library tests and a
 GOROOT sentinel. The full package audit remains a separate gate; passing this

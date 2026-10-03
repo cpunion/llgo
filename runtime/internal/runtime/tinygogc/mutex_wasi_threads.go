@@ -8,7 +8,7 @@ import "github.com/xgo-dev/llgo/runtime/internal/sync"
 // lock is usable before Go package initialization. Runtime Mutex.Lock publishes
 // roots while waiting in C, letting the collector stop allocation waiters.
 // Sleeping on the host futex avoids a sched_yield/host-mutex polling storm
-// when many pthreads allocate concurrently in WAMR's interpreter.
+// when many pthreads allocate concurrently in the Wasm runtime.
 type mutex = sync.Mutex
 
 func lock(m *mutex) { m.Lock() }
