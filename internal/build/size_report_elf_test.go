@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -45,6 +46,7 @@ func TestELFSizeSymbolRanges(t *testing.T) {
 			// Overlapping VMAs are possible in embedded address spaces. Symbol
 			// ownership must stay within the symbol's own section.
 			{SectionHeader: elf.SectionHeader{Name: ".constant", Type: elf.SHT_PROGBITS, Flags: elf.SHF_ALLOC, Addr: 0x1000, Size: 12}},
+			{SectionHeader: elf.SectionHeader{Name: ".debug_info", Type: elf.SHT_PROGBITS, Addr: 0x1000, Size: 8}},
 		},
 	}
 	symbols := []elf.Symbol{
@@ -59,6 +61,9 @@ func TestELFSizeSymbolRanges(t *testing.T) {
 		{Name: "data.constant", Section: 2, Info: byte(elf.STT_OBJECT), Value: 0x1000, Size: 12},
 		{Name: "outside.function", Section: 1, Info: byte(elf.STT_FUNC), Value: 0x1028, Size: 8},
 		{Name: "absolute", Section: elf.SHN_ABS, Value: 0x1000, Size: 40},
+		{Name: "source.c", Section: 1, Info: byte(elf.STT_FILE), Value: 0x1000, Size: 40},
+		{Name: "section", Section: 1, Info: byte(elf.STT_SECTION), Value: 0x1000, Size: 40},
+		{Name: "debug.object", Section: 3, Info: byte(elf.STT_OBJECT), Value: 0x1000, Size: 8},
 	}
 	report := buildELFSizeReport("test.elf", f, symbols, nil, "module")
 	for name, want := range map[string]uint64{"pkg": 12, "(shared .text)": 4, "next": 8, "(unknown .text)": 16} {
@@ -108,6 +113,68 @@ func TestELFSizeSymbolSectionOffsets(t *testing.T) {
 	sym.Info = byte(elf.STT_OBJECT)
 	if got, ok := elfSymbolSectionOffset(f, sec, sym); !ok || got != 3 {
 		t.Fatalf("odd data address offset = %d, %t; want 3, true", got, ok)
+	}
+	sym.Value = 0x7fff
+	if _, ok := elfSymbolSectionOffset(f, sec, sym); ok {
+		t.Fatal("address before section base accepted")
+	}
+	sym.Info, sym.Value = byte(elf.STT_TLS), 24
+	f.Progs = nil
+	if _, ok := elfSymbolSectionOffset(f, sec, sym); ok {
+		t.Fatal("TLS symbol without a TLS image accepted")
+	}
+}
+
+func TestCollectELFSizeRejectsMalformedArtifacts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func([]byte)
+		wantErr string
+	}{
+		{"bad magic", func(raw []byte) { raw[0] = 0 }, "reading ELF size"},
+		{"bad static symbols", func(raw []byte) {
+			mutateELFSizeSections(raw, func(section []byte) {
+				if elf.SectionType(binary.LittleEndian.Uint32(section[4:8])) == elf.SHT_SYMTAB {
+					binary.LittleEndian.PutUint64(section[32:40], 1) // incomplete symbol entry
+				}
+			})
+		}, "reading ELF symbols"},
+		{"bad dynamic symbols", func(raw []byte) {
+			mutateELFSizeSections(raw, func(section []byte) {
+				if elf.SectionType(binary.LittleEndian.Uint32(section[4:8])) == elf.SHT_SYMTAB {
+					binary.LittleEndian.PutUint32(section[4:8], uint32(elf.SHT_DYNSYM))
+					binary.LittleEndian.PutUint64(section[32:40], 1)
+				}
+			})
+		}, "reading ELF dynamic symbols"},
+		{"no allocated bytes", func(raw []byte) {
+			mutateELFSizeSections(raw, func(section []byte) {
+				flags := binary.LittleEndian.Uint64(section[8:16])
+				binary.LittleEndian.PutUint64(section[8:16], flags&^uint64(elf.SHF_ALLOC))
+			})
+		}, "no allocatable sections"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := elfSizeFixture(t, true)
+			tc.mutate(raw)
+			path := filepath.Join(t.TempDir(), "broken.elf")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := collectELFSize(path, nil, "full"); report != nil || err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("broken ELF report = %+v, error = %v; want %q", report, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func mutateELFSizeSections(raw []byte, mutate func([]byte)) {
+	offset := binary.LittleEndian.Uint64(raw[40:48])
+	stride := binary.LittleEndian.Uint16(raw[58:60])
+	count := binary.LittleEndian.Uint16(raw[60:62])
+	for i := uint16(0); i < count; i++ {
+		start := offset + uint64(i)*uint64(stride)
+		mutate(raw[start : start+uint64(stride)])
 	}
 }
 

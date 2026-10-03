@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func sizeWasmUint(n uint64) []byte { return binary.AppendUvarint(nil, n) }
@@ -180,6 +182,85 @@ func TestWasmSizeMalformedAndOptionalNames(t *testing.T) {
 	}
 }
 
+func TestWasmSizeRejectsInvalidModuleFields(t *testing.T) {
+	header := []byte{0, 'a', 's', 'm', 1, 0, 0, 0}
+	importField := func(descriptor ...byte) []byte {
+		payload := append([]byte{1}, sizeWasmName("env")...)
+		payload = append(payload, sizeWasmName("item")...)
+		return sizeWasmSection(2, append(payload, descriptor...))
+	}
+	for _, tc := range []struct {
+		name    string
+		raw     []byte
+		wantErr string
+	}{
+		{"short header", header[:7], "invalid WebAssembly header"},
+		{"unknown version", []byte{0, 'a', 's', 'm', 2, 0, 0, 0}, "invalid WebAssembly header"},
+		{"non UTF-8 custom name", append(bytes.Clone(header), sizeWasmSection(0, []byte{1, 0xff})...), "invalid UTF-8"},
+		{"unknown import kind", append(bytes.Clone(header), importField(5)...), "unsupported WebAssembly import kind"},
+		{"invalid table element type", append(bytes.Clone(header), importField(1, 0, 0, 0)...), "unsupported WebAssembly value type"},
+		{"truncated global import", append(bytes.Clone(header), importField(3, 0x7f)...), "truncated WebAssembly encoding"},
+		{"trailing memory bytes", append(bytes.Clone(header), sizeWasmSection(5, []byte{0, 0})...), "unexpected trailing WebAssembly bytes"},
+		{"memory byte overflow", append(bytes.Clone(header), sizeWasmSection(5, append([]byte{1, 4}, sizeWasmUint(1<<48)...))...), "memory byte size overflow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report, err := collectWasmSize("invalid.wasm", tc.raw, nil, "full")
+			if report != nil || err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("invalid module report = %+v, error = %v; want %q", report, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestWasmSizeExtendedOffsetsAndOptionalNameSubsections(t *testing.T) {
+	raw := []byte{0, 'a', 's', 'm', 1, 0, 0, 0}
+	raw = append(raw, sizeWasmSection(1, []byte{1, 0x60, 0, 0})...) // () -> ()
+	imports := append([]byte{1}, sizeWasmName("env")...)
+	imports = append(imports, sizeWasmName("base")...)
+	imports = append(imports, 3, 0x7f, 0) // immutable i32 global
+	raw = append(raw, sizeWasmSection(2, imports)...)
+	raw = append(raw, sizeWasmSection(3, []byte{1, 0})...)
+	raw = append(raw, sizeWasmSection(5, []byte{1, 0, 1})...)
+	raw = append(raw, sizeWasmSection(10, []byte{1, 2, 0, 0x0b})...)
+	// Active data at global.get(0) + 4. Its offset expression is encoding
+	// overhead; only the three stored bytes belong to the data payload.
+	raw = append(raw, sizeWasmSection(11, []byte{1, 0, 0x23, 0, 0x41, 4, 0x6a, 0x0b, 3, 'a', 'b', 'c'})...)
+	names := append(sizeWasmName("name"), sizeWasmSection(0, sizeWasmName("example"))...)
+	functions := append([]byte{1, 0}, sizeWasmName("main.work")...)
+	names = append(names, sizeWasmSection(1, functions)...)
+	raw = append(raw, sizeWasmSection(0, names)...)
+	report, err := collectWasmSize("offset.wasm", raw, nil, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner := report.Modules["main.work"]; owner == nil || owner.Code != 2 || report.Total.Data != 3 || len(report.Warnings) != 0 {
+		t.Fatalf("offset/name attribution = %+v, warnings = %v", report.Modules, report.Warnings)
+	}
+	if sum := report.Total.Code + report.Total.Data + report.Wasm.CustomBytes + report.Wasm.StructureBytes; sum != uint64(len(raw)) {
+		t.Fatalf("encoded byte total = %d, want %d", sum, len(raw))
+	}
+}
+
+func TestWasmSizeDuplicateFunctionNamesRemainOptional(t *testing.T) {
+	functions := []byte{2}
+	for _, name := range []string{"first", "second"} {
+		functions = append(functions, 1) // both entries claim the same function
+		functions = append(functions, sizeWasmName(name)...)
+	}
+	names := append(sizeWasmName("name"), sizeWasmSection(1, functions)...)
+	raw := append(sizeWasmFixture(false), sizeWasmSection(0, names)...)
+	report, err := collectWasmSize("duplicate-names.wasm", raw, nil, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], "duplicate WebAssembly function name index") {
+		t.Fatalf("duplicate names warning = %v", report.Warnings)
+	}
+	if owner := report.Modules["(unknown function 1)"]; owner == nil || owner.Code != 2 {
+		t.Fatalf("unreliable names replaced physical accounting: %+v", report.Modules)
+	}
+}
+
 func TestFinalSizeEmscriptenArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	out := &OutFmtDetails{Out: filepath.Join(dir, "app.mjs"), PCLN: filepath.Join(dir, "app.pclntab")}
@@ -303,6 +384,37 @@ func TestWasmSizeReadBounds(t *testing.T) {
 		if _, err := readWasmSizeBytes(bytes.NewReader(raw), 1<<32); err == nil {
 			t.Fatal("file size outside host int range accepted")
 		}
+	}
+	reader := io.MultiReader(bytes.NewReader(raw), iotest.ErrReader(io.ErrClosedPipe))
+	if _, err := readWasmSizeBytes(reader, int64(len(raw))); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("read failure after expected file bytes = %v", err)
+	}
+}
+
+func TestFinalSizeFormatDispatch(t *testing.T) {
+	dir := t.TempDir()
+	if report, err := collectBinarySize(filepath.Join(dir, "missing"), nil, "full"); report != nil || !os.IsNotExist(err) {
+		t.Fatalf("missing input report = %+v, error = %v", report, err)
+	}
+	elfPath := filepath.Join(dir, "app.elf")
+	raw := elfSizeFixture(t, true)
+	if err := os.WriteFile(elfPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := collectBinarySize(elfPath, nil, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Format != "elf" || report.FileSize != uint64(len(raw)) || report.Total.Code != 32 {
+		t.Fatalf("ELF dispatch report = %+v", report)
+	}
+	wasmPath := filepath.Join(dir, "future-version.wasm")
+	if err := os.WriteFile(wasmPath, []byte{0, 'a', 's', 'm', 2, 0, 0, 0}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conf := &Config{Mode: ModeBuild, SizeReport: true, DebugArtifactMode: DebugArtifactNone}
+	if err := reportBuildOutputs(conf, &OutFmtDetails{Out: wasmPath}, nil, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "size report: invalid WebAssembly header") {
+		t.Fatalf("invalid binary report must fail the build: %v", err)
 	}
 }
 
