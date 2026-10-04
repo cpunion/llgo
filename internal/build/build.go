@@ -3438,24 +3438,19 @@ func exportPackageObject(ctx *context, pkgPath string, exportFile string, pkg ll
 	return "", packageArchiveBuffer{name: name, buffer: buf}, nil
 }
 
-// Clang's -fwasm-exceptions controls object codegen, but it does not attach
-// features to functions in LLVM IR input. Preserve the WASI backend contract
-// in bitcode so the linker's LTO SjLj pass can lower setjmp/longjmp.
+// LTO backend defaults do not merge into existing target-features attributes.
+// Fill the WASI profile requirements without replacing features such as SIMD.
 func applyWASILTOFeatures(ctx *context, mod gllvm.Module) {
 	if !ctx.buildConf.ltoEnabled() || ctx.crossCompile.WasmProfile != crosscompile.WasmProfileW32 {
 		return
 	}
-	// Keep sorted to match the merged attributes below, including when a
-	// function starts without target-features. Keep this contract in sync with
-	// the WASI compiler flags in internal/crosscompile/crosscompile.go.
+	// Match the WASI compiler/backend flags in internal/crosscompile/crosscompile.go.
 	const required = "+atomics,+bulk-memory,+exception-handling,+mutable-globals,+nontrapping-fptoint,+sign-ext"
-	attr := mod.Context().CreateStringAttribute("target-features", required)
 	requiredFeatures := strings.Split(required, ",")
 	for fn := mod.FirstFunction(); !fn.IsNil(); fn = gllvm.NextFunction(fn) {
 		if fn.IsDeclaration() {
 			continue
 		}
-		features := required
 		for _, existing := range fn.GetFunctionAttributes() {
 			if existing.IsString() && existing.GetStringKind() == "target-features" {
 				merged := slices.Clone(requiredFeatures)
@@ -3467,13 +3462,10 @@ func applyWASILTOFeatures(ctx *context, mod gllvm.Module) {
 					}
 				}
 				slices.Sort(merged)
-				features = strings.Join(slices.Compact(merged), ",")
+				features := strings.Join(slices.Compact(merged), ",")
+				fn.AddFunctionAttr(mod.Context().CreateStringAttribute("target-features", features))
+				break
 			}
-		}
-		if features == required {
-			fn.AddFunctionAttr(attr)
-		} else {
-			fn.AddFunctionAttr(mod.Context().CreateStringAttribute("target-features", features))
 		}
 	}
 }

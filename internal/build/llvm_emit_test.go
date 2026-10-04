@@ -56,9 +56,60 @@ func TestWASILTOFunctionFeatures(t *testing.T) {
 			if test.want && (strings.Contains(ir, "-atomics") || strings.Contains(ir, "-exception-handling")) {
 				t.Fatalf("required features still have negative counterparts:\n%s", ir)
 			}
+			for _, attr := range plain.GetFunctionAttributes() {
+				if attr.IsString() && attr.GetStringKind() == "target-features" {
+					t.Fatal("function without target-features should inherit backend defaults")
+				}
+			}
 			applyWASILTOFeatures(ctx, mod)
 			if mod.String() != ir {
 				t.Fatal("applying LTO features twice changed the module")
+			}
+		})
+	}
+}
+
+func TestWASILTOFunctionFeaturesCodegen(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	target, err := llvm.GetTargetFromTriple("wasm32-unknown-wasip1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []lto.Mode{lto.Off, lto.Thin, lto.Full} {
+		t.Run(mode.String(), func(t *testing.T) {
+			mod := parseWasmAggregateIR(t, `
+target datalayout = "e-m:e-p:32:32-i64:64-n32:64-S128"
+target triple = "wasm32-unknown-wasip1"
+@counter = thread_local global i32 0, align 4
+define i32 @increment() #0 {
+  %p = call ptr @llvm.threadlocal.address.p0(ptr @counter)
+  %old = atomicrmw add ptr %p, i32 1 seq_cst
+  ret i32 %old
+}
+declare ptr @llvm.threadlocal.address.p0(ptr)
+attributes #0 = { "target-features"="+simd128" }
+`)
+			ctx := &context{buildConf: &Config{LTO: mode}, crossCompile: crosscompile.Export{WasmProfile: crosscompile.WasmProfileW32}}
+			applyWASILTOFeatures(ctx, mod)
+			machine := target.CreateTargetMachine("wasm32-unknown-wasip1", "generic",
+				"+atomics,+bulk-memory,+exception-handling", llvm.CodeGenLevelDefault,
+				llvm.RelocStatic, llvm.CodeModelDefault)
+			defer machine.Dispose()
+			buf, err := machine.EmitToMemoryBuffer(mod, llvm.AssemblyFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer buf.Dispose()
+			assembly := string(buf.Bytes())
+			// Off is the unmerged input control: backend defaults alone strip
+			// TLS and atomics when every definition already has feature attributes.
+			for _, instruction := range []string{"__tls_base", "i32.atomic.rmw.add"} {
+				if strings.Contains(assembly, instruction) != mode.Enabled() {
+					t.Fatalf("%s: expected preserved=%v:\n%s", instruction, mode.Enabled(), assembly)
+				}
+			}
+			if !strings.Contains(assembly, "simd128") {
+				t.Fatalf("SIMD feature was lost:\n%s", assembly)
 			}
 		})
 	}

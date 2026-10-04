@@ -4,6 +4,7 @@
 import argparse
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 
@@ -53,27 +54,36 @@ def main():
             print("ESP32-C3 C-only DCE cold/warm builds passed (build-only)")
             return
 
-        iwasm = env.get("IWASM", "iwasm")
+        wasmer = env.get("WASMER", "wasmer")
+        if not shutil.which(wasmer):
+            raise RuntimeError(f"Wasmer runner not found: {wasmer}")
+        env["RUST_LOG"] = "off"
         cases = (("full", "println"), ("thin", "println"),
-                 ("full", "fmtprintf"), ("full", "threaded-gc"))
+                 ("full", "fmtprintf"), ("full", "goexit-defer"),
+                 ("thin", "goexit-defer"), ("full", "threaded-gc"))
+        probes = {
+            "goexit-defer": ("./internal/build/testdata/wasm-wasi-goexit-defer",
+                             "wasi worker defer ok"),
+            "threaded-gc": ("./internal/build/testdata/wasm-wasi-threaded-gc",
+                            "wasi threaded gc ok"),
+        }
         for mode, sample in cases:
-            fixture = ("./internal/build/testdata/wasm-wasi-threaded-gc"
-                       if sample == "threaded-gc"
-                       else f"./benchmark/binary_size/{sample}")
-            expected = "wasi threaded gc ok" if sample == "threaded-gc" else "Hello, world"
-            # Reuse the full-LTO packages for the large GC probe; the smaller
+            fixture, expected = probes.get(
+                sample, (f"./benchmark/binary_size/{sample}", "Hello, world"))
+            # Reuse the LTO packages for the runtime probes; the smaller
             # samples above independently check forced and cached builds.
-            builds = (False,) if sample == "threaded-gc" else (True, False)
+            builds = (False,) if sample in probes else (True, False)
             for cold in builds:
                 output = directory / f"{sample}-{mode}.wasm"
                 flags = ["-a"] if cold else []
                 command([str(llgo), "build", *flags, "-target=wasi",
                          f"-lto={mode}", "-o", str(output), fixture], env)
-                actual = command([iwasm, "--max-threads=128", "--stack-size=1048576",
-                                  "--heap-size=0", str(output)], env, timeout=90)
+                actual = command([wasmer, "run", "--enable-exceptions", "--enable-simd",
+                                  "--stack-size=1048576", "--volume=" + str(ROOT),
+                                  "--volume=/tmp", str(output)], env, timeout=90)
                 if actual.strip() != expected:
                     raise RuntimeError(f"{sample}/{mode}: expected {expected!r}, got {actual!r}")
-            print(f"WASI {sample}/{mode} builds and WAMR runs passed", flush=True)
+            print(f"WASI {sample}/{mode} builds and Wasmer runs passed", flush=True)
 
 
 if __name__ == "__main__":

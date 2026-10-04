@@ -688,7 +688,7 @@ jobs:
           go build -tags=dev -o "$RUNNER_TEMP/llgo-dev" ./cmd/llgo
           LLGO="$RUNNER_TEMP/llgo-dev" python3 dev/test_wasm_wasi_lto.py
 
-      - name: Test WASI size-build LTO regressions (WAMR)
+      - name: Test WASI size-build LTO regressions (Wasmer)
         shell: bash
         run: |
           python3 -m unittest discover -s test/sizebuild -p '*_test.py'
