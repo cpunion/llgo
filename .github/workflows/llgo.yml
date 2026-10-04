@@ -721,6 +721,9 @@ jobs:
           windows-arch: ${{ matrix.windows_arch }}
 
   wasm-browser-debug:
+    permissions:
+      contents: read
+      id-token: write
     if: needs.prepare.outputs.run_code_ci == 'true'
     needs: prepare
     name: wasm-browser-debug
