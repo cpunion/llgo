@@ -49,12 +49,14 @@ func peSectionSizes(sec *pe.Section) (stored, memory uint64) {
 // classification. Raw alignment padding is excluded; virtual zero-fill is BSS.
 func buildPESizeReport(path string, f *pe.File, pkgs []Package, level string) *Report {
 	data := &readelfData{sections: make(map[int]*sectionInfo), symbols: make(map[int][]symbolInfo)}
+	sizes := make([]struct{ stored, memory uint64 }, len(f.Sections))
 	for i, sec := range f.Sections {
 		kind := peSectionKind(sec)
 		if kind == sectionUnknown {
 			continue
 		}
 		stored, memory := peSectionSizes(sec)
+		sizes[i].stored, sizes[i].memory = stored, memory
 		base := uint64(sec.VirtualAddress)
 		data.sections[i] = &sectionInfo{Name: sec.Name, Address: base, Size: stored, Kind: kind}
 		if memory > stored {
@@ -64,21 +66,20 @@ func buildPESizeReport(path string, f *pe.File, pkgs []Package, level string) *R
 		}
 	}
 	for _, sym := range f.Symbols {
-		i := int(sym.SectionNumber) - 1
-		if i < 0 || i >= len(f.Sections) || sym.Name == "" {
+		section := int(sym.SectionNumber) - 1
+		if section < 0 || section >= len(f.Sections) || sym.Name == "" {
 			continue
 		}
-		stored, memory := peSectionSizes(f.Sections[i])
-		if uint64(sym.Value) >= memory {
+		if uint64(sym.Value) >= sizes[section].memory {
 			continue
 		}
-		if uint64(sym.Value) >= stored {
+		i := section
+		if uint64(sym.Value) >= sizes[section].stored {
 			i += len(f.Sections)
 		}
-		if data.sections[i] == nil {
-			continue
-		}
-		base := uint64(f.Sections[int(sym.SectionNumber)-1].VirtualAddress)
+		// Symbol values remain relative to the original PE section, even
+		// when i selects its synthetic zero-fill section.
+		base := uint64(f.Sections[section].VirtualAddress)
 		data.symbols[i] = append(data.symbols[i], symbolInfo{Name: sym.Name, Address: base + uint64(sym.Value)})
 	}
 	return buildSizeReport(path, data, pkgs, level)

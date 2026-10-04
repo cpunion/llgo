@@ -66,19 +66,22 @@ func TestPESizeSectionRelativeSymbols(t *testing.T) {
 	f := &pe.File{Sections: []*pe.Section{
 		{SectionHeader: pe.SectionHeader{Name: ".text", VirtualAddress: 0x1000, Size: 32, Characteristics: pe.IMAGE_SCN_MEM_EXECUTE}},
 		{SectionHeader: pe.SectionHeader{Name: ".debug", VirtualAddress: 0x2000, Size: 64}},
+		{SectionHeader: pe.SectionHeader{Name: ".data", VirtualAddress: 0x3000, Size: 8, VirtualSize: 16, Characteristics: pe.IMAGE_SCN_MEM_READ | pe.IMAGE_SCN_MEM_WRITE}},
 	}, Symbols: []*pe.Symbol{
 		{Name: "main.first", SectionNumber: 1},
 		{Name: "main.alias", SectionNumber: 1},
 		{Name: "main.second", SectionNumber: 1, Value: 16},
 		{Name: "undefined", SectionNumber: 0},
 		{Name: "absolute", SectionNumber: -1},
-		{Name: "bad.section", SectionNumber: 3},
+		{Name: "bad.section", SectionNumber: 4},
 		{Name: "out.of.range", SectionNumber: 1, Value: 32},
 		{Name: "debug.only", SectionNumber: 2},
+		{Name: "main.initialized", SectionNumber: 3},
+		{Name: "main.uninitialized", SectionNumber: 3, Value: 8},
 		{SectionNumber: 1},
 	}}
 	report := buildPESizeReport("app.exe", f, nil, "module")
-	if report.Total.Code != 32 || len(report.Modules) != 1 || report.Modules["main"].Code != 32 {
+	if report.Total.Code != 32 || report.Total.Data != 8 || report.Total.BSS != 8 || len(report.Modules) != 1 || report.Modules["main"].Code != 32 || report.Modules["main"].Data != 8 || report.Modules["main"].BSS != 8 {
 		t.Fatalf("PE aliases/invalid symbols = %+v", report)
 	}
 }
