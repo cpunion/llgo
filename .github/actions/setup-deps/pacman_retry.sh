@@ -4,6 +4,10 @@
 # LLGO_PACMAN_RETRY_DELAY_SECONDS: delay between attempts (default: 5).
 # Retries intentionally accept any pacman failure, including permanent errors;
 # the bounded attempt count limits the delay before reporting exhaustion.
+# Explicit package URLs bypass pacman's mirror lists. Rotate those from the
+# MSYS2 primary server through its published HTTPS mirrors on retries, keeping
+# the exact package versions and pacman's signature verification unchanged.
+# https://www.msys2.org/dev/mirrors/
 
 pacman_command() {
 	command pacman "$@"
@@ -29,9 +33,23 @@ pacman_with_retry() {
 		return 2
 	fi
 
-	local attempt
+	local mirrors=(
+		https://repo.msys2.org
+		https://mirror.umd.edu/msys2
+		https://mirror.msys2.org
+	)
+	local attempt argument mirror
+	local args=()
 	for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-		if pacman_command "$@"; then
+		mirror="${mirrors[$(((attempt - 1) % ${#mirrors[@]}))]}"
+		args=()
+		for argument in "$@"; do
+			case "$argument" in
+				https://repo.msys2.org/*) argument="$mirror/${argument#https://repo.msys2.org/}" ;;
+			esac
+			args+=("$argument")
+		done
+		if pacman_command "${args[@]}"; then
 			return 0
 		fi
 		if (( attempt < max_attempts )); then
