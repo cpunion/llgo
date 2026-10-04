@@ -889,7 +889,7 @@ jobs:
           LLGO_BUILD_CACHE: "1"
         run: dev/test_wasm_workers.sh
 
-      - name: Test SIMD behavior on WASI
+      - name: Test SIMD behavior on WebAssembly
         if: matrix.suite == 'test-command'
         shell: bash
         env:
