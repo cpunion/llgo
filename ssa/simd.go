@@ -145,7 +145,7 @@ func (b Builder) SIMD(op SIMDOp, result Type, args ...Expr) Expr {
 		}
 		return b.Call(b.Pkg.rtFunc("PanicSIMDUnimplemented"), args...)
 	}
-	b.simdFeatures(op)
+	b.requireSIMDFeatures()
 	if op == SIMDRound && b.Prog.Target().GOARCH == "amd64" {
 		return b.simdRoundEven(args[0])
 	}
@@ -225,22 +225,26 @@ func (b Builder) SIMD(op SIMDOp, result Type, args ...Expr) Expr {
 	}
 }
 
+var simdFloatPredicates = map[SIMDOp]llvm.FloatPredicate{
+	SIMDEqual: llvm.FloatOEQ, SIMDNotEqual: llvm.FloatUNE,
+	SIMDLess: llvm.FloatOLT, SIMDLessEqual: llvm.FloatOLE,
+	SIMDGreater: llvm.FloatOGT, SIMDGreaterEqual: llvm.FloatOGE,
+}
+
+var simdIntPredicates = map[SIMDOp]llvm.IntPredicate{
+	SIMDEqual: llvm.IntEQ, SIMDNotEqual: llvm.IntNE,
+	SIMDLess: llvm.IntSLT, SIMDLessEqual: llvm.IntSLE,
+	SIMDGreater: llvm.IntSGT, SIMDGreaterEqual: llvm.IntSGE,
+}
+
 func (b Builder) simdCompare(op SIMDOp, result Type, x, y Expr) Expr {
 	info := simdLanes(x.RawType()).Elem().Underlying().(*types.Basic).Info()
 	var cond llvm.Value
 	if info&types.IsFloat != 0 {
-		pred := map[SIMDOp]llvm.FloatPredicate{
-			SIMDEqual: llvm.FloatOEQ, SIMDNotEqual: llvm.FloatUNE,
-			SIMDLess: llvm.FloatOLT, SIMDLessEqual: llvm.FloatOLE,
-			SIMDGreater: llvm.FloatOGT, SIMDGreaterEqual: llvm.FloatOGE,
-		}[op]
+		pred := simdFloatPredicates[op]
 		cond = b.impl.CreateFCmp(pred, x.impl, y.impl, "")
 	} else {
-		pred := map[SIMDOp]llvm.IntPredicate{
-			SIMDEqual: llvm.IntEQ, SIMDNotEqual: llvm.IntNE,
-			SIMDLess: llvm.IntSLT, SIMDLessEqual: llvm.IntSLE,
-			SIMDGreater: llvm.IntSGT, SIMDGreaterEqual: llvm.IntSGE,
-		}[op]
+		pred := simdIntPredicates[op]
 		if info&types.IsUnsigned != 0 {
 			switch pred {
 			case llvm.IntSLT:
@@ -261,10 +265,6 @@ func (b Builder) simdCompare(op SIMDOp, result Type, x, y Expr) Expr {
 var simdFloatUnary = map[SIMDOp]string{
 	SIMDSqrt: "llvm.sqrt", SIMDCeil: "llvm.ceil", SIMDFloor: "llvm.floor",
 	SIMDTrunc: "llvm.trunc", SIMDRound: "llvm.roundeven",
-}
-
-func (b Builder) simdFeatures(op SIMDOp) {
-	b.requireSIMDFeatures()
 }
 
 func (b Builder) requireSIMDFeatures() {

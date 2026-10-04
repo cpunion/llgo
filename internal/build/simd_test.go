@@ -77,9 +77,17 @@ func simdTestDir(t *testing.T) string {
 	dir := t.TempDir()
 	for name, text := range map[string]string{
 		"go.mod": "module simdtest\n\ngo 1.27\n", "main.go": simd128Source, "bitmap_amd64.go": simdMaskBitmapSource,
-		"lookup_arm64.go":  `package main; import "simd/archsimd"; func lookup(x,y archsimd.Int8x16) archsimd.Int8x16 { return x.LookupOrZero(y) }`,
-		"lookup_wasm.go":   `package main; import "simd/archsimd"; func lookup(x,y archsimd.Int8x16) archsimd.Int8x16 { return x.LookupOrZero(y) }`,
-		"permute_amd64.go": `package main; import "simd/archsimd"; func permute(x archsimd.Uint8x16, y archsimd.Int8x16) archsimd.Uint8x16 { return x.PermuteOrZero(y) }`,
+		"lookup_arm64.go": `package main; import "simd/archsimd"; func lookup(x,y archsimd.Int8x16) archsimd.Int8x16 { return x.LookupOrZero(y) }`,
+		"lookup_wasm.go":  `package main; import "simd/archsimd"; func lookup(x,y archsimd.Int8x16) archsimd.Int8x16 { return x.LookupOrZero(y) }`,
+		"permute_amd64.go": `package main; import "simd/archsimd"; func permute(x archsimd.Uint8x16, y archsimd.Int8x16) archsimd.Uint8x16 { return x.PermuteOrZero(y) }
+func permuteConstant(x archsimd.Uint8x16) archsimd.Uint8x16 {
+ indices := [16]uint8{31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16}
+ return x.Permute(archsimd.LoadUint8x16Array(&indices))
+}
+func permuteZeroConstant(x archsimd.Uint8x16) archsimd.Uint8x16 {
+ indices := [16]int8{-1, 30, -128, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16}
+ return x.PermuteOrZero(archsimd.LoadInt8x16Array(&indices))
+}`,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0600); err != nil {
 			t.Fatal(err)
@@ -192,6 +200,14 @@ func TestSIMD128LLVM(t *testing.T) {
 			opts.SetVerifyEach(true)
 			if err := mod.RunPasses("default<O2>", prog.TargetMachine(), opts); err != nil {
 				t.Fatal(err)
+			}
+			if target.arch == "amd64" {
+				for _, name := range []string{"permuteConstant", "permuteZeroConstant"} {
+					ir := mod.NamedFunction("main." + name).String()
+					if !strings.Contains(ir, "shufflevector") || strings.Contains(ir, "extractelement") || strings.Contains(ir, "insertelement") {
+						t.Fatalf("constant permutation did not fold to a vector shuffle:\n%s", ir)
+					}
+				}
 			}
 			asm, err := prog.TargetMachine().EmitToMemoryBuffer(mod, llvm.AssemblyFile)
 			if err != nil {

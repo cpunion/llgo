@@ -17,8 +17,8 @@ func TestSIMDFeaturesPreserveExistingRequirements(t *testing.T) {
 	fn := pkg.NewFunc("p.f", NoArgsNoRet, InGo)
 	fn.impl.AddFunctionAttr(prog.ctx.CreateStringAttribute("target-features", "+bulk-memory"))
 	b := fn.MakeBody(1)
-	b.simdFeatures(SIMDAdd)
-	b.simdFeatures(SIMDSub)
+	b.requireSIMDFeatures()
+	b.requireSIMDFeatures()
 	b.Return()
 	b.EndBuild()
 	for _, attr := range fn.impl.GetFunctionAttributes() {

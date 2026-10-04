@@ -59,7 +59,8 @@ func (b Builder) simdConvert(result Type, x Expr) Expr {
 		v = b.impl.CreateBitCast(x.impl, typ, "")
 	}
 	if n != result.ll.VectorSize() {
-		// Narrowing conversions leave the unused upper lanes zero on these targets.
+		// Converting to a narrower element type increases the result lane count.
+		// Preserve the converted lanes and zero-fill the added upper lanes.
 		mask := make([]llvm.Value, result.ll.VectorSize())
 		for i := range mask {
 			index := i

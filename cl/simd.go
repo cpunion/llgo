@@ -168,6 +168,9 @@ func lookupSIMD(fn *ssa.Function, arch string) (simdOperation, bool) {
 	if !ok || !desc.matches(sig, vector) {
 		return fallback()
 	}
+	if desc.op == llssa.SIMDLookupOrZero && arch != "arm64" && arch != "wasm" {
+		return fallback()
+	}
 	return desc, true
 }
 

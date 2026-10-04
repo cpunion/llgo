@@ -23,7 +23,8 @@ architecture.
 - Four mask shapes, comparisons, mask bitmaps where provided, and the official
   Go helpers for masking and conditional selection.
 - Byte lookup with out-of-range zeroing on arm64/wasm, and baseline-safe amd64
-  byte/word permutations and negative-index zeroing.
+  byte/word permutations and negative-index zeroing. Constant permutations
+  fold to vector shuffles at O2; dynamic indices use a per-lane fallback.
 
 Tests cover NaNs, signed zero, wrapping/saturation boundaries, large shift
 counts, every byte lookup index, element-aligned addresses, short slices,
@@ -49,21 +50,18 @@ GOEXPERIMENT=simd llgo test -O2 -count=1 ./test/simd/...
 GOEXPERIMENT=simd GODEBUG=cpu.all=off llgo test -O2 -lto=full -count=1 ./test/simd/...
 
 GOEXPERIMENT=simd GOOS=wasip1 GOARCH=wasm go test -exec=wasmtime -count=1 ./test/simd/...
+GOEXPERIMENT=simd llgo test -O0 -target wasi -emulator -count=1 -timeout=2m ./test/simd/...
 GOEXPERIMENT=simd llgo test -O2 -target wasi -emulator -count=1 -timeout=2m ./test/simd/...
 GOEXPERIMENT=simd llgo test -O2 -target emscripten -emulator -count=1 -timeout=2m ./test/simd/...
 ```
 
-LLGo WASI execution uses the threaded W32 profile and WAMR (`iwasm`), built
-with `bash dev/build_iwasm.sh`. The official Go WASI comparison uses Wasmtime.
+LLGo WASI execution uses the threaded W32 profile and Wasmer 7.5.0, installed
+with `bash dev/install_wasmer.sh`. The runner supports SIMD, shared-memory
+threads, and standard Wasm exception handling; Wasmer selects an available
+backend automatically. The official Go WASI comparison uses Wasmtime.
 Emscripten execution requires a compatible SDK and Node.js. The local
 qualification used Go 1.27.0, LLVM 22.1.8, Emscripten 6.0.8, and Node 24.19.0.
-Existing CI runs native amd64/arm64 at O0/O2 and WASI at O2.
-
-The current WAMR 2.4.5 classic-interpreter profile rejects `v128` function
-types with `unknown value type`, even though its build reports SIMD enabled.
-The WASI suite is therefore blocked at module loading; the same failure is
-reproducible on the main-branch baseline and an import-free `v128` identity
-module. Emscripten provides executable Wasm SIMD coverage independently.
+Existing CI runs native amd64/arm64 and WASI at O0/O2.
 
 The complete O0 Emscripten test executable exceeds Node's local-variable
 limit. A small executable covers SIMD initialization, cross-package calls,

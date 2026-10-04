@@ -114,3 +114,34 @@ func TestSIMDFallbackDeclarations(t *testing.T) {
 		}
 	}
 }
+
+func TestSIMDLookupOrZeroTargets(t *testing.T) {
+	const source = `package archsimd
+ type v128 struct { _ [0]func() }
+ type Int8x16 struct { tag v128; vals [16]int8 }
+ func (x Int8x16) LookupOrZero(y Int8x16) Int8x16
+ `
+	fs := token.NewFileSet()
+	file, err := parser.ParseFile(fs, "simd.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, _, err := ssautil.BuildPackage(&types.Config{}, fs, types.NewPackage("simd/archsimd", "archsimd"), []*ast.File{file}, ssa.SanityCheckFunctions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vector := pkg.Pkg.Scope().Lookup("Int8x16").Type().(*types.Named)
+	fn := pkg.Prog.FuncValue(vector.Method(0))
+	for _, arch := range []string{"arm64", "wasm", "amd64"} {
+		t.Run(arch, func(t *testing.T) {
+			want := llssa.SIMDLookupOrZero
+			if arch == "amd64" {
+				want = llssa.SIMDUnimplemented
+			}
+			op, ok := lookupSIMD(fn, arch)
+			if !ok || op.op != want {
+				t.Fatalf("lookup = (%v, %v), want %v", op.op, ok, want)
+			}
+		})
+	}
+}

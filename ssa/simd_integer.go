@@ -56,8 +56,12 @@ func (b Builder) simdShiftValue(x Expr, count llvm.Value, right bool) llvm.Value
 	return b.impl.CreateSelect(large, llvm.ConstNull(x.ll), shifted, "")
 }
 
+var simdIntegerIntrinsics = map[SIMDOp]string{
+	SIMDAddSaturated: "add.sat", SIMDSubSaturated: "sub.sat", SIMDMin: "min", SIMDMax: "max",
+}
+
 func (b Builder) simdIntegerIntrinsic(op SIMDOp, x, y Expr) Expr {
-	name := map[SIMDOp]string{SIMDAddSaturated: "add.sat", SIMDSubSaturated: "sub.sat", SIMDMin: "min", SIMDMax: "max"}[op]
+	name := simdIntegerIntrinsics[op]
 	prefix := "llvm.s"
 	if simdLanes(x.RawType()).Elem().Underlying().(*types.Basic).Info()&types.IsUnsigned != 0 {
 		prefix = "llvm.u"

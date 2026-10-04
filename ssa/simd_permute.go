@@ -11,6 +11,8 @@ func (b Builder) simdPermute(op SIMDOp, x, indices Expr) Expr {
 		value := b.impl.CreateIntrinsic(x.ll, llvm.LookupIntrinsicID(name), []llvm.Value{x.impl, indices.impl}, "")
 		return Expr{value, x.Type}
 	}
+	// Dynamic amd64 permutations use a baseline-safe lane gather; constant
+	// indices fold to shufflevector during LLVM optimization.
 	// Mask indices before extracting a lane, including indices whose sign bit
 	// requests zero. An out-of-bounds extract would create LLVM poison.
 	n := x.ll.VectorSize()
