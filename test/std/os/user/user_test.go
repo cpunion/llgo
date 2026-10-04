@@ -76,7 +76,9 @@ func checkLookupError[T error](t *testing.T, err error) {
 		t.Fatal("lookup unexpectedly succeeded")
 	}
 	var pathErr *os.PathError
-	if runtime.GOOS == "wasip1" && errors.As(err, &pathErr) && errors.Is(err, syscall.EBADF) {
+	if runtime.GOOS == "wasip1" && errors.As(err, &pathErr) && pathErr.Op == "open" &&
+		(pathErr.Path == "/etc/passwd" || pathErr.Path == "/etc/group") &&
+		(errors.Is(err, syscall.EBADF) || errors.Is(err, os.ErrNotExist)) {
 		t.Logf("WASI host does not expose the user and group database: %v", pathErr)
 		return
 	}
@@ -90,7 +92,7 @@ func checkLookupError[T error](t *testing.T, err error) {
 		return
 	}
 	if _, ok := err.(T); !ok {
-		t.Errorf("error type = %T, want %T", err, *new(T))
+		t.Errorf("error = %v (%T), want %T", err, err, *new(T))
 	}
 }
 
