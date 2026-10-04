@@ -1,9 +1,8 @@
-package build
+package sizereport
 
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -261,60 +260,15 @@ func TestWasmSizeDuplicateFunctionNamesRemainOptional(t *testing.T) {
 	}
 }
 
-func TestFinalSizeEmscriptenArtifacts(t *testing.T) {
-	dir := t.TempDir()
-	out := &OutFmtDetails{Out: filepath.Join(dir, "app.mjs"), PCLN: filepath.Join(dir, "app.pclntab")}
-	raw := sizeWasmFixture(true)
-	for path, data := range map[string][]byte{out.Out: []byte("javascript"), filepath.Join(dir, "app.wasm"): raw, out.PCLN: []byte("pcln")} {
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	conf := &Config{Mode: ModeBuild, SizeReport: true, SizeFormat: "json", Goos: "js", Goarch: "wasm", DebugArtifactMode: DebugArtifactNone}
-	var output bytes.Buffer
-	if err := reportBuildOutputs(conf, out, nil, &output, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	var payload struct {
-		Version   int
-		Stage     string
-		Binary    string
-		FileSize  uint64 `json:"file_size"`
-		Artifacts []Artifact
-	}
-	if err := json.Unmarshal(output.Bytes(), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload.Version != 1 || payload.Stage != "final" || !strings.HasSuffix(payload.Binary, "app.wasm") || payload.FileSize != uint64(len(raw)) || len(payload.Artifacts) != 3 {
-		t.Fatalf("final report: %s", output.String())
-	}
-	if err := os.Remove(out.PCLN); err != nil {
-		t.Fatal(err)
-	}
-	if err := reportBuildOutputs(conf, out, nil, io.Discard, io.Discard); err == nil {
-		t.Fatal("missing final artifact must fail report")
-	}
-}
-
 type sizeFailWriter struct{}
 
 func (sizeFailWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
 func TestSizeReportErrorsAndConfiguration(t *testing.T) {
 	for _, format := range []string{"text", "json"} {
-		if err := writeSizeReport(sizeFailWriter{}, &sizeReport{}, format); err == nil {
+		if err := Write(sizeFailWriter{}, &Report{}, format); err == nil {
 			t.Fatalf("%s write error ignored", format)
 		}
-	}
-	if err := ensureSizeReporting(&Config{SizeReport: true, SizeFormat: "invalid"}); err == nil {
-		t.Fatal("invalid format accepted")
-	}
-	if err := ensureSizeReporting(&Config{SizeReport: true, SizeLevel: "invalid"}); err == nil {
-		t.Fatal("invalid level accepted")
-	}
-	conf := &Config{SizeReport: true, SizeFormat: "JSON", SizeLevel: "FULL"}
-	if err := ensureSizeReporting(conf); err != nil || conf.SizeFormat != "json" || conf.SizeLevel != "full" {
-		t.Fatalf("normalization: %+v %v", conf, err)
 	}
 }
 
@@ -325,9 +279,9 @@ func TestFinalSizeTextAndReadErrors(t *testing.T) {
 	}
 	report.Format = "wasm"
 	report.Warnings = []string{"optional names unavailable"}
-	report.Artifacts = []Artifact{{Path: "app.wasm", Format: "wasm", Role: ArtifactRoleDeployment, Size: 99}}
+	report.Artifacts = []Artifact{{Path: "app.wasm", Format: "wasm", Role: "deployment", Size: 99}}
 	var output bytes.Buffer
-	if err := writeSizeReport(&output, report, "text"); err != nil {
+	if err := Write(&output, report, "text"); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"encoded function bodies", "main.(*T).Method", "Memory 0: initial=131072 maximum=262144", "shared=true", "Artifact: 99", "optional names unavailable"} {
@@ -335,25 +289,17 @@ func TestFinalSizeTextAndReadErrors(t *testing.T) {
 			t.Fatalf("text missing %q: %s", want, output.String())
 		}
 	}
-	if err := writeSizeReport(io.Discard, report, "bad"); err == nil {
+	if err := Write(io.Discard, report, "bad"); err == nil {
 		t.Fatal("unknown report format accepted")
-	}
-	conf := &Config{Mode: ModeRun, SizeReport: true}
-	if err := reportBuildOutputs(conf, &OutFmtDetails{}, nil, io.Discard, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	conf.Mode = ModeBuild
-	if err := reportBuildOutputs(conf, &OutFmtDetails{Out: filepath.Join(t.TempDir(), "missing")}, nil, io.Discard, io.Discard); err == nil {
-		t.Fatal("missing binary accepted")
 	}
 	short := filepath.Join(t.TempDir(), "short")
 	if err := os.WriteFile(short, []byte{0}, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := collectBinarySize(short, nil, "full"); err == nil {
+	if _, err := Collect(short, nil, "full"); err == nil {
 		t.Fatal("truncated header accepted")
 	}
-	if _, err := collectBinarySize(t.TempDir(), nil, "full"); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+	if _, err := Collect(t.TempDir(), nil, "full"); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("directory size report = %v", err)
 	}
 }
@@ -393,7 +339,7 @@ func TestWasmSizeReadBounds(t *testing.T) {
 
 func TestFinalSizeFormatDispatch(t *testing.T) {
 	dir := t.TempDir()
-	if report, err := collectBinarySize(filepath.Join(dir, "missing"), nil, "full"); report != nil || !os.IsNotExist(err) {
+	if report, err := Collect(filepath.Join(dir, "missing"), nil, "full"); report != nil || !os.IsNotExist(err) {
 		t.Fatalf("missing input report = %+v, error = %v", report, err)
 	}
 	elfPath := filepath.Join(dir, "app.elf")
@@ -401,20 +347,28 @@ func TestFinalSizeFormatDispatch(t *testing.T) {
 	if err := os.WriteFile(elfPath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := collectBinarySize(elfPath, nil, "full")
+	report, err := Collect(elfPath, nil, "full")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if report.Format != "elf" || report.FileSize != uint64(len(raw)) || report.Total.Code != 32 {
 		t.Fatalf("ELF dispatch report = %+v", report)
 	}
-	wasmPath := filepath.Join(dir, "future-version.wasm")
-	if err := os.WriteFile(wasmPath, []byte{0, 'a', 's', 'm', 2, 0, 0, 0}, 0o600); err != nil {
+	wasmPath := filepath.Join(dir, "app.wasm")
+	raw = sizeWasmFixture(true)
+	if err := os.WriteFile(wasmPath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	conf := &Config{Mode: ModeBuild, SizeReport: true, DebugArtifactMode: DebugArtifactNone}
-	if err := reportBuildOutputs(conf, &OutFmtDetails{Out: wasmPath}, nil, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "size report: invalid WebAssembly header") {
-		t.Fatalf("invalid binary report must fail the build: %v", err)
+	report, err = Collect(wasmPath, nil, "full")
+	if err != nil || report.Format != "wasm" || report.FileSize != uint64(len(raw)) || report.Modules["main.(*T).Method"].Code != 2 {
+		t.Fatalf("Wasm dispatch report = %+v, error = %v", report, err)
+	}
+	raw[4] = 2
+	if err := os.WriteFile(wasmPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Collect(wasmPath, nil, "full"); err == nil {
+		t.Fatal("unsupported Wasm version accepted")
 	}
 }
 
@@ -422,29 +376,6 @@ func TestSizeReportPreservesMethodNames(t *testing.T) {
 	for raw, want := range map[string]string{"pkg.(*T).Method (123)": "pkg.(*T).Method", "pkg.(T).Method": "pkg.(T).Method", "__text (5F)": "__text", "name (not an index)": "name (not an index)"} {
 		if got := parseNameField(raw); got != want {
 			t.Fatalf("%q -> %q, want %q", raw, got, want)
-		}
-	}
-}
-
-func TestCollectFinalSizeRealBinary(t *testing.T) {
-	path := os.Getenv("LLGO_SIZE_REPORT_BIN")
-	if path == "" {
-		t.Skip("set LLGO_SIZE_REPORT_BIN for a final-artifact smoke test")
-	}
-	report, err := collectBinarySize(path, nil, "full")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.Wasm != nil && report.Total.Code+report.Total.Data+report.Wasm.StructureBytes+report.Wasm.CustomBytes != report.FileSize {
-		t.Fatal("file size does not close")
-	}
-	var output bytes.Buffer
-	if err := emitJSONReport(&output, report); err != nil {
-		t.Fatal(err)
-	}
-	if path := os.Getenv("LLGO_SIZE_REPORT_JSON"); path != "" {
-		if err := os.WriteFile(path, output.Bytes(), 0o600); err != nil {
-			t.Fatal(err)
 		}
 	}
 }

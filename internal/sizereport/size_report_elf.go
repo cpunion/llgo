@@ -1,4 +1,4 @@
-package build
+package sizereport
 
 import (
 	"debug/elf"
@@ -10,7 +10,7 @@ import (
 
 // collectELFSize reads the final ELF directly: section names do not determine
 // whether bytes are loaded, and local labels do not determine function sizes.
-func collectELFSize(path string, pkgs []Package, level string) (*sizeReport, error) {
+func collectELFSize(path string, pkgs []Package, level string) (*Report, error) {
 	f, err := elf.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading ELF size: %w", err)
@@ -54,8 +54,8 @@ type elfSizeEvent struct {
 	delta  int
 }
 
-func buildELFSizeReport(path string, f *elf.File, symbols []elf.Symbol, pkgs []Package, level string) *sizeReport {
-	report := &sizeReport{Binary: path, Modules: make(map[string]*moduleSize)}
+func buildELFSizeReport(path string, f *elf.File, symbols []elf.Symbol, pkgs []Package, level string) *Report {
+	report := &Report{Binary: path, Modules: make(map[string]*Module)}
 	resolver := newNameResolver(level, pkgs)
 	events := make(map[elf.SectionIndex][]elfSizeEvent)
 	for _, sym := range symbols {
@@ -139,7 +139,7 @@ func elfSymbolSectionOffset(f *elf.File, sec *elf.Section, sym elf.Symbol) (uint
 // Sweep section-relative ranges so aliases, overlapping symbols and duplicate
 // static/dynamic entries never count physical bytes more than once. Unknown
 // bytes may contain padding or unnamed data; the symbol table cannot tell which.
-func addELFSectionSizes(report *sizeReport, section string, kind sectionKind, size uint64, events []elfSizeEvent) {
+func addELFSectionSizes(report *Report, section string, kind sectionKind, size uint64, events []elfSizeEvent) {
 	sort.Slice(events, func(i, j int) bool { return events[i].offset < events[j].offset })
 	owners := make(map[string]int)
 	addRange := func(n uint64) {

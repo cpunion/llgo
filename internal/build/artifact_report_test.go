@@ -287,7 +287,7 @@ func (w *artifactRemovingWriter) Write(p []byte) (int, error) {
 func TestReportBuildOutputsSharesArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	out := &OutFmtDetails{Out: filepath.Join(dir, "app.wasm"), PCLN: filepath.Join(dir, "app.pclntab")}
-	if err := os.WriteFile(out.Out, sizeWasmFixture(false), 0o600); err != nil {
+	if err := os.WriteFile(out.Out, sizeWasmFixture(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(out.PCLN, []byte("symbols"), 0o600); err != nil {
@@ -324,7 +324,7 @@ func TestReportBuildOutputsErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "app.wasm")
-	if err := os.WriteFile(path, sizeWasmFixture(false), 0o600); err != nil {
+	if err := os.WriteFile(path, sizeWasmFixture(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	conf := &Config{Mode: ModeBuild, SizeReport: true, SizeFormat: "json", DebugArtifactMode: DebugArtifactNone, DebugArtifactModeSet: true}

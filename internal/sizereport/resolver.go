@@ -1,4 +1,4 @@
-package build
+package sizereport
 
 import "strings"
 
@@ -18,8 +18,8 @@ func newNameResolver(level string, pkgs []Package) *nameResolver {
 	}
 	pkgPrefixes := make([]string, len(pkgs))
 	for i, pkg := range pkgs {
-		if pkg != nil && pkg.Package != nil {
-			pkgPrefixes[i] = pkg.PkgPath + "."
+		if pkg.Path != "" {
+			pkgPrefixes[i] = pkg.Path + "."
 		}
 	}
 	return &nameResolver{
@@ -60,10 +60,7 @@ func (r *nameResolver) matchPackage(symbol string) string {
 		return cached
 	}
 	for i, pkg := range r.pkgs {
-		if pkg == nil || pkg.Package == nil {
-			continue
-		}
-		id := pkg.PkgPath
+		id := pkg.Path
 		if id == "" {
 			continue
 		}
@@ -84,17 +81,14 @@ func (r *nameResolver) matchModule(symbol string) string {
 		return cached
 	}
 	for _, pkg := range r.pkgs {
-		if pkg == nil || pkg.Package == nil {
-			continue
-		}
-		path := pkg.PkgPath
+		path := pkg.Path
 		if path == "" {
 			continue
 		}
 		if strings.HasPrefix(symbol, path+".") {
 			mod := path
-			if pkg.Module != nil && pkg.Module.Path != "" {
-				mod = pkg.Module.Path
+			if pkg.Module != "" {
+				mod = pkg.Module
 			}
 			r.moduleMap[symbol] = mod
 			return mod

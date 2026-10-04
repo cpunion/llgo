@@ -26,11 +26,15 @@ it is not silently replaced by a warning.
   resources, runtime symbols and external DWARF described by the build output.
   Alternate firmware formats are listed individually, not summed as if every
   format must be deployed together.
-- Other native formats retain the `llvm-readelf` reader and address-range
-  estimates. Parentheses within Go method names are preserved.
+- PE/COFF is read directly using section characteristics. Section payload excludes
+  raw-file alignment padding; virtual zero-fill is counted as BSS. COFF symbol
+  ownership uses address-range estimates because symbols do not carry ELF-style
+  sizes. Stripped Windows executables retain section totals.
+- Mach-O retains the `llvm-readelf` reader and address-range estimates.
+  Parentheses within Go method names are preserved.
 
 Native `flash` remains the sum of allocated code/rodata/data section payload;
-`ram` is data plus NOBITS section sizes. These are not the ELF container size,
+`ram` is data plus zero-fill (ELF NOBITS or PE virtual zero-fill). These are not the ELF container size,
 load-image padding, physical RAM after target address-alias resolution, or
 dynamic runtime usage. Linker reservations may be included in NOBITS.
 
@@ -44,6 +48,10 @@ Symbol attribution describes the final physical owner. Inlining and LTO may
 move work across package boundaries. LLVM instruction counts and archive sizes
 are not substituted for final bytes; this reader also works with cached build
 inputs and after LLVM modules have been released.
+
+The parsers, aggregation and output live in `internal/sizereport`, with only
+standard-library dependencies. The build layer selects the final module, converts
+package/artifact metadata and invokes the Mach-O tool fallback.
 
 ## Aggregation Levels
 
@@ -85,12 +93,13 @@ remain compatible with the previous report.
 
 1. Unit tests:
    ```sh
-   go test ./internal/build -run 'Test(WasmSize|ELFSize|CollectELFSize|FinalSize|SizeReport|BuildSizeReport|NameResolver|ModuleNameFromSymbol|ParseReadelfOutput|ReportBuildOutputs)' -count=1
+   CGO_ENABLED=0 go test ./internal/sizereport -count=1
+   go test ./internal/build -run 'Test(SizeReport|FinalSize|ReportBuildOutputs)' -count=1
    ```
 2. Real binary test:
    ```sh
    LLGO_SIZE_REPORT_BIN=/absolute/path/to/app.wasm \
-     go test ./internal/build -run '^TestCollectFinalSizeRealBinary$' -count=1
+     go test ./test/sizereport -run '^TestCollectFinalSizeRealBinary$' -count=1
    ```
 3. Manual smoke test: `llgo build -size -size-level=module .` (or
    `package`/`full` as desired).

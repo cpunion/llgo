@@ -1,4 +1,4 @@
-package build
+package sizereport
 
 import (
 	"bytes"
@@ -195,11 +195,11 @@ func wasmFunctionNames(payload []byte) (map[uint64]string, error) {
 	return names, r.done()
 }
 
-func collectWasmSize(path string, raw []byte, pkgs []Package, level string) (*sizeReport, error) {
+func collectWasmSize(path string, raw []byte, pkgs []Package, level string) (*Report, error) {
 	if len(raw) < 8 || !bytes.Equal(raw[:8], []byte{0, 'a', 's', 'm', 1, 0, 0, 0}) {
 		return nil, fmt.Errorf("invalid WebAssembly header")
 	}
-	report := &sizeReport{Binary: path, Modules: make(map[string]*moduleSize), Wasm: &wasmSizeDetails{}}
+	report := &Report{Binary: path, Modules: make(map[string]*Module), Wasm: &wasmSizeDetails{}}
 	w := report.Wasm
 	r := wasmSizeReader{data: raw, off: 8}
 	sections := make(map[byte][]byte)
