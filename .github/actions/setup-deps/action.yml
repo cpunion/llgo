@@ -537,6 +537,7 @@ runs:
         msystem: ${{ inputs.windows-arch == 'arm64' && 'CLANGARM64' || 'CLANG64' }}
         path-type: inherit
         update: true
+        install: pacman-contrib
 
     - name: Test MSYS2 package retry helper
       if: runner.os == 'Windows' && inputs.install-llvm == 'true' && inputs.windows-abi == 'mingw'
