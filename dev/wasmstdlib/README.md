@@ -12,6 +12,8 @@ The full audit requires GNU `timeout`. Each package has a five-minute build/run 
 
 Reviewed exclusions are reported as `not-applicable` with a profile-specific reason. Native-only signal, CPU-profiler, BDWGC finalizer and weak-reference stress suites; OS-only plugin, syscall and Windows suites; and the unsupported Go `cgo` frontend are not counted as passes. Official Go reference profiles also classify `test/llgoext` explicitly because those packages require LLGo-only build tags and runtime APIs. Dedicated target tests continue to cover LLGo's C ABI and host boundaries.
 
+`test/simd` is reported as `separate-suite`: it requires `GOEXPERIMENT=simd` and runs in the regular Go workflow's dedicated native and W32-WASI SIMD jobs at O0 and O2. This does not claim SIMD acceptance on the JavaScript profiles or count the package as a standard-library pass.
+
 ## Focused standard-library slice
 
 This bounded acceptance slice runs the complete repository test packages for `errors`, `sort`, `encoding/binary`, `fmt`, `strconv`, and `io`. It exercises error wrapping and assertion, reflection-based sorting, byte-order interfaces, structured encoding, varints, fixed- and native-width integer boundaries, formatting and scanning interfaces, readers and writers, and pipe goroutine/timer coordination.
