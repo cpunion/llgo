@@ -98,10 +98,12 @@ type WasmProfile string
 
 const (
 	// WASIThreadedEmulator runs shared-memory modules with standard Wasm EH
-	// and SIMD. wasi-libc manages its own heap inside the module memory.
+	// and SIMD. Wasmer chooses an available backend; the pinned Windows CLI
+	// uses V8 and supported Unix builds prefer Cranelift for these modules.
+	// wasi-libc manages its own heap inside the module memory.
 	// The runner resolves the working-directory preopen to an absolute path
 	// before execution and also grants Go's default /tmp directory.
-	WASIThreadedEmulator = `wasmer run --cranelift --enable-exceptions --enable-simd --stack-size=1048576 --volume=. --volume=/tmp "{}"`
+	WASIThreadedEmulator = `wasmer run --enable-exceptions --enable-simd --stack-size=1048576 --volume=. --volume=/tmp "{}"`
 
 	WasmProfileNone WasmProfile = ""
 	WasmProfileJ32  WasmProfile = "j32"

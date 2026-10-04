@@ -74,8 +74,10 @@ are macOS arm64, Linux amd64/aarch64/riscv64 and Windows amd64 (including use
 from MinGW). Wasmer 7.5.0 does not publish a macOS Intel archive; that host
 requires a source-built CLI on PATH. The Windows CLI is a standalone host
 process and does not need to match the guest compiler's C ABI. Its official
-archive only includes the V8 backend, so Windows invocations select `--v8`;
-Unix invocations retain `--cranelift`.
+archive only includes the V8 backend. All invocations leave backend selection to
+Wasmer: the pinned Windows CLI selects V8, while supported Unix builds prefer
+Cranelift for these modules. Backend selection also checks the module's required
+features. Windows host directories still need explicit POSIX guest mappings.
 
 ## Reproducible checks
 

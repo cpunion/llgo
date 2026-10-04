@@ -670,7 +670,7 @@ jobs:
           # Check file type
           file hello.wasm
 
-          RUST_LOG=off wasmer run --cranelift --enable-exceptions --enable-simd --stack-size=1048576 hello.wasm
+          RUST_LOG=off wasmer run --enable-exceptions --enable-simd --stack-size=1048576 hello.wasm
 
       - name: Set up wasm-tools for EH fixtures
         uses: bytecodealliance/actions/wasm-tools/setup@v1

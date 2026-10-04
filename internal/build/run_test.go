@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/internal/targets"
 )
 
 func TestRunInEmulatorValidation(t *testing.T) {
@@ -110,6 +111,32 @@ func TestWASIRunnerIsolatesEngineLogging(t *testing.T) {
 }
 
 func TestWASIThreadedEmulatorHostContract(t *testing.T) {
+	testWASIThreadedEmulatorHostContract(t, crosscompile.WASIThreadedEmulator)
+}
+
+func TestWASIInheritedTargetHostContract(t *testing.T) {
+	dir := t.TempDir()
+	data, err := os.ReadFile("../../targets/wasi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "wasi.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "downstream.json"), []byte(`{"inherits":["wasi"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := targets.NewLoader(dir).Load("downstream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the resolved template through the runner: checking only the
+	// built-in target names hides template drift behind their explicit override.
+	testWASIThreadedEmulatorHostContract(t, config.Emulator)
+}
+
+func testWASIThreadedEmulatorHostContract(t *testing.T, emulator string) {
+	t.Helper()
 	dir := t.TempDir()
 	runner := filepath.Join(dir, "wasmer")
 	argsFile := filepath.Join(dir, "args")
@@ -120,7 +147,7 @@ func TestWASIThreadedEmulatorHostContract(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	commands := commandEnv{dir: dir, environ: append(os.Environ(), "PATH="+dir, "LLGO_STRESS_PROFILE=quick", "LLGO_PRIVATE_SENTINEL=not-forwarded")}
 	artifact := filepath.Join(dir, "program.wasm")
-	err := runEmuCmd(commands, map[string]string{"": artifact}, crosscompile.WASIThreadedEmulator,
+	err := runEmuCmd(commands, map[string]string{"": artifact}, emulator,
 		[]string{"-test.v"}, false, false, runnerDetails{phase: "test"})
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +157,11 @@ func TestWASIThreadedEmulatorHostContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, flag := range []string{"--cranelift", "--v8", "--llvm", "--singlepass", "--disable-cache"} {
+		if slices.Contains(args, flag) {
+			t.Fatalf("runner overrides Wasmer defaults with %q", flag)
+		}
+	}
 	if want := "--volume=" + dir; !slices.Contains(args, want) {
 		t.Fatalf("Wasmer arguments %q omit working directory %q", args, want)
 	}
@@ -145,7 +177,7 @@ func TestWASIThreadedEmulatorHostContract(t *testing.T) {
 		t.Fatalf("runner tail = %q, want %q", got, want)
 	}
 	commands.dir = ""
-	if err := runEmuCmd(commands, map[string]string{"": artifact}, crosscompile.WASIThreadedEmulator,
+	if err := runEmuCmd(commands, map[string]string{"": artifact}, emulator,
 		nil, false, false, runnerDetails{phase: "test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +214,7 @@ func TestNativeWasmerRunUsesThreadedHostContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(string(data)), "\n")
-	for _, want := range []string{"run", "--cranelift", "--enable-exceptions", "--enable-simd", "--stack-size=1048576", "--volume=" + dir, "--env=PWD=" + dir} {
+	for _, want := range []string{"run", "--enable-exceptions", "--enable-simd", "--stack-size=1048576", "--volume=" + dir, "--env=PWD=" + dir} {
 		if !slices.Contains(args, want) {
 			t.Fatalf("Wasmer arguments omit %q: %q", want, args)
 		}

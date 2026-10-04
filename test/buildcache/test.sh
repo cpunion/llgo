@@ -314,7 +314,6 @@ run_test_suite "native" \
 # location shared with dev/install_wasmer.sh.
 LLGO_WASMER_DIR="$CACHE_ROOT/bin"
 WASMER_NAME="wasmer"
-WASMER_BACKEND=--cranelift
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
         # This script runs under Git Bash. Keep the native cache location,
@@ -322,8 +321,6 @@ case "$(uname -s)" in
         # otherwise backslashes in C:\Users\... are consumed as escapes.
         LLGO_WASMER_DIR="$(cygpath -u "$CACHE_ROOT")/bin"
         WASMER_NAME="wasmer.exe"
-        # The official Windows archive supplies V8, not Cranelift.
-        WASMER_BACKEND=--v8
         ;;
 esac
 LLGO_WASMER="$LLGO_WASMER_DIR/$WASMER_NAME"
@@ -347,7 +344,7 @@ if [ -n "$LLGO_WASMER" ] && [ -f "$LLGO_WASMER" ]; then
     run_test_suite "wasm" \
         "GOOS=wasip1 GOARCH=wasm llgo build -o $BUILD_TEMP_DIR/buildcache.wasm -tags=nogc -compiler-verbose ." \
         "$BUILD_TEMP_DIR/buildcache.wasm" \
-        "RUST_LOG=off $LLGO_WASMER run $WASMER_BACKEND --enable-exceptions --enable-simd --stack-size=1048576 $BUILD_TEMP_DIR/buildcache.wasm"
+        "RUST_LOG=off $LLGO_WASMER run --enable-exceptions --enable-simd --stack-size=1048576 $BUILD_TEMP_DIR/buildcache.wasm"
 else
     echo ""
     echo -e "${BLUE}Skipping WASM tests (wasmer not available)${NC}"

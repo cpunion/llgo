@@ -16,7 +16,7 @@ WASMER = os.environ.get("WASMER", "wasmer")
 
 
 def wasmer_command(module, *args):
-    return [WASMER, "run", "--v8" if os.name == "nt" else "--cranelift", "--enable-exceptions", "--enable-simd",
+    return [WASMER, "run", "--enable-exceptions", "--enable-simd",
             "--stack-size=1048576", "--volume=" + str(ROOT), "--volume=/tmp",
             str(module), "--", *args]
 

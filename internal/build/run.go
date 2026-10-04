@@ -435,10 +435,7 @@ func runEmuCmdTo(commands commandEnv, envMap map[string]string, emulatorTemplate
 		}
 		workVolume, tempVolume, guestCwd := wasiHostDirectories(cwd, os.TempDir(), runtime.GOOS == "windows")
 		for i, part := range cmdParts {
-			if part == "--cranelift" && runtime.GOOS == "windows" {
-				// Wasmer's official Windows archive only supplies V8.
-				cmdParts[i] = "--v8"
-			} else if part == "--volume=." {
+			if part == "--volume=." {
 				cmdParts[i] = "--volume=" + workVolume
 			} else if part == "--volume=/tmp" {
 				cmdParts[i] = "--volume=" + tempVolume
