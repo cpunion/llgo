@@ -29,5 +29,10 @@ func methodValues() (results [5]int) {
 
 func main() {
 	results := methodValues()
+	for _, result := range results {
+		if result != 42 {
+			panic("reflect method value result")
+		}
+	}
 	println("wasm reflect method values:", results[0], results[1], results[2], results[3], results[4])
 }

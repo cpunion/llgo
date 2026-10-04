@@ -842,6 +842,19 @@ jobs:
           dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
           echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
+      - name: Test reflected method value calls
+        if: matrix.suite == 'runtime'
+        shell: bash
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+          LLGO_BUILD_CACHE: "1"
+        run: |
+          for fixture in reflect-method-value reflect-method-alias; do
+            for target in wasi emscripten emscripten-memory64; do
+              "$LLGO" run -O2 -target "$target" -emulator "./test/wasm/$fixture"
+            done
+          done
+
       - name: Compare WebAssembly EH encodings and Go/C++ boundary
         if: matrix.suite == 'runtime'
         timeout-minutes: 10

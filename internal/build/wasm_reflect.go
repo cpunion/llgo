@@ -286,7 +286,7 @@ func isWasmReflectBridgeSignature(name string, signature *types.Signature) bool 
 		if signature == nil || signature.Results().Len() != 1 {
 			return false
 		}
-		typ, ok := signature.Results().At(0).Type().(*types.Named)
+		typ, ok := types.Unalias(signature.Results().At(0).Type()).(*types.Named)
 		return ok && typ.Obj().Pkg() != nil && typ.Obj().Pkg().Path() == reflectPackagePath && typ.Obj().Name() == "Value"
 	default:
 		return false
