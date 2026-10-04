@@ -92,20 +92,21 @@ func TestWorkerEmvalFinalizersStayInRealm(t *testing.T) {
 		t.Fatalf("JavaScript values were created on %d worker, want at least 2", len(owners))
 	}
 
-	// Create the progress barrier on a fiber that exits before collection,
-	// rather than on this still-active test fiber. As in the retirement test,
-	// try independent allocations: a conservative heap word can retain one
-	// arbitrary object even when the finalizer worker is making progress.
-	finalizersComplete := false
-	for range 3 {
-		if retiredWorkerFiberReleasesFinalizer(t) {
-			finalizersComplete = true
-			break
+	finalizersDone := make(chan struct{})
+	installWorkerFinalizerBarrier(finalizersDone)
+	for range 24 {
+		clobberWorkerStack(16, 1)
+		runtime.GC()
+		select {
+		case <-finalizersDone:
+			goto finalizersComplete
+		default:
+			time.Sleep(time.Millisecond)
 		}
 	}
-	if !finalizersComplete {
-		t.Fatal("JavaScript value finalizers did not make progress")
-	}
+	t.Fatal("JavaScript value finalizers did not make progress")
+
+finalizersComplete:
 
 	checked := make(chan workerCallbackResult, goroutines)
 	for range goroutines {
@@ -157,18 +158,13 @@ func retiredWorkerFiberReleasesFinalizer(t *testing.T) bool {
 	<-installed
 	// The notification precedes the goroutine's return. Run a later task on
 	// each worker so its scheduler has retired the finished fiber before GC.
-	settled := make(chan int, 8)
+	settled := make(chan int, 2)
+	for range 2 {
+		wasmworkers.GoIndependent(func() { settled <- schedulerProcID() })
+	}
 	owners := map[int]bool{}
-	// Other runtime goroutines also advance the round-robin placement counter.
-	// Two consecutive submissions need not reach two different workers. Observe
-	// both workers, with a finite bound, before asserting retirement coverage.
-	for batch := 0; batch < 8 && len(owners) < 2; batch++ {
-		for range 8 {
-			wasmworkers.GoIndependent(func() { settled <- schedulerProcID() })
-		}
-		for range 8 {
-			owners[<-settled] = true
-		}
+	for range 2 {
+		owners[<-settled] = true
 	}
 	if len(owners) != 2 {
 		t.Fatalf("fiber retirement reached %d workers, want 2", len(owners))

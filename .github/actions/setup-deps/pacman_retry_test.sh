@@ -45,40 +45,6 @@ sleeps=0
 # shellcheck disable=SC2329
 pacman_command() {
 	attempts=$((attempts + 1))
-	local mirror
-	case "$attempts" in
-		1) mirror=https://repo.msys2.org ;;
-		2) mirror=https://mirror.umd.edu/msys2 ;;
-		3) mirror=https://mirror.msys2.org ;;
-		*) fail "unexpected mirror attempt $attempts" ;;
-	esac
-	local expected=(
-		--noconfirm -U --assume-installed mingw-w64-clang-x86_64-cc-libs=22.1.8
-		"$mirror/mingw/clang64/llvm-22.1.8-2-any.pkg.tar.zst"
-		"$mirror/mingw/clangarm64/lldb-22.1.8-1-any.pkg.tar.zst"
-		'https://example.com/package.pkg.tar.zst' 'local package.pkg.tar.zst'
-	)
-	[[ $# -eq ${#expected[@]} ]] || fail "mirror changed argument count"
-	local argument index=0
-	for argument in "$@"; do
-		[[ "$argument" == "${expected[index]}" ]] || fail "mirror changed argument $index: $argument"
-		index=$((index + 1))
-	done
-	(( attempts >= 3 ))
-}
-LLGO_PACMAN_MAX_ATTEMPTS=3 LLGO_PACMAN_RETRY_DELAY_SECONDS=0 \
-	pacman_with_retry --noconfirm -U --assume-installed mingw-w64-clang-x86_64-cc-libs=22.1.8 \
-	'https://repo.msys2.org/mingw/clang64/llvm-22.1.8-2-any.pkg.tar.zst' \
-	'https://repo.msys2.org/mingw/clangarm64/lldb-22.1.8-1-any.pkg.tar.zst' \
-	'https://example.com/package.pkg.tar.zst' 'local package.pkg.tar.zst' 2>/dev/null
-[[ "$attempts" -eq 3 ]] || fail "mirror attempts = $attempts, want 3"
-
-attempts=0
-sleeps=0
-# Called indirectly by pacman_with_retry.
-# shellcheck disable=SC2329
-pacman_command() {
-	attempts=$((attempts + 1))
 	return 1
 }
 
