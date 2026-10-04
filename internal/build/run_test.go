@@ -464,20 +464,22 @@ func TestRunNativeTest(t *testing.T) {
 	})
 
 	t.Run("signal exit", func(t *testing.T) {
-		var stderr bytes.Buffer
-		conf := &Config{RunArgs: append(args, "signal")}
-		program := testProgram{app: executable, pkgDir: t.TempDir(), pkgName: "signal"}
-		err := runNativeTest(commands, program, conf, io.Discard, &stderr)
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) {
-			t.Fatalf("runNativeTest error = %v, want signal termination", err)
-		}
-		status, ok := exitErr.Sys().(syscall.WaitStatus)
-		if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
-			t.Fatalf("process status = %v, want SIGKILL", exitErr.Sys())
-		}
-		if got := stderr.String(); !strings.Contains(got, "killed") || strings.Contains(got, "exit code") {
-			t.Fatalf("stderr = %q, want signal reason without an exit code", got)
+		for _, coverage := range []bool{false, true} {
+			var stderr bytes.Buffer
+			conf := &Config{RunArgs: append(args, "signal")}
+			program := testProgram{app: executable, pkgDir: t.TempDir(), pkgName: "signal", coverage: coverage}
+			err := runNativeTest(commands, program, conf, io.Discard, &stderr)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("coverage=%v: runNativeTest error = %v, want signal termination", coverage, err)
+			}
+			status, ok := exitErr.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatalf("coverage=%v: process status = %v, want SIGKILL", coverage, exitErr.Sys())
+			}
+			if got := stderr.String(); !strings.Contains(got, "killed") || strings.Contains(got, "exit code") {
+				t.Fatalf("coverage=%v: stderr = %q, want signal reason without an exit code", coverage, got)
+			}
 		}
 	})
 

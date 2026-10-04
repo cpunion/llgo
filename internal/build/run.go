@@ -205,7 +205,7 @@ func runNativeTest(commands commandEnv, program testProgram, conf *Config, stdou
 		return nil
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
-		if !program.coverage {
+		if !program.coverage || !exitErr.Exited() {
 			if exitErr.Exited() {
 				fmt.Fprintf(stderr, "%s: exit code %d\n", program.app, exitErr.ExitCode())
 			} else {
