@@ -99,6 +99,11 @@ available; this does not qualify native AVX512 execution.
 
 Reference boundaries:
 
+- Official Go 1.27.0 initializes Windows CPU flags before reading `GODEBUG`.
+  The CPU startup test compares default hardware detection with Go and checks
+  LLGo overrides against explicit expectations; other native hosts also retain
+  the Go comparison for each override. Both amd64 compilers use `GOAMD64=v1`.
+
 - Official Go 1.27.0 on WASI does not panic for nil SIMD array loads/stores.
   `memory_nil_test.go` therefore checks the nil-panic contract under LLGo on
   every target and under official native Go. Shared WASI tests still cover

@@ -64,7 +64,7 @@ func TestCPUInitializationMatchesGo(t *testing.T) {
 	}
 	cmd := exec.Command("go", "build", "-o", reference, ".")
 	cmd.Dir = dir
-	cmd.Env = withEnv(os.Environ(), "GOEXPERIMENT=simd")
+	cmd.Env = withEnv(os.Environ(), "GOEXPERIMENT=simd", "GOAMD64=v1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("official build: %v\n%s", err, out)
 	}
@@ -82,6 +82,39 @@ func TestCPUInitializationMatchesGo(t *testing.T) {
 	if runtime.GOARCH == "arm64" {
 		debugOptions = debugOptions[:4]
 	}
+	// Go 1.27 initializes CPU flags before reading Windows environment
+	// variables. Compare default detection there, then check LLGo overrides
+	// against explicit expectations instead of that reference limitation.
+	baseline := strings.Fields(run(reference, ""))
+	if len(baseline) != 6 {
+		t.Fatalf("unexpected CPU output: %v", baseline)
+	}
+	expected := func(debug string) string {
+		if debug == "" {
+			return strings.Join(baseline, " ")
+		}
+		values := append([]string(nil), baseline...)
+		switch debug {
+		case "cpu.all=off", "cpu.all=off,cpu.aes=on":
+			for i := range values {
+				values[i] = "false"
+			}
+			if debug == "cpu.all=off,cpu.aes=on" && runtime.GOARCH == "arm64" {
+				values[0], values[1] = baseline[0], baseline[1]
+			}
+		case "cpu.aes=off":
+			if runtime.GOARCH == "arm64" {
+				values[0], values[1] = "false", "false"
+			} else {
+				values[5] = "false"
+			}
+		case "cpu.avx=off":
+			values[0], values[2], values[5] = "false", "false", "false"
+		default:
+			t.Fatalf("missing expectation for GODEBUG=%q", debug)
+		}
+		return strings.Join(values, " ")
+	}
 	for _, mode := range []struct {
 		name  string
 		level optlevel.Level
@@ -93,6 +126,9 @@ func TestCPUInitializationMatchesGo(t *testing.T) {
 		t.Run(mode.name, func(t *testing.T) {
 			conf := NewDefaultConf(ModeBuild)
 			conf.GOEXPERIMENT, conf.OptLevel, conf.LTO = "simd", mode.level, mode.lto
+			if runtime.GOARCH == "amd64" {
+				conf.GOAMD64 = "v1"
+			}
 			conf.OutFile = filepath.Join(dir, "llgo-"+mode.name)
 			if runtime.GOOS == "windows" {
 				conf.OutFile += ".exe"
@@ -101,8 +137,14 @@ func TestCPUInitializationMatchesGo(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, debug := range debugOptions {
-				if got, want := run(conf.OutFile, debug), run(reference, debug); got != want {
-					t.Fatalf("GODEBUG=%q: LLGo %q, official Go %q", debug, got, want)
+				got := run(conf.OutFile, debug)
+				if want := expected(debug); got != want {
+					t.Fatalf("GODEBUG=%q: LLGo %q, expected %q", debug, got, want)
+				}
+				if runtime.GOOS != "windows" {
+					if want := run(reference, debug); got != want {
+						t.Fatalf("GODEBUG=%q: LLGo %q, official Go %q", debug, got, want)
+					}
 				}
 			}
 		})
