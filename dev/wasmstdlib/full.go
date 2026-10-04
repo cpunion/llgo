@@ -18,7 +18,7 @@ import (
 
 // Full auditing deliberately has no compatibility allowlist. Source exclusions
 // and failures remain unresolved until reviewed individually; independently
-// executable host-side suites are named explicitly in the report.
+// executed suites are named explicitly in the report.
 type fullPackage struct {
 	Package    string          `json:"package"`
 	Status     string          `json:"status"`
@@ -351,6 +351,8 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 			e.Status, e.Reason = "separate-suite", "host-side target runner is executed by the wasm GOROOT acceptance jobs"
 		case e.Package == "test/cmd/llgo":
 			e.Status, e.Reason = "separate-suite", "host-side compiler integration suite is executed by the regular Go workflow"
+		case e.Package == "test/simd":
+			e.Status, e.Reason = "separate-suite", "experimental SIMD requires GOEXPERIMENT=simd and is executed by the native and W32-WASI SIMD jobs in the regular Go workflow"
 		case excluded:
 			e.Status, e.Reason = "not-applicable", exclusionReason
 		case !exists:

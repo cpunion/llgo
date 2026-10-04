@@ -43,6 +43,9 @@ func TestFullChildCommandProfiles(t *testing.T) {
 			if !slices.Contains(cmd.Args, "node") || !strings.Contains(joined, "emscripten") {
 				t.Fatalf("%s missing JS runner: %+v", name, cmd)
 			}
+			if got := slices.Contains(cmd.Args, "--browser-only"); got != (p.Target == "") {
+				t.Fatalf("%s browser loader selection = %v: %+v", name, got, cmd)
+			}
 		}
 	}
 }

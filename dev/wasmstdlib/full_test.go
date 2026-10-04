@@ -585,6 +585,50 @@ func TestFullProfileCommandsKeepLLGoAndReferenceDistinct(t *testing.T) {
 	}
 }
 
+func TestFullAuditClassifiesExperimentalSIMDSeparately(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "test", "simd")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "simd_test.go"), []byte("//go:build goexperiment.simd\n\npackage simd\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	structured := func(_ string, c command) ([]byte, error) {
+		if c.Args[0] == "env" {
+			return []byte("/goroot"), nil
+		}
+		return nil, nil // The experiment is disabled in the default source context.
+	}
+	run := func(_ string, c command) ([]byte, error) {
+		t.Fatalf("separate SIMD suite was executed as standard-library acceptance: %+v", c)
+		return nil, nil
+	}
+	for _, name := range []string{"J32-GoJS", "J32-Emscripten", "J64-Emscripten", "W32-WASI", "GoJS-reference", "GoWASI-reference"} {
+		t.Run(name, func(t *testing.T) {
+			report := filepath.Join(root, "report.json")
+			if err := runFullAt(root, name, report, "go", "llgo", 0, 1, structured, run); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result struct{ Packages []fullPackage }
+			if err := json.Unmarshal(data, &result); err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Packages) != 1 {
+				t.Fatalf("SIMD disappeared from the inventory: %s", data)
+			}
+			entry := result.Packages[0]
+			if entry.Package != "test/simd" || entry.Status != "separate-suite" || entry.Tests != 0 || !strings.Contains(entry.Reason, "W32-WASI") {
+				t.Fatalf("SIMD execution scope misreported: %+v", entry)
+			}
+		})
+	}
+}
+
 func TestFullStressCommandsUseQuickProfile(t *testing.T) {
 	p, err := fullProfile("J32-Emscripten")
 	if err != nil {
