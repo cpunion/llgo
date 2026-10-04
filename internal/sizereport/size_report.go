@@ -1,9 +1,11 @@
-package build
+// Package sizereport measures final binary artifacts independently of the compiler.
+package sizereport
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -12,9 +14,25 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/xgo-dev/llgo/xtool/env/llvm"
 )
+
+// Package describes the names needed for symbol aggregation without loading
+// compiler packages or LLVM modules.
+type Package struct {
+	Path   string
+	Module string
+}
+
+// Artifact is the final build-output metadata included in a report.
+type Artifact struct {
+	Path   string
+	Format string
+	Role   string
+	Size   int64
+}
+
+// ErrUnsupportedFormat lets the build layer supply its native tool fallback.
+var ErrUnsupportedFormat = errors.New("unsupported size report format")
 
 type sectionKind int
 
@@ -65,7 +83,7 @@ type readelfData struct {
 	symbols  map[int][]symbolInfo
 }
 
-type moduleSize struct {
+type Module struct {
 	Name   string
 	Code   uint64
 	ROData uint64
@@ -73,18 +91,18 @@ type moduleSize struct {
 	BSS    uint64
 }
 
-func (m *moduleSize) Flash() uint64 {
+func (m *Module) Flash() uint64 {
 	return m.Code + m.ROData + m.Data
 }
 
-func (m *moduleSize) RAM() uint64 {
+func (m *Module) RAM() uint64 {
 	return m.Data + m.BSS
 }
 
-type sizeReport struct {
+type Report struct {
 	Binary    string
-	Modules   map[string]*moduleSize
-	Total     moduleSize
+	Modules   map[string]*Module
+	Total     Module
 	Format    string
 	FileSize  uint64
 	Wasm      *wasmSizeDetails
@@ -92,22 +110,22 @@ type sizeReport struct {
 	Warnings  []string
 }
 
-func (r *sizeReport) module(name string) *moduleSize {
+func (r *Report) module(name string) *Module {
 	if name == "" {
 		name = "(anonymous)"
 	}
 	if r.Modules == nil {
-		r.Modules = make(map[string]*moduleSize)
+		r.Modules = make(map[string]*Module)
 	}
 	m, ok := r.Modules[name]
 	if !ok {
-		m = &moduleSize{Name: name}
+		m = &Module{Name: name}
 		r.Modules[name] = m
 	}
 	return m
 }
 
-func (r *sizeReport) add(name string, kind sectionKind, size uint64) {
+func (r *Report) add(name string, kind sectionKind, size uint64) {
 	if size == 0 {
 		return
 	}
@@ -128,16 +146,8 @@ func (r *sizeReport) add(name string, kind sectionKind, size uint64) {
 	}
 }
 
-func reportFinalSize(conf *Config, out *OutFmtDetails, pkgs []Package, artifacts []Artifact, w io.Writer) error {
-	report, err := collectBinarySize(debugWasmModulePath(conf, out.Out), pkgs, conf.SizeLevel)
-	if err != nil {
-		return fmt.Errorf("size report: %w", err)
-	}
-	report.Artifacts = artifacts
-	return writeSizeReport(w, report, conf.SizeFormat)
-}
-
-func writeSizeReport(w io.Writer, report *sizeReport, format string) error {
+// Write emits a text or JSON report and propagates output failures.
+func Write(w io.Writer, report *Report, format string) error {
 	switch format {
 	case "", "text":
 		var buf bytes.Buffer
@@ -151,7 +161,8 @@ func writeSizeReport(w io.Writer, report *sizeReport, format string) error {
 	}
 }
 
-func collectBinarySize(path string, pkgs []Package, level string) (*sizeReport, error) {
+// Collect measures a final Wasm, ELF or PE artifact.
+func Collect(path string, pkgs []Package, level string) (*Report, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -168,7 +179,7 @@ func collectBinarySize(path string, pkgs []Package, level string) (*sizeReport, 
 	if _, err := io.ReadFull(f, magic[:]); err != nil {
 		return nil, fmt.Errorf("read binary header: %w", err)
 	}
-	var report *sizeReport
+	var report *Report
 	format := "native"
 	switch string(magic[:]) {
 	case "\x00asm":
@@ -184,7 +195,11 @@ func collectBinarySize(path string, pkgs []Package, level string) (*sizeReport, 
 		format = "elf"
 		report, err = collectELFSize(path, pkgs, level)
 	default:
-		report, err = collectReadelfSize(path, pkgs, level)
+		if string(magic[:2]) != "MZ" {
+			return nil, ErrUnsupportedFormat
+		}
+		format = "pe"
+		report, err = collectPESize(path, pkgs, level)
 	}
 	if err != nil {
 		return nil, err
@@ -215,36 +230,22 @@ func readWasmSizeBytes(r io.Reader, size int64) ([]byte, error) {
 	return raw, nil
 }
 
-func collectReadelfSize(path string, pkgs []Package, level string) (*sizeReport, error) {
-	cmd, err := llvm.New("").Readelf("--elf-output-style=LLVM", "--all", path)
+// ReadReadelf measures a native artifact from the build layer's llvm-readelf
+// output. Tool discovery and invocation stay outside this package.
+func ReadReadelf(path string, output io.Reader, pkgs []Package, level string) (*Report, error) {
+	parsed, err := parseReadelfOutput(output)
 	if err != nil {
-		return nil, fmt.Errorf("llvm-readelf: %w", err)
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("llvm-readelf stdout: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to execute llvm-readelf: %w", err)
-	}
-	parsed, parseErr := parseReadelfOutput(stdout)
-	closeErr := stdout.Close()
-	waitErr := cmd.Wait()
-	if waitErr != nil {
-		return nil, fmt.Errorf("llvm-readelf failed: %w\n%s", waitErr, stderr.String())
-	}
-	if parseErr != nil {
-		return nil, fmt.Errorf("parsing llvm-readelf output failed: %w", parseErr)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("closing llvm-readelf stdout pipe failed: %w", closeErr)
+		return nil, err
 	}
 	report := buildSizeReport(path, parsed, pkgs, level)
 	if report == nil || len(report.Modules) == 0 {
 		return nil, fmt.Errorf("size report: no allocatable sections found in %s", path)
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	report.Format, report.FileSize = "native", uint64(info.Size())
 	return report, nil
 }
 
@@ -432,8 +433,8 @@ func classifySection(name, segment string) sectionKind {
 	return sectionUnknown
 }
 
-func buildSizeReport(path string, data *readelfData, pkgs []Package, level string) *sizeReport {
-	report := &sizeReport{Binary: path, Modules: make(map[string]*moduleSize)}
+func buildSizeReport(path string, data *readelfData, pkgs []Package, level string) *Report {
+	report := &Report{Binary: path, Modules: make(map[string]*Module)}
 	if data == nil {
 		return report
 	}
@@ -515,7 +516,7 @@ func buildSizeReport(path string, data *readelfData, pkgs []Package, level strin
 	return report
 }
 
-func emitJSONReport(w io.Writer, report *sizeReport) error {
+func emitJSONReport(w io.Writer, report *Report) error {
 	type moduleJSON struct {
 		Name   string  `json:"name"`
 		Code   uint64  `json:"code"`
@@ -525,7 +526,7 @@ func emitJSONReport(w io.Writer, report *sizeReport) error {
 		Flash  *uint64 `json:"flash,omitempty"`
 		RAM    *uint64 `json:"ram,omitempty"`
 	}
-	moduleValue := func(m *moduleSize) moduleJSON {
+	moduleValue := func(m *Module) moduleJSON {
 		value := moduleJSON{Name: m.Name, Code: m.Code, ROData: m.ROData, Data: m.Data, BSS: m.BSS}
 		if report.Wasm == nil {
 			flash, ram := m.Flash(), m.RAM()
@@ -541,10 +542,10 @@ func emitJSONReport(w io.Writer, report *sizeReport) error {
 	total := moduleValue(&report.Total)
 	total.Name = "total"
 	type artifactJSON struct {
-		Path   string       `json:"path"`
-		Format string       `json:"format"`
-		Role   ArtifactRole `json:"role"`
-		Size   int64        `json:"size"`
+		Path   string `json:"path"`
+		Format string `json:"format"`
+		Role   string `json:"role"`
+		Size   int64  `json:"size"`
 	}
 	artifacts := make([]artifactJSON, 0, len(report.Artifacts))
 	for _, a := range report.Artifacts {
@@ -578,7 +579,7 @@ func emitJSONReport(w io.Writer, report *sizeReport) error {
 	return enc.Encode(payload)
 }
 
-func printTextReport(w io.Writer, report *sizeReport) {
+func printTextReport(w io.Writer, report *Report) {
 	fmt.Fprintf(w, "\nSize report for %s\n", filepath.Clean(report.Binary))
 	fmt.Fprintf(w, "Final file: %d bytes (%s)\n", report.FileSize, report.Format)
 	for _, a := range report.Artifacts {
@@ -613,8 +614,8 @@ func printTextReport(w io.Writer, report *sizeReport) {
 	fmt.Fprintf(w, "%7d %7d %7d %7d | %7d %7d | total\n", report.Total.Code, report.Total.ROData, report.Total.Data, report.Total.BSS, report.Total.Flash(), report.Total.RAM())
 }
 
-func (r *sizeReport) sortedModules() []*moduleSize {
-	mods := make([]*moduleSize, 0, len(r.Modules))
+func (r *Report) sortedModules() []*Module {
+	mods := make([]*Module, 0, len(r.Modules))
 	for _, m := range r.Modules {
 		mods = append(mods, m)
 	}
@@ -727,27 +728,4 @@ func parseUintField(field string) (uint64, error) {
 		return strconv.ParseUint(val[2:], 16, 64)
 	}
 	return strconv.ParseUint(val, 10, 64)
-}
-
-func ensureSizeReporting(conf *Config) error {
-	if !conf.SizeReport {
-		return nil
-	}
-	switch strings.ToLower(conf.SizeLevel) {
-	case "", "module":
-		conf.SizeLevel = "module"
-	case "package", "full":
-		conf.SizeLevel = strings.ToLower(conf.SizeLevel)
-	default:
-		return fmt.Errorf("invalid size level %q (valid: full,module,package)", conf.SizeLevel)
-	}
-	switch strings.ToLower(conf.SizeFormat) {
-	case "", "text":
-		conf.SizeFormat = "text"
-	case "json":
-		conf.SizeFormat = "json"
-	default:
-		return fmt.Errorf("invalid size format %q (valid: text,json)", conf.SizeFormat)
-	}
-	return nil
 }
