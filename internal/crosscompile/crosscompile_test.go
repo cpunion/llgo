@@ -321,13 +321,52 @@ func TestUseWASILTOEnablesSjLjAtLink(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping the external WASI SDK link test in short mode")
 	}
-	export, err := use("wasip1", "wasm", false, optlevel.O2, lto.Thin, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(export.LDFLAGS, "-Wl,--mllvm=-wasm-enable-sjlj") ||
-		!slices.Contains(export.LDFLAGS, "-Wl,--mllvm=-wasm-use-legacy-eh=false") {
-		t.Fatalf("LDFLAGS do not enable Wasm SjLj for LTO: %v", export.LDFLAGS)
+	for _, mode := range []lto.Mode{lto.Off, lto.Thin, lto.Full} {
+		t.Run(mode.String(), func(t *testing.T) {
+			for _, tc := range []struct {
+				level optlevel.Level
+				want  string
+			}{
+				{optlevel.O0, "--lto-O0"}, {optlevel.O1, "--lto-O1"},
+				{optlevel.O2, "--lto-O2"}, {optlevel.O3, "--lto-O3"},
+				{optlevel.Os, "--lto-O2"}, {optlevel.Oz, "--lto-O2"},
+			} {
+				t.Run(tc.level.String(), func(t *testing.T) {
+					export, err := use("wasip1", "wasm", false, tc.level, mode, false)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, flags := range [][]string{export.CCFLAGS, export.LDFLAGS} {
+						for _, candidate := range []lto.Mode{lto.Thin, lto.Full} {
+							if slices.Contains(flags, candidate.ClangFlag()) != (mode == candidate) {
+								t.Fatalf("LTO mode %s: incorrect %s in %v", mode, candidate.ClangFlag(), flags)
+							}
+						}
+					}
+					if hasFlagValue(export.LDFLAGS, "-Xlinker", "--mllvm=-mattr=+atomics,+bulk-memory,+exception-handling") != mode.Enabled() {
+						t.Fatalf("LTO mode %s: missing shared-memory features in %v", mode, export.LDFLAGS)
+					}
+					for _, flag := range []string{"-Wl,--mllvm=-wasm-enable-sjlj", "-Wl,--mllvm=-exception-model=wasm", "-Wl,--mllvm=-wasm-use-legacy-eh=false"} {
+						if slices.Contains(export.LDFLAGS, flag) != mode.Enabled() {
+							t.Fatalf("LTO mode %s: incorrect %s in %v", mode, flag, export.LDFLAGS)
+						}
+					}
+					var optimizationFlags []string
+					for _, flag := range export.LDFLAGS {
+						if strings.HasPrefix(flag, "-Wl,--lto-O") {
+							optimizationFlags = append(optimizationFlags, flag)
+						}
+					}
+					if mode.Enabled() {
+						if len(optimizationFlags) != 1 || optimizationFlags[0] != "-Wl,"+tc.want {
+							t.Fatalf("LTO optimizer flags = %v, want %s", optimizationFlags, tc.want)
+						}
+					} else if len(optimizationFlags) != 0 {
+						t.Fatalf("LTO disabled but optimizer flags present: %v", optimizationFlags)
+					}
+				})
+			}
+		})
 	}
 }
 
