@@ -237,6 +237,8 @@ jobs:
         if: steps.test_coverage.outputs.windows_runtime_corruption != 'true'
         uses: codecov/codecov-action@v7
         with:
+          use_pypi: true
+          version: "11.3.1"
           token: ${{secrets.CODECOV_TOKEN}}
           use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           files: coverage-main-host.txt,coverage-compiler-host.txt,coverage-traceback.txt,coverage-simd.txt
@@ -363,6 +365,8 @@ jobs:
         continue-on-error: true
         uses: codecov/codecov-action@v7
         with:
+          use_pypi: true
+          version: "11.3.1"
           token: ${{secrets.CODECOV_TOKEN}}
           use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           files: coverage-dev-globaldce-unit.txt,coverage-dev-lto-globaldce-cl.txt,coverage-dev-lto-globaldce-symbols.txt,coverage-dev-lto-plugin-cl.txt

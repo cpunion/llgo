@@ -223,6 +223,8 @@ jobs:
         if: ${{ !cancelled() && hashFiles('coverage-llgo.txt') != '' }}
         uses: codecov/codecov-action@v7
         with:
+          use_pypi: true
+          version: "11.3.1"
           token: ${{ secrets.CODECOV_TOKEN }}
           use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           files: coverage-llgo.txt
@@ -777,6 +779,8 @@ jobs:
         if: ${{ !cancelled() && hashFiles('coverage-browser/*.out') != '' }}
         uses: codecov/codecov-action@v7
         with:
+          use_pypi: true
+          version: "11.3.1"
           token: ${{ secrets.CODECOV_TOKEN }}
           use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           files: coverage-browser/j32-embedded.out,coverage-browser/j32-external.out,coverage-browser/j64-embedded.out,coverage-browser/j64-external.out
