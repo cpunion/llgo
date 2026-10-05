@@ -20,7 +20,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $pythonRoot = $env:pythonLocation
-          & (Join-Path $pythonRoot 'python.exe') -c 'import platform; assert platform.machine() == "AMD64"; print(platform.machine())'
+          & (Join-Path $pythonRoot 'python.exe') -c 'import sysconfig; assert sysconfig.get_platform() == "win-amd64"; print(sysconfig.get_platform())'
           if ($LASTEXITCODE -ne 0) { throw "Host Python architecture probe failed: $LASTEXITCODE" }
           & (Join-Path $pythonRoot 'python.exe') -m pip install --only-binary=:all: codecov-cli==11.3.1
           if ($LASTEXITCODE -ne 0) { throw "Installing Codecov CLI failed: $LASTEXITCODE" }
