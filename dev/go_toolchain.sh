@@ -34,26 +34,7 @@ llgo_go_root() {
 	if [[ "${current_version}" == "go${version}" ]]; then
 		toolchain_root="$(GOTOOLCHAIN=local go env GOROOT)"
 	else
-		local attempt=1 diagnostic_file
-		diagnostic_file="$(mktemp)" || return 1
-		while true; do
-			if toolchain_root="$(GOTOOLCHAIN="go${version}" go env GOROOT 2>"${diagnostic_file}")"; then
-				cat "${diagnostic_file}" >&2
-				rm -f "${diagnostic_file}"
-				break
-			fi
-			cat "${diagnostic_file}" >&2
-			# Retry only transport failures. Go still verifies every download;
-			# checksum mismatches and unavailable versions must fail immediately.
-			if [[ "${attempt}" -ge 3 ]] ||
-				! grep -Eq 'stream error:|connection reset by peer|TLS handshake timeout|i/o timeout|temporary failure in name resolution' "${diagnostic_file}"; then
-				rm -f "${diagnostic_file}"
-				return 1
-			fi
-			echo "retrying Go toolchain go${version} after transport failure (${attempt}/3)" >&2
-			sleep "${attempt}"
-			attempt=$((attempt + 1))
-		done
+		toolchain_root="$(GOTOOLCHAIN="go${version}" go env GOROOT)"
 	fi
 	if [[ "${OS:-}" == "Windows_NT" ]] && command -v cygpath >/dev/null 2>&1; then
 		toolchain_root="$(cygpath -u "${toolchain_root}")"
