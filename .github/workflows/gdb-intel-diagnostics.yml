@@ -30,12 +30,16 @@ jobs:
           chmod +x "$wrapper"
           "$wrapper" --batch --nx -ex 'python import gdb; print(gdb.VERSION)'
           echo "LLGO_GDB=$wrapper" >> "$GITHUB_ENV"
+      - name: Match the preceding LLDB acceptance in PR CI
+        env:
+          LLGO_LLDB: /usr/bin/lldb
+        run: bash test/debug/runtime/runtest.sh -v
       - name: Run native GDB acceptance with live command traces
         env:
           LLGO_GDB_INTEGRATION: "1"
         run: |
           set -euo pipefail
-          go test ./cmd/internal/gdb -run '^TestGDBIntegration$' -count=1 -timeout=10m -v 2>&1 | tee "$RUNNER_TEMP/gdb-acceptance.log"
+          go test ./cmd/internal/gdb -run '^TestGDBIntegration$' -count=5 -timeout=12m -v 2>&1 | tee "$RUNNER_TEMP/gdb-acceptance.log"
       - name: Collect stuck debugger stacks
         if: failure()
         run: |
