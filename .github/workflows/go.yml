@@ -76,6 +76,10 @@ jobs:
       - name: Set up Go
         uses: ./.github/actions/setup-go
 
+      - name: Test exact Go toolchain selection
+        shell: bash
+        run: bash test/toolchain/go_toolchain_test.sh
+
       - name: Set up LLGo cache
         uses: ./.github/actions/setup-llgo-cache
         with:
