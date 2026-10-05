@@ -234,8 +234,8 @@ jobs:
           done
 
       - name: Upload coverage reports to Codecov
-        # Temporarily bypass Codecov's TLS outage for PR #2722 only.
-        if: github.event.pull_request.number != 2722 && steps.test_coverage.outputs.windows_runtime_corruption != 'true'
+        # Temporarily disabled during the Codecov TLS outage; re-enable in a follow-up PR.
+        if: ${{ false && steps.test_coverage.outputs.windows_runtime_corruption != 'true' }}
         uses: codecov/codecov-action@v7
         with:
           token: ${{secrets.CODECOV_TOKEN}}
@@ -361,8 +361,8 @@ jobs:
             bash .github/workflows/test_demo.sh
 
       - name: Upload dev LTO GlobalDCE coverage reports to Codecov
-        # Temporarily bypass Codecov's TLS outage for PR #2722 only.
-        if: github.event.pull_request.number != 2722
+        # Temporarily disabled during the Codecov TLS outage; re-enable in a follow-up PR.
+        if: ${{ false && success() }}
         continue-on-error: true
         uses: codecov/codecov-action@v7
         with:

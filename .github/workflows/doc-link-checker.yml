@@ -51,9 +51,8 @@ jobs:
         id: lychee
         uses: lycheeverse/lychee-action@v2
         with:
-          # The same Codecov TLS outage affects its README link. Keep all
-          # other links checked; restore Codecov automatically outside #2722.
+          # Temporarily exclude Codecov during its TLS outage; restore in a follow-up PR.
           args: >-
             --max-concurrency 3 --retry-wait-time 15
-            ${{ github.event.pull_request.number == 2722 && '--exclude "^https://(app[.])?codecov[.]io/"' || '' }}
+            --exclude "^https://(app[.])?codecov[.]io/"
             README.md
