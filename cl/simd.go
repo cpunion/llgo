@@ -243,8 +243,12 @@ func (d simdOperation) matches(sig *types.Signature, vector types.Type) bool {
 		if !ok || d.signature == simdConvert && shape.Len() < lanes.Len() {
 			return false
 		}
-		if d.signature == simdConvert && shape.Len() != lanes.Len() && lanes.Elem().Underlying().(*types.Basic).Info()&types.IsFloat == 0 && shape.Elem().Underlying().(*types.Basic).Info()&types.IsFloat == 0 {
-			return false
+		if d.signature == simdConvert && shape.Len() != lanes.Len() {
+			fromFloat := lanes.Elem().Underlying().(*types.Basic).Info()&types.IsFloat != 0
+			toFloat := shape.Elem().Underlying().(*types.Basic).Info()&types.IsFloat != 0
+			if !fromFloat && !toFloat {
+				return false
+			}
 		}
 	case simdUnary:
 		// Receiver only.

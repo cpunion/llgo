@@ -478,11 +478,7 @@ func (b Builder) simdRoundEven(x Expr) Expr {
 	integer := b.Prog.ctx.IntType(width)
 	vector := llvm.VectorType(integer, int(lanes.Len()))
 	constant := func(value uint64) llvm.Value {
-		values := make([]llvm.Value, lanes.Len())
-		for i := range values {
-			values[i] = llvm.ConstInt(integer, value, false)
-		}
-		return llvm.ConstVector(values, false)
+		return simdIntegerConstant(vector, value)
 	}
 	bits := b.impl.CreateBitCast(x.impl, vector, "")
 	sign := b.impl.CreateAnd(bits, constant(uint64(1)<<(width-1)), "")

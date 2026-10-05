@@ -74,21 +74,17 @@ func lowerEmscriptenSIMDCalls(ctx *context, mod llvm.Module) int {
 		return 0
 	}
 	setjmp := mod.NamedFunction("setjmp")
-	functions := make(map[llvm.Value]bool)
-	if !setjmp.IsNil() {
-		for use := setjmp.FirstUse(); !use.IsNil(); use = use.NextUse() {
-			call := use.User().IsACallInst()
-			if !call.IsNil() && call.CalledValue() == setjmp {
-				functions[call.InstructionParent().Parent()] = true
-			}
-		}
-	}
 	var calls []llvm.Value
 	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		var vectorCalls []llvm.Value
+		hasSetjmp := false
 		for block := fn.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
 			for inst := block.FirstInstruction(); !inst.IsNil(); inst = llvm.NextInstruction(inst) {
 				if inst.IsACallInst().IsNil() || strings.HasPrefix(inst.CalledValue().Name(), "llvm.") {
 					continue
+				}
+				if inst.CalledValue() == setjmp {
+					hasSetjmp = true
 				}
 				typ := inst.CalledFunctionType()
 				vector := typ.ReturnType().TypeKind() == llvm.VectorTypeKind
@@ -96,17 +92,18 @@ func lowerEmscriptenSIMDCalls(ctx *context, mod llvm.Module) int {
 					vector = vector || inst.Operand(i).Type().TypeKind() == llvm.VectorTypeKind
 				}
 				if vector {
-					if functions[fn] {
-						calls = append(calls, inst)
-					} else {
-						// A later backend/LTO inliner must not transplant these
-						// unbridged calls into a function containing setjmp.
-						// The body has already received the selected optimization.
-						fn.RemoveEnumFunctionAttribute(llvm.AttributeKindID("alwaysinline"))
-						fn.AddFunctionAttr(mod.Context().CreateEnumAttribute(llvm.AttributeKindID("noinline"), 0))
-					}
+					vectorCalls = append(vectorCalls, inst)
 				}
 			}
+		}
+		if hasSetjmp {
+			calls = append(calls, vectorCalls...)
+		} else if len(vectorCalls) != 0 {
+			// A later backend/LTO inliner must not transplant these
+			// unbridged calls into a function containing setjmp.
+			// The body has already received the selected optimization.
+			fn.RemoveEnumFunctionAttribute(llvm.AttributeKindID("alwaysinline"))
+			fn.AddFunctionAttr(mod.Context().CreateEnumAttribute(llvm.AttributeKindID("noinline"), 0))
 		}
 	}
 	for i, call := range calls {

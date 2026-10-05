@@ -45,6 +45,7 @@ func (b Builder) simdShiftValue(x Expr, count llvm.Value, right bool) llvm.Value
 	}
 	unsigned := simdLanes(x.RawType()).Elem().Underlying().(*types.Basic).Info()&types.IsUnsigned != 0
 	if right && !unsigned {
+		// Clamping to width-1 already sign-extends oversized arithmetic shifts.
 		return b.impl.CreateAShr(x.impl, safe, "")
 	}
 	var shifted llvm.Value
