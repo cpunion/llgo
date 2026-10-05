@@ -1,37 +1,38 @@
 #!/bin/bash
-# Install the unmodified, pinned Wasmer CLI used by local and CI WASI tests.
+# Install the pinned LLGo Wasmer fork used by local and CI WASI tests.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/llgo_cache_dir.sh"
 WASMER_BIN_DIR="$(llgo_cache_dir)/bin"
-WASMER_VERSION=7.5.0
+WASMER_REPOSITORY=xgo-dev/wasmer
+WASMER_VERSION=llgo-v7.5.0.1
 WASMER_NAME=wasmer
 
 case "$(uname -s)-$(uname -m)" in
     Darwin-arm64)
         asset=wasmer-darwin-arm64.tar.gz
-        digest=fd6526fdce3f8c68a8c3139e9b0e438991d04bafda3d0f091bf98c1600ea0401 ;;
+        digest=d76adbb9da9caff280404efba88f2a863e525c4c476a9c63543fd8650a35cc4f ;;
     Linux-x86_64)
         asset=wasmer-linux-amd64.tar.gz
-        digest=23f99818deaad93859f8bb8292af81f0c39f25aea19eaccfb72fc7c9e8a3fae9 ;;
+        digest=2d7da51fe5b86fcad5268a716d3ca5a257cd0b50efdd23fac1232ee32e029950 ;;
     Linux-aarch64|Linux-arm64)
         asset=wasmer-linux-aarch64.tar.gz
-        digest=903dadb34ba984d981a9bdd2ed1e456dab862c4489d65d2498ad5e7cf1a1fe87 ;;
+        digest=cd229e0fe14fa358bac52bc26f5149ca2744e72864a2946e34ce3b361f9c6dfd ;;
     Linux-riscv64)
         asset=wasmer-linux-riscv64.tar.gz
-        digest=98fe9ea5e1806cb16659daace881a3f24fae14d0af32a113c4b52b17f28c2261 ;;
+        digest=28d42d8a80ac6423495127001af609e8310ec3c1c29abef7e54cba7ed344ab6c ;;
     MINGW*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64)
         # This standalone host executable also runs LLGo's MinGW-built guests.
         asset=wasmer-windows-amd64.tar.gz
-        digest=05ed663fd0db01d5a690e151c976c384d035a8acac7a7710ffb5fcc9d54c917f
+        digest=db380e5259f0de8720918dea4012377ec2408aa106015e120fa1ea6e6fe8bef5
         WASMER_NAME=wasmer.exe ;;
     *)
         echo "Wasmer ${WASMER_VERSION} has no supported prebuilt CLI for $(uname -s)-$(uname -m); install it from source and put wasmer on PATH." >&2
         exit 1 ;;
 esac
 
-build_id="${WASMER_VERSION}-${digest}"
+build_id="${WASMER_REPOSITORY}-${WASMER_VERSION}-${digest}"
 id_file="${WASMER_BIN_DIR}/${WASMER_NAME}.llgo-build-id"
 if [ -x "${WASMER_BIN_DIR}/${WASMER_NAME}" ] && [ -f "${id_file}" ] && \
     [ "$(cat "${id_file}")" = "${build_id}" ]; then
@@ -40,7 +41,7 @@ else
     staging=$(mktemp -d)
     trap 'rm -rf "${staging}"' EXIT
     curl --fail --location --retry 3 \
-        "https://github.com/wasmerio/wasmer/releases/download/v${WASMER_VERSION}/${asset}" \
+        "https://github.com/${WASMER_REPOSITORY}/releases/download/${WASMER_VERSION}/${asset}" \
         --output "${staging}/${asset}"
     if command -v sha256sum >/dev/null 2>&1; then
         actual=$(sha256sum "${staging}/${asset}")
@@ -62,4 +63,5 @@ fi
 if [ -n "${GITHUB_PATH:-}" ]; then
     printf '%s\n' "${WASMER_BIN_DIR}" >> "${GITHUB_PATH}"
 fi
+echo "Wasmer ${WASMER_REPOSITORY}@${WASMER_VERSION}"
 echo "Add ${WASMER_BIN_DIR} to PATH to run WASI programs with Wasmer."
