@@ -351,6 +351,8 @@ func runFullAt(root, name, reportPath, goCmd, llgo string, shard, shards int, st
 			e.Status, e.Reason = "separate-suite", "host-side target runner is executed by the wasm GOROOT acceptance jobs"
 		case e.Package == "test/cmd/llgo":
 			e.Status, e.Reason = "separate-suite", "host-side compiler integration suite is executed by the regular Go workflow"
+		case e.Package == "test/sizereport":
+			e.Status, e.Reason = "separate-suite", "host-side final-artifact size reporting is executed by the regular Go workflow"
 		case e.Package == "test/simd":
 			e.Status, e.Reason = "separate-suite", "experimental SIMD requires GOEXPERIMENT=simd and is executed by the native and W32-WASI SIMD jobs in the regular Go workflow"
 		case excluded:

@@ -506,10 +506,11 @@ func TestFullHostArtifactMustBeNonEmptyRegularFile(t *testing.T) {
 func TestFullAuditClassifiesUnknownSelectionAndWitnessFailures(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
-		"test/goroot/runner_test.go": "package goroot\n",
-		"test/missing/a_test.go":     "package missing\nimport \"testing\"\nfunc TestMissing(t *testing.T) {}\n",
-		"test/empty/a_test.go":       "package empty\n",
-		"test/bad/a_test.go":         "package bad\nfunc TestBad(\n",
+		"test/goroot/runner_test.go":   "package goroot\n",
+		"test/sizereport/size_test.go": "package sizereport\n",
+		"test/missing/a_test.go":       "package missing\nimport \"testing\"\nfunc TestMissing(t *testing.T) {}\n",
+		"test/empty/a_test.go":         "package empty\n",
+		"test/bad/a_test.go":           "package bad\nfunc TestBad(\n",
 	}
 	for name, contents := range files {
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0o755); err != nil {
@@ -547,10 +548,11 @@ func TestFullAuditClassifiesUnknownSelectionAndWitnessFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"test/bad":     "unresolved",
-		"test/empty":   "source-excluded",
-		"test/goroot":  "separate-suite",
-		"test/missing": "source-excluded",
+		"test/bad":        "unresolved",
+		"test/empty":      "source-excluded",
+		"test/goroot":     "separate-suite",
+		"test/sizereport": "separate-suite",
+		"test/missing":    "source-excluded",
 	}
 	for _, pkg := range report.Packages {
 		if pkg.Status != want[pkg.Package] || pkg.Reason == "" {

@@ -233,10 +233,27 @@ jobs:
               "$profile.txt" > "$profile-host.txt"
           done
 
+      - name: Install Codecov CLI with Windows host Python
+        if: runner.os == 'Windows' && steps.test_coverage.outputs.windows_runtime_corruption != 'true'
+        id: windows_codecov
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pythonRoot = $env:LLGO_WINDOWS_PYTHON_HOME
+          & (Join-Path $pythonRoot 'python.exe') -m pip install --only-binary=:all: codecov-cli==11.3.1
+          if ($LASTEXITCODE -ne 0) { throw "Installing Codecov CLI failed: $LASTEXITCODE" }
+          $binary = Join-Path $pythonRoot 'Scripts/codecovcli.exe'
+          & $binary --version
+          if ($LASTEXITCODE -ne 0) { throw "Codecov CLI version probe failed: $LASTEXITCODE" }
+          "binary=$binary" >> $env:GITHUB_OUTPUT
+
       - name: Upload coverage reports to Codecov
         if: steps.test_coverage.outputs.windows_runtime_corruption != 'true'
         uses: codecov/codecov-action@v7
         with:
+          binary: ${{ steps.windows_codecov.outputs.binary }}
+          use_pypi: true
+          version: "11.3.1"
           token: ${{secrets.CODECOV_TOKEN}}
           use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           files: coverage-main-host.txt,coverage-compiler-host.txt,coverage-traceback.txt,coverage-simd.txt
@@ -363,6 +380,8 @@ jobs:
         continue-on-error: true
         uses: codecov/codecov-action@v7
         with:
+          use_pypi: true
+          version: "11.3.1"
           token: ${{secrets.CODECOV_TOKEN}}
           use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           files: coverage-dev-globaldce-unit.txt,coverage-dev-lto-globaldce-cl.txt,coverage-dev-lto-globaldce-symbols.txt,coverage-dev-lto-plugin-cl.txt
