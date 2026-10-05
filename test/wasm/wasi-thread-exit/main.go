@@ -11,6 +11,15 @@ import (
 
 const LLGoFiles = "_wrap/probe.c"
 
+const (
+	// Let timer, TLS and allocator setup settle before measuring growth.
+	warmupIterations   = 32
+	measuredIterations = 4096
+	wasmPageBytes      = 64 << 10
+	// A few 1 MiB stacks may overlap while libc finishes retirement.
+	memorySlackBytes = 8 << 20
+)
+
 //go:linkname probeInit C.llgo_thread_exit_probe_init
 func probeInit() int32
 
@@ -39,7 +48,7 @@ func main() {
 	}
 	useGoexit := len(os.Args) > 1 && os.Args[1] == "goexit"
 	var warmPages, peakPages uint32
-	for i := range 400 {
+	for i := range warmupIterations + measuredIterations {
 		done := make(chan struct{})
 		go func() {
 			if probeSet() != 0 {
@@ -72,16 +81,17 @@ func main() {
 		// A TLS destructor precedes libc's final thread-list removal.
 		time.Sleep(time.Millisecond)
 		pages := probePages()
-		if i == 31 {
+		if i+1 == warmupIterations {
 			warmPages = pages
+			peakPages = pages
 		}
-		if i >= 31 && pages > peakPages {
+		if i >= warmupIterations && pages > peakPages {
 			peakPages = pages
 		}
 	}
 	// Each detached stack is 1 MiB. Allow a few overlapping exits and
 	// allocator bookkeeping, but never a stack per retired goroutine.
-	if peakPages > warmPages+(8<<20)/65536 {
+	if peakPages > warmPages+memorySlackBytes/wasmPageBytes {
 		panic("retired pthread stacks kept growing linear memory")
 	}
 	if probeCThreads() != 0 {

@@ -54,6 +54,7 @@ _Noreturn void pthread_exit(void *result) {
   struct __ptcb cleanup;
   _pthread_cleanup_push(&cleanup, NULL, NULL);
   _pthread_cleanup_pop(&cleanup, 0);
+  // Cleanup records must be lexically paired and popped in strict LIFO order.
   while (cleanup.__next) {
     struct __ptcb *record = cleanup.__next;
     cleanup.__next = record->__next;

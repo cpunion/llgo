@@ -124,7 +124,7 @@ are preserved; the launcher does not substitute host imports.
 Browser debugging currently covers the paused Wasm execution frame. Full
 goroutine views and multi-worker frame coordination remain a later phase.
 WASI source sessions are explicitly rejected: current W32 modules require
-shared `env.memory`, `wasi.thread-spawn`, and `wasix_32v1.thread_exit`, which the
+shared `env.memory` and `wasi.thread-spawn`, which the
 current Wasmtime debug backend does not implement. Use `llgo run -target=wasi`
 with Wasmer for execution; retaining valid DWARF does not provide a runtime
 debugger transport. See [browser debugging](../dev/browser-debugging.md).

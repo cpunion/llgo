@@ -139,7 +139,7 @@ def main():
             for mode in ("return", "goexit"):
                 run_probe(env, directory, f"thread-exit-{mode}-{suffix}",
                           ROOT / "test/wasm/wasi-thread-exit", tags,
-                          "wasi thread exit resources ok", 60, args=(mode,))
+                          "wasi thread exit resources ok", 60, args=(mode,), runs=3)
             run_probe(env, directory, f"deferred-goexit-{suffix}",
                       "wasm-wasi-goexit-defer", tags,
                       "wasi worker defer ok", 30, runs=10)
