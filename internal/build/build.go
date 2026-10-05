@@ -3229,7 +3229,7 @@ func lowerMainCExportModule(ctx *context, pkg llssa.Package, exports []cExport) 
 	if err := optimizeLLVMModule(ctx, pkg.Path(), mod); err != nil {
 		return true, err
 	}
-	lowerEmscriptenSIMDCalls(string(ctx.crossCompile.WasmProvider), mod)
+	lowerEmscriptenSIMDCalls(ctx, mod)
 	localizeWasmStackAddresses(ctx.buildConf.Goarch, mod)
 	return true, nil
 }
@@ -3298,7 +3298,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	if err := optimizeLLVMModule(ctx, pkgPath, ret.Module()); err != nil {
 		return err
 	}
-	lowerEmscriptenSIMDCalls(string(ctx.crossCompile.WasmProvider), ret.Module())
+	lowerEmscriptenSIMDCalls(ctx, ret.Module())
 	localizeWasmStackAddresses(ctx.buildConf.Goarch, ret.Module())
 	dropUnusedWindowsTestMain(ctx, aPkg, ret.Module())
 	emitFuncInfoEntrySites(ctx, ret)

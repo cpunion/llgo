@@ -2,18 +2,75 @@ package build
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
+	"github.com/xgo-dev/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/xtool/safesplit"
 	"github.com/xgo-dev/llvm"
 )
+
+func needsEmscriptenSIMDCallBridge(ctx *context) bool {
+	provider := ctx.crossCompile.WasmProvider
+	if provider != crosscompile.WasmProviderEmscripten && provider != crosscompile.WasmProviderGoJS {
+		return false
+	}
+	if ctx.crossCompile.WasmProfile == crosscompile.WasmProfileJ64 {
+		// Memory64 IR uses matching clang with explicit JS SjLj flags, rather
+		// than emcc. EMCC_CFLAGS does not select that compiler's lowering.
+		return true
+	}
+	emccFlags := ctx.commands.lookup("EMCC_CFLAGS")
+	if ctx.commands.environ == nil {
+		emccFlags = os.Getenv("EMCC_CFLAGS")
+	}
+	flags := safesplit.SplitPkgConfigFlags(emccFlags)
+	compiler := ctx.irCompiler()
+	linker := ctx.linker()
+	// emcc appends EMCC_CFLAGS after its command-line arguments. Require
+	// native SjLj at both codegen and link time, including LTO codegen.
+	return !emscriptenNativeSjLj(append(compiler.CompileArguments(), flags...)) ||
+		!emscriptenNativeSjLj(append(linker.LinkArguments(), flags...))
+}
+
+func emscriptenNativeSjLj(args []string) bool {
+	wasmEH := false
+	wasmEHSetting := ""
+	longjmp := "1"
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "@") {
+			// Unknown response-file contents can override any earlier option.
+			return false
+		}
+		if arg == "-fwasm-exceptions" {
+			wasmEH = true
+		}
+		if arg == "-s" && i+1 < len(args) {
+			i++
+			arg += args[i]
+		}
+		if value, ok := strings.CutPrefix(arg, "-sSUPPORT_LONGJMP="); ok {
+			longjmp = strings.Trim(value, "\"'")
+		}
+		if value, ok := strings.CutPrefix(arg, "-sWASM_EXCEPTIONS="); ok {
+			wasmEHSetting = value
+		}
+	}
+	// Emscripten applies explicit -s settings after parsing driver flags.
+	if wasmEHSetting != "" {
+		wasmEH = wasmEHSetting == "1"
+	}
+	return longjmp == "wasm" || longjmp == "1" && wasmEH
+}
 
 // lowerEmscriptenSIMDCalls keeps vectors inside Wasm when Emscripten's JS SjLj
 // lowering wraps a potentially throwing call. JavaScript cannot carry v128.
 // Only calls in setjmp functions need a memory bridge; ordinary vector calls
 // retain their vector ABI. Run after optimization so inlined calls are covered.
 // Remaining vector-call bodies cannot be inlined later into a setjmp function.
-func lowerEmscriptenSIMDCalls(provider string, mod llvm.Module) int {
-	if provider != "emscripten" {
+func lowerEmscriptenSIMDCalls(ctx *context, mod llvm.Module) int {
+	if !needsEmscriptenSIMDCallBridge(ctx) {
 		return 0
 	}
 	setjmp := mod.NamedFunction("setjmp")

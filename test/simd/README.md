@@ -52,6 +52,8 @@ GOEXPERIMENT=simd GODEBUG=cpu.all=off llgo test -O2 -lto=full -count=1 ./test/si
 GOEXPERIMENT=simd GOOS=wasip1 GOARCH=wasm go test -exec=wasmtime -count=1 ./test/simd/...
 GOEXPERIMENT=simd llgo test -O0 -target wasi -emulator -count=1 -timeout=2m ./test/simd/...
 GOEXPERIMENT=simd llgo test -O2 -target wasi -emulator -count=1 -timeout=2m ./test/simd/...
+GOEXPERIMENT=simd llgo test -O2 -lto=thin -target wasi -emulator -count=1 -timeout=2m ./test/simd/...
+GOEXPERIMENT=simd llgo test -O2 -lto=full -target wasi -emulator -count=1 -timeout=2m ./test/simd/...
 GOEXPERIMENT=simd llgo test -O2 -target emscripten -emulator -count=1 -timeout=2m ./test/simd/...
 ```
 
@@ -70,16 +72,23 @@ recovery, and scheduling at O0 without importing the testing framework:
 ```sh
 GOEXPERIMENT=simd llgo run -O0 -target wasi -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd llgo run -O0 -target emscripten -emulator ./test/simd/testdata/boundary
+GOEXPERIMENT=simd GOOS=js GOARCH=wasm llgo run -O0 -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd llgo run -O2 -lto=thin -target emscripten -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd llgo run -O2 -lto=full -target emscripten -emulator ./test/simd/testdata/boundary
 ```
 
-Emscripten's JavaScript SjLj wrappers cannot carry `v128`. Calls in functions
+The default GoJS and Emscripten JavaScript SjLj wrappers cannot carry `v128`. Calls in functions
 containing `setjmp` use a memory bridge for vector arguments/results; ordinary
 Wasm vector calls retain their vector ABI. These bridges cannot be inlined,
 and bodies retaining vector calls cannot be moved into recovery functions by
 a later backend/LTO inliner. The earlier LLVM optimization still runs at the
-requested level.
+requested level. When compilation and linking select native Wasm SjLj (for
+example, `EMCC_CFLAGS='-fwasm-exceptions -sSUPPORT_LONGJMP=wasm'`), these
+bridges and late-inlining restrictions are unnecessary and omitted. Memory64
+IR still uses explicit JS SjLj codegen and retains the bridge.
+
+WASI SIMD execution is also qualified at O2 with Thin and Full LTO using the
+commands above and Wasmer 7.5.0.
 
 ## CPU initialization and reference boundaries
 

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xgo-dev/llgo/internal/crosscompile"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -36,28 +37,44 @@ define <4 x float> @ordinary(<4 x float> %x, ptr %env) {
  ret <4 x float> %v
 }
 `
-	for _, provider := range []string{"emscripten", "wasi", "gojs"} {
-		t.Run(provider, func(t *testing.T) {
-			mod := parseWasmAggregateIR(t, source)
-			before := mod.NamedFunction("ordinary").String()
-			count := lowerEmscriptenSIMDCalls(provider, mod)
-			want := 0
-			if provider == "emscripten" {
-				want = 4
+	t.Setenv("CCFLAGS", "")
+	t.Setenv("CFLAGS", "")
+	t.Setenv("LDFLAGS", "")
+	for _, tc := range []struct {
+		name     string
+		provider crosscompile.WasmProvider
+		flags    string
+		bridges  int
+	}{
+		{"emscripten JS", crosscompile.WasmProviderEmscripten, "", 4},
+		{"gojs JS", crosscompile.WasmProviderGoJS, "", 4},
+		{"wasi", crosscompile.WasmProviderWASI, "", 0},
+		{"emscripten native", crosscompile.WasmProviderEmscripten, "-fwasm-exceptions -sSUPPORT_LONGJMP=wasm", 0},
+		{"gojs native", crosscompile.WasmProviderGoJS, "-fwasm-exceptions -sSUPPORT_LONGJMP=wasm", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &context{
+				buildConf:    &Config{},
+				crossCompile: crosscompile.Export{WasmProvider: tc.provider},
+				commands:     commandEnv{environ: []string{"EMCC_CFLAGS=" + tc.flags}},
 			}
+			mod := parseWasmAggregateIR(t, source)
+			before := mod.String()
+			count := lowerEmscriptenSIMDCalls(ctx, mod)
+			want := tc.bridges
 			if count != want {
 				t.Fatalf("bridges=%d want %d", count, want)
 			}
 			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("%v\n%s", err, mod.String())
 			}
-			if provider != "emscripten" && before != mod.NamedFunction("ordinary").String() {
-				t.Fatal("changed other provider")
+			if want == 0 && before != mod.String() {
+				t.Fatal("changed a module without JS SjLj")
 			}
 			if !strings.Contains(mod.NamedFunction("ordinary").String(), "call <4 x float> @callee") {
 				t.Fatal("changed ordinary vector ABI")
 			}
-			if provider == "emscripten" {
+			if want != 0 {
 				ir := mod.NamedFunction("withjmp").String()
 				if strings.Contains(ir, "call <4 x float> @callee") || strings.Contains(ir, "call <4 x float> %fn") {
 					t.Fatalf("v128 crosses JS SjLj boundary:\n%s", ir)
@@ -82,9 +99,56 @@ define <4 x float> @ordinary(<4 x float> %x, ptr %env) {
 				if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 					t.Fatal(err)
 				}
-				if second := lowerEmscriptenSIMDCalls(provider, mod); second != 0 {
+				if second := lowerEmscriptenSIMDCalls(ctx, mod); second != 0 {
 					t.Fatalf("pass not idempotent: %d", second)
 				}
+			}
+		})
+	}
+}
+
+func TestEmscriptenSIMDCallBridgeMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, cc, c, ld, emcc string
+		configCC, configLD    []string
+		cxx                   []string
+		memory64, bridge      bool
+	}{
+		{name: "default", bridge: true},
+		{name: "native flag", emcc: "-fwasm-exceptions"},
+		{name: "native longjmp", emcc: "-s SUPPORT_LONGJMP='wasm'"},
+		{name: "explicit JS", emcc: "-sSUPPORT_LONGJMP=emscripten", bridge: true},
+		{name: "last longjmp wins", emcc: "-sSUPPORT_LONGJMP=wasm -s SUPPORT_LONGJMP=emscripten", bridge: true},
+		{name: "default longjmp with EH", emcc: "-fwasm-exceptions -sSUPPORT_LONGJMP=1"},
+		{name: "explicit EH setting", emcc: "-sWASM_EXCEPTIONS=1"},
+		{name: "EH setting overrides flag", emcc: "-sWASM_EXCEPTIONS=0 -fwasm-exceptions", bridge: true},
+		{name: "shared driver flags", cc: "-fwasm-exceptions"},
+		{name: "compile only", c: "-fwasm-exceptions", bridge: true},
+		{name: "link only", ld: "-fwasm-exceptions", bridge: true},
+		{name: "config both", configCC: []string{"-fwasm-exceptions"}, configLD: []string{"-fwasm-exceptions"}},
+		{name: "CXX link driver", c: "-fwasm-exceptions", cxx: []string{"-fwasm-exceptions"}},
+		{name: "emcc overrides config", configCC: []string{"-sSUPPORT_LONGJMP=emscripten"}, configLD: []string{"-sSUPPORT_LONGJMP=emscripten"}, emcc: "-sSUPPORT_LONGJMP=wasm"},
+		{name: "unknown response file", emcc: "-fwasm-exceptions @options.rsp", bridge: true},
+		{name: "memory64 retains JS codegen", memory64: true, emcc: "-fwasm-exceptions -sSUPPORT_LONGJMP=wasm", bridge: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CCFLAGS", tc.cc)
+			t.Setenv("CFLAGS", tc.c)
+			t.Setenv("LDFLAGS", tc.ld)
+			t.Setenv("EMCC_CFLAGS", tc.emcc)
+			ctx := &context{buildConf: &Config{}, crossCompile: crosscompile.Export{
+				WasmProvider: crosscompile.WasmProviderGoJS,
+				CCFLAGS:      tc.configCC, LDFLAGS: tc.configLD,
+			}}
+			if tc.cxx != nil {
+				ctx.crossCompile.CXX = "em++"
+				ctx.crossCompile.CXXArgs = tc.cxx
+			}
+			if tc.memory64 {
+				ctx.crossCompile.WasmProfile = crosscompile.WasmProfileJ64
+			}
+			if got := needsEmscriptenSIMDCallBridge(ctx); got != tc.bridge {
+				t.Fatalf("bridge = %v, want %v", got, tc.bridge)
 			}
 		})
 	}
