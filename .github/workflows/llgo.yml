@@ -217,12 +217,27 @@ jobs:
             (cd runtime && "$LLGO" test -v -run '^TestSlotGCAllocation$' -count=20 -timeout=2m ./internal/clite/tls)
           fi
 
+      - name: Install Codecov CLI with Windows host Python
+        if: ${{ runner.os == 'Windows' && !cancelled() && hashFiles('coverage-llgo.txt') != '' }}
+        id: windows_codecov
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pythonRoot = $env:LLGO_WINDOWS_PYTHON_HOME
+          & (Join-Path $pythonRoot 'python.exe') -m pip install --only-binary=:all: codecov-cli==11.3.1
+          if ($LASTEXITCODE -ne 0) { throw "Installing Codecov CLI failed: $LASTEXITCODE" }
+          $binary = Join-Path $pythonRoot 'Scripts/codecovcli.exe'
+          & $binary --version
+          if ($LASTEXITCODE -ne 0) { throw "Codecov CLI version probe failed: $LASTEXITCODE" }
+          "binary=$binary" >> $env:GITHUB_OUTPUT
+
       - name: Upload LLGo test coverage to Codecov
         # Preserve any profile emitted by failing tests, without uploading
         # unrelated profiles produced by child compiler integration tests.
         if: ${{ !cancelled() && hashFiles('coverage-llgo.txt') != '' }}
         uses: codecov/codecov-action@v7
         with:
+          binary: ${{ steps.windows_codecov.outputs.binary }}
           use_pypi: true
           version: "11.3.1"
           token: ${{ secrets.CODECOV_TOKEN }}

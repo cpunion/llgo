@@ -92,9 +92,12 @@ jobs:
       - name: Install Windows emulator in the isolated debugger environment
         if: runner.os == 'Windows'
         shell: msys2 {0}
+        env:
+          LLGO_PACMAN_RETRY_DELAY_SECONDS: "30"
         run: |
           set -euo pipefail
-          pacman --noconfirm -S --needed mingw-w64-clang-x86_64-qemu
+          source .github/actions/setup-deps/pacman_retry.sh
+          pacman_with_retry --noconfirm -S --needed mingw-w64-clang-x86_64-qemu
           echo "QEMU_SYSTEM_ARM=$(cygpath -m /clang64/bin/qemu-system-arm.exe)" >> "$GITHUB_ENV"
       - name: Install matching Windows LLDB Python runtime
         if: runner.os == 'Windows' && matrix.backend == 'lldb'

@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -180,6 +181,7 @@ func integrationBuildFixture(t *testing.T) (gdbPath, fixtureDir, executable stri
 func integrationGDBArgs(executable string) []string {
 	args := []string{
 		"--nx", "--quiet", "--batch", executable,
+		"-ex", "set trace-commands on",
 		"-ex", "set debuginfod enabled off",
 		"-ex", "python _llgo_last_stop = []; gdb.events.stop.connect(lambda event: _llgo_last_stop.__setitem__(slice(None), [event]))",
 	}
@@ -310,7 +312,10 @@ func integrationRunGDB(t *testing.T, gdbPath, dir string, args ...string) string
 			t.Errorf("restore working directory: %v", err)
 		}
 	}()
-	if err := Run(gdbPath, nil, args, strings.NewReader(""), &stdout, &stderr); err != nil {
+	// Stream diagnostics before Run returns so a stuck debugger leaves its
+	// last command and stop visible when the enclosing Go test times out.
+	if err := Run(gdbPath, nil, args, strings.NewReader(""),
+		io.MultiWriter(&stdout, os.Stdout), io.MultiWriter(&stderr, os.Stderr)); err != nil {
 		t.Fatalf("run GDB: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
 	output := stdout.String() + stderr.String()
