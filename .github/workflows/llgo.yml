@@ -220,8 +220,7 @@ jobs:
       - name: Upload LLGo test coverage to Codecov
         # Preserve any profile emitted by failing tests, without uploading
         # unrelated profiles produced by child compiler integration tests.
-        # Temporarily disabled during the Codecov TLS outage; re-enable in a follow-up PR.
-        if: ${{ false && !cancelled() && hashFiles('coverage-llgo.txt') != '' }}
+        if: ${{ !cancelled() && hashFiles('coverage-llgo.txt') != '' }}
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -775,8 +774,7 @@ jobs:
           LLGO_BROWSER_COVERAGE_DIR: coverage-browser
         run: python3 dev/test_wasm_browser_debug.py
       - name: Upload browser debugger coverage to Codecov
-        # Temporarily disabled during the Codecov TLS outage; re-enable in a follow-up PR.
-        if: ${{ false && !cancelled() && hashFiles('coverage-browser/*.out') != '' }}
+        if: ${{ !cancelled() && hashFiles('coverage-browser/*.out') != '' }}
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

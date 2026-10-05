@@ -51,8 +51,4 @@ jobs:
         id: lychee
         uses: lycheeverse/lychee-action@v2
         with:
-          # Temporarily exclude Codecov during its TLS outage; restore in a follow-up PR.
-          args: >-
-            --max-concurrency 3 --retry-wait-time 15
-            --exclude "^https://(app[.])?codecov[.]io/"
-            README.md
+          args: --max-concurrency 3 --retry-wait-time 15 README.md
