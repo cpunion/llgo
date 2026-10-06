@@ -46,8 +46,7 @@ llgo_uintptr_t GC_beginthreadex(
     void *arg, llgo_uint flags, llgo_uint *thread_id);
 void GC_endthreadex(llgo_uint exit_code);
 int GC_is_init_called(void);
-int GC_thread_is_registered(void);
-int GC_unregister_my_thread(void);
+void GC_disable(void);
 #endif
 
 enum {
@@ -67,13 +66,14 @@ void llgo_win_thread_exit_process(llgo_dword exit_code)
 {
     __atomic_store_n(&llgo_process_exiting, 1, __ATOMIC_RELEASE);
 #if defined(LLGO_USE_BDWGC)
-    /* Finish any in-flight suspension and remove this thread before killing
-     * the collector. Otherwise a pending SuspendThread request can suspend
-     * the exiting thread after ExitProcess has killed the thread that would
-     * resume it. No Go/GC operation may follow unregistration. Minimal programs
-     * may reach process exit without ever initializing the collector. */
-    if (GC_is_init_called() && GC_thread_is_registered())
-        GC_unregister_my_thread();
+    /* GC_disable takes the allocator lock, completing an in-flight
+     * stop-the-world collection before preventing new ones. Otherwise
+     * ExitProcess may kill the collector while another thread is suspended
+     * with a shutdown lock held. Only unregistering this thread still allows
+     * other threads to be suspended during process teardown. Minimal programs
+     * may exit without ever initializing the collector. */
+    if (GC_is_init_called())
+        GC_disable();
 #endif
     ExitProcess(exit_code);
 }
