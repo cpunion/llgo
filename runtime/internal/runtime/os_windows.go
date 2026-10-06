@@ -39,15 +39,15 @@ type mOS struct {
 // processExiting is non-zero after runtime.exit or syscall.Exit starts
 // terminating the process. It serves the same purpose as exiting in the Go
 // runtime. The thread backend separately records the same transition before
-// Windows starts running FLS process-shutdown callbacks.
+// native process shutdown.
 var processExiting uint32
 
 // processExitLock is used only to freeze a thread until ExitProcess terminates
 // it. Its zero value is a ready-to-use Windows SRW lock.
 var processExitLock psync.Mutex
 
-// ExitProcess marks the runtime as exiting before asking Windows to terminate
-// all process threads. Keep every Go-facing process exit path behind this
+// ExitProcess marks the runtime as exiting before immediate native process
+// termination. Keep every Go-facing process exit path behind this
 // helper so newosproc can distinguish shutdown from a real resource failure.
 //
 //go:nosplit
