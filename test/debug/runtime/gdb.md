@@ -48,9 +48,13 @@ Darwin GDB uses debugger-local Mach ports in its native thread identifiers.
 The adapter asks the host kernel for each port's system thread ID so that it
 can match the runtime registry. Remote target identifiers are not passed to
 host Mach APIs. Intel macOS native launch additionally needs a debugger with
-permission to obtain task ports. The dedicated Intel CI job runs only GDB
-through an explicit `sudo -n` wrapper on its ephemeral runner; compilation and
-Go test orchestration remain unprivileged. It also runs the full native LLDB
+permission to obtain task ports. The dedicated Intel CI job launches the executable
+suspended with Darwin's `posix_spawn`, then uses GDB's native attach path. This
+avoids GDB 17's fork/exec hang in `decode_message`/`wait4` before `_dyld_start`
+executes. The helper preserves GDB's normal disabled-ASLR layout and all
+acceptance assertions, and reaps the inferior after GDB finishes. Only GDB runs
+through `sudo -n` on the ephemeral runner; compilation and Go test orchestration
+remain unprivileged. It also runs the full native LLDB
 suite using Apple's signed `/usr/bin/lldb`. Apple Silicon GDB native process
 debugging is not supported; the native acceptance command reports that limitation directly.
 `llgo gdb` still supports cross-target/remote sessions on Apple Silicon.

@@ -59,8 +59,10 @@ modules exclude these programs
 from root-module `go test ./test/...` and `llgo test ./test/...` enumeration.
 The LLGo workflow invokes the LLDB suite in its native platform jobs and the
 GDB suite in its Linux and all six Windows ABI/architecture jobs. A separate
-Intel macOS job exercises both debuggers; its GDB wrapper uses the ephemeral
-runner's passwordless sudo permission to obtain native task ports.
+Intel macOS job exercises both debuggers; its GDB wrapper starts the executable
+suspended with `posix_spawn`, then attaches natively using the ephemeral runner's
+passwordless sudo permission to obtain task ports. This avoids GDB's Darwin
+fork/exec startup hang while preserving the complete values/registry gate.
 The Windows debugger is installed separately from the pinned compiler and
 LLDB dependencies. Apple Silicon has no native GDB process target: use LLDB
 there; GDB remote debugging remains available. Unit tests and package-specific `testdata` remain
