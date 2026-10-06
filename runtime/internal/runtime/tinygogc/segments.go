@@ -79,6 +79,15 @@ func segmentForBlock(block uintptr) *heapSegment {
 }
 
 func segmentForAddress(address uintptr) *heapSegment {
+	// Contiguous heaps have one segment. This lookup runs for every scanned
+	// word, so avoid the arena index and binary search on those targets.
+	if !segmentedHeap {
+		segment := &heapSegments[0]
+		if address >= segment.start && address < segment.metadata {
+			return segment
+		}
+		return nil
+	}
 	low, high := 0, heapSegmentCount
 	for low < high {
 		mid := low + (high-low)/2
