@@ -257,7 +257,11 @@ func TestEmscriptenArchiverUsesSDK(t *testing.T) {
 	tool := func(dir, name string) string {
 		t.Helper()
 		if runtime.GOOS == "windows" {
-			name += ".exe"
+			if name == "emcc" || name == "emar" {
+				name += ".bat"
+			} else {
+				name += ".exe"
+			}
 		}
 		path := filepath.Join(root, dir, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -268,10 +272,15 @@ func TestEmscriptenArchiverUsesSDK(t *testing.T) {
 		}
 		return path
 	}
+	if runtime.GOOS == "windows" {
+		t.Setenv("PATHEXT", ".EXE;.BAT;.CMD")
+	}
 	cc := tool("sdk", "emcc")
 	emar := tool("sdk", "emar")
 	hostAR := tool("host", "llvm-ar")
-	t.Setenv("PATH", filepath.Dir(hostAR))
+	otherEMAR := tool("other-sdk", "emar")
+	// A different SDK on PATH must not override emcc's sibling emar.
+	t.Setenv("PATH", filepath.Dir(otherEMAR)+string(os.PathListSeparator)+filepath.Dir(hostAR))
 	t.Setenv("LLGO_AR", "")
 	for _, provider := range []crosscompile.WasmProvider{crosscompile.WasmProviderGoJS, crosscompile.WasmProviderEmscripten} {
 		ctx := &context{buildConf: &Config{Goarch: "wasm"}, crossCompile: crosscompile.Export{CC: cc, WasmProvider: provider}}

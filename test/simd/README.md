@@ -71,9 +71,14 @@ default JavaScript SjLj/Asyncify configuration:
 LLGO=/path/to/llgo dev/test_wasm_simd.sh
 ```
 
-Each profile runs the O0 boundary executable and the complete O2 test suite
-with LTO disabled, ThinLTO, and Full LTO. The LTO modes pass `-flto=thin` or
-`-flto=full` to both compilation and final linking. Earlier browser builds
+Each profile runs the O0 boundary executable, the complete O2 test suite
+with LTO disabled, ThinLTO, and Full LTO, and the O3 boundary executable with
+ThinLTO and Full LTO. The O3 runs guard against late argument promotion
+replacing a bridge pointer with a vector parameter. The LTO modes pass `-flto=thin` or
+`-flto=full` to both compilation and final linking. The requested `-O` level
+also reaches compilation and emcc's post-link pipeline. LTO additionally gets
+an explicit `--lto-O0` through `--lto-O3`; `-Os`/`-Oz` use `--lto-O2` and retain
+their size attributes and post-link size optimizations. Earlier browser builds
 accepted `-lto` but did not forward these driver flags, so their successful
 runs did not qualify actual link-time optimization. Archives use the SDK's
 `emar` to index bitcode produced by its Clang; `LLGO_AR` remains an explicit
@@ -96,8 +101,10 @@ The default GoJS and Emscripten JavaScript SjLj wrappers cannot carry `v128`. Ca
 containing `setjmp` use a memory bridge for vector arguments/results; ordinary
 Wasm vector calls retain their vector ABI. These bridges cannot be inlined,
 and bodies retaining vector calls cannot be moved into recovery functions by
-a later backend/LTO inliner. The earlier LLVM optimization still runs at the
-requested level. When compilation and linking select native Wasm SjLj (for
+a later backend/LTO inliner. Volatile vector loads in the bridge also prevent
+LLVM 22's O3 argument promotion from replacing its pointer parameters with
+vectors, even though the bridge is `optnone`. The earlier LLVM optimization
+still runs at the requested level. When compilation and linking select native Wasm SjLj (for
 example, `EMCC_CFLAGS='-fwasm-exceptions -sSUPPORT_LONGJMP=wasm'`), these
 bridges and late-inlining restrictions are unnecessary and omitted. Memory64
 IR still uses explicit JS SjLj codegen and retains the bridge.

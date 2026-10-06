@@ -152,7 +152,7 @@ func bridgeEmscriptenSIMDCall(mod llvm.Module, call llvm.Value, id int) {
 		types, args = append(types, typ), append(args, arg)
 	}
 	// Each bridge retains the original call and its complete ABI attributes.
-	// noinline/optnone keep late optimization from exposing a v128 JS call again.
+	// noinline/optnone keep late inlining from exposing a v128 JS call again.
 	bridgeType := llvm.FunctionType(retType, types, false)
 	bridge := llvm.AddFunction(mod, fmt.Sprintf("__llgo_simd_sjlj.%d", id), bridgeType)
 	bridge.SetLinkage(llvm.InternalLinkage)
@@ -174,6 +174,10 @@ func bridgeEmscriptenSIMDCall(mod llvm.Module, call llvm.Value, id int) {
 		arg := bridge.Param(paramOffset + i)
 		if typ.TypeKind() == llvm.VectorTypeKind {
 			arg = b.CreateLoad(typ, arg, "")
+			// LLVM 22's O3 argument promotion ignores optnone and can turn
+			// this pointer back into a v128 parameter. A volatile load keeps
+			// the memory ABI required by the JavaScript SjLj wrapper.
+			arg.SetVolatile(true)
 		}
 		call.SetOperand(i, arg)
 	}

@@ -153,3 +153,46 @@ func TestEmscriptenSIMDCallBridgeMode(t *testing.T) {
 		})
 	}
 }
+
+func TestEmscriptenSIMDCallBridgeArgumentPromotion(t *testing.T) {
+	const source = `
+target datalayout = "e-p:64:64-i64:64-n32:64-S128"
+target triple = "wasm64-unknown-emscripten"
+declare i32 @setjmp(ptr) returns_twice
+declare <4 x float> @callee(<4 x float>)
+define <4 x float> @withjmp(ptr %jmp, <4 x float> %x) "target-features"="+simd128" {
+ %saved = call i32 @setjmp(ptr %jmp)
+ %v = call <4 x float> @callee(<4 x float> %x)
+ ret <4 x float> %v
+}
+`
+	for _, pipeline := range []string{"cgscc(argpromotion)", "thinlto-pre-link<O3>", "lto-pre-link<O3>"} {
+		t.Run(pipeline, func(t *testing.T) {
+			mod := parseWasmAggregateIR(t, source)
+			ctx := &context{crossCompile: crosscompile.Export{
+				WasmProvider: crosscompile.WasmProviderEmscripten,
+				WasmProfile:  crosscompile.WasmProfileJ64,
+			}}
+			if got := lowerEmscriptenSIMDCalls(ctx, mod); got != 1 {
+				t.Fatalf("bridges = %d, want 1", got)
+			}
+			opts := llvm.NewPassBuilderOptions()
+			defer opts.Dispose()
+			if err := mod.RunPasses(pipeline, llvm.TargetMachine{}, opts); err != nil {
+				t.Fatal(err)
+			}
+			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+			bridge := mod.NamedFunction("__llgo_simd_sjlj.0")
+			if bridge.IsNil() || bridge.GlobalValueType().ReturnType().TypeKind() != llvm.VoidTypeKind {
+				t.Fatalf("lost the memory bridge:\n%s", mod.String())
+			}
+			for _, param := range bridge.GlobalValueType().ParamTypes() {
+				if param.TypeKind() == llvm.VectorTypeKind {
+					t.Fatalf("late optimization promoted a bridge pointer to v128:\n%s", bridge.String())
+				}
+			}
+		})
+	}
+}
