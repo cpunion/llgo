@@ -614,12 +614,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Unsigned Homebrew GDB cannot obtain the inferior's task port as
-          # the runner user. Elevate only the debugger, not builds or Go tests.
-          # This does not change host trust settings or pretend Apple Silicon
-          # has the native Darwin process backend.
+          # GDB's Darwin fork/exec can block in wait4 at _dyld_start. Spawn
+          # suspended, then use native attach with the same test assertions.
+          # Elevate only GDB to obtain task ports on the ephemeral runner.
           wrapper="$RUNNER_TEMP/llgo-gdb-native"
-          printf '#!/bin/bash\nexec sudo -n %q "$@"\n' "$LLGO_GDB" > "$wrapper"
+          printf '#!/bin/bash\nexec python3 %q %q "$@"\n' \
+            "$GITHUB_WORKSPACE/test/debug/runtime/gdb_darwin.py" "$LLGO_GDB" > "$wrapper"
           chmod +x "$wrapper"
           "$wrapper" --batch --nx -ex 'python import gdb; print(gdb.VERSION)'
           echo "LLGO_GDB=$wrapper" >> "$GITHUB_ENV"

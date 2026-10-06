@@ -3,11 +3,13 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -79,7 +81,12 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("test/debug/runtime/runtest.sh -v", commands)
         self.assertIn("^TestGDBIntegration$", commands)
         self.assertNotIn("^TestGDBCompleteWorkerUnwind$", commands)
-        self.assertIn("exec sudo -n", commands)
+        self.assertIn("test/debug/runtime/gdb_darwin.py", commands)
+        self.assertNotIn("sudo", commands)
+        helper = runpy.run_path(str(WORKFLOWS.parents[1] / "test/debug/runtime/gdb_darwin.py"))
+        with mock.patch("os.execvp", side_effect=SystemExit) as execute, self.assertRaises(SystemExit):
+            helper["main"]("/native/gdb", ["--version"])
+        execute.assert_called_once_with("sudo", ["sudo", "-n", "/native/gdb", "--version"])
         self.assertNotIn("continue-on-error", job)
         self.assertTrue(all("continue-on-error" not in step for step in job["steps"]))
 

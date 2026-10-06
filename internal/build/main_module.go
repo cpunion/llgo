@@ -137,9 +137,13 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	if cfg.rtInit || wasmRuntimeScheduler {
 		rtInit = declareNoArgFunc(mainPkg, rtPkgPath+".init")
 	}
-	var processExit llssa.Function
+	var processExit, stdioFlush llssa.Function
 	if ctx.buildConf.Goos == "windows" {
 		processExit = declareRuntimeExit(mainPkg, "runtime.exit")
+		stdioFlush = mainPkg.NewFunc("fflush", newSignature(
+			[]types.Type{types.Typ[types.UnsafePointer]},
+			[]types.Type{types.Typ[types.Int32]},
+		), llssa.InC)
 	}
 
 	var abiInit llssa.Function
@@ -223,6 +227,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		pyFinalize:   pyFinalize,
 		rtInit:       rtInit,
 		processExit:  processExit,
+		stdioFlush:   stdioFlush,
 		coverageExit: coverageExit,
 		abiInit:      abiInit,
 		packageInits: packageInits,
@@ -449,6 +454,7 @@ type entryFunctions struct {
 	pyFinalize   llssa.Function
 	rtInit       llssa.Function
 	processExit  llssa.Function
+	stdioFlush   llssa.Function
 	coverageExit llssa.Function
 	abiInit      llssa.Function
 	packageInits []llssa.Function
@@ -549,10 +555,10 @@ func emitRuntimeMainBody(b llssa.Builder, fns entryFunctions) {
 		b.Call(fns.coverageExit.Expr, b.Prog.IntVal(0, b.Prog.Int()))
 	}
 	if fns.processExit != nil {
-		// Go terminates the process as soon as main returns, regardless of
-		// other goroutines. On Windows, call runtime.exit (ExitProcess) rather
-		// than returning through CRT teardown, which may wait on runtime-owned
-		// threads and violates that guarantee.
+		// Preserve normal C-main stdio flushing before immediate Go termination.
+		// Flush while the other threads can still release their stream locks;
+		// DLL_PROCESS_DETACH after killing them cannot safely do that cleanup.
+		b.Call(fns.stdioFlush.Expr, b.Prog.Nil(b.Prog.VoidPtr()))
 		b.Call(fns.processExit.Expr, b.Prog.IntVal(0, b.Prog.Int32()))
 	}
 }

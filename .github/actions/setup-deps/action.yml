@@ -535,6 +535,9 @@ runs:
         # the ARM64 runner. The x64 runner keeps CLANG64 as the LLGo host even
         # when R11 activates a separate llvm-mingw 386 target afterwards.
         msystem: ${{ inputs.windows-arch == 'arm64' && 'CLANGARM64' || 'CLANG64' }}
+        # ARM64 images initialize MSYS2 before the job starts. Reuse that
+        # installation instead of bootstrapping an x64 base under emulation.
+        release: ${{ runner.arch != 'ARM64' }}
         path-type: inherit
         update: true
         install: pacman-contrib
