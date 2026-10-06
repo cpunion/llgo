@@ -822,10 +822,17 @@ func runCase(t *testing.T, repoRoot, goroot, goCmd, llgoBin string, tc testCase,
 }
 
 func boundedCaseEnv(goos, goarch string, tc testCase, extra []string) []string {
-	if goos == "linux" && goarch == "amd64" && tc.Directive == "runoutput" && tc.RelPath == "rangegen.go" {
+	if (goos == "linux" && goarch == "amd64" || goos == "windows" && goarch == "arm64") &&
+		tc.Directive == "runoutput" && tc.RelPath == "rangegen.go" {
 		// The generated compiler torture test exceeded the 4 GiB hosted
 		// runner guard. Bound Go and LLGo's heaps for this case only.
-		return upsertEnv(extra, "GOMEMLIMIT=3GiB")
+		limit := "3GiB"
+		if goos == "windows" {
+			// Leave room for ARM64 native LLVM/CodeView allocations, which
+			// are outside Go's soft memory limit.
+			limit = "1GiB"
+		}
+		return upsertEnv(extra, "GOMEMLIMIT="+limit)
 	}
 	return extra
 }
@@ -1008,15 +1015,20 @@ func runProgram(dir, app string, env []string, timeout time.Duration, args ...st
 	}
 
 	waitCh := make(chan error, 1)
+	var waitFinished time.Time
 	go func() {
-		waitCh <- cmd.Wait()
+		err := cmd.Wait()
+		waitFinished = time.Now()
+		waitCh <- err
 	}()
 
 	var err error
 	var terminationErr error
 	var timeoutTimer *time.Timer
 	var timeoutCh <-chan time.Time
+	var deadline time.Time
 	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
 		timeoutTimer = time.NewTimer(timeout)
 		timeoutCh = timeoutTimer.C
 		defer timeoutTimer.Stop()
@@ -1045,20 +1057,23 @@ func runProgram(dir, app string, env []string, timeout time.Duration, args ...st
 	}
 	var peakRSS uint64
 	for {
+		// Completion takes priority over a queued sampling tick or timeout,
+		// especially when a slow resource query outlives the direct child.
 		select {
 		case err = <-waitCh:
-			// ErrWaitDelay identifies a pipe-copy timeout after a successful
-			// direct child, but an ExitError masks it after a non-zero exit.
-			// Either error can therefore leave descendants alive.
-			if err != nil {
-				killProcessTree(cmd)
-			}
-			goto finished
+			goto waited
+		default:
+		}
+		select {
 		case <-timeoutCh:
-			terminationErr = fmt.Errorf("timed out after %s", timeout)
-			killProcessTree(cmd)
-			err = waitTerminatedProgram(cmd, waitCh, 10*time.Second)
-			goto finished
+			goto timedOut
+		default:
+		}
+		select {
+		case err = <-waitCh:
+			goto waited
+		case <-timeoutCh:
+			goto timedOut
 		case <-rssCh:
 			rssBytes, rssErr := processGroupRSS(cmd.Process.Pid)
 			if rssErr != nil {
@@ -1084,6 +1099,29 @@ func runProgram(dir, app string, env []string, timeout time.Duration, args ...st
 		}
 	}
 
+timedOut:
+	select {
+	case err = <-waitCh:
+		goto waited
+	default:
+	}
+	terminationErr = fmt.Errorf("timed out after %s", timeout)
+	killProcessTree(cmd)
+	err = waitTerminatedProgram(cmd, waitCh, 10*time.Second)
+	goto finished
+waited:
+	// Receiving waitCh also publishes waitFinished. Preserve the deadline
+	// for children that finish late, even if completion and timeout were both
+	// queued while a resource query was running.
+	if !deadline.IsZero() && waitFinished.After(deadline) {
+		terminationErr = fmt.Errorf("timed out after %s", timeout)
+	}
+	// ErrWaitDelay identifies a pipe-copy timeout after a successful direct
+	// child, but an ExitError masks it after a non-zero exit. Either error
+	// can therefore leave descendants alive.
+	if err != nil || terminationErr != nil {
+		killProcessTree(cmd)
+	}
 finished:
 	if *flagRSSWarnMiB > 0 && peakRSS >= uint64(*flagRSSWarnMiB)<<20 {
 		fmt.Fprintf(os.Stderr, "goroot resource warning: %s peak process-group RSS %s\n", filepath.Base(app), formatBytes(peakRSS))

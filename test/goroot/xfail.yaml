@@ -119,6 +119,11 @@ timeouts:
     case: fixedbugs/issue39541.go
     timeout: 90s
     reason: the one-million reflect.MakeFunc concurrent call loop needs load-dependent runtime slack on Windows 386
+  - platform: windows/amd64
+    directive: run
+    case: fixedbugs/issue39541.go
+    timeout: 2m
+    reason: the one-million reflect.MakeFunc concurrent call loop exceeded the default minute on a paired Windows MSVC/amd64 runner; retain a bounded run with all output and exit checks
   - platform: darwin/arm64
     directive: runoutput
     case: rangegen.go
@@ -129,6 +134,16 @@ timeouts:
     case: rangegen.go
     timeout: 10m
     reason: rangegen generates a 6.4 MB compiler torture test; allow bounded build time while its 3 GiB heap target stays under the 4 GiB host guard
+  - platform: windows-mingw/amd64
+    directive: runoutput
+    case: rangegen.go
+    timeout: 10m
+    reason: both Go 1.26 and 1.27 generated builds exceeded the default 3m timeout on Windows MinGW/amd64, peaking at 3.3 GiB each; keep the case enabled with bounded build time
+  - platform: windows/arm64
+    directive: runoutput
+    case: rangegen.go
+    timeout: 10m
+    reason: the generated build still reached the 4 GiB guard with a 2 GiB Go heap target on Windows MSVC/ARM64; allow bounded build time with a case-local 1 GiB target while retaining the host resource guard
   - version: go1.26
     platform: linux/amd64
     directive: run

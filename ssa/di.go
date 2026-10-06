@@ -908,6 +908,15 @@ func (b Builder) doConstructDebugAddrWithStore(v Expr, t types.Type) (dbgPtr, st
 	default:
 		ty = v.Type
 	}
+	// Empty aggregates have no SelectionDAG value. LLVM 22 can crash when
+	// promoting their debug snapshots to dbg.value(empty zeroinitializer).
+	// Back the debug-only address with a byte while keeping the source type
+	// in the variable metadata; there are no source value bits to copy.
+	storedValue := v
+	if b.Prog.SizeOf(ty) == 0 {
+		ty = b.Prog.Byte()
+		storedValue = b.Prog.IntVal(0, ty)
+	}
 	// A debug snapshot reserves one slot per function invocation. Allocating
 	// it at a DebugRef inside a loop grows the stack on every iteration at O0.
 	// Keep the value update at its source position, but reserve the slot with
@@ -915,8 +924,10 @@ func (b Builder) doConstructDebugAddrWithStore(v Expr, t types.Type) (dbgPtr, st
 	entryBuilder := *b
 	entryBuilder.impl = b.Func.entryAllocaBuilder()
 	dbgPtr = entryBuilder.AllocaT(ty)
+	// Store through the allocated type so closure snapshots also initialize
+	// their data field before exposing the source-typed debug address.
+	store = b.Store(dbgPtr, storedValue)
 	dbgPtr.Type = b.Prog.Pointer(v.Type)
-	store = b.Store(dbgPtr, v)
 	return dbgPtr, store
 }
 
