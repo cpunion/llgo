@@ -133,6 +133,12 @@ func (c *Cmd) Compile(args ...string) error {
 	return c.exec(allArgs...)
 }
 
+// CompileArguments returns the effective driver arguments without executing
+// the compiler, including the command prefix and environment flags.
+func (c *Cmd) CompileArguments(args ...string) []string {
+	return slices.Concat(c.prefixArgs, c.mergeCompilerFlags(), args)
+}
+
 // Link executes a linking command with merged flags.
 func (c *Cmd) Link(args ...string) error {
 	return c.exec(c.linkArguments(args...)...)
