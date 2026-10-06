@@ -60,7 +60,13 @@ func processGroupRSS(processGroupID int) (uint64, error) {
 	}
 	result := make(chan queryResult, 1)
 	go func() {
-		output, err := exec.CommandContext(ctx, "ps", "-axo", "pgid=,rss=").Output()
+		args := []string{"-axo", "pgid=,rss="}
+		if runtime.GOOS == "darwin" {
+			// Reading RSS for every process can stall on unrelated Mach tasks.
+			// BSD ps -g selects the entire process group, including descendants.
+			args = []string{"-g", strconv.Itoa(processGroupID), "-o", "pgid=,rss="}
+		}
+		output, err := exec.CommandContext(ctx, "ps", args...).Output()
 		result <- queryResult{output, err}
 	}()
 	var output []byte

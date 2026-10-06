@@ -96,6 +96,7 @@ func TestGenMainModuleWindowsExitsAfterMain(t *testing.T) {
 	ir := mod.LPkg.String()
 	assertInOrder(t, ir,
 		`call void @"example.com/foo.main"()`,
+		`call i32 @fflush(ptr null)`,
 		`call void @runtime.exit(i32 0)`,
 	)
 }
@@ -131,7 +132,7 @@ func TestGenMainModuleCoverageExit(t *testing.T) {
 					`call void @runtime.runCoverageExitHook(i64 0)`,
 				}
 				if goos == "windows" {
-					order = append(order, `call void @runtime.exit(i32 0)`)
+					order = append(order, `call i32 @fflush(ptr null)`, `call void @runtime.exit(i32 0)`)
 				}
 				assertInOrder(t, ir, order...)
 			}

@@ -828,6 +828,14 @@ func TestRunProgramRSSLimit(t *testing.T) {
 		runtime.KeepAlive(memory)
 		return
 	}
+	if os.Getenv("LLGO_GOROOT_HELPER") == "allocate-descendant" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestRunProgramRSSLimit$")
+		cmd.Env = upsertEnv(os.Environ(), "LLGO_GOROOT_HELPER=allocate")
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	disableSystemMemoryLimits(t)
 
 	oldLimit := *flagMaxRSSMiB
@@ -839,18 +847,22 @@ func TestRunProgramRSSLimit(t *testing.T) {
 		*flagRSSPoll = oldPoll
 	}()
 
-	_, _, _, elapsed, err := runProgram(
-		t.TempDir(),
-		os.Args[0],
-		append(os.Environ(), "LLGO_GOROOT_HELPER=allocate"),
-		5*time.Second,
-		"-test.run=^TestRunProgramRSSLimit$",
-	)
-	if err == nil || !strings.Contains(err.Error(), "RSS") {
-		t.Fatalf("err=%v, want RSS limit error", err)
-	}
-	if elapsed >= 5*time.Second {
-		t.Fatalf("elapsed=%s, memory limit did not terminate before timeout", elapsed)
+	for _, helper := range []string{"allocate", "allocate-descendant"} {
+		t.Run(helper, func(t *testing.T) {
+			_, _, _, elapsed, err := runProgram(
+				t.TempDir(),
+				os.Args[0],
+				upsertEnv(os.Environ(), "LLGO_GOROOT_HELPER="+helper),
+				5*time.Second,
+				"-test.run=^TestRunProgramRSSLimit$",
+			)
+			if err == nil || !strings.Contains(err.Error(), "RSS") {
+				t.Fatalf("err=%v, want RSS limit error", err)
+			}
+			if elapsed >= 5*time.Second {
+				t.Fatalf("elapsed=%s, memory limit did not terminate before timeout", elapsed)
+			}
+		})
 	}
 }
 
