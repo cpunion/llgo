@@ -914,24 +914,28 @@ func runnerEnv(repoRoot, goroot, gopath string, extra []string) []string {
 	env := append([]string{}, os.Environ()...)
 	pathFound := false
 	for i, item := range env {
-		switch {
-		case strings.HasPrefix(item, "GOROOT="):
+		key, value, _ := strings.Cut(item, "=")
+		if runtime.GOOS == "windows" {
+			key = strings.ToUpper(key)
+		}
+		switch key {
+		case "GOROOT":
 			env[i] = "GOROOT=" + goroot
-		case strings.HasPrefix(item, "GOENV="):
+		case "GOENV":
 			env[i] = "GOENV=off"
-		case strings.HasPrefix(item, "GOFLAGS="):
+		case "GOFLAGS":
 			env[i] = "GOFLAGS="
-		case strings.HasPrefix(item, "GOTOOLCHAIN="):
+		case "GOTOOLCHAIN":
 			env[i] = "GOTOOLCHAIN=local"
-		case strings.HasPrefix(item, "LLGO_ROOT="):
+		case "LLGO_ROOT":
 			env[i] = "LLGO_ROOT=" + repoRoot
-		case strings.HasPrefix(item, "GOPATH="):
+		case "GOPATH":
 			env[i] = "GOPATH=" + gopath
-		case strings.HasPrefix(item, "GO111MODULE="):
+		case "GO111MODULE":
 			env[i] = "GO111MODULE=off"
-		case strings.HasPrefix(item, "PATH="):
+		case "PATH":
 			pathFound = true
-			env[i] = "PATH=" + filepath.Join(goroot, "bin") + string(os.PathListSeparator) + strings.TrimPrefix(item, "PATH=")
+			env[i] = "PATH=" + filepath.Join(goroot, "bin") + string(os.PathListSeparator) + value
 		}
 	}
 	if !pathFound {
