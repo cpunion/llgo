@@ -546,8 +546,8 @@ func TestBoundedCaseEnv(t *testing.T) {
 	}{
 		{"linux", "amd64", rangegen, nil, []string{"GOMEMLIMIT=3GiB"}},
 		{"linux", "amd64", rangegen, []string{"GOMEMLIMIT=1GiB"}, []string{"GOMEMLIMIT=3GiB"}},
-		{"windows", "arm64", rangegen, nil, []string{"GOMEMLIMIT=2GiB"}},
-		{"windows", "arm64", rangegen, []string{"GOMEMLIMIT=1GiB"}, []string{"GOMEMLIMIT=2GiB"}},
+		{"windows", "arm64", rangegen, nil, []string{"GOMEMLIMIT=1GiB"}},
+		{"windows", "arm64", rangegen, []string{"GOMEMLIMIT=4GiB"}, []string{"GOMEMLIMIT=1GiB"}},
 		{"linux", "arm64", rangegen, nil, nil},
 		{"darwin", "arm64", rangegen, nil, nil},
 		{"linux", "amd64", testCase{RelPath: "other.go", Directive: "runoutput"}, nil, nil},

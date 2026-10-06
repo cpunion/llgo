@@ -830,7 +830,7 @@ func boundedCaseEnv(goos, goarch string, tc testCase, extra []string) []string {
 		if goos == "windows" {
 			// Leave room for ARM64 native LLVM/CodeView allocations, which
 			// are outside Go's soft memory limit.
-			limit = "2GiB"
+			limit = "1GiB"
 		}
 		return upsertEnv(extra, "GOMEMLIMIT="+limit)
 	}

@@ -143,7 +143,7 @@ timeouts:
     directive: runoutput
     case: rangegen.go
     timeout: 10m
-    reason: the generated build reached the 4 GiB guard on Windows MSVC/ARM64; allow bounded build time with the case-local 2 GiB Go heap target while retaining the host resource guard
+    reason: the generated build still reached the 4 GiB guard with a 2 GiB Go heap target on Windows MSVC/ARM64; allow bounded build time with a case-local 1 GiB target while retaining the host resource guard
   - version: go1.26
     platform: linux/amd64
     directive: run
