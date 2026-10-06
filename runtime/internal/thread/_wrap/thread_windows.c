@@ -26,6 +26,9 @@ __declspec(dllimport) llgo_handle LLGO_WINAPI CreateThread(
     void *arg, llgo_dword flags, llgo_dword *thread_id);
 __declspec(dllimport) void LLGO_WINAPI ExitThread(llgo_dword exit_code);
 __declspec(dllimport) void LLGO_WINAPI ExitProcess(llgo_dword exit_code);
+__declspec(dllimport) llgo_handle LLGO_WINAPI GetCurrentProcess(void);
+__declspec(dllimport) llgo_bool LLGO_WINAPI
+TerminateProcess(llgo_handle process, llgo_uint exit_code);
 __declspec(dllimport) llgo_bool LLGO_WINAPI CloseHandle(llgo_handle handle);
 __declspec(dllimport) llgo_dword LLGO_WINAPI GetLastError(void);
 __declspec(dllimport) llgo_handle LLGO_WINAPI GetProcessHeap(void);
@@ -45,8 +48,6 @@ llgo_uintptr_t GC_beginthreadex(
     void *security, llgo_uint stack_size, llgo_crt_thread_start start,
     void *arg, llgo_uint flags, llgo_uint *thread_id);
 void GC_endthreadex(llgo_uint exit_code);
-int GC_is_init_called(void);
-void GC_disable(void);
 #endif
 
 enum {
@@ -65,16 +66,16 @@ static llgo_dword llgo_process_exiting;
 void llgo_win_thread_exit_process(llgo_dword exit_code)
 {
     __atomic_store_n(&llgo_process_exiting, 1, __ATOMIC_RELEASE);
-#if defined(LLGO_USE_BDWGC)
-    /* GC_disable takes the allocator lock, completing an in-flight
-     * stop-the-world collection before preventing new ones. Otherwise
-     * ExitProcess may kill the collector while another thread is suspended
-     * with a shutdown lock held. Only unregistering this thread still allows
-     * other threads to be suspended during process teardown. Minimal programs
-     * may exit without ever initializing the collector. */
-    if (GC_is_init_called())
-        GC_disable();
-#endif
+    /* Go process exit must not wait for other goroutines or DLL callbacks.
+     * ExitProcess kills the other threads before DLL_PROCESS_DETACH; a DLL
+     * cleanup callback can then wait on a lock held by a killed thread. Native
+     * gcgort stress reproduces this inside LdrShutdownProcess even with GC
+     * disabled. Self-termination skips that unsafe teardown and does not return.
+     * See Microsoft's ExitProcess documentation on shutdown with unknown
+     * thread state. Go exit hooks run before this call. */
+    TerminateProcess(GetCurrentProcess(), (llgo_uint)exit_code);
+    /* The current-process pseudo-handle has termination rights. Retain the
+     * normal exit path only if self-termination unexpectedly fails. */
     ExitProcess(exit_code);
 }
 
