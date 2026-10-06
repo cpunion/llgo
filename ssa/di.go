@@ -924,6 +924,8 @@ func (b Builder) doConstructDebugAddrWithStore(v Expr, t types.Type) (dbgPtr, st
 	entryBuilder := *b
 	entryBuilder.impl = b.Func.entryAllocaBuilder()
 	dbgPtr = entryBuilder.AllocaT(ty)
+	// Store through the allocated type so closure snapshots also initialize
+	// their data field before exposing the source-typed debug address.
 	store = b.Store(dbgPtr, storedValue)
 	dbgPtr.Type = b.Prog.Pointer(v.Type)
 	return dbgPtr, store
