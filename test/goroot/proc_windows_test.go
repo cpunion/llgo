@@ -45,11 +45,11 @@ func (tree *processTree) close() {
 	}
 }
 
-func (tree *processTree) snapshot() (map[uint32]windowsProcessInfo, error) {
+func (tree *processTree) snapshot(includeNames bool) (map[uint32]windowsProcessInfo, error) {
 	if tree.handle == 0 {
 		return nil, fmt.Errorf("process tree is closed")
 	}
-	processes, err := snapshotWindowsProcesses()
+	processes, err := snapshotWindowsProcesses(includeNames)
 	if err != nil {
 		return nil, err
 	}
@@ -69,14 +69,14 @@ func (tree *processTree) kill() {
 	if tree.handle == 0 {
 		return
 	}
-	if processes, err := tree.snapshot(); err == nil {
+	if processes, err := tree.snapshot(true); err == nil {
 		pids := windowsProcessTree(tree.rootPID, processes)
 		parents := make(map[uint32]bool, len(pids))
 		for _, pid := range pids {
 			parents[pid] = true
 		}
 		for pid, process := range processes {
-			if parents[process.parentPID] && process.creationTime < processes[process.parentPID].creationTime {
+			if parents[process.parentPID] && !parents[pid] {
 				fmt.Fprintf(os.Stderr, "goroot cleanup ignored stale parent link: pid=%d name=%q parent=%d\n", pid, process.name, process.parentPID)
 			}
 		}
@@ -90,7 +90,7 @@ func (tree *processTree) kill() {
 func resourceMonitoringSupported() bool { return true }
 
 func (tree *processTree) rss() (uint64, error) {
-	processes, err := tree.snapshot()
+	processes, err := tree.snapshot(false)
 	if err != nil {
 		return 0, err
 	}
@@ -101,7 +101,7 @@ func (tree *processTree) rss() (uint64, error) {
 	return total, nil
 }
 
-func snapshotWindowsProcesses() (map[uint32]windowsProcessInfo, error) {
+func snapshotWindowsProcesses(includeNames bool) (map[uint32]windowsProcessInfo, error) {
 	bufferSize := uint32(1 << 20)
 	for {
 		buffer := make([]byte, bufferSize)
@@ -123,11 +123,11 @@ func snapshotWindowsProcesses() (map[uint32]windowsProcessInfo, error) {
 		if err != nil {
 			return nil, err
 		}
-		return parseWindowsProcessSnapshot(buffer)
+		return parseWindowsProcessSnapshot(buffer, includeNames)
 	}
 }
 
-func parseWindowsProcessSnapshot(buffer []byte) (map[uint32]windowsProcessInfo, error) {
+func parseWindowsProcessSnapshot(buffer []byte, includeNames bool) (map[uint32]windowsProcessInfo, error) {
 	processes := make(map[uint32]windowsProcessInfo)
 	entrySize := uint32(unsafe.Sizeof(windows.SYSTEM_PROCESS_INFORMATION{}))
 	for offset := uint32(0); ; {
@@ -136,12 +136,15 @@ func parseWindowsProcessSnapshot(buffer []byte) (map[uint32]windowsProcessInfo, 
 		}
 		entry := (*windows.SYSTEM_PROCESS_INFORMATION)(unsafe.Pointer(&buffer[offset]))
 		pid := uint32(entry.UniqueProcessID)
-		processes[pid] = windowsProcessInfo{
+		process := windowsProcessInfo{
 			parentPID:    uint32(entry.InheritedFromUniqueProcessID),
 			rss:          uint64(entry.WorkingSetSize),
 			creationTime: entry.CreateTime,
-			name:         entry.ImageName.String(),
 		}
+		if includeNames {
+			process.name = entry.ImageName.String()
+		}
+		processes[pid] = process
 		if entry.NextEntryOffset == 0 {
 			return processes, nil
 		}
@@ -153,6 +156,8 @@ func parseWindowsProcessSnapshot(buffer []byte) (map[uint32]windowsProcessInfo, 
 }
 
 func windowsProcessCreationTime(handle windows.Handle) (int64, error) {
+	// GetProcessTimes and SYSTEM_PROCESS_INFORMATION.CreateTime both use
+	// FILETIME: 100-nanosecond intervals since January 1, 1601 (UTC).
 	var created, exited, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(handle, &created, &exited, &kernel, &user); err != nil {
 		return 0, err
