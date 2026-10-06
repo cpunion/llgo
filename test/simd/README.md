@@ -63,7 +63,21 @@ threads, and standard Wasm exception handling; Wasmer selects an available
 backend automatically. The official Go WASI comparison uses Wasmtime.
 Emscripten execution requires a compatible SDK and Node.js. The local
 qualification used Go 1.27.0, LLVM 22.1.8, Emscripten 6.0.8, and Node 24.19.0.
-Existing CI runs native amd64/arm64 and WASI at O0/O2.
+CI runs native amd64/arm64 and WASI at O0/O2. The JavaScript matrix runs
+GoJS (`GOOS=js GOARCH=wasm`), Emscripten, and Emscripten Memory64 with the
+default JavaScript SjLj/Asyncify configuration:
+
+```sh
+LLGO=/path/to/llgo dev/test_wasm_simd.sh
+```
+
+Each profile runs the O0 boundary executable and the complete O2 test suite
+with LTO disabled, ThinLTO, and Full LTO. The LTO modes pass `-flto=thin` or
+`-flto=full` to both compilation and final linking. Earlier browser builds
+accepted `-lto` but did not forward these driver flags, so their successful
+runs did not qualify actual link-time optimization. Archives use the SDK's
+`emar` to index bitcode produced by its Clang; `LLGO_AR` remains an explicit
+override.
 
 The complete O0 Emscripten test executable exceeds Node's local-variable
 limit. A small executable covers SIMD initialization, cross-package calls,
@@ -72,6 +86,7 @@ recovery, and scheduling at O0 without importing the testing framework:
 ```sh
 GOEXPERIMENT=simd llgo run -O0 -target wasi -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd llgo run -O0 -target emscripten -emulator ./test/simd/testdata/boundary
+GOEXPERIMENT=simd llgo run -O0 -target emscripten-memory64 -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd GOOS=js GOARCH=wasm llgo run -O0 -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd llgo run -O2 -lto=thin -target emscripten -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd llgo run -O2 -lto=full -target emscripten -emulator ./test/simd/testdata/boundary

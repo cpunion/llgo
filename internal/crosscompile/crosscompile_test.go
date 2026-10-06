@@ -1457,3 +1457,23 @@ func TestUseTargetCodegenFlagsOnlyAddedToLDFlagsWithLTO(t *testing.T) {
 		t.Fatalf("missing full LTO ccflag: %v", fullLTO.CCFLAGS)
 	}
 }
+
+func TestEmscriptenLTOFlags(t *testing.T) {
+	for _, target := range []string{"", "emscripten", "emscripten-memory64"} {
+		for _, mode := range []lto.Mode{lto.Off, lto.Thin, lto.Full} {
+			t.Run(target+"/"+mode.String(), func(t *testing.T) {
+				export, err := Use("js", "wasm", target, false, optlevel.O2, mode, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for name, flags := range map[string][]string{"compile": export.CCFLAGS, "link": export.LDFLAGS} {
+					for _, candidate := range []lto.Mode{lto.Thin, lto.Full} {
+						if slices.Contains(flags, candidate.ClangFlag()) != (mode == candidate) {
+							t.Errorf("%s flags for %s: incorrect %s in %v", name, mode, candidate.ClangFlag(), flags)
+						}
+					}
+				}
+			})
+		}
+	}
+}
