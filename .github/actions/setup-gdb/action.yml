@@ -36,7 +36,7 @@ runs:
         echo "path=$gdb_path" >> "$GITHUB_OUTPUT"
         echo "LLGO_GDB=$gdb_path" >> "$GITHUB_ENV"
 
-    - name: Install isolated Windows GDB environment
+    - name: Initialize isolated Windows GDB environment
       if: runner.os == 'Windows'
       id: msys2
       uses: msys2/setup-msys2@v2
@@ -44,8 +44,49 @@ runs:
         location: ${{ runner.temp }}/llgo-gdb-msys2
         msystem: ${{ runner.arch == 'ARM64' && 'CLANGARM64' || 'CLANG64' }}
         path-type: minimal
-        update: true
-        install: ${{ runner.arch == 'ARM64' && 'mingw-w64-clang-aarch64-gdb-multiarch' || 'mingw-w64-clang-x86_64-gdb-multiarch' }}
+        update: false
+
+    - name: Populate Windows GDB package trust
+      if: runner.os == 'Windows'
+      shell: msys2 {0}
+      run: |
+        set -euo pipefail
+        # MSYS2's first-login script ignores a failed --populate operation.
+        # Require trusted package keys before the first package transaction.
+        pacman-key --populate msys2
+
+    - name: Upgrade Windows GDB core packages
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        GDB_MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        # First pass of the two-pass MSYS2 upgrade. The install step below
+        # completes the remaining upgrade in a fresh shell after this pass.
+        # A runtime upgrade deliberately terminates its MSYS2 shell. Capture
+        # that specific shutdown; every other package failure remains fatal.
+        & msys2 -c 'set -o pipefail; LC_ALL=C pacman --noconfirm -Syu 2>&1 | tee /var/log/llgo-gdb-core-update.log'
+        $status = $LASTEXITCODE
+        if ($status -ne 0) {
+          $log = Get-Content -Raw (Join-Path $env:GDB_MSYS2_ROOT "var/log/llgo-gdb-core-update.log")
+          if ($status -ne 1 -or $log -notmatch 'To complete this update all MSYS2 processes including this terminal will be closed' -or $log -match '(?m)^error:') {
+            throw "MSYS2 core upgrade failed: $status"
+          }
+          exit 0
+        }
+
+    - name: Install Windows GDB packages
+      if: runner.os == 'Windows'
+      shell: msys2 {0}
+      env:
+        GDB_PACKAGE: ${{ runner.arch == 'ARM64' && 'mingw-w64-clang-aarch64-gdb-multiarch' || 'mingw-w64-clang-x86_64-gdb-multiarch' }}
+      run: |
+        set -euo pipefail
+        # A core upgrade can terminate its MSYS2 shell. Complete the upgrade
+        # in a fresh process before installing the debugger.
+        pacman --noconfirm -Syu
+        pacman --noconfirm -S --needed "$GDB_PACKAGE"
 
     - name: Export Windows GDB
       if: runner.os == 'Windows'
