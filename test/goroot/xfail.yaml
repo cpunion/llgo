@@ -139,6 +139,11 @@ timeouts:
     case: rangegen.go
     timeout: 10m
     reason: both Go 1.26 and 1.27 generated builds exceeded the default 3m timeout on Windows MinGW/amd64, peaking at 3.3 GiB each; keep the case enabled with bounded build time
+  - platform: windows/arm64
+    directive: runoutput
+    case: rangegen.go
+    timeout: 10m
+    reason: the generated build reached the 4 GiB guard on Windows MSVC/ARM64; allow bounded build time with the case-local 2 GiB Go heap target while retaining the host resource guard
   - version: go1.26
     platform: linux/amd64
     directive: run

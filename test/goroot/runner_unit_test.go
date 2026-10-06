@@ -468,6 +468,11 @@ func TestWasmObservedResourceExceptions(t *testing.T) {
 		if timeout, _, match := cfg.MatchTimeout(version, "windows-mingw/amd64", rangegen); !match || timeout != 10*time.Minute {
 			t.Errorf("%s Windows MinGW/amd64 rangegen timeout = %s, %v; want 10m, true", version, timeout, match)
 		}
+		for _, platform := range []string{"windows-msvc/arm64", "windows-mingw/arm64"} {
+			if timeout, _, match := cfg.MatchTimeout(version, platform, rangegen); !match || timeout != 10*time.Minute {
+				t.Errorf("%s %s rangegen timeout = %s, %v; want 10m, true", version, platform, timeout, match)
+			}
+		}
 	}
 	for _, tt := range []struct {
 		tc            testCase
@@ -541,6 +546,8 @@ func TestBoundedCaseEnv(t *testing.T) {
 	}{
 		{"linux", "amd64", rangegen, nil, []string{"GOMEMLIMIT=3GiB"}},
 		{"linux", "amd64", rangegen, []string{"GOMEMLIMIT=1GiB"}, []string{"GOMEMLIMIT=3GiB"}},
+		{"windows", "arm64", rangegen, nil, []string{"GOMEMLIMIT=2GiB"}},
+		{"windows", "arm64", rangegen, []string{"GOMEMLIMIT=1GiB"}, []string{"GOMEMLIMIT=2GiB"}},
 		{"linux", "arm64", rangegen, nil, nil},
 		{"darwin", "arm64", rangegen, nil, nil},
 		{"linux", "amd64", testCase{RelPath: "other.go", Directive: "runoutput"}, nil, nil},
