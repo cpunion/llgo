@@ -1013,6 +1013,13 @@ func runProgram(dir, app string, env []string, timeout time.Duration, args ...st
 	if err := cmd.Start(); err != nil {
 		return nil, nil, 0, time.Since(start), err
 	}
+	tree, treeErr := newProcessTree(cmd)
+	if treeErr != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, nil, 0, time.Since(start), fmt.Errorf("track process tree: %w", treeErr)
+	}
+	defer tree.close()
 
 	waitCh := make(chan error, 1)
 	var waitFinished time.Time
@@ -1075,7 +1082,7 @@ func runProgram(dir, app string, env []string, timeout time.Duration, args ...st
 		case <-timeoutCh:
 			goto timedOut
 		case <-rssCh:
-			rssBytes, rssErr := processGroupRSS(cmd.Process.Pid)
+			rssBytes, rssErr := tree.rss()
 			if rssErr != nil {
 				continue
 			}
@@ -1085,14 +1092,14 @@ func runProgram(dir, app string, env []string, timeout time.Duration, args ...st
 			limitBytes := uint64(*flagMaxRSSMiB) << 20
 			if *flagMaxRSSMiB > 0 && rssBytes > limitBytes {
 				terminationErr = &resourceLimitError{message: fmt.Sprintf("process-group RSS %s exceeded limit %s", formatBytes(rssBytes), formatBytes(limitBytes))}
-				killProcessTree(cmd)
+				tree.kill()
 				err = waitTerminatedProgram(cmd, waitCh, 10*time.Second)
 				goto finished
 			}
 		case <-memoryCh:
 			if memoryErr := checkSystemMemoryPressure(); memoryErr != nil {
 				terminationErr = memoryErr
-				killProcessTree(cmd)
+				tree.kill()
 				err = waitTerminatedProgram(cmd, waitCh, 10*time.Second)
 				goto finished
 			}
@@ -1106,7 +1113,7 @@ timedOut:
 	default:
 	}
 	terminationErr = fmt.Errorf("timed out after %s", timeout)
-	killProcessTree(cmd)
+	tree.kill()
 	err = waitTerminatedProgram(cmd, waitCh, 10*time.Second)
 	goto finished
 waited:
@@ -1120,7 +1127,7 @@ waited:
 	// child, but an ExitError masks it after a non-zero exit. Either error
 	// can therefore leave descendants alive.
 	if err != nil || terminationErr != nil {
-		killProcessTree(cmd)
+		tree.kill()
 	}
 finished:
 	if *flagRSSWarnMiB > 0 && peakRSS >= uint64(*flagRSSWarnMiB)<<20 {

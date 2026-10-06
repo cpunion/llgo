@@ -23,7 +23,22 @@ func configureProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func killProcessTree(cmd *exec.Cmd) {
+type processTree struct {
+	cmd *exec.Cmd
+}
+
+func newProcessTree(cmd *exec.Cmd) (*processTree, error) {
+	return &processTree{cmd: cmd}, nil
+}
+
+func (tree *processTree) close() {}
+
+func (tree *processTree) rss() (uint64, error) {
+	return processGroupRSS(tree.cmd.Process.Pid)
+}
+
+func (tree *processTree) kill() {
+	cmd := tree.cmd
 	if cmd.Process == nil {
 		return
 	}
