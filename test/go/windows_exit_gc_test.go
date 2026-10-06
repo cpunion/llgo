@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -21,29 +22,36 @@ func TestWindowsExitDuringGC(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ready := make(chan struct{}, len(windowsExitGCObjects))
+		ready := make(chan struct{}, len(windowsExitGCObjects)+1)
+		start := make(chan struct{})
 		for i := range windowsExitGCObjects {
 			go func(i int) {
-				windowsExitGCObjects[i] = make([]byte, 4096)
 				ready <- struct{}{}
-				for {
+				<-start
+				for range 256 {
 					windowsExitGCObjects[i] = make([]byte, 4096)
 				}
 			}(i)
 		}
-		for range windowsExitGCObjects {
+		var collecting uint32
+		go func() {
+			ready <- struct{}{}
+			<-start
+			atomic.StoreUint32(&collecting, 1)
+			runtime.GC()
+		}()
+		for range len(windowsExitGCObjects) + 1 {
 			<-ready
 		}
-		started := make(chan struct{})
-		go func() {
-			close(started)
-			for {
-				runtime.GC()
-			}
-		}()
-		<-started
-		// Vary the overlap between explicit collection, allocation, and exit.
-		time.Sleep(time.Duration(iteration%4) * time.Millisecond)
+		close(start)
+		for atomic.LoadUint32(&collecting) == 0 {
+		}
+		// Vary exit timing without allocating or starting the timer scheduler.
+		// Bound background work so the test isolates shutdown, not starvation
+		// under a collector loop that never lets other threads acquire its lock.
+		for range iteration % 4 * 10000 {
+			atomic.LoadUint32(&collecting)
+		}
 		os.Exit(iteration % 2 * 23)
 	}
 
