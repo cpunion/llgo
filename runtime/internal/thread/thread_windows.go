@@ -71,8 +71,8 @@ func Exit() {
 	exit()
 }
 
-// ExitProcess removes the exiting thread from the collector before Windows
-// terminates its peers, and prevents Go/GC calls from shutdown FLS callbacks.
+// ExitProcess terminates the current process without DLL or FLS teardown.
+// Such callbacks can deadlock after Windows has killed their lock owners.
 func ExitProcess(code uint32) {
 	exitProcess(c.Uint(code))
 }

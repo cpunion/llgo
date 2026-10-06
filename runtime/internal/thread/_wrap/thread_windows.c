@@ -69,8 +69,8 @@ void llgo_win_thread_exit_process(llgo_dword exit_code)
     /* Go process exit must not wait for other goroutines or DLL callbacks.
      * ExitProcess kills the other threads before DLL_PROCESS_DETACH; a DLL
      * cleanup callback can then wait on a lock held by a killed thread. Native
-     * gcgort stress reproduces this inside LdrShutdownProcess even with GC
-     * disabled. Self-termination skips that unsafe teardown and does not return.
+     * gcgort stress gets stuck inside LdrShutdownProcess. Self-termination
+     * skips that unsafe teardown and does not return.
      * See Microsoft's ExitProcess documentation on shutdown with unknown
      * thread state. Go exit hooks run before this call. */
     TerminateProcess(GetCurrentProcess(), (llgo_uint)exit_code);
