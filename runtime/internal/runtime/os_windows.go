@@ -22,7 +22,6 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	cliteos "github.com/xgo-dev/llgo/runtime/internal/clite/os"
 	psync "github.com/xgo-dev/llgo/runtime/internal/sync"
 	"github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 	"github.com/xgo-dev/llgo/runtime/internal/thread"
@@ -54,8 +53,7 @@ var processExitLock psync.Mutex
 //go:nosplit
 func ExitProcess(code uint32) {
 	atomic.Store(&processExiting, 1)
-	thread.BeginProcessExit()
-	cliteos.ExitProcess(code)
+	thread.ExitProcess(code)
 }
 
 //go:linkname runtime_exit runtime.exit

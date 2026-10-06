@@ -25,6 +25,7 @@ __declspec(dllimport) llgo_handle LLGO_WINAPI CreateThread(
     void *attributes, llgo_size_t stack_size, llgo_win_thread_start start,
     void *arg, llgo_dword flags, llgo_dword *thread_id);
 __declspec(dllimport) void LLGO_WINAPI ExitThread(llgo_dword exit_code);
+__declspec(dllimport) void LLGO_WINAPI ExitProcess(llgo_dword exit_code);
 __declspec(dllimport) llgo_bool LLGO_WINAPI CloseHandle(llgo_handle handle);
 __declspec(dllimport) llgo_dword LLGO_WINAPI GetLastError(void);
 __declspec(dllimport) llgo_handle LLGO_WINAPI GetProcessHeap(void);
@@ -44,6 +45,9 @@ llgo_uintptr_t GC_beginthreadex(
     void *security, llgo_uint stack_size, llgo_crt_thread_start start,
     void *arg, llgo_uint flags, llgo_uint *thread_id);
 void GC_endthreadex(llgo_uint exit_code);
+int GC_is_init_called(void);
+int GC_thread_is_registered(void);
+int GC_unregister_my_thread(void);
 #endif
 
 enum {
@@ -59,9 +63,19 @@ enum {
  * deliberately retained sidecar allocation. */
 static llgo_dword llgo_process_exiting;
 
-void llgo_win_thread_begin_process_exit(void)
+void llgo_win_thread_exit_process(llgo_dword exit_code)
 {
     __atomic_store_n(&llgo_process_exiting, 1, __ATOMIC_RELEASE);
+#if defined(LLGO_USE_BDWGC)
+    /* Finish any in-flight suspension and remove this thread before killing
+     * the collector. Otherwise a pending SuspendThread request can suspend
+     * the exiting thread after ExitProcess has killed the thread that would
+     * resume it. No Go/GC operation may follow unregistration. Minimal programs
+     * may reach process exit without ever initializing the collector. */
+    if (GC_is_init_called() && GC_thread_is_registered())
+        GC_unregister_my_thread();
+#endif
+    ExitProcess(exit_code);
 }
 
 typedef void *(*llgo_thread_routine)(void *arg);
