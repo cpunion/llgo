@@ -124,6 +124,11 @@ func gorootArtifactCommand(dir, artifact string, llgo bool, env []string, progra
 			return "", nil, nil, fmt.Errorf("resolve Wasmer working directory: %w", err)
 		}
 		args := gorootWASIArgs(cwd, os.TempDir(), artifact, runtime.GOOS == "windows")
+		// Wasmer does not inherit the host environment into the WASI guest.
+		// Keep PATH explicit, as in the public runner, so both baselines see it.
+		if path := envEntry(env, "PATH"); path != "" {
+			args = append([]string{"run", "--env=PATH=" + path}, args[1:]...)
+		}
 		// Suppress engine tracing at its source while preserving the module
 		// cache and guest stdout/stderr, including log-shaped guest output.
 		runEnv := upsertEnv(gorootRuntimeEnv(env), "RUST_LOG=off")
