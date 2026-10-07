@@ -92,7 +92,7 @@ func TestWorkerEmvalFinalizersStayInRealm(t *testing.T) {
 		t.Fatalf("JavaScript values were created on %d worker, want at least 2", len(owners))
 	}
 
-	finalizersDone := make(chan struct{})
+	finalizersDone := make(chan struct{}, 3)
 	installRetiredWorkerFinalizerBarrier(t, finalizersDone)
 	for range 24 {
 		clobberWorkerStack(16, 1)
@@ -149,7 +149,7 @@ func TestRetiredWorkerFiberReleasesFinalizer(t *testing.T) {
 
 //go:noinline
 func retiredWorkerFiberReleasesFinalizer(t *testing.T) bool {
-	finalized := make(chan struct{})
+	finalized := make(chan struct{}, 3)
 	installRetiredWorkerFinalizerBarrier(t, finalized)
 
 	// The G has exited, but a conservative reference in its retired fiber
@@ -172,31 +172,33 @@ func retiredWorkerFiberReleasesFinalizer(t *testing.T) bool {
 // scan even after the factory returns; stack clobbering is optimizer dependent.
 func installRetiredWorkerFinalizerBarrier(t *testing.T, finalized chan struct{}) {
 	t.Helper()
-	installed := make(chan struct{})
+	retired := make(chan struct{})
 	go func() {
-		installWorkerFinalizerBarrier(finalized)
-		close(installed)
+		// Bind this parent and its child to one realm. Once the parent resumes,
+		// that worker has returned from and retired the child's fiber. Two
+		// independent spawns cannot guarantee this: finalizer goroutines may
+		// advance the scheduler's round-robin cursor between them.
+		js.Global()
+		installed := make(chan struct{})
+		go func() {
+			// Any one marker may be retained by an unrelated conservative
+			// root. Install independent markers together and require progress
+			// within the same collection budget, rather than retrying the test.
+			for range 3 {
+				installWorkerFinalizerBarrier(finalized)
+			}
+			close(installed)
+		}()
+		<-installed
+		close(retired)
 	}()
-	<-installed
-	// The notification precedes the goroutine's return. Run a later task on
-	// each worker so its scheduler has retired the finished fiber before GC.
-	settled := make(chan int, 2)
-	for range 2 {
-		wasmworkers.GoIndependent(func() { settled <- schedulerProcID() })
-	}
-	owners := map[int]bool{}
-	for range 2 {
-		owners[<-settled] = true
-	}
-	if len(owners) != 2 {
-		t.Fatalf("fiber retirement reached %d workers, want 2", len(owners))
-	}
+	<-retired
 }
 
 //go:noinline
 func installWorkerFinalizerBarrier(done chan<- struct{}) {
 	barrier := &workerFinalizerBarrier{}
-	runtime.SetFinalizer(barrier, func(*workerFinalizerBarrier) { close(done) })
+	runtime.SetFinalizer(barrier, func(*workerFinalizerBarrier) { done <- struct{}{} })
 }
 
 //go:noinline

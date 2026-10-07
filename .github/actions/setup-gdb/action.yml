@@ -54,6 +54,10 @@ runs:
         # MSYS2's first-login script ignores a failed --populate operation.
         # Require trusted package keys before the first package transaction.
         pacman-key --populate msys2
+        # Prefer the official package server over the geo-redirector, whose
+        # selected mirror can time out during the core upgrade on CI runners.
+        sed -i '\|^Server = https://mirror\.msys2\.org/|d' \
+          /etc/pacman.d/mirrorlist.mingw /etc/pacman.d/mirrorlist.msys
 
     - name: Upgrade Windows GDB core packages
       if: runner.os == 'Windows'
