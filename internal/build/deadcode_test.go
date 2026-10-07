@@ -119,6 +119,7 @@ func TestLinkedCExportsIncludesDependencyAndExecutableCallbacks(t *testing.T) {
 				exports, err := linkedCExports(ctx, []Package{
 					newExport("main", "main", "main.Exported", "Exported"),
 					newExport("example.com/dep", "dep", "example.com/dep.Callback", "Callback"),
+					newExport("example.com/capi", "C", "example.com/capi.Xadd", "add"),
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -219,6 +220,7 @@ func TestCExportWrapperTargetPolicy(t *testing.T) {
 		{name: "runtime subtree", goos: "windows", mode: BuildModeCShared, path: llssa.PkgRuntime + "/signal"},
 		{name: "standard runtime", goos: "darwin", mode: BuildModeExe, path: "runtime"},
 		{name: "explicit target", goos: "linux", target: "wasi", mode: BuildModeExe, path: "example.com/callback"},
+		{name: "package C direct exports", goos: "linux", mode: BuildModeExe, path: "example.com/capi", pkgName: "C"},
 		{name: "unsupported build mode", goos: "linux", mode: "invalid", path: "example.com/callback"},
 		{name: "other OS executable", goos: "freebsd", mode: BuildModeExe, path: "main", pkgName: "main"},
 		{name: "other OS dependency", goos: "freebsd", mode: BuildModeCShared, path: "example.com/callback", pkgName: "callback"},

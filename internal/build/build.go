@@ -2684,10 +2684,11 @@ func linkedCExports(ctx *context, pkgs []Package) ([]cExport, error) {
 
 func needsCExportWrappers(ctx *context, pkg *aPackage) bool {
 	if ctx == nil || ctx.buildConf == nil || pkg == nil || pkg.Package == nil ||
-		ctx.buildConf.Target != "" || isRuntimePkg(pkg.PkgPath) || pkg.PkgPath == "runtime" {
+		ctx.buildConf.Target != "" || pkg.Name == "C" || isRuntimePkg(pkg.PkgPath) || pkg.PkgPath == "runtime" {
 		return false
 	}
 	// A C callback may live in an imported package or an ordinary executable.
+	// package C defines its unqualified exports in the package module itself.
 	// Runtime-owned low-level entries keep their existing bootstrap contracts.
 	switch ctx.buildConf.Goos {
 	case "darwin", "linux", "windows":
@@ -3229,10 +3230,11 @@ func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string,
 		return nil, fmt.Errorf("load go:embed directives for %s failed: %w", pkgPath, err)
 	}
 	options := ctx.frontendOptions
-	// Hosted C exports use final-link wrappers to register foreign caller threads
+	// Hosted //export entries use final-link wrappers to register foreign caller threads
 	// with the collector; Windows shared libraries also initialize lazily.
 	// Dependency implementations retain Go symbols too; their public entry
 	// wrappers are generated in the uncached final-link module.
+	// package C retains its direct, unqualified definitions in its own module.
 	options.CExportWrappers = needsCExportWrappers(ctx, aPkg)
 	ret, externs, err := cl.NewPackageExWithEmbedMetaOptions(
 		ctx.prog, ctx.callerTracking, ctx.patches, aPkg.rewriteVars,
