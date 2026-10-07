@@ -42,6 +42,7 @@ func fail(message string) {
 }
 
 func main() {
+	testMapKeyAllocations()
 	baseline, _ := gStateForTesting()
 	const workers = 3
 	var wg sync.WaitGroup
@@ -324,4 +325,28 @@ func waitForRegistered(expected int32) {
 		yieldC()
 	}
 	fail("WASI timer pthread did not start")
+}
+
+// Existing integer keys must not allocate a temporary heap object for hashing.
+func testMapKeyAllocations() {
+	m := make(map[uint64]uint64, 64)
+	for i := uint64(0); i < 64; i++ {
+		m[i] = i
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := uint64(0); i < 4096; i++ {
+		key := i % 64
+		value, ok := m[key]
+		if !ok || value != key {
+			fail("integer map lookup failed")
+		}
+		m[key] = value
+		delete(m, key)
+		m[key] = key
+	}
+	runtime.ReadMemStats(&after)
+	if after.Mallocs != before.Mallocs {
+		fail("integer map hashing allocated")
+	}
 }
