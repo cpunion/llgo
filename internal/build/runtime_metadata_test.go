@@ -18,15 +18,16 @@ import (
 
 func TestPlanMainLinkRuntimeMetadata(t *testing.T) {
 	for _, test := range []struct {
-		name                         string
-		runtime, python, wasm, local bool
-		wantRuntime                  bool
+		name                                  string
+		runtime, python, wasm, local, cExport bool
+		wantRuntime                           bool
 	}{
 		{name: "runtime-free native"},
 		{name: "runtime required", runtime: true, wantRuntime: true},
 		{name: "python required", python: true, wantRuntime: true},
 		{name: "wasm scheduler", wasm: true, wantRuntime: true},
 		{name: "local context startup", local: true, wantRuntime: true},
+		{name: "leaf C export", cExport: true, wantRuntime: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			prog := llssa.NewProgram(nil)
@@ -37,6 +38,11 @@ func TestPlanMainLinkRuntimeMetadata(t *testing.T) {
 			app := snapshotPkg("example.com/main", "main.main")
 			rt := snapshotPkg(llssa.PkgRuntime, llssa.PkgRuntime+".unusedHelper")
 			app.NeedRt, app.NeedPyInit = test.runtime, test.python
+			if test.cExport {
+				app.linkSnapshot.cExports = []cExport{{
+					goName: "example.com/main.Callback", cName: "callback", sig: llssa.NoArgsNoRet,
+				}}
+			}
 			for _, pkg := range []Package{app, rt} {
 				pkg.ID = pkg.PkgPath
 				pkg.ExportFile = pkg.PkgPath + ".o"
@@ -51,6 +57,9 @@ func TestPlanMainLinkRuntimeMetadata(t *testing.T) {
 			plan, err := planMainLink(ctx, app.Package, []*aPackage{app, rt})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if test.cExport && (!plan.gen.rtInit || len(plan.gen.cExports) != 1) {
+				t.Fatal("leaf C export lost its runtime initialization or entry wrapper")
 			}
 			// The host archive policy is unchanged, even when metadata is omitted.
 			if !slices.Contains(plan.archiveInputs, rt.ArchiveFile) {
