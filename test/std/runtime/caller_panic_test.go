@@ -38,3 +38,43 @@ func TestCallerDuringPanicAndRecovery(t *testing.T) {
 	}()
 	callerPanicSite()
 }
+
+var callerFaultPointer *int
+
+//go:noinline
+func callerFaultSite() {
+	_ = *callerFaultPointer
+}
+
+func TestCallerAfterHardwareFaultRecovery(t *testing.T) {
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("nil dereference did not panic")
+			}
+			if !callerStackContains(".callerFaultSite") {
+				t.Fatal("recovered fault stack lost its panic site")
+			}
+		}()
+		callerFaultSite()
+	}()
+	if callerStackContains(".callerFaultSite") {
+		t.Fatal("fault stack survived the recovering deferred activation")
+	}
+}
+
+//go:noinline
+func callerStackContains(suffix string) bool {
+	var pcs [32]uintptr
+	n := runtime.Callers(1, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		if strings.HasSuffix(frame.Function, suffix) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
