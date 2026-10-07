@@ -97,7 +97,7 @@ func TestDCEEntryRootCandidatesIncludesCExports(t *testing.T) {
 	}
 }
 
-func TestLinkedCExportsIncludesOnlyLibraryMain(t *testing.T) {
+func TestLinkedCExportsIncludesDependencyAndExecutableCallbacks(t *testing.T) {
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()
 	newExport := func(path, name, goName, cName string) Package {
@@ -110,7 +110,7 @@ func TestLinkedCExportsIncludesOnlyLibraryMain(t *testing.T) {
 		}
 	}
 	for _, goos := range []string{"darwin", "linux", "windows"} {
-		for _, mode := range []BuildMode{BuildModeCShared, BuildModeCArchive} {
+		for _, mode := range []BuildMode{BuildModeCShared, BuildModeCArchive, BuildModeExe} {
 			t.Run(goos+"/"+string(mode), func(t *testing.T) {
 				ctx := &context{buildConf: &Config{
 					Goos:      goos,
@@ -123,8 +123,8 @@ func TestLinkedCExportsIncludesOnlyLibraryMain(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(exports) != 1 || exports[0].goName != "main.Exported" {
-					t.Fatalf("linked C exports = %+v, want command-package export only", exports)
+				if len(exports) != 2 || exports[0].goName != "example.com/dep.Callback" || exports[1].goName != "main.Exported" {
+					t.Fatalf("linked C exports = %+v, want dependency and command exports", exports)
 				}
 			})
 		}

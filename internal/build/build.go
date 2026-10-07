@@ -2411,6 +2411,13 @@ func planMainLink(ctx *context, pkg *packages.Package, pkgs []*aPackage) (*mainL
 		}
 	}
 
+	cExports, err := linkedCExports(ctx, linkedOrder)
+	if err != nil {
+		return nil, err
+	}
+	// Even a leaf export needs the runtime for foreign-thread registration.
+	needRuntime = needRuntime || len(cExports) != 0
+
 	// Only link runtime objects when needed (or for host builds where runtime is always required).
 	if needRuntime || needPyInit || ctx.buildConf.Target == "" {
 		linkArgs = append(linkArgs, rtLinkArgs...)
@@ -2436,10 +2443,6 @@ func planMainLink(ctx *context, pkg *packages.Package, pkgs []*aPackage) (*mainL
 		pcLineInfo = collectPCLineInfo(metadataOrder)
 	}
 	packageInits, err := linkedPackageInitNames(pkg, linkedOrder)
-	if err != nil {
-		return nil, err
-	}
-	cExports, err := linkedCExports(ctx, linkedOrder)
 	if err != nil {
 		return nil, err
 	}
@@ -2620,37 +2623,57 @@ func dceEntryRootCandidates(pkgs []Package, needRuntime bool) []string {
 	return roots
 }
 
+// packageCExportDeclarations snapshots Go-owned export names and signatures.
+// It deliberately retains no LLVM values after an isolated worker is disposed.
+func packageCExportDeclarations(pkg llssa.Package) []cExport {
+	if pkg == nil {
+		return nil
+	}
+	var exports []cExport
+	for goName, cName := range pkg.ExportFuncs() {
+		if strings.Contains(goName, ".") && !strings.HasPrefix(goName, pkg.Path()+".") {
+			continue
+		}
+		var sig *types.Signature
+		if fn := pkg.FuncOf(goName); fn != nil {
+			sig, _ = fn.RawType().(*types.Signature)
+		}
+		exports = append(exports, cExport{goName: goName, cName: cName, sig: sig})
+	}
+	return exports
+}
+
+func packageCExports(pkg *aPackage) []cExport {
+	if pkg.linkSnapshot != nil {
+		return pkg.linkSnapshot.cExports
+	}
+	return packageCExportDeclarations(pkg.LPkg)
+}
+
 func linkedCExports(ctx *context, pkgs []Package) ([]cExport, error) {
 	seen := make(map[string]string)
 	var exports []cExport
 	for _, pkg := range pkgs {
-		if !needsCExportWrappers(ctx, pkg) || pkg.LPkg == nil {
+		if !needsCExportWrappers(ctx, pkg) {
 			continue
 		}
-		for goName, cName := range pkg.LPkg.ExportFuncs() {
-			if strings.Contains(goName, ".") && !strings.HasPrefix(goName, pkg.LPkg.Path()+".") {
-				continue
-			}
+		for _, export := range packageCExports(pkg) {
+			goName, cName := export.goName, export.cName
 			if previous, ok := seen[cName]; ok {
 				if previous != goName {
 					return nil, fmt.Errorf("C export %q is provided by both %q and %q", cName, previous, goName)
 				}
 				continue
 			}
-			fn := pkg.LPkg.FuncOf(goName)
-			if fn == nil {
+			sig := export.sig
+			if sig == nil {
 				return nil, fmt.Errorf("C export implementation %q not found", goName)
 			}
-			sig, ok := fn.RawType().(*types.Signature)
-			if !ok || sig.Recv() != nil || sig.Variadic() || sig.Results().Len() > 1 {
+			if sig.Recv() != nil || sig.Variadic() || sig.Results().Len() > 1 {
 				return nil, fmt.Errorf("C export %q has an unsupported signature", goName)
 			}
 			seen[cName] = goName
-			exports = append(exports, cExport{
-				goName: goName,
-				cName:  cName,
-				sig:    sig,
-			})
+			exports = append(exports, export)
 		}
 	}
 	slices.SortFunc(exports, func(a, b cExport) int {
@@ -2660,10 +2683,24 @@ func linkedCExports(ctx *context, pkgs []Package) ([]cExport, error) {
 }
 
 func needsCExportWrappers(ctx *context, pkg *aPackage) bool {
-	return ctx != nil && ctx.buildConf != nil && pkg != nil && pkg.Package != nil &&
-		ctx.buildConf.Target == "" &&
-		(ctx.buildConf.BuildMode == BuildModeCShared || ctx.buildConf.BuildMode == BuildModeCArchive) &&
-		pkg.Name == "main"
+	if ctx == nil || ctx.buildConf == nil || pkg == nil || pkg.Package == nil ||
+		ctx.buildConf.Target != "" || isRuntimePkg(pkg.PkgPath) || pkg.PkgPath == "runtime" {
+		return false
+	}
+	// A C callback may live in an imported package or an ordinary executable.
+	// Runtime-owned low-level entries keep their existing bootstrap contracts.
+	switch ctx.buildConf.Goos {
+	case "darwin", "linux", "windows":
+		switch ctx.buildConf.BuildMode {
+		case BuildModeExe, BuildModeCShared, BuildModeCArchive:
+			return true
+		}
+	default:
+		// Preserve the existing export policy on other execution targets.
+		return pkg.Name == "main" &&
+			(ctx.buildConf.BuildMode == BuildModeCShared || ctx.buildConf.BuildMode == BuildModeCArchive)
+	}
+	return false
 }
 
 func linkedModuleGlobals(pkgs []Package) map[string]none {
@@ -2887,12 +2924,12 @@ func cSharedExportArgs(ctx *context, pkgs []*aPackage) []string {
 	}
 	exports := make(map[string]none)
 	for _, pkg := range pkgs {
-		if pkg == nil || pkg.LPkg == nil {
+		if pkg == nil {
 			continue
 		}
-		for _, name := range pkg.LPkg.ExportFuncs() {
-			if name != "" {
-				exports[name] = none{}
+		for _, export := range packageCExports(pkg) {
+			if export.cName != "" {
+				exports[export.cName] = none{}
 			}
 		}
 		if ctx.mode == ModeTest && pkg.Package != nil && pkg.Name == "main" && strings.HasSuffix(pkg.PkgPath, ".test") {
@@ -3192,10 +3229,10 @@ func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string,
 		return nil, fmt.Errorf("load go:embed directives for %s failed: %w", pkgPath, err)
 	}
 	options := ctx.frontendOptions
-	// Library exports use final-link wrappers to register foreign caller threads
-	// with the collector; Windows shared libraries also initialize lazily. Only
-	// the command package needs alternate export symbols, and command packages
-	// are deliberately excluded from the package cache.
+	// Hosted C exports use final-link wrappers to register foreign caller threads
+	// with the collector; Windows shared libraries also initialize lazily.
+	// Dependency implementations retain Go symbols too; their public entry
+	// wrappers are generated in the uncached final-link module.
 	options.CExportWrappers = needsCExportWrappers(ctx, aPkg)
 	ret, externs, err := cl.NewPackageExWithEmbedMetaOptions(
 		ctx.prog, ctx.callerTracking, ctx.patches, aPkg.rewriteVars,
