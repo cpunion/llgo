@@ -889,6 +889,16 @@ func useWithGOARMAndToolchain(goos, goarch, goarm string, forceEspClang bool, le
 			// before an overflow can overwrite another goroutine's memory.
 			"-sSTACK_OVERFLOW_CHECK=2",
 		}...)
+		if ltoMode.Enabled() {
+			export.CCFLAGS = append(export.CCFLAGS, ltoMode.ClangFlag())
+			export.LDFLAGS = append(export.LDFLAGS, ltoMode.ClangFlag())
+			// emcc's -O controls its compile and post-link pipelines, but can
+			// leave wasm-ld's LTO optimizer at its default O2 (e.g. SDK 6.0.8).
+			// Set the LTO level explicitly, as for the WASI linker above.
+			if optFlag := ltoLinkerOptFlag(level); optFlag != "" {
+				export.LDFLAGS = append(export.LDFLAGS, "-Wl,"+optFlag)
+			}
+		}
 		appendEmscriptenLibffiSearchPath(&export, llgoRoot, wasmProfile)
 	default:
 		err = errors.New("unsupported GOOS for WebAssembly: " + goos)

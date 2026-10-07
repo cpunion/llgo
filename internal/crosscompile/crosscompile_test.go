@@ -1457,3 +1457,41 @@ func TestUseTargetCodegenFlagsOnlyAddedToLDFlagsWithLTO(t *testing.T) {
 		t.Fatalf("missing full LTO ccflag: %v", fullLTO.CCFLAGS)
 	}
 }
+
+func TestEmscriptenLTOFlags(t *testing.T) {
+	for _, target := range []string{"", "emscripten", "emscripten-memory64"} {
+		for _, mode := range []lto.Mode{lto.Off, lto.Thin, lto.Full} {
+			for _, level := range []optlevel.Level{optlevel.O0, optlevel.O1, optlevel.O2, optlevel.O3, optlevel.Os, optlevel.Oz} {
+				t.Run(target+"/"+mode.String()+"/"+level.Name(), func(t *testing.T) {
+					export, err := Use("js", "wasm", target, false, level, mode, false)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for name, flags := range map[string][]string{"compile": export.CCFLAGS, "link": export.LDFLAGS} {
+						if !slices.Contains(flags, level.Flag()) {
+							t.Errorf("%s flags do not preserve %s: %v", name, level, flags)
+						}
+						for _, candidate := range []lto.Mode{lto.Thin, lto.Full} {
+							if slices.Contains(flags, candidate.ClangFlag()) != (mode == candidate) {
+								t.Errorf("%s flags for %s: incorrect %s in %v", name, mode, candidate.ClangFlag(), flags)
+							}
+						}
+					}
+					var got []string
+					for _, flag := range export.LDFLAGS {
+						if strings.HasPrefix(flag, "-Wl,--lto-O") {
+							got = append(got, flag)
+						}
+					}
+					var want []string
+					if mode.Enabled() {
+						want = []string{"-Wl," + ltoLinkerOptFlag(level)}
+					}
+					if !slices.Equal(got, want) {
+						t.Errorf("LTO optimizer flags = %v, want %v", got, want)
+					}
+				})
+			}
+		}
+	}
+}

@@ -959,6 +959,14 @@ jobs:
               -v -count=1 -timeout=2m ./test/simd/...
           done
 
+      - name: Test SIMD on JavaScript targets with off, Thin and Full LTO
+        if: matrix.suite == 'test-command'
+        shell: bash
+        env:
+          LLGO: ${{ runner.temp }}/llgo-bin/llgo
+          LLGO_BUILD_CACHE: "1"
+        run: dev/test_wasm_simd.sh
+
       - name: Compare JavaScript call semantics with Go
         if: matrix.suite == 'test-command'
         shell: bash

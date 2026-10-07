@@ -2959,6 +2959,9 @@ func (c *context) archiver() string {
 	if ar := os.Getenv("LLGO_AR"); ar != "" {
 		return ar
 	}
+	if ar := c.emscriptenArchiver(); ar != "" {
+		return ar
+	}
 	// First check toolchain directory (for cross-compilation)
 	if llvmAr := siblingTool(c.crossCompile.CC, "llvm-ar"); llvmAr != "" {
 		return llvmAr
@@ -2979,6 +2982,9 @@ func (c *context) archiveMerger() (string, error) {
 	if ar := os.Getenv("LLGO_AR"); ar != "" {
 		return ar, nil
 	}
+	if ar := c.emscriptenArchiver(); ar != "" {
+		return ar, nil
+	}
 	if llvmAr := siblingTool(c.crossCompile.CC, "llvm-ar"); llvmAr != "" {
 		return llvmAr, nil
 	}
@@ -2986,6 +2992,27 @@ func (c *context) archiveMerger() (string, error) {
 		return llvmAr, nil
 	}
 	return "", errors.New("llvm-ar is required to create a flat c-archive")
+}
+
+// Both GoJS and the named Emscripten targets build C/C++ through emcc. That
+// bitcode can be newer than LLGo's linked LLVM, so use the SDK's emar wrapper
+// to select its matching llvm-ar for both objects and MRI merges.
+func (c *context) emscriptenArchiver() string {
+	provider := c.crossCompile.WasmProvider
+	if provider != crosscompile.WasmProviderGoJS && provider != crosscompile.WasmProviderEmscripten {
+		return ""
+	}
+	if cc, err := exec.LookPath(c.crossCompile.CC); err == nil {
+		// LookPath handles the SDK's emar.bat via PATHEXT on Windows;
+		// siblingTool only handles native executables such as llvm-ar.exe.
+		if ar, err := exec.LookPath(filepath.Join(filepath.Dir(cc), "emar")); err == nil {
+			return ar
+		}
+	}
+	if ar, err := exec.LookPath("emar"); err == nil {
+		return ar
+	}
+	return ""
 }
 
 func siblingTool(compiler, name string) string {

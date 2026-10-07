@@ -63,7 +63,26 @@ threads, and standard Wasm exception handling; Wasmer selects an available
 backend automatically. The official Go WASI comparison uses Wasmtime.
 Emscripten execution requires a compatible SDK and Node.js. The local
 qualification used Go 1.27.0, LLVM 22.1.8, Emscripten 6.0.8, and Node 24.19.0.
-Existing CI runs native amd64/arm64 and WASI at O0/O2.
+CI runs native amd64/arm64 and WASI at O0/O2. The JavaScript matrix runs
+GoJS (`GOOS=js GOARCH=wasm`), Emscripten, and Emscripten Memory64 with the
+default JavaScript SjLj/Asyncify configuration:
+
+```sh
+LLGO=/path/to/llgo dev/test_wasm_simd.sh
+```
+
+Each profile runs the O0 boundary executable, the complete O2 test suite
+with LTO disabled, ThinLTO, and Full LTO, and the O3 boundary executable with
+ThinLTO and Full LTO. The O3 runs guard against late argument promotion
+replacing a bridge pointer with a vector parameter. The LTO modes pass `-flto=thin` or
+`-flto=full` to both compilation and final linking. The requested `-O` level
+also reaches compilation and emcc's post-link pipeline. LTO additionally gets
+an explicit `--lto-O0` through `--lto-O3`; `-Os`/`-Oz` use `--lto-O2` and retain
+their size attributes and post-link size optimizations. Earlier browser builds
+accepted `-lto` but did not forward these driver flags, so their successful
+runs did not qualify actual link-time optimization. Archives use the SDK's
+`emar` to index bitcode produced by its Clang; `LLGO_AR` remains an explicit
+override.
 
 The complete O0 Emscripten test executable exceeds Node's local-variable
 limit. A small executable covers SIMD initialization, cross-package calls,
@@ -72,6 +91,7 @@ recovery, and scheduling at O0 without importing the testing framework:
 ```sh
 GOEXPERIMENT=simd llgo run -O0 -target wasi -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd llgo run -O0 -target emscripten -emulator ./test/simd/testdata/boundary
+GOEXPERIMENT=simd llgo run -O0 -target emscripten-memory64 -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd GOOS=js GOARCH=wasm llgo run -O0 -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd llgo run -O2 -lto=thin -target emscripten -emulator ./test/simd/testdata/boundary
 GOEXPERIMENT=simd llgo run -O2 -lto=full -target emscripten -emulator ./test/simd/testdata/boundary
@@ -81,8 +101,10 @@ The default GoJS and Emscripten JavaScript SjLj wrappers cannot carry `v128`. Ca
 containing `setjmp` use a memory bridge for vector arguments/results; ordinary
 Wasm vector calls retain their vector ABI. These bridges cannot be inlined,
 and bodies retaining vector calls cannot be moved into recovery functions by
-a later backend/LTO inliner. The earlier LLVM optimization still runs at the
-requested level. When compilation and linking select native Wasm SjLj (for
+a later backend/LTO inliner. Volatile vector loads in the bridge also prevent
+LLVM 22's O3 argument promotion from replacing its pointer parameters with
+vectors, even though the bridge is `optnone`. The earlier LLVM optimization
+still runs at the requested level. When compilation and linking select native Wasm SjLj (for
 example, `EMCC_CFLAGS='-fwasm-exceptions -sSUPPORT_LONGJMP=wasm'`), these
 bridges and late-inlining restrictions are unnecessary and omitted. Memory64
 IR still uses explicit JS SjLj codegen and retains the bridge.
