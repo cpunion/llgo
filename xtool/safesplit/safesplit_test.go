@@ -59,6 +59,17 @@ func TestSplitPkgConfigFlags(t *testing.T) {
 		ftest("-I -", `["-I" "-"]`)
 	})
 
+	// Whitespace-only pkg-config output (e.g. a trailing newline from a query
+	// that resolves to no include/library flags) must yield no arguments, not a
+	// spurious "-". See https://github.com/xgo-dev/llgo/issues/2749.
+	t.Run("whitespace_only", func(t *testing.T) {
+		ftest("\n", "[]")
+		ftest("\r\n", "[]")
+		ftest(" \t\n", "[]")
+		ftest("\t", "[]")
+		ftest("\n\n", "[]")
+	})
+
 	t.Run("escaped_spaces", func(t *testing.T) {
 		ftest(`-I/path\ with\ spaces -L/lib`, `["-I/path with spaces" "-L/lib"]`)
 		ftest(`-I /first\ path -L /second\ long path`, `["-I/first path" "-L/second long path"]`)

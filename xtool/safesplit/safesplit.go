@@ -23,6 +23,15 @@ import "strings"
 // spaces within paths. Other options remain intact, except that -framework and
 // -weak_framework retain their required separate name argument.
 func SplitPkgConfigFlags(s string) []string {
+	// Whitespace-only output (including newlines, as produced by a
+	// pkg-config query that resolves to no flags) carries no arguments.
+	// Treat it as empty so callers do not receive a spurious "-" argument,
+	// which would otherwise be passed to clang as a stdin marker and break
+	// the AST probe. See https://github.com/xgo-dev/llgo/issues/2749.
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+
 	var result []string
 	var current strings.Builder
 	i := 0
