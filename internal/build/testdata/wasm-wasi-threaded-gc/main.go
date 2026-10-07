@@ -89,6 +89,7 @@ func main() {
 	waitForBaseline(baseline)
 	testPrivateRootsAndLifecycle(baseline)
 	testIdleForeignThread(baseline)
+	testParkedSemaphore(baseline)
 
 	// A parked channel receiver still owns a pthread in this backend. It
 	// must acknowledge a collection without requiring a sender to wake it.
@@ -349,4 +350,37 @@ func testMapKeyAllocations() {
 	if after.Mallocs != before.Mallocs {
 		fail("integer map hashing allocated")
 	}
+}
+
+func testParkedSemaphore(baseline uint64) {
+	var mutex sync.Mutex
+	mutex.Lock()
+	ready := make(chan struct{})
+	done := make(chan bool, 1)
+	go func() {
+		private := &payload{value: 0x1234, next: &payload{value: 0x5678}}
+		close(ready)
+		mutex.Lock()
+		done <- private.value == 0x1234 && private.next.value == 0x5678
+		mutex.Unlock()
+	}()
+	<-ready
+	waitForRegistered(2)
+	for i := 0; i < 1000; i++ {
+		yieldC()
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 6; i++ {
+		runtime.GC()
+	}
+	runtime.ReadMemStats(&after)
+	if after.NumGC < before.NumGC+6 {
+		fail("collection stalled while semaphore waiter was parked")
+	}
+	mutex.Unlock()
+	if !<-done {
+		fail("parked semaphore waiter lost its private roots")
+	}
+	waitForBaseline(baseline)
 }
