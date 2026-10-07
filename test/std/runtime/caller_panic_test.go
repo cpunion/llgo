@@ -39,11 +39,12 @@ func TestCallerDuringPanicAndRecovery(t *testing.T) {
 	callerPanicSite()
 }
 
-var callerFaultPointer *int
+var callerFaultPointer *struct{ c chan int }
+var callerFaultSink chan int
 
 //go:noinline
 func callerFaultSite() {
-	_ = *callerFaultPointer
+	callerFaultSink = callerFaultPointer.c
 }
 
 func TestCallerAfterHardwareFaultRecovery(t *testing.T) {

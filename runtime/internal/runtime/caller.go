@@ -387,14 +387,6 @@ func PanicActive() bool {
 	return getg().panic_ != nil
 }
 
-// PanicRecoveredInCurrentFrame keeps the captured panic stack visible until
-// the recovering deferred activation returns. EndRecoverFrame and transparent
-// wrapper cleanup clear this record, without relying on retired native frames.
-func PanicRecoveredInCurrentFrame() bool {
-	gp := getg()
-	return gp.panicPCs.recovered.frame != nil && gp.panicPCs.recovered.frame == gp.recoverFrame
-}
-
 func BindCallerLocation(pc uintptr, rawName string) {
 	store := callerLocationStoreCurrent
 	if store == nil || pc == 0 {

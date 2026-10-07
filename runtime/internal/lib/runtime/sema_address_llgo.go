@@ -1,4 +1,4 @@
-//go:build windows || linux
+//go:build windows || (linux && !baremetal)
 
 package runtime
 
