@@ -93,7 +93,7 @@ func TestWorkerEmvalFinalizersStayInRealm(t *testing.T) {
 	}
 
 	finalizersDone := make(chan struct{})
-	installWorkerFinalizerBarrier(finalizersDone)
+	installRetiredWorkerFinalizerBarrier(t, finalizersDone)
 	for range 24 {
 		clobberWorkerStack(16, 1)
 		runtime.GC()
@@ -150,6 +150,28 @@ func TestRetiredWorkerFiberReleasesFinalizer(t *testing.T) {
 //go:noinline
 func retiredWorkerFiberReleasesFinalizer(t *testing.T) bool {
 	finalized := make(chan struct{})
+	installRetiredWorkerFinalizerBarrier(t, finalized)
+
+	// The G has exited, but a conservative reference in its retired fiber
+	// storage must not keep the finalizable object alive indefinitely.
+	for range 24 {
+		clobberWorkerStack(16, 1)
+		runtime.GC()
+		select {
+		case <-finalized:
+			return true
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	return false
+}
+
+// Allocate the marker in a fiber that will retire before collection. A marker
+// installed on the collecting fiber may stay visible in its conservative stack
+// scan even after the factory returns; stack clobbering is optimizer dependent.
+func installRetiredWorkerFinalizerBarrier(t *testing.T, finalized chan struct{}) {
+	t.Helper()
 	installed := make(chan struct{})
 	go func() {
 		installWorkerFinalizerBarrier(finalized)
@@ -169,20 +191,6 @@ func retiredWorkerFiberReleasesFinalizer(t *testing.T) bool {
 	if len(owners) != 2 {
 		t.Fatalf("fiber retirement reached %d workers, want 2", len(owners))
 	}
-
-	// The G has exited, but a conservative reference in its retired fiber
-	// storage must not keep the finalizable object alive indefinitely.
-	for range 24 {
-		clobberWorkerStack(16, 1)
-		runtime.GC()
-		select {
-		case <-finalized:
-			return true
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	return false
 }
 
 //go:noinline

@@ -130,7 +130,10 @@ const (
 	// finalizers, and runtime code has no automatic scheduling safepoints.
 	// Excluding them avoids an Asyncify branch at every recorded call site,
 	// which can exhaust V8's optimizer zone on large generated functions.
-	emscriptenAsyncifyRemove = `-sASYNCIFY_REMOVE=["*llgo_reflect_bind0_js*","*llgo_reflect_bind1_js*","*llgo_reflect_bindn_js*","*PushCallerLocationFrameWasm*","*RecordCallerLocationWasm*","*RecordPanicLocationWasm*"]`
+	// TinyGC allocation also stays on its caller: allocator waits only
+	// acknowledge STW and finalizers are queued for a separate G. Keep their
+	// callback runner instrumented, since user finalizers may suspend.
+	emscriptenAsyncifyRemove = `-sASYNCIFY_REMOVE=["*llgo_reflect_bind0_js*","*llgo_reflect_bind1_js*","*llgo_reflect_bindn_js*","*PushCallerLocationFrameWasm*","*RecordCallerLocationWasm*","*RecordPanicLocationWasm*","*tinygogc*Alloc*"]`
 	wasm32LibffiRelDir       = "runtime/internal/clite/ffi/wasm32"
 	wasm64LibffiRelDir       = "runtime/internal/clite/ffi/wasm64"
 )
