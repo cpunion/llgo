@@ -21,6 +21,11 @@ host_skips:
     case: fixedbugs/bug449.go
     reason: go1.26 bug449 generated build exceeds the linux/amd64 hosted runner memory budget
 timeouts:
+  - platform: darwin/amd64
+    directive: run
+    case: abi/uglyfib.go
+    timeout: 90s
+    reason: the full recursive ABI stress passed in 35-46s but exceeded 60s on a hosted Intel runner where adjacent cases also took twice as long
   - platform: js/wasm
     directive: run
     case: winbatch.go

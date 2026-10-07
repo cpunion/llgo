@@ -126,7 +126,11 @@ const (
 	// argument buffers during rewind. Keep the three thin entry functions out
 	// of Asyncify so each replay observes the current trampoline buffers; their
 	// separately instrumented callees retain the suspended Go invocation.
-	emscriptenAsyncifyRemove = `-sASYNCIFY_REMOVE=["*llgo_reflect_bind0_js*","*llgo_reflect_bind1_js*","*llgo_reflect_bindn_js*"]`
+	// Caller-location updates also cannot suspend: allocations only enqueue
+	// finalizers, and runtime code has no automatic scheduling safepoints.
+	// Excluding them avoids an Asyncify branch at every recorded call site,
+	// which can exhaust V8's optimizer zone on large generated functions.
+	emscriptenAsyncifyRemove = `-sASYNCIFY_REMOVE=["*llgo_reflect_bind0_js*","*llgo_reflect_bind1_js*","*llgo_reflect_bindn_js*","*PushCallerLocationFrameWasm*","*RecordCallerLocationWasm*","*RecordPanicLocationWasm*"]`
 	wasm32LibffiRelDir       = "runtime/internal/clite/ffi/wasm32"
 	wasm64LibffiRelDir       = "runtime/internal/clite/ffi/wasm64"
 )
