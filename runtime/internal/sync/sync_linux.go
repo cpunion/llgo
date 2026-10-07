@@ -2,7 +2,11 @@
 
 package sync
 
-import c "github.com/xgo-dev/llgo/runtime/internal/clite"
+import (
+	_ "unsafe"
+
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+)
 
 const LLGoFiles = "_wrap/sync_linux.c"
 
