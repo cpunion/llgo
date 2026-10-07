@@ -57,6 +57,7 @@ type callerLocationStore struct {
 	// Memoized synthetic PC bases for the static frames emitted around every
 	// Callers walk. Per-store because the corresponding frame metadata is.
 	callersPCBase uintptr
+	panicPCBase   uintptr
 	mainPCBase    uintptr
 	goexitPCBase  uintptr
 }
@@ -121,7 +122,7 @@ func updateCurrentFrame(entry uintptr, name, file string, line int) {
 		frame := &store.stack[i]
 		if frame.Entry == entry {
 			// Line directives can change the filename while retaining the same
-			// line number. Invalidate the cached PC before updating the frame.
+			// line number. Invalidate the cached frame index before updating it.
 			if frame.Line != line || frame.File != file {
 				frame.captured = 0
 			}
@@ -168,6 +169,16 @@ func Caller(skip int) (CallerFrame, bool) {
 	if store == nil || len(store.stack) == 0 {
 		return CallerFrame{}, false
 	}
+	if store.panicDepth > 0 && store.panicDepth <= len(store.stack) {
+		// Deferred calls sit above gopanic, then the frozen panic-site prefix.
+		above := len(store.stack) - store.panicDepth
+		if skip == above {
+			return store.captureFrame(runtimePanicFrame, callerPCValue), true
+		}
+		if skip > above {
+			skip--
+		}
+	}
 	if skip < len(store.stack) {
 		return store.captureFrameAt(&store.stack[len(store.stack)-1-skip], callerPCValue), true
 	}
@@ -202,6 +213,17 @@ func Callers(skip int, pcs []uintptr) int {
 		n++
 	}
 	for i := len(store.stack) - 1; i >= 0; i-- {
+		if store.panicDepth > 0 && i == store.panicDepth-1 {
+			if skip > 0 {
+				skip--
+			} else {
+				if n >= len(pcs) {
+					return n
+				}
+				pcs[n] = store.staticPC(runtimePanicFrame, &store.panicPCBase, callersPCValue)
+				n++
+			}
+		}
 		if skip > 0 {
 			skip--
 			continue
@@ -378,6 +400,7 @@ func BindCallerLocation(pc uintptr, rawName string) {
 
 var (
 	runtimeCallersFrame = CallerFrame{Function: "runtime.Callers"}
+	runtimePanicFrame   = CallerFrame{Function: "runtime.gopanic"}
 	runtimeMainFrame    = CallerFrame{Function: "runtime.main"}
 	runtimeGoexitFrame  = CallerFrame{Function: "runtime.goexit"}
 )

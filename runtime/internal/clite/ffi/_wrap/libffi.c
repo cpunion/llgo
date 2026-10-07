@@ -108,7 +108,7 @@ struct llgo_ffi_call_context {
     void *env;
 };
 
-/* libffi installs the context in X18; LLVM 22's nest entry reads X15.
+/* libffi installs the context in X18; LLVM's AArch64 nest entry reads X15.
  * A tail branch preserves every C argument, the return address and SP. */
 __attribute__((naked)) static void llgo_ffi_env_trampoline(void) {
     __asm__ volatile(
