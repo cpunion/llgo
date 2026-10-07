@@ -833,7 +833,9 @@ func useWithGOARMAndToolchain(goos, goarch, goarm string, forceEspClang bool, le
 		export.LDFLAGS = append(
 			export.LDFLAGS,
 			"-Wl,--initial-memory=67108864",
-			"-Wl,--max-memory=268435456",
+			// Leave room for 256 default 1 MiB pthread stacks, the process
+			// stack, libc metadata, and independently owned GC arenas.
+			"-Wl,--max-memory=536870912",
 			"-Wl,--import-memory",
 			"-lpthread",
 		)
