@@ -7,24 +7,30 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xgo-dev/llgo/internal/filecheck"
+	"github.com/xgo-dev/llgo/internal/littest"
 	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
 
 func TestCgoDeferExportEntries(t *testing.T) {
-	testCExportEntries(t, "../../cl/_testgo/cgodefer", []string{"go_callback", "go_callback_c_only"}, "i32 %0")
+	testCExportEntries(t, "../../cl/_testgo/cgodefer", []string{"go_callback", "go_callback_c_only"})
 }
 
 func TestCExportCallbackEntries(t *testing.T) {
-	testCExportEntries(t, "../../cl/_testdrop/c_export_callback", []string{"Callback"}, "")
+	testCExportEntries(t, "../../cl/_testdrop/c_export_callback", []string{"Callback"})
 }
 
-func testCExportEntries(t *testing.T, fixture string, names []string, args string) {
+func testCExportEntries(t *testing.T, fixture string, names []string) {
 	t.Helper()
 	switch runtime.GOOS {
 	case "darwin", "linux", "windows":
 	default:
 		t.Skip("hosted native C callbacks")
+	}
+	spec, err := littest.LoadSpec(fixture)
+	if err != nil {
+		t.Fatal(err)
 	}
 	conf := NewDefaultConf(ModeGen)
 	pkgs, err := Do([]string{fixture}, conf)
@@ -72,6 +78,9 @@ func testCExportEntries(t *testing.T, fixture string, names []string, args strin
 				if err := llvm.VerifyModule(entry, llvm.ReturnStatusAction); err != nil {
 					t.Fatalf("invalid entry module: %v\n%s", err, entry.String())
 				}
+				if err := filecheck.MatchWithPrefixes(spec.Path, entry.String(), "ENTRY"); err != nil {
+					t.Fatalf("public C entry checks: %v\n%s", err, entry.String())
+				}
 				for _, name := range names {
 					goName := "main." + name
 					wrapper := entry.NamedFunction(name)
@@ -81,16 +90,8 @@ func testCExportEntries(t *testing.T, fixture string, names []string, args strin
 					if fn := entry.NamedFunction(goName); fn.IsNil() || !fn.IsDeclaration() {
 						t.Fatalf("final-link module must reference the package's Go implementation %q:\n%s", goName, entry.String())
 					}
-					ir := wrapper.String()
-					assertInOrder(t, ir,
-						"define i32 @"+name+"("+args+")",
-						`call i1 @"github.com/xgo-dev/llgo/runtime/internal/runtime.EnterForeignThread"()`,
-						"call i32 @"+goName+"("+args+")",
-						`call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.ExitForeignThread"(i1`,
-						"ret i32",
-					)
 					if goos == "windows" && mode == BuildModeCShared {
-						assertInOrder(t, ir,
+						assertInOrder(t, wrapper.String(),
 							"call void @__llgo_runtime_ensure_initialized()",
 							`call i1 @"github.com/xgo-dev/llgo/runtime/internal/runtime.EnterForeignThread"()`,
 						)
