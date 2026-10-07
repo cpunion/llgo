@@ -11,8 +11,14 @@ import "C"
 
 // SYMBOL-NOT: main{{.*}}T{{.*}}Drop
 // SYMBOL-DAG: {{ T _?Callback$}}
+// SYMBOL-DAG: {{ T _?main\.Callback$}}
 // SYMBOL-DAG: main{{.*}}T{{.*}}M
 // SYMBOL-NOT: main{{.*}}T{{.*}}Drop
+
+// C-only reachability must preserve both the public Callback entry and its Go
+// implementation, together with the interface method reached only from C.
+// TestCExportCallbackEntries also checks the public wrapper's thread guard and
+// call to main.Callback in each hosted final-link mode.
 
 type I interface {
 	M() int

@@ -12,23 +12,31 @@ import (
 )
 
 func TestCgoDeferExportEntries(t *testing.T) {
+	testCExportEntries(t, "../../cl/_testgo/cgodefer", []string{"go_callback", "go_callback_c_only"}, "i32 %0")
+}
+
+func TestCExportCallbackEntries(t *testing.T) {
+	testCExportEntries(t, "../../cl/_testdrop/c_export_callback", []string{"Callback"}, "")
+}
+
+func testCExportEntries(t *testing.T, fixture string, names []string, args string) {
+	t.Helper()
 	switch runtime.GOOS {
 	case "darwin", "linux", "windows":
 	default:
 		t.Skip("hosted native C callbacks")
 	}
 	conf := NewDefaultConf(ModeGen)
-	pkgs, err := Do([]string{"../../cl/_testgo/cgodefer"}, conf)
+	pkgs, err := Do([]string{fixture}, conf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(pkgs) != 1 {
-		t.Fatalf("got %d packages, want the cgodefer command package", len(pkgs))
+		t.Fatalf("got %d packages for %s, want one command package", len(pkgs), fixture)
 	}
 	pkg := pkgs[0]
 	defer pkg.LPkg.Prog.Dispose()
 	module := pkg.LPkg.Module()
-	names := []string{"go_callback", "go_callback_c_only"}
 	for _, name := range names {
 		goName := "main." + name
 		if fn := module.NamedFunction(goName); fn.IsNil() || fn.IsDeclaration() {
@@ -75,9 +83,9 @@ func TestCgoDeferExportEntries(t *testing.T) {
 					}
 					ir := wrapper.String()
 					assertInOrder(t, ir,
-						"define i32 @"+name+"(i32 %0)",
+						"define i32 @"+name+"("+args+")",
 						`call i1 @"github.com/xgo-dev/llgo/runtime/internal/runtime.EnterForeignThread"()`,
-						"call i32 @"+goName+"(i32 %0)",
+						"call i32 @"+goName+"("+args+")",
 						`call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.ExitForeignThread"(i1`,
 						"ret i32",
 					)
