@@ -31,8 +31,9 @@ import "C"
 // reachability regression.
 // These checks inspect package IR, which retains the Go implementations.
 // Final-link wrappers export go_callback and go_callback_c_only without the
-// main. prefix and register foreign threads. The C calls below exercise those
-// public entries, including callback addresses.
+// main. prefix and register foreign threads. TestCgoDeferExportEntries checks
+// both implementation definitions and their public wrapper bodies. The C calls
+// below exercise those public entries, including callback addresses.
 // CHECK-LABEL: define i32 @main.go_callback(i32 %0){{.*}} {
 // CHECK: [[GO_CONTEXT:%[0-9]+]] = alloca %"{{.*}}LocalContext"
 // CHECK: [[GO_TOKEN:%[0-9]+]] = call i64 @"{{.*}}EnterLocalContext"(ptr [[GO_CONTEXT]])
