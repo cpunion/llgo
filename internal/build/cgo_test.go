@@ -413,6 +413,47 @@ func TestGenExternDeclsSkipsMissingAddressPlaceholders(t *testing.T) {
 	}
 }
 
+func TestGenExternDeclsUsesPublicExportAddress(t *testing.T) {
+	gllvm.InitializeAllTargets()
+	gllvm.InitializeAllTargetMCs()
+	gllvm.InitializeAllTargetInfos()
+	for _, test := range []struct {
+		name, exportGoName, want string
+	}{
+		{name: "ordinary Go function", want: "example.com/p.callback"},
+		{name: "exported Go function", exportGoName: "example.com/p.callback", want: "callback"},
+		{name: "renamed export shadows private Go function", exportGoName: "example.com/p.Exported", want: "callback"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog := llssa.NewProgram(nil)
+			defer prog.Dispose()
+			lpkg := prog.NewPackage("p", "example.com/p")
+			lpkg.NewFunc("example.com/p.callback", llssa.NoArgsNoRet, llssa.InGo)
+			if test.exportGoName != "" {
+				if test.exportGoName != "example.com/p.callback" {
+					lpkg.NewFunc(test.exportGoName, llssa.NoArgsNoRet, llssa.InGo)
+				}
+				lpkg.SetExport(test.exportGoName, "callback")
+			}
+			const name = "example.com/p.__cgo_callback"
+			placeholder := lpkg.NewVar(name, types.NewPointer(types.Typ[types.UnsafePointer]), llssa.InGo)
+			keep := lpkg.NewVar("example.com/p.keep", types.NewPointer(types.NewPointer(types.Typ[types.UnsafePointer])), llssa.InGo)
+			keep.Init(placeholder.Expr)
+			compiler := llclang.NewCompiler(llclang.Config{})
+			if _, err := genExternDeclsByClang(compiler, &aPackage{LPkg: lpkg}, "void callback(void);", nil,
+				map[string]string{name: "__cgo_callback"}, false); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := lpkg.Module().NamedGlobal("example.com/p.keep").Initializer(), lpkg.Module().NamedFunction(test.want); got != want {
+				t.Fatalf("C callback address = %s, want %s", got.Name(), test.want)
+			}
+			if err := gllvm.VerifyModule(lpkg.Module(), gllvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestBuildCgoReportsClangProbeFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test helper uses a shell script")

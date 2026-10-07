@@ -2,7 +2,10 @@ package dep
 
 /*
 #cgo !windows LDFLAGS: -pthread
+typedef int (*callback_t)(int);
+extern int GoDepCallback(int);
 int invoke_threads(int main_callback);
+int invoke_callback_threads(callback_t callback);
 */
 import "C"
 
@@ -26,3 +29,4 @@ func GoDepCallback(value C.int) C.int { return C.int(Result(int32(value))) }
 
 func Run(mainCallback int) int { return int(C.invoke_threads(C.int(mainCallback))) }
 func Count() int32             { return atomic.LoadInt32(&calls) }
+func RunPointer() int          { return int(C.invoke_callback_threads((C.callback_t)(C.GoDepCallback))) }

@@ -18,7 +18,7 @@ static void *run(void *data) {
     return 0;
 }
 
-int invoke_threads(int main_callback) {
+int invoke_callback_threads(int (*callback)(int)) {
     struct worker workers[3] = {0};
 #if defined(_WIN32)
     HANDLE threads[3];
@@ -27,7 +27,7 @@ int invoke_threads(int main_callback) {
 #endif
     int started = 0, result = 0;
     for (int i = 0; i < 3; i++) {
-        workers[i].callback = main_callback ? GoMainCallback : GoDepCallback;
+        workers[i].callback = callback;
 #if defined(_WIN32)
         threads[i] = CreateThread(0, 0, run, &workers[i], 0, 0);
         if (!threads[i]) break;
@@ -46,4 +46,8 @@ int invoke_threads(int main_callback) {
         result += workers[i].result;
     }
     return started == 3 ? result : -1;
+}
+
+int invoke_threads(int main_callback) {
+    return invoke_callback_threads(main_callback ? GoMainCallback : GoDepCallback);
 }

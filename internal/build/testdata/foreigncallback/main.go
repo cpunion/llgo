@@ -19,7 +19,7 @@ func main() {
 	if C.Double(21) != 42 || C.add(20, 22) != 42 {
 		panic("package C direct exports failed")
 	}
-	if dep.Run(0) != 504 || dep.Run(1) != 504 || dep.Count() != 24 {
+	if dep.RunPointer() != 504 || dep.Run(0) != 504 || dep.Run(1) != 504 || dep.Count() != 36 {
 		panic("foreign callback allocation/GC or result failed")
 	}
 	println("ok")
