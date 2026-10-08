@@ -26,11 +26,6 @@ timeouts:
     case: recover.go
     timeout: 10m
     reason: the complete panic/recover compiler stress exceeded the 3m build budget on paired Intel macOS
-  - platform: js/wasm
-    directive: run
-    case: cmplxdivide.go
-    timeout: 10m
-    reason: LLVM WebAssembly register stackification of the full 4096-entry initializer dominates compilation; the corresponding WASI build and run completed in 249s
   - platform: wasip1/wasm
     directive: run
     case: cmplxdivide.go
@@ -463,6 +458,10 @@ xfails:
   - directive: run
     case: heapsampling.go
     reason: LLGo does not currently report the heap-profile samples required by this runtime test
+  - platform: js/wasm
+    directive: run
+    case: cmplxdivide.go
+    reason: LLVM 22 lowering of this large complex-division constant table does not complete within the hosted WebAssembly build budget
   - platform: js/wasm
     directive: rundir
     case: typeparam/chansimp.go
