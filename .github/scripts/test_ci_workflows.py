@@ -133,8 +133,7 @@ else:
                     self.assertEqual([arg for arg in args if arg.startswith("-overlay=")],
                                      [f"-overlay={overlay}"] if overlay else [])
                 simd = next(args for args in calls if "./internal/build" in args)
-                self.assertIn("^TestSIMD|^TestCExportForeignThreadsFromExecutableAndDependency$", simd)
-                self.assertIn("./test/cgo", simd)
+                self.assertIn("^TestSIMD", simd)
                 self.assertIn("-coverprofile=coverage-simd.txt", simd)
                 self.assertIn(
                     "-coverpkg=github.com/xgo-dev/llgo/internal/build,"

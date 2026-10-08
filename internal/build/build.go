@@ -2684,7 +2684,7 @@ func linkedCExports(ctx *context, pkgs []Package) ([]cExport, error) {
 
 func needsCExportWrappers(ctx *context, pkg *aPackage) bool {
 	if ctx == nil || ctx.buildConf == nil || pkg == nil || pkg.Package == nil ||
-		ctx.buildConf.Target != "" || pkg.Name == "C" || isRuntimePkg(pkg.PkgPath) || pkg.PkgPath == "runtime" {
+		ctx.buildConf.Target != "" || cl.IsCPackage(pkg.Name) || isRuntimePkg(pkg.PkgPath) || pkg.PkgPath == "runtime" {
 		return false
 	}
 	// A C callback may live in an imported package or an ordinary executable.

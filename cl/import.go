@@ -90,6 +90,12 @@ func (p *pkgSymInfo) initLinknames(ctx *context) {
 	}
 }
 
+// IsCPackage reports whether name selects LLGo's package C export convention.
+// This depends on the declared package name, not its import path.
+func IsCPackage(name string) bool {
+	return name == "C"
+}
+
 // PkgKindOf returns the kind of a package.
 func PkgKindOf(pkg *types.Package) (int, string) {
 	scope := pkg.Scope()
@@ -1008,6 +1014,7 @@ func ParsePkgSyntaxWithOptions(prog llssa.Program, fset *token.FileSet, pkg *typ
 	}
 	ctx := &context{prog: prog, options: options}
 	pkgPath := llssa.PathOf(pkg)
+	cPkg := IsCPackage(pkg.Name())
 	aliases := receiverAliases(files)
 	syms := make(map[string]string)
 	linkDocs := make(map[*ast.CommentGroup]bool)
@@ -1033,7 +1040,7 @@ func ParsePkgSyntaxWithOptions(prog llssa.Program, fset *token.FileSet, pkg *typ
 				if err != nil {
 					return err
 				}
-				if !hasLinkname && pkg.Name() == "C" && decl.Recv == nil && token.IsExported(inPkgName) {
+				if !hasLinkname && cPkg && decl.Recv == nil && token.IsExported(inPkgName) {
 					exportName := strings.TrimPrefix(inPkgName, "X")
 					prog.SetLinkname(fullName, exportName)
 					prog.SetPackageExport(fullName, exportName)

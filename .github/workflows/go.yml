@@ -180,11 +180,13 @@ jobs:
           # Its host Go coverage is not uploaded: test/ is measured by LLGo.
           # Compiler-only source and diagnostic fixtures live in test/cmd/llgo;
           # remaining test/go sources pass go test's default vet checks.
+          # Record coverage across packages so host runtime tests also measure
+          # the compiler they invoke.
           go list ./... \
             | grep -v '^github.com/xgo-dev/llgo/test/go$' \
             | grep -v '^github.com/xgo-dev/llgo/cl$' \
             | xargs "${main_go_test[@]}" -timeout 45m -coverprofile="coverage-main.txt" -covermode=atomic \
-                -bench '^BenchmarkGo126' -benchtime=1x
+                -coverpkg=./... -bench '^BenchmarkGo126' -benchtime=1x
 
           # cl's error-path tests (e.g. TestErrInitLinkname) also recover nil
           # dereferences. Apply the measured Windows exception-stack reserve
@@ -200,11 +202,8 @@ jobs:
             -coverpkg=github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
             -coverprofile="coverage-compiler.txt" -covermode=atomic \
             -bench '^BenchmarkGo126' -benchtime=1x ./cl
-          # SIMD and native C-export fixtures exercise the compiler in-process.
-          # Include the test/cgo host driver so moving runtime tests under test/
-          # preserves build/cl/ssa coverage of executable export guards.
-          "${go_test[@]}" ./internal/build ./test/cgo \
-            -run '^TestSIMD|^TestCExportForeignThreadsFromExecutableAndDependency$' -count=1 -timeout=10m \
+          # Build-level SIMD fixtures exercise cl/ssa in-process too.
+          "${go_test[@]}" ./internal/build -run '^TestSIMD' -count=1 -timeout=10m \
             -coverpkg=github.com/xgo-dev/llgo/internal/build,github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
             -coverprofile=coverage-simd.txt -covermode=atomic
           "${go_test[@]}" -timeout 45m ./test/go

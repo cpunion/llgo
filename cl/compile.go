@@ -2881,10 +2881,11 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	pkgTypes := pkg.Pkg
 	oldTypes := pkgTypes
 	pkgName, pkgPath := pkgTypes.Name(), llssa.PathOf(pkgTypes)
+	cPkg := IsCPackage(pkgName)
 	// package C's exported names are part of the package object/archive ABI,
 	// including automatic X-prefix removal. They must not depend on final-link
 	// wrappers, even when an embedding compiler enables this option globally.
-	if pkgName == "C" {
+	if cPkg {
 		options.CExportWrappers = false
 	}
 	patch, hasPatch := patches[pkgPath]
@@ -2950,7 +2951,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		}
 	}
 	ctx.initPyModule()
-	ctx.initFiles(pkgPath, files, pkgName == "C")
+	ctx.initFiles(pkgPath, files, cPkg)
 	ctx.prog.SetPatch(ctx.patchType)
 	ctx.prog.SetCompileMethods(ctx.checkCompileMethods)
 	ret.SetResolveLinkname(ctx.resolveLinkname)
