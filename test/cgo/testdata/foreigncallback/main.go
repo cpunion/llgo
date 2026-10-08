@@ -34,6 +34,7 @@ func main() {
 	if calls, defers := dep.NestedCounts(); calls != 4 || defers != 4 {
 		panic("nested callback on Go thread lost calls or defers")
 	}
+	println("Go-thread reentry: ok")
 	// C -> Go export -> Go -> C -> Go export -> Go, on C-created worker threads.
 	if dep.RunNestedThreads() != 1332 {
 		panic("nested callback on C threads failed")
@@ -41,5 +42,6 @@ func main() {
 	if calls, defers := dep.NestedCounts(); calls != 52 || defers != 52 {
 		panic("nested callback on C threads lost calls or defers")
 	}
+	println("C-thread reentry: ok")
 	println("ok")
 }

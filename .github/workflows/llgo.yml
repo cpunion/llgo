@@ -190,6 +190,13 @@ jobs:
             -Profile "${{ matrix.windows_abi }}" `
             -GoArch "${{ matrix.windows_arch || 'amd64' }}"
 
+      - name: Execute C exports and nested Go/C callbacks
+        working-directory: test/cgo/testdata/foreigncallback
+        env:
+          LLGO_BUILD_CACHE: "off"
+        shell: bash
+        run: llgo run .
+
       - name: Run Go 1.27 LLGo core tests
         env:
           LLGO_BUILD_CACHE: "1"

@@ -200,8 +200,11 @@ jobs:
             -coverpkg=github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
             -coverprofile="coverage-compiler.txt" -covermode=atomic \
             -bench '^BenchmarkGo126' -benchtime=1x ./cl
-          # Build-level SIMD fixtures exercise cl/ssa in-process too.
-          "${go_test[@]}" ./internal/build -run '^TestSIMD' -count=1 -timeout=10m \
+          # SIMD and native C-export fixtures exercise the compiler in-process.
+          # Include the test/cgo host driver so moving runtime tests under test/
+          # preserves build/cl/ssa coverage of executable export guards.
+          "${go_test[@]}" ./internal/build ./test/cgo \
+            -run '^TestSIMD|^TestCExportForeignThreadsFromExecutableAndDependency$' -count=1 -timeout=10m \
             -coverpkg=github.com/xgo-dev/llgo/internal/build,github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
             -coverprofile=coverage-simd.txt -covermode=atomic
           "${go_test[@]}" -timeout 45m ./test/go

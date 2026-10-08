@@ -23,6 +23,16 @@ The ordinary current-version command remains:
 llgo test ./test/...
 ```
 
+Native C-export and nested callback execution checks live in
+`cgo/testdata/foreigncallback`. The host Go test in `cgo/export_threads_host_test.go`
+builds and executes this standalone program to cover both main-package and
+dependency exports. CI also runs it with `llgo run .` on every native LLGo
+matrix entry: Linux amd64, macOS arm64, and Windows amd64/arm64/386 with
+both MSVC and MinGW ABI profiles.
+The program reports Go-thread and C-thread reentry separately, after checking
+allocation/GC, retained outer values, and all nested defers. Compiler IR and
+symbol checks remain in `cl/_test*` and `internal/build`.
+
 Use the version runner for an older release or a smaller local package set:
 
 ```sh
