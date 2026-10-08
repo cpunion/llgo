@@ -47,6 +47,8 @@ runs:
         msystem: ${{ runner.arch == 'ARM64' && 'CLANGARM64' || 'CLANG64' }}
         path-type: minimal
         update: false
+        # GDB packages are installed below, after the action's cache phase.
+        cache: false
 
     - name: Populate Windows GDB package trust
       if: runner.os == 'Windows'

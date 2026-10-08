@@ -543,7 +543,8 @@ runs:
         release: ${{ runner.arch != 'ARM64' }}
         path-type: inherit
         update: true
-        install: pacman-contrib
+        # Dependencies are installed below, after the action's cache phase.
+        cache: false
 
     - name: Test MSYS2 package retry helper
       if: runner.os == 'Windows' && inputs.install-llvm == 'true' && inputs.windows-abi == 'mingw'
