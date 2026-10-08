@@ -923,7 +923,7 @@ jobs:
             done
           done
           for profile in J32-GoJS J32-Emscripten J64-Emscripten W32-WASI; do
-            go test ./test/goroot -run '^TestGoRootRunCases$' -count=1 -timeout=10m -v -args \
+            go test ./test/goroot -run '^TestGoRootRunCases$' -count=1 -timeout=4m -v -args \
               -llgo "$LLGO" -goroot "$(go env GOROOT)" -directive-mode ci \
               -case '^cmplxdivide\.go$' -wasm-profile "$profile"
           done

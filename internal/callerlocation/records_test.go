@@ -92,6 +92,55 @@ func TestDifferentRecordArguments(t *testing.T) {
 	}
 }
 
+func TestSameCallDifferentOperandCounts(t *testing.T) {
+	mod := parseIR(t, recordDecl+"define void @f() {\n"+
+		record("RecordPanicLocationWasm", args)+"  call void @ordinary()\n  ret void\n}\n")
+	left := mod.NamedFunction("f").FirstBasicBlock().FirstInstruction()
+	if sameCall(left, llvm.NextInstruction(left)) {
+		t.Fatal("calls with different operand counts compared equal")
+	}
+}
+
+func TestRecordDebugLocations(t *testing.T) {
+	const debugInfo = `
+!llvm.dbg.cu = !{!0}
+!llvm.module.flags = !{!3}
+!0 = distinct !DICompileUnit(language: DW_LANG_Go, file: !1, producer: "llgo", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)
+!1 = !DIFile(filename: "fixture.go", directory: ".")
+!2 = distinct !DISubprogram(name: "f", scope: !1, file: !1, line: 1, type: !4, scopeLine: 1, spFlags: DISPFlagDefinition, unit: !0)
+!3 = !{i32 2, !"Debug Info Version", i32 3}
+!4 = !DISubroutineType(types: !5)
+!5 = !{null}
+!6 = !DILocation(line: 4, column: 1, scope: !2)
+!7 = !DILocation(line: 4, column: 20, scope: !2)
+`
+	for _, tc := range []struct {
+		name string
+		loc  string
+		want int
+	}{
+		{"same position", ", !dbg !6", 1},
+		{"different column", ", !dbg !7", 0},
+		{"missing position", "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := strings.TrimSuffix(record("RecordPanicLocationWasm", args), "\n")
+			mod := parseIR(t, recordDecl+"define void @f() !dbg !2 {\n"+
+				call+", !dbg !6\n"+call+tc.loc+"\n  ret void, !dbg !6\n}\n"+debugInfo)
+			before := mod.String()
+			if got := DeduplicateWasmRecords(mod); got != tc.want {
+				t.Fatalf("removed %d records, want %d", got, tc.want)
+			}
+			if tc.want == 0 && mod.String() != before {
+				t.Fatal("lost a distinct debug location")
+			}
+			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestLargeInitializerRecords(t *testing.T) {
 	const rows, repeats = 4096, 12
 	var source strings.Builder

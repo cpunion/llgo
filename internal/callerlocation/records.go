@@ -22,23 +22,24 @@ import "github.com/xgo-dev/llvm"
 const runtimePrefix = "github.com/xgo-dev/llgo/runtime/internal/runtime."
 
 // DeduplicateWasmRecords removes identical location records within a basic
-// block when no other call intervenes. Large initializers otherwise repeat the
-// same record for every SSA operation on a source line, causing quadratic work
-// in WebAssembly register stackification. Calls and block boundaries invalidate
-// the remembered record because they can change the runtime's caller state.
+// block when no other call intervenes and the debug locations match. Large
+// initializers otherwise repeat the same record for every SSA operation on a
+// source line, causing quadratic work in WebAssembly register stackification.
+// Non-record calls and block boundaries invalidate the remembered record,
+// because they can change the caller state. Distinct debug locations remain
+// as stepping and variable-location anchors.
+//
+// It returns the number of removed calls.
 func DeduplicateWasmRecords(mod llvm.Module) int {
 	removed := 0
 	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-		if fn.BasicBlocksCount() == 0 {
-			continue
-		}
-		for _, block := range fn.BasicBlocks() {
+		for block := fn.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
 			var previous llvm.Value
 			for instr := block.FirstInstruction(); !instr.IsNil(); {
 				next := llvm.NextInstruction(instr)
 				if !instr.IsACallInst().IsNil() {
 					if isRecord(instr) {
-						if sameCall(previous, instr) {
+						if sameCall(previous, instr) && previous.InstructionDebugLoc() == instr.InstructionDebugLoc() {
 							instr.EraseFromParentAsInstruction()
 							removed++
 						} else {
@@ -68,10 +69,14 @@ func isRecord(call llvm.Value) bool {
 }
 
 func sameCall(left, right llvm.Value) bool {
-	if left.IsNil() || left.OperandsCount() != right.OperandsCount() {
+	if left.IsNil() {
 		return false
 	}
-	for i := 0; i < left.OperandsCount(); i++ {
+	n := left.OperandsCount()
+	if n != right.OperandsCount() {
+		return false
+	}
+	for i := 0; i < n; i++ {
 		if left.Operand(i) != right.Operand(i) {
 			return false
 		}
