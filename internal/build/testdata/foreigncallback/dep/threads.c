@@ -7,6 +7,8 @@
 
 extern int GoMainCallback(int);
 extern int GoDepCallback(int);
+extern int GoMainNestedCallback(int, int);
+extern int GoDepNestedCallback(int, int);
 struct worker { int (*callback)(int); int result; };
 #if defined(_WIN32)
 static DWORD WINAPI run(void *data) {
@@ -50,4 +52,16 @@ int invoke_callback_threads(int (*callback)(int)) {
 
 int invoke_threads(int main_callback) {
     return invoke_callback_threads(main_callback ? GoMainCallback : GoDepCallback);
+}
+
+int invoke_nested(int value, int depth) {
+    return depth & 1 ? GoMainNestedCallback(value, depth) : GoDepNestedCallback(value, depth);
+}
+
+static int nested_callback(int value) {
+    return invoke_nested(value, 3);
+}
+
+int invoke_nested_threads(void) {
+    return invoke_callback_threads(nested_callback);
 }
