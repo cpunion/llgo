@@ -261,13 +261,11 @@ func TestDebugServerFailureIncludesOutput(t *testing.T) {
 	if err := os.WriteFile(serverPath, []byte("#!/bin/sh\necho 'server startup failed' >&2\nexit 7\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	port, err := freeTCPPort()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = startServer(serverPlan{
+	// This server never listens. Port zero cannot be reclaimed by another
+	// listener, including startServer's own debugger relay.
+	_, err := startServer(serverPlan{
 		command: []string{serverPath},
-		address: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+		address: "127.0.0.1:0",
 	})
 	if err == nil || !strings.Contains(err.Error(), "server startup failed") {
 		t.Fatalf("startServer() error = %v", err)
