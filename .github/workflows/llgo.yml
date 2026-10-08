@@ -521,6 +521,7 @@ jobs:
           msystem: MSYS
           path-type: inherit
           update: false
+          cache: false
 
       - name: Test from the MSYS2 host shell
         if: ${{ runner.os == 'Windows' }}
