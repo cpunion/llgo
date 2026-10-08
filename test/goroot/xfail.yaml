@@ -459,10 +459,6 @@ xfails:
     case: heapsampling.go
     reason: LLGo does not currently report the heap-profile samples required by this runtime test
   - platform: js/wasm
-    directive: run
-    case: cmplxdivide.go
-    reason: LLVM 22 lowering of this large complex-division constant table does not complete within the hosted WebAssembly build budget
-  - platform: js/wasm
     directive: rundir
     case: typeparam/chansimp.go
     reason: the Ranger subtest requires its receiver finalizer to run at an exact liveness boundary, while LLGo's conservative WebAssembly roots can retain the receiver

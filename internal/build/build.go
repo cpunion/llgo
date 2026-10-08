@@ -45,6 +45,7 @@ import (
 	llabi "github.com/xgo-dev/llgo/internal/abi"
 	"github.com/xgo-dev/llgo/internal/buildenv"
 	"github.com/xgo-dev/llgo/internal/cabi"
+	"github.com/xgo-dev/llgo/internal/callerlocation"
 	"github.com/xgo-dev/llgo/internal/clang"
 	"github.com/xgo-dev/llgo/internal/crosscompile"
 	"github.com/xgo-dev/llgo/internal/dcepass"
@@ -3301,6 +3302,9 @@ func lowerMainCExportModule(ctx *context, pkg llssa.Package, exports []cExport) 
 }
 
 func optimizeLLVMModule(ctx *context, pkgPath string, mod gllvm.Module) error {
+	if ctx.buildConf.Goarch == "wasm" {
+		callerlocation.DeduplicateWasmRecords(mod)
+	}
 	if !ctx.passOpt {
 		return nil
 	}
