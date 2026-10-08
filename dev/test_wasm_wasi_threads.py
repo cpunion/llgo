@@ -182,6 +182,9 @@ def main():
                   "wasi threads ok", 30)
         run_probe(env, directory, "threaded-gc", "wasm-wasi-threaded-gc",
                   "", "wasi threaded gc ok", 180)
+        run_llgo(env, ["test", "-v", "-count=1", "-target", "wasi", "-emulator",
+                       str(ROOT / "test/std/runtime"), str(ROOT / "test/std/sync")],
+                 "PASS", timeout=300)
         run_arena_boundaries(env, directory)
         for _ in range(2):
             # The second build exercises the bridge-enabled package cache.
@@ -244,7 +247,7 @@ def main():
             ["go", "test", "./test/goroot", "-run", "^TestGoRootRunCases$",
              "-count=1", "-args", "-goroot", goroot, "-llgo", LLGO,
              "-wasm-profile", "W32-WASI", "-directive-mode", "ci",
-             "-case", r"^helloworld\.go$", "-min-swap-free-mib=0"],
+             "-case", r"^(helloworld|env)\.go$", "-min-swap-free-mib=0"],
             check=True, cwd=ROOT, env=env, timeout=180,
         )
 

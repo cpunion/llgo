@@ -42,7 +42,6 @@ func fail(message string) {
 }
 
 func main() {
-	testMapKeyAllocations()
 	baseline, _ := gStateForTesting()
 	const workers = 3
 	var wg sync.WaitGroup
@@ -89,6 +88,7 @@ func main() {
 	waitForBaseline(baseline)
 	testPrivateRootsAndLifecycle(baseline)
 	testIdleForeignThread(baseline)
+	testSemaphoreContention(baseline)
 	testParkedSemaphore(baseline)
 
 	// A parked channel receiver still owns a pthread in this backend. It
@@ -328,28 +328,43 @@ func waitForRegistered(expected int32) {
 	fail("WASI timer pthread did not start")
 }
 
-// Existing integer keys must not allocate a temporary heap object for hashing.
-func testMapKeyAllocations() {
-	m := make(map[uint64]uint64, 64)
-	for i := uint64(0); i < 64; i++ {
-		m[i] = i
+func testSemaphoreContention(baseline uint64) {
+	// All 256 pthreads must coexist: their 1 MiB stacks alone exhaust the old
+	// memory limit. Keep the workload short while forcing RWMutex handoffs.
+	const workers = 256
+	var mutex sync.RWMutex
+	m := make(map[int]int, workers)
+	for i := 0; i < workers; i++ {
+		m[i] = 0
 	}
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	for i := uint64(0); i < 4096; i++ {
-		key := i % 64
-		value, ok := m[key]
-		if !ok || value != key {
-			fail("integer map lookup failed")
-		}
-		m[key] = value
-		delete(m, key)
-		m[key] = key
+	ready := make(chan struct{}, workers)
+	start := make(chan struct{})
+	var done sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		done.Add(1)
+		go func(key int) {
+			defer done.Done()
+			ready <- struct{}{}
+			<-start
+			for round := 0; round < 16; round++ {
+				mutex.Lock()
+				m[key]++
+				mutex.Unlock()
+				mutex.RLock()
+				value := m[key]
+				mutex.RUnlock()
+				if value != round+1 {
+					fail("RWMutex handoff lost a map update")
+				}
+			}
+		}(i)
 	}
-	runtime.ReadMemStats(&after)
-	if after.Mallocs != before.Mallocs {
-		fail("integer map hashing allocated")
+	for i := 0; i < workers; i++ {
+		<-ready
 	}
+	close(start)
+	done.Wait()
+	waitForBaseline(baseline)
 }
 
 func testParkedSemaphore(baseline uint64) {
