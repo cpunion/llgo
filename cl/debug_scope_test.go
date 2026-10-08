@@ -49,7 +49,11 @@ func f(param int) (result int) {
 	check()
 	// Merge copies the package scope without changing each object's Parent.
 	// Globals must remain globals after that scope identity changes.
+	before := pkg.Scope()
 	typepatch.Merge(pkg, types.NewPackage("original", "original"), nil, false)
+	if pkg.Scope() == before {
+		t.Fatal("Merge did not swap the package scope")
+	}
 	check()
 	global := pkg.Scope().Lookup("global").(*types.Var)
 	if allocs := testing.AllocsPerRun(100, func() {
