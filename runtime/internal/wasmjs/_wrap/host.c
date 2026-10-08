@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <emscripten.h>
 
-EM_JS_DEPS(llgo_js_host, "$getWasmTableEntry,$Asyncify,$Fibers,$ExitStatus");
+EM_JS_DEPS(llgo_js_host, "$getWasmTableEntry,$Asyncify,$Fibers,$ExitStatus,emscripten_stack_get_base,emscripten_stack_get_end,emscripten_stack_set_limits");
 
 EM_JS(void, llgo_js_random_data, (uint8_t *data, size_t length), {
     globalThis.crypto.getRandomValues(HEAPU8.subarray(Number(data), Number(data) + Number(length)));
@@ -66,10 +66,24 @@ EM_JS(void, llgo_js_host, (int32_t op, uint64_t *frame), {
                     // only after this handler finishes on its original G.
                     const callStack = Asyncify.exportCallStack;
                     const trampolineRunning = Fibers.trampolineRunning;
+                    const stackBase = _emscripten_stack_get_base();
+                    const stackEnd = _emscripten_stack_get_end();
                     Asyncify.exportCallStack = [];
                     Fibers.trampolineRunning = false;
                     try {
                         state.handler();
+                        // Asyncify.doRewind consumes ExitStatus. Do not return
+                        // into the suspended caller after another fiber exits.
+                        if (ABORT) throw new ExitStatus(EXITSTATUS);
+                    } catch (error) {
+                        // A different fiber can exit while this handler is
+                        // parked. Restore the calling fiber before outer
+                        // invoke wrappers restore their saved stack pointers.
+                        _emscripten_stack_set_limits(stackBase, stackEnd);
+                        if (typeof ___set_stack_limits === "function") {
+                            ___set_stack_limits(stackBase, stackEnd);
+                        }
+                        throw error;
                     } finally {
                         Asyncify.exportCallStack = callStack;
                         Fibers.trampolineRunning = trampolineRunning;

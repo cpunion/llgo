@@ -124,6 +124,15 @@ func gorootArtifactCommand(dir, artifact string, llgo bool, env []string, progra
 			return "", nil, nil, fmt.Errorf("resolve Wasmer working directory: %w", err)
 		}
 		args := gorootWASIArgs(cwd, os.TempDir(), artifact, runtime.GOOS == "windows")
+		// Source-tree tests such as winbatch.go read runtime.GOROOT(). WASI
+		// guests need that directory preopened in addition to their workdir.
+		if goroot := envEntry(env, "GOROOT"); goroot != "" {
+			volume, guest := goroot, goroot
+			if runtime.GOOS == "windows" {
+				volume, guest = goroot+":/goroot", "/goroot"
+			}
+			args = append([]string{"run", "--volume=" + volume, "--env=GOROOT=" + guest}, args[1:]...)
+		}
 		// Wasmer does not inherit the host environment into the WASI guest.
 		// Keep PATH explicit, as in the public runner, so both baselines see it.
 		if path := envEntry(env, "PATH"); path != "" {

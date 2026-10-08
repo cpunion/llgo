@@ -1771,6 +1771,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		ret = b.FieldAddr(x, v.Field)
 	case *ssa.Alloc:
+		// An allocation with no uses has no observable result. In particular,
+		// do not emit a runtime GC call for an unused composite literal.
+		if refs, ok := nonDebugReferrers(v); ok && len(refs) == 0 {
+			return
+		}
 		t := v.Type().(*types.Pointer)
 		if p.checkVArgs(v, t) { // varargs: this maybe a varargs allocation
 			return
@@ -2385,7 +2390,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		runDefers := p.returnNeedsImplicitRunDefers(v)
 		if runDefers {
 			p.spillImplicitDeferResults(b, v)
-			p.recordPanicLocation(b, v.Pos())
+			p.recordPanicLocation(b, p.deferRunPos(v.Pos()))
 			p.emitPCLineLabel(b, p.deferRunPos(v.Pos()))
 			b.RunDefers()
 		}
@@ -2443,7 +2448,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.checkMethodCallReceiver(b, &v.Call)
 		p.call(b, llssa.Go, &v.Call)
 	case *ssa.RunDefers:
-		p.recordPanicLocation(b, v.Pos())
+		p.recordPanicLocation(b, p.deferRunPos(v.Pos()))
 		p.emitPCLineLabel(b, p.deferRunPos(v.Pos()))
 		b.RunDefers()
 	case *ssa.Panic:

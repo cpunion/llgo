@@ -128,8 +128,9 @@ def main():
                         "-o", str(simd)], check=True, timeout=30)
         subprocess.run(wasmer_command(simd), env=env, check=True, timeout=30)
         print("wasi SIMD/thread/standard-EH boundary ok", flush=True)
-        run_probe(env, directory, "startup", "wasm-wasi-thread-startup", "nogc",
-                  "wasi thread startup ok", 30)
+        for tags in ("nogc", ""):
+            run_probe(env, directory, f"startup-{tags or 'gc'}", "wasm-wasi-thread-startup", tags,
+                      "wasi thread startup ok", 30)
         # Accept a host error (1) or the guest fatal status (2), never success.
         deadlock_exits = (1, 2)
         # LLVM lowers both Go defer/Goexit and C setjmp/longjmp through standard

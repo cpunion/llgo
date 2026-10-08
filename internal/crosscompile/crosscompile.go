@@ -839,7 +839,6 @@ func useWithGOARMAndToolchain(goos, goarch, goarm string, forceEspClang bool, le
 		export.BuildTags = append(export.BuildTags, "llgo.wasi_threads")
 		export.LDFLAGS = append(
 			export.LDFLAGS,
-			"-Wl,--initial-memory=67108864",
 			// Leave room for 256 default 1 MiB pthread stacks, the process
 			// stack, libc metadata, and independently owned GC arenas.
 			"-Wl,--max-memory=536870912",

@@ -80,7 +80,11 @@ func TestGOROOTWasiRunCommand(t *testing.T) {
 			if runtime.GOOS == "windows" {
 				workVolume, tempVolume, guestCwd = dir+":/work", os.TempDir()+":/tmp", "/work"
 			}
-			want := []string{"run", "--env=PATH=/tools/bin:/usr/bin", "--enable-exceptions", "--enable-simd", "--stack-size=1048576",
+			rootVolume, guestRoot := "/go", "/go"
+			if runtime.GOOS == "windows" {
+				rootVolume, guestRoot = "/go:/goroot", "/goroot"
+			}
+			want := []string{"run", "--env=PATH=/tools/bin:/usr/bin", "--volume=" + rootVolume, "--env=GOROOT=" + guestRoot, "--enable-exceptions", "--enable-simd", "--stack-size=1048576",
 				"--volume=" + workVolume, "--volume=" + tempVolume, "--env=PWD=" + guestCwd, "out.wasm", "--", "-test.v"}
 			if err != nil || app != "wasmer" || !reflect.DeepEqual(args, want) || envEntry(targetEnv, "GOWASIRUNTIME") != "wasmtime" || envEntry(targetEnv, "RUST_LOG") != "off" {
 				t.Fatalf("llgo=%v threads=%q: WASI command: %q %v %v %v", llgo, threads, app, args, targetEnv, err)
