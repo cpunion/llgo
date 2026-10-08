@@ -530,6 +530,9 @@ runs:
       if: runner.os == 'Windows' && inputs.install-llvm == 'true' && inputs.windows-abi == 'mingw'
       id: windows_mingw
       uses: msys2/setup-msys2@v2
+      env:
+        # Configure mirrors before the action's initial package upgrade.
+        __SETUP_MSYS2_USE_MAIN_MIRROR_ONLY: "true"
       with:
         # CLANGARM64 supplies an architecture-native LLVM host and target on
         # the ARM64 runner. The x64 runner keeps CLANG64 as the LLGo host even

@@ -74,13 +74,17 @@ func TestGOROOTWasiRunCommand(t *testing.T) {
 	dir := t.TempDir()
 	for _, llgo := range []bool{false, true} {
 		for _, threads := range []string{"", "1"} {
-			env := []string{"GOROOT=/go", "LLGO_ROOT=/llgo", "LLGO_WASI_THREADS=" + threads, "RUST_LOG=warn"}
+			env := []string{"GOROOT=/go", "LLGO_ROOT=/llgo", "LLGO_WASI_THREADS=" + threads, "RUST_LOG=warn", "PATH=/tools/bin:/usr/bin"}
 			app, args, targetEnv, err := gorootArtifactCommand(dir, "out.wasm", llgo, env, "-test.v")
 			workVolume, tempVolume, guestCwd := dir, "/tmp", dir
 			if runtime.GOOS == "windows" {
 				workVolume, tempVolume, guestCwd = dir+":/work", os.TempDir()+":/tmp", "/work"
 			}
-			want := []string{"run", "--enable-exceptions", "--enable-simd", "--stack-size=1048576",
+			rootVolume, guestRoot := "/go", "/go"
+			if runtime.GOOS == "windows" {
+				rootVolume, guestRoot = "/go:/goroot", "/goroot"
+			}
+			want := []string{"run", "--env=PATH=/tools/bin:/usr/bin", "--volume=" + rootVolume, "--env=GOROOT=" + guestRoot, "--enable-exceptions", "--enable-simd", "--stack-size=1048576",
 				"--volume=" + workVolume, "--volume=" + tempVolume, "--env=PWD=" + guestCwd, "out.wasm", "--", "-test.v"}
 			if err != nil || app != "wasmer" || !reflect.DeepEqual(args, want) || envEntry(targetEnv, "GOWASIRUNTIME") != "wasmtime" || envEntry(targetEnv, "RUST_LOG") != "off" {
 				t.Fatalf("llgo=%v threads=%q: WASI command: %q %v %v %v", llgo, threads, app, args, targetEnv, err)

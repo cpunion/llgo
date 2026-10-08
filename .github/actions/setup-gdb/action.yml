@@ -40,6 +40,8 @@ runs:
       if: runner.os == 'Windows'
       id: msys2
       uses: msys2/setup-msys2@v2
+      env:
+        __SETUP_MSYS2_USE_MAIN_MIRROR_ONLY: "true"
       with:
         location: ${{ runner.temp }}/llgo-gdb-msys2
         msystem: ${{ runner.arch == 'ARM64' && 'CLANGARM64' || 'CLANG64' }}
