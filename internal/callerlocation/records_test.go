@@ -158,7 +158,7 @@ func TestLargeInitializerRecords(t *testing.T) {
 		t.Fatalf("removed %d records, want %d", got, want)
 	}
 	ir := mod.String()
-	if got := strings.Count(ir, "call void"); got != rows {
+	if got := strings.Count(ir, `call void @"`+runtimePrefix+`RecordPanicLocationWasm"`); got != rows {
 		t.Fatalf("kept %d records, want one per line (%d)", got, rows)
 	}
 	if got := strings.Count(ir, "store i32 7"); got != rows*repeats {

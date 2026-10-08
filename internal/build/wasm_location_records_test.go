@@ -29,7 +29,7 @@ define void @initializer(ptr %out) {
 			if arch == "wasm" {
 				want = 1
 			}
-			if got := strings.Count(mod.String(), "call void"); got != want {
+			if got := strings.Count(mod.String(), `call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.RecordPanicLocationWasm"`); got != want {
 				t.Fatalf("kept %d location records, want %d", got, want)
 			}
 			if !strings.Contains(mod.String(), "store i32 7") {
