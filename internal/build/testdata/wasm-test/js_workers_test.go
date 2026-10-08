@@ -136,19 +136,6 @@ finalizersComplete:
 }
 
 func TestRetiredWorkerFiberReleasesFinalizer(t *testing.T) {
-	// A finalizable allocation can itself be kept alive by an unrelated
-	// conservative root. Check independent retired fibers before concluding
-	// that the fiber storage remains rooted.
-	for range 3 {
-		if retiredWorkerFiberReleasesFinalizer(t) {
-			return
-		}
-	}
-	t.Fatal("finalizers stayed reachable after their worker fibers exited")
-}
-
-//go:noinline
-func retiredWorkerFiberReleasesFinalizer(t *testing.T) bool {
 	finalized := make(chan struct{}, 3)
 	installRetiredWorkerFinalizerBarrier(t, finalized)
 
@@ -159,12 +146,12 @@ func retiredWorkerFiberReleasesFinalizer(t *testing.T) bool {
 		runtime.GC()
 		select {
 		case <-finalized:
-			return true
+			return
 		default:
 			time.Sleep(time.Millisecond)
 		}
 	}
-	return false
+	t.Fatal("finalizers stayed reachable after their worker fibers exited")
 }
 
 // Allocate the marker in a fiber that will retire before collection. A marker
