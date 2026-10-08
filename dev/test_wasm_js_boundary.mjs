@@ -48,6 +48,8 @@ if (browserFlag === "--browser-only") {
   };
   globalThis.window ??= globalThis;
   globalThis.process = undefined;
+  globalThis.fs = undefined;
+  globalThis.path = undefined;
 }
 await runEmscriptenModule(factory, options);
 if (mode.startsWith("callback-exit-")) {
