@@ -1031,8 +1031,10 @@ func parseLineDirectiveFilename(text string) (filename string, previous, ok bool
 }
 
 func isGlobal(v *types.Var) bool {
-	// TODO(lijie): better implementation
-	return strings.HasPrefix(v.Parent().String(), "package ")
+	// Package scopes, including copies made by typepatch, are direct children
+	// of Universe. Avoid formatting every declaration in the scope.
+	scope := v.Parent()
+	return scope != nil && scope.Parent() == types.Universe
 }
 
 func (p *context) debugRef(b llssa.Builder, v *ssa.DebugRef) {
