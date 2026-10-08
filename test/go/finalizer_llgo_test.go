@@ -37,6 +37,7 @@ func TestRuntimeGoroutineClosureFinalizers(t *testing.T) {
 	released := false
 	t.Cleanup(func() {
 		if !released {
+			// Unblock workers on early failure; completed sends are buffered.
 			close(release)
 		}
 	})
@@ -74,17 +75,23 @@ func TestRuntimeGoroutineClosureFinalizers(t *testing.T) {
 	deadline := time.After(3 * time.Second)
 	for count <= n/2 {
 		runGCWithTimeout(t)
-		for len(finalized) != 0 {
-			value := <-finalized
-			if value < 0 || value >= n || seen[value] {
-				t.Fatalf("invalid or duplicate finalized closure %d", value)
+		for {
+			select {
+			case value := <-finalized:
+				if value < 0 || value >= n || seen[value] {
+					t.Fatalf("invalid or duplicate finalized closure %d", value)
+				}
+				seen[value] = true
+				count++
+			default:
+				goto drained
 			}
-			seen[value] = true
-			count++
 		}
+	drained:
 		// Conservative stack/register values can retain a few dead closures.
 		// As in the neighboring native finalizer tests, require progress and
-		// detect wholesale retention of completed goroutine startup records.
+		// detect wholesale retention of the completed goroutines' captured
+		// function variables.
 		if count > n/2 {
 			return
 		}
