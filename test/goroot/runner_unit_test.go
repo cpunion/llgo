@@ -478,7 +478,6 @@ func TestWasmObservedResourceExceptions(t *testing.T) {
 		timeout       time.Duration
 		nativeTimeout time.Duration
 	}{
-		{testCase{RelPath: "cmplxdivide.go", Directive: "run"}, 10 * time.Minute, 0},
 		{testCase{RelPath: "winbatch.go", Directive: "run"}, 6 * time.Minute, 0},
 		{testCase{RelPath: "fixedbugs/issue78081.go", Directive: "run"}, 6 * time.Minute, 0},
 		{testCase{RelPath: "fixedbugs/issue79186.go", Directive: "run"}, 4 * time.Minute, 90 * time.Second},
@@ -501,9 +500,6 @@ func TestWasmObservedResourceExceptions(t *testing.T) {
 				want = 0
 				if tc.RelPath == "fixedbugs/issue78081.go" {
 					want = 6 * time.Minute
-				}
-				if tc.RelPath == "cmplxdivide.go" {
-					want = 10 * time.Minute
 				}
 			}
 			if timeout, _, match := cfg.MatchTimeout("go1.27.0", platform, tc); timeout != want || match != (want != 0) {
