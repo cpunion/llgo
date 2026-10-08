@@ -39,6 +39,7 @@ type packageLinkSnapshot struct {
 	funcInfo        []funcInfoRecord
 	pcLineInfo      []pcLineRecord
 	hasLocalExports bool
+	cExports        []cExport
 }
 
 type packageBuildTask struct {
@@ -353,6 +354,7 @@ func (ctx *context) snapshotBackendPackage(pkg *aPackage) {
 		abiSymbols:      linkedModuleGlobals([]Package{pkg}),
 		abiTypes:        append([]llssa.AbiTypeInfo(nil), lpkg.Prog.AbiTypes()...),
 		hasLocalExports: hasLocalCExports(lpkg),
+		cExports:        packageCExportDeclarations(lpkg),
 	}
 	for index := range lpkg.MethodByIndex {
 		snapshot.methodByIndex[index] = none{}

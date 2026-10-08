@@ -97,7 +97,7 @@ func TestDCEEntryRootCandidatesIncludesCExports(t *testing.T) {
 	}
 }
 
-func TestLinkedCExportsIncludesOnlyLibraryMain(t *testing.T) {
+func TestLinkedCExportsIncludesDependencyAndExecutableCallbacks(t *testing.T) {
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()
 	newExport := func(path, name, goName, cName string) Package {
@@ -110,7 +110,7 @@ func TestLinkedCExportsIncludesOnlyLibraryMain(t *testing.T) {
 		}
 	}
 	for _, goos := range []string{"darwin", "linux", "windows"} {
-		for _, mode := range []BuildMode{BuildModeCShared, BuildModeCArchive} {
+		for _, mode := range []BuildMode{BuildModeCShared, BuildModeCArchive, BuildModeExe} {
 			t.Run(goos+"/"+string(mode), func(t *testing.T) {
 				ctx := &context{buildConf: &Config{
 					Goos:      goos,
@@ -119,12 +119,13 @@ func TestLinkedCExportsIncludesOnlyLibraryMain(t *testing.T) {
 				exports, err := linkedCExports(ctx, []Package{
 					newExport("main", "main", "main.Exported", "Exported"),
 					newExport("example.com/dep", "dep", "example.com/dep.Callback", "Callback"),
+					newExport("example.com/capi", "C", "example.com/capi.Xadd", "add"),
 				})
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(exports) != 1 || exports[0].goName != "main.Exported" {
-					t.Fatalf("linked C exports = %+v, want command-package export only", exports)
+				if len(exports) != 2 || exports[0].goName != "example.com/dep.Callback" || exports[1].goName != "main.Exported" {
+					t.Fatalf("linked C exports = %+v, want dependency and command exports", exports)
 				}
 			})
 		}
@@ -207,6 +208,53 @@ func TestLinkedCExportsValidation(t *testing.T) {
 			t.Fatalf("linkedCExports() = (%+v, %v), want exports sorted by C name", exports, err)
 		}
 	})
+}
+
+func TestCExportWrapperTargetPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name, goos, target, path, pkgName string
+		mode                              BuildMode
+		want                              bool
+	}{
+		{name: "runtime bootstrap", goos: "linux", mode: BuildModeExe, path: llssa.PkgRuntime},
+		{name: "runtime subtree", goos: "windows", mode: BuildModeCShared, path: llssa.PkgRuntime + "/signal"},
+		{name: "standard runtime", goos: "darwin", mode: BuildModeExe, path: "runtime"},
+		{name: "explicit target", goos: "linux", target: "wasi", mode: BuildModeExe, path: "example.com/callback"},
+		{name: "package C direct exports", goos: "linux", mode: BuildModeExe, path: "example.com/capi", pkgName: "C"},
+		{name: "unsupported build mode", goos: "linux", mode: "invalid", path: "example.com/callback"},
+		{name: "other OS executable", goos: "freebsd", mode: BuildModeExe, path: "main", pkgName: "main"},
+		{name: "other OS dependency", goos: "freebsd", mode: BuildModeCShared, path: "example.com/callback", pkgName: "callback"},
+		{name: "other OS main shared", goos: "freebsd", mode: BuildModeCShared, path: "main", pkgName: "main", want: true},
+		{name: "other OS main archive", goos: "freebsd", mode: BuildModeCArchive, path: "main", pkgName: "main", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := &context{buildConf: &Config{Goos: test.goos, Target: test.target, BuildMode: test.mode}}
+			pkg := &aPackage{Package: &packages.Package{PkgPath: test.path, Name: test.pkgName}}
+			if got := needsCExportWrappers(ctx, pkg); got != test.want {
+				t.Fatalf("C export wrapper policy = %v, want %v", got, test.want)
+			}
+		})
+	}
+	// No backend may exist for a package that contributes no native exports.
+	ctx := &context{buildConf: &Config{Goos: "linux", BuildMode: BuildModeExe}}
+	pkg := &aPackage{Package: &packages.Package{PkgPath: "example.com/empty"}}
+	if exports, err := linkedCExports(ctx, []Package{nil, {}, pkg}); err != nil || len(exports) != 0 {
+		t.Fatalf("packages without a backend contributed exports: %+v, %v", exports, err)
+	}
+}
+
+func TestPlanMainLinkRejectsInvalidCExportSnapshot(t *testing.T) {
+	app := snapshotPkg("example.com/main", "main.main")
+	app.ID, app.ExportFile = app.PkgPath, "main.o"
+	app.linkSnapshot.cExports = []cExport{{goName: "example.com/main.Missing", cName: "callback"}}
+	ctx := &context{
+		buildConf: &Config{Goos: "linux", BuildMode: BuildModeExe},
+		pkgs:      map[*packages.Package]Package{app.Package: app},
+	}
+	if plan, err := planMainLink(ctx, app.Package, []*aPackage{app}); err == nil ||
+		!strings.Contains(err.Error(), `C export implementation "example.com/main.Missing" not found`) || plan != nil {
+		t.Fatalf("invalid export produced link plan %+v, error %v", plan, err)
+	}
 }
 
 func buildDeadcodeMeta(t *testing.T) *meta.PackageMeta {

@@ -563,6 +563,7 @@ func TestSnapshotBackendPackageAndConsumers(t *testing.T) {
 	lpkg := isolated.NewPackage("p", "example.com/p")
 	lpkg.NeedAbiInit = 3
 	lpkg.SetExport("example.com/p.Export", "Export")
+	lpkg.NewFunc("example.com/p.Export", llssa.NoArgsNoRet, llssa.InGo)
 	lpkg.RecordReflectMethodByIndex("example.com/p.useIndex", 7)
 	lpkg.RecordReflectMethodByName("example.com/p.useName", "Method")
 	pkg := &aPackage{
@@ -612,6 +613,11 @@ func TestSnapshotBackendPackageAndConsumers(t *testing.T) {
 	}
 	if pkg.LPkg != nil {
 		t.Fatal("disposed package retained LPkg")
+	}
+	exportCtx := &context{buildConf: &Config{BuildMode: BuildModeExe, Goos: "linux"}}
+	cExports, err := linkedCExports(exportCtx, []Package{pkg})
+	if err != nil || len(cExports) != 1 || cExports[0].goName != "example.com/p.Export" {
+		t.Fatalf("disposed package lost its callable C export: %+v %v", cExports, err)
 	}
 	pkg.ExportFile = "p.a"
 	pkg.ArchiveFile = "p.a"

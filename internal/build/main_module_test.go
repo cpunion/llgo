@@ -101,6 +101,41 @@ func TestGenMainModuleWindowsExitsAfterMain(t *testing.T) {
 	)
 }
 
+func TestGenMainModuleExecutableRegistersCExportThread(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			ctx := &context{
+				prog:      llssa.NewProgram(nil),
+				buildConf: &Config{BuildMode: BuildModeExe, Goos: goos, Goarch: "amd64"},
+			}
+			defer ctx.prog.Dispose()
+			pkg := &packages.Package{PkgPath: "main", ExportFile: "main.a"}
+			ir := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{
+				rtInit:       true,
+				packageInits: []string{"example.com/dep.init"},
+				cExports: []cExport{{
+					goName: "example.com/dep.Callback", cName: "callback",
+					sig: newSignature([]types.Type{types.Typ[types.Int32]}, []types.Type{types.Typ[types.Int32]}),
+				}},
+			}).LPkg.String()
+			wrapper := ir[strings.Index(ir, "define i32 @callback(i32 %0)"):]
+			assertInOrder(t, wrapper,
+				`call i1 @"github.com/xgo-dev/llgo/runtime/internal/runtime.EnterForeignThread"()`,
+				`call i32 @"example.com/dep.Callback"(i32 %0)`,
+				`call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.ExitForeignThread"(i1`,
+				"ret i32",
+			)
+			if goos != "windows" {
+				assertInOrder(t, ir,
+					`call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.init"()`,
+					`call void @"github.com/xgo-dev/llgo/runtime/internal/runtime.EnableForeignThreadRegistration"()`,
+					`call void @"example.com/dep.init"()`,
+				)
+			}
+		})
+	}
+}
+
 func TestGenMainModuleCoverageExit(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		t.Run(goos, func(t *testing.T) {

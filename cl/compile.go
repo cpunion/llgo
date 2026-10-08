@@ -69,6 +69,7 @@ type Options struct {
 	AllowInternalDirectives bool
 	// CExportWrappers keeps //export implementations under their Go symbols;
 	// the final-link module supplies the public C entry points.
+	// It does not apply to package C, which defines its exports directly.
 	CExportWrappers bool
 	ShadowStack     bool
 	// PreloadedSyntax means all Program-side source metadata was collected
@@ -2880,6 +2881,13 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	pkgTypes := pkg.Pkg
 	oldTypes := pkgTypes
 	pkgName, pkgPath := pkgTypes.Name(), llssa.PathOf(pkgTypes)
+	cPkg := IsCPackage(pkgName)
+	// package C's exported names are part of the package object/archive ABI,
+	// including automatic X-prefix removal. They must not depend on final-link
+	// wrappers, even when an embedding compiler enables this option globally.
+	if cPkg {
+		options.CExportWrappers = false
+	}
 	patch, hasPatch := patches[pkgPath]
 	if hasPatch {
 		pkgTypes = patch.Types
@@ -2943,7 +2951,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		}
 	}
 	ctx.initPyModule()
-	ctx.initFiles(pkgPath, files, pkgName == "C")
+	ctx.initFiles(pkgPath, files, cPkg)
 	ctx.prog.SetPatch(ctx.patchType)
 	ctx.prog.SetCompileMethods(ctx.checkCompileMethods)
 	ret.SetResolveLinkname(ctx.resolveLinkname)

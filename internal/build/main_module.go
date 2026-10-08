@@ -180,7 +180,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		inits := []llssa.Function{pyInit, rtInit, abiInit, runtimeStub}
 		// Windows already enables this during runtime initialization because
 		// callbacks in ordinary executables also enter from foreign threads.
-		// Other platforms enable it only for libraries with C exports.
+		// Other platforms enable it at startup when linked C exports exist.
 		if len(cfg.cExports) != 0 && ctx.buildConf.Goos != "windows" {
 			inits = append(inits, declareNoArgFunc(
 				mainPkg, llssa.PkgRuntime+".EnableForeignThreadRegistration",
@@ -205,6 +205,13 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		return mainAPkg
 	}
 
+	var callbackInit llssa.Function
+	if len(cfg.cExports) != 0 {
+		if ctx.buildConf.Goos != "windows" {
+			callbackInit = declareNoArgFunc(mainPkg, llssa.PkgRuntime+".EnableForeignThreadRegistration")
+		}
+		defineCExportWrappers(mainPkg, cfg.cExports, nil)
+	}
 	var wasmRunMain llssa.Function
 	if wasmRuntimeScheduler {
 		defineWasmMainTask(mainPkg, packageInits, mainInit, mainMain)
@@ -226,6 +233,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		pyInit:       pyInit,
 		pyFinalize:   pyFinalize,
 		rtInit:       rtInit,
+		callbackInit: callbackInit,
 		processExit:  processExit,
 		stdioFlush:   stdioFlush,
 		coverageExit: coverageExit,
@@ -453,6 +461,7 @@ type entryFunctions struct {
 	pyInit       llssa.Function
 	pyFinalize   llssa.Function
 	rtInit       llssa.Function
+	callbackInit llssa.Function
 	processExit  llssa.Function
 	stdioFlush   llssa.Function
 	coverageExit llssa.Function
@@ -534,6 +543,9 @@ func emitRuntimeMainBody(b llssa.Builder, fns entryFunctions) {
 	}
 	if fns.rtInit != nil {
 		b.Call(fns.rtInit.Expr)
+	}
+	if fns.callbackInit != nil {
+		b.Call(fns.callbackInit.Expr)
 	}
 	if fns.abiInit != nil {
 		b.Call(fns.abiInit.Expr)

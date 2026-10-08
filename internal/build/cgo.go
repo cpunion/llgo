@@ -209,11 +209,20 @@ func genExternDeclsByClang(compiler *llclang.Cmd, pkg *aPackage, src string, cfl
 				continue
 			}
 			gofuncName := strings.Replace(cgoName, ".__cgo_", ".", 1)
+			cfuncName := symbolName[len("__cgo_"):]
 			gofn := pkg.LPkg.FuncOf(gofuncName)
+			// C takes the address of the public export, whose final-link wrapper
+			// registers foreign threads. A same-named Go implementation (or a
+			// private Go function shadowing a renamed export) must not bypass it.
+			for _, exportName := range pkg.LPkg.ExportFuncs() {
+				if exportName == cfuncName {
+					gofn = pkg.LPkg.FuncOf(cfuncName)
+					break
+				}
+			}
 			if gofn != nil {
 				pkg.LPkg.ReplaceVarWith(cgoName, gofn.Expr)
 			} else {
-				cfuncName := symbolName[len("__cgo_"):]
 				cfn := pkg.LPkg.NewFunc(cfuncName, types.NewSignatureType(nil, nil, nil, nil, nil, false), llssa.InC)
 				pkg.LPkg.ReplaceVarWith(cgoName, cfn.Expr)
 			}
