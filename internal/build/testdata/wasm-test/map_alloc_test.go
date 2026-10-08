@@ -8,17 +8,23 @@ import (
 )
 
 func TestMapKeyHashNoAlloc(t *testing.T) {
-	// Multiple buckets force hashing. High bits exercise the full uint64 key
-	// on both memory32 and memory64; single-bucket lookups can bypass hashing.
-	m := make(map[uint64]uint64, 64)
-	for i := uint64(0); i < 64; i++ {
-		key := i | 1<<40
+	testMapKeyHashNoAlloc(t, uint32(1<<31))
+	testMapKeyHashNoAlloc(t, int32(-1<<31))
+	testMapKeyHashNoAlloc(t, uint64(1<<40))
+}
+
+func testMapKeyHashNoAlloc[K ~uint32 | ~int32 | ~uint64](t *testing.T, highBit K) {
+	// Multiple buckets force hashing. High bits exercise the full key on
+	// both memory32 and memory64; single-bucket lookups can bypass hashing.
+	m := make(map[K]K, 64)
+	for i := 0; i < 64; i++ {
+		key := K(i) | highBit
 		m[key] = key
 	}
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	for i := uint64(0); i < 4096; i++ {
-		key := i%64 | 1<<40
+	for i := 0; i < 4096; i++ {
+		key := K(i%64) | highBit
 		if m[key] != key {
 			t.Fatal("single-result lookup returned the wrong value")
 		}
@@ -32,6 +38,6 @@ func TestMapKeyHashNoAlloc(t *testing.T) {
 	}
 	runtime.ReadMemStats(&after)
 	if after.Mallocs != before.Mallocs {
-		t.Fatalf("integer map hashing allocated %d objects", after.Mallocs-before.Mallocs)
+		t.Fatalf("%T map hashing allocated %d objects", highBit, after.Mallocs-before.Mallocs)
 	}
 }

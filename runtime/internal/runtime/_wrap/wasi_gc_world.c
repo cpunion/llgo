@@ -107,6 +107,11 @@ static _Atomic uint32_t allocator_yielders;
 
 void llgo_wasi_gc_allocator_lock(pthread_mutex_t *mutex, uintptr_t chain,
                                  uintptr_t bottom, uintptr_t top) {
+  int status = pthread_mutex_trylock(mutex);
+  if (status == 0)
+    return;
+  if (status != EBUSY)
+    __builtin_trap();
   atomic_fetch_add(&allocator_waiters, 1);
   world_begin_wait(chain, bottom, top);
   if (pthread_mutex_lock(mutex) != 0)
