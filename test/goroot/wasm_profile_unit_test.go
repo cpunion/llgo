@@ -47,7 +47,7 @@ func TestGOROOTWasmBuildAndRunCommands(t *testing.T) {
 		t.Fatalf("build args: %v", got)
 	}
 	app, args, targetEnv, err := gorootArtifactCommand("/work", "out.mjs", true, env, "one")
-	if err != nil || app != "node" || !reflect.DeepEqual(args, []string{filepath.Join("/llgo", "targets", "emscripten-memory64-runner.mjs"), "out.mjs", "one"}) {
+	if err != nil || app != "node" || !reflect.DeepEqual(args, []string{"--stack-size=8192", filepath.Join("/llgo", "targets", "emscripten-memory64-runner.mjs"), "out.mjs", "one"}) {
 		t.Fatalf("LLGo command: %q %v %v", app, args, err)
 	}
 	if envEntry(targetEnv, "GOOS") != "js" || envEntry(targetEnv, "GOARCH") != "wasm" || envEntry(targetEnv, "CGO_ENABLED") != "0" || envEntry(targetEnv, "GOMAXPROCS") != "1" {
@@ -63,7 +63,7 @@ func TestGOROOTGoJSRunCommandModelsBrowser(t *testing.T) {
 	withGOROOTWasmProfile(t, "J32-GoJS")
 	env := []string{"GOROOT=/go", "LLGO_ROOT=/llgo"}
 	app, args, _, err := gorootArtifactCommand("/work", "out.mjs", true, env, "arg")
-	want := []string{filepath.Join("/llgo", "targets", "emscripten-runner.mjs"), "--browser-only", "out.mjs", "arg"}
+	want := []string{"--stack-size=8192", filepath.Join("/llgo", "targets", "emscripten-runner.mjs"), "--browser-only", "out.mjs", "arg"}
 	if err != nil || app != "node" || !reflect.DeepEqual(args, want) {
 		t.Fatalf("GoJS command: %q %v %v", app, args, err)
 	}
