@@ -349,6 +349,7 @@ func TestObservedNotApplicableCasesAreGlobal(t *testing.T) {
 	repo := repoRoot(t)
 	cfg := loadNotApplicableConfig(t, repo, filepath.Join("test", "goroot", "notapplicable.yaml"))
 	cases := []testCase{
+		{RelPath: "fixedbugs/issue5493.go", Directive: "run"},
 		{RelPath: "fixedbugs/issue75764.go", Directive: "run"},
 		{RelPath: "deferfin.go", Directive: "run"},
 		{RelPath: "finprofiled.go", Directive: "run"},

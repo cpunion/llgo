@@ -223,10 +223,6 @@ flakes:
     reason: darwin/arm64 goroot run can either pass or fail
   - platform: linux/amd64
     directive: run
-    case: fixedbugs/issue5493.go
-    reason: linux/amd64 goroot run can either pass or expose incomplete goroutine stack growth
-  - platform: linux/amd64
-    directive: run
     case: fixedbugs/issue25897a.go
     reason: reflect-generated goroutines under a single-P continuous-GC loop can complete or exceed the 1m run timeout on linux/amd64
   - version: go1.26
