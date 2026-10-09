@@ -19,7 +19,9 @@ type Tracker struct {
 }
 
 // Repeated checks only the instructions appended since the last checkpoint.
-// Even a skipped record advances the checkpoint, keeping repeated checks linear.
+// It always advances the checkpoint to last, regardless of the result.
+// Linear scanning requires a live checkpoint at or before last in this block;
+// reset the tracker after IR rewrites. Reaching the block head returns false.
 // Calls (including inline assembly) and terminators are conservative barriers.
 func (t *Tracker) Repeated(block llvm.BasicBlock, last llvm.Value, location Location, debug llvm.DebugLoc) bool {
 	previous := t.cursor

@@ -4,9 +4,10 @@ import "github.com/xgo-dev/llgo/internal/callerlocation"
 
 // EmitLocationRecord emits an idempotent runtime source-location update unless
 // the current block already has the same update and debug position with no
-// intervening call. emit must append that update to the current block.
+// intervening call or terminator. emit returns the update it appended;
+// any instructions following it remain visible to the tracker.
 // Non-tail insertion keeps all records; it cannot reuse append-only history.
-func (b Builder) EmitLocationRecord(kind, name, file string, line int, emit func()) {
+func (b Builder) EmitLocationRecord(kind, name, file string, line int, emit func() Expr) {
 	if !b.locationRecordsAtEnd {
 		emit()
 		return
@@ -16,6 +17,5 @@ func (b Builder) EmitLocationRecord(kind, name, file string, line int, emit func
 	if b.locationRecords.Repeated(block, block.LastInstruction(), location, b.diLocation) {
 		return
 	}
-	emit()
-	b.locationRecords.Checkpoint(block.LastInstruction())
+	b.locationRecords.Checkpoint(emit().impl)
 }

@@ -2030,8 +2030,8 @@ func (p *context) recordRuntimeLocation(b llssa.Builder, pos token.Pos, fn strin
 		return
 	}
 	name := p.runtimeCallerFrameName()
-	b.EmitLocationRecord(fn, name, position.Filename, position.Line, func() {
-		p.callRuntimeLocation(
+	b.EmitLocationRecord(fn, name, position.Filename, position.Line, func() llssa.Expr {
+		return p.callRuntimeLocation(
 			b, fn,
 			b.Convert(p.prog.Uintptr(), p.fn.Expr),
 			b.Str(name),

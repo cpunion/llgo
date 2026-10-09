@@ -19,9 +19,9 @@ func TestLocationRecordInsertionPoint(t *testing.T) {
 	callee := pkg.NewFunc("record", NoArgsNoRet, InGo)
 	emitted := 0
 	record := func() {
-		b.EmitLocationRecord("panic", "foo.f", "foo.go", 1, func() {
-			b.Call(callee.Expr)
+		b.EmitLocationRecord("panic", "foo.f", "foo.go", 1, func() Expr {
 			emitted++
+			return b.Call(callee.Expr)
 		})
 	}
 	record()
@@ -61,9 +61,9 @@ func TestLocationRecordDebugPositions(t *testing.T) {
 	callee := pkg.NewFunc("record", NoArgsNoRet, InGo)
 	emitted := 0
 	record := func() {
-		b.EmitLocationRecord("panic", "foo.f", pos.Filename, pos.Line, func() {
-			b.Call(callee.Expr)
+		b.EmitLocationRecord("panic", "foo.f", pos.Filename, pos.Line, func() Expr {
 			emitted++
+			return b.Call(callee.Expr)
 		})
 	}
 	record()
@@ -80,5 +80,54 @@ func TestLocationRecordDebugPositions(t *testing.T) {
 	pkg.FinalizeDebug()
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLocationRecordCallbackBarrier(t *testing.T) {
+	for _, change := range []string{"call", "split before", "split after"} {
+		t.Run(change, func(t *testing.T) {
+			prog := NewProgram(nil)
+			defer prog.Dispose()
+			pkg := prog.NewPackage("foo", "foo")
+			fn := pkg.NewFunc("foo.f", NoArgsNoRet, InGo)
+			b := fn.MakeBody(1)
+			defer b.Dispose()
+			record := pkg.NewFunc("record", NoArgsNoRet, InGo)
+			helper := pkg.NewFunc("helper", NoArgsNoRet, InGo)
+			split := func() {
+				next := fn.MakeBlock()
+				b.Jump(next)
+				b.SetBlock(next)
+			}
+			emitted := 0
+			for range 3 {
+				b.EmitLocationRecord("panic", "foo.f", "foo.go", 1, func() Expr {
+					if emitted == 0 && change == "split before" {
+						split()
+					}
+					update := b.Call(record.Expr)
+					// Calls and block changes inside the callback must remain barriers.
+					if change == "call" {
+						b.Call(helper.Expr)
+					} else if emitted == 0 && change == "split after" {
+						split()
+					}
+					emitted++
+					return update
+				})
+			}
+			want := 2 // A block change resets history; the third update is redundant.
+			if change == "call" {
+				want = 3 // Every update is followed by a call barrier.
+			}
+			if emitted != want {
+				t.Fatalf("emitted %d records, want %d", emitted, want)
+			}
+			b.Return()
+			b.EndBuild()
+			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

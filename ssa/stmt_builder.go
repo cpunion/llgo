@@ -76,6 +76,7 @@ type aBuilder struct {
 	// mutation through setDebugLocation so generated builders can copy it safely.
 	diLocation llvm.DebugLoc
 
+	// Builder copies must reset this history via SetBlockEx before emitting records.
 	locationRecords      callerlocation.Tracker
 	locationRecordsAtEnd bool
 }
