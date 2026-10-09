@@ -17,9 +17,12 @@
 // Package callerlocation simplifies compiler-generated source location records.
 package callerlocation
 
-import "github.com/xgo-dev/llvm"
+import (
+	"github.com/xgo-dev/llgo/ssa"
+	"github.com/xgo-dev/llvm"
+)
 
-const runtimePrefix = "github.com/xgo-dev/llgo/runtime/internal/runtime."
+const runtimePrefix = ssa.PkgRuntime + "."
 
 // DeduplicateWasmRecords removes identical location records within a basic
 // block when no other call intervenes and the debug locations match. Large
