@@ -764,6 +764,11 @@ func (p *context) funcKind(vfn ssa.Value) int {
 			}
 		}
 	}
+	if vfn != nil {
+		if signature, ok := vfn.Type().Underlying().(*types.Signature); ok && llssa.HasNameValist(signature) {
+			return fnHasVArg
+		}
+	}
 	return fnNormal
 }
 
