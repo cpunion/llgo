@@ -51,19 +51,14 @@ runs:
         # Avoid Bash-based pruning, which has failed intermittently on ARM64.
         cache: false
 
-    - name: Set Windows GDB cache date
-      if: runner.os == 'Windows'
-      id: cache_date
-      shell: pwsh
-      run: |
-        "date=$(Get-Date -AsUTC -Format yyyy-MM-dd)" >> $env:GITHUB_OUTPUT
-
     - name: Cache Windows GDB packages
       uses: actions/cache@v6
       if: runner.os == 'Windows'
       with:
         path: ${{ steps.msys2.outputs.msys2-location }}/var/cache/pacman/pkg
-        key: llgo-msys2-gdb-${{ runner.arch }}-${{ steps.cache_date.outputs.date }}
+        key: llgo-msys2-gdb-${{ runner.arch }}-${{ github.run_id }}
+        restore-keys: |
+          llgo-msys2-gdb-${{ runner.arch }}-
 
     - name: Populate Windows GDB package trust
       if: runner.os == 'Windows'
