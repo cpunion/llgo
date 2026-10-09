@@ -289,7 +289,7 @@ class CollectorSignalTests(unittest.TestCase):
             with self.assertRaises(fixture.LLDBTestException):
                 debugger.check_target_contract(replace(after, triple=triple))
 
-    def test_only_collector_signals_are_delivered_and_continued(self):
+    def test_only_runtime_signals_are_delivered_and_continued(self):
         lldb.eStateStopped = 5
         lldb.eStopReasonSignal = 5
         lldb.eStopReasonBreakpoint = 3
@@ -307,15 +307,15 @@ class CollectorSignalTests(unittest.TestCase):
         process.__iter__.return_value = [thread]
         thread.GetStopReason.return_value = lldb.eStopReasonSignal
         signals = process.GetUnixSignals.return_value
-        signals.GetSignalNumberFromName.side_effect = {"SIGPWR": 30, "SIGXCPU": 24}.get
-        for signal_number in (30, 24):
+        signals.GetSignalNumberFromName.side_effect = {"SIGPWR": 30, "SIGXCPU": 24, "SIGURG": 23}.get
+        for signal_number in (30, 24, 23):
             with self.subTest(signal=signal_number):
                 thread.GetStopReason.return_value = lldb.eStopReasonSignal
                 thread.GetStopReasonDataAtIndex.return_value = signal_number
                 process.Continue.side_effect = lambda: setattr(
                     thread.GetStopReason, "return_value", lldb.eStopReasonBreakpoint)
                 process.Continue.reset_mock()
-                debugger.continue_gc_signals()
+                debugger.continue_runtime_signals()
                 process.Continue.assert_called_once()
                 signals.SetShouldStop.assert_any_call(signal_number, False)
                 signals.SetShouldSuppress.assert_any_call(signal_number, False)
@@ -323,7 +323,7 @@ class CollectorSignalTests(unittest.TestCase):
         thread.GetStopReason.return_value = lldb.eStopReasonSignal
         thread.GetStopReasonDataAtIndex.return_value = 11
         process.Continue.reset_mock()
-        debugger.continue_gc_signals()
+        debugger.continue_runtime_signals()
         process.Continue.assert_not_called()
         # A selected GC stop cannot resume past another thread's real fault.
         other_fault = Mock()
@@ -331,7 +331,7 @@ class CollectorSignalTests(unittest.TestCase):
         other_fault.GetStopReasonDataAtIndex.return_value = 11
         process.__iter__.return_value = [thread, other_fault]
         thread.GetStopReasonDataAtIndex.return_value = 30
-        debugger.continue_gc_signals()
+        debugger.continue_runtime_signals()
         process.Continue.assert_not_called()
         thread.GetStopReasonDataAtIndex.return_value = 11
         # A second thread at the right source line cannot hide a real fault.
