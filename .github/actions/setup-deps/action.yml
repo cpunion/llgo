@@ -544,7 +544,7 @@ runs:
         path-type: inherit
         update: true
         # Cache dependency downloads below instead of bootstrap packages.
-        # This also avoids Bash-based paccache pruning on Windows ARM64.
+        # Avoid Bash-based pruning, which has failed intermittently on ARM64.
         cache: false
 
     - name: Cache Windows MinGW packages

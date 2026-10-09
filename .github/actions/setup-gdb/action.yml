@@ -48,17 +48,27 @@ runs:
         path-type: minimal
         update: false
         # Cache dependency downloads below instead of bootstrap packages.
-        # This also avoids Bash-based paccache pruning on Windows ARM64.
+        # Avoid Bash-based pruning, which has failed intermittently on ARM64.
         cache: false
+
+    - name: Select Windows GDB package cache week
+      if: runner.os == 'Windows'
+      id: package_cache
+      shell: pwsh
+      run: |
+        $now = [DateTime]::UtcNow
+        $monday = $now.Date.AddDays(-(([int]$now.DayOfWeek + 6) % 7))
+        "week=$($monday.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture))" >> $env:GITHUB_OUTPUT
 
     - name: Cache Windows GDB packages
       uses: actions/cache@v6
       if: runner.os == 'Windows'
       with:
         path: ${{ steps.msys2.outputs.msys2-location }}/var/cache/pacman/pkg
-        key: llgo-msys2-gdb-${{ runner.arch }}-${{ hashFiles('.github/actions/setup-gdb/action.yml') }}
+        key: llgo-msys2-gdb-${{ runner.arch }}-${{ steps.package_cache.outputs.week }}-${{ hashFiles('.github/actions/setup-gdb/action.yml') }}
+        # Start fresh each week so superseded package versions do not accumulate.
         restore-keys: |
-          llgo-msys2-gdb-${{ runner.arch }}-
+          llgo-msys2-gdb-${{ runner.arch }}-${{ steps.package_cache.outputs.week }}-
 
     - name: Populate Windows GDB package trust
       if: runner.os == 'Windows'
