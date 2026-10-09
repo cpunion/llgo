@@ -208,20 +208,6 @@ func TestConfigCloneDropsGeneratedCoverageOverlay(t *testing.T) {
 	}
 }
 
-func TestUseShadowStack(t *testing.T) {
-	t.Setenv(llgoShadowStack, "0")
-	if !useShadowStack("wasm") {
-		t.Fatal("WebAssembly must use the software shadow stack")
-	}
-	if useShadowStack("amd64") {
-		t.Fatal("native target unexpectedly enabled the shadow stack")
-	}
-	t.Setenv(llgoShadowStack, "1")
-	if !useShadowStack("amd64") {
-		t.Fatal("native target did not honor LLGO_SHADOW_STACK=1")
-	}
-}
-
 func TestResolveBuildConfigDefaultsAndValidation(t *testing.T) {
 	resolved, err := resolveBuildConfig(&Config{
 		BuildMode:    BuildModeCArchive,

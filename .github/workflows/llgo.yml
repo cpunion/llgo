@@ -210,9 +210,6 @@ jobs:
           export LLGO_TEST_LLGEN="$RUNNER_TEMP/llgo-bin/llgen${tool_suffix}"
           dev/test_go_version.sh 1.27
 
-          LLGO_SHADOW_STACK=1 "$LLGO" test -a -timeout=3m \
-            -run '^(TestCallerIntrospection|TestDeferredCallerClosingLine|TestCallerPanicTraceback|TestCallerRepanicTraceback|TestRecoverThenDeferredPanic)$' ./test/go
-
           python .github/scripts/check_llgo_coverage.py coverage-llgo.txt
 
           if [[ "$RUNNER_OS" == Windows ]]; then

@@ -671,7 +671,8 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 		// host entries even when selected through raw GOOS/GOARCH rather than a
 		// named -target.
 		ExportRename: conf.Target != "" || export.WasmProfile != crosscompile.WasmProfileNone,
-		ShadowStack:  useShadowStack(conf.Goarch),
+		// Wasm has no inspectable native return addresses for runtime callers.
+		ShadowStack: conf.Goarch == "wasm",
 	}
 	preloadOptions := frontendOptions
 	llssaInitOnce.Do(func() {
@@ -1083,13 +1084,6 @@ func resolveTestPthreadStackSize(conf *Config) {
 // single-worker scheduler and nogc builds keep their existing root model.
 func useThreadLocalGCRoots(conf *Config, wasmGC bool, workers wasmworkers.Config) bool {
 	return wasmGC && (workers.Enabled() || conf.Goos == "wasip1")
-}
-
-func useShadowStack(goarch string) bool {
-	// WebAssembly has no inspectable native return addresses. Its runtime
-	// callers implementation therefore relies on LLGo's selective software
-	// shadow stack; native targets retain the opt-in diagnostic behavior.
-	return goarch == "wasm" || isEnvOn(llgoShadowStack, false)
 }
 
 type initialPackageLink struct {
@@ -4200,7 +4194,6 @@ const llgoWasmWorkers = "LLGO_WASM_WORKERS"
 const llgoStdioNobuf = "LLGO_STDIO_NOBUF"
 const llgoFullRpath = "LLGO_FULL_RPATH"
 const llgoBuildCache = "LLGO_BUILD_CACHE"
-const llgoShadowStack = "LLGO_SHADOW_STACK"
 
 // for Plan9 asm translation debug
 const llgoPlan9ASMPkgs = "LLGO_PLAN9ASM_PKGS"
