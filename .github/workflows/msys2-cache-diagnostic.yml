@@ -1,0 +1,61 @@
+name: MSYS2 cache diagnostic
+
+on:
+  push:
+    branches: [codex/diagnose-msys2-cache-20261009]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: ${{ matrix.profile }} (${{ matrix.os }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-11-arm
+            profile: mingw
+          - os: windows-2022
+            profile: mingw
+          - os: windows-11-arm
+            profile: gdb
+          - os: windows-11-arm
+            profile: gdb-contrib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Set up MSYS2 with the original package cache
+        id: msys2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e
+        env:
+          __SETUP_MSYS2_USE_MAIN_MIRROR_ONLY: "true"
+        with:
+          msystem: ${{ runner.arch == 'ARM64' && 'CLANGARM64' || 'CLANG64' }}
+          release: ${{ matrix.profile != 'mingw' || runner.arch != 'ARM64' }}
+          location: ${{ runner.temp }}/llgo-cache-diagnostic
+          path-type: ${{ matrix.profile == 'mingw' && 'inherit' || 'minimal' }}
+          update: ${{ matrix.profile == 'mingw' }}
+          install: ${{ matrix.profile == 'gdb' && '' || 'pacman-contrib' }}
+          cache: true
+
+      - name: Trace cache prerequisites and pruning
+        if: always()
+        shell: msys2 {0}
+        run: |
+          set -uo pipefail
+          printf 'MSYSTEM=%s\nPATH=%s\n' "$MSYSTEM" "$PATH"
+          uname -a
+          for tool in bash pacman pacman-conf paccache pacsort awk xargs du; do
+            command -v "$tool"
+          done
+          pacman -Q pacman-contrib
+          printf '\nDirect paccache version:\n'
+          paccache --version
+          version_status=$?
+          printf 'version_status=%d\n' "$version_status"
+          printf '\nInstalled-package pruning trace:\n'
+          /usr/bin/bash -x /usr/bin/paccache -r -f -u -k0
+          prune_status=$?
+          printf 'prune_status=%d\n' "$prune_status"
+          test "$version_status" -eq 0 && test "$prune_status" -eq 0
