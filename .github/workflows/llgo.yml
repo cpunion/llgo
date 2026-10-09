@@ -210,6 +210,9 @@ jobs:
           export LLGO_TEST_LLGEN="$RUNNER_TEMP/llgo-bin/llgen${tool_suffix}"
           dev/test_go_version.sh 1.27
 
+          LLGO_SHADOW_STACK=1 "$LLGO" test -a -timeout=3m \
+            -run '^(TestCallerIntrospection|TestDeferredCallerClosingLine|TestCallerPanicTraceback|TestCallerRepanicTraceback|TestRecoverThenDeferredPanic)$' ./test/go
+
           python .github/scripts/check_llgo_coverage.py coverage-llgo.txt
 
           if [[ "$RUNNER_OS" == Windows ]]; then
@@ -910,7 +913,7 @@ jobs:
           dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
           echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
-      - name: Test reflected method value calls
+      - name: Test reflected method calls and large initializers
         if: matrix.suite == 'runtime'
         shell: bash
         env:
@@ -921,6 +924,11 @@ jobs:
             for target in wasi emscripten emscripten-memory64; do
               "$LLGO" run -O2 -target "$target" -emulator "./test/wasm/$fixture"
             done
+          done
+          for profile in J32-GoJS J32-Emscripten J64-Emscripten W32-WASI; do
+            go test ./test/goroot -run '^TestGoRootRunCases$' -count=1 -timeout=4m -v -args \
+              -llgo "$LLGO" -goroot "$(go env GOROOT)" -directive-mode ci \
+              -case '^cmplxdivide\.go$' -wasm-profile "$profile"
           done
 
       - name: Compare WebAssembly EH encodings and Go/C++ boundary

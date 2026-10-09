@@ -24,6 +24,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/xgo-dev/llgo/internal/callerlocation"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -74,6 +75,9 @@ type aBuilder struct {
 	// diLocation mirrors the LLVM builder state. Route every debug-location
 	// mutation through setDebugLocation so generated builders can copy it safely.
 	diLocation llvm.DebugLoc
+
+	locationRecords      callerlocation.Tracker
+	locationRecordsAtEnd bool
 }
 
 // Builder represents a builder for creating instructions in a function.
@@ -132,6 +136,8 @@ func (b Builder) SetBlockEx(blk BasicBlock, pos InsertPoint, setBlk bool) {
 	if b.Func != blk.fn {
 		panic("mismatched function")
 	}
+	b.locationRecords = callerlocation.Tracker{}
+	b.locationRecordsAtEnd = pos == AtEnd
 	switch pos {
 	case AtEnd:
 		b.impl.SetInsertPointAtEnd(blk.last)

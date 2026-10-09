@@ -391,7 +391,6 @@ func TestObservedFailuresHaveXFailClassifications(t *testing.T) {
 		{version: "go1.26.7", platform: "windows-msvc/386", tc: testCase{RelPath: "fixedbugs/issue23305.go", Directive: "run"}},
 		{version: "go1.26.7", platform: "windows-msvc/386", tc: testCase{RelPath: "fixedbugs/issue42032.go", Directive: "run"}},
 		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "init1.go", Directive: "run"}},
-		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "cmplxdivide.go", Directive: "run"}},
 		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "typeparam/chansimp.go", Directive: "rundir"}},
 		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "fixedbugs/issue5089.go", Directive: "errorcheck"}},
 		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "fixedbugs/issue59680.go", Directive: "run"}},
