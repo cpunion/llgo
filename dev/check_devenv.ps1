@@ -1,5 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
+if (-not $env:LLGO_ROOT) {
+  throw "Enter the development environment with 'mise -C dev en'."
+}
 if ($env:GOFLAGS -ne '-tags=byollvm') { throw 'GOFLAGS must enable byollvm' }
 if ((go env GOVERSION) -ne ('go' + (Get-Content (Join-Path $env:LLGO_ROOT '.go-version')).Trim())) { throw 'Go must match .go-version' }
 if (-not ((llvm-config --version) -match '^22\.')) { throw 'LLVM 22 is required' }

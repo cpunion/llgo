@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+: "${LLGO_ROOT:?enter the development environment with 'mise -C dev en'}"
 test "${GOFLAGS:-}" = '-tags=byollvm'
 [[ "$(go env GOVERSION)" == "go$(cat "$LLGO_ROOT/.go-version")" ]]
 [[ "$(llvm-config --version)" == 22.* ]]
