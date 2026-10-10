@@ -128,7 +128,7 @@ func godebugFixture(t *testing.T) string {
 }
 
 func godebugConfig(mode Mode) *Config {
-	return &Config{Mode: mode, Goos: runtime.GOOS, Goarch: runtime.GOARCH, OptLevel: optlevel.O0}
+	return &Config{Mode: mode, BuildMode: BuildModeExe, Goos: runtime.GOOS, Goarch: runtime.GOARCH, OptLevel: optlevel.O0}
 }
 
 func godebugGo(t *testing.T, dir string, args ...string) string {

@@ -850,7 +850,7 @@ jobs:
     if: needs.prepare.outputs.run_code_ci == 'true'
     needs: prepare
     name: wasm-runtime (${{ matrix.suite }})
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
