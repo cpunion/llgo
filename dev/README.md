@@ -3,45 +3,70 @@
 This directory contains reproducible host environments and scripts for running
 LLGo locally or inside reusable Linux dev containers.
 
-## Host development environments
+## Host development environment
 
-| Environment | Configuration | Native platforms | Start from the repository root |
-| --- | --- | --- | --- |
-| [Pixi](https://pixi.sh/latest/installation/) | `pixi.toml`, `pixi.lock` | Linux x86-64/ARM64, macOS Intel/ARM64, Windows x86-64 | `pixi shell --manifest-path dev/pixi.toml` |
-| [Nix](https://nix.dev/install-nix) | `flake.nix`, `flake.lock` | Linux x86-64/ARM64, macOS Intel/ARM64 | `nix develop ./dev` |
+The root [mise.toml](../mise.toml) and [mise.lock](../mise.lock) define the host
+development environment. Install [mise](https://mise.jdx.dev/installing-mise.html)
+2026.10.7 or newer, then start from the repository root:
 
-Both shells provide Go 1.27, LLVM/Clang/LLD 22, and the native libraries used
-by LLGo. Pixi needs only its standalone executable; it downloads the pinned
-packages on first use. Nix runs on Windows through WSL2, while Pixi runs on
-native Windows. The Windows Pixi shell targets the x86-64 host and uses the
-system's Windows SDK and C runtime. Specialized optional packages such as
-cJSON, Python, and LLDB are not part of Pixi's default environment.
-
-CI builds LLGo and runs a small compiled program in each environment on all
-listed platforms; the Nix CI also checks Windows through WSL2.
-
-On Windows, `pixi shell` starts a temporary PowerShell script. If PowerShell's
-execution policy is `Restricted`, allow local scripts for the current session
-before starting the shell (this does not change the user or machine policy):
-
-```powershell
-Set-ExecutionPolicy -Scope Process RemoteSigned
-pixi shell --manifest-path .\dev\pixi.toml
+```sh
+mise trust
+mise install --locked
+mise run build
+mise run check
 ```
 
-If the same worktree is shared with macOS over a mapped Windows drive, keep
-Windows' Pixi environment on the local disk so it does not reuse macOS's
-`dev/.pixi/envs/default`. Pixi resolves mapped shares to UNC paths, where its
-automatic Windows batch activation is unreliable. From the repository root on
-the mapped drive, use a CMD shell with explicit activation instead:
+`mise run build` builds `llgo` (`llgo.exe` on Windows). `mise run check` also
+runs a compiled Go program and a native dependency check that calls GC,
+libffi, OpenSSL, SQLite, libuv, and zlib. CI runs these checks on all supported
+host platforms:
 
-```powershell
-pixi config set --global detached-environments true
-pixi run --manifest-path .\dev\pixi.toml --frozen cmd /k "call dev\activate_pixi.bat"
+| Host | Architectures |
+| --- | --- |
+| Linux | x86-64, ARM64 |
+| macOS | Intel, ARM64 |
+| Windows | x86-64, native PowerShell/CMD |
+
+The Go version comes from [`.go-version`](../.go-version). LLVM/Clang/LLD 22,
+pkg-config, and the native libraries are installed by mise's built-in `conda:`
+backend directly from conda-forge. No additional package manager is required.
+macOS requires the Xcode Command Line Tools (`xcode-select --install`). Windows
+requires the Visual Studio C++ Build Tools with the Windows SDK and the
+x86-64 C++ toolchain. Python, LLDB, cJSON, and cross-compilers are optional and
+are not included in this environment.
+
+Use `mise exec -- <command>` to run other commands with the development
+environment, or `mise en` to enter a shell and `exit` to leave it. For example:
+
+```sh
+mise exec -- go build ./cmd/llgo
+mise exec -- ./llgo run ./dev/_mise_smoke
 ```
 
-The first command is a one-time setting for the Windows user. `exit` leaves the
-CMD shell. The mapped drive must be available in the session running Pixi.
+On Windows, use `.\llgo.exe` in place of `./llgo`. mise installs tools in its
+user data directory, so a worktree shared between macOS and Windows does not
+share a platform-specific package environment. Keep `MISE_DATA_DIR` local to
+each host if you override it.
+
+The configuration enables the LLVM Go bindings' `byollvm` tag and obtains
+headers and linker flags from `llvm-config`. If you supply `-tags` explicitly,
+include `byollvm` in your tag list. Native packages have separate installation
+directories, which the configuration exposes through header, library,
+pkg-config, and runtime search paths. Linux compiler wrappers activate the
+compiler's own prefix and pass its sysroot to LLD. Windows translates LLVM's
+static library names into flags accepted by Go's cgo linker.
+
+To update dependencies, edit `mise.toml` (or `.go-version` for Go), then
+regenerate the lockfile for every supported platform and run the checks:
+
+```sh
+mise lock --platform linux-x64,linux-arm64,macos-x64,macos-arm64,windows-x64
+mise install --locked
+mise run check
+```
+
+Commit both the configuration changes and `mise.lock`. Installation uses
+locked mode to keep each platform's package versions and checksums fixed.
 
 ## Containers and scripts
 

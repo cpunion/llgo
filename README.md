@@ -330,47 +330,29 @@ llgo run .
 
 Use the platform package manager instructions below whenever possible.
 
-### with Pixi (development)
+### with mise (development)
 
-[Pixi](https://pixi.sh/latest/installation/) is a single executable; it
-installs the versions pinned in [the development lock file](dev/pixi.lock)
-without a separate Conda installation. From the repository root:
-
-```sh
-pixi shell --manifest-path dev/pixi.toml
-go build ./cmd/llgo
-./llgo version
-```
-
-Pixi runs natively on Linux x86-64/ARM64, macOS Intel/ARM64, and Windows
-x86-64. On Windows, run `llgo.exe version` in PowerShell. It provides the
-compiler toolchain and common native libraries; specialized C packages such as
-cJSON are outside the default environment. See [development tooling](dev/README.md)
-for the platform matrix, CI checks, and Windows PowerShell/shared-worktree setup.
-
-### with Nix (development)
-
-The [Nix flake](dev/flake.nix) provides Go 1.27, LLVM/Clang/LLD 22, and LLGo's
-native build dependencies. Enable Nix's `nix-command` and `flakes` features if
-your installation requires it. From the repository root:
+[mise](https://mise.jdx.dev/installing-mise.html) installs Go, LLVM/Clang/LLD
+22, and common native libraries using the versions pinned in
+[mise.lock](mise.lock). Install mise 2026.10.7 or newer, then run these commands
+from the repository root:
 
 ```sh
-nix develop ./dev
-go build ./cmd/llgo
-./llgo version
+mise trust
+mise install --locked
+mise run build
 ```
 
-The lock file in `dev/` pins the package versions so the same development environment can
-be recreated later. Intel macOS uses the Nixpkgs 26.05 Darwin branch, which is
-supported through the end of 2026; newer Nixpkgs no longer supports that
-platform. The shell uses the LLVM bindings' `byollvm` build tag to find
-Nix-provided headers and libraries. If you pass `-tags` explicitly to a Go
-command, include `byollvm` in that tag list.
+Run `mise exec -- ./llgo version` on Linux/macOS, or
+`mise exec -- .\llgo.exe version` in Windows PowerShell. Use `mise exec --`
+before other development commands, or `mise en` to enter a development shell.
+`mise run check` builds LLGo and checks compiled programs and native libraries.
 
-Nix development shells run natively on Linux and macOS (x86-64 and ARM64).
-On Windows, use Nix inside WSL2. NixOS itself is a Linux distribution and is
-not required for this shell. Python, LLDB, and target-specific cross-compilers
-are optional and are not included in the default shell.
+The environment supports Linux x86-64/ARM64, macOS Intel/ARM64, and native
+Windows x86-64. mise downloads the native packages directly from conda-forge;
+no separate Conda installation is needed. macOS needs the Xcode Command Line
+Tools; Windows needs the Visual Studio C++ Build Tools and Windows SDK.
+See [development tooling](dev/README.md) for prerequisites and configuration.
 
 ### on macOS
 
