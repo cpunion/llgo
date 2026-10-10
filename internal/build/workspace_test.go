@@ -41,6 +41,23 @@ func TestWorkspaceInvalidGoFlags(t *testing.T) {
 	}
 }
 
+func TestWorkspaceBuildRejectsInvalidGoFlagsMetadata(t *testing.T) {
+	bin := t.TempDir()
+	writeBuildTestTool(t, bin, "go")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("LLGO_TEST_GO_CONFIG_HELPER", "invalid-goflags")
+	t.Setenv("GOENV", "off")
+	t.Setenv("GOFLAGS", "")
+	t.Setenv("GOTOOLCHAIN", "local")
+	t.Setenv("GOWORK", "off")
+	// The launcher supplies malformed metadata while the selected compiler
+	// still resolves tool tags. Build must reject it before loading packages.
+	_, err := Build(Invocation{Dir: t.TempDir(), Config: workspaceConfig(ModeBuild)})
+	if err == nil || !strings.Contains(err.Error(), "parse Go package flags:") {
+		t.Fatalf("invalid GOFLAGS metadata was not rejected by Build: %v", err)
+	}
+}
+
 func TestWorkspacePackageListErrors(t *testing.T) {
 	deferred := &packages.Package{Errors: []packages.Error{
 		{Kind: gopackages.ListError, Msg: "# example.com/llgo-only\ngc cannot compile this source"},
