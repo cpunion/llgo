@@ -833,6 +833,10 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 		return nil, err
 	}
 
+	defaultGODEBUG, err := resolveDefaultGODEBUG(cfg, sourcePatchGOROOT, initial, patterns)
+	if err != nil {
+		return nil, err
+	}
 	altPkgPaths := altPkgs(initial, conf, llssa.PkgRuntime)
 	altCfg := *cfg
 	altCfg.Dir = env.LLGoRuntimeDir()
@@ -901,6 +905,7 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 		cTransformer:    cabi.NewTransformer(prog, export.LLVMTarget, export.TargetABI, true),
 		buildTrace:      buildTrace,
 		goVersion:       sourcePatchGoVersion,
+		defaultGODEBUG:  defaultGODEBUG,
 	}
 	defer ctx.closePackageMetas()
 	defer ctx.closePackageArchiveBuffers()
@@ -1686,7 +1691,8 @@ type context struct {
 	// goVersion is the GOVERSION of the GOROOT whose standard library is being
 	// compiled. collectEnvInputs records it through sourceGoVersion; compiled
 	// programs report it through addDefaultRuntimeGlobals as runtime.Version().
-	goVersion string
+	goVersion      string
+	defaultGODEBUG map[string]string // generated entry package ID -> effective defaults
 
 	// go list derived file lists (SFiles, etc.)
 	sfilesCache       map[string][]string // pkg.ID -> absolute .s/.S file paths
@@ -2447,17 +2453,18 @@ func planMainLink(ctx *context, pkg *packages.Package, pkgs []*aPackage) (*mainL
 		return nil, err
 	}
 	gen := genConfig{
-		rtInit:        needRuntime,
-		pyInit:        needPyInit,
-		abiInit:       needAbiInit,
-		packageInits:  packageInits,
-		methodByIndex: methodByIndex,
-		methodByName:  methodByName,
-		abiSymbols:    linkedModuleGlobals(linkedOrder),
-		abiTypes:      ctx.backendAbiTypes(linkedOrder),
-		funcInfo:      funcInfo,
-		pcLineInfo:    pcLineInfo,
-		cExports:      cExports,
+		defaultGODEBUG: ctx.defaultGODEBUG[pkg.ID],
+		rtInit:         needRuntime,
+		pyInit:         needPyInit,
+		abiInit:        needAbiInit,
+		packageInits:   packageInits,
+		methodByIndex:  methodByIndex,
+		methodByName:   methodByName,
+		abiSymbols:     linkedModuleGlobals(linkedOrder),
+		abiTypes:       ctx.backendAbiTypes(linkedOrder),
+		funcInfo:       funcInfo,
+		pcLineInfo:     pcLineInfo,
+		cExports:       cExports,
 	}
 
 	if IsFullRpathEnabled() {

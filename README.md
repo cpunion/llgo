@@ -468,6 +468,16 @@ A real Go executable must remain in an absolute PATH directory. If `go` is a sym
 
 Use `llgo mod init`, `llgo mod tidy`, `llgo mod vendor`, and other `go mod` subcommands to manage modules with the underlying Go toolchain. Arguments, working directory, environment, standard streams, and exit status are preserved. As with `llgo env`, a real Go executable must remain in an absolute PATH directory; links from `go` back to LLGo are skipped to prevent recursion.
 
+Native programs and test executables receive the selected Go toolchain's
+[`GODEBUG` defaults](https://go.dev/doc/godebug), including the `go` and
+`godebug` directives in `go.mod` or `go.work` and selected `//go:debug` source
+directives. Workspace defaults take precedence over module defaults; source
+directives and runtime `GODEBUG` environment settings can override them.
+Each executable receives its own defaults before package initialization,
+including when several programs share cached runtime code. These settings
+affect LLGo-supported standard-library behavior; they do not add support for
+gc-specific runtime features.
+
 Module maintenance does not inject LLGo-specific build tags. Go's `tidy` and `vendor` already consider all build tags except `ignore`, including dependencies imported only by files with `//go:build llgo`.
 
 ## Development tools
