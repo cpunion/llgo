@@ -11,6 +11,8 @@ import (
 // Use a standalone executable so main-package and dependency exports are both
 // exercised through their real C entry points.
 func TestCExportForeignThreadsFromExecutableAndDependency(t *testing.T) {
+	// Keep optional unwind diagnostics out of the fixture's result protocol.
+	t.Setenv("LLGO_DYNUNWIND_DEBUG", "0")
 	switch runtime.GOOS {
 	case "darwin", "linux", "windows":
 	default:
