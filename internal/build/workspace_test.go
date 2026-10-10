@@ -10,6 +10,7 @@ import (
 
 	"github.com/xgo-dev/llgo/internal/optlevel"
 	"github.com/xgo-dev/llgo/internal/packages"
+	gopackages "golang.org/x/tools/go/packages"
 )
 
 func TestWorkspaceRuntimeConfig(t *testing.T) {
@@ -27,6 +28,34 @@ func TestWorkspaceRuntimeConfig(t *testing.T) {
 	}
 	if caller.Dir != "app" || (commandEnv{environ: caller.Env}).lookup("GOWORK") != "/app/go.work" || len(caller.BuildFlags) != 4 {
 		t.Fatal("runtime configuration changed application inputs")
+	}
+}
+
+func TestWorkspaceInvalidGoFlags(t *testing.T) {
+	conf := &packages.Config{Env: []string{"GOFLAGS=keep"}, BuildFlags: []string{"-tags=llgo"}}
+	if err := applyPackageLoadFlags(conf, "'-modfile=unterminated"); err == nil {
+		t.Fatal("invalid quoted flags accepted")
+	}
+	if strings.Join(conf.Env, "|") != "GOFLAGS=keep" || strings.Join(conf.BuildFlags, "|") != "-tags=llgo" {
+		t.Fatal("invalid flags changed the package configuration")
+	}
+}
+
+func TestWorkspacePackageListErrors(t *testing.T) {
+	deferred := &packages.Package{Errors: []packages.Error{
+		{Kind: gopackages.ListError, Msg: "# example.com/llgo-only\ngc cannot compile this source"},
+		{Kind: gopackages.TypeError, Msg: "LLGo must type-check patched source"},
+	}}
+	if err := initialPackageListErrors([]*packages.Package{deferred}); err != nil {
+		t.Fatalf("frontend diagnostics were not deferred: %v", err)
+	}
+	roots := []*packages.Package{deferred, {Errors: []packages.Error{
+		{Kind: gopackages.ListError, Msg: "directory prefix does not contain workspace modules"},
+		{Kind: gopackages.ListError, Msg: "missing package directory"},
+	}}}
+	err := initialPackageListErrors(roots)
+	if err == nil || !strings.Contains(err.Error(), "workspace modules") || !strings.Contains(err.Error(), "missing package directory") || strings.Contains(err.Error(), "gc cannot") {
+		t.Fatalf("package errors were lost or mixed with deferred diagnostics: %v", err)
 	}
 }
 
