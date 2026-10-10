@@ -1036,7 +1036,7 @@ jobs:
           bash dev/test_wasm_stdlib.sh
 
       - name: Run caller and large-function regressions on browser targets
-        if: matrix.suite == 'runtime'
+        if: matrix.suite == 'test-command'
         timeout-minutes: 15
         env:
           LLGO: ${{ runner.temp }}/llgo-bin/llgo
