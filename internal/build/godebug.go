@@ -21,7 +21,7 @@ import (
 func resolveDefaultGODEBUG(cfg *packages.Config, goroot string, roots []*packages.Package, patterns []string) (map[string]string, error) {
 	entries := make(map[string]string)
 	var entryPaths []string
-	fileArguments := false
+	localArguments := false
 	for _, pkg := range roots {
 		if pkg.Name == "main" {
 			entries[pkg.ID] = ""
@@ -31,17 +31,17 @@ func resolveDefaultGODEBUG(cfg *packages.Config, goroot string, roots []*package
 				// their source package with -test recreates the same entry.
 				path = strings.TrimSuffix(path, ".test")
 			}
-			fileArguments = fileArguments || path == "command-line-arguments"
+			localArguments = localArguments || path == "command-line-arguments" || strings.HasPrefix(path, "_/")
 			entryPaths = append(entryPaths, path)
 		}
 	}
 	if len(entries) == 0 {
 		return entries, nil
 	}
-	if !fileArguments {
+	if !localArguments {
 		// Resolve only known entries, avoiding a second wildcard expansion.
-		// File arguments retain their original invocation patterns because
-		// command-line-arguments cannot be passed back as an import path.
+		// File arguments and GOPATH-local packages retain invocation patterns:
+		// their synthetic IDs cannot be passed back as import paths.
 		slices.Sort(entryPaths)
 		patterns = slices.Compact(entryPaths)
 	}

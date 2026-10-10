@@ -176,6 +176,42 @@ func TestDefaultGODEBUGBuildMetadataError(t *testing.T) {
 	}
 }
 
+func TestDefaultGODEBUGGOPATHLocalPackages(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "main.go"), "//go:debug randseednop=0\npackage main\nfunc main() {}\n")
+	writeFile(t, filepath.Join(dir, "main_test.go"), "//go:debug randseednop=0\npackage main\nimport \"testing\"\nfunc TestLocal(t *testing.T) {}\n")
+	environ := withEnv(os.Environ(), "GOENV=off", "GOFLAGS=", "GO111MODULE=off", "GOWORK=off",
+		"GOPATH="+t.TempDir(), "GOTOOLCHAIN=local", "GOPACKAGESDRIVER=off")
+	for _, tests := range []bool{false, true} {
+		for _, pattern := range []string{".", "./..."} {
+			t.Run(fmt.Sprintf("tests=%t/%s", tests, pattern), func(t *testing.T) {
+				cfg := &packages.Config{Dir: dir, Env: environ, Tests: tests, Mode: packages.NeedName}
+				roots, err := gopackages.Load(cfg, pattern)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defaults, err := resolveDefaultGODEBUG(cfg, runtime.GOROOT(), roots, []string{pattern})
+				if err != nil {
+					t.Fatal(err)
+				}
+				entries := 0
+				for _, pkg := range roots {
+					if pkg.Name != "main" || (tests && !strings.HasSuffix(pkg.ID, ".test")) {
+						continue
+					}
+					entries++
+					if !strings.HasPrefix(pkg.ID, "_/") || !strings.Contains(defaults[pkg.ID], "randseednop=0") {
+						t.Fatalf("local entry %q defaults = %q", pkg.ID, defaults[pkg.ID])
+					}
+				}
+				if entries == 0 {
+					t.Fatal("no GOPATH-local entry was checked")
+				}
+			})
+		}
+	}
+}
+
 func TestDefaultGODEBUGPrecedenceAndCache(t *testing.T) {
 	root := godebugFixture(t)
 	for _, tc := range []struct {
