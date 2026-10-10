@@ -24,9 +24,9 @@ $flags = $libraries | ForEach-Object {
   $name = [IO.Path]::GetFileNameWithoutExtension($_) -replace '\.dll$', ''
   '-l' + $name
 }
-# LLVM's runtime dependencies do not always include import libraries. mise
-# installs development packages such as zlib separately, so expose their lib
-# directories explicitly without replacing the SDK/CRT's LIB environment.
+# LLVM's runtime dependencies do not always include import libraries. Expose
+# native development packages' lib directories explicitly without replacing
+# the SDK/CRT's LIB environment.
 $searchDirectories = @($libraryDirectory)
 if ($env:LIBRARY_PATH) {
   $searchDirectories += $env:LIBRARY_PATH -split ';' | Where-Object { $_ }

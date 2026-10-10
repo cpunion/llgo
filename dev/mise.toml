@@ -30,7 +30,7 @@ LLGO_LLD_PREFIX = { value = "{{ tools.lld.path }}", tools = true }
 # Use the full compiler prefix: clangxx is a metapackage, whose actual
 # executables are dependencies and are not exposed by mise's conda launchers.
 _.path = { path = [
-  "{% if os() == 'linux' %}{{ config_root }}/mise-tools{% else %}{{ env.LLGO_CLANG_PREFIX }}/{{ os(windows='Library/bin', macos='bin') }}{% endif %}",
+  "{% if os() == 'linux' %}{{ config_root }}/conda-tools{% else %}{{ env.LLGO_CLANG_PREFIX }}/{{ os(windows='Library/bin', macos='bin') }}{% endif %}",
   "{{ env.LLGO_CLANG_PREFIX }}/{{ os(windows='Library/bin', linux='bin', macos='bin') }}",
   "{{ env.LLGO_LLVM_PREFIX }}/{{ os(windows='Library/bin', linux='bin', macos='bin') }}",
   "{{ env.LLGO_LLD_PREFIX }}/{{ os(windows='Library/bin', linux='bin', macos='bin') }}",
@@ -42,9 +42,9 @@ PKG_CONFIG_PATH = { value = "{% for name in vars.native_libraries | split(pat=',
 # Preserve LIB on Windows so Clang can discover the SDK/CRT automatically or
 # use the caller's Visual Studio environment. pkg-config supplies native -L flags.
 LD_LIBRARY_PATH = { value = "{% if os() == 'linux' %}{{ env.LLGO_CLANG_PREFIX }}/lib:{{ env.LLGO_LLVM_PREFIX }}/lib:{{ env.LIBRARY_PATH }}:${LD_LIBRARY_PATH:-}{% else %}${LD_LIBRARY_PATH:-}{% endif %}", tools = true }
-CC = { value = "{% if os() == 'linux' %}\"{{ config_root }}/mise-tools/clang\"{% elif os() == 'windows' %}clang -fuse-ld=lld -fms-runtime-lib=dll{% else %}clang{% endif %}", tools = true }
-CXX = { value = "{% if os() == 'linux' %}\"{{ config_root }}/mise-tools/clang++\"{% elif os() == 'windows' %}clang++ -fuse-ld=lld -fms-runtime-lib=dll{% else %}clang++{% endif %}", tools = true }
+CC = { value = "{% if os() == 'linux' %}\"{{ config_root }}/conda-tools/clang\"{% elif os() == 'windows' %}clang -fuse-ld=lld -fms-runtime-lib=dll{% else %}clang{% endif %}", tools = true }
+CXX = { value = "{% if os() == 'linux' %}\"{{ config_root }}/conda-tools/clang++\"{% elif os() == 'windows' %}clang++ -fuse-ld=lld -fms-runtime-lib=dll{% else %}clang++{% endif %}", tools = true }
 LLVM_CONFIG = "llvm-config"
 CGO_CPPFLAGS = { value = "{{ exec(command='llvm-config --cppflags') }}", tools = true }
 CGO_CXXFLAGS = "-std=c++17"
-CGO_LDFLAGS = { value = "{% if os() == 'windows' %}{{ exec(command='powershell.exe -NoProfile -ExecutionPolicy Bypass -File mise_windows_ldflags.ps1') }}{% else %}{{ exec(command='llvm-config --ldflags --link-shared --libs all --system-libs') }} \"-Wl,-rpath,{{ env.LLGO_LLVM_PREFIX }}/lib\"{% endif %}", tools = true }
+CGO_LDFLAGS = { value = "{% if os() == 'windows' %}{{ exec(command='powershell.exe -NoProfile -ExecutionPolicy Bypass -File devenv_windows_ldflags.ps1') }}{% else %}{{ exec(command='llvm-config --ldflags --link-shared --libs all --system-libs') }} \"-Wl,-rpath,{{ env.LLGO_LLVM_PREFIX }}/lib\"{% endif %}", tools = true }

@@ -330,13 +330,11 @@ llgo run .
 
 Use the platform package manager instructions below whenever possible.
 
-### with mise (development)
+### with mise or Pixi (development)
 
-[mise](https://mise.jdx.dev/installing-mise.html) installs Go, LLVM/Clang/LLD
-22, and common native libraries using the versions pinned in
-[dev/mise.lock](dev/mise.lock). The configuration lives in
-[dev/mise.toml](dev/mise.toml). Install mise 2026.10.7 or newer, then run these
-commands from the repository root:
+Install [mise](https://mise.jdx.dev/installing-mise.html) or
+[Pixi](https://pixi.prefix.dev/latest/installation/), then enter the environment
+from the repository root:
 
 ```sh
 mise -C dev trust
@@ -344,24 +342,15 @@ mise -C dev install --locked
 mise -C dev en
 ```
 
-In the new shell, return to the repository root and use Go to run or build
-LLGo:
+Or, with Pixi:
 
 ```sh
-cd ..
-go run ./cmd/llgo version
-go build ./cmd/llgo
+cd dev
+pixi shell --locked
 ```
 
-The build creates `llgo` (`llgo.exe` on Windows). mise provides the toolchain
-and dependency environment; run other Go commands in this shell as usual.
-Type `exit` to leave the development shell.
-
-The environment supports Linux x86-64/ARM64, macOS Intel/ARM64, and native
-Windows x86-64. mise downloads the native packages directly from conda-forge;
-no separate Conda installation is needed. macOS needs the Xcode Command Line
-Tools; Windows needs the Visual Studio C++ Build Tools and Windows SDK.
-See [development tooling](dev/README.md) for prerequisites and configuration.
+In either shell, run `cd ..`, then use `go run ./cmd/llgo version` or
+`go build ./cmd/llgo`. See [development tooling](dev/README.md) for details.
 
 ### on macOS
 
