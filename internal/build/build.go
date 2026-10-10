@@ -753,6 +753,9 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	conf.sourceGoVersion = sourceGo.GOVERSION
 	conf.toolTags = slices.Clone(sourceGo.toolTags)
 	cfg.Env = sourceGo.apply(cfg.Env)
+	if err := applyPackageLoadFlags(cfg, sourceGo.GOFLAGS); err != nil {
+		return nil, fmt.Errorf("parse Go package flags: %w", err)
+	}
 	commands.environ = sourceGo.apply(commands.environ)
 	var llgoFiles map[string][]string
 	conf.Overlay, llgoFiles, err = buildSourcePatchOverlayForGOROOT(conf.Overlay, env.LLGoRuntimeDir(), sourcePatchGOROOT, sourcePatchBuildContext{
@@ -791,6 +794,9 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	}
 	if conf.AllowNoBody {
 		allowMissingFunctionBodies(initial)
+	}
+	if err := initialPackageListErrors(initial); err != nil {
+		return nil, err
 	}
 	mode := conf.Mode
 	var multiOutputDir string
@@ -835,10 +841,9 @@ func buildInvocation(inv Invocation, plan *initialBuildPlan) (result []Package, 
 	}
 
 	altPkgPaths := altPkgs(initial, conf, llssa.PkgRuntime)
-	altCfg := *cfg
-	altCfg.Dir = env.LLGoRuntimeDir()
+	altCfg := runtimePackageConfig(cfg, env.LLGoRuntimeDir())
 	// The runtime submodule may otherwise select a different toolchain from its go.mod.
-	altCfg.Env = withResolvedGoToolchain(cfg.Env, sourcePatchGoVersion)
+	altCfg.Env = withResolvedGoToolchain(altCfg.Env, sourcePatchGoVersion)
 	loadAltSpan := buildTrace.startCoordinator("load runtime packages", map[string]any{
 		"packages": slices.Clone(altPkgPaths),
 	})

@@ -2403,12 +2403,13 @@ func TestTestMultiplePackagesWithOutputFile(t *testing.T) {
 
 func TestCmpTestNonexistentPatternReturnsError(t *testing.T) {
 	cfg := &Config{Mode: ModeCmpTest}
-	_, err := Do([]string{"./this/path/does/not/exist/..."}, cfg)
+	const pattern = "./this/path/does/not/exist/..."
+	_, err := Do([]string{pattern}, cfg)
 	if err == nil {
 		t.Fatal("expected error for nonexistent cmptest pattern")
 	}
-	if !strings.Contains(err.Error(), "cannot build SSA for packages") && !strings.Contains(err.Error(), "no such file or directory") {
-		t.Fatalf("unexpected error: %v", err)
+	if !strings.Contains(err.Error(), pattern) {
+		t.Fatalf("package diagnostic lost the requested pattern: %v", err)
 	}
 }
 
