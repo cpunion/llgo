@@ -18,6 +18,7 @@ import (
 	"github.com/xgo-dev/llgo/internal/optlevel"
 	"github.com/xgo-dev/llgo/internal/packages"
 	llssa "github.com/xgo-dev/llgo/ssa"
+	gopackages "golang.org/x/tools/go/packages"
 )
 
 const godebugMainSource = `package main
@@ -147,6 +148,31 @@ func godebugAssertProgram(t *testing.T, app, want string) {
 	output, err := exec.Command(app).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(output)) != want {
 		t.Fatalf("GODEBUG application: %v, output %q, want %q", err, output, want)
+	}
+}
+
+func TestDefaultGODEBUGBuildMetadataError(t *testing.T) {
+	dir := godebugFixture(t)
+	writeFile(t, filepath.Join(dir, "go.mod"), "module example.com/app\ngo 1.27.0\n")
+	source := filepath.Join(dir, "main.go")
+	writeFile(t, source, "package main\nfunc main() {}\n")
+	// An external package driver can load a main that the selected Go
+	// toolchain cannot resolve. Propagate that metadata error through Build.
+	const id = "example.com/driver-only"
+	response, err := json.Marshal(gopackages.DriverResponse{Compiler: "gc", Arch: runtime.GOARCH, GoVersion: 27,
+		Roots: []string{id}, Packages: []*packages.Package{{ID: id, PkgPath: id, Name: "main",
+			GoFiles: []string{source}, CompiledGoFiles: []string{source}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOPACKAGESDRIVER", writeBuildTestTool(t, t.TempDir(), "driver"))
+	t.Setenv("LLGO_TEST_GODEBUG_METADATA", string(response))
+	t.Setenv("LLGO_TEST_GODEBUG_ARGS", filepath.Join(t.TempDir(), "args.json"))
+	t.Setenv("GOPROXY", "off")
+	t.Setenv("GOSUMDB", "off")
+	_, err = Build(Invocation{Dir: dir, Config: godebugConfig(ModeBuild)})
+	if err == nil || !strings.Contains(err.Error(), "default GODEBUG for "+id+":") || !strings.Contains(err.Error(), "no required module provides package") {
+		t.Fatalf("Build did not propagate the Go metadata diagnostic: %v", err)
 	}
 }
 
