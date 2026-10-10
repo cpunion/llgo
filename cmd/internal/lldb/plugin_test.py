@@ -308,17 +308,41 @@ class CollectorSignalTests(unittest.TestCase):
         thread.GetStopReason.return_value = lldb.eStopReasonSignal
         signals = process.GetUnixSignals.return_value
         signals.GetSignalNumberFromName.side_effect = {"SIGPWR": 30, "SIGXCPU": 24, "SIGURG": 23}.get
+        resumed = Mock()
+        resumed.Fail.return_value = False
+
+        def hit_breakpoint():
+            thread.GetStopReason.return_value = lldb.eStopReasonBreakpoint
+            return resumed
+
         for signal_number in (30, 24, 23):
             with self.subTest(signal=signal_number):
                 thread.GetStopReason.return_value = lldb.eStopReasonSignal
                 thread.GetStopReasonDataAtIndex.return_value = signal_number
-                process.Continue.side_effect = lambda: setattr(
-                    thread.GetStopReason, "return_value", lldb.eStopReasonBreakpoint)
+                process.Continue.side_effect = hit_breakpoint
                 process.Continue.reset_mock()
                 debugger.continue_runtime_signals()
                 process.Continue.assert_called_once()
                 signals.SetShouldStop.assert_any_call(signal_number, False)
                 signals.SetShouldSuppress.assert_any_call(signal_number, False)
+        # Repeated snapshot polls can produce more than four SIGURG stops.
+        thread.GetStopReason.return_value = lldb.eStopReasonSignal
+        thread.GetStopReasonDataAtIndex.return_value = 23
+        process.Continue.reset_mock()
+
+        def finish_snapshots():
+            if process.Continue.call_count == 8:
+                thread.GetStopReason.return_value = lldb.eStopReasonBreakpoint
+            return resumed
+
+        process.Continue.side_effect = finish_snapshots
+        debugger.continue_runtime_signals()
+        self.assertEqual(process.Continue.call_count, 8)
+        # A failed continue must not turn the signal-draining loop into a hang.
+        thread.GetStopReason.return_value = lldb.eStopReasonSignal
+        resumed.Fail.return_value = True
+        with self.assertRaisesRegex(fixture.LLDBTestException, "Cannot continue"):
+            debugger.continue_runtime_signals()
         # SIGSEGV must remain a visible failure, even after GC signal setup.
         thread.GetStopReason.return_value = lldb.eStopReasonSignal
         thread.GetStopReasonDataAtIndex.return_value = 11

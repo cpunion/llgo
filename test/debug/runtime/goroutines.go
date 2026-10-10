@@ -6,6 +6,8 @@ import (
 	"unsafe"
 )
 
+const goroutineWaiting = 4 // _Gwaiting in runtime/internal/runtime/runtime2.go.
+
 // Use the native snapshot API rather than walking the live debugger registry.
 // runtime.Stack infers channel wait reasons from frames, even before the
 // worker publishes the waiting state that the debugger actually reads.
@@ -31,7 +33,7 @@ func parkedWorkers() int {
 		var created, count uintptr
 		var state uint32
 		threadInfo(s, &id, &parent, &created, &count, &state)
-		if parent == 1 && state == 4 { // _Gwaiting
+		if parent == 1 && state == goroutineWaiting {
 			waiting++
 		}
 	}

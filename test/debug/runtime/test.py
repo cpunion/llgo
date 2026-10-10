@@ -588,9 +588,7 @@ class LLDBDebugger:
             for name in ("SIGPWR", "SIGXCPU", "SIGURG")
         }
         runtime_signals.discard(-1)
-        for _attempt in range(4):
-            if self.process.GetState() != lldb.eStateStopped:
-                return
+        while self.process.GetState() == lldb.eStateStopped:
             thread = self.process.GetSelectedThread()
             if (thread.GetStopReason() != lldb.eStopReasonSignal or
                     thread.GetStopReasonDataAtIndex(0) not in runtime_signals):
@@ -605,7 +603,9 @@ class LLDBDebugger:
                 signals.SetShouldStop(number, False)
                 signals.SetShouldNotify(number, False)
                 signals.SetShouldSuppress(number, False)
-            self.process.Continue()
+            error = self.process.Continue()
+            if error.Fail():
+                raise LLDBTestException(f"Cannot continue runtime signal: {error}")
 
     def get_selected_frame(self) -> lldb.SBFrame:
         if not self.frame or not self.frame.IsValid():

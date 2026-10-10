@@ -541,10 +541,12 @@ func (p Function) closureCtx(b Builder) Expr {
 		}
 		ptr := p.Env()
 		if b.blk.Index() != 0 {
-			blk := b.impl.GetInsertBlock()
+			blk := *b.blk
+			// A synthetic branch can be ahead of the logical block's tail.
+			blk.last = b.impl.GetInsertBlock()
 			b.SetBlockEx(p.blks[0], AtStart, false)
 			p.freeVars = b.Load(ptr)
-			b.impl.SetInsertPointAtEnd(blk)
+			b.SetBlockEx(&blk, AtEnd, false)
 		} else {
 			p.freeVars = b.Load(ptr)
 		}

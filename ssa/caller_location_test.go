@@ -47,6 +47,55 @@ func TestLocationRecordInsertionPoint(t *testing.T) {
 	}
 }
 
+func TestLocationRecordAfterClosureContext(t *testing.T) {
+	for _, synthetic := range []bool{false, true} {
+		name := "block"
+		if synthetic {
+			name = "synthetic block"
+		}
+		t.Run(name, func(t *testing.T) {
+			prog := NewProgram(nil)
+			defer prog.Dispose()
+			pkg := prog.NewPackage("foo", "foo")
+			fields := []*types.Var{types.NewField(0, nil, "x", types.Typ[types.Int], false)}
+			env := types.NewParam(0, nil, "$env", types.NewPointer(types.NewStruct(fields, nil)))
+			fn := pkg.NewEnvFunc("foo.f", NoArgsNoRet, InGo, env, false)
+			b := fn.MakeBody(2)
+			defer b.Dispose()
+			b.Jump(fn.Block(1))
+			b.SetBlock(fn.Block(1))
+			callee := pkg.NewFunc("record", NoArgsNoRet, InGo)
+			check := func() {
+				block := b.impl.GetInsertBlock()
+				fn.FreeVar(b, 0) // Hoists the first environment load to the entry block.
+				if b.impl.GetInsertBlock() != block {
+					t.Fatal("closure context changed the insertion block")
+				}
+				emitted := 0
+				for range 2 {
+					b.EmitLocationRecord("panic", "foo.f", "foo.go", 1, func() Expr {
+						emitted++
+						return b.Call(callee.Expr)
+					})
+				}
+				if emitted != 1 {
+					t.Fatalf("emitted %d records after closure context load, want 1", emitted)
+				}
+			}
+			if synthetic {
+				b.IfThen(prog.BoolVal(true), check)
+			} else {
+				check()
+			}
+			b.Return()
+			b.EndBuild()
+			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestLocationRecordDebugPositions(t *testing.T) {
 	prog := NewProgram(nil)
 	defer prog.Dispose()
