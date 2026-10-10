@@ -1,4 +1,12 @@
 @echo off
+rem Conda places go.exe outside GOROOT; LLGo uses GOROOT/bin/go.exe.
+if not exist "%CONDA_PREFIX%\go\bin" (
+  mkdir "%CONDA_PREFIX%\go\bin"
+  if errorlevel 1 exit /b 1
+)
+copy /y "%CONDA_PREFIX%\bin\go.exe" "%CONDA_PREFIX%\go\bin\go.exe" >nul
+if errorlevel 1 exit /b 1
+
 set "GOFLAGS=-tags=byollvm"
 set "GOTOOLCHAIN=local"
 set "CGO_ENABLED=1"
