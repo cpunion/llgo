@@ -178,7 +178,7 @@ func LoadExWithGoVersion(dedup Deduper, sizes func(sizes types.Sizes, compiler, 
 
 	// When type information or custom syntax parsing is requested, we do not let
 	// packages.Load typecheck or parse directly. We request files, imports, embed patterns,
-	// and module metadata from packages.Load (go list driver), and perform custom parsing
+	// and module metadata via LoadMetadata, and perform custom parsing
 	// and typechecking ourselves.
 	driverCfg.Mode = (origMode &^ (NeedTypes | NeedTypesSizes | NeedTypesInfo | NeedSyntax)) | NeedCompiledGoFiles | NeedImports | NeedName | NeedFiles
 	if origMode&(NeedEmbedPatterns|NeedEmbedFiles|NeedTypes|NeedTypesInfo|NeedSyntax) != 0 {

@@ -5,11 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"go/types"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -227,8 +232,23 @@ func TestLoadMetadataExternalDriver(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	cfg := metadataTestConfig(t)
 	cfg.Mode = NeedName | NeedFiles | NeedImports | NeedTypesSizes
-	for _, selection := range []string{driver, "gopackagesdriver", ""} {
+	relDir := "relative driver with spaces"
+	if err := os.Mkdir(filepath.Join(cfg.Dir, relDir), 0755); err != nil {
+		t.Fatal(err)
+	}
+	relative := copyDriverTestTool(t, filepath.Join(cfg.Dir, relDir), "custom-driver")
+	relative, err := filepath.Rel(cfg.Dir, relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, selection := range []string{driver, "gopackagesdriver", "", relative} {
 		cfg.Env = replaceEnvironment(cfg.Env, "GOPACKAGESDRIVER", selection)
+		// x/tools sets cmd.Dir = cfg.Dir even for relative driver paths.
+		// Compare its original behavior with the worker, whose cwd is cfg.Dir.
+		baseline, err := gopackages.Load(cfg, "driver:handled")
+		if err != nil || len(baseline) != 1 || baseline[0].ID != "external" {
+			t.Fatalf("original external driver %q: %v / %v", selection, err, baseline)
+		}
 		pkgs, err := LoadMetadata(cfg, "driver:handled")
 		if err != nil || len(pkgs) != 1 || pkgs[0].ID != "external" {
 			t.Fatalf("external driver %q: %v / %v", selection, err, pkgs)
@@ -290,6 +310,7 @@ func TestLoadMetadataErrorsAndCancellation(t *testing.T) {
 func TestPackageMetadataRoundTrip(t *testing.T) {
 	dep := &Package{ID: "dependency", PkgPath: "example.com/dep", Name: "dep"}
 	root := &Package{ID: "root", PkgPath: "example.com/root", Name: "root", Imports: map[string]*Package{"example.com/dep": dep}}
+	root.Imports["example.com/partial"] = &Package{ID: "partial"}
 	response := metadataResponse{
 		Roots: []string{"root"}, Compiler: "gc", Arch: "386",
 		Packages: []packageMetadata{
@@ -319,5 +340,60 @@ func TestPackageMetadataRoundTrip(t *testing.T) {
 	}
 	if decoded.Packages[1].Package.Imports == nil {
 		t.Fatal("empty import map became nil")
+	}
+	if stub := pkg.Imports["example.com/partial"]; stub == nil || stub.ID != "partial" {
+		t.Fatal("partial metadata lost its import stub")
+	}
+}
+
+func TestMetadataDriverRequiresMarker(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(executable, metadataDriverArg)
+	cmd.Env = replaceEnvironment(os.Environ(), metadataDriverEnv, "")
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "flag provided but not defined") {
+		t.Fatalf("private argument alone entered the worker: %v / %s", err, output)
+	}
+	cmd = exec.Command(executable, metadataDriverArg)
+	cmd.Env = replaceEnvironment(os.Environ(), metadataDriverEnv, "1")
+	cmd.Stdin = strings.NewReader("{")
+	output, err = cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "unexpected EOF") {
+		t.Fatalf("invalid worker input: %v / %s", err, output)
+	}
+}
+
+func TestDescribeSizesSupportedArchitectures(t *testing.T) {
+	// Fail visibly if the Go SDK adds a gc architecture without updating the
+	// transport. Read the SDK table rather than repeating the production list.
+	file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(runtime.GOROOT(), "src", "go", "types", "sizes.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	ast.Inspect(file, func(node ast.Node) bool {
+		value, ok := node.(*ast.ValueSpec)
+		if !ok || len(value.Names) != 1 || value.Names[0].Name != "gcArchSizes" {
+			return true
+		}
+		for _, element := range value.Values[0].(*ast.CompositeLit).Elts {
+			key := element.(*ast.KeyValueExpr).Key.(*ast.BasicLit)
+			arch, err := strconv.Unquote(key.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compiler, gotArch, std := describeSizes(types.SizesFor("gc", arch))
+			if compiler != "gc" || gotArch != arch || std != nil {
+				t.Errorf("gc/%s is not represented by the metadata transport", arch)
+			}
+			checked++
+		}
+		return false
+	})
+	if checked == 0 {
+		t.Fatal("Go SDK gc architecture table not found")
 	}
 }

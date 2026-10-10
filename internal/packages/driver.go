@@ -22,12 +22,16 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-const metadataDriverArg = "--llgo-internal-package-driver"
+const (
+	metadataDriverArg = "--llgo-internal-package-driver"
+	metadataDriverEnv = "__LLGO_PACKAGE_DRIVER_WORKER"
+)
 
 // Re-exec also works for programs embedding LLGo and for Go test binaries.
-// Only the private driver invocation takes this path, before the caller's main.
+// init inspects os.Args[1], but only the private argument plus the child-only
+// environment marker takes this path before the caller's main or TestMain.
 func init() {
-	if len(os.Args) != 2 || os.Args[1] != metadataDriverArg {
+	if len(os.Args) != 2 || os.Args[1] != metadataDriverArg || os.Getenv(metadataDriverEnv) != "1" {
 		return
 	}
 	if err := runMetadataDriver(os.Stdin, os.Stdout); err != nil {
@@ -115,7 +119,9 @@ func LoadMetadata(cfg *Config, patterns ...string) ([]*Package, error) {
 	request.Env = replaceEnvironment(request.Env, "PATH", goBin+string(os.PathListSeparator)+environmentValue(cfg.Env, "PATH"))
 	cmd := exec.CommandContext(ctx, executable, metadataDriverArg)
 	cmd.Dir = cfg.Dir
-	cmd.Env = request.Env
+	// This is a re-exec protocol marker, not a user-facing build/test switch.
+	// Keep it out of request.Env, which is passed on to external package drivers.
+	cmd.Env = replaceEnvironment(request.Env, metadataDriverEnv, "1")
 	if cfg.Dir != "" {
 		cmd.Env = replaceEnvironment(cmd.Env, "PWD", cfg.Dir)
 	}
@@ -250,7 +256,9 @@ func (response metadataResponse) packages() ([]*Package, error) {
 	}
 	for _, pkg := range byID {
 		for path, imported := range pkg.Imports {
-			pkg.Imports[path] = byID[imported.ID]
+			if resolved := byID[imported.ID]; resolved != nil {
+				pkg.Imports[path] = resolved
+			}
 		}
 	}
 	initial := make([]*Package, 0, len(response.Roots))
