@@ -265,6 +265,16 @@ runs:
       run: |
         set -euo pipefail
 
+        if [[ "${RUNNER_OS}" == "macOS" ]]; then
+          # Intel runners also have a python.org installation. Select the
+          # Homebrew interpreter and embedding metadata even if brew link
+          # could not replace that installation's commands.
+          python_prefix="$(brew --prefix python@3.12)"
+          export PATH="${python_prefix}/bin:${PATH}"
+          export PKG_CONFIG_PATH="${python_prefix}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          echo "${python_prefix}/bin" >> "${GITHUB_PATH}"
+        fi
+
         pip3.12 install --user --break-system-packages numpy
         if [[ "${RUNNER_OS}" == "Linux" ]]; then
           # The demos use CPU tensors. The default PyPI wheel pulls CUDA
