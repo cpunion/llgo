@@ -391,7 +391,6 @@ func TestObservedFailuresHaveXFailClassifications(t *testing.T) {
 		{version: "go1.26.7", platform: "windows-msvc/386", tc: testCase{RelPath: "fixedbugs/issue23305.go", Directive: "run"}},
 		{version: "go1.26.7", platform: "windows-msvc/386", tc: testCase{RelPath: "fixedbugs/issue42032.go", Directive: "run"}},
 		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "init1.go", Directive: "run"}},
-		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "cmplxdivide.go", Directive: "run"}},
 		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "typeparam/chansimp.go", Directive: "rundir"}},
 		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "fixedbugs/issue5089.go", Directive: "errorcheck"}},
 		{version: "go1.27.0", platform: "js/wasm", tc: testCase{RelPath: "fixedbugs/issue59680.go", Directive: "run"}},
@@ -518,7 +517,7 @@ func TestWasmObservedResourceExceptions(t *testing.T) {
 	}
 }
 
-func TestIssue16037WindowsMSVC386Timeout(t *testing.T) {
+func TestIssue16037Windows386Timeout(t *testing.T) {
 	cfg := loadXFailConfig(t, repoRoot(t), filepath.Join("test", "goroot", "xfail.yaml"))
 	tc := testCase{RelPath: "fixedbugs/issue16037_run.go", Directive: "run"}
 	for _, test := range []struct {
@@ -528,7 +527,8 @@ func TestIssue16037WindowsMSVC386Timeout(t *testing.T) {
 	}{
 		{"go1.26.7", "windows-msvc/386", 3 * time.Minute},
 		{"go1.27.0", "windows-msvc/386", 0},
-		{"go1.26.7", "windows-mingw/386", 0},
+		{"go1.26.7", "windows-mingw/386", 3 * time.Minute},
+		{"go1.27.0", "windows-mingw/386", 0},
 		{"go1.26.7", "windows-msvc/amd64", 0},
 	} {
 		got, _, matched := cfg.MatchTimeout(test.version, test.platform, tc)

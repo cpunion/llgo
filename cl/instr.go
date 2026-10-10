@@ -2029,13 +2029,16 @@ func (p *context) recordRuntimeLocation(b llssa.Builder, pos token.Pos, fn strin
 	if position.Line <= 0 || position.Filename == "" {
 		return
 	}
-	p.callRuntimeLocation(
-		b, fn,
-		b.Convert(p.prog.Uintptr(), p.fn.Expr),
-		b.Str(p.runtimeCallerFrameName()),
-		b.Str(position.Filename),
-		p.prog.IntVal(uint64(position.Line), p.prog.Int()),
-	)
+	name := p.runtimeCallerFrameName()
+	b.EmitLocationRecord(fn, name, position.Filename, position.Line, func() llssa.Expr {
+		return p.callRuntimeLocation(
+			b, fn,
+			b.Convert(p.prog.Uintptr(), p.fn.Expr),
+			b.Str(name),
+			b.Str(position.Filename),
+			p.prog.IntVal(uint64(position.Line), p.prog.Int()),
+		)
+	})
 }
 
 // callRuntimeLocation keeps static strings out of the caller's Wasm C stack.

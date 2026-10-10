@@ -156,7 +156,9 @@ func gorootArtifactCommand(dir, artifact string, llgo bool, env []string, progra
 		return "", nil, nil, errors.New("target LLGo execution requires LLGO_ROOT")
 	}
 	runner := filepath.Join(root, "targets", p.runner)
-	args := []string{runner}
+	// Match Go's go_js_wasm_exec wrapper: the default 984 KiB V8 stack
+	// cannot run deep-recursion cases such as stackobj2.go.
+	args := []string{"--stack-size=8192", runner}
 	if p.browserOnly {
 		args = append(args, "--browser-only")
 	}
