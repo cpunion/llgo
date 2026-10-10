@@ -863,9 +863,6 @@ func copyABIAttrs(from, to llvm.Type, paramMap []int, get func(int, uint) llvm.A
 			}
 		}
 	}
-	if from.ReturnType() == to.ReturnType() {
-		copyIndex(0, 0, integerExtensionAttributeKinds[:])
-	}
 	fromParams, toParams := from.ParamTypes(), to.ParamTypes()
 	// paramMap uses zero-based source positions and one-based LLVM attribute
 	// indices, reserving zero for elided parameters. Attribute index 0 is return.

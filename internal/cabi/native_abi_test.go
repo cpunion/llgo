@@ -22,15 +22,15 @@ define %Large @large(i8 signext %a, i16 zeroext %b) {
   ret %Large zeroinitializer
 }
 
-define signext i8 @small(%Empty %empty, %Split %split, i8 signext %a, i16 zeroext %b) {
+define i8 @small(%Empty %empty, %Split %split, i8 signext %a, i16 zeroext %b) {
   ret i8 %a
 }
 
 define void @caller(ptr %largePtr, ptr %smallPtr, i8 %a, i16 %b) {
   %largeDirect = call %Large @large(i8 signext %a, i16 zeroext %b)
   %largeIndirect = call %Large %largePtr(i8 signext %a, i16 zeroext %b)
-  %smallDirect = call signext i8 @small(%Empty zeroinitializer, %Split zeroinitializer, i8 signext %a, i16 zeroext %b)
-  %smallIndirect = call zeroext i8 %smallPtr(%Empty zeroinitializer, %Split zeroinitializer, i8 zeroext %a, i16 signext %b)
+  %smallDirect = call i8 @small(%Empty zeroinitializer, %Split zeroinitializer, i8 signext %a, i16 zeroext %b)
+  %smallIndirect = call i8 %smallPtr(%Empty zeroinitializer, %Split zeroinitializer, i8 zeroext %a, i16 signext %b)
   ret void
 }
 `
@@ -57,14 +57,14 @@ define void @caller(ptr %largePtr, ptr %smallPtr, i8 %a, i16 %b) {
 			}
 			defer mod.Dispose()
 			NewTransformer(prog, target.Spec().Triple, "", true).TransformModule("test", mod)
-			// The large return inserts sret. The small return keeps its attribute,
-			// removes an empty parameter, and expands the pair on amd64.
+			// The large return inserts sret. The small function removes an empty
+			// parameter and expands the pair on amd64.
 			largeWant := []string{"", "", "signext", "zeroext"}
-			smallWant := []string{"signext", "", "signext", "zeroext"}
-			indirectWant := []string{"zeroext", "", "zeroext", "signext"}
+			smallWant := []string{"", "", "signext", "zeroext"}
+			indirectWant := []string{"", "", "zeroext", "signext"}
 			if target.GOARCH == "amd64" {
-				smallWant = []string{"signext", "", "", "signext", "zeroext"}
-				indirectWant = []string{"zeroext", "", "", "zeroext", "signext"}
+				smallWant = []string{"", "", "", "signext", "zeroext"}
+				indirectWant = []string{"", "", "", "zeroext", "signext"}
 			}
 			checkIntegerAttrs(t, mod.NamedFunction("large"), false, largeWant)
 			checkIntegerAttrs(t, mod.NamedFunction("small"), false, smallWant)

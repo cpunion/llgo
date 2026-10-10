@@ -38,7 +38,6 @@ func TestNativeNarrowIntegerAttributes(t *testing.T) {
 				name := types.TypeString(paramTypes[resultIndex], nil)
 				native := pkg.NewFunc("native."+name, sig, InC)
 				native.MakeBody(1).Return(native.Param(resultIndex))
-				want[0] = want[resultIndex+1]
 				checkNarrowAttrs(t, native.impl, false, want)
 
 				caller := pkg.NewFunc("direct."+name, sig, InGo)

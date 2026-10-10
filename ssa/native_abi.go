@@ -16,8 +16,8 @@ var nativeIntegerAttributeKinds = [...]uint{nativeSignExtKind, nativeZeroExtKind
 // nativeIntegerAttrs records signedness while the Go signature is still
 // available. LLVM's integer types alone cannot distinguish signed from unsigned
 // C values. Apple's arm64 ABI and the WebAssembly C ABI require narrow arguments
-// and results to be extended to 32 bits. Other arm64 ABIs leave argument
-// extension to the callee.
+// to be extended to 32 bits. Other arm64 ABIs leave argument extension to the
+// callee.
 func (p Program) nativeIntegerAttrs(sig *types.Signature, ft llvm.Type, add func(int, llvm.Attribute)) {
 	if !p.nativeIntegerExtensionRequired() {
 		return
@@ -44,9 +44,8 @@ func (p Program) nativeIntegerAttrs(sig *types.Signature, ft llvm.Type, add func
 		}
 		add(index, p.ctx.CreateEnumAttribute(kind, 0))
 	}
-	if results := sig.Results(); results.Len() == 1 {
-		addInteger(0, results.At(0).Type(), ft.ReturnType())
-	}
+	// Return attributes require Go-to-native callback adapters: a native
+	// function pointer can currently refer to an unadapted Go entry.
 	// The LLVM prototype omits __llgo_va_list. Only fixed parameters carry
 	// extension attributes; the ellipsis arguments have already been promoted.
 	for i, physical := range physicalParams {
@@ -82,7 +81,6 @@ func (b Builder) setNativeIntegerCallAttrs(call llvm.Value, fn Expr, sig *types.
 			}
 		}
 		ft := call.CalledFunctionType()
-		copyInteger(0, ft.ReturnType())
 		for i, physical := range ft.ParamTypes() {
 			copyInteger(i+1, physical)
 		}
