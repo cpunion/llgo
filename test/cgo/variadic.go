@@ -33,7 +33,7 @@ type nativeVariadic func(mode int32, __llgo_va_list ...any) int32
 func fixedVariadicControl() int32 { return int32(C.variadic_fixed(7, 20, 22)) }
 
 func indirectVariadic(mode int32) int32 {
-	address := uintptr(C.variadic_address())
+	address := C.variadic_address()
 	function := *(*nativeVariadic)(unsafe.Pointer(&address))
 	if mode == 0 {
 		return function(mode)

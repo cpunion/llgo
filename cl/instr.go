@@ -757,13 +757,9 @@ func (p *context) funcKind(vfn ssa.Value) int {
 					return fnIgnore
 				}
 			}
-		} else {
-			last := params.At(n - 1)
-			if last.Name() == llssa.NameValist {
-				return fnHasVArg
-			}
 		}
 	}
+	// Direct C symbols and indirect function values share the same varargs rule.
 	if vfn != nil {
 		if signature, ok := vfn.Type().Underlying().(*types.Signature); ok && llssa.HasNameValist(signature) {
 			return fnHasVArg

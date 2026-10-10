@@ -2,7 +2,6 @@ package cl
 
 import (
 	"regexp"
-	"strings"
 	"testing"
 )
 
@@ -20,16 +19,21 @@ func Ordinary(function func(marker int32, values ...any) int32, marker int32, in
 `
 	_, module := mustCompileLLPkgFromSrc(t, source)
 	defer module.Dispose()
-	text := module.String()
 	// C ellipsis arguments must be concrete scalar LLVM values, rather than a
 	// Go slice header. Ordinary Go variadic function values keep their slice ABI.
-	if !regexp.MustCompile(`call i32 \(i32, \.\.\.\) %[^ (]+\(i32 %[^,]+, i32 %[^,]+, double %[^)]+\)`).MatchString(text) {
-		t.Fatalf("missing expanded indirect C varargs:\n%s", text)
-	}
-	if !regexp.MustCompile(`call i32 \(i32, \.\.\.\) %[^ (]+\(i32 %[^)]+\)`).MatchString(text) {
-		t.Fatalf("missing zero-tail indirect C call:\n%s", text)
-	}
-	if !strings.Contains(text, `runtime.Slice" %`) {
-		t.Fatalf("ordinary Go variadic call lost its slice argument:\n%s", text)
+	for _, test := range []struct {
+		name    string
+		pattern string
+	}{
+		{"Call", `call i32 \(i32, \.\.\.\) %[^ (]+\(i32 %[^,)\n]+, i32 %[^,)\n]+, double %[^,)\n]+\)`},
+		{"Empty", `call i32 \(i32, \.\.\.\) %[^ (]+\(i32 %[^,)\n]+\)`},
+		{"Ordinary", `call i32 \(ptr, i32, \.\.\.\) %[^ (]+\(ptr swiftself %[^,)\n]+, i32 %[^,)\n]+, %"[^"]*runtime\.Slice" %[^,)\n]+\)`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			text := mustNamedFunction(t, module, "foo."+test.name).String()
+			if !regexp.MustCompile(test.pattern).MatchString(text) {
+				t.Fatalf("missing expected call ABI:\n%s", text)
+			}
+		})
 	}
 }
