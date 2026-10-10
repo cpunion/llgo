@@ -405,8 +405,7 @@ func (p *Transformer) transformFunc(m llvm.Module, fn llvm.Value) bool {
 			nfn.AddAttributeAtIndex(i, attr)
 		}
 	}
-	copyABIIntegerFunctionAttrs(fn, nfn, paramMap)
-	copyClosureEnvFunctionAttrs(fn, nfn, paramMap)
+	copyFunctionABIAttrs(fn, nfn, paramMap)
 	if !preloweredSRet.IsNil() {
 		nfn.AddAttributeAtIndex(1, preloweredSRet)
 	}
@@ -796,8 +795,7 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 				"llgo.reflect.methodbyname.name", "1",
 			))
 		}
-		copyABIIntegerCallAttrs(call, replacement, paramMap)
-		copyClosureEnvCallAttrs(call, replacement, paramMap)
+		copyCallABIAttrs(call, replacement, paramMap)
 	}
 
 	var instr llvm.Value
@@ -833,65 +831,51 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 	return true
 }
 
-// Integer extension belongs to scalar values, so retain it only when the
-// corresponding physical type survives aggregate lowering unchanged. Parameter
-// indices can shift when an empty argument is removed or an sret is inserted.
-func copyABIIntegerFunctionAttrs(from, to llvm.Value, paramMap []int) {
+var integerExtensionAttributeKinds = [...]uint{
+	llvm.AttributeKindID("signext"),
+	llvm.AttributeKindID("zeroext"),
+}
+
+var closureEnvAttributeKinds = [...]uint{
+	llvm.AttributeKindID("nest"),
+	llvm.AttributeKindID("swiftself"),
+}
+
+func copyFunctionABIAttrs(from, to llvm.Value, paramMap []int) {
 	fromType, toType := from.GlobalValueType(), to.GlobalValueType()
-	copyABIIntegerAttrs(fromType, toType, paramMap, from.GetEnumAttributeAtIndex, to.AddAttributeAtIndex)
+	copyABIAttrs(fromType, toType, paramMap, from.GetEnumAttributeAtIndex, to.AddAttributeAtIndex)
 }
 
-func copyABIIntegerCallAttrs(from, to llvm.Value, paramMap []int) {
+func copyCallABIAttrs(from, to llvm.Value, paramMap []int) {
 	fromType, toType := from.CalledFunctionType(), to.CalledFunctionType()
-	copyABIIntegerAttrs(fromType, toType, paramMap, from.GetCallSiteEnumAttribute, to.AddCallSiteAttribute)
+	copyABIAttrs(fromType, toType, paramMap, from.GetCallSiteEnumAttribute, to.AddCallSiteAttribute)
 }
 
-func copyABIIntegerAttrs(from, to llvm.Type, paramMap []int, get func(int, uint) llvm.Attribute, add func(int, llvm.Attribute)) {
-	copyIndex := func(oldIndex, newIndex int) {
-		for _, name := range []string{"signext", "zeroext"} {
-			if attr := get(oldIndex, llvm.AttributeKindID(name)); !attr.IsNil() {
+// copyABIAttrs preserves attributes on the replacement LLVM entry or call.
+// SSA codegen has already selected integer extension from Go signedness and
+// the target ABI. Keep those attributes only where the physical type survives
+// lowering; closure environment markers follow the environment parameter.
+func copyABIAttrs(from, to llvm.Type, paramMap []int, get func(int, uint) llvm.Attribute, add func(int, llvm.Attribute)) {
+	copyIndex := func(oldIndex, newIndex int, kinds []uint) {
+		for _, kind := range kinds {
+			if attr := get(oldIndex, kind); !attr.IsNil() {
 				add(newIndex, attr)
 			}
 		}
 	}
 	if from.ReturnType() == to.ReturnType() {
-		copyIndex(0, 0)
+		copyIndex(0, 0, integerExtensionAttributeKinds[:])
 	}
 	fromParams, toParams := from.ParamTypes(), to.ParamTypes()
-	for oldIndex, newIndex := range paramMap {
-		if newIndex != 0 && fromParams[oldIndex] == toParams[newIndex-1] {
-			copyIndex(oldIndex+1, newIndex)
-		}
-	}
-}
-
-var closureEnvAttributeKinds = []uint{
-	llvm.AttributeKindID("nest"),
-	llvm.AttributeKindID("swiftself"),
-}
-
-func copyClosureEnvFunctionAttrs(from, to llvm.Value, paramMap []int) {
+	// paramMap uses zero-based source positions and one-based LLVM attribute
+	// indices, reserving zero for elided parameters. Attribute index 0 is return.
 	for oldIndex, newIndex := range paramMap {
 		if newIndex == 0 {
 			continue
 		}
-		for _, kind := range closureEnvAttributeKinds {
-			if attr := from.GetEnumAttributeAtIndex(oldIndex+1, kind); !attr.IsNil() {
-				to.AddAttributeAtIndex(newIndex, attr)
-			}
-		}
-	}
-}
-
-func copyClosureEnvCallAttrs(from, to llvm.Value, paramMap []int) {
-	for oldIndex, newIndex := range paramMap {
-		if newIndex == 0 {
-			continue
-		}
-		for _, kind := range closureEnvAttributeKinds {
-			if attr := from.GetCallSiteEnumAttribute(oldIndex+1, kind); !attr.IsNil() {
-				to.AddCallSiteAttribute(newIndex, attr)
-			}
+		copyIndex(oldIndex+1, newIndex, closureEnvAttributeKinds[:])
+		if fromParams[oldIndex] == toParams[newIndex-1] {
+			copyIndex(oldIndex+1, newIndex, integerExtensionAttributeKinds[:])
 		}
 	}
 }

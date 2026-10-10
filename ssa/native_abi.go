@@ -6,6 +6,13 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
+var (
+	nativeSignExtKind = llvm.AttributeKindID("signext")
+	nativeZeroExtKind = llvm.AttributeKindID("zeroext")
+)
+
+var nativeIntegerAttributeKinds = [...]uint{nativeSignExtKind, nativeZeroExtKind}
+
 // nativeIntegerAttrs records signedness while the Go signature is still
 // available. LLVM's integer types alone cannot distinguish signed from unsigned
 // C values. Apple's arm64 ABI and the WebAssembly C ABI require narrow arguments
@@ -15,23 +22,34 @@ func (p Program) nativeIntegerAttrs(sig *types.Signature, ft llvm.Type, add func
 	if !p.nativeIntegerExtensionRequired() {
 		return
 	}
+	// This runs during SSA codegen, before cabi.TransformModule can reorder or
+	// expand parameters. toLLVMFuncBackground preserves signature order and
+	// only omits the trailing __llgo_va_list from the fixed LLVM prototype.
+	physicalParams := ft.ParamTypes()
+	fixedCount := sig.Params().Len()
+	if HasNameValist(sig) {
+		fixedCount--
+	}
+	if len(physicalParams) != fixedCount {
+		panic("ssa: native integer attributes require the unlowered function signature")
+	}
 	addInteger := func(index int, raw types.Type, physical llvm.Type) {
 		basic, ok := raw.Underlying().(*types.Basic)
 		if !ok || physical.TypeKind() != llvm.IntegerTypeKind || physical.IntTypeWidth() >= 32 {
 			return
 		}
-		kind := "signext"
+		kind := nativeSignExtKind
 		if basic.Info()&(types.IsUnsigned|types.IsBoolean) != 0 {
-			kind = "zeroext"
+			kind = nativeZeroExtKind
 		}
-		add(index, p.ctx.CreateEnumAttribute(llvm.AttributeKindID(kind), 0))
+		add(index, p.ctx.CreateEnumAttribute(kind, 0))
 	}
 	if results := sig.Results(); results.Len() == 1 {
 		addInteger(0, results.At(0).Type(), ft.ReturnType())
 	}
 	// The LLVM prototype omits __llgo_va_list. Only fixed parameters carry
 	// extension attributes; the ellipsis arguments have already been promoted.
-	for i, physical := range ft.ParamTypes() {
+	for i, physical := range physicalParams {
 		addInteger(i+1, sig.Params().At(i).Type(), physical)
 	}
 }
@@ -57,8 +75,8 @@ func (b Builder) setNativeIntegerCallAttrs(call llvm.Value, fn Expr, sig *types.
 			if physical.TypeKind() != llvm.IntegerTypeKind || physical.IntTypeWidth() >= 32 {
 				return
 			}
-			for _, name := range []string{"signext", "zeroext"} {
-				if attr := direct.GetEnumAttributeAtIndex(i, llvm.AttributeKindID(name)); !attr.IsNil() {
+			for _, kind := range nativeIntegerAttributeKinds {
+				if attr := direct.GetEnumAttributeAtIndex(i, kind); !attr.IsNil() {
 					call.AddCallSiteAttribute(i, attr)
 				}
 			}
