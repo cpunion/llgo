@@ -12,12 +12,19 @@ func TestNativeNarrowIntegerAttributes(t *testing.T) {
 	for _, target := range []Target{
 		{GOOS: "darwin", GOARCH: "arm64"},
 		{GOOS: "darwin", GOARCH: "amd64"},
+		{GOOS: "linux", GOARCH: "amd64"},
+		{GOOS: "linux", GOARCH: "386"},
 		{GOOS: "linux", GOARCH: "arm64"},
+		{GOOS: "windows", GOARCH: "amd64"},
+		{GOOS: "windows", GOARCH: "amd64", LLVMTarget: "x86_64-w64-windows-gnu"},
+		{GOOS: "windows", GOARCH: "386"},
+		{GOOS: "windows", GOARCH: "386", LLVMTarget: "i686-w64-windows-gnu"},
 		{GOOS: "windows", GOARCH: "arm64"},
+		{GOOS: "windows", GOARCH: "arm64", LLVMTarget: "aarch64-w64-windows-gnu"},
 		{GOOS: "wasip1", GOARCH: "wasm"},
 		{GOOS: "js", GOARCH: "wasm"},
 	} {
-		t.Run(target.GOOS+"/"+target.GOARCH, func(t *testing.T) {
+		t.Run(target.GOOS+"/"+target.GOARCH+"/"+target.LLVMTarget, func(t *testing.T) {
 			prog := NewProgram(&target)
 			defer prog.Dispose()
 			pkg := prog.NewPackage("p", "example.com/p")
@@ -30,8 +37,10 @@ func TestNativeNarrowIntegerAttributes(t *testing.T) {
 				params[i] = types.NewVar(token.NoPos, nil, "", typ)
 			}
 			want := []string{"", "signext", "zeroext", "signext", "zeroext", "zeroext", ""}
-			if target.GOARCH != "wasm" && (target.GOOS != "darwin" || target.GOARCH != "arm64") {
+			if target.GOARCH == "arm64" && target.GOOS != "darwin" {
 				want = make([]string, len(want))
+			} else if target.GOARCH == "amd64" && target.GOOS == "windows" {
+				want = []string{"", "", "", "", "", "zeroext", ""}
 			}
 			for _, resultIndex := range []int{0, 3, 4} {
 				sig := types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), types.NewTuple(params[resultIndex]), false)
@@ -47,9 +56,15 @@ func TestNativeNarrowIntegerAttributes(t *testing.T) {
 					args[i] = caller.Param(i)
 				}
 				call := body.Call(native.Expr, args...)
-				body.Return(call)
 				checkNarrowAttrs(t, call.impl, true, want)
 				checkNarrowAttrs(t, caller.impl, false, make([]string, len(want)))
+				if target.GOOS == "windows" {
+					stdcall := pkg.NewFunc("stdcall."+name, sig, InStdcall)
+					stdcall.MakeBody(1).Return(stdcall.Param(resultIndex))
+					checkNarrowAttrs(t, stdcall.impl, false, want)
+					checkNarrowAttrs(t, body.Call(stdcall.Expr, args...).impl, true, want)
+				}
+				body.Return(call)
 
 				pointerName := "Pointer" + name
 				pointer := types.NewNamed(types.NewTypeName(token.NoPos, rawPkg, pointerName, nil), sig, nil)

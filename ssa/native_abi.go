@@ -15,9 +15,9 @@ var nativeIntegerAttributeKinds = [...]uint{nativeSignExtKind, nativeZeroExtKind
 
 // nativeIntegerAttrs records signedness while the Go signature is still
 // available. LLVM's integer types alone cannot distinguish signed from unsigned
-// C values. Apple's arm64 ABI and the WebAssembly C ABI require narrow arguments
-// to be extended to 32 bits. Other arm64 ABIs leave argument extension to the
-// callee.
+// C values. Apple arm64, SysV amd64, x86-32 and WebAssembly require extension
+// attributes for narrow arguments. Native Windows amd64 only requires zeroext
+// for bool; other arm64 ABIs leave argument extension to the callee.
 func (p Program) nativeIntegerAttrs(sig *types.Signature, ft llvm.Type, add func(int, llvm.Attribute)) {
 	if !p.nativeIntegerExtensionRequired() {
 		return
@@ -38,6 +38,10 @@ func (p Program) nativeIntegerAttrs(sig *types.Signature, ft llvm.Type, add func
 		if !ok || physical.TypeKind() != llvm.IntegerTypeKind || physical.IntTypeWidth() >= 32 {
 			return
 		}
+		if target := p.Target(); target.effectiveGOARCH() == "amd64" &&
+			target.effectiveGOOS() == "windows" && basic.Info()&types.IsBoolean == 0 {
+			return
+		}
 		kind := nativeSignExtKind
 		if basic.Info()&(types.IsUnsigned|types.IsBoolean) != 0 {
 			kind = nativeZeroExtKind
@@ -47,7 +51,7 @@ func (p Program) nativeIntegerAttrs(sig *types.Signature, ft llvm.Type, add func
 	// Return attributes require Go-to-native callback adapters: a native
 	// function pointer can currently refer to an unadapted Go entry.
 	// The LLVM prototype omits __llgo_va_list. Only fixed parameters carry
-	// extension attributes; the ellipsis arguments have already been promoted.
+	// extension attributes; callers supply the promoted ellipsis argument types.
 	for i, physical := range physicalParams {
 		addInteger(i+1, sig.Params().At(i).Type(), physical)
 	}
@@ -55,8 +59,13 @@ func (p Program) nativeIntegerAttrs(sig *types.Signature, ft llvm.Type, add func
 
 func (p Program) nativeIntegerExtensionRequired() bool {
 	target := p.Target()
-	return target.effectiveGOARCH() == "wasm" ||
-		target.effectiveGOOS() == "darwin" && target.effectiveGOARCH() == "arm64"
+	switch target.effectiveGOARCH() {
+	case "amd64", "386", "wasm":
+		return true
+	case "arm64":
+		return target.effectiveGOOS() == "darwin"
+	}
+	return false
 }
 
 func (b Builder) setNativeIntegerCallAttrs(call llvm.Value, fn Expr, sig *types.Signature) {

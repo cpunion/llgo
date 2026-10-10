@@ -49,3 +49,15 @@ func TestNarrowCArguments(t *testing.T) {
 		})
 	}
 }
+
+func TestNarrowCStackArguments(t *testing.T) {
+	for _, flag := range []bool{false, true} {
+		want := int32(-8 + 10*250 + 100*(-300) + 1000*60000)
+		if !flag {
+			want = -want
+		}
+		if got := stackedNarrow(-8, 250, -300, 60000, flag); got != want {
+			t.Errorf("flag=%t: got %d, want %d", flag, got, want)
+		}
+	}
+}
