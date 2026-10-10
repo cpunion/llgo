@@ -334,19 +334,21 @@ Use the platform package manager instructions below whenever possible.
 
 [mise](https://mise.jdx.dev/installing-mise.html) installs Go, LLVM/Clang/LLD
 22, and common native libraries using the versions pinned in
-[mise.lock](mise.lock). Install mise 2026.10.7 or newer, then run these commands
-from the repository root:
+[dev/mise.lock](dev/mise.lock). The configuration lives in
+[dev/mise.toml](dev/mise.toml). Install mise 2026.10.7 or newer, then run these
+commands from the repository root:
 
 ```sh
-mise trust
-mise install --locked
-mise run build
+mise -C dev trust
+mise -C dev install --locked
+mise -C dev run build
 ```
 
-Run `mise exec -- ./llgo version` on Linux/macOS, or
-`mise exec -- .\llgo.exe version` in Windows PowerShell. Use `mise exec --`
-before other development commands, or `mise en` to enter a development shell.
-`mise run check` builds LLGo and checks compiled programs and native libraries.
+Run `mise -C dev exec -- ../llgo version` on Linux/macOS, or
+`mise -C dev exec -- ..\llgo.exe version` in Windows PowerShell.
+`mise -C dev run check` builds LLGo and checks compiled programs and native
+libraries. For an interactive development shell, run `mise -C dev en`, then
+`cd ..` to return to the repository root with the environment loaded.
 
 The environment supports Linux x86-64/ARM64, macOS Intel/ARM64, and native
 Windows x86-64. mise downloads the native packages directly from conda-forge;

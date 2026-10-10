@@ -33,5 +33,6 @@ jobs:
         with:
           version: 2026.10.7
           install_args: --locked
+          working_directory: dev
       - name: Build LLGo and check native dependencies
-        run: mise run check
+        run: mise -C dev run check

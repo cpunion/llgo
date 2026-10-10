@@ -5,21 +5,23 @@ LLGo locally or inside reusable Linux dev containers.
 
 ## Host development environment
 
-The root [mise.toml](../mise.toml) and [mise.lock](../mise.lock) define the host
-development environment. Install [mise](https://mise.jdx.dev/installing-mise.html)
-2026.10.7 or newer, then start from the repository root:
+The [mise.toml](mise.toml) and [mise.lock](mise.lock) in this directory define
+the host development environment. Install
+[mise](https://mise.jdx.dev/installing-mise.html) 2026.10.7 or newer, then start
+from the repository root:
 
 ```sh
-mise trust
-mise install --locked
-mise run build
-mise run check
+mise -C dev trust
+mise -C dev install --locked
+mise -C dev run build
+mise -C dev run check
 ```
 
-`mise run build` builds `llgo` (`llgo.exe` on Windows). `mise run check` also
-runs a compiled Go program and a native dependency check that calls GC,
-libffi, OpenSSL, SQLite, libuv, and zlib. CI runs these checks on all supported
-host platforms:
+The build and check tasks run from the repository root.
+`mise -C dev run build` builds `llgo` (`llgo.exe` on Windows).
+`mise -C dev run check` also runs a compiled Go program and a native dependency
+check that calls GC, libffi, OpenSSL, SQLite, libuv, and zlib. CI runs these
+checks on all supported host platforms:
 
 | Host | Architectures |
 | --- | --- |
@@ -35,18 +37,23 @@ requires the Visual Studio C++ Build Tools with the Windows SDK and the
 x86-64 C++ toolchain. Python, LLDB, cJSON, and cross-compilers are optional and
 are not included in this environment.
 
-Use `mise exec -- <command>` to run other commands with the development
-environment, or `mise en` to enter a shell and `exit` to leave it. For example:
+From the repository root, use `mise -C dev exec -- <command>` to run other
+commands with the development environment. These commands run inside `dev/`,
+so paths are relative to that directory. For example:
 
 ```sh
-mise exec -- go build ./cmd/llgo
-mise exec -- ./llgo run ./dev/_mise_smoke
+mise -C dev exec -- go build -o ../llgo ../cmd/llgo
+mise -C dev exec -- ../llgo run ./_mise_smoke
 ```
 
-On Windows, use `.\llgo.exe` in place of `./llgo`. mise installs tools in its
-user data directory, so a worktree shared between macOS and Windows does not
-share a platform-specific package environment. Keep `MISE_DATA_DIR` local to
-each host if you override it.
+On Windows, use `..\llgo.exe` in place of `../llgo` and `-o ../llgo.exe` when
+building. For an interactive shell, run `mise -C dev en`, then `cd ..` to work
+from the repository root. The environment stays loaded when you change
+directories; type `exit` to leave the shell.
+
+mise installs tools in its user data directory, so a worktree shared between
+macOS and Windows does not share a platform-specific package environment.
+Keep `MISE_DATA_DIR` local to each host if you override it.
 
 The configuration enables the LLVM Go bindings' `byollvm` tag and obtains
 headers and linker flags from `llvm-config`. If you supply `-tags` explicitly,
@@ -56,16 +63,16 @@ pkg-config, and runtime search paths. Linux compiler wrappers activate the
 compiler's own prefix and pass its sysroot to LLD. Windows translates LLVM's
 static library names into flags accepted by Go's cgo linker.
 
-To update dependencies, edit `mise.toml` (or `.go-version` for Go), then
+To update dependencies, edit `dev/mise.toml` (or `.go-version` for Go), then
 regenerate the lockfile for every supported platform and run the checks:
 
 ```sh
-mise lock --platform linux-x64,linux-arm64,macos-x64,macos-arm64,windows-x64
-mise install --locked
-mise run check
+mise -C dev lock --platform linux-x64,linux-arm64,macos-x64,macos-arm64,windows-x64
+mise -C dev install --locked
+mise -C dev run check
 ```
 
-Commit both the configuration changes and `mise.lock`. Installation uses
+Commit both the configuration changes and `dev/mise.lock`. Installation uses
 locked mode to keep each platform's package versions and checksums fixed.
 
 ## Containers and scripts
