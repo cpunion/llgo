@@ -191,6 +191,8 @@ func LoadExWithGoVersion(dedup Deduper, sizes func(sizes types.Sizes, compiler, 
 		driverCfg.Mode |= NeedModule
 	}
 
+	// TODO(golang/go#68495): Restore packages.Load here and in coverage reloads
+	// once per-load Go executable selection makes the adapter unnecessary.
 	initial, err := LoadMetadata(&driverCfg, patterns...)
 	if err != nil {
 		return nil, err

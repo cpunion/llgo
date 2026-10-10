@@ -117,6 +117,11 @@ func LoadMetadata(cfg *Config, patterns ...string) ([]*Package, error) {
 		return nil, fmt.Errorf("selected Go executable: %w", err)
 	}
 	request.Env = replaceEnvironment(request.Env, "PATH", goBin+string(os.PathListSeparator)+environmentValue(cfg.Env, "PATH"))
+	// TODO(golang/go#68495): Use packages.Load directly once x/tools can select
+	// the Go executable per load, including its GO111MODULE=off probes. Remove
+	// the worker init dispatch and metadata round trip together at that point.
+	// CLI-only setup misses direct build callers; changing the parent PATH
+	// would let concurrent invocations interfere with each other's toolchain.
 	cmd := exec.CommandContext(ctx, executable, metadataDriverArg)
 	cmd.Dir = cfg.Dir
 	// This is a re-exec protocol marker, not a user-facing build/test switch.
