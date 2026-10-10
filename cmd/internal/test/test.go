@@ -47,6 +47,9 @@ func runCmd(cmd *base.Command, args []string) {
 		err = cmd.Flag.Parse(flagArgs)
 	}
 	if err != nil {
+		if err == flag.ErrHelp {
+			return
+		}
 		fmt.Fprintln(os.Stderr, err)
 		mockable.Exit(1)
 	}

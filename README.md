@@ -470,6 +470,42 @@ Use `llgo mod init`, `llgo mod tidy`, `llgo mod vendor`, and other `go mod` subc
 
 Module maintenance does not inject LLGo-specific build tags. Go's `tidy` and `vendor` already consider all build tags except `ignore`, including dependencies imported only by files with `//go:build llgo`.
 
+## Workspaces
+
+LLGo uses standard `go.work` files and the selected Go toolchain's workspace
+resolution. Use `llgo work init ./app ./lib`, `llgo work use ./other`, and
+`llgo work edit`, `sync`, or `vendor` to maintain them. These commands delegate
+to Go with the original arguments, environment, and exit status.
+
+`llgo build`, `run`, `test`, and `install` discover `go.work` in the current
+directory or its parents. `GOWORK=/absolute/path/go.work` selects another
+workspace, and `GOWORK=off` selects single-module mode. `llgo env GOWORK` reports
+the selected file. LLGo loads its own runtime separately; users do not need to
+add the compiler's runtime module to their workspace.
+
+Workspace members and `go.work` replacements participate in dependency
+resolution and cache invalidation. `llgo work sync` applies Go's workspace
+version selection to member requirements, and Go manages `go.work.sum`.
+Workspace vendor directories follow Go's automatic selection rules;
+`-mod=vendor` and `-mod=readonly` select the corresponding modes explicitly.
+`-mod=mod` and `-modfile` are incompatible with workspace mode, as in Go.
+
+From a workspace root containing no `go.mod`, name each module's packages:
+
+```sh
+llgo test ./app/... ./lib/...
+llgo build -o bin/app ./app/cmd/app
+```
+
+`./...` at that root is invalid under Go's package-pattern rules and returns an
+error. Native cross-module source coverage uses the same workspace package
+graph and supports selections such as `-coverpkg=./app/...,./lib/...`.
+
+Workspace `godebug` compile-time defaults are tracked in
+[the workspace support proposal](https://github.com/xgo-dev/llgo/issues/2768);
+the current runtime accepts supported settings through `GODEBUG` environment
+overrides. Target and runtime limitations still apply to workspace programs.
+
 ## Development tools
 
 `llgo list` provides a Go-compatible package query backed by the real Go toolchain while adding LLGo's source-selection build tags to package queries. Module queries keep caller-supplied and explicit target tags but do not add LLGo's defaults. It supports the list queries used by `golang.org/x/tools/go/packages`, including `list -f '{{context.GOARCH}} {{context.Compiler}}' -- unsafe`; the reported `gc` context identifies Go frontend and type-size compatibility, not LLGo's LLVM backend. Use `-target name` to apply a resolved LLGo target's GOOS, GOARCH, and build tags without installing its toolchain. When `go/packages` requests `-export=true`, paths in the `Export` field refer to Go frontend type data in Go's build cache, not LLGo package archives.
