@@ -39,8 +39,8 @@ _.path = { path = [
 CPATH = { value = "{% for name in vars.native_libraries | split(pat=',') %}{{ tools[name].path }}/{{ os(windows='Library/include', linux='include', macos='include') }}{{ os(windows=';', linux=':', macos=':') }}{% endfor %}${CPATH:-}", tools = true }
 LIBRARY_PATH = { value = "{% for name in vars.native_libraries | split(pat=',') %}{{ tools[name].path }}/{{ os(windows='Library/lib', linux='lib', macos='lib') }}{{ os(windows=';', linux=':', macos=':') }}{% endfor %}${LIBRARY_PATH:-}", tools = true }
 PKG_CONFIG_PATH = { value = "{% for name in vars.native_libraries | split(pat=',') %}{{ tools[name].path }}/{{ os(windows='Library/lib/pkgconfig', linux='lib/pkgconfig', macos='lib/pkgconfig') }}{{ os(windows=';', linux=':', macos=':') }}{% endfor %}${PKG_CONFIG_PATH:-}", tools = true }
-# MSVC-style links use LIB; ELF programs also need runtime library search paths.
-LIB = { value = "{% if os() == 'windows' %}{{ env.LIBRARY_PATH }};${LIB:-}{% else %}${LIB:-}{% endif %}", tools = true }
+# Preserve LIB on Windows so Clang can discover the SDK/CRT automatically or
+# use the caller's Visual Studio environment. pkg-config supplies native -L flags.
 LD_LIBRARY_PATH = { value = "{% if os() == 'linux' %}{{ env.LLGO_CLANG_PREFIX }}/lib:{{ env.LLGO_LLVM_PREFIX }}/lib:{{ env.LIBRARY_PATH }}:${LD_LIBRARY_PATH:-}{% else %}${LD_LIBRARY_PATH:-}{% endif %}", tools = true }
 CC = { value = "{% if os() == 'linux' %}\"{{ config_root }}/dev/mise-tools/clang\"{% elif os() == 'windows' %}clang -fuse-ld=lld -fms-runtime-lib=dll{% else %}clang{% endif %}", tools = true }
 CXX = { value = "{% if os() == 'linux' %}\"{{ config_root }}/dev/mise-tools/clang++\"{% elif os() == 'windows' %}clang++ -fuse-ld=lld -fms-runtime-lib=dll{% else %}clang++{% endif %}", tools = true }
