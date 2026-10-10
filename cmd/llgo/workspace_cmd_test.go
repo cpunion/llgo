@@ -43,6 +43,7 @@ func TestWorkspaceCommandErrors(t *testing.T) {
 			want string
 		}{
 			{[]string{"-unknown-workspace-flag"}, 1, "flag provided but not defined"},
+			{[]string{"-mod"}, 1, "flag needs an argument"},
 			{[]string{"-h"}, 0, "Usage"},
 			{[]string{"-mod=mod", "."}, 1, "workspace"},
 			{[]string{"-mod", "mod", "."}, 1, "workspace"},
@@ -63,6 +64,9 @@ func TestWorkspaceCommandErrors(t *testing.T) {
 				}
 				if code != tc.code || !strings.Contains(string(output), tc.want) {
 					t.Fatalf("%s %v: exit %d, want %d; output %s", command, tc.args, code, tc.code, output)
+				}
+				if strings.HasPrefix(tc.want, "flag ") && strings.Count(string(output), tc.want) != 1 {
+					t.Fatalf("%s %v: want one flag diagnostic; output %s", command, tc.args, output)
 				}
 			})
 		}

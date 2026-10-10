@@ -28,6 +28,8 @@ func applyPackageLoadFlags(conf *packages.Config, goflags string) error {
 // explicit GOWORK applies even after changing directories, and GOFLAGS can
 // select a caller modfile or vendor tree. Override those choices through
 // command-line flags, which also take precedence over persistent GOENV flags.
+// Only module selection is isolated: retain build tags, source overlays, and
+// export package directories so both loads use the same compilation inputs.
 func runtimePackageConfig(caller *packages.Config, dir string) packages.Config {
 	conf := *caller
 	conf.Dir = dir

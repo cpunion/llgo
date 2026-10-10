@@ -15,18 +15,18 @@ import (
 
 func TestWorkspaceRuntimeConfig(t *testing.T) {
 	caller := &packages.Config{Dir: "app", Env: []string{"GOWORK=/app/go.work", "GOFLAGS=-mod=vendor"}, BuildFlags: []string{"-tags=llgo", "-modfile=/app/custom.mod"}}
-	if err := applyPackageLoadFlags(caller, "-mod=vendor '-tags=first second'"); err != nil {
+	if err := applyPackageLoadFlags(caller, "-mod=vendor '-tags=first second' -overlay=/app/overlay.json -pkgdir=/app/exports"); err != nil {
 		t.Fatal(err)
 	}
 	conf := runtimePackageConfig(caller, "compiler/runtime")
 	if conf.Dir != "compiler/runtime" || (commandEnv{environ: conf.Env}).lookup("GOWORK") != "off" {
 		t.Fatalf("runtime configuration: %+v", conf)
 	}
-	want := "-mod=vendor|-tags=first second|-tags=llgo|-modfile=/app/custom.mod|-mod=readonly|-modfile="
+	want := "-mod=vendor|-tags=first second|-overlay=/app/overlay.json|-pkgdir=/app/exports|-tags=llgo|-modfile=/app/custom.mod|-mod=readonly|-modfile="
 	if got := strings.Join(conf.BuildFlags, "|"); got != want {
 		t.Fatalf("runtime flags %q, want %q", got, want)
 	}
-	if caller.Dir != "app" || (commandEnv{environ: caller.Env}).lookup("GOWORK") != "/app/go.work" || len(caller.BuildFlags) != 4 {
+	if caller.Dir != "app" || (commandEnv{environ: caller.Env}).lookup("GOWORK") != "/app/go.work" || len(caller.BuildFlags) != 6 {
 		t.Fatal("runtime configuration changed application inputs")
 	}
 }
