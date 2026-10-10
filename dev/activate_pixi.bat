@@ -4,8 +4,11 @@ if not exist "%CONDA_PREFIX%\go\bin" (
   mkdir "%CONDA_PREFIX%\go\bin"
   if errorlevel 1 exit /b 1
 )
-copy /y "%CONDA_PREFIX%\bin\go.exe" "%CONDA_PREFIX%\go\bin\go.exe" >nul
-if errorlevel 1 exit /b 1
+fc /b "%CONDA_PREFIX%\bin\go.exe" "%CONDA_PREFIX%\go\bin\go.exe" >nul 2>&1
+if errorlevel 1 (
+  copy /y "%CONDA_PREFIX%\bin\go.exe" "%CONDA_PREFIX%\go\bin\go.exe" >nul
+  if errorlevel 1 exit /b 1
+)
 
 set "GOFLAGS=-tags=byollvm"
 set "GOTOOLCHAIN=local"
