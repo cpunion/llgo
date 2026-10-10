@@ -405,6 +405,7 @@ func (p *Transformer) transformFunc(m llvm.Module, fn llvm.Value) bool {
 			nfn.AddAttributeAtIndex(i, attr)
 		}
 	}
+	copyABIIntegerFunctionAttrs(fn, nfn, paramMap)
 	copyClosureEnvFunctionAttrs(fn, nfn, paramMap)
 	if !preloweredSRet.IsNil() {
 		nfn.AddAttributeAtIndex(1, preloweredSRet)
@@ -795,6 +796,7 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 				"llgo.reflect.methodbyname.name", "1",
 			))
 		}
+		copyABIIntegerCallAttrs(call, replacement, paramMap)
 		copyClosureEnvCallAttrs(call, replacement, paramMap)
 	}
 
@@ -829,6 +831,38 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 	call.ReplaceAllUsesWith(instr)
 	call.EraseFromParentAsInstruction()
 	return true
+}
+
+// Integer extension belongs to scalar values, so retain it only when the
+// corresponding physical type survives aggregate lowering unchanged. Parameter
+// indices can shift when an empty argument is removed or an sret is inserted.
+func copyABIIntegerFunctionAttrs(from, to llvm.Value, paramMap []int) {
+	fromType, toType := from.GlobalValueType(), to.GlobalValueType()
+	copyABIIntegerAttrs(fromType, toType, paramMap, from.GetEnumAttributeAtIndex, to.AddAttributeAtIndex)
+}
+
+func copyABIIntegerCallAttrs(from, to llvm.Value, paramMap []int) {
+	fromType, toType := from.CalledFunctionType(), to.CalledFunctionType()
+	copyABIIntegerAttrs(fromType, toType, paramMap, from.GetCallSiteEnumAttribute, to.AddCallSiteAttribute)
+}
+
+func copyABIIntegerAttrs(from, to llvm.Type, paramMap []int, get func(int, uint) llvm.Attribute, add func(int, llvm.Attribute)) {
+	copyIndex := func(oldIndex, newIndex int) {
+		for _, name := range []string{"signext", "zeroext"} {
+			if attr := get(oldIndex, llvm.AttributeKindID(name)); !attr.IsNil() {
+				add(newIndex, attr)
+			}
+		}
+	}
+	if from.ReturnType() == to.ReturnType() {
+		copyIndex(0, 0)
+	}
+	fromParams, toParams := from.ParamTypes(), to.ParamTypes()
+	for oldIndex, newIndex := range paramMap {
+		if newIndex != 0 && fromParams[oldIndex] == toParams[newIndex-1] {
+			copyIndex(oldIndex+1, newIndex)
+		}
+	}
 }
 
 var closureEnvAttributeKinds = []uint{
