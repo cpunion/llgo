@@ -3,6 +3,8 @@ package cl
 import (
 	"regexp"
 	"testing"
+
+	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
 func TestIndirectCVariadicArguments(t *testing.T) {
@@ -17,22 +19,35 @@ func Ordinary(function func(marker int32, values ...any) int32, marker int32, in
 	return function(marker, integer)
 }
 `
-	_, module := mustCompileLLPkgFromSrc(t, source)
-	defer module.Dispose()
-	// C ellipsis arguments must be concrete scalar LLVM values, rather than a
-	// Go slice header. Ordinary Go variadic function values keep their slice ABI.
-	for _, test := range []struct {
-		name    string
-		pattern string
-	}{
-		{"Call", `call i32 \(i32, \.\.\.\) %[^ (]+\(i32 %[^,)\n]+, i32 %[^,)\n]+, double %[^,)\n]+\)`},
-		{"Empty", `call i32 \(i32, \.\.\.\) %[^ (]+\(i32 %[^,)\n]+\)`},
-		{"Ordinary", `call i32 \(ptr, i32, \.\.\.\) %[^ (]+\(ptr swiftself %[^,)\n]+, i32 %[^,)\n]+, %"[^"]*runtime\.Slice" %[^,)\n]+\)`},
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	for _, target := range []llssa.Target{
+		{GOOS: "linux", GOARCH: "amd64"},
+		{GOOS: "darwin", GOARCH: "arm64"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			text := mustNamedFunction(t, module, "foo."+test.name).String()
-			if !regexp.MustCompile(test.pattern).MatchString(text) {
-				t.Fatalf("missing expected call ABI:\n%s", text)
+		t.Run(target.GOOS+"/"+target.GOARCH, func(t *testing.T) {
+			prog := newLLSSAProgForTarget(t, &target)
+			defer prog.Dispose()
+			pkg, err := NewPackage(prog, ssaPkg, files)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// C ellipsis arguments must be concrete scalar LLVM values, rather than a
+			// Go slice header. Ordinary Go variadic function values keep their slice ABI.
+			// Ignore target-specific attributes on the closure environment argument.
+			for _, test := range []struct {
+				name    string
+				pattern string
+			}{
+				{"Call", `call i32 \(i32, \.\.\.\) %[^ (]+\(i32 %[^,)\n]+, i32 %[^,)\n]+, double %[^,)\n]+\)`},
+				{"Empty", `call i32 \(i32, \.\.\.\) %[^ (]+\(i32 %[^,)\n]+\)`},
+				{"Ordinary", `call i32 \(ptr, i32, \.\.\.\) %[^ (]+\(ptr [^,)\n]+, i32 %[^,)\n]+, %"[^"]*runtime\.Slice" %[^,)\n]+\)`},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					text := mustNamedFunction(t, pkg.Module(), "foo."+test.name).String()
+					if !regexp.MustCompile(test.pattern).MatchString(text) {
+						t.Fatalf("missing expected call ABI:\n%s", text)
+					}
+				})
 			}
 		})
 	}
