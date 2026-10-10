@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 
 	"github.com/xgo-dev/llgo/internal/packages"
 )
@@ -18,13 +20,30 @@ import (
 // cached runtime package shared by multiple executables.
 func resolveDefaultGODEBUG(cfg *packages.Config, goroot string, roots []*packages.Package, patterns []string) (map[string]string, error) {
 	entries := make(map[string]string)
+	var entryPaths []string
+	fileArguments := false
 	for _, pkg := range roots {
 		if pkg.Name == "main" {
 			entries[pkg.ID] = ""
+			path := pkg.ID
+			if cfg.Tests {
+				// Generated .test IDs are not importable packages. Listing
+				// their source package with -test recreates the same entry.
+				path = strings.TrimSuffix(path, ".test")
+			}
+			fileArguments = fileArguments || path == "command-line-arguments"
+			entryPaths = append(entryPaths, path)
 		}
 	}
 	if len(entries) == 0 {
 		return entries, nil
+	}
+	if !fileArguments {
+		// Resolve only known entries, avoiding a second wildcard expansion.
+		// File arguments retain their original invocation patterns because
+		// command-line-arguments cannot be passed back as an import path.
+		slices.Sort(entryPaths)
+		patterns = slices.Compact(entryPaths)
 	}
 	goExe := "go"
 	if runtime.GOOS == "windows" {

@@ -51,8 +51,8 @@ func TestDefaultGODEBUGMetadata(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &packages.Config{Dir: dir, Tests: true, BuildFlags: []string{"-tags=llgo,custom", "-mod=readonly"},
-				Env: withEnv(os.Environ(), "PATH=", "LLGO_TEST_GODEBUG_METADATA="+tc.data, "LLGO_TEST_GODEBUG_ARGS="+argsFile)}
-			roots := []*packages.Package{{ID: "example.com/app.test", Name: "main"}}
+				Env: withEnv(os.Environ(), "LLGO_TEST_GODEBUG_METADATA="+tc.data, "LLGO_TEST_GODEBUG_ARGS="+argsFile)}
+			roots := []*packages.Package{{ID: "example.com/app.test", Name: "main"}, {ID: "example.com/other", Name: "library"}}
 			defaults, err := resolveDefaultGODEBUG(cfg, root, roots, []string{"./..."})
 			if tc.failure != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.failure) {
@@ -80,7 +80,7 @@ func TestDefaultGODEBUGMetadata(t *testing.T) {
 			if err := json.Unmarshal(data, &invocation); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"list", "-e", "-json", "-test", "-tags=llgo,custom", "-mod=readonly", "--", "./..."}
+			want := []string{"list", "-e", "-json", "-test", "-tags=llgo,custom", "-mod=readonly", "--", "example.com/app"}
 			if !slices.Equal(invocation.Args, want) || invocation.PWD != dir {
 				t.Fatalf("selected-toolchain invocation: %+v", invocation)
 			}
@@ -208,6 +208,33 @@ func TestDefaultGODEBUGMultipleExecutables(t *testing.T) {
 			t.Fatalf("Go baseline %q, want %q", got, want)
 		}
 		godebugAssertProgram(t, filepath.Join(root, "bin", name+defaultAppExt(conf)), want)
+	}
+}
+
+func TestDefaultGODEBUGFileArguments(t *testing.T) {
+	root := godebugFixture(t)
+	writeFile(t, filepath.Join(root, "go.mod"), "module example.com/debugfiles\ngo 1.27.0\n")
+	writeFile(t, filepath.Join(root, "main.go"), "//go:debug randseednop=0\n"+godebugMainSource)
+	if got := godebugGo(t, root, "run", "main.go"); got != "true true" {
+		t.Fatalf("Go file baseline %q", got)
+	}
+	conf := godebugConfig(ModeBuild)
+	conf.OutFile = filepath.Join(root, "app"+defaultAppExt(conf))
+	if _, err := Build(Invocation{Dir: root, Args: []string{"main.go"}, Config: conf}); err != nil {
+		t.Fatal(err)
+	}
+	godebugAssertProgram(t, conf.OutFile, "true true")
+
+	writeFile(t, filepath.Join(root, "main_test.go"), `//go:debug randseednop=0
+package main
+import ("math/rand"; "testing")
+func seeded() bool { rand.Seed(1); a := rand.Int63(); rand.Seed(1); return a == rand.Int63() }
+var initialized = seeded()
+func TestDefaults(t *testing.T) { if !initialized || !seeded() { t.Fatal("file test defaults not initialized") } }
+`)
+	godebugGo(t, root, "test", "-count=1", "main_test.go")
+	if _, err := Build(Invocation{Dir: root, Args: []string{"main_test.go"}, Config: godebugConfig(ModeTest)}); err != nil {
+		t.Fatal(err)
 	}
 }
 
