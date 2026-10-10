@@ -48,16 +48,3 @@ LLVM_CONFIG = "llvm-config"
 CGO_CPPFLAGS = { value = "{{ exec(command='llvm-config --cppflags') }}", tools = true }
 CGO_CXXFLAGS = "-std=c++17"
 CGO_LDFLAGS = { value = "{% if os() == 'windows' %}{{ exec(command='powershell.exe -NoProfile -ExecutionPolicy Bypass -File mise_windows_ldflags.ps1') }}{% else %}{{ exec(command='llvm-config --ldflags --link-shared --libs all --system-libs') }} \"-Wl,-rpath,{{ env.LLGO_LLVM_PREFIX }}/lib\"{% endif %}", tools = true }
-
-[task_config]
-dir = "{{ config_root | dirname }}"
-
-[tasks.build]
-description = "Build the LLGo compiler"
-run = "go build -o llgo ./cmd/llgo"
-run_windows = "go build -o llgo.exe ./cmd/llgo"
-
-[tasks.check]
-description = "Build LLGo and run the development environment smoke checks"
-run = "bash dev/check_devenv.sh"
-run_windows = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File dev/check_devenv.ps1"

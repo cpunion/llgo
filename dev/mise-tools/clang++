@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CONDA_PREFIX=${LLGO_CLANG_PREFIX:?run with mise exec or mise run}
+export CONDA_PREFIX=${LLGO_CLANG_PREFIX:?run inside the mise development environment}
 for script in "$CONDA_PREFIX"/etc/conda/activate.d/*.sh; do
   # shellcheck disable=SC1090
   [[ ! -f "$script" ]] || source "$script"

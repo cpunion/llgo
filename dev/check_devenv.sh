@@ -7,6 +7,7 @@ test "${GOFLAGS:-}" = '-tags=byollvm'
 [[ -f "$LLGO_ROOT/runtime/go.mod" ]]
 
 cd "$LLGO_ROOT"
+go run ./cmd/llgo version
 go build ./cmd/llgo
 ./llgo version
 

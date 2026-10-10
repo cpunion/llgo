@@ -13,15 +13,23 @@ from the repository root:
 ```sh
 mise -C dev trust
 mise -C dev install --locked
-mise -C dev run build
-mise -C dev run check
+mise -C dev en
 ```
 
-The build and check tasks run from the repository root.
-`mise -C dev run build` builds `llgo` (`llgo.exe` on Windows).
-`mise -C dev run check` also runs a compiled Go program and a native dependency
-check that calls GC, libffi, OpenSSL, SQLite, libuv, and zlib. CI runs these
-checks on all supported host platforms:
+The new shell starts inside `dev/`. Return to the repository root, then use Go
+to run or build LLGo:
+
+```sh
+cd ..
+go run ./cmd/llgo version
+go build ./cmd/llgo
+```
+
+The build creates `llgo` (`llgo.exe` on Windows). mise supplies the toolchain
+and dependency environment. The environment stays loaded when you change
+directories; type `exit` to leave the shell.
+
+CI validates this environment on all supported host platforms:
 
 | Host | Architectures |
 | --- | --- |
@@ -37,19 +45,24 @@ requires the Visual Studio C++ Build Tools with the Windows SDK and the
 x86-64 C++ toolchain. Python, LLDB, cJSON, and cross-compilers are optional and
 are not included in this environment.
 
-From the repository root, use `mise -C dev exec -- <command>` to run other
-commands with the development environment. These commands run inside `dev/`,
-so paths are relative to that directory. For example:
+To check the environment yourself, run the script from the repository root
+inside the development shell:
 
 ```sh
-mise -C dev exec -- go build -o ../llgo ../cmd/llgo
-mise -C dev exec -- ../llgo run ./_mise_smoke
+bash dev/check_devenv.sh
 ```
 
-On Windows, use `..\llgo.exe` in place of `../llgo` and `-o ../llgo.exe` when
-building. For an interactive shell, run `mise -C dev en`, then `cd ..` to work
-from the repository root. The environment stays loaded when you change
-directories; type `exit` to leave the shell.
+On Windows PowerShell, run `.\dev\check_devenv.ps1`. These scripts use Go to
+build LLGo, run a compiled Go program, and run a native dependency check that
+calls GC, libffi, OpenSSL, SQLite, libuv, and zlib.
+
+For a single command without entering a shell, use `mise -C dev exec` from the
+repository root. The command runs inside `dev/`, so paths are relative to that
+directory:
+
+```sh
+mise -C dev exec -- go run ../cmd/llgo version
+```
 
 mise installs tools in its user data directory, so a worktree shared between
 macOS and Windows does not share a platform-specific package environment.
@@ -64,15 +77,15 @@ compiler's own prefix and pass its sysroot to LLD. Windows translates LLVM's
 static library names into flags accepted by Go's cgo linker.
 
 To update dependencies, edit `dev/mise.toml` (or `.go-version` for Go), then
-regenerate the lockfile for every supported platform and run the checks:
+regenerate the lockfile for every supported platform from the repository root:
 
 ```sh
 mise -C dev lock --platform linux-x64,linux-arm64,macos-x64,macos-arm64,windows-x64
 mise -C dev install --locked
-mise -C dev run check
 ```
 
-Commit both the configuration changes and `dev/mise.lock`. Installation uses
+Open a new development shell and run the checks above. Commit both the
+configuration changes and `dev/mise.lock`. Installation uses
 locked mode to keep each platform's package versions and checksums fixed.
 
 ## Containers and scripts

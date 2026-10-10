@@ -34,5 +34,12 @@ jobs:
           version: 2026.10.7
           install_args: --locked
           working_directory: dev
+          env: true
+          export_path: true
       - name: Build LLGo and check native dependencies
-        run: mise -C dev run check
+        if: runner.os != 'Windows'
+        run: bash dev/check_devenv.sh
+      - name: Build LLGo and check native dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\dev\check_devenv.ps1

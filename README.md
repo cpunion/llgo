@@ -341,14 +341,21 @@ commands from the repository root:
 ```sh
 mise -C dev trust
 mise -C dev install --locked
-mise -C dev run build
+mise -C dev en
 ```
 
-Run `mise -C dev exec -- ../llgo version` on Linux/macOS, or
-`mise -C dev exec -- ..\llgo.exe version` in Windows PowerShell.
-`mise -C dev run check` builds LLGo and checks compiled programs and native
-libraries. For an interactive development shell, run `mise -C dev en`, then
-`cd ..` to return to the repository root with the environment loaded.
+In the new shell, return to the repository root and use Go to run or build
+LLGo:
+
+```sh
+cd ..
+go run ./cmd/llgo version
+go build ./cmd/llgo
+```
+
+The build creates `llgo` (`llgo.exe` on Windows). mise provides the toolchain
+and dependency environment; run other Go commands in this shell as usual.
+Type `exit` to leave the development shell.
 
 The environment supports Linux x86-64/ARM64, macOS Intel/ARM64, and native
 Windows x86-64. mise downloads the native packages directly from conda-forge;
