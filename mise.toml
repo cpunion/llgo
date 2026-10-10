@@ -30,6 +30,7 @@ LLGO_LLD_PREFIX = { value = "{{ tools.lld.path }}", tools = true }
 # Use the full compiler prefix: clangxx is a metapackage, whose actual
 # executables are dependencies and are not exposed by mise's conda launchers.
 _.path = { path = [
+  "{% if os() == 'linux' %}{{ config_root }}/dev/mise-tools{% else %}{{ env.LLGO_CLANG_PREFIX }}/{{ os(windows='Library/bin', macos='bin') }}{% endif %}",
   "{{ env.LLGO_CLANG_PREFIX }}/{{ os(windows='Library/bin', linux='bin', macos='bin') }}",
   "{{ env.LLGO_LLVM_PREFIX }}/{{ os(windows='Library/bin', linux='bin', macos='bin') }}",
   "{{ env.LLGO_LLD_PREFIX }}/{{ os(windows='Library/bin', linux='bin', macos='bin') }}",
