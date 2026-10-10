@@ -34,6 +34,10 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("LLGO_TEST_GODEBUG_METADATA") != "" {
+		runDefaultGODEBUGMetadataHelper()
+		os.Exit(0)
+	}
 	if mode := os.Getenv("LLGO_TEST_GO_CONFIG_HELPER"); mode != "" {
 		runGoConfigHelper(mode)
 		os.Exit(0)

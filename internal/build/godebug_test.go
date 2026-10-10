@@ -2,12 +2,15 @@ package build
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"go/token"
 	"go/types"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,6 +26,87 @@ func seeded() bool { rand.Seed(1); a := rand.Int63(); rand.Seed(1); return a == 
 var initialized = seeded()
 func main() { println(initialized, seeded()) }
 `
+
+// Exercise the selected-toolchain metadata boundary independently of LLVM:
+// older Go omits the field, newer Go streams multiple package records, and
+// subprocess or metadata errors must retain useful diagnostics.
+func TestDefaultGODEBUGMetadata(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeBuildTestTool(t, bin, "go")
+	dir := filepath.Join(t.TempDir(), "directory with spaces")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(t.TempDir(), "args.json")
+	for _, tc := range []struct{ name, data, want, failure string }{
+		{"current", `{"ImportPath":"example.com/other","DefaultGODEBUG":"ignored=1"}` + "\n" + `{"ImportPath":"example.com/app.test","DefaultGODEBUG":"randseednop=0"}`, "randseednop=0", ""},
+		{"older", `{"ImportPath":"example.com/app.test"}`, "", ""},
+		{"invalid-json", "not JSON", "", "decode default GODEBUG"},
+		{"package-error", `{"ImportPath":"example.com/app.test","Error":{"Err":"invalid //go:debug directive"}}`, "", "invalid //go:debug directive"},
+		{"command-error", "exit", "", "Go metadata unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &packages.Config{Dir: dir, Tests: true, BuildFlags: []string{"-tags=llgo,custom", "-mod=readonly"},
+				Env: withEnv(os.Environ(), "PATH=", "LLGO_TEST_GODEBUG_METADATA="+tc.data, "LLGO_TEST_GODEBUG_ARGS="+argsFile)}
+			roots := []*packages.Package{{ID: "example.com/app.test", Name: "main"}}
+			defaults, err := resolveDefaultGODEBUG(cfg, root, roots, []string{"./..."})
+			if tc.failure != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.failure) {
+					t.Fatalf("metadata error: %v, want %q", err, tc.failure)
+				}
+				if tc.data == "exit" {
+					var exit *exec.ExitError
+					if !errors.As(err, &exit) || exit.ExitCode() != 7 {
+						t.Fatalf("toolchain failure lost exit status: %v", err)
+					}
+				}
+				return
+			}
+			if err != nil || len(defaults) != 1 || defaults[roots[0].ID] != tc.want {
+				t.Fatalf("metadata defaults: %v, %v", defaults, err)
+			}
+			var invocation struct {
+				Args []string
+				PWD  string
+			}
+			data, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &invocation); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"list", "-e", "-json", "-test", "-tags=llgo,custom", "-mod=readonly", "--", "./..."}
+			if !slices.Equal(invocation.Args, want) || invocation.PWD != dir {
+				t.Fatalf("selected-toolchain invocation: %+v", invocation)
+			}
+		})
+	}
+	if defaults, err := resolveDefaultGODEBUG(&packages.Config{}, "missing", []*packages.Package{{Name: "library"}}, nil); err != nil || len(defaults) != 0 {
+		t.Fatalf("library unnecessarily queried entry metadata: %v, %v", defaults, err)
+	}
+}
+
+func runDefaultGODEBUGMetadataHelper() {
+	data := os.Getenv("LLGO_TEST_GODEBUG_METADATA")
+	if data == "exit" {
+		fmt.Fprintln(os.Stderr, "Go metadata unavailable")
+		os.Exit(7)
+	}
+	record, _ := json.Marshal(struct {
+		Args []string
+		PWD  string
+	}{os.Args[1:], os.Getenv("PWD")})
+	if err := os.WriteFile(os.Getenv("LLGO_TEST_GODEBUG_ARGS"), record, 0600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(8)
+	}
+	fmt.Println(data)
+}
 
 func godebugFixture(t *testing.T) string {
 	t.Helper()
