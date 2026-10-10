@@ -191,7 +191,7 @@ func LoadExWithGoVersion(dedup Deduper, sizes func(sizes types.Sizes, compiler, 
 		driverCfg.Mode |= NeedModule
 	}
 
-	initial, err := packages.Load(&driverCfg, patterns...)
+	initial, err := LoadMetadata(&driverCfg, patterns...)
 	if err != nil {
 		return nil, err
 	}
