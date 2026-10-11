@@ -40,7 +40,7 @@ debugger.SetAsync(True)
 target = debugger.CreateTarget(str(exe))
 assert target.IsValid(), 'invalid target'
 debugger.SetSelectedTarget(target)
-bp = target.BreakpointCreateByName('github.com/xgo-dev/llgo/runtime/internal/runtime.panicWindowsException')
+bp = target.BreakpointCreateByRegex('panicWindowsException|onWindowsFault')
 print('PANIC BREAKPOINT', bp.GetNumLocations(), flush=True)
 interpreter = debugger.GetCommandInterpreter()
 
@@ -51,7 +51,7 @@ def command(text):
 
 command('image list')
 records = []
-for run in range(5):
+for run in range(2):
     print('ROUND', run, flush=True)
     listener = lldb.SBListener('gc-fault-probe')
     launch = target.GetLaunchInfo()
@@ -81,7 +81,11 @@ for run in range(5):
         stop_count += 1
         thread = process.GetSelectedThread()
         print('STOP', process.GetNumThreads(), thread.GetStopDescription(512), flush=True)
-        command('thread backtrace all -c 24')
+
+        for thread in process:
+            print(str(thread), flush=True)
+            for frame in list(thread)[:24]:
+                print(str(frame), flush=True)
         command('register read')
         command('frame variable')
         command('disassemble --frame')
@@ -96,7 +100,10 @@ for run in range(5):
             if process.GetState() == lldb.eStateStopped:
                 break
             time.sleep(0.05)
-        command('thread backtrace all -c 24')
+        for thread in process:
+            print(str(thread), flush=True)
+            for frame in list(thread)[:24]:
+                print(str(frame), flush=True)
         process.Kill()
     item = {'round': run, 'result': result, 'seconds': time.monotonic() - started, 'stops': stop_count}
     records.append(item)

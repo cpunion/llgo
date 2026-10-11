@@ -17,7 +17,7 @@ jobs:
             rounds: 10
           - name: current-fix
             ref: 209c2f255de48e389704edc30a66d868ddc3fed1
-            rounds: 30
+            rounds: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
@@ -44,6 +44,29 @@ jobs:
         with:
           windows-abi: msvc
           windows-arch: '386'
+      - name: Record accepted hardware faults without changing the test
+        shell: bash
+        run: |
+          python - <<'PYTHON'
+          from pathlib import Path
+          p = Path('source/runtime/internal/runtime/fault_handler_windows.go')
+          s = p.read_text()
+          marker = '\n\t// The panic path does not return through the vectored handler'
+          assert marker in s
+          probe = """
+          \n\t// Diagnostic only: capture the original x86 CONTEXT before Go unwinds.
+          \tctx := (*[50]uint32)(context)
+          \tgp := (*g)(unsafe.Pointer(currentG))
+          \tc.Fprintf(c.Stderr, c.Str("FAULT code=%x addr=%x pc=%x sp=%x bp=%x eax=%x ebx=%x ecx=%x g=%p goid=%llu startarg=%p\\n"),
+          \t\tcode, address, ctx[46], ctx[49], ctx[45], ctx[44], ctx[41], ctx[43], gp, gp.goid, gp.startarg)
+          \tif gp.startarg != nil {
+          \t\twords := (*[2]uintptr)(gp.startarg)
+          \t\tc.Fprintf(c.Stderr, c.Str("START fn=%x ctx=%x\\n"), words[0], words[1])
+          \t}
+          """
+          s = s.replace(marker, probe + marker, 1)
+          p.write_text(s)
+          PYTHON
       - name: Build original GC stress with debug information
         shell: bash
         run: |
@@ -62,6 +85,12 @@ jobs:
       - name: Reproduce original case
         shell: bash
         run: python .github/scripts/diagnose_gc_fault.py --direct
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && env.GC_PROBE_DIR != '' }}
+        with:
+          name: gc-direct-${{ matrix.name }}
+          path: ${{ runner.temp }}/gc-probe
+          if-no-files-found: error
       - name: Capture exception site and all threads
         if: ${{ !cancelled() && env.GC_PROBE_DIR != '' }}
         shell: bash
