@@ -12,16 +12,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: macos-15
             abi: msvc
             arch: amd64
           - os: windows-2022
             abi: mingw
+            arch: '386'
+          - os: windows-2022
+            abi: msvc
+            arch: '386'
+          - os: windows-2022
+            abi: msvc
             arch: amd64
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 44bb8b40461be6d5d0cb408086fabb313cb32a7c
+          ref: 58a9d864bcaeccbe9472a8b3986bdc18cd630837
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
@@ -69,9 +75,9 @@ jobs:
           done
           cd test/goroot
           "$RUNNER_TEMP/llgo-bin/goroot-runner$suffix" \
-            -test.run='^TestGoRootRunCases$' -test.count=10 -test.v -test.timeout=20m \
+            -test.run='^TestGoRootRunCases$' -test.count=3 -test.v -test.timeout=12m \
             -llgo "$llgo" -goroot "$target_goroot" -directive-mode ci \
-            -case='^fixedbugs/issue25897a.go$' \
+            -case='^fixedbugs/issue(25897a|79186).go$' \
             -min-swap-free-mib="$min_swap" -keepwork \
             -slow-build=1s -slow-run=1s -progress=30s \
             2>&1 | tee "$RUNNER_TEMP/diagnosis.log"
@@ -95,6 +101,30 @@ jobs:
             kill "$pid"
           fi
           wait "$pid" || true
+      - name: Capture macOS RWMutex stalls
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, time
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          source = next((root / 'diagnosis-work').rglob('issue79186.go'))
+          binary = source.parent / 'llgo.out'
+          with (root / 'rwmutex.log').open('w') as log:
+            for i in range(5):
+              start = time.monotonic()
+              p = subprocess.Popen([str(binary)], stdout=log, stderr=log)
+              try:
+                p.wait(timeout=15)
+              except subprocess.TimeoutExpired:
+                subprocess.run(['sample', str(p.pid), '1', '-file', str(root / f'rwmutex-{i}.txt')], timeout=10)
+                try:
+                  p.wait(timeout=74)
+                except subprocess.TimeoutExpired:
+                  p.kill()
+                  p.wait()
+              print(i, p.returncode, time.monotonic()-start, file=log, flush=True)
+          PY
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -103,4 +133,5 @@ jobs:
             ${{ runner.temp }}/diagnosis.log
             ${{ runner.temp }}/backtrace.log
             ${{ runner.temp }}/program.log
+            ${{ runner.temp }}/rwmutex*
           if-no-files-found: warn
