@@ -16,6 +16,10 @@ jobs:
           llvm-version: 22
           windows-abi: msvc
           windows-arch: '386'
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: msvc
+          windows-arch: '386'
       - uses: actions/download-artifact@v8
         with:
           name: gc-handoff-comparison
