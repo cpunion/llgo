@@ -1,0 +1,56 @@
+name: Diagnose PR 2785 Windows process exit
+
+on:
+  push:
+    branches: [codex/pr2785-windows-exit-diagnosis-20261011]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: msvc
+          windows-arch: '386'
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: x64
+      - uses: ./.github/actions/setup-llgo-cache
+      - name: Build compiler
+        shell: bash
+        run: |
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: msvc
+          windows-arch: '386'
+      - name: Compare covered process-exit stress before and after TLS registration
+        env:
+          LLGO_STDIO_NOBUF: '1'
+          LLGO_BUILD_CACHE: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p probes
+          llgo test -c -g -cover -coverpkg=github.com/xgo-dev/llgo/test/... -o probes/windows-baseline.exe ./test/windows
+          python .github/scripts/diagnose_pr2785_windows_exit.py probes/windows-baseline.exe baseline
+          git fetch origin codex/runtime-flakes-20261011
+          git cherry-pick --no-commit 96c974df1c3ef01a4fca678788e920c73f67998a
+          llgo test -c -g -cover -coverpkg=github.com/xgo-dev/llgo/test/... -o probes/windows-tls-fixed.exe ./test/windows
+          python .github/scripts/diagnose_pr2785_windows_exit.py probes/windows-tls-fixed.exe tls-fixed
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pr2785-windows-exit-comparison
+          path: probes
+          if-no-files-found: error
