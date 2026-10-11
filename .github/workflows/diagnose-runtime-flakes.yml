@@ -100,7 +100,7 @@ jobs:
                   process.Kill()
           lldb.SBDebugger.Destroy(debugger)
           PY
-          "$LLDB_PATH" --batch -o 'script import os, runpy; runpy.run_path("probe.py")' > "$RUNNER_TEMP/backtrace.log" 2>&1
+          llgo lldb -lldb "$LLDB_PATH" -- --batch -o 'script import os, runpy; runpy.run_path("probe.py")' > "$RUNNER_TEMP/backtrace.log" 2>&1
           cat "$RUNNER_TEMP/backtrace.log"
       - name: Reproduce without flaky exemptions
         if: runner.os != 'Windows'
