@@ -12,21 +12,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            abi: msvc
-            arch: amd64
-          - os: macos-latest
-            abi: msvc
-            arch: arm64
-          - os: windows-2022
-            abi: msvc
-            arch: amd64
-          - os: windows-2022
-            abi: mingw
-            arch: amd64
-          - os: windows-2022
-            abi: msvc
-            arch: '386'
           - os: windows-2022
             abi: mingw
             arch: '386'
@@ -40,7 +25,12 @@ jobs:
       - uses: ./.github/actions/setup-go
       - name: Build compiler and runner
         shell: bash
-        run: LLGO_BUILD_GOROOT_RUNNER=1 dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+        run: |
+          LLGO_BUILD_GOROOT_RUNNER=1 dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          llgo="$RUNNER_TEMP/llgo-bin/llgo"
+          if [[ "$RUNNER_OS" == Windows ]]; then llgo=$(cygpath -w "$llgo.exe"); fi
+          echo "LLGO_TEST_LLGO=$llgo" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-go
         with:
           go-version: '1.26.7'
