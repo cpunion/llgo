@@ -15,10 +15,13 @@ jobs:
           - os: windows-2022
             abi: msvc
             arch: '386'
+          - os: ubuntu-24.04
+            abi: msvc
+            arch: amd64
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 20bcec1213ebbc1c4364da3a95907600fefcca7e
+          ref: 48b57866a4c42a472efe0dd524834baf041a95ce
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
@@ -43,6 +46,7 @@ jobs:
           windows-abi: ${{ matrix.abi }}
           windows-arch: ${{ matrix.arch }}
       - name: Diagnose continuous GC with LLDB
+        if: false
         shell: bash
         run: |
           export LLGO_ROOT="$PWD"
@@ -113,7 +117,6 @@ jobs:
           cat "$RUNNER_TEMP/backtrace.log"
           grep -q GC_PROBE_DONE "$RUNNER_TEMP/backtrace.log"
       - name: Reproduce without flaky exemptions
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           export LLGO_ROOT="$PWD"
@@ -137,14 +140,14 @@ jobs:
           done
           cd test/goroot
           "$RUNNER_TEMP/llgo-bin/goroot-runner$suffix" \
-            -test.run='^TestGoRootRunCases$' -test.count=10 -test.v -test.timeout=20m \
+            -test.run='^TestGoRootRunCases$' -test.count=3 -test.v -test.timeout=10m \
             -llgo "$llgo" -goroot "$target_goroot" -directive-mode ci \
-            -case='^fixedbugs/issue79186.go$' \
+            -case='^fixedbugs/issue25897a.go$' \
             -min-swap-free-mib="$min_swap" -keepwork \
             -slow-build=1s -slow-run=1s -progress=30s \
             2>&1 | tee "$RUNNER_TEMP/diagnosis.log"
       - name: Capture all threads of the stuck program
-        if: always() && runner.os == 'Linux'
+        if: failure() && runner.os == 'Linux'
         shell: bash
         run: |
           binary=$(find "$RUNNER_TEMP/diagnosis-work" -type f -name llgo.out -print -quit)
