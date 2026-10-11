@@ -23,8 +23,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p probes/c-fairness
-          clang --target=i686-pc-windows-msvc -O2 .github/scripts/gc-fairness-c/fairness.c \
-            -o probes/c-fairness/fairness.exe $(pkg-config --libs bdw-gc) -lkernel32
+          clang --target=i686-pc-windows-msvc -fms-runtime-lib=dll -fuse-ld=lld -O2 .github/scripts/gc-fairness-c/fairness.c \
+            -o probes/c-fairness/fairness.exe $(pkg-config --libs bdw-gc) -lkernel32 -llegacy_stdio_definitions
       - name: Compare allocation progress with and without repeated collection
         shell: bash
         run: python .github/scripts/gc-fairness-c/run.py probes/c-fairness/fairness.exe --output probes/c-fairness --rounds 3 --timeout 90
