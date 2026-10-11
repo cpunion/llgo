@@ -12,6 +12,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: ubuntu-latest
+            abi: ''
+            arch: amd64
           - os: windows-2022
             abi: msvc
             arch: '386'
@@ -21,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 0a1b4e0c486774f0d2daf8b59eca2cd424a00294
+          ref: e8042be666937a019e92a0271beb216709cd8bc4
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
@@ -152,7 +155,7 @@ jobs:
           done
           cd test/goroot
           "$RUNNER_TEMP/llgo-bin/goroot-runner$suffix" \
-            -test.run='^TestGoRootRunCases$' -test.count=3 -test.v -test.timeout=10m \
+            -test.run='^TestGoRootRunCases$' -test.count=5 -test.v -test.timeout=15m \
             -llgo "$llgo" -goroot "$target_goroot" -directive-mode ci \
             -case='^fixedbugs/issue25897a.go$' \
             -min-swap-free-mib="$min_swap" -keepwork \
