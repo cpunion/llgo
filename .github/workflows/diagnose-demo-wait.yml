@@ -1,0 +1,28 @@
+name: Diagnose demo wait status
+on:
+  push:
+    branches: [codex/2781-demo-wait-20261011]
+permissions:
+  contents: read
+jobs:
+  wait:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Identify completed-job behavior
+        shell: bash
+        run: |
+          bash --version
+          sleep 0.1 & probe_pid=$!
+          sleep 0.3
+          jobs
+          if wait -n -p done_pid; then probe_status=0; else probe_status=$?; fi
+          echo "waitn=$probe_status done=${done_pid-unset} expected=$probe_pid"
+          if wait "$probe_pid"; then probe_status=0; else probe_status=$?; fi
+          echo "waitpid=$probe_status"
+      - name: Exercise real scheduler with missing PID and failing workers
+        shell: bash
+        run: |
+          export LLGO_TEST_BASH=$(cygpath -m "$BASH")
+          python .github/scripts/test_demo_scheduler.py -v
