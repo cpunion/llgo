@@ -15,8 +15,13 @@ jobs:
           - os: ubuntu-24.04
             abi: msvc
             arch: amd64
+          - os: windows-2022
+            abi: mingw
+            arch: amd64
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: 44bb8b404
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
@@ -64,14 +69,14 @@ jobs:
           done
           cd test/goroot
           "$RUNNER_TEMP/llgo-bin/goroot-runner$suffix" \
-            -test.run='^TestGoRootRunCases$' -test.count=1 -test.v -test.timeout=10m \
+            -test.run='^TestGoRootRunCases$' -test.count=10 -test.v -test.timeout=20m \
             -llgo "$llgo" -goroot "$target_goroot" -directive-mode ci \
             -case='^fixedbugs/issue25897a.go$' \
             -min-swap-free-mib="$min_swap" -keepwork \
             -slow-build=1s -slow-run=1s -progress=30s \
             2>&1 | tee "$RUNNER_TEMP/diagnosis.log"
       - name: Capture all threads of the stuck program
-        if: always()
+        if: always() && runner.os == 'Linux'
         shell: bash
         run: |
           binary=$(find "$RUNNER_TEMP/diagnosis-work" -type f -name llgo.out -print -quit)
