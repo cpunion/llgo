@@ -15,15 +15,6 @@ jobs:
           - os: macos-15
             abi: msvc
             arch: amd64
-          - os: windows-2022
-            abi: mingw
-            arch: '386'
-          - os: windows-2022
-            abi: msvc
-            arch: '386'
-          - os: windows-2022
-            abi: msvc
-            arch: amd64
     steps:
       - uses: actions/checkout@v7
         with:
@@ -75,9 +66,9 @@ jobs:
           done
           cd test/goroot
           "$RUNNER_TEMP/llgo-bin/goroot-runner$suffix" \
-            -test.run='^TestGoRootRunCases$' -test.count=3 -test.v -test.timeout=12m \
+            -test.run='^TestGoRootRunCases$' -test.count=1 -test.v -test.timeout=12m \
             -llgo "$llgo" -goroot "$target_goroot" -directive-mode ci \
-            -case='^fixedbugs/issue(25897a|79186).go$' \
+            -case='^fixedbugs/issue79186.go$' \
             -min-swap-free-mib="$min_swap" -keepwork \
             -slow-build=1s -slow-run=1s -progress=30s \
             2>&1 | tee "$RUNNER_TEMP/diagnosis.log"
@@ -109,7 +100,7 @@ jobs:
           import os, pathlib, subprocess, time
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
           source = next((root / 'diagnosis-work').rglob('issue79186.go'))
-          binary = source.parent / 'llgo.out'
+          binary = source.parent.parent / 'llgo.out'
           with (root / 'rwmutex.log').open('w') as log:
             for i in range(5):
               start = time.monotonic()
