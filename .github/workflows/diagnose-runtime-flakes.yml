@@ -12,31 +12,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            abi: ''
-            arch: arm64
-          - os: macos-15-intel
-            abi: ''
-            arch: amd64
           - os: ubuntu-24.04-arm
             abi: ''
-            arch: arm64
-          - os: windows-2022
-            abi: msvc
-            arch: amd64
-          - os: windows-2022
-            abi: mingw
-            arch: amd64
-          - os: windows-11-arm
-            abi: msvc
-            arch: arm64
-          - os: windows-11-arm
-            abi: mingw
             arch: arm64
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: b2b4c077825ae09fc0f6a2ea9ff4c98facf4231d
+          ref: fd5255c40b24bdd3633839f66be3a12bfb2477f1
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
@@ -167,9 +149,9 @@ jobs:
           done
           cd test/goroot
           "$RUNNER_TEMP/llgo-bin/goroot-runner$suffix" \
-            -test.run='^TestGoRootRunCases$' -test.count=5 -test.v -test.timeout=15m \
+            -test.run='^TestGoRootRunCases$' -test.count=10 -test.v -test.timeout=15m \
             -llgo "$llgo" -goroot "$target_goroot" -directive-mode ci \
-            -case='^(fixedbugs/issue25897a.go|inline_literal.go)$' \
+            -case='^fixedbugs/issue25897a.go$' \
             -min-swap-free-mib="$min_swap" -keepwork \
             -slow-build=1s -slow-run=1s -progress=30s \
             2>&1 | tee "$RUNNER_TEMP/diagnosis.log"
@@ -177,8 +159,9 @@ jobs:
         if: failure() && runner.os == 'Linux'
         shell: bash
         run: |
-          binary=$(find "$RUNNER_TEMP/diagnosis-work" -type f -name llgo.out -print -quit)
-          test -n "$binary"
+          source=$(find "$RUNNER_TEMP/diagnosis-work" -type f -name issue25897a.go -print -quit)
+          test -n "$source"
+          binary="${source%/work/*}/llgo.out"
           if ! command -v gdb; then
             sudo apt-get update
             sudo apt-get install -y gdb
@@ -228,3 +211,69 @@ jobs:
             ${{ runner.temp }}/blocked-roots.log
             ${{ runner.temp }}/rwmutex*
           if-no-files-found: warn
+
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: J32-GoJS
+            target: emscripten
+          - profile: J32-Emscripten
+            target: emscripten
+          - profile: J64-Emscripten
+            target: emscripten-memory64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 19a61ca196f6e19cb66dc24d72e4fd91f80a8acb
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '6.0.8'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: ./.github/actions/setup-go
+      - name: Build compiler and runner
+        run: |
+          LLGO_BUILD_GOROOT_RUNNER=1 dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$PWD" >> "$GITHUB_ENV"
+      - name: Check caller allocation and traceback semantics
+        run: |
+          llgo test -target=${{ matrix.target }} -emulator \
+            -run='(Caller|Panic|Recover)' -count=3 ./internal/build/testdata/wasm-test \
+            2>&1 | tee "$RUNNER_TEMP/caller.log"
+          llgo test -target=${{ matrix.target }} -emulator \
+            -run='^TestCallerInstrumentationAllocations$' -count=100 ./internal/build/testdata/wasm-test
+      - name: Run original recursive case without expected-failure allowance
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          p = Path('test/goroot/xfail.yaml')
+          s, count = re.subn(r'(?m)^  - platform: js/wasm\n    directive: run\n    case: fixedbugs/issue59680.go\n    reason: .*\n', '', p.read_text())
+          assert count == 1, count
+          p.write_text(s)
+          PY
+          target_goroot=$(go env GOROOT)
+          cd test/goroot
+          "$RUNNER_TEMP/llgo-bin/goroot-runner" \
+            -test.run='^TestGoRootRunCases$' -test.count=5 -test.v -test.timeout=10m \
+            -llgo "$RUNNER_TEMP/llgo-bin/llgo" -goroot "$target_goroot" -directive-mode=ci \
+            -case='^fixedbugs/issue59680.go$' -wasm-profile=${{ matrix.profile }} \
+            -min-swap-free-mib=0 -slow-build=1s -slow-run=1s -progress=30s \
+            2>&1 | tee "$RUNNER_TEMP/recursion.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wasm-${{ matrix.profile }}
+          path: |
+            ${{ runner.temp }}/caller.log
+            ${{ runner.temp }}/recursion.log
