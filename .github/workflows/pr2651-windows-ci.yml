@@ -31,4 +31,11 @@ jobs:
       - name: Record compiler flags
         run: pixi run --manifest-path dev/pixi.toml --locked pwsh -NoProfile -Command '[ordered]@{CFLAGS=$env:CFLAGS; CPPFLAGS=$env:CPPFLAGS; CGO_CPPFLAGS=$env:CGO_CPPFLAGS} | ConvertTo-Json'
       - name: Check the development environment
+        # Compare relocation handling before running the full checks.
+        run: |
+          pixi run --manifest-path dev/pixi.toml --locked pkg-config --cflags bdw-gc libffi openssl sqlite3 libuv zlib
+          pixi run --manifest-path dev/pixi.toml --locked pkg-config --define-prefix --cflags bdw-gc libffi openssl sqlite3 libuv zlib
+          pixi run --manifest-path dev/pixi.toml --locked pkg-config --cflags libffi
+          pixi run --manifest-path dev/pixi.toml --locked pkg-config --define-prefix --cflags libffi
+      - name: Run the full environment checks
         run: pixi run --manifest-path dev/pixi.toml --locked pwsh -File dev/check_devenv.ps1
