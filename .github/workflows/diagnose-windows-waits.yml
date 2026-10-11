@@ -74,15 +74,14 @@ jobs:
           PY
           bash test/debug/runtime/runtest.sh -v > .artifacts/waits/debug-direct.log 2>&1
           echo "DIRECT RESULT=$?"
-      - name: Reproduce the original commandrun under Git Bash
+      - name: Diagnose the exact complete demo harness
         shell: bash
         run: |
           mkdir -p .artifacts/waits
-          (cd _demo/go/commandrun && llgo build -p=1 -o ../../../.artifacts/waits/commandrun.exe .)
           export WAIT_PROBE_DIR=$(cygpath -m "$PWD/.artifacts/waits")
           echo "WAIT_PROBE_DIR=$WAIT_PROBE_DIR" >> "$GITHUB_ENV"
-          python .github/scripts/diagnose_windows_waits.py --direct
-      - name: Capture stalled commandrun
+          python .github/scripts/diagnose_windows_waits.py --demo
+      - name: Capture pending commandrun stacks
         shell: msys2 {0}
         run: |
           source test/debug/runtime/common.sh
