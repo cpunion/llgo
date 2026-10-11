@@ -1,0 +1,60 @@
+name: Diagnose PR 2785 Windows ARM64 archive links
+
+on:
+  push:
+    branches: [codex/pr2785-arm64-link-diagnosis-20261011]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: mingw
+          windows-arch: arm64
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: arm64
+      - uses: ./.github/actions/setup-llgo-cache
+      - name: Build compiler
+        shell: bash
+        run: |
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: mingw
+          windows-arch: arm64
+      - name: Prime covered native package archives
+        env:
+          LLGO_BUILD_CACHE: '1'
+          LLGO_TEST_SUITE: core
+          LLGO_TEST_COVERPROFILE: coverage-llgo.txt
+          LLGO_TEST_COVERPKG: github.com/xgo-dev/llgo/test/...
+        shell: bash
+        run: |
+          export LLGO="$RUNNER_TEMP/llgo-bin/llgo.exe"
+          export LLGO_TEST_LLGEN="$RUNNER_TEMP/llgo-bin/llgen.exe"
+          export LLGO_STDIO_NOBUF=1
+          dev/test_go_version.sh 1.27 ./test/go ./test/llgoext ./test/windows ./test/std/fmt ./test/std/reflect
+      - name: Diagnose cold concurrent and warm export links
+        env:
+          LLGO_BUILD_CACHE: '1'
+          GOTOOLCHAIN: local
+          GOWORK: 'off'
+          GOFLAGS: ''
+        shell: bash
+        run: python .github/scripts/diagnose_pr2785_arm64_link.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pr2785-arm64-link-diagnosis
+          path: probes
+          if-no-files-found: error
