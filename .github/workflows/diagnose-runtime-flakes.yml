@@ -4,54 +4,30 @@ on:
     branches: [codex/diagnose-runtime-flakes-20261011]
 permissions:
   contents: read
+  actions: read
 jobs:
-  msvc386-gc-handoff:
+  msvc386-gc-handoff-stress:
     runs-on: windows-2022
-    timeout-minutes: 35
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          ref: 0fc3c2648134d4396b0592ecd74ec45016b69991
-          path: source
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
           windows-abi: msvc
           windows-arch: '386'
-      - uses: ./.github/actions/setup-go
-      - name: Build compiler
-        shell: bash
-        working-directory: source
-        run: |
-          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
-          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
-      - uses: ./.github/actions/setup-go
+      - uses: actions/download-artifact@v8
         with:
-          go-version: '1.26.7'
-      - uses: ./.github/actions/activate-windows-target
-        with:
-          windows-abi: msvc
-          windows-arch: '386'
-      - name: Build identical stress with and without explicit GC handoff
+          name: gc-handoff-comparison
+          run-id: 38123024848
+          github-token: ${{ github.token }}
+          path: probes
+      - name: Run published handoff binary 100 times with unchanged 90 second limit
         shell: bash
-        run: |
-          export LLGO_ROOT="$PWD/source"
-          mkdir -p probes/current probes/gc-handoff
-          cp "$(go env GOROOT)/test/fixedbugs/issue25897a.go" probes/main.go
-          echo 'module gcprobe' > probes/go.mod
-          echo 'go 1.26' >> probes/go.mod
-          (cd probes && llgo build -debug-artifact=embedded -o current/gc.exe .)
-          cp .github/scripts/gc-handoff-probe/*.go source/runtime/internal/lib/runtime/
-          git -C source diff -- runtime/internal/lib/runtime/
-          cat source/runtime/internal/lib/runtime/gc_worker.go
-          (cd probes && llgo build -debug-artifact=embedded -o gc-handoff/gc.exe .)
-      - name: Alternate binaries with external collector counters
-        shell: bash
-        run: python .github/scripts/diagnose_gc_paired.py
+        run: python .github/scripts/diagnose_gc_handoff_stress.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: gc-handoff-comparison
+          name: gc-handoff-stress
           path: probes
           if-no-files-found: error
