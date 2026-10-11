@@ -15,13 +15,13 @@ jobs:
           - os: windows-2022
             abi: msvc
             arch: '386'
-          - os: ubuntu-24.04
-            abi: msvc
-            arch: amd64
+          - os: windows-2022
+            abi: mingw
+            arch: '386'
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 48b57866a4c42a472efe0dd524834baf041a95ce
+          ref: 0a1b4e0c486774f0d2daf8b59eca2cd424a00294
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
@@ -116,6 +116,17 @@ jobs:
           llgo lldb -lldb "$LLDB_PATH" -- --batch -o 'script import os, runpy; _ = runpy.run_path("probe.py")' > "$RUNNER_TEMP/backtrace.log" 2>&1
           cat "$RUNNER_TEMP/backtrace.log"
           grep -q GC_PROBE_DONE "$RUNNER_TEMP/backtrace.log"
+      - name: Check blocked roots and collector callbacks
+        shell: bash
+        run: |
+          export LLGO_ROOT="$PWD"
+          cp .github/test-go.mod "$RUNNER_TEMP/blocked-test.mod"
+          go mod edit -modfile="$RUNNER_TEMP/blocked-test.mod" -go=1.26 -replace="github.com/xgo-dev/llgo/runtime=$PWD/runtime"
+          llgo test -modfile="$RUNNER_TEMP/blocked-test.mod" \
+            -run='^TestRuntime.*(Blocked|Finalizer|Cleanup|Gosched)' -count=10 -timeout=4m ./test/go \
+            2>&1 | tee "$RUNNER_TEMP/blocked-roots.log"
+          llgo test -modfile="$RUNNER_TEMP/blocked-test.mod" -tags=nogc \
+            -run='^TestRuntimeGoschedHandoff$' -timeout=1m ./test/go
       - name: Reproduce without flaky exemptions
         shell: bash
         run: |
@@ -198,5 +209,6 @@ jobs:
             ${{ runner.temp }}/diagnosis.log
             ${{ runner.temp }}/backtrace.log
             ${{ runner.temp }}/program.log
+            ${{ runner.temp }}/blocked-roots.log
             ${{ runner.temp }}/rwmutex*
           if-no-files-found: warn
