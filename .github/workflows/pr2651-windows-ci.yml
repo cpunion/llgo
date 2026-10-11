@@ -54,5 +54,17 @@ jobs:
           working_directory: llgo dev/dev
           env: true
           export_path: true
+      - name: Inspect native library prefixes
+        run: |
+          pkgconf --libs bdw-gc libffi
+          pkgconf --dont-define-prefix --libs bdw-gc libffi
+          pkgconf --dont-relocate-paths --libs bdw-gc libffi
+          pkg-config --libs bdw-gc libffi
+          foreach ($directory in ($env:PKG_CONFIG_PATH -split ';' | Where-Object { $_ })) {
+            foreach ($name in @('bdw-gc.pc', 'libffi.pc')) {
+              $file = Join-Path $directory $name
+              if (Test-Path -LiteralPath $file) { Get-Content -LiteralPath $file }
+            }
+          }
       - name: Run the full environment checks
         run: .\dev\check_devenv.ps1
