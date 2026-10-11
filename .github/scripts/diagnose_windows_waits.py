@@ -16,7 +16,7 @@ if '--demo' in sys.argv:
     source = "\n".join(": # Preserve diagnostic files" if line.startswith("trap ") else line for line in source.splitlines())
     p.write_text(source)
     with (root / 'demo-harness.log').open('w') as log:
-        harness = subprocess.Popen(['bash', str(p)], stdout=log, stderr=log)
+        harness = subprocess.Popen([os.environ['DEMO_BASH'], str(p)], stdout=log, stderr=log)
         started = time.monotonic()
         while time.monotonic() - started < 240 and harness.poll() is None:
             time.sleep(10)

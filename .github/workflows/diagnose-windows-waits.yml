@@ -79,6 +79,7 @@ jobs:
         run: |
           mkdir -p .artifacts/waits
           export WAIT_PROBE_DIR=$(cygpath -m "$PWD/.artifacts/waits")
+          export DEMO_BASH=$(cygpath -m "$BASH")
           echo "WAIT_PROBE_DIR=$WAIT_PROBE_DIR" >> "$GITHUB_ENV"
           python .github/scripts/diagnose_windows_waits.py --demo
       - name: Capture pending commandrun stacks
