@@ -1,0 +1,86 @@
+name: Runtime flake diagnosis
+on:
+  push:
+    branches: [codex/diagnose-runtime-flakes-20261011]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            abi: msvc
+            arch: amd64
+          - os: macos-latest
+            abi: msvc
+            arch: arm64
+          - os: windows-2022
+            abi: msvc
+            arch: amd64
+          - os: windows-2022
+            abi: mingw
+            arch: amd64
+          - os: windows-2022
+            abi: msvc
+            arch: '386'
+          - os: windows-2022
+            abi: mingw
+            arch: '386'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: ${{ matrix.arch }}
+      - uses: ./.github/actions/setup-go
+      - name: Build compiler and runner
+        shell: bash
+        run: LLGO_BUILD_GOROOT_RUNNER=1 dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: '1.26.7'
+          cache: false
+      - uses: ./.github/actions/activate-windows-target
+        if: runner.os == 'Windows'
+        with:
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: ${{ matrix.arch }}
+      - name: Reproduce without flaky exemptions
+        shell: bash
+        run: |
+          export LLGO_ROOT="$PWD"
+          suffix=
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          llgo="$RUNNER_TEMP/llgo-bin/llgo$suffix"
+          if [[ "$RUNNER_OS" == Windows ]]; then llgo=$(cygpath -w "$llgo"); fi
+          target_goroot=$(go env GOROOT)
+          min_swap=512
+          if [[ "$RUNNER_OS" == macOS ]]; then min_swap=0; fi
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('test/goroot/xfail.yaml')
+          s = p.read_text()
+          p.write_text(s[:s.index('flakes:')] + s[s.index('xfails:'):])
+          PY
+          for name in $(compgen -e); do
+            case "$name" in GITHUB_*|ACTIONS_*) unset "$name" ;; esac
+          done
+          cd test/goroot
+          "$RUNNER_TEMP/llgo-bin/goroot-runner$suffix" \
+            -test.run='^TestGoRootRunCases$' -test.count=3 -test.v -test.timeout=30m \
+            -llgo "$llgo" -goroot "$target_goroot" -directive-mode ci \
+            -case='^(goprint.go|rotate0.go|index0.go|abi/uglyfib.go|typeparam/chans.go|fixedbugs/issue(13160|48898|27695|25897a|79186|30041|39541).go)$' \
+            -min-swap-free-mib="$min_swap" -keepwork \
+            -slow-build=1s -slow-run=1s -progress=30s \
+            2>&1 | tee "$RUNNER_TEMP/diagnosis.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: diagnosis-${{ matrix.os }}-${{ matrix.abi }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/diagnosis.log
+          if-no-files-found: warn
