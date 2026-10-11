@@ -10,6 +10,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: windows-11-arm
+            abi: msvc
+            arch: arm64
           - os: windows-2022
             abi: mingw
             arch: amd64
@@ -22,6 +25,11 @@ jobs:
           llvm-version: 22
           windows-abi: ${{ matrix.abi }}
           windows-arch: ${{ matrix.arch }}
+      - uses: ./.github/actions/setup-demo-deps
+        with:
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: ${{ matrix.arch }}
+          install-lldb-python: "true"
       - uses: ./.github/actions/setup-go
       - name: Build compiler
         shell: bash
@@ -33,18 +41,6 @@ jobs:
         with:
           windows-abi: ${{ matrix.abi }}
           windows-arch: ${{ matrix.arch }}
-      - name: Install MinGW LLDB
-        if: matrix.abi == 'mingw'
-        shell: msys2 {0}
-        run: |
-          prefix=mingw-w64-clang-x86_64
-          repo=https://repo.msys2.org/mingw/clang64
-          args=(--noconfirm -U)
-          for dep in cc-libs expat bzip2 mpdecimal ncurses openssl sqlite3 tcl tk tzdata; do
-            args+=(--assume-installed "$prefix-$dep")
-          done
-          pacman "${args[@]}" "$repo/$prefix-python-3.14.6-2-any.pkg.tar.zst" "$repo/$prefix-lldb-22.1.8-1-any.pkg.tar.zst"
-          echo "LLGO_LLDB=$(cygpath -m /clang64/bin/lldb.exe)" >> "$GITHUB_ENV"
       - name: Collect dependency unwind information
         if: matrix.abi == 'msvc'
         shell: bash
@@ -75,6 +71,7 @@ jobs:
           bash test/debug/runtime/runtest.sh -v > .artifacts/waits/debug-direct.log 2>&1
           echo "DIRECT RESULT=$?"
       - name: Diagnose the exact complete demo harness
+        if: matrix.abi == 'mingw'
         shell: bash
         run: |
           mkdir -p .artifacts/waits
@@ -82,7 +79,20 @@ jobs:
           export DEMO_BASH=$(cygpath -m "$BASH")
           echo "WAIT_PROBE_DIR=$WAIT_PROBE_DIR" >> "$GITHUB_ENV"
           python .github/scripts/diagnose_windows_waits.py --demo
+      - name: Install MinGW LLDB
+        if: matrix.abi == 'mingw'
+        shell: msys2 {0}
+        run: |
+          prefix=mingw-w64-clang-x86_64
+          repo=https://repo.msys2.org/mingw/clang64
+          args=(--noconfirm -U)
+          for dep in cc-libs expat bzip2 mpdecimal ncurses openssl sqlite3 tcl tk tzdata; do
+            args+=(--assume-installed "$prefix-$dep")
+          done
+          pacman "${args[@]}" "$repo/$prefix-python-3.14.6-2-any.pkg.tar.zst" "$repo/$prefix-lldb-22.1.8-1-any.pkg.tar.zst"
+          echo "LLGO_LLDB=$(cygpath -m /clang64/bin/lldb.exe)" >> "$GITHUB_ENV"
       - name: Capture pending commandrun stacks
+        if: matrix.abi == 'mingw'
         shell: msys2 {0}
         run: |
           source test/debug/runtime/common.sh
