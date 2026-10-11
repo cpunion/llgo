@@ -1,0 +1,34 @@
+name: PR2651 Windows environment check
+
+on:
+  push:
+    branches: [codex/pr2651-windows-ci-20261011]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pixi:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: llgo dev
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: llgo dev
+      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          pixi-version: v0.81.0
+          working-directory: llgo dev/dev
+          locked: true
+      - name: Record compiler flags
+        run: pixi run --manifest-path dev/pixi.toml --locked pwsh -NoProfile -Command '[ordered]@{CFLAGS=$env:CFLAGS; CPPFLAGS=$env:CPPFLAGS; CGO_CPPFLAGS=$env:CGO_CPPFLAGS} | ConvertTo-Json'
+      - name: Check the development environment
+        run: pixi run --manifest-path dev/pixi.toml --locked pwsh -File dev/check_devenv.ps1
