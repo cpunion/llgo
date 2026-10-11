@@ -12,9 +12,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15
+          - os: windows-2022
             abi: msvc
-            arch: amd64
+            arch: '386'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -42,7 +42,68 @@ jobs:
         with:
           windows-abi: ${{ matrix.abi }}
           windows-arch: ${{ matrix.arch }}
+      - name: Diagnose continuous GC with LLDB
+        shell: bash
+        run: |
+          export LLGO_ROOT="$PWD"
+          source test/debug/runtime/common.sh
+          target_goroot=$(go env GOROOT)
+          mkdir -p "$RUNNER_TEMP/gc-probe"
+          cp "$target_goroot/test/fixedbugs/issue25897a.go" "$RUNNER_TEMP/gc-probe/main.go"
+          cd "$RUNNER_TEMP/gc-probe"
+          echo 'module gcprobe' > go.mod
+          echo 'go 1.26' >> go.mod
+          llgo build -debug-artifact=embedded -o gc.exe .
+          export LLGO_GC_PROBE=$(cygpath -w "$PWD/gc.exe")
+          cat > probe.py <<'PY'
+          import os, time, lldb
+          debugger = lldb.SBDebugger.Create()
+          debugger.SetAsync(True)
+          target = debugger.CreateTarget(os.environ['LLGO_GC_PROBE'])
+          interpreter = debugger.GetCommandInterpreter()
+          def command(text):
+              result = lldb.SBCommandReturnObject()
+              interpreter.HandleCommand(text, result)
+              print(text, result.GetOutput(), result.GetError(), flush=True)
+          for run in range(3):
+              print('ROUND', run, flush=True)
+              process = target.LaunchSimple(None, None, os.path.dirname(os.environ['LLGO_GC_PROBE']))
+              started = time.monotonic()
+              sampled = False
+              stops = 0
+              while time.monotonic() - started < 95:
+                  state = process.GetState()
+                  if state == lldb.eStateExited:
+                      print('EXIT', process.GetExitStatus(), time.monotonic()-started, flush=True)
+                      break
+                  if state == lldb.eStateStopped:
+                      stops += 1
+                      print('STOP', process.GetSelectedThread().GetStopDescription(512), flush=True)
+                      command('thread backtrace all -c 16')
+                      command('register read')
+                      command('disassemble --frame')
+                      if stops > 5:
+                          break
+                      process.Continue()
+                  if time.monotonic()-started > 45 and not sampled:
+                      sampled = True
+                      print('SAMPLE', flush=True)
+                      process.Stop()
+                      time.sleep(1)
+                      command('thread backtrace all -c 16')
+                      process.Continue()
+                  time.sleep(.1)
+              if process.GetState() != lldb.eStateExited:
+                  process.Stop()
+                  time.sleep(1)
+                  command('thread backtrace all -c 16')
+                  process.Kill()
+          lldb.SBDebugger.Destroy(debugger)
+          PY
+          "$LLDB_PATH" --batch -o 'script import os, runpy; runpy.run_path("probe.py")' > "$RUNNER_TEMP/backtrace.log" 2>&1
+          cat "$RUNNER_TEMP/backtrace.log"
       - name: Reproduce without flaky exemptions
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           export LLGO_ROOT="$PWD"
