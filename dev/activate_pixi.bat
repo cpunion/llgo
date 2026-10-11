@@ -16,9 +16,10 @@ set "CGO_ENABLED=1"
 set "CC=clang -fuse-ld=lld -fms-runtime-lib=dll"
 set "CXX=clang++ -fuse-ld=lld -fms-runtime-lib=dll"
 set "LLVM_CONFIG=llvm-config"
-rem Conda has already relocated the native library prefixes.
+rem LLGo needs explicit native include and library search flags.
 set "PKG_CONFIG=pkgconf"
-set "PKG_CONFIG_DONT_DEFINE_PREFIX=1"
+set "PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1"
+set "PKG_CONFIG_ALLOW_SYSTEM_LIBS=1"
 set "CGO_CXXFLAGS=-std=c++17"
 set "LLGO_ROOT=%~dp0.."
 set "CGO_CPPFLAGS="

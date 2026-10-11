@@ -30,8 +30,9 @@ LLGO_CLANG_PREFIX = { value = "{{ tools.clangxx.path }}", tools = true }
 LLGO_LLD_PREFIX = { value = "{{ tools.lld.path }}", tools = true }
 LLGO_PKG_CONFIG_PREFIX = { value = "{{ tools['pkg-config'].path }}", tools = true }
 PKG_CONFIG = { value = "{% if os() == 'windows' %}pkgconf{% else %}\"{{ config_root }}/conda-tools/pkg-config\"{% endif %}", tools = true }
-# Conda has already relocated these prefixes; keep pkgconf from redefining them.
-PKG_CONFIG_DONT_DEFINE_PREFIX = "1"
+# LLGo needs explicit flags, including paths also listed in CPATH/LIBRARY_PATH.
+PKG_CONFIG_ALLOW_SYSTEM_CFLAGS = "1"
+PKG_CONFIG_ALLOW_SYSTEM_LIBS = "1"
 # Use the full compiler prefix: clangxx is a metapackage, whose actual
 # executables are dependencies and are not exposed by mise's conda launchers.
 _.path = { path = [
