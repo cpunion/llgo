@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 813e6b2dd942086fd86eff4a39426870179dd0d8
+          ref: 20bcec1213ebbc1c4364da3a95907600fefcca7e
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
@@ -57,9 +57,11 @@ jobs:
           export LLGO_GC_PROBE=$(cygpath -w "$PWD/gc.exe")
           cat > probe.py <<'PY'
           import os, time, lldb
-          debugger = lldb.SBDebugger.Create()
+          debugger = lldb.debugger
           debugger.SetAsync(True)
           target = debugger.CreateTarget(os.environ['LLGO_GC_PROBE'])
+          assert target.IsValid(), 'invalid target'
+          debugger.SetSelectedTarget(target)
           interpreter = debugger.GetCommandInterpreter()
           def command(text):
               result = lldb.SBCommandReturnObject()
@@ -67,41 +69,49 @@ jobs:
               print(text, result.GetOutput(), result.GetError(), flush=True)
           for run in range(3):
               print('ROUND', run, flush=True)
-              process = target.LaunchSimple(None, None, os.path.dirname(os.environ['LLGO_GC_PROBE']))
+              listener = lldb.SBListener('gc-probe')
+              launch = target.GetLaunchInfo()
+              launch.SetWorkingDirectory(os.path.dirname(os.environ['LLGO_GC_PROBE']))
+              launch.SetListener(listener)
+              error = lldb.SBError()
+              process = target.Launch(launch, error)
+              print('LAUNCH', str(error), process.GetProcessID(), flush=True)
+              assert error.Success() and process.IsValid(), str(error)
               started = time.monotonic()
               sampled = False
               stops = 0
               while time.monotonic() - started < 95:
-                  state = process.GetState()
+                  event = lldb.SBEvent()
+                  if not listener.WaitForEvent(1, event):
+                      if time.monotonic()-started > 45 and not sampled:
+                          sampled = True
+                          print('SAMPLE', str(process.Stop()), flush=True)
+                      continue
+                  if not lldb.SBProcess.EventIsProcessEvent(event):
+                      continue
+                  state = lldb.SBProcess.GetStateFromEvent(event)
                   if state == lldb.eStateExited:
                       print('EXIT', process.GetExitStatus(), time.monotonic()-started, flush=True)
                       break
-                  if state == lldb.eStateStopped:
+                  if state == lldb.eStateStopped and not lldb.SBProcess.GetRestartedFromEvent(event):
                       stops += 1
-                      print('STOP', process.GetSelectedThread().GetStopDescription(512), flush=True)
+                      print('STOP', process.GetNumThreads(), process.GetSelectedThread().GetStopDescription(512), flush=True)
                       command('thread backtrace all -c 16')
                       command('register read')
                       command('disassemble --frame')
                       if stops > 5:
                           break
-                      process.Continue()
-                  if time.monotonic()-started > 45 and not sampled:
-                      sampled = True
-                      print('SAMPLE', flush=True)
-                      process.Stop()
-                      time.sleep(1)
-                      command('thread backtrace all -c 16')
-                      process.Continue()
-                  time.sleep(.1)
+                      print('CONTINUE', str(process.Continue()), flush=True)
               if process.GetState() != lldb.eStateExited:
                   process.Stop()
                   time.sleep(1)
                   command('thread backtrace all -c 16')
                   process.Kill()
-          lldb.SBDebugger.Destroy(debugger)
+          print('GC_PROBE_DONE', flush=True)
           PY
-          llgo lldb -lldb "$LLDB_PATH" -- --batch -o 'script import os, runpy; runpy.run_path("probe.py")' > "$RUNNER_TEMP/backtrace.log" 2>&1
+          llgo lldb -lldb "$LLDB_PATH" -- --batch -o 'script import os, runpy; _ = runpy.run_path("probe.py")' > "$RUNNER_TEMP/backtrace.log" 2>&1
           cat "$RUNNER_TEMP/backtrace.log"
+          grep -q GC_PROBE_DONE "$RUNNER_TEMP/backtrace.log"
       - name: Reproduce without flaky exemptions
         if: runner.os != 'Windows'
         shell: bash
