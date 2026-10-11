@@ -74,8 +74,12 @@ jobs:
         if: always()
         shell: bash
         run: |
-          binary=$(rg --files "$RUNNER_TEMP/diagnosis-work" | rg '/llgo\.out$' | head -1)
+          binary=$(find "$RUNNER_TEMP/diagnosis-work" -type f -name llgo.out -print -quit)
           test -n "$binary"
+          if ! command -v gdb; then
+            sudo apt-get update
+            sudo apt-get install -y gdb
+          fi
           "$binary" > "$RUNNER_TEMP/program.log" 2>&1 &
           pid=$!
           sleep 5
