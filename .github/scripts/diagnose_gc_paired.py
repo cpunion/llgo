@@ -52,7 +52,7 @@ def sample(handle, address):
 root = Path('probes').resolve()
 results = []
 for round in range(5):
-    variants = ['current', 'caller-reuse']
+    variants = ['current', 'gc-handoff']
     if round % 2:
         variants.reverse()
     for variant in variants:

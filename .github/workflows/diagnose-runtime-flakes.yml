@@ -5,14 +5,14 @@ on:
 permissions:
   contents: read
 jobs:
-  msvc386-caller-allocation:
+  msvc386-gc-handoff:
     runs-on: windows-2022
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
         with:
-          ref: 209c2f255de48e389704edc30a66d868ddc3fed1
+          ref: 0fc3c2648134d4396b0592ecd74ec45016b69991
           path: source
       - uses: ./.github/actions/setup-deps
         with:
@@ -33,25 +33,25 @@ jobs:
         with:
           windows-abi: msvc
           windows-arch: '386'
-      - name: Build identical stress with and without existing caller-frame allocation fix
+      - name: Build identical stress with and without explicit GC handoff
         shell: bash
         run: |
           export LLGO_ROOT="$PWD/source"
-          mkdir -p probes/current probes/caller-reuse
+          mkdir -p probes/current probes/gc-handoff
           cp "$(go env GOROOT)/test/fixedbugs/issue25897a.go" probes/main.go
           echo 'module gcprobe' > probes/go.mod
           echo 'go 1.26' >> probes/go.mod
           (cd probes && llgo build -debug-artifact=embedded -o current/gc.exe .)
-          git -C source fetch origin 36d37081ee0c3b1fb8c2d311f9825044400d721e
-          git -C source show 36d37081ee0c3b1fb8c2d311f9825044400d721e:runtime/internal/runtime/caller.go > source/runtime/internal/runtime/caller.go
-          git -C source diff -- runtime/internal/runtime/caller.go
-          (cd probes && llgo build -debug-artifact=embedded -o caller-reuse/gc.exe .)
+          cp .github/scripts/gc-handoff-probe/*.go source/runtime/internal/lib/runtime/
+          git -C source diff -- runtime/internal/lib/runtime/
+          cat source/runtime/internal/lib/runtime/gc_worker.go
+          (cd probes && llgo build -debug-artifact=embedded -o gc-handoff/gc.exe .)
       - name: Alternate binaries with external collector counters
         shell: bash
         run: python .github/scripts/diagnose_gc_paired.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: gc-caller-allocation-comparison
+          name: gc-handoff-comparison
           path: probes
           if-no-files-found: error
