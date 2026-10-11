@@ -38,15 +38,21 @@ jobs:
         env:
           LLGO_STDIO_NOBUF: '1'
           LLGO_BUILD_CACHE: '1'
+          GOENV: 'off'
+          GOWORK: 'off'
+          GOFLAGS: ''
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p probes
-          llgo test -c -g -cover -coverpkg=github.com/xgo-dev/llgo/test/... -o probes/windows-baseline.exe ./test/windows
+          cp .github/test-go.mod probes/test.mod
+          cp .github/test-go.sum probes/test.sum
+          go mod edit -modfile=probes/test.mod -go=1.27 -replace="github.com/xgo-dev/llgo/runtime=$PWD/runtime"
+          llgo test -c -modfile=probes/test.mod -covermode=atomic -coverpkg=github.com/xgo-dev/llgo/test/... -o probes/windows-baseline.exe ./test/windows
           python .github/scripts/diagnose_pr2785_windows_exit.py probes/windows-baseline.exe baseline
           git fetch origin codex/runtime-flakes-20261011
           git cherry-pick --no-commit 96c974df1c3ef01a4fca678788e920c73f67998a
-          llgo test -c -g -cover -coverpkg=github.com/xgo-dev/llgo/test/... -o probes/windows-tls-fixed.exe ./test/windows
+          llgo test -c -modfile=probes/test.mod -covermode=atomic -coverpkg=github.com/xgo-dev/llgo/test/... -o probes/windows-tls-fixed.exe ./test/windows
           python .github/scripts/diagnose_pr2785_windows_exit.py probes/windows-tls-fixed.exe tls-fixed
       - uses: actions/upload-artifact@v7
         if: always()

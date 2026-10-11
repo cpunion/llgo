@@ -15,7 +15,19 @@ def main():
     root.mkdir(parents=True, exist_ok=True)
     results = []
     failures = 0
-    debugger = shutil.which("lldb.exe") or shutil.which("lldb")
+    debugger = os.environ.get("LLGO_LLDB") or shutil.which("lldb.exe") or shutil.which("lldb")
+    with (root / "parent.log").open("wb") as stream:
+        parent = subprocess.Popen(
+            [str(binary), "-test.run=^TestExitDuringThreadCreation$", "-test.count=3", "-test.timeout=3m"],
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            parent_code = parent.wait(timeout=200)
+        except subprocess.TimeoutExpired:
+            parent.kill()
+            parent_code = parent.wait(timeout=10)
+        print(json.dumps(dict(label=label, parent_code=parent_code)), flush=True)
     for mode in ["return", "os-exit"]:
         for iteration in range(512):
             output = root / f"{mode}-{iteration}.log"
@@ -56,7 +68,7 @@ def main():
                 break
         if failures >= 3:
             break
-    summary = dict(label=label, total=len(results), failures=failures, results=results)
+    summary = dict(label=label, parent_code=parent_code, total=len(results), failures=failures, results=results)
     (root / "results.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps({key: summary[key] for key in ["label", "total", "failures"]}), flush=True)
 
