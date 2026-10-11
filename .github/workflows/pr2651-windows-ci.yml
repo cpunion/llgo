@@ -30,12 +30,29 @@ jobs:
           locked: true
       - name: Record compiler flags
         run: pixi run --manifest-path dev/pixi.toml --locked pwsh -NoProfile -Command '[ordered]@{CFLAGS=$env:CFLAGS; CPPFLAGS=$env:CPPFLAGS; CGO_CPPFLAGS=$env:CGO_CPPFLAGS} | ConvertTo-Json'
-      - name: Check the development environment
-        # Compare relocation handling before running the full checks.
+      - name: Check native dependency flags
         run: |
-          pixi run --manifest-path dev/pixi.toml --locked pkg-config --cflags bdw-gc libffi openssl sqlite3 libuv zlib
-          pixi run --manifest-path dev/pixi.toml --locked pkg-config --define-prefix --cflags bdw-gc libffi openssl sqlite3 libuv zlib
-          pixi run --manifest-path dev/pixi.toml --locked pkg-config --cflags libffi
-          pixi run --manifest-path dev/pixi.toml --locked pkg-config --define-prefix --cflags libffi
+          pixi run --manifest-path dev/pixi.toml --locked pkgconf --cflags bdw-gc libffi openssl sqlite3 libuv zlib
+          pixi run --manifest-path dev/pixi.toml --locked pkgconf --libs bdw-gc libffi openssl sqlite3 libuv zlib
       - name: Run the full environment checks
         run: pixi run --manifest-path dev/pixi.toml --locked pwsh -File dev/check_devenv.ps1
+  mise:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: llgo dev
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: llgo dev
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.7
+          install_args: --locked
+          working_directory: llgo dev/dev
+          env: true
+          export_path: true
+      - name: Run the full environment checks
+        run: .\dev\check_devenv.ps1
