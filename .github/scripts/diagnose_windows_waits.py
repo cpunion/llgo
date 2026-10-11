@@ -1,62 +1,62 @@
+import concurrent.futures
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 
 root = Path(os.environ['WAIT_PROBE_DIR'])
 exe = root / 'commandrun.exe'
 if '--direct' in sys.argv:
-    for i in range(10):
+    failed = threading.Event()
+    records = []
+    def check(i):
+        if failed.is_set():
+            return
+        start = time.monotonic()
         with (root / f'commandrun-direct-{i}.log').open('w') as log:
-            process = subprocess.Popen([str(exe)], stdout=log, stderr=log)
+            process = subprocess.Popen([str(exe)], cwd='_demo/go/commandrun', stdout=log, stderr=log)
             try:
                 process.wait(timeout=15)
-                print(i, process.returncode, flush=True)
-                if process.returncode:
-                    break
+                result = process.returncode
             except subprocess.TimeoutExpired:
-                subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'])
-                print(i, 'timeout', flush=True)
-                break
+                result = 'timeout'
+                if not failed.is_set():
+                    (root / 'stalled-pid').write_text(str(process.pid))
+                failed.set()
+            item = {'round': i, 'pid': process.pid, 'result': result, 'seconds': time.monotonic()-start}
+            print(json.dumps(item), flush=True)
+            records.append(item)
+            if result:
+                failed.set()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(check, range(100)))
+    (root / 'results.json').write_text(json.dumps(records, indent=2))
     sys.exit(0)
 
 import lldb
-debugger = lldb.debugger
-debugger.SetAsync(True)
-target = debugger.CreateTarget(str(exe))
-debugger.SetSelectedTarget(target)
-listener = lldb.SBListener('wait-probe')
-launch = target.GetLaunchInfo()
-launch.SetListener(listener)
-launch.AddOpenFileAction(1, str(root / 'commandrun-debug.stdout'), False, True)
-launch.AddOpenFileAction(2, str(root / 'commandrun-debug.stderr'), False, True)
-error = lldb.SBError()
-process = target.Launch(launch, error)
-print('LAUNCH', str(error), flush=True)
-assert error.Success(), str(error)
-started = time.monotonic()
-while time.monotonic() - started < 15:
-    event = lldb.SBEvent()
-    if not listener.WaitForEvent(1, event):
-        continue
-    if not lldb.SBProcess.EventIsProcessEvent(event):
-        continue
-    state = lldb.SBProcess.GetStateFromEvent(event)
-    if state == lldb.eStateExited:
-        print('EXIT', process.GetExitStatus(), flush=True)
-        break
-    if state == lldb.eStateStopped and not lldb.SBProcess.GetRestartedFromEvent(event):
-        print('STOP', str(process.GetSelectedThread()), flush=True)
-        process.Continue()
-if process.GetState() != lldb.eStateExited:
-    process.Stop()
-    for _ in range(20):
-        if process.GetState() == lldb.eStateStopped:
-            break
-        time.sleep(.05)
-    for thread in process:
-        print(str(thread), flush=True)
-        for frame in list(thread)[:32]:
-            print(str(frame), flush=True)
-    process.Kill()
+if (root / 'stalled-pid').exists():
+    pid = int((root / 'stalled-pid').read_text())
+    debugger = lldb.debugger
+    debugger.SetAsync(False)
+    target = debugger.CreateTarget(str(exe))
+    debugger.SetSelectedTarget(target)
+    error = lldb.SBError()
+    process = target.AttachToProcessWithID(debugger.GetListener(), pid, error)
+    print('ATTACH', str(error), flush=True)
+    if error.Success():
+        for thread in process:
+            print(str(thread), flush=True)
+            for frame in list(thread)[:40]:
+                print(str(frame), flush=True)
+        result = lldb.SBCommandReturnObject()
+        debugger.GetCommandInterpreter().HandleCommand('image list', result)
+        print(result.GetOutput(), result.GetError(), flush=True)
+        process.Kill()
+    for item in json.loads((root / 'results.json').read_text()):
+        if item['result'] == 'timeout':
+            subprocess.run(['taskkill', '/PID', str(item['pid']), '/T', '/F'])
+else:
+    print('No stalled process', flush=True)

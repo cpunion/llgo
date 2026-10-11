@@ -10,9 +10,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-11-arm
-            abi: msvc
-            arch: arm64
           - os: windows-2022
             abi: mingw
             arch: amd64
@@ -77,25 +74,19 @@ jobs:
           PY
           bash test/debug/runtime/runtest.sh -v > .artifacts/waits/debug-direct.log 2>&1
           echo "DIRECT RESULT=$?"
-      - name: Diagnose MinGW commandrun
-        if: matrix.abi == 'mingw'
-        shell: msys2 {0}
+      - name: Reproduce the original commandrun under Git Bash
+        shell: bash
         run: |
           mkdir -p .artifacts/waits
-          source test/debug/runtime/common.sh
-          echo "LLDB_PATH=$LLDB_PATH" >> "$GITHUB_ENV"
-          python - <<'PY'
-          from pathlib import Path
-          p = Path('_demo/go/commandrun/main.go')
-          s = p.read_text()
-          for marker in ['cmd := exec.Command', 'if err := cmd.Run()', 'out, err := exec.Command', 'executable, err := os.Executable()', 'child := exec.Command', 'output, err := child.Output()']:
-            s = s.replace(marker, 'println("STAGE", '+repr(marker).replace("'", '"')+')\n\t'+marker)
-          p.write_text(s)
-          PY
-          (cd _demo/go/commandrun && llgo build -debug-artifact=embedded -o ../../../.artifacts/waits/commandrun.exe .)
+          (cd _demo/go/commandrun && llgo build -p=1 -o ../../../.artifacts/waits/commandrun.exe .)
           export WAIT_PROBE_DIR=$(cygpath -m "$PWD/.artifacts/waits")
-          export WAIT_PROBE_SCRIPT=$(cygpath -m "$PWD/.github/scripts/diagnose_windows_waits.py")
+          echo "WAIT_PROBE_DIR=$WAIT_PROBE_DIR" >> "$GITHUB_ENV"
           python .github/scripts/diagnose_windows_waits.py --direct
+      - name: Capture stalled commandrun
+        shell: msys2 {0}
+        run: |
+          source test/debug/runtime/common.sh
+          export WAIT_PROBE_SCRIPT=$(cygpath -m "$PWD/.github/scripts/diagnose_windows_waits.py")
           llgo lldb -lldb "$LLDB_PATH" -- --batch -o 'script import os, runpy; _ = runpy.run_path(os.environ["WAIT_PROBE_SCRIPT"])' > .artifacts/waits/commandrun-backtrace.log 2>&1
       - uses: actions/upload-artifact@v7
         if: always()
