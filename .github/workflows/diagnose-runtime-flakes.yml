@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
-  msvc386-paired:
+  msvc386-bdwgc:
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -19,30 +19,18 @@ jobs:
         with:
           windows-abi: msvc
           windows-arch: '386'
-      - uses: actions/download-artifact@v8
-        with:
-          github-token: ${{ github.token }}
-          run-id: 38114231804
-          name: gc-fault-current-fix
-          path: probes/current
-      - uses: actions/download-artifact@v8
-        with:
-          github-token: ${{ github.token }}
-          run-id: 38115474206
-          name: gc-fault-current-fix
-          path: probes/fault-probe
-      - name: Sample identical binaries on the same host without a debugger
+      - name: Build standalone C collector contention probe
         shell: bash
-        run: python .github/scripts/diagnose_gc_paired.py
+        run: |
+          mkdir -p probes/c-fairness
+          clang --target=i686-pc-windows-msvc -O2 .github/scripts/gc-fairness-c/fairness.c \
+            -o probes/c-fairness/fairness.exe $(pkg-config --libs bdw-gc) -lkernel32
+      - name: Compare allocation progress with and without repeated collection
+        shell: bash
+        run: python .github/scripts/gc-fairness-c/run.py probes/c-fairness/fairness.exe --output probes/c-fairness --rounds 3 --timeout 90
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: gc-paired-samples
-          path: probes/*.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: gc-paired-output
-          path: probes/*.log
+          name: c-bdwgc-fairness
+          path: probes/c-fairness
           if-no-files-found: error
