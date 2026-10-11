@@ -5,112 +5,44 @@ on:
 permissions:
   contents: read
 jobs:
-  msvc386:
+  msvc386-paired:
     runs-on: windows-2022
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: original-fault
-            ref: 58a9d864bcaeccbe9472a8b3986bdc18cd630837
-            rounds: 10
-          - name: current-fix
-            ref: 209c2f255de48e389704edc30a66d868ddc3fed1
-            rounds: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ matrix.ref }}
-          path: source
-      - uses: ./source/.github/actions/setup-deps
+      - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
           windows-abi: msvc
           windows-arch: '386'
-      - uses: ./source/.github/actions/setup-go
-      - name: Build compiler
-        shell: bash
-        working-directory: source
-        run: |
-          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
-          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
-      - uses: ./source/.github/actions/setup-go
-        with:
-          go-version: '1.26.7'
-          cache: false
-      - uses: ./source/.github/actions/activate-windows-target
+      - uses: ./.github/actions/activate-windows-target
         with:
           windows-abi: msvc
           windows-arch: '386'
-      - name: Record accepted hardware faults without changing the test
-        shell: bash
-        run: |
-          python - <<'PYTHON'
-          from pathlib import Path
-          p = Path('source/runtime/internal/runtime/fault_handler_windows.go')
-          s = p.read_text()
-          marker = '\n\t// The panic path does not return through the vectored handler'
-          assert marker in s
-          probe = """
-          \n\t// Diagnostic only: capture the original x86 CONTEXT before Go unwinds.
-          \tctx := (*[50]uint32)(context)
-          \tgp := (*g)(unsafe.Pointer(currentG))
-          \tc.Fprintf(c.Stderr, c.Str("FAULT code=%x addr=%x pc=%x sp=%x bp=%x eax=%x ebx=%x ecx=%x g=%p goid=%llu startarg=%p\\n"),
-          \t\tcode, address, ctx[46], ctx[49], ctx[45], ctx[44], ctx[41], ctx[43], gp, gp.goid, gp.startarg)
-          \tif gp.startarg != nil {
-          \t\twords := (*[2]uintptr)(gp.startarg)
-          \t\tc.Fprintf(c.Stderr, c.Str("START fn=%x ctx=%x\\n"), words[0], words[1])
-          \t}
-          """
-          s = s.replace(marker, probe + marker, 1)
-          p.write_text(s)
-          PYTHON
-      - name: Build original GC stress with debug information
-        shell: bash
-        run: |
-          export LLGO_ROOT="$PWD/source"
-          echo "LLGO_ROOT=$LLGO_ROOT" >> "$GITHUB_ENV"
-          source source/test/debug/runtime/common.sh
-          echo "LLDB_PATH=$LLDB_PATH" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/gc-probe"
-          cp "$(go env GOROOT)/test/fixedbugs/issue25897a.go" "$RUNNER_TEMP/gc-probe/main.go"
-          cd "$RUNNER_TEMP/gc-probe"
-          echo 'module gcprobe' > go.mod
-          echo 'go 1.26' >> go.mod
-          llgo build -debug-artifact=embedded -o gc.exe .
-          echo "GC_PROBE_DIR=$(cygpath -w "$PWD")" >> "$GITHUB_ENV"
-          echo "GC_PROBE_ROUNDS=${{ matrix.rounds }}" >> "$GITHUB_ENV"
-      - name: Reproduce original case
-        shell: bash
-        run: python .github/scripts/diagnose_gc_fault.py --direct
-      - uses: actions/upload-artifact@v7
-        if: ${{ !cancelled() && env.GC_PROBE_DIR != '' }}
+      - uses: actions/download-artifact@v8
         with:
-          name: gc-direct-${{ matrix.name }}
-          path: ${{ runner.temp }}/gc-probe
-          if-no-files-found: error
-      - name: Capture exception site and all threads
-        if: ${{ !cancelled() && env.GC_PROBE_DIR != '' }}
+          github-token: ${{ github.token }}
+          run-id: 38114231804
+          name: gc-fault-current-fix
+          path: probes/current
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 38115474206
+          name: gc-fault-current-fix
+          path: probes/fault-probe
+      - name: Sample identical binaries on the same host without a debugger
         shell: bash
-        run: |
-          export GC_PROBE_SCRIPT=$(cygpath -w "$PWD/.github/scripts/diagnose_gc_fault.py")
-          llgo lldb -lldb "$LLDB_PATH" -- --batch \
-            -o 'script import os, runpy; _ = runpy.run_path(os.environ["GC_PROBE_SCRIPT"])' \
-            > "$RUNNER_TEMP/gc-probe/backtrace.log" 2>&1
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          p = Path(os.environ['GC_PROBE_DIR']) / 'debug-results.json'
-          results = json.loads(p.read_text())
-          print(json.dumps(results, indent=2))
-          if any(r['result'] != 0 for r in results):
-              raise SystemExit(1)
-          PY
+        run: python .github/scripts/diagnose_gc_paired.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: gc-fault-${{ matrix.name }}
-          path: ${{ runner.temp }}/gc-probe
+          name: gc-paired-samples
+          path: probes/*.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gc-paired-output
+          path: probes/*.log
           if-no-files-found: error
