@@ -5,275 +5,83 @@ on:
 permissions:
   contents: read
 jobs:
-  native:
-    runs-on: ${{ matrix.os }}
+  msvc386:
+    runs-on: windows-2022
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04-arm
-            abi: ''
-            arch: arm64
+          - name: original-fault
+            ref: 58a9d864bcaeccbe9472a8b3986bdc18cd630837
+            rounds: 10
+          - name: current-fix
+            ref: 209c2f255de48e389704edc30a66d868ddc3fed1
+            rounds: 30
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
-          ref: fd5255c40b24bdd3633839f66be3a12bfb2477f1
-      - uses: ./.github/actions/setup-deps
+          ref: ${{ matrix.ref }}
+          path: source
+      - uses: ./source/.github/actions/setup-deps
         with:
           llvm-version: 22
-          windows-abi: ${{ matrix.abi }}
-          windows-arch: ${{ matrix.arch }}
-      - uses: ./.github/actions/setup-go
-      - name: Build compiler and runner
+          windows-abi: msvc
+          windows-arch: '386'
+      - uses: ./source/.github/actions/setup-go
+      - name: Build compiler
         shell: bash
+        working-directory: source
         run: |
-          LLGO_BUILD_GOROOT_RUNNER=1 dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
           echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
-          llgo="$RUNNER_TEMP/llgo-bin/llgo"
-          if [[ "$RUNNER_OS" == Windows ]]; then llgo=$(cygpath -w "$llgo.exe"); fi
-          echo "LLGO_TEST_LLGO=$llgo" >> "$GITHUB_ENV"
-      - uses: ./.github/actions/setup-go
+      - uses: ./source/.github/actions/setup-go
         with:
           go-version: '1.26.7'
           cache: false
-      - uses: ./.github/actions/activate-windows-target
-        if: runner.os == 'Windows'
+      - uses: ./source/.github/actions/activate-windows-target
         with:
-          windows-abi: ${{ matrix.abi }}
-          windows-arch: ${{ matrix.arch }}
-      - name: Diagnose continuous GC with LLDB
-        if: false
+          windows-abi: msvc
+          windows-arch: '386'
+      - name: Build original GC stress with debug information
         shell: bash
         run: |
-          export LLGO_ROOT="$PWD"
-          source test/debug/runtime/common.sh
-          target_goroot=$(go env GOROOT)
+          export LLGO_ROOT="$PWD/source"
+          echo "LLGO_ROOT=$LLGO_ROOT" >> "$GITHUB_ENV"
+          source source/test/debug/runtime/common.sh
+          echo "LLDB_PATH=$LLDB_PATH" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/gc-probe"
-          cp "$target_goroot/test/fixedbugs/issue25897a.go" "$RUNNER_TEMP/gc-probe/main.go"
+          cp "$(go env GOROOT)/test/fixedbugs/issue25897a.go" "$RUNNER_TEMP/gc-probe/main.go"
           cd "$RUNNER_TEMP/gc-probe"
           echo 'module gcprobe' > go.mod
           echo 'go 1.26' >> go.mod
           llgo build -debug-artifact=embedded -o gc.exe .
-          export LLGO_GC_PROBE=$(cygpath -w "$PWD/gc.exe")
-          cat > probe.py <<'PY'
-          import os, time, lldb
-          debugger = lldb.debugger
-          debugger.SetAsync(True)
-          target = debugger.CreateTarget(os.environ['LLGO_GC_PROBE'])
-          assert target.IsValid(), 'invalid target'
-          debugger.SetSelectedTarget(target)
-          interpreter = debugger.GetCommandInterpreter()
-          def command(text):
-              result = lldb.SBCommandReturnObject()
-              interpreter.HandleCommand(text, result)
-              print(text, result.GetOutput(), result.GetError(), flush=True)
-          for run in range(3):
-              print('ROUND', run, flush=True)
-              listener = lldb.SBListener('gc-probe')
-              launch = target.GetLaunchInfo()
-              launch.SetWorkingDirectory(os.path.dirname(os.environ['LLGO_GC_PROBE']))
-              launch.SetListener(listener)
-              error = lldb.SBError()
-              process = target.Launch(launch, error)
-              print('LAUNCH', str(error), process.GetProcessID(), flush=True)
-              assert error.Success() and process.IsValid(), str(error)
-              started = time.monotonic()
-              sampled = False
-              stops = 0
-              while time.monotonic() - started < 95:
-                  event = lldb.SBEvent()
-                  if not listener.WaitForEvent(1, event):
-                      if time.monotonic()-started > 45 and not sampled:
-                          sampled = True
-                          print('SAMPLE', str(process.Stop()), flush=True)
-                      continue
-                  if not lldb.SBProcess.EventIsProcessEvent(event):
-                      continue
-                  state = lldb.SBProcess.GetStateFromEvent(event)
-                  if state == lldb.eStateExited:
-                      print('EXIT', process.GetExitStatus(), time.monotonic()-started, flush=True)
-                      break
-                  if state == lldb.eStateStopped and not lldb.SBProcess.GetRestartedFromEvent(event):
-                      stops += 1
-                      print('STOP', process.GetNumThreads(), process.GetSelectedThread().GetStopDescription(512), flush=True)
-                      command('thread backtrace all -c 16')
-                      command('register read')
-                      command('disassemble --frame')
-                      if stops > 5:
-                          break
-                      print('CONTINUE', str(process.Continue()), flush=True)
-              if process.GetState() != lldb.eStateExited:
-                  process.Stop()
-                  time.sleep(1)
-                  command('thread backtrace all -c 16')
-                  process.Kill()
-          print('GC_PROBE_DONE', flush=True)
-          PY
-          llgo lldb -lldb "$LLDB_PATH" -- --batch -o 'script import os, runpy; _ = runpy.run_path("probe.py")' > "$RUNNER_TEMP/backtrace.log" 2>&1
-          cat "$RUNNER_TEMP/backtrace.log"
-          grep -q GC_PROBE_DONE "$RUNNER_TEMP/backtrace.log"
-      - name: Check blocked roots and collector callbacks
+          echo "GC_PROBE_DIR=$(cygpath -w "$PWD")" >> "$GITHUB_ENV"
+          echo "GC_PROBE_ROUNDS=${{ matrix.rounds }}" >> "$GITHUB_ENV"
+      - name: Reproduce original case
+        shell: bash
+        run: python .github/scripts/diagnose_gc_fault.py --direct
+      - name: Capture exception site and all threads
+        if: ${{ !cancelled() && env.GC_PROBE_DIR != '' }}
         shell: bash
         run: |
-          export LLGO_ROOT="$PWD"
-          cp .github/test-go.mod "$RUNNER_TEMP/blocked-test.mod"
-          cp .github/test-go.sum "$RUNNER_TEMP/blocked-test.sum"
-          go mod edit -modfile="$RUNNER_TEMP/blocked-test.mod" -go=1.26 -replace="github.com/xgo-dev/llgo/runtime=$PWD/runtime"
-          llgo test -modfile="$RUNNER_TEMP/blocked-test.mod" \
-            -run='^TestRuntime.*(Blocked|Finalizer|Cleanup|Gosched)' -count=10 -timeout=4m ./test/go \
-            2>&1 | tee "$RUNNER_TEMP/blocked-roots.log"
-          llgo test -modfile="$RUNNER_TEMP/blocked-test.mod" -tags=nogc \
-            -run='^TestRuntimeGoschedHandoff$' -timeout=1m ./test/go
-      - name: Reproduce without flaky exemptions
-        shell: bash
-        run: |
-          export LLGO_ROOT="$PWD"
-          mkdir -p "$RUNNER_TEMP/diagnosis-work"
-          export TMPDIR="$RUNNER_TEMP/diagnosis-work"
-          suffix=
-          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
-          llgo="$RUNNER_TEMP/llgo-bin/llgo$suffix"
-          if [[ "$RUNNER_OS" == Windows ]]; then llgo=$(cygpath -w "$llgo"); fi
-          target_goroot=$(go env GOROOT)
-          min_swap=512
-          if [[ "$RUNNER_OS" == macOS ]]; then min_swap=0; fi
-          python3 - <<'PY'
+          export GC_PROBE_SCRIPT=$(cygpath -w "$PWD/.github/scripts/diagnose_gc_fault.py")
+          llgo lldb -lldb "$LLDB_PATH" -- --batch \
+            -o 'script import os, runpy; _ = runpy.run_path(os.environ["GC_PROBE_SCRIPT"])' \
+            > "$RUNNER_TEMP/gc-probe/backtrace.log" 2>&1
+          python - <<'PY'
+          import json, os
           from pathlib import Path
-          p = Path('test/goroot/xfail.yaml')
-          s = p.read_text()
-          p.write_text(s[:s.index('flakes:')] + s[s.index('xfails:'):])
-          PY
-          for name in $(compgen -e); do
-            case "$name" in GITHUB_*|ACTIONS_*) unset "$name" ;; esac
-          done
-          cd test/goroot
-          "$RUNNER_TEMP/llgo-bin/goroot-runner$suffix" \
-            -test.run='^TestGoRootRunCases$' -test.count=10 -test.v -test.timeout=15m \
-            -llgo "$llgo" -goroot "$target_goroot" -directive-mode ci \
-            -case='^fixedbugs/issue25897a.go$' \
-            -min-swap-free-mib="$min_swap" -keepwork \
-            -slow-build=1s -slow-run=1s -progress=30s \
-            2>&1 | tee "$RUNNER_TEMP/diagnosis.log"
-      - name: Capture all threads of the stuck program
-        if: failure() && runner.os == 'Linux'
-        shell: bash
-        run: |
-          source=$(find "$RUNNER_TEMP/diagnosis-work" -type f -name issue25897a.go -print -quit)
-          test -n "$source"
-          binary="${source%/work/*}/llgo.out"
-          if ! command -v gdb; then
-            sudo apt-get update
-            sudo apt-get install -y gdb
-          fi
-          "$binary" > "$RUNNER_TEMP/program.log" 2>&1 &
-          pid=$!
-          sleep 5
-          if kill -0 "$pid" 2>/dev/null; then
-            sudo timeout 30s gdb -batch -p "$pid" \
-              -ex 'set pagination off' -ex 'thread apply all bt 12' \
-              2>&1 | tee "$RUNNER_TEMP/backtrace.log"
-            kill "$pid"
-          fi
-          wait "$pid" || true
-      - name: Capture macOS RWMutex stalls
-        if: false
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import os, pathlib, subprocess, time
-          root = pathlib.Path(os.environ['RUNNER_TEMP'])
-          source = next((root / 'diagnosis-work').rglob('issue79186.go'))
-          binary = source.parent.parent / 'llgo.out'
-          with (root / 'rwmutex.log').open('w') as log:
-            for i in range(5):
-              start = time.monotonic()
-              p = subprocess.Popen([str(binary)], stdout=log, stderr=log)
-              try:
-                p.wait(timeout=15)
-              except subprocess.TimeoutExpired:
-                subprocess.run(['sample', str(p.pid), '1', '-file', str(root / f'rwmutex-{i}.txt')], timeout=10)
-                try:
-                  p.wait(timeout=74)
-                except subprocess.TimeoutExpired:
-                  p.kill()
-                  p.wait()
-              print(i, p.returncode, time.monotonic()-start, file=log, flush=True)
+          p = Path(os.environ['GC_PROBE_DIR']) / 'debug-results.json'
+          results = json.loads(p.read_text())
+          print(json.dumps(results, indent=2))
+          if any(r['result'] != 0 for r in results):
+              raise SystemExit(1)
           PY
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: diagnosis-${{ matrix.os }}-${{ matrix.abi }}-${{ matrix.arch }}
-          path: |
-            ${{ runner.temp }}/diagnosis.log
-            ${{ runner.temp }}/backtrace.log
-            ${{ runner.temp }}/program.log
-            ${{ runner.temp }}/blocked-roots.log
-            ${{ runner.temp }}/rwmutex*
-          if-no-files-found: warn
-
-  wasm:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - profile: J32-GoJS
-            target: emscripten
-          - profile: J32-Emscripten
-            target: emscripten
-          - profile: J64-Emscripten
-            target: emscripten-memory64
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: 19a61ca196f6e19cb66dc24d72e4fd91f80a8acb
-      - uses: ./.github/actions/setup-deps
-        with:
-          llvm-version: 22
-      - uses: emscripten-core/setup-emsdk@v15
-        with:
-          version: '6.0.8'
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-      - uses: ./.github/actions/setup-binaryen
-      - uses: ./.github/actions/setup-go
-      - name: Build compiler and runner
-        run: |
-          LLGO_BUILD_GOROOT_RUNNER=1 dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
-          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
-          echo "LLGO_ROOT=$PWD" >> "$GITHUB_ENV"
-      - name: Check caller allocation and traceback semantics
-        run: |
-          llgo test -target=${{ matrix.target }} -emulator \
-            -run='(Caller|Panic|Recover)' -count=3 ./internal/build/testdata/wasm-test \
-            2>&1 | tee "$RUNNER_TEMP/caller.log"
-          llgo test -target=${{ matrix.target }} -emulator \
-            -run='^TestCallerInstrumentationAllocations$' -count=100 ./internal/build/testdata/wasm-test
-      - name: Run original recursive case without expected-failure allowance
-        run: |
-          python3 - <<'PY'
-          import re
-          from pathlib import Path
-          p = Path('test/goroot/xfail.yaml')
-          s, count = re.subn(r'(?m)^  - platform: js/wasm\n    directive: run\n    case: fixedbugs/issue59680.go\n    reason: .*\n', '', p.read_text())
-          assert count == 1, count
-          p.write_text(s)
-          PY
-          target_goroot=$(go env GOROOT)
-          cd test/goroot
-          "$RUNNER_TEMP/llgo-bin/goroot-runner" \
-            -test.run='^TestGoRootRunCases$' -test.count=5 -test.v -test.timeout=10m \
-            -llgo "$RUNNER_TEMP/llgo-bin/llgo" -goroot "$target_goroot" -directive-mode=ci \
-            -case='^fixedbugs/issue59680.go$' -wasm-profile=${{ matrix.profile }} \
-            -min-swap-free-mib=0 -slow-build=1s -slow-run=1s -progress=30s \
-            2>&1 | tee "$RUNNER_TEMP/recursion.log"
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: wasm-${{ matrix.profile }}
-          path: |
-            ${{ runner.temp }}/caller.log
-            ${{ runner.temp }}/recursion.log
+          name: gc-fault-${{ matrix.name }}
+          path: ${{ runner.temp }}/gc-probe
+          if-no-files-found: error
