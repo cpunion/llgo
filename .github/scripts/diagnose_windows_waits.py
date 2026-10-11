@@ -10,6 +10,11 @@ import time
 root = Path(os.environ['WAIT_PROBE_DIR'])
 exe = root / 'demos' / '0003' / 'demo.exe'
 if '--demo' in sys.argv:
+    environment_keys = ['PATH', 'PYTHONHOME', 'PYTHONPATH', 'LLGO_WINDOWS_ABI',
+                        'LLGO_WINDOWS_PYTHON_HOME', 'LLGO_WINDOWS_TARGET_PYTHON_HOME',
+                        'PKG_CONFIG_PATH', 'CC', 'CXX', 'GOARCH', 'GOOS']
+    (root / 'target-environment.json').write_text(json.dumps(
+        {key: os.environ.get(key) for key in environment_keys}, indent=2))
     p = Path('.github/workflows/test_demo.sh')
     source = p.read_text()
     source = source.replace('tmp_root="$(mktemp -d)"', 'tmp_root="$PWD/.artifacts/waits/demos"\nmkdir -p "$tmp_root"')
@@ -60,3 +65,21 @@ if (root / 'stalled-pids.json').exists():
     subprocess.run(['taskkill','/PID',str(result['pid']),'/T','/F'])
 else:
     print('No stalled process',flush=True)
+    debugger = lldb.debugger
+    debugger.SetAsync(False)
+    target = debugger.CreateTarget(str(exe))
+    debugger.SetSelectedTarget(target)
+    entry = target.GetModuleAtIndex(0).GetObjectFileEntryPointAddress()
+    breakpoint = target.BreakpointCreateBySBAddress(entry)
+    print('ENTRY',str(entry),'LOCATIONS',breakpoint.GetNumLocations(),flush=True)
+    launch = target.GetLaunchInfo()
+    environment = json.loads((root / 'target-environment.json').read_text())
+    launch.SetEnvironmentEntries(['PATH='+environment['PATH']],True)
+    error = lldb.SBError()
+    process = target.Launch(launch,error)
+    print('LOAD WITH DEMO PATH',str(error),flush=True)
+    if error.Success():
+        result = lldb.SBCommandReturnObject()
+        debugger.GetCommandInterpreter().HandleCommand('image list',result)
+        print(result.GetOutput(),result.GetError(),flush=True)
+        process.Kill()
