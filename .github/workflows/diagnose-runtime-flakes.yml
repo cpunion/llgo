@@ -5,32 +5,53 @@ on:
 permissions:
   contents: read
 jobs:
-  msvc386-bdwgc:
+  msvc386-caller-allocation:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          ref: 209c2f255de48e389704edc30a66d868ddc3fed1
+          path: source
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
           windows-abi: msvc
           windows-arch: '386'
+      - uses: ./.github/actions/setup-go
+      - name: Build compiler
+        shell: bash
+        working-directory: source
+        run: |
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: '1.26.7'
       - uses: ./.github/actions/activate-windows-target
         with:
           windows-abi: msvc
           windows-arch: '386'
-      - name: Build standalone C collector contention probe
+      - name: Build identical stress with and without existing caller-frame allocation fix
         shell: bash
         run: |
-          mkdir -p probes/c-fairness
-          clang --target=i686-pc-windows-msvc -fms-runtime-lib=dll -fuse-ld=lld -O2 .github/scripts/gc-fairness-c/fairness.c \
-            -o probes/c-fairness/fairness.exe $(pkg-config --libs bdw-gc) -lkernel32 -llegacy_stdio_definitions
-      - name: Compare allocation progress with and without repeated collection
+          export LLGO_ROOT="$PWD/source"
+          mkdir -p probes/current probes/caller-reuse
+          cp "$(go env GOROOT)/test/fixedbugs/issue25897a.go" probes/main.go
+          echo 'module gcprobe' > probes/go.mod
+          echo 'go 1.26' >> probes/go.mod
+          (cd probes && llgo build -debug-artifact=embedded -o current/gc.exe .)
+          git -C source fetch origin 36d37081ee0c3b1fb8c2d311f9825044400d721e
+          git -C source show 36d37081ee0c3b1fb8c2d311f9825044400d721e:runtime/internal/runtime/caller.go > source/runtime/internal/runtime/caller.go
+          git -C source diff -- runtime/internal/runtime/caller.go
+          (cd probes && llgo build -debug-artifact=embedded -o caller-reuse/gc.exe .)
+      - name: Alternate binaries with external collector counters
         shell: bash
-        run: python .github/scripts/gc-fairness-c/run.py probes/c-fairness/fairness.exe --output probes/c-fairness --rounds 3 --timeout 90
+        run: python .github/scripts/diagnose_gc_paired.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: c-bdwgc-fairness
-          path: probes/c-fairness
+          name: gc-caller-allocation-comparison
+          path: probes
           if-no-files-found: error
