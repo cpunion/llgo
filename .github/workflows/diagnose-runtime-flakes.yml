@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 44bb8b404
+          ref: 44bb8b40461be6d5d0cb408086fabb313cb32a7c
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
