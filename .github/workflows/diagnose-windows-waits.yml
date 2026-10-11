@@ -10,9 +10,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-11-arm
-            abi: msvc
-            arch: arm64
           - os: windows-2022
             abi: mingw
             arch: amd64
