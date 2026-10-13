@@ -23,7 +23,6 @@ import (
 	_ "unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
-	csyscall "github.com/xgo-dev/llgo/runtime/internal/clite/syscall"
 )
 
 const LLGoPackage = "link"
@@ -79,14 +78,7 @@ func CreateDetached(stackSize uintptr, routine RoutineFunc, arg c.Pointer) c.Int
 		}
 	}
 	var native nativeThread
-	ret := create(&native, &attr, routine, arg)
-	// Detached threads can briefly exhaust the host's thread resources while
-	// completed threads are still being reclaimed. Match Go's bounded EAGAIN
-	// backoff so short bursts do not fail an otherwise runnable goroutine.
-	for retry := 0; ret == c.Int(csyscall.EAGAIN) && retry < 20; retry++ {
-		c.Usleep(c.Uint(retry+1) * 1000)
-		ret = create(&native, &attr, routine, arg)
-	}
+	ret := createWithRetry(&native, &attr, routine, arg)
 	// Once create succeeds, the caller-owned context belongs to the detached
 	// thread. An attribute destroy failure cannot be reported as create failure.
 	_ = attr.Destroy()
