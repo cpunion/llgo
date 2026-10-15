@@ -7,8 +7,16 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-16 (Asia/Shanghai)
 
-Integration is in `coro/sync-main-20260830-r2`, with parent `97572a91d` and an
-existing merge of `c4941f9ae`. The integration changes remain uncommitted.
+Integration is in `coro/sync-main-20260830-r2`. Commit `d0838f492` completes the
+existing merge of parents `97572a91d` and `c4941f9ae`; no newer main was merged.
+Draft PR [cpunion/llgo#260](https://github.com/cpunion/llgo/pull/260) carries this
+checkpoint. Follow-up commit `d93ff685c` fixes dynamic pointer-result consumption;
+Coroutine run `38817134420` checks that head and is queued. The preceding run
+`38814074088` passed Cortex-M timer, native fleet E2E and JS/WASM command-reactor
+jobs before the new commit superseded it. Those passes do not establish the
+current head's CI status. No reviews, inline review comments or issue comments
+were present at the latest inspection. Later CI/review observations must name
+the checked head.
 The destination is `cpunion/llgo:llvm-coro`. The acceptance environment is
 Darwin/arm64, Go 1.27 and LLVM 22. No new upstream-main synchronization is
 required for this work.
@@ -105,11 +113,48 @@ production-plan regression check that distinction; the latter reproduces v43's
 failure before the fix. Integrated v44 compiler/IR gates now pass; the permanent
 live-caller GC regression passes ten executions and unchanged original `chans`
 passes five. The extended GC/resource/timer gates also pass, with identical
-source manifests before/after. The fresh demo cohort remains in progress;
+source manifests before/after. Node borrowed-resource cleanup and all three
+WASI standard/fake-time timer GC programs also pass on v44, followed by the
+host-protocol tests; the combined linked tests took 197.040s / 1440.6 MiB,
+including compilation. Source manifests match before/after.
+The fresh demo cohort is incomplete;
 its first attempt stopped on a transient scratch-scan race, and its second on
 `goimporter-1389` exceeding the 8GiB compiler cap. Those infrastructure/resource
-interruptions are preserved separately from semantic results. This is not yet
-a whole-tree pass.
+interruptions are preserved separately from semantic results. The third attempt
+uses 12GiB only for that importer and retains 8GiB for other compiler invocations
+and 2GiB for programs. It passed five demos before the 10GiB disk floor stopped
+the cgo build. The independent stdlib rerun has 20/180 completed package passes;
+the remaining-package cohort stopped at the same disk floor while compiling
+crypto/ecdsa. Both runners joined their children, reclaimed private scratch and
+verified source fingerprints. They must resume with the same inputs after space
+recovery; neither interruption is a semantic failure or a complete suite pass.
+
+A subsequent source review found a v44 gap not covered by those passes:
+descriptor coroutine calls discarded the value returned by the child-await
+helper, then loaded the same result slot again. The first load now retires
+scalar pointer fields, so the second can read nil. The follow-up separates
+completion reconciliation from result loading; every dynamic branch converges
+on one load/retirement. The correction is committed as `d93ff685c`. Fixed v45
+compiler SHA-256 is
+`50ed9b374add317f01f766b9ac2b59706fc98d0f134bbcaef20c4a48de5880c7`.
+Its 12 native64/wasm32 IR cases pass, while adding only those tests to unchanged
+v44 fails all 12 with duplicate pointer loads. The real function-value,
+interface, closure and GC program passes 10/10 v45 executions (P=1 and P=2
+internally) and the Go control passes; unchanged v44 compiles it and then
+panics on the cleared result. Source manifests match before/after. The original
+disk-stop and interrupted outer scan attempts are retained separately; the
+successful bounded reruns exit zero. This is focused evidence, not a full v45
+compatibility rerun.
+
+Commit `17bbfe58d` then consolidates coroutine/outcome/descriptor result tuple
+construction. Exported `R0`, `R1`, ... fields let an internal Go helper declare
+an identical anonymous struct alias, preserving strict named-type identity
+without a pointer-layout reinterpretation mechanism. Parsed-source alias tests
+and selected compiler/Coro/Emission/SSA gates pass (279.126s / 1254.8 MiB).
+The typed delivery-recipe/selection and real-FD boundary/value tests also pass
+as host tests; FD tests run with race detection (2.366s / 397.2 MiB). Physical
+static/dynamic cleanup, reflection, archives and public API adapters remain
+unimplemented. Those type/model tests do not close public resource delivery.
 
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
@@ -164,7 +209,7 @@ this is storage reclamation, not loss of the earlier source evidence.
 | Integrated v37 compiler/build gates | Passed | Fixed snapshot: cl 146.87s, SSA 0.44s and internal/build 518.50s; combined peak 6624.3 MiB. Selection is `^Test(Coro\|Emission\|GenMainModule.*Coro\|BuildCoroPlan\|NativeObject)`, not every test in those packages. Older SSA fixtures which host-import LLGo-only runtime still fail independently and require test-loader correction. |
 | Native runtime ABI/fleet E2E | All 27 selected gates passed, 118.04s / peak 2086.7 MiB | Source islands now load the real shared execution-domain state, channel and GC observer dependencies. Existing ABI, cross-route select/cancel, callback reentry, locked-M and replacement-thread assertions are retained; no new fake runtime implementation. |
 | Production time.Sleep plan/codegen | Passed, 11.58s / peak 1025.6 MiB | Uses complete production `Do`, default analysis, and actual synctest bridge instead of a partial mocked SSA universe. Preserves five physical bodies, direct-call effects, immediate nonpositive return, frame retention, direct tail-forward IR and LLVM coroutine pass verification. |
-| Complete `test/std/...` and GOROOT | Full stdlib pending; v35 GOROOT CI selection completed with failures | All 1082 selected original Go 1.27 cases ran: 1059 runner-classified PASS and 23 unexpected FAIL. PASS includes one pre-existing xfail and eleven expected not-applicable failures, leaving 1047 actual successful checks. Four not-applicable cases actually succeeded. All four source fingerprints match. Twenty failures have later focused passing runs; four use extended compiler limits. Two depend on private gc behavior. After the x/tools repair, the original full rangegen-generated program compiles and executes on v42 at both O0 and default optimization (24GiB cap; default build peak 22,826.6MiB, run peak 30.5MiB). The generic chans case now compiles but times out waiting for finalization; its independent main-panic reporting error is fixed. No new xfails added; no final-snapshot full-suite pass claimed. |
+| Complete `test/std/...` and GOROOT | Full stdlib pending; v35 GOROOT CI selection completed with failures | All 1082 selected original Go 1.27 cases ran: 1059 runner-classified PASS and 23 unexpected FAIL. PASS includes one pre-existing xfail and eleven expected not-applicable failures, leaving 1047 actual successful checks. Four not-applicable cases actually succeeded. All four source fingerprints match. Twenty-one failures have later focused passing runs; four use extended compiler limits. Two depend on private gc behavior. After the x/tools repair, the original full rangegen-generated program compiles and executes on v42 at both O0 and default optimization (24GiB cap; default build peak 22,826.6MiB, run peak 30.5MiB). The generic chans finalization regression passes five unchanged executions on v44; its independent main-panic reporting error is also fixed. No new xfails added; no final-snapshot full-suite pass claimed. |
 | Generic descriptor calls and closed spawn | v40 original absdiff3 10/10 and generated generic-spawn regression passed | Outcome-plain bodies can call descriptors independently of their own function representation; all-target outcome/native-result proofs remain strict. Core spawn analysis and physical ABI now share exact materialized-generic identity, including context-free literals inside instantiated functions/receiver methods. Native/wasm positive and malformed-identity/capture negative gates pass. The chans compile failure is fixed, but its finalizer-dependent runtime failure remains open. |
 | Main panic with live peers | v40-derived runtime fix: 30/30 real executions and 41 host race tests passed | A committed dead main G with ready/parked peers uses the existing task panic reporter. The command reporter still requires fully retired executor/admission ownership. Last-G, parked-peer and ready-peer cases at P=1,2 preserve the original payload, user source location and exit status 2; no invariant check was relaxed. |
 | WaitGroup semaphore storage | Fixed v40-sema actual sync, both synctest fixtures and cancellation/GC 10/10 passed | Ordinary and durable waits use one typed internal prepare entry, adjacent to the same park. Existing frame-borrow proof now applies without a broader compiler analysis; the generated resume no longer allocates a 256-byte GC object. A quiet seven-pair comparison reduces serial spawn/WaitGroup time 142.673 to 130.561 ms (8.49%), but Go is 16.837 ms: the remaining 7.754x gap is not solved by this allocation correction. |
@@ -174,7 +219,7 @@ this is storage reclamation, not loss of the earlier source evidence.
 | Node JavaScript standard filesystem | v36: actual compile/run passed, then independent execution repeated successfully | Production wasm_exec.js invokes asynchronous Node fs, preserving Go's fd/cwd/seek/dirent bodies. Covers OffsetWriter, ReadAt/EOF, closed/error cases and an exact fmt completion marker; fixture removes its temporary files. Build peak 2550.8 MiB. Source/typed-owner/producer-archive-consumer/protocol gates also pass. Post-publication cancellation ownership remains explicitly open. See [JavaScript filesystem boundary](coro-javascript-filesystem.md). |
 | Freestanding dynamic reflection boundary | v35 explicit-unsupported negative probe passed | The target capability guard prevents unreachable libffi imports from breaking ordinary fmt/file programs. Actual reflect.Call/MakeFunc remain unsupported on WASM/baremetal; the probe checks the specific ABI/unsupported error. Native reflection remains separately covered. |
 | Resource-producing operation cancellation | Borrowed-output execution passed; public delivery remains open | A real-fd LLGo fixture pre-registers ordinary defer cleanup around caller-owned output. Normal completion, early/late cancellation, pending GC, panic/recover and blocking close all pass, including other-G progress at P=1 and exact open/close counts. This reuses existing frame ownership and strong join. The unused optional custody experiment was removed after review; its isolated race tests are archived, not production acceptance. Public scalar-fd return and adoption by os.File still need platform integration; cleanup registered only after Open returns cannot cover the delivery window. See async-core contract §3.6. |
-| Integrated borrowed-output/platform gates | v38 native 10 executions and Node 3 executions passed | Formal opt-in gates compile real LLGo programs, require exact FD close counts before completion, and exercise cancellation, GC and delayed close with other-G progress. Full runtime core race and platform protocol/source gates also pass. Node scheduler turns yield to host tasks so filesystem callbacks cannot be starved by an endless microtask chain. These results do not cover public Open result delivery or arbitrary fatal host termination. |
+| Integrated borrowed-output/platform gates | v44 native 10 executions and Node 3 executions passed | Formal opt-in gates compile real LLGo programs, require exact FD close counts before completion, and exercise cancellation, GC and delayed close with other-G progress. The three WASI timer/GC programs and platform protocol/source gates also pass on v44. Earlier full runtime-core race evidence remains tied to its recorded snapshot. Node scheduler turns yield to host tasks so filesystem callbacks cannot be starved by an endless microtask chain. These results do not cover public Open result delivery or arbitrary fatal host termination. |
 | Full target matrix | Pending | Historical target CI is not validation of the current integration |
 | Baremetal standard timers | Passed | v17, LLVM 22 Cortex-M3 ELF executed on QEMU MPS2; host-return plus four alarm/continue transactions |
 | Optimized compute/timer progress | v25 compiler / v32 timer source passed, then 10 repeated runs passed | Actual `-O3 -lto=full` binary, `GOMAXPROCS=1`, 100-million-iteration pure compute loop with an elapsed standard-library timer. This is a progress regression gate, not a hard latency bound for every possible path. Added to the stdlib-time CI lane. |
@@ -291,8 +336,10 @@ bound is still explicit.
    compiler's 6GiB process-tree limit, without a preceding assertion failure.
    The successful second run reuses the exact test binary from the start under
    a 12GiB tree cap. The
-   180-package `test/std` evaluation runs independently with private cache
-   reclamation and a 10GiB disk floor. Preserve the original interrupted run.
+   180-package `test/std` evaluation retains 20 completed passes and is stopped
+   at its 10GiB disk floor, as is the newest demo cohort after five passes.
+   Resume only after sufficient disk recovery, with private cache reclamation
+   and unchanged source/compiler inputs. Preserve every interrupted run.
    v35 basic-package and v25 73-demo passes remain dated evidence, not a new
    final-snapshot claim. Rerun affected executable gates after later fixes;
    do not update instruction goldens to hide runtime failures.
@@ -314,6 +361,11 @@ bound is still explicit.
    public `syscall.Open`/`os.Open` child-to-parent result delivery and platform
    wrapper adoption are not covered by that primitive. Reuse existing
    completion/cleanup ownership, without a second resource-capsule framework.
+   The shared result tuple now has a source-expressible anonymous alias; retain
+   exact types and use existing compiler-inserted helper demand where needed.
+   Do not add a generic representation-cast or synthetic-SSA framework for
+   helper field names. Typed recipe/model tests are passing, but no public
+   seed may be enabled until static, dynamic and library consumption are wired.
 4. Complete or explicitly delimit platform gaps. Native/WASI ordinary and
    fake-time timer collection, weak objects, standard WASI file operations and
    Node asynchronous filesystem paths have real execution gates. Remaining
@@ -326,12 +378,16 @@ bound is still explicit.
 5. Close remaining measured performance gaps and remeasure on a quiet host.
    Static compute/channel fast paths are competitive; serial spawn/WaitGroup,
    file wrappers and TCP still lag Go. A shared raw-helper capability fix removes
-   redundant synchronous-helper coroutine frames, but its v43 channel-close
-   integration failure must be closed before acceptance. Same-work diagnostic
-   persistent-worker comparisons isolate most remaining serial-WaitGroup cost
-   to keyed semaphore completion, not ordinary channel switching or per-G
-   allocation. These measurements overlap background compilation and do not
-   replace the quiet formal baseline. Preserve atomic/preemption proofs;
+   redundant synchronous-helper coroutine frames; its v43 channel-close
+   integration failure is corrected and tested in v44. Same-work diagnostic
+   persistent-worker comparisons identify the WaitGroup await/completion path,
+   not per-G creation, as the remaining serial hot path. Actual counters show
+   four child-frame allocations and five inline awaits per round, versus none
+   in the channel control. The same-P keyed fast path is already being used;
+   removing one wrapper barrier or forcing LLVM's global elision heuristic
+   has not established a stable large speedup. These background diagnostics
+   do not replace the quiet formal baseline or justify removing checks.
+   Preserve atomic/preemption proofs;
    do not add stdlib-specific coloring labels or remove lifecycle checks.
    Keep size, parked-G memory slope and generated-code checks in the final
    comparison. Completed native/WASI timer progress gates do not prove every
