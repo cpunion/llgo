@@ -282,8 +282,8 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 		} else if options.transparentRecoverAlias {
 			afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
 		}
-		p.awaitCoroChildWithRecoveryAndConsume(
-			b, child, resultSlot, abi.signature.Results(), options.cleanup,
+		p.awaitCoroChildCompletionWithRecovery(
+			b, child, options.cleanup,
 			options.keepaliveSlots, afterConsume,
 		)
 	}

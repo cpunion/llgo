@@ -1001,21 +1001,38 @@ func (p *context) awaitCoroChildWithRecovery(
 	)
 }
 
-// awaitCoroChildWithRecoveryAndConsume lets a compiler-owned lexical scope
-// reconcile immediately after the child CompletionRecord has been consumed,
-// before any Return/Panic/cancellation status can leave this call site. The
-// callback is emitted on both the ordinary and cancellation resume lanes.
+// awaitCoroChildWithRecoveryAndConsume reconciles one child transaction and
+// then loads and retires its result exactly once. Mixed descriptor dispatch
+// instead joins the completion-only path with its plain/outcome alternatives
+// before loading their shared result storage.
 func (p *context) awaitCoroChildWithRecoveryAndConsume(
 	b llssa.Builder, child, resultSlot llssa.Expr, results *types.Tuple,
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 	afterConsume func(llssa.Builder),
 ) llssa.Expr {
+	if resultSlot.IsNil() {
+		panic("coroutine child await requires a result slot")
+	}
+	p.awaitCoroChildCompletionWithRecovery(b, child, cleanup, keepaliveSlots, afterConsume)
+	return p.loadCoroAwaitResult(b, resultSlot, results)
+}
+
+// awaitCoroChildCompletionWithRecovery does not read or retire user results.
+// Its ordinary successor has consumed and validated a Return completion; all
+// other outcomes enter the existing terminal/cleanup paths. afterConsume is
+// emitted on both ordinary and canceled lanes before either can leave the
+// transaction, preserving recover-alias and other lexical reconciliation.
+func (p *context) awaitCoroChildCompletionWithRecovery(
+	b llssa.Builder, child llssa.Expr,
+	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+	afterConsume func(llssa.Builder),
+) {
 	body := p.coroBody()
 	if body == nil {
 		panic("coroutine child await requires an active PhysicalABIV1 body")
 	}
-	if b.Func != p.fn || child.IsNil() || resultSlot.IsNil() {
-		panic("coroutine child await requires a child handle and result slot in the active function")
+	if b == nil || b.Func != p.fn || child.IsNil() {
+		panic("coroutine child await requires a child handle in the active function")
 	}
 	childHeader := b.CoroPromise(child, coroHeaderType(p.prog))
 	b.Store(b.FieldAddr(childHeader, coroHeaderParent), body.coro.Handle())
@@ -1191,7 +1208,7 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 		)
 		b.IfWithBranchWeights(isReturn, returned, p.sharedCoroTerminalBlock(b, body), 1000, 1)
 		b.SetBlockContinuation(returned)
-		return p.loadCoroAwaitResult(b, resultSlot, results)
+		return
 	}
 	returned := p.fn.MakeBlock()
 	panicked := p.fn.MakeBlock()
@@ -1241,7 +1258,6 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 		b.Jump(returned)
 	}
 	b.SetBlockContinuation(returned)
-	return p.loadCoroAwaitResult(b, resultSlot, results)
 }
 
 // sharedCoroTerminalBlock owns the non-return outcome fanout for structured
