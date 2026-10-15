@@ -156,6 +156,16 @@ as host tests; FD tests run with race detection (2.366s / 397.2 MiB). Physical
 static/dynamic cleanup, reflection, archives and public API adapters remain
 unimplemented. Those type/model tests do not close public resource delivery.
 
+The resource-delivery development branch extends the existing archive summary
+to v17, without adding a second metadata section. Optional producer records
+resolve initializer/drop identities and exact ABI hashes through the shared
+cross-package index; malformed, missing and target-width-incompatible records
+fail before lowering. Ordinary functions omit the record. Framed record
+round-trip, cross-package lookup, immutable value and negative tests pass with
+race detection (1.516s / 376.3 MiB). This validates metadata transport/index
+consumption only: compiler publication, typed physical helper binding and actual
+source-unavailable archive execution are still pending.
+
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
 both the source SHA-256 manifest and recursive content comparison before
