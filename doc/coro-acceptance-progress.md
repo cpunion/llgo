@@ -179,6 +179,18 @@ under `scratch-interrupted-lsof` / `interrupted-lsof.lock`. Adding `/usr/sbin`
 does not change source/compiler inputs, but disk admission still prevents a
 fresh full-suite run. These are infrastructure stops, not new suite passes.
 
+After disk recovery the same v46 cohorts resumed with the repaired PATH. Full
+test/go compiles successfully (7633.7 MiB sampled process-tree peak) and is now
+executing; the demo and fresh 180-package stdlib cohorts are also running. They
+remain incomplete. CI head `bb860510d` passes the earlier target/clock/TCP
+corrections. Two later workflow gates exposed further host-test wiring:
+WASI reactor discovery used the obsolete `.llgo/clibs_build` location instead
+of the current XDG crosscompile cache, and a host-SSA test lacked its matching
+`!llgo` build constraint. The corrected actual C reactor lifecycle test passes
+(0.648s / 91.6 MiB); the llgo-tag package test passes (0.424s / 265.3 MiB), as
+do analyzer/build vet and production-tagged runtime vet. No runtime fallback or
+semantic test assertion is removed by these corrections.
+
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
 both the source SHA-256 manifest and recursive content comparison before
