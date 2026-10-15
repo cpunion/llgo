@@ -370,7 +370,8 @@ jobs:
           result="$(wasmtime run "$math_output")"
           grep -Fx 'WASM generic math semantics ok' <<<"$result"
 
-          mapfile -t wasi_headers < <(find "$HOME/.llgo/clibs_build" -path '*/sysroot/include/wasm32-wasip1/wasi/api.h')
+          wasi_cache="${XDG_CACHE_HOME:-$HOME/.cache}/llgo/crosscompile"
+          mapfile -t wasi_headers < <(find "$wasi_cache" -path '*/include/wasm32-wasip1/wasi/api.h')
           test "${#wasi_headers[@]}" -gt 0
           LLGO_WASI_REACTOR_SYSROOT="${wasi_headers[0]%/include/wasm32-wasip1/wasi/api.h}" \
             go test ./internal/crosscompile -run '^TestWASIReactorOperationLifecycle$' -count=1
