@@ -818,7 +818,7 @@ func TestCoroDynamicDispatchProducerCoroThunkDropsNilEnvironment(t *testing.T) {
 	targetBody.EndBuild()
 	targetBody.Dispose()
 	resultSlot := types.NewStruct([]*types.Var{
-		types.NewField(token.NoPos, nil, "r0", types.Typ[types.Int], false),
+		types.NewField(token.NoPos, nil, "R0", types.Typ[types.Int], false),
 	}, nil)
 	abi := coroPlainDispatchABI{signature: logical, resultSlotType: resultSlot}
 	ctx := &context{prog: prog, pkg: pkg}
@@ -911,7 +911,7 @@ func TestCoroDynamicDispatchProducerCapturedCoroThunkInsertsEnvironment(t *testi
 	targetBody.EndBuild()
 	targetBody.Dispose()
 	resultSlot := types.NewStruct([]*types.Var{
-		types.NewField(token.NoPos, nil, "r0", types.Typ[types.Int], false),
+		types.NewField(token.NoPos, nil, "R0", types.Typ[types.Int], false),
 	}, nil)
 	abi := coroPlainDispatchABI{signature: logical, resultSlotType: resultSlot}
 	ctx := &context{prog: prog, pkg: pkg}

@@ -407,11 +407,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	faultPrepareArgsHook := coroFaultPrepareHookV2
 	faultPayloadArgsHook := coroFaultPayloadHookV2
 	completePrepareHook := coroCompletePrepareHookV2
-	resultFields := make([]*types.Var, sourceSig.Results().Len())
-	for i := range resultFields {
-		resultFields[i] = types.NewField(token.NoPos, nil, fmt.Sprintf("r%d", i), sourceSig.Results().At(i).Type(), false)
-	}
-	resultSlotType := types.NewStruct(resultFields, nil)
+	resultSlotType := coro.ResultSlotType(sourceSig.Results())
 	physicalParams := make([]*types.Var, 0, sourceSig.Params().Len()+2)
 	physicalParams = append(physicalParams,
 		types.NewParam(token.NoPos, nil, "__llgo_g", types.Typ[types.UnsafePointer]),

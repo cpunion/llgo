@@ -939,11 +939,7 @@ func newCoroPlainDispatchEffectiveABI(p *context, patched *types.Signature) (cor
 	}
 	patched = canonicalCoroPlainDispatchSignature(patched)
 	physical := p.prog.PhysicalFuncDecl(patched, llssa.InGo)
-	resultFields := make([]*types.Var, physical.Results().Len())
-	for i := range resultFields {
-		resultFields[i] = types.NewField(token.NoPos, nil, fmt.Sprintf("r%d", i), physical.Results().At(i).Type(), false)
-	}
-	resultSlot := types.NewStruct(resultFields, nil)
+	resultSlot := coro.ResultSlotType(physical.Results())
 
 	qualified := func(pkg *types.Package) string {
 		if pkg == nil {

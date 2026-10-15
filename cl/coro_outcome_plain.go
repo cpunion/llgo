@@ -43,13 +43,7 @@ type outcomePlainPhysicalABI struct {
 
 func newOutcomePlainPhysicalABI(sourceSig *types.Signature) outcomePlainPhysicalABI {
 	sourceSig = coroPhysicalNormalizeSourceSignature(sourceSig)
-	resultFields := make([]*types.Var, sourceSig.Results().Len())
-	for index := range resultFields {
-		resultFields[index] = types.NewField(
-			token.NoPos, nil, fmt.Sprintf("r%d", index), sourceSig.Results().At(index).Type(), false,
-		)
-	}
-	resultSlotType := types.NewStruct(resultFields, nil)
+	resultSlotType := coro.ResultSlotType(sourceSig.Results())
 	physicalParams := make([]*types.Var, 0, sourceSig.Params().Len()+3)
 	physicalParams = append(physicalParams,
 		types.NewParam(token.NoPos, nil, "__llgo_g", types.Typ[types.UnsafePointer]),
