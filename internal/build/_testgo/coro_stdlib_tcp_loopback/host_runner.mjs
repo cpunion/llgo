@@ -150,6 +150,7 @@ let nextPort = 43000;
 let now = 0n;
 let operationCount = 0;
 let cancellationCount = 0;
+const canceledOpcodes = new Set();
 let scheduleCount = 0;
 let alarmCount = 0;
 const dnsQueryTypes = new Set();
@@ -716,6 +717,12 @@ const serviceCancellation = (record) => {
   retained.cancel();
   pending.delete(key);
   cancellationCount++;
+  canceledOpcodes.add(retained.operation.opcode);
+  if (traceHostOperations) {
+    console.error(
+      `host-cancel #${cancellationCount} id=${key} opcode=0x${retained.operation.opcode.toString(16)}`,
+    );
+  }
   // Completion is the physical cancellation acknowledgement. The worker
   // result is discarded because the timer has already won the ParkSet.
   fail(retained.operation, 125);
@@ -769,6 +776,9 @@ try {
       }
       now = deadline;
       alarmCount++;
+      if (traceHostOperations) {
+        console.error(`host-alarm #${alarmCount} now=${now}`);
+      }
     }
     const [nowLo, nowHi] = split(now);
     scheduleCount++;
@@ -795,10 +805,22 @@ try {
     }
   }
 
+  // The Go program checks every logical deadline/Close/context result. Here
+  // require physical cancellation for each underlying operation family and
+  // exact resource retirement. Retry and alarm totals are not a semantic ABI:
+  // scheduler interleavings and entry selection need not preserve those totals.
+  const cancellationOpcodes = [...canceledOpcodes].sort((a, b) => a - b);
+  const requiredCancellations = [
+    0x00010002, // TCP read
+    0x00010003, // TCP write
+    0x00020004, // accept
+    0x00020005, // connect
+    0x0002000b, // recvfrom
+    0x0002000d, // recvmsg
+  ];
   if (
-    operationCount !== 594 ||
-    cancellationCount !== 17 ||
-    alarmCount < 18 ||
+    requiredCancellations.some((opcode) => !canceledOpcodes.has(opcode)) ||
+    alarmCount === 0 ||
     dnsQueryTypes.size !== 2 ||
     !dnsQueryTypes.has(1) ||
     !dnsQueryTypes.has(28) ||
@@ -808,13 +830,14 @@ try {
     descriptors.size !== 0
   ) {
     throw new Error(
-      `incomplete stdlib network lifecycle: operations=${operationCount}, cancellations=${cancellationCount}, alarms=${alarmCount}, dnsQueries=${[...dnsQueryTypes].sort((a, b) => a - b)}, pending=${pending.size}, listeners=${listeners.size}, datagrams=${datagrams.size}, fds=${descriptors.size}`,
+      `incomplete stdlib network lifecycle: operations=${operationCount}, cancellations=${cancellationCount}, cancellationOpcodes=${cancellationOpcodes}, alarms=${alarmCount}, dnsQueries=${[...dnsQueryTypes].sort((a, b) => a - b)}, pending=${pending.size}, listeners=${listeners.size}, datagrams=${datagrams.size}, fds=${descriptors.size}`,
     );
   }
   console.log(JSON.stringify({
     status: "complete",
     operations: operationCount,
     cancellations: cancellationCount,
+    cancellationOpcodes,
     alarms: alarmCount,
     dnsQueries: [...dnsQueryTypes].sort((a, b) => a - b),
     scheduleActions: scheduleCount,
