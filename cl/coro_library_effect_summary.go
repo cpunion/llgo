@@ -221,6 +221,13 @@ func (view CoroLibraryEffectView) ValidateFunction(
 			fact.ID, base, fact.RawPlainSymbol,
 		)
 	}
+	// Transport/index validation does not authorize ownership lowering. Until
+	// the exact typed initializer/drop and parent cleanup recipe are bound in
+	// ProgramIR, neither imports nor producer publication may silently discard
+	// this capability and emit an ordinary result transfer.
+	if !fact.Delivery.IsZero() {
+		return fmt.Errorf("coroutine library function %q requires a bound physical resource-delivery recipe", fact.ID)
+	}
 	return nil
 }
 

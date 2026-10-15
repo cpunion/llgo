@@ -165,6 +165,12 @@ round-trip, cross-package lookup, immutable value and negative tests pass with
 race detection (1.516s / 376.3 MiB). This validates metadata transport/index
 consumption only: compiler publication, typed physical helper binding and actual
 source-unavailable archive execution are still pending.
+The complete `internal/coro` race/shuffle suite passes on this branch
+(95.035s / 1660.3 MiB). Compiler import/publication also explicitly rejects a
+nonzero delivery record until its physical cleanup recipe is bound; the real
+imported-entry/descriptor LLVM gate passes with a new unbound-record negative
+case (0.573s / 1231.3 MiB including host compilation). Metadata is not silently
+dropped into ordinary resource-result lowering.
 
 The `02606d89a` CI run 38820862342 exposed three acceptance-wiring problems:
 both WASM target lanes selected the basic network host runner for the stdlib
