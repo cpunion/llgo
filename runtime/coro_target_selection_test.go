@@ -190,6 +190,8 @@ func TestCoroHostTargetCrossCompile(t *testing.T) {
 		{name: "js-wasm", goos: "js", goarch: "wasm", tags: "llgo,llgo_coro,nogc"},
 		{name: "wasip1", goos: "wasip1", goarch: "wasm", tags: "llgo,llgo_coro,nogc"},
 		{name: "baremetal", goos: "linux", goarch: "arm", tags: "llgo,llgo_coro,nogc,baremetal,cortexm"},
+		{name: "embedded-arm", goos: "linux", goarch: "arm", tags: "llgo,llgo_coro,llgo_coro_host,nogc"},
+		{name: "embedded-riscv64", goos: "linux", goarch: "riscv64", tags: "llgo,llgo_coro,llgo_coro_host,nogc"},
 		{name: "embedded", goos: "linux", goarch: "arm64", tags: "llgo,llgo_coro,llgo_coro_host,nogc,nintendoswitch"},
 	}
 	for _, test := range tests {

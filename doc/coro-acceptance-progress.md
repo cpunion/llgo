@@ -156,6 +156,29 @@ as host tests; FD tests run with race detection (2.366s / 397.2 MiB). Physical
 static/dynamic cleanup, reflection, archives and public API adapters remain
 unimplemented. Those type/model tests do not close public resource delivery.
 
+The `02606d89a` CI run 38820862342 exposed three acceptance-wiring problems:
+both WASM target lanes selected the basic network host runner for the stdlib
+TCP fixture; target-core compiled an incomplete host-Go runtime configuration;
+the Linux clock test required a synchronous primary although the exact-static
+outcome twin was already available. The follow-up selects the matching TCP
+runner, uses production-tagged cross-compilation (six targets passed locally,
+60.016s), and inspects the actual synchronous clock entry (39.632s / 1023.5 MiB
+locally). No production runtime shim or fallback is added. The downloaded CI
+WASM TCP artifact completes with 593 operations, 16 cancellations and 17 alarms,
+not the obsolete 594/17/18 totals. Acceptance now requires physical cancellation
+of all six read/write/accept/connect/recvfrom/recvmsg families, both DNS query
+types, every existing Go result assertion and zero pending operations/listeners/
+datagrams/descriptors. A fresh CI run remains required.
+
+Fresh immutable v46 source/compiler acceptance passed the first demo, then
+stopped on a missing `/usr/sbin` in the local runner PATH during handle-checked
+cleanup. The parallel full-test/go build stopped at the 10GiB disk floor before
+producing a completed test result. Both inactive process domains were inspected
+with absolute-path lsof; their marked scratch and lock receipts were preserved
+under `scratch-interrupted-lsof` / `interrupted-lsof.lock`. Adding `/usr/sbin`
+does not change source/compiler inputs, but disk admission still prevents a
+fresh full-suite run. These are infrastructure stops, not new suite passes.
+
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
 both the source SHA-256 manifest and recursive content comparison before

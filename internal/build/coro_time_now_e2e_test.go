@@ -45,7 +45,7 @@ func TestCoroNativeTimeNowProductionPlanAndCodegen(t *testing.T) {
 			for _, suffix := range []string{"", "$outcome"} {
 				physical := pkg.LPkg.Module().NamedFunction(target.symbol + suffix)
 				if !physical.IsNil() && physical.BasicBlocksCount() != 0 {
-					bodies[target.symbol] += physical.String()
+					bodies[target.symbol+suffix] = physical.String()
 				}
 			}
 		}
@@ -80,16 +80,22 @@ func TestCoroNativeTimeNowProductionPlanAndCodegen(t *testing.T) {
 		path, name := target.path, target.name
 		function := find(path, name)
 		got, found := plan.FunctionPlan(function)
-		// A synchronous status-returning body may transport panic without
-		// requiring a coroutine frame. Its semantic representation is still
-		// DirectCoro; the physical OutcomePlain entry is the relevant fact.
-		plain := got.Emission == coro.EmitPlain && got.FuncRep == coro.DirectPlain ||
-			got.Emission == coro.EmitOutcomePlain && got.ManagedEntry == coro.ManagedEntryOutcomePlain
+		// Inspect the exact static entry, not only its primary ABI. Linux's
+		// pointer-writing clock also has raw scheduler callers, so it retains a
+		// coroutine primary while managed static calls use its outcome twin.
+		// Require that twin's real body below; the raw plain body cannot mask a
+		// missing or suspending managed entry.
+		plain := got.Emission == coro.EmitPlain && got.FuncRep == coro.DirectPlain
+		suffix := ""
+		if got.HasStaticOutcome() {
+			plain = true
+			suffix = "$outcome"
+		}
 		if !found || !plain || got.Effect&^coro.OutcomeStructured != coro.NoSuspend ||
 			got.Exec&(coro.BlockForeign|coro.NeedsPreempt) != 0 {
 			t.Fatalf("%s.%s retained a suspending clock path: %+v, found=%t", path, name, got, found)
 		}
-		body := bodies[target.symbol]
+		body := bodies[target.symbol+suffix]
 		if body == "" {
 			t.Fatalf("%s.%s has no emitted synchronous body", path, name)
 		}
