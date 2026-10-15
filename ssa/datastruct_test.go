@@ -19,7 +19,6 @@
 package ssa
 
 import (
-	"go/importer"
 	"go/types"
 	"runtime"
 	"strings"
@@ -29,13 +28,7 @@ import (
 func TestMapLookupTrustsRuntimeNonNilElementPointer(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("maplookup", "test/maplookup")
 	mapType := types.NewMap(types.Typ[types.String], types.Typ[types.Int])
 	params := types.NewTuple(

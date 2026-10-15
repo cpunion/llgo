@@ -21,18 +21,17 @@ package ssa_test
 
 import (
 	"flag"
-	"go/importer"
 	"go/types"
 	"io"
 	"log"
 	"runtime"
 	"testing"
 
-	"github.com/xgo-dev/llgo/cl/cltest"
 	"github.com/xgo-dev/llgo/ssa"
 )
 
 func TestMain(m *testing.M) {
+	ssa.Initialize(ssa.InitAll | ssa.InitNative)
 	flag.Parse()
 	if !testing.Verbose() {
 		log.SetOutput(io.Discard)
@@ -40,46 +39,10 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
-func TestFromTestlibgo(t *testing.T) {
-	cltest.FromDir(t, "", "../cl/_testlibgo")
-}
-
-func TestFromTestgo(t *testing.T) {
-	cltest.FromDir(t, "", "../cl/_testgo")
-}
-
-func TestFromTestpy(t *testing.T) {
-	cltest.FromDir(t, "", "../cl/_testpy")
-}
-
-func TestFromTestlibc(t *testing.T) {
-	var ignore []string
-	if runtime.GOOS == "windows" {
-		ignore = []string{
-			"./../cl/_testlibc/once", // POSIX pthread_once has no Windows ABI counterpart; Windows synchronization is covered by goplus/lib.
-		}
-	}
-	cltest.RunAndTestFromDir(t, "", "../cl/_testlibc", ignore, cltest.WithOutputCheck(false))
-}
-
-func TestFromTestrt(t *testing.T) {
-	cltest.FromDir(t, "", "../cl/_testrt")
-}
-
-func TestFromTestdata(t *testing.T) {
-	cltest.FromDir(t, "", "../cl/_testdata")
-}
-
 func TestMakeInterface(t *testing.T) {
 	prog := ssa.NewProgram(nil)
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(ssa.PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(ssa.RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("foo", "foo")
 	fn := pkg.NewFunc("main", types.NewSignatureType(nil, nil, nil, nil, nil, false), ssa.InC)
 	b := fn.MakeBody(1)

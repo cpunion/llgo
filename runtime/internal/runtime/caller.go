@@ -229,6 +229,13 @@ func recordPCLocation(pc, entry uintptr, name, file string, line int) {
 	})
 }
 
+// CallerStackActive distinguishes an exhausted logical stack from the absence
+// of one. Physical executor frames are not additional frames of a managed G.
+func CallerStackActive() bool {
+	store := callerLocationStoreCurrent
+	return store != nil && len(store.stack) != 0
+}
+
 func Caller(skip int) (CallerFrame, bool) {
 	if skip < 0 {
 		return CallerFrame{}, false

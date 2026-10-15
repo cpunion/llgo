@@ -66,6 +66,16 @@ func (pipe *Pipe) ReadFD() (int32, bool) {
 	return pipe.readFD, true
 }
 
+// NotificationFD is an owner-only registration boundary for collector-native
+// notifications. The collector must detach under its own callback lock before
+// Close; ordinary producers must continue to use Ring plus TargetIngress.
+func (pipe *Pipe) NotificationFD() (int32, bool) {
+	if pipe == nil || nativeAtomicLoad(&pipe.open) != 1 || pipe.writeFD < 0 {
+		return invalidFD, false
+	}
+	return pipe.writeFD, true
+}
+
 // OwnsDescriptor reports whether fd is either end of this runtime-owned
 // doorbell. The descriptors are published before Open sets open and remain
 // stable for the target lifetime; Close clears open before invalidating them.

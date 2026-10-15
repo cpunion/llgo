@@ -43,6 +43,34 @@ func coroRuntimeAbort(message string) {
 	panic(message)
 }
 
+// Ordinary channel source-island tests do not install an execution domain.
+func newSynctestChan() *Chan                                                                   { return nil }
+func coroCheckSynctestChan(ch *Chan, context *coroChanExternalCommitContextV1, message string) {}
+func coroSynctestChanDurable(ch *Chan, task *coro.G, message string) bool                      { return false }
+
+func TestCoroChannelAdapterSynctestFlagKeepsOrdinaryLayout(t *testing.T) {
+	// This shape is the ordinary channel before the optional flag. Run the
+	// same gate in native64 and wasm32 source-island lanes.
+	type ordinaryBeforeDomain struct {
+		mutex             channelMutex
+		qcount, dataqsiz  int
+		buf               unsafe.Pointer
+		elemsize          int
+		closed, timerSync bool
+		recvx, sendx      int
+		sendq, recvq      chanWaitq
+	}
+	var before ordinaryBeforeDomain
+	var after Chan
+	if unsafe.Sizeof(before) != unsafe.Sizeof(after) ||
+		unsafe.Alignof(before) != unsafe.Alignof(after) ||
+		unsafe.Offsetof(before.recvx) != unsafe.Offsetof(after.recvx) ||
+		unsafe.Offsetof(before.sendq) != unsafe.Offsetof(after.sendq) ||
+		unsafe.Offsetof(before.recvq) != unsafe.Offsetof(after.recvq) {
+		t.Fatal("optional bubble flag grew or shifted the ordinary channel layout")
+	}
+}
+
 //go:linkname coroChannelTestMemcpy C.memcpy
 func coroChannelTestMemcpy(dst, src unsafe.Pointer, size uintptr) unsafe.Pointer {
 	copy(unsafe.Slice((*byte)(dst), size), unsafe.Slice((*byte)(src), size))

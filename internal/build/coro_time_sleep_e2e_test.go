@@ -20,23 +20,15 @@ package build
 
 import (
 	"fmt"
-	"go/ast"
 	"go/constant"
-	"go/importer"
-	"go/parser"
 	"go/token"
-	"go/types"
-	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/xgo-dev/llgo/cl"
 	"github.com/xgo-dev/llgo/internal/coro"
-	"github.com/xgo-dev/llgo/internal/env"
-	"github.com/xgo-dev/llgo/internal/goembed"
 	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
@@ -48,326 +40,121 @@ const (
 	coroTimeSleepAwaitHookV1    = "__llgo_coro_await_prepare_inline_v4"
 )
 
-// TestCoroNativeTimeSleepProductionPlanAndCodegen starts from an ordinary
-// synchronous Go call to time.Sleep. It obtains the exact injected source from
-// the production GOROOT overlay, discovers MayPark from that body's
-// llgo.coroTimerSleep intrinsic, taints both callers without a test-supplied effect
-// seed, and emits one stackless DirectCoro body at every level.
-//
-// A complete Do build currently stops before the plan builder because
-// sync.Pool passes a captured destructor through an exact synchronous C
-// callback ABI that has no closure-context slot. The focused frozen universe
-// below deliberately excludes that unrelated callback limitation; it does not
-// copy, rewrite, or weaken the production Sleep body or its frame-retention
-// checks.
+// TestCoroNativeTimeSleepProductionPlanAndCodegen compiles ordinary synchronous
+// Go through the complete production pipeline, including the synctest bridge.
+// No hand-written runtime types, effect seeds, or partial SSA universe stand in
+// for the production implementation. Hooks observe the final plan and frontend
+// IR without replacing the default analysis policy.
 func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
-	capability := &Config{
-		BuildMode: BuildModeExe,
-		Goos:      runtime.GOOS,
-		Goarch:    runtime.GOARCH}
+	capability := &Config{BuildMode: BuildModeExe, Goos: runtime.GOOS, Goarch: runtime.GOARCH}
 	if !nativeCoroTimerRuntimeABI(capability) {
 		t.Skipf("native coroutine time.Sleep compilation is unavailable on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
-		goos:       runtime.GOOS,
-		goarch:     runtime.GOARCH,
-		buildFlags: []string{"-tags=llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,nogc"},
-	})
+	const callerPath = "github.com/xgo-dev/llgo/internal/build/_testgo/coro_time_sleep"
+	var input CoroPlanInput
+	var plan *coro.SSAPlan
+	bodies := make(map[string]string)
+	var emitted []llssa.Package
+	conf := NewDefaultConf(ModeGen)
+	conf.ForceRebuild = true
+	conf.CoroPlanBuilder = func(next CoroPlanInput) (*coro.SSAPlan, error) {
+		analyzed, err := defaultCoroPlanBuilder(next)
+		if err == nil {
+			input, plan = next, analyzed
+		}
+		return analyzed, err
+	}
+	conf.ModuleHook = func(pkg Package) {
+		if pkg.LPkg == nil || pkg.PkgPath != "time" && pkg.PkgPath != callerPath {
+			return
+		}
+		emitted = append(emitted, pkg.LPkg)
+		for _, name := range []string{"Sleep", "sleepOnce", "sleepZero", "sleepNegative", "main"} {
+			symbol := llssa.FullName(pkg.Types, name) + "$coro"
+			physical := pkg.LPkg.Module().NamedFunction(symbol)
+			if !physical.IsNil() && physical.BasicBlocksCount() != 0 {
+				bodies[symbol] = physical.String()
+			}
+		}
+	}
+	packages, err := Do([]string{"./_testgo/coro_time_sleep"}, conf)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("compile production time.Sleep program: %v", err)
 	}
-	injectedPath := filepath.Join(runtime.GOROOT(), "src", "time", "z_llgo_patch_sleep_coro_native_llgo.go")
-	injected, ok := overlay[injectedPath]
-	if !ok {
-		t.Fatalf("production source overlay has no native coroutine time.Sleep body %s", injectedPath)
+	if len(packages) != 1 || packages[0].LPkg == nil {
+		t.Fatal("production pipeline did not return one owned LLVM program")
 	}
-	callerPath := filepath.Join("_testgo", "coro_time_sleep", "main.go")
-	caller, err := os.ReadFile(callerPath)
-	if err != nil {
-		t.Fatal(err)
+	defer packages[0].LPkg.Prog.Dispose()
+	if input.Program == nil || plan == nil {
+		t.Fatal("production pipeline did not publish its final plan")
 	}
-	ssaProg, timeSSA, timeFiles, mainSSA, mainFiles := buildCoroTimeSleepOverlaySSA(
-		t, injectedPath, injected, callerPath, caller,
-	)
 
-	llssa.Initialize(llssa.InitAll)
-	prog := llssa.NewProgram(nil)
-	defer prog.Dispose()
-	prog.SetRuntime(func() *types.Package {
-		runtimePackage, err := importer.For("source", nil).Import(llssa.PkgRuntime)
+	find := func(path, name string) *ssa.Function {
+		t.Helper()
+		fn, err := findCoroTimeSleepFunction(input.Program, path, name)
 		if err != nil {
-			t.Fatal("load runtime failed:", err)
+			t.Fatal(err)
 		}
-		for _, typeName := range []string{"CoroSleepParkV2", "CoroTimerParkV2"} {
-			if runtimePackage.Scope().Lookup(typeName) != nil {
-				continue
-			}
-			name := types.NewTypeName(token.NoPos, runtimePackage, typeName, nil)
-			types.NewNamed(name, types.NewArray(types.Typ[types.Uintptr], 32), nil)
-			if previous := runtimePackage.Scope().Insert(name); previous != nil {
-				t.Fatalf("install %s test runtime type: duplicate %v", typeName, previous)
-			}
-		}
-		return runtimePackage
-	})
-	emission, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{
-		{SSA: timeSSA, Files: timeFiles, Identity: "time"},
-		{SSA: mainSSA, Files: mainFiles, Identity: "example.com/llgo-coro-time-sleep"},
-	}, cl.EmissionUniverseOptions{})
-	if err != nil {
-		t.Fatal(err)
+		return fn
 	}
-	ssaEmission, err := coro.NewSSAEmissionUniverse(ssaProg, emission.Functions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	functionIDs := emission.FunctionIDConfig()
-	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
-	functionIDs.ArchiveReady = true
-	input := CoroPlanInput{
-		Program:                        ssaProg,
-		EmissionUniverse:               ssaEmission,
-		resolveFunction:                emission.Resolve,
-		functionBackground:             emission.FunctionBackground,
-		foreignNoBlock:                 emission.CoroForeignNoBlockCertificate,
-		foreignSync:                    emission.CoroForeignSyncCertificate,
-		foreignWorker:                  emission.CoroForeignWorkerCertificate,
-		callSitePlan:                   emission.CoroCallSitePlan,
-		rawFunctionAddressCallArgument: emission.CoroRawFunctionAddressCallArgument,
-		staticCodeAddressCallArgument:  emission.CoroStaticCodeAddressCallArgument,
-		demandReferences:               emission.CoroDemandReferences,
-		syncDemandReferences:           emission.CoroSyncDemandReferences,
-		loweredCalls:                   emission.CoroLoweredCalls,
-	}
-	main := mainSSA.Func("main")
-	plan, err := input.Analyze(coro.Roots{{Function: main, Demand: coro.AsyncDemand}}, coro.SSAConfig{
-		FunctionIDs:          functionIDs,
-		MaxPlainInstructions: -1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	sleep, err := findCoroTimeSleepFunction(input.Program, "time", "Sleep")
-	if err != nil {
-		t.Fatal(err)
-	}
+	sleep := find("time", "Sleep")
 	position := input.Program.Fset.PositionFor(sleep.Pos(), true)
 	wantPatch := filepath.ToSlash(filepath.Join("runtime", "_patch", "time", "sleep_coro_native_llgo.go"))
 	if got := filepath.ToSlash(position.Filename); !strings.HasSuffix(got, wantPatch) {
 		t.Fatalf("time.Sleep source = %q, want production source patch suffix %q", got, wantPatch)
 	}
-	sleepOnce := mainSSA.Func("sleepOnce")
-	sleepZero := mainSSA.Func("sleepZero")
-	sleepNegative := mainSSA.Func("sleepNegative")
-	if main == nil || sleepOnce == nil || sleepZero == nil || sleepNegative == nil || len(sleepOnce.Blocks) == 0 {
-		t.Fatal("synchronous fixture has no bodyful main/Sleep callers")
-	}
-	intrinsic, err := findCoroTimeSleepFunction(input.Program, "time", "llgoCoroTimerSleep")
-	if err != nil {
-		t.Fatal(err)
-	}
+	intrinsic := find("time", "llgoCoroTimerSleep")
 	intrinsicCall, err := findCoroTimeSleepDirectCall(sleep, intrinsic)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertCoroTimeSleepNonpositiveFastPath(t, sleep, intrinsicCall)
-	semantics, isIntrinsic, semanticsErr := coroIntrinsicCallSiteSemanticsForTest(emission, intrinsicCall)
-	if semanticsErr != nil || !isIntrinsic || !semantics.SuspendsCurrentFrame() || !plan.ElidesCall(intrinsicCall) {
-		t.Fatalf("production time.Sleep timer semantics = %v, intrinsic=%t, err=%v, elided=%t; want exact suspending intrinsic", semantics, isIntrinsic, semanticsErr, plan.ElidesCall(intrinsicCall))
+	site, found, err := input.callSitePlan(intrinsicCall)
+	if err != nil || !found || !site.Intrinsic || !site.IntrinsicSemantics.SuspendsCurrentFrame() || !plan.ElidesCall(intrinsicCall) {
+		t.Fatalf("production time.Sleep timer site = %+v, found=%t, err=%v, elided=%t; want exact suspending intrinsic",
+			site, found, err, plan.ElidesCall(intrinsicCall))
 	}
 	if err := assertCoroTimeSleepFunctionPlan(plan, sleep, true, "time.Sleep"); err != nil {
 		t.Fatal(err)
 	}
-	sleepPlan, _ := plan.FunctionPlan(sleep)
-	if err := assertCoroTimeSleepFunctionPlan(plan, sleepOnce, false, "sleepOnce"); err != nil {
-		t.Fatal(err)
-	}
-	if err := assertCoroTimeSleepFunctionPlan(plan, sleepZero, false, "sleepZero"); err != nil {
-		t.Fatal(err)
-	}
-	if err := assertCoroTimeSleepFunctionPlan(plan, sleepNegative, false, "sleepNegative"); err != nil {
-		t.Fatal(err)
-	}
+	main := find("main", "main")
 	if err := assertCoroTimeSleepFunctionPlan(plan, main, false, "main"); err != nil {
 		t.Fatal(err)
 	}
-	sleepCall, err := findCoroTimeSleepDirectCall(sleepOnce, sleep)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := assertCoroTimeSleepDirectCoroCall(plan, sleepCall, sleep, "sleepOnce -> time.Sleep"); err != nil {
-		t.Fatal(err)
-	}
-	zeroCall, err := findCoroTimeSleepDirectCall(sleepZero, sleep)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := assertCoroTimeSleepDirectCoroCall(plan, zeroCall, sleep, "sleepZero -> time.Sleep"); err != nil {
-		t.Fatal(err)
-	}
-	negativeCall, err := findCoroTimeSleepDirectCall(sleepNegative, sleep)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := assertCoroTimeSleepDirectCoroCall(plan, negativeCall, sleep, "sleepNegative -> time.Sleep"); err != nil {
-		t.Fatal(err)
-	}
-	mainCall, err := findCoroTimeSleepDirectCall(main, sleepOnce)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := assertCoroTimeSleepDirectCoroCall(plan, mainCall, sleepOnce, "main -> sleepOnce"); err != nil {
-		t.Fatal(err)
-	}
-	mainZeroCall, err := findCoroTimeSleepDirectCall(main, sleepZero)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := assertCoroTimeSleepDirectCoroCall(plan, mainZeroCall, sleepZero, "main -> sleepZero"); err != nil {
-		t.Fatal(err)
-	}
-	mainNegativeCall, err := findCoroTimeSleepDirectCall(main, sleepNegative)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := assertCoroTimeSleepDirectCoroCall(plan, mainNegativeCall, sleepNegative, "main -> sleepNegative"); err != nil {
-		t.Fatal(err)
-	}
-
-	compilation := &cl.Compilation{
-		CoroPlan: plan,
-
-		CoroFrameRetentionABI: cl.CoroFrameRetentionParkABIV2,
-		CoroABI:               coro.PhysicalABIV1,
-		SchedulerABI:          coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
-		PanicABI:              coro.PanicExplicitStatusABIV0,
-		FuncRepABI:            coro.FuncRepABIV2,
-		EmissionUniverse:      emission}
-	freezeCoroNativeE2EProgramCapabilities(t, compilation)
-	timePkg, _, err := cl.NewPackageExWithEmbedOptions(
-		prog, nil, nil, nil, timeSSA, timeFiles, goembed.VarMap{},
-		cl.PackageOptions{Compilation: compilation},
-	)
-	if err != nil {
-		t.Fatalf("compile production-overlay time package: %v", err)
-	}
-	mainPkg, _, err := cl.NewPackageExWithEmbedOptions(
-		prog, nil, nil, nil, mainSSA, mainFiles, goembed.VarMap{},
-		cl.PackageOptions{Compilation: compilation},
-	)
-	if err != nil {
-		t.Fatalf("compile synchronous time.Sleep caller: %v", err)
-	}
-
 	sleepSymbol := llssa.FullName(sleep.Pkg.Pkg, sleep.Name()) + "$coro"
-	sleepOnceSymbol := llssa.FullName(sleepOnce.Pkg.Pkg, sleepOnce.Name()) + "$coro"
-	sleepZeroSymbol := llssa.FullName(sleepZero.Pkg.Pkg, sleepZero.Name()) + "$coro"
-	sleepNegativeSymbol := llssa.FullName(sleepNegative.Pkg.Pkg, sleepNegative.Name()) + "$coro"
-	mainSymbol := llssa.FullName(main.Pkg.Pkg, main.Name()) + "$coro"
-	sleepPhysical := timePkg.Module().NamedFunction(sleepSymbol)
-	sleepOncePhysical := mainPkg.Module().NamedFunction(sleepOnceSymbol)
-	sleepZeroPhysical := mainPkg.Module().NamedFunction(sleepZeroSymbol)
-	sleepNegativePhysical := mainPkg.Module().NamedFunction(sleepNegativeSymbol)
-	mainPhysical := mainPkg.Module().NamedFunction(mainSymbol)
-	if sleepPhysical.IsNil() || sleepOncePhysical.IsNil() || sleepZeroPhysical.IsNil() || sleepNegativePhysical.IsNil() || mainPhysical.IsNil() {
-		t.Fatalf("production time.Sleep codegen bodies = Sleep:%t once:%t zero:%t negative:%t main:%t; want all physical",
-			!sleepPhysical.IsNil(), !sleepOncePhysical.IsNil(), !sleepZeroPhysical.IsNil(), !sleepNegativePhysical.IsNil(), !mainPhysical.IsNil())
-	}
-	sleepIR := sleepPhysical.String()
-	assertCoroTimerSleepV2FrameIR(t, "production time.Sleep", sleepIR, sleepPlan.Exec.Contains(coro.NeedsPreempt))
-	assertCoroTimeSleepAwaitsIR(t, "sleepOnce", sleepOncePhysical.String(), sleepSymbol)
-	assertCoroTimeSleepAwaitsIR(t, "sleepZero", sleepZeroPhysical.String(), sleepSymbol)
-	assertCoroTimeSleepAwaitsIR(t, "sleepNegative", sleepNegativePhysical.String(), sleepSymbol)
-	// Exact static tail-forward wrappers remain materialized for dynamic use,
-	// but main's physical await sites name their final ramp directly.
-	assertCoroTimeSleepAwaitsIR(t, "main", mainPhysical.String(), sleepSymbol, sleepSymbol, sleepSymbol)
-	runCoroSpawnNativeE2EPasses(t, prog, timePkg.Module())
-	runCoroSpawnNativeE2EPasses(t, prog, mainPkg.Module())
-}
-
-type coroTimeSleepImporter struct {
-	local    map[string]*types.Package
-	fallback types.Importer
-}
-
-func (p coroTimeSleepImporter) Import(path string) (*types.Package, error) {
-	if pkg := p.local[path]; pkg != nil {
-		return pkg, nil
-	}
-	return p.fallback.Import(path)
-}
-
-func buildCoroTimeSleepOverlaySSA(
-	t *testing.T, injectedPath string, injected []byte, callerPath string, caller []byte,
-) (*ssa.Program, *ssa.Package, []*ast.File, *ssa.Package, []*ast.File) {
-	t.Helper()
-	fset := token.NewFileSet()
-	parse := func(filename string, source []byte) *ast.File {
-		file, err := parser.ParseFile(fset, filename, source, parser.ParseComments)
-		if err != nil {
-			t.Fatalf("parse %s: %v", filename, err)
+	body := func(fn *ssa.Function) string {
+		t.Helper()
+		symbol := llssa.FullName(fn.Pkg.Pkg, fn.Name()) + "$coro"
+		ir, found := bodies[symbol]
+		if !found {
+			t.Fatalf("production pipeline emitted no physical body for %s", symbol)
 		}
-		return file
+		return ir
 	}
-	patchFile := parse(injectedPath, injected)
-	supportFile := parse("coro_time_sleep_support.go", []byte(`package time
-type Duration int64
-const Nanosecond Duration = 1
-type Timer struct{}
-func when(Duration) int64
-`))
-	timeFiles := []*ast.File{patchFile, supportFile}
-	newInfo := func() *types.Info {
-		return &types.Info{
-			Types:      make(map[ast.Expr]types.TypeAndValue),
-			Defs:       make(map[*ast.Ident]types.Object),
-			Uses:       make(map[*ast.Ident]types.Object),
-			Implicits:  make(map[ast.Node]types.Object),
-			Scopes:     make(map[ast.Node]*types.Scope),
-			Selections: make(map[*ast.SelectorExpr]*types.Selection),
-			Instances:  make(map[*ast.Ident]types.Instance),
+	sleepPlan, _ := plan.FunctionPlan(sleep)
+	assertCoroTimerSleepV2FrameIR(t, "production time.Sleep", body(sleep), sleepPlan.Exec.Contains(coro.NeedsPreempt))
+	for _, name := range []string{"sleepOnce", "sleepZero", "sleepNegative"} {
+		caller := find("main", name)
+		if err := assertCoroTimeSleepFunctionPlan(plan, caller, false, name); err != nil {
+			t.Fatal(err)
 		}
-	}
-	base := importer.Default()
-	timeTypes := types.NewPackage("time", "time")
-	timeInfo := newInfo()
-	if err := types.NewChecker(&types.Config{Importer: base}, fset, timeTypes, timeInfo).Files(timeFiles); err != nil {
-		t.Fatalf("type-check production-overlay time.Sleep: %v", err)
-	}
-
-	mainFile := parse(callerPath, caller)
-	mainFiles := []*ast.File{mainFile}
-	mainTypes := types.NewPackage("example.com/llgo-coro-time-sleep", "main")
-	mainInfo := newInfo()
-	localImporter := coroTimeSleepImporter{local: map[string]*types.Package{"time": timeTypes}, fallback: base}
-	if err := types.NewChecker(&types.Config{Importer: localImporter}, fset, mainTypes, mainInfo).Files(mainFiles); err != nil {
-		t.Fatalf("type-check synchronous time.Sleep caller: %v", err)
-	}
-
-	ssaProg := ssa.NewProgram(fset, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
-	created := make(map[*types.Package]bool)
-	var createDependencies func(*types.Package)
-	createDependencies = func(pkg *types.Package) {
-		if pkg == nil || created[pkg] {
-			return
+		for _, edge := range [][2]*ssa.Function{{caller, sleep}, {main, caller}} {
+			call, err := findCoroTimeSleepDirectCall(edge[0], edge[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := assertCoroTimeSleepDirectCoroCall(plan, call, edge[1], edge[0].Name()+" -> "+edge[1].Name()); err != nil {
+				t.Fatal(err)
+			}
 		}
-		created[pkg] = true
-		for _, imported := range pkg.Imports() {
-			createDependencies(imported)
-		}
-		ssaProg.CreatePackage(pkg, nil, nil, true)
+		assertCoroTimeSleepAwaitsIR(t, name, body(caller), sleepSymbol)
 	}
-	for _, imported := range timeTypes.Imports() {
-		createDependencies(imported)
+	// Static tail-forward calls use the final ramp, not a redundant wrapper.
+	assertCoroTimeSleepAwaitsIR(t, "main", body(main), sleepSymbol, sleepSymbol, sleepSymbol)
+	for _, pkg := range emitted {
+		runCoroSpawnNativeE2EPasses(t, pkg.Prog, pkg.Module())
 	}
-	timeSSA := ssaProg.CreatePackage(timeTypes, timeFiles, timeInfo, true)
-	created[timeTypes] = true
-	mainSSA := ssaProg.CreatePackage(mainTypes, mainFiles, mainInfo, true)
-	ssaProg.Build()
-	return ssaProg, timeSSA, timeFiles, mainSSA, mainFiles
 }
 
 func findCoroTimeSleepFunction(prog *ssa.Program, path, name string) (*ssa.Function, error) {
@@ -407,7 +194,10 @@ func assertCoroTimeSleepFunctionPlan(plan *coro.SSAPlan, function *ssa.Function,
 		}
 		return nil
 	}
-	if got.DeclaredEffect.MaySuspend() || got.LocalEffect.MaySuspend() || !got.Effect.Contains(coro.AwaitStructured) {
+	// The complete production plan also records demand-sensitive terminal
+	// outcome transport. It is not a local timer/wait seed; reject every other
+	// local effect so MayPark must still be inferred through the call chain.
+	if got.DeclaredEffect != coro.NoSuspend || got.LocalEffect&^coro.OutcomeStructured != coro.NoSuspend || !got.Effect.Contains(coro.AwaitStructured) {
 		return fmt.Errorf("%s production effects = declared:%s local:%s total:%s, want unseeded synchronous source automatically tainted by MayPark+AwaitStructured", label, got.DeclaredEffect, got.LocalEffect, got.Effect)
 	}
 	return nil

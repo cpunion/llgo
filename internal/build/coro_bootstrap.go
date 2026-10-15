@@ -73,7 +73,7 @@ const (
 	coroPollPostClosingOrAbortSymbolV1                          = "__llgo_coro_poll_post_closing_or_abort_v1"
 	coroKeyedParkSymbolV2                                       = "__llgo_coro_keyed_park_v2"
 	coroKeyedResumeSymbolV2                                     = "__llgo_coro_keyed_resume_v2"
-	coroSemaphorePrepareOrAbortSymbolV2                         = "__llgo_coro_sema_prepare_or_abort_v2"
+	coroSemaphorePrepareOrAbortSymbolV3                         = "__llgo_coro_sema_prepare_or_abort_v3"
 	coroSemaphoreReleaseOrAbortSymbolV2                         = "__llgo_coro_sema_release_or_abort_v2"
 	coroNotifyPrepareOrAbortSymbolV2                            = "__llgo_coro_notify_prepare_or_abort_v2"
 	coroNotifyOneOrAbortSymbolV2                                = "__llgo_coro_notify_one_or_abort_v2"
@@ -825,7 +825,7 @@ func coroProgramBootstrapHash(ctx *context, version, flags uint32, steps []coroP
 			coroKeyedParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr)->void;" +
 			coroKeyedResumeSymbolV2 + "(g:ptr,state:ptr)->u32")
 		write("semaphore-owner-v2=" +
-			coroSemaphorePrepareOrAbortSymbolV2 + "(state:ptr,addr:ptr)->void;" +
+			coroSemaphorePrepareOrAbortSymbolV3 + "(state:ptr,addr:ptr,durable:bool)->void;" +
 			coroSemaphoreReleaseOrAbortSymbolV2 + "(addr:ptr)->void")
 		write("notify-owner-v2=" +
 			coroNotifyPrepareOrAbortSymbolV2 + "(state:ptr,notify-addr:ptr,target:u32)->void;" +

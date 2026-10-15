@@ -54,6 +54,64 @@ func install() {}
 	}
 }
 
+func TestCoroGlobalFunctionSlotExcludesOnlyFrozenUnevaluatedReaders(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+var optional func()
+func folded() { if 1 < 0 { optional() } }
+func dormant() { optional() }
+func install() {}
+`)
+	folded := onlyDynamicBuildTestCall(t, fixture.pkg.Func("folded"))
+	site, present, err := fixture.ctx.coroEmission.CoroCallSitePlan(folded)
+	if err != nil || !present || site.Elision != cl.CoroCallElidedFrontendUnevaluated {
+		t.Fatalf("folded reader site = %+v, present=%t, err=%v", site, present, err)
+	}
+	if _, found := fixture.closedDynamic[folded]; found {
+		t.Error("frontend-unevaluated reader acquired a closed dynamic certificate")
+	}
+	if _, found := fixture.ctx.coroGlobalFunctionSlots[folded]; found {
+		t.Error("frontend-unevaluated reader acquired a global slot proof")
+	}
+	// Absence of demand is not evidence of an unevaluated source call: keep
+	// its certificate so a later root cannot bypass the target-set checks.
+	dormant, _ := onlyCoroGlobalFunctionSlotCertificate(t, fixture, "dormant")
+	plan, err := analyzeCoroGlobalFunctionSlotFixture(fixture, fixture.pkg.Func("folded"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.ElidesCall(folded) {
+		t.Fatal("final plan lost the frozen frontend elision")
+	}
+	if _, found := plan.CallPlan(folded); found {
+		t.Fatal("unevaluated reader retained a physical call plan")
+	}
+	if _, found := plan.CallPlan(dormant); !found || plan.ElidesCall(dormant) {
+		t.Fatal("dormant but evaluated reader lost its exact call plan")
+	}
+}
+
+func TestCoroGlobalFunctionSlotFoldedOnlyReaderDoesNotInheritTargetEffect(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+var channel chan struct{}
+var optional = target
+func target() { <-channel }
+func folded() { if 1 < 0 { optional() } }
+func install() {}
+`)
+	owner := fixture.pkg.Func("folded")
+	call := onlyDynamicBuildTestCall(t, owner)
+	if _, found := fixture.closedDynamic[call]; found {
+		t.Fatal("folded-only reader acquired a target-set certificate")
+	}
+	plan, err := analyzeCoroGlobalFunctionSlotFixture(fixture, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.ElidesCall(call) || functionPlanForBuildTest(t, plan, owner).Effect.MaySuspend() {
+		t.Fatal("unevaluated global slot call colored its owner from the parked target")
+	}
+}
+
 func TestCoroGlobalFunctionSlotNilOnlyTupleResultProof(t *testing.T) {
 	fixture := buildRequiredCoroRuntimeFixture(t, `
 var optional func(string, string) ([]byte, error)

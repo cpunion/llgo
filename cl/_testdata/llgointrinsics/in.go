@@ -1,3 +1,5 @@
+// LITTEST darwin/arm64 linux/amd64
+// Scope: arch (arm64/amd64 function-value ABI; intrinsic lowering otherwise common)
 package llgointrinsics
 
 import (
@@ -6,8 +8,55 @@ import (
 
 // llgo.funcPCABI0 resolves declarations and non-capturing functions directly,
 // and returns the code pointer (not the environment) for a closure.
-// DARWIN-ARM64-LABEL: define void @"{{.*}}.UseClosure$1"(ptr swiftself
-// LINUX-AMD64-LABEL: define void @"{{.*}}.UseClosure$1"(ptr nest
+// CHECK-LABEL: define void @"{{.*}}.UseBare$outcome"(
+// CHECK: store i64 ptrtoint (ptr @bar to i64), ptr
+// CHECK-LABEL: define void @"{{.*}}.UseC$outcome"(
+// CHECK: store i64 ptrtoint (ptr @write to i64), ptr
+// CHECK-LABEL: define void @"{{.*}}.UseCTrampoline$outcome"(
+// CHECK: store i64 ptrtoint (ptr @write to i64), ptr
+// CHECK-LABEL: define void @"{{.*}}.UseClosure$outcome"(
+// CHECK: [[UC_X:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
+// CHECK-NEXT: [[UC_ENV:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 8)
+// CHECK-NEXT: [[UC_X_SLOT:%[0-9]+]] = getelementptr inbounds{{.*}} { ptr }, ptr [[UC_ENV]], i32 0, i32 0
+// CHECK-NEXT: store ptr [[UC_X]], ptr [[UC_X_SLOT]]
+// CHECK-NEXT: [[UC_CLOSURE:%[0-9]+]] = insertvalue { ptr, ptr } { ptr @__llgo_coro_func_descriptor_v2.{{[^,]+}}, ptr undef }, ptr [[UC_ENV]], 1
+// CHECK: store i64 ptrtoint (ptr @"{{.*}}.UseClosure$1" to i64), ptr
+// ARM64-LABEL: define void @"{{.*}}.UseClosure$1"(ptr swiftself
+// AMD64-LABEL: define void @"{{.*}}.UseClosure$1"(ptr nest
+// CHECK: [[UC_ENV_VALUE:%[0-9]+]] = load { ptr }, ptr %{{[0-9]+}}
+// CHECK-NEXT: [[UC_X_PTR:%[0-9]+]] = extractvalue { ptr } [[UC_ENV_VALUE]], 0
+// CHECK-NEXT: [[UC_OLD_X:%[0-9]+]] = load i64, ptr [[UC_X_PTR]]
+// CHECK-NEXT: [[UC_NEW_X:%[0-9]+]] = add i64 [[UC_OLD_X]], 1
+// CHECK-NEXT: [[UC_X_PTR_AGAIN:%[0-9]+]] = extractvalue { ptr } [[UC_ENV_VALUE]], 0
+// CHECK-NEXT: store i64 [[UC_NEW_X]], ptr [[UC_X_PTR_AGAIN]]
+// CHECK-NEXT: ret void
+// CHECK-LABEL: define void @"{{.*}}.UseFunc$outcome"(
+// CHECK: store i64 ptrtoint (ptr @"{{.*}}.UseFunc$1" to i64), ptr
+// CHECK-LABEL: define void @"{{.*}}.UseFunc$1"(){{.*}} {
+// CHECK: ret void
+// CHECK-LABEL: define void @"{{.*}}.UseFuncAddr$outcome"(
+// CHECK: store ptr @"{{.*}}.addForAddress", ptr
+// CHECK-LABEL: define void @"{{.*}}.UseFuncIdentity$outcome"(
+// CHECK: store ptr @"{{.*}}.addForAddress", ptr [[DECLARED_SLOT:%[0-9]+]]
+// CHECK: store ptr @"{{.*}}.UseFuncIdentity$1", ptr [[LITERAL_SLOT:%[0-9]+]]
+// CHECK: icmp eq ptr @"{{.*}}.addForAddress", %{{[0-9]+}}
+// CHECK: icmp eq ptr @"{{.*}}.UseFuncIdentity$1", %{{[0-9]+}}
+// CHECK: store i1 {{%[0-9]+}}, ptr
+// CHECK-LABEL: define void @"{{.*}}.UseLibc$outcome"(
+// CHECK: store i64 ptrtoint (ptr @foo to i64), ptr
+// CHECK-LABEL: define ptr @"{{.*}}.UseSkip$coro"(
+// CHECK-NOT: call {{.*}}skip
+// CHECK: store %"{{.*}}PrintArgV1" { i8 3, ptr null, ptr null, i64 0, i64 0 }, ptr
+// CHECK: call ptr @"{{.*}}.PrintBatchV1$coro"
+// CHECK: store %"{{.*}}PrintArgV1" { i8 3, ptr null, ptr null, i64 0, i64 0 }, ptr
+// CHECK: store %"{{.*}}PrintArgV1" { i8 3, ptr null, ptr null, i64 0, i64 0 }, ptr
+// CHECK: call ptr @"{{.*}}.PrintBatchV1$coro"
+// CHECK-LABEL: define void @"{{.*}}.UseUnreachable"(){{.*}} {
+// CHECK: unreachable
+// CHECK-NEXT: }
+// CHECK-LABEL: define ptr @"{{.*}}.UseUnreachableWithDefer$coro"(
+// CHECK: store i1 true, ptr
+// CHECK-NEXT: unreachable
 
 //go:linkname funcPCABI0 llgo.funcPCABI0
 func funcPCABI0(fn interface{}) uintptr
@@ -20,6 +69,12 @@ func skipWithRet() uintptr
 
 //go:linkname skipWithMultiRet llgo.skip
 func skipWithMultiRet() (uintptr, uintptr)
+
+//go:linkname funcAddr llgo.funcAddr
+func funcAddr(fn interface{}) unsafe.Pointer
+
+//go:linkname unreachable llgo.unreachable
+func unreachable()
 
 //go:linkname libc_foo_trampoline C.foo
 func libc_foo_trampoline()
@@ -66,4 +121,33 @@ func UseSkip() {
 	print(i)
 	a, b := skipWithMultiRet()
 	print(a, b)
+}
+
+//llgo:type C
+type cAdd func(int, int) int
+
+func addForAddress(a, b int) int {
+	return a + b
+}
+
+func UseFuncAddr() unsafe.Pointer {
+	return funcAddr(cAdd(addForAddress))
+}
+
+// UseFuncIdentity retains the default C-function-value path for both declared
+// functions and literals. It is distinct from UseFuncAddr's direct operand.
+func UseFuncIdentity() bool {
+	var declared cAdd = addForAddress
+	var literal cAdd = func(a, b int) int { return a + b }
+	return funcAddr(declared) == *(*unsafe.Pointer)(unsafe.Pointer(&declared)) &&
+		funcAddr(literal) == *(*unsafe.Pointer)(unsafe.Pointer(&literal))
+}
+
+func UseUnreachable() {
+	unreachable()
+}
+
+func UseUnreachableWithDefer() {
+	defer func() {}()
+	unreachable()
 }

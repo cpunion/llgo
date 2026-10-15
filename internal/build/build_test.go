@@ -37,6 +37,14 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("LLGO_TEST_PKG_CONFIG_HELPER") == "1" {
+		if len(os.Args) > 1 && os.Args[1] == "--libs" {
+			fmt.Print("-L/request/lib -lrequest")
+		} else {
+			fmt.Print(`-I/request/include -DREQUEST="request value"`)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv("LLGO_TEST_FAILING_ARCHIVER") == "1" {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		fmt.Fprintln(os.Stderr, "merge failed")
@@ -207,6 +215,34 @@ func TestInvocationUsesExplicitWorkingDirectory(t *testing.T) {
 		t.Fatalf("Build changed process PATH from %q to %q", ambientPath, got)
 	}
 	pkgs[0].LPkg.Prog.Dispose()
+}
+
+func TestBuildUsesSyntheticPythonPackage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/pythonfixture\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fixture.go"), []byte("package pythonfixture\n\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	conf := NewDefaultConf(ModeGen)
+	calls := 0
+	conf.TestPythonPackage = func() *types.Package {
+		calls++
+		return types.NewPackage(llssa.PkgPython, "py")
+	}
+	t.Setenv(llgoBuildCache, "0")
+	pkgs, err := Build(Invocation{Args: []string{"."}, Config: conf, Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("TestPythonPackage called %d times, want 1", calls)
+	}
+	for _, pkg := range pkgs {
+		pkg.LPkg.Prog.Dispose()
+	}
 }
 
 func TestConcurrentInvocationsIsolateFrontendOptions(t *testing.T) {
@@ -722,7 +758,7 @@ func TestWasmRuntimeAvoidsNativeHostDependencies(t *testing.T) {
 				"mfinal_nogc.go",
 				"runtime_webassembly.go",
 				"signal_webassembly_llgo.go",
-				"nanotime_webassembly_llgo.go",
+				"nanotime_host_llgo.go",
 				"unwind_webassembly_llgo.go",
 			} {
 				if !selected[name] {
@@ -1258,9 +1294,10 @@ func runBinary(t *testing.T, path string, args ...string) string {
 	return string(output)
 }
 
-func TestRunPrintfWithStdioNobuf(t *testing.T) {
+func TestRunStdioNobuf(t *testing.T) {
 	t.Setenv(llgoStdioNobuf, "1")
-	mockRun([]string{"../../cl/_testdata/printf"}, &Config{Mode: ModeRun})
+	// allocstr owns the consolidated C string/printf integration fixture.
+	mockRun([]string{"../../cl/_testrt/allocstr"}, &Config{Mode: ModeRun})
 }
 
 func TestTestOutputFileLogic(t *testing.T) {
@@ -1661,6 +1698,61 @@ func TestApplyBuildModeCompileFlags(t *testing.T) {
 	applyBuildModeCompileFlags(BuildModeCShared, crosscompile.NativeToolchain{}, nil)
 }
 
+func TestApplyModeGenTargetCompileFlag(t *testing.T) {
+	tests := []struct {
+		name   string
+		mode   Mode
+		export *crosscompile.Export
+		want   string
+	}{
+		{name: "nil", mode: ModeGen},
+		{name: "ordinary build", mode: ModeBuild, export: &crosscompile.Export{LLVMTarget: "x86_64-pc-windows-msvc"}},
+		{name: "missing target", mode: ModeGen, export: &crosscompile.Export{}},
+		{
+			name: "adds authoritative target",
+			mode: ModeGen,
+			export: &crosscompile.Export{
+				LLVMTarget: "x86_64-pc-windows-msvc",
+				CCFLAGS:    []string{"-O2"},
+			},
+			want: "--target=x86_64-pc-windows-msvc",
+		},
+		{
+			name: "does not duplicate exact target",
+			mode: ModeGen,
+			export: &crosscompile.Export{
+				LLVMTarget: "aarch64-unknown-linux-gnu",
+				CCArgs:     []string{"--target", "aarch64-unknown-linux-gnu"},
+			},
+		},
+		{
+			name: "overrides later mismatch",
+			mode: ModeGen,
+			export: &crosscompile.Export{
+				LLVMTarget: "aarch64-pc-windows-msvc",
+				CCArgs:     []string{"--target=aarch64-pc-windows-msvc"},
+				CFLAGS:     []string{"-target=x86_64-apple-macosx"},
+			},
+			want: "--target=aarch64-pc-windows-msvc",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			applyModeGenTargetCompileFlag(tt.mode, tt.export)
+			if tt.export == nil {
+				return
+			}
+			got := ""
+			if len(tt.export.CFLAGS) != 0 {
+				got = tt.export.CFLAGS[len(tt.export.CFLAGS)-1]
+			}
+			if got != tt.want {
+				t.Fatalf("last CFLAGS entry = %q, want %q (all %v)", got, tt.want, tt.export.CFLAGS)
+			}
+		})
+	}
+}
+
 func TestCSharedLinkArgs(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -1677,6 +1769,26 @@ func TestCSharedLinkArgs(t *testing.T) {
 				t.Fatalf("cSharedLinkArgs() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestCSharedImportLibraryArgs(t *testing.T) {
+	output := filepath.Join("tmp", "native-shared.dll")
+	gnu := crosscompile.NativeToolchain{
+		ObjectFormat: crosscompile.ObjectFormatCOFF,
+		ABI:          crosscompile.PlatformABIGNU,
+	}
+	want := strings.Join([]string{"-Xlinker", "--out-implib", "-Xlinker", filepath.Join("tmp", "native-shared.lib")}, " ")
+	if got := strings.Join(cSharedImportLibraryArgs(gnu, output), " "); got != want {
+		t.Fatalf("GNU COFF import-library arguments = %q, want %q", got, want)
+	}
+	for _, toolchain := range []crosscompile.NativeToolchain{
+		{ObjectFormat: crosscompile.ObjectFormatCOFF, ABI: crosscompile.PlatformABIMsvc},
+		{ObjectFormat: crosscompile.ObjectFormatELF, ABI: crosscompile.PlatformABIGNU},
+	} {
+		if got := cSharedImportLibraryArgs(toolchain, output); got != nil {
+			t.Fatalf("toolchain %+v import-library arguments = %q, want none", toolchain, got)
+		}
 	}
 }
 
@@ -1894,15 +2006,28 @@ func TestDeadcodeDropEnabled(t *testing.T) {
 		want bool
 	}{
 		{name: "not requested", conf: &Config{LTO: lto.Off}, want: false},
-		{name: "requested", conf: &Config{DeadcodeDrop: true, LTO: lto.Off}, want: buildenv.Dev},
-		{name: "disabled by go global dce", conf: &Config{DeadcodeDrop: true, LTO: lto.Full}, want: false},
-		{name: "enabled when go global dce disabled", conf: &Config{DeadcodeDrop: true, LTO: lto.Full, DisableGoGlobalDCE: true}, want: buildenv.Dev},
+		{name: "nil config", conf: nil, want: false},
+		{name: "requested", conf: &Config{DeadcodeDrop: true, LTO: lto.Off}, want: true},
+		{name: "default full lto", conf: &Config{LTO: lto.Full}, want: !buildenv.Dev},
+		{name: "go global dce wins when available", conf: &Config{DeadcodeDrop: true, LTO: lto.Full}, want: !buildenv.Dev},
+		{name: "enabled when go global dce disabled", conf: &Config{DeadcodeDrop: true, LTO: lto.Full, DisableGoGlobalDCE: true}, want: true},
+		{name: "explicit false", conf: &Config{DeadcodeDropSet: true, LTO: lto.Full}, want: false},
+		{name: "thin lto remains opt in", conf: &Config{LTO: lto.Thin}, want: false},
+		{name: "library archive", conf: &Config{BuildMode: BuildModeCArchive, DeadcodeDrop: true, LTO: lto.Full}, want: false},
+		{name: "library shared", conf: &Config{BuildMode: BuildModeCShared, DeadcodeDrop: true, LTO: lto.Full}, want: false},
+		{name: "generation", conf: &Config{Mode: ModeGen, DeadcodeDrop: true, LTO: lto.Full}, want: false},
+		{name: "package producer", conf: &Config{PackageCompileOnly: true, DeadcodeDrop: true, LTO: lto.Full}, want: false},
+		{name: "importcfg lacks method summaries", conf: &Config{ImportCfg: "imports.cfg", DeadcodeDrop: true, LTO: lto.Full}, want: false},
+		{name: "test executable", conf: &Config{Mode: ModeTest, CompileOnly: true, LTO: lto.Full}, want: !buildenv.Dev},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.conf.deadcodeDropEnabled(); got != tt.want {
 				t.Fatalf("deadcodeDropEnabled() = %v, want %v", got, tt.want)
+			}
+			if tt.conf.deadcodeDropEnabled() && tt.conf.goGlobalDCEEnabled() {
+				t.Fatal("semantic and LLVM method DCE must not run together")
 			}
 		})
 	}
@@ -1916,7 +2041,9 @@ func TestPackageMetaEnabled(t *testing.T) {
 	}{
 		{name: "disabled", conf: &Config{}, want: false},
 		{name: "explicit collection", conf: &Config{CollectPackageMeta: true}, want: true},
-		{name: "deadcode drop", conf: &Config{DeadcodeDrop: true}, want: buildenv.Dev},
+		{name: "deadcode drop", conf: &Config{DeadcodeDrop: true}, want: true},
+		{name: "full lto default", conf: &Config{LTO: lto.Full}, want: !buildenv.Dev},
+		{name: "full lto opt out", conf: &Config{LTO: lto.Full, DeadcodeDropSet: true}, want: false},
 		{name: "collection with global dce", conf: &Config{CollectPackageMeta: true, LTO: lto.Full}, want: true},
 	}
 

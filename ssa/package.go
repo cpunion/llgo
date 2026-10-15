@@ -264,8 +264,9 @@ type AbiSymbol struct {
 // AbiTypeInfo is the LLVM-free identity needed to declare one runtime type
 // descriptor in another Program.
 type AbiTypeInfo struct {
-	Name string
-	Raw  types.Type
+	Name   string
+	Raw    types.Type // physical layout
+	source types.Type // exact source identity, captured only by AbiTypes
 }
 
 // A Program presents a program.

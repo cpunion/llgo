@@ -19,6 +19,7 @@ SECTIONS
     .stack0 (NOLOAD) :
     {
         . = ALIGN(16);
+        _stack_end = .;
         . += _stack_size;
         _stack_top = .;
     } >RAM
@@ -81,5 +82,8 @@ SECTIONS
 /* For the memory allocator. */
 _heap_start = ALIGN(_ebss, 16);
 _heap_end = ORIGIN(RAM) + LENGTH(RAM);
+/* LLGo's conservative collector uses the same exported layout as ESP. */
+_heapStart = _heap_start;
+_heapEnd = _heap_end;
 _globals_start = _sdata;
 _globals_end = _ebss;

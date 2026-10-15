@@ -166,6 +166,191 @@ func TestSSAFunctionDominatingNonNilProofIsExact(t *testing.T) {
 	}
 }
 
+const ssaCompletedFieldAddressFixture = `package foo
+import "unsafe"
+type Value struct { A, B int }
+var P *int
+var N int
+func SameBlock(p *Value) { P = &p.A; P = &p.B }
+func StrictBlock(p *Value, yes bool) { P = &p.A; if yes { P = &p.B } }
+func Converted(p *Value) { P = &p.A; q := (*Value)(unsafe.Pointer(p)); P = &q.B }
+func DifferentBase(p, q *Value) { P = &p.A; P = &q.B }
+func NonDominating(p *Value, yes bool) { if yes { P = &p.A }; P = &p.B }
+func Implicit(p *Value) { N = p.A; P = &p.B }
+func UnusedExplicit(p *Value) { _ = &p.A; P = &p.B }
+func AddressResult(p *Value) { q := &p.A; _ = *q }
+func AddressResultConverted(p *Value) { q := (*int)(unsafe.Pointer(&p.A)); _ = *q }
+`
+
+func TestSSADominatingCompletedFieldAddressIsExact(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, ssaCompletedFieldAddressFixture)
+	fields := collectAddrOfFieldSelectors(files)
+	for _, test := range []struct {
+		name string
+		want bool
+	}{
+		{"SameBlock", true}, {"StrictBlock", true}, {"Converted", true},
+		{"UnusedExplicit", true}, {"DifferentBase", false},
+		{"NonDominating", false}, {"Implicit", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			function := ssaPkg.Func(test.name)
+			var addresses []*ssa.FieldAddr
+			for _, block := range function.Blocks {
+				for _, instruction := range block.Instrs {
+					if field, ok := instruction.(*ssa.FieldAddr); ok {
+						addresses = append(addresses, field)
+					}
+				}
+			}
+			if len(addresses) != 2 {
+				t.Fatalf("FieldAddr count = %d, want 2", len(addresses))
+			}
+			first, second := addresses[0], addresses[1]
+			if ssaDominatingFieldAddressNonNil(first.X, first, fields, nil) {
+				t.Fatal("first check proved itself using a same/later instruction")
+			}
+			if got := ssaDominatingFieldAddressNonNil(second.X, second, fields, nil); got != test.want {
+				t.Fatalf("completed field check = %v, want %v", got, test.want)
+			}
+			wantResult := test.name != "NonDominating" && test.name != "Implicit"
+			if got := ssaDominatingFieldAddressNonNil(first, second, fields, nil); got != wantResult {
+				t.Fatalf("completed address result = %v, want %v", got, wantResult)
+			}
+			if ssaDominatingFieldAddressNonNil(second, first, fields, nil) {
+				t.Fatal("later field-address result proved an earlier instruction")
+			}
+			if ssaDominatingFieldAddressNonNil(second.X, second, nil, nil) {
+				t.Fatal("missing source &field evidence manufactured a successful check")
+			}
+			unevaluated := map[ssa.Instruction]none{first: {}}
+			if ssaDominatingFieldAddressNonNil(second.X, second, fields, unevaluated) ||
+				ssaDominatingFieldAddressNonNil(first, second, fields, unevaluated) {
+				t.Fatal("unevaluated FieldAddr manufactured a successful check")
+			}
+			delete(fields, first.Pos())
+			if ssaDominatingFieldAddressNonNil(second.X, second, fields, nil) {
+				t.Fatal("source-unconfirmed first FieldAddr manufactured a successful check")
+			}
+		})
+	}
+	for _, name := range []string{"AddressResult", "AddressResultConverted"} {
+		function := ssaPkg.Func(name)
+		deref := onlySSADeref(t, function)
+		if !ssaAddressValueProvenNonNilAt(deref.X, deref, fields, nil) {
+			t.Fatalf("%s completed address result retained a redundant nil check", name)
+		}
+		if ssaAddressValueProvenNonNilAt(deref.X, deref, nil, nil) {
+			t.Fatalf("%s result was accepted without source check evidence", name)
+		}
+	}
+}
+
+func TestCompletedFieldAddressChecksMatchCodegenAndEmissionFacts(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, ssaCompletedFieldAddressFixture)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	pkg, err := NewPackage(prog, ssaPkg, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	universe := &EmissionUniverse{prog: prog}
+	for _, test := range []struct {
+		name   string
+		checks int
+	}{
+		{"SameBlock", 1}, {"StrictBlock", 1}, {"Converted", 1},
+		{"UnusedExplicit", 1}, {"DifferentBase", 2}, {"NonDominating", 2},
+		{"AddressResult", 1}, {"AddressResultConverted", 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			function := ssaPkg.Func(test.name)
+			ctx := &context{prog: prog, goFn: function, goProg: ssaPkg.Prog,
+				goTyps: ssaPkg.Pkg, goPkg: ssaPkg, addrOfFieldAddrs: collectAddrOfFieldSelectors(files)}
+			planned := 0
+			for _, block := range function.Blocks {
+				for _, instruction := range block.Instrs {
+					if stringSliceContains(universe.loweredRuntimeHelpers(ctx, instruction), "AssertNilDeref") {
+						planned++
+					}
+				}
+			}
+			compiled := pkg.Module().NamedFunction("foo." + test.name)
+			if compiled.IsNil() {
+				t.Fatal("missing compiled function")
+			}
+			emitted := 0
+			for _, line := range strings.Split(compiled.String(), "\n") {
+				if strings.Contains(line, "call ") && strings.Contains(line, "AssertNilDeref") {
+					emitted++
+				}
+			}
+			if planned != test.checks || emitted != test.checks {
+				t.Fatalf("nil guards planned=%d emitted=%d, want %d:\n%s", planned, emitted, test.checks, compiled.String())
+			}
+		})
+	}
+}
+
+func TestUnevaluatedFieldAddressDoesNotRemoveLaterNilCheck(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, `package foo
+import "unsafe"
+type Value struct { A, B int }
+func SizeOnly[T any](p *Value) *int {
+	_ = unsafe.Sizeof(struct { Field *int; Extra T }{Field: &p.A})
+	return &p.B
+}
+func Use(p *Value) *int { return SizeOnly[int](p) }
+`)
+	function := unsafeSizeAlignStaticCallee(t, ssaPkg.Func("Use"), "SizeOnly")
+	fields := collectAddrOfFieldSelectors(files)
+	unevaluated := collectUnsafeLayoutUnevaluatedSSA(function)
+	var omitted, evaluated *ssa.FieldAddr
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			field, ok := instruction.(*ssa.FieldAddr)
+			if !ok || ssaCanonicalPointerValue(field.X) != function.Params[0] {
+				continue
+			}
+			if _, skip := unevaluated[field]; skip {
+				omitted = field
+			} else {
+				evaluated = field
+			}
+		}
+	}
+	if omitted == nil || evaluated == nil {
+		t.Fatalf("fixture lacks both field addresses: omitted=%v evaluated=%v", omitted, evaluated)
+	}
+	if !ssaDominatingFieldAddressNonNil(evaluated.X, evaluated, fields, nil) {
+		t.Fatal("fixture does not expose the false proof when omission facts are missing")
+	}
+	if ssaAddressValueProvenNonNilAt(evaluated.X, evaluated, fields, unevaluated) {
+		t.Fatal("unevaluated source &field incorrectly removed the actual nil check")
+	}
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	pkg, err := NewPackage(prog, ssaPkg, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &context{prog: prog, goFn: function, goProg: ssaPkg.Prog,
+		goTyps: ssaPkg.Pkg, goPkg: ssaPkg, addrOfFieldAddrs: fields, unevaluatedSSA: unevaluated}
+	if !stringSliceContains((&EmissionUniverse{prog: prog}).loweredRuntimeHelpers(ctx, evaluated), "AssertNilDeref") {
+		t.Fatal("helper inventory lost the actual nil check")
+	}
+	compiled := unsafeSizeAlignFunctionWithPrefix(t, pkg.Module(), "foo.SizeOnly[")
+	guards := 0
+	for _, line := range strings.Split(compiled.String(), "\n") {
+		if strings.Contains(line, "call ") && strings.Contains(line, "AssertNilDeref") {
+			guards++
+		}
+	}
+	if guards != 1 {
+		t.Fatalf("emitted guards = %d, want exactly the actual field's guard:\n%s", guards, compiled.String())
+	}
+}
+
 func TestSSACompletedIndexAddrPreservesBaseNonNilProof(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, ssaDominatingNonNilFixture)
 	for _, test := range []struct {
@@ -181,7 +366,7 @@ func TestSSACompletedIndexAddrPreservesBaseNonNilProof(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s FieldAddr base is %T, want *ssa.IndexAddr", test.name, field.X)
 		}
-		if got := ssaAddressValueProvenNonNilAt(index, field); got != test.want {
+		if got := ssaAddressValueProvenNonNilAt(index, field, nil, nil); got != test.want {
 			t.Errorf("%s completed IndexAddr non-nil proof = %t, want %t", test.name, got, test.want)
 		}
 	}
@@ -215,7 +400,7 @@ func Owner(value int) func() {
 			}
 		}
 	}
-	if deref == nil || !isKnownNonNilAddr(free) || !ssaAddressValueProvenNonNilAt(free, deref) {
+	if deref == nil || !isKnownNonNilAddr(free) || !ssaAddressValueProvenNonNilAt(free, deref, nil, nil) {
 		t.Fatalf("source closure cell lacks structural non-nil proof: free=%v deref=%v", free, deref)
 	}
 	if audit := (&coroPhysicalPureSSAAudit{fn: closure}); audit.derefRequiresImplicitNilFault(deref) {
@@ -223,7 +408,7 @@ func Owner(value int) func() {
 	}
 
 	closure.Synthetic = "wrapper"
-	if isKnownNonNilAddr(free) || ssaAddressValueProvenNonNilAt(free, deref) {
+	if isKnownNonNilAddr(free) || ssaAddressValueProvenNonNilAt(free, deref, nil, nil) {
 		t.Fatal("synthetic captured value received lexical-cell non-nil authority")
 	}
 }

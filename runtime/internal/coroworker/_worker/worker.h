@@ -61,6 +61,12 @@ enum {
     LLGO_CORO_WORKER_FAULT_DIVIDE_V1 = 2,
 };
 
+/* Suspend the current C landing while executing a managed callback. The
+ * token has native activation lifetime and must be restored only on normal
+ * callback return; a callback escape leaves the abandoned landing detached. */
+uintptr_t __llgo_coro_worker_fault_suspend_v1(void);
+bool __llgo_coro_worker_fault_resume_v1(uintptr_t scope);
+
 int __llgo_coro_worker_create_v1(pthread_t *thread);
 
 bool __llgo_coro_worker_queue_init_v1(void);

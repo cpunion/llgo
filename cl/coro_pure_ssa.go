@@ -107,12 +107,16 @@ func newCoroPhysicalPureSSAAuditForOwner(
 	owner *preparedEmissionPackage,
 	frameRetentionABI string,
 ) (*coroPhysicalPureSSAAudit, error) {
+	var ir *coroProgramIR
+	if universe != nil {
+		ir = universe.coroProgramIR
+	}
 	audit := &coroPhysicalPureSSAAudit{
 		universe:          universe,
 		plan:              plan,
 		fn:                fn,
 		frameRetentionABI: frameRetentionABI,
-		reachableBlocks:   coroPhysicalConstantReachableBlocks(fn),
+		reachableBlocks:   ir.coroReachableBlocks(fn),
 	}
 	if universe == nil {
 		// Structural unit tests may call the validator directly. Active
@@ -318,6 +322,10 @@ func (a *coroPhysicalPureSSAAudit) validateMakeClosure(closure *ssa.MakeClosure)
 }
 
 func coroPhysicalConstantReachableBlocks(fn *ssa.Function) map[*ssa.BasicBlock]bool {
+	return coroPhysicalConstantReachableBlocksWith(fn, nil)
+}
+
+func coroPhysicalConstantReachableBlocksWith(fn *ssa.Function, resolve func(ssa.Value) (bool, bool)) map[*ssa.BasicBlock]bool {
 	reachable := make(map[*ssa.BasicBlock]bool)
 	if fn == nil || len(fn.Blocks) == 0 || fn.Blocks[0] == nil {
 		return reachable
@@ -341,7 +349,7 @@ func coroPhysicalConstantReachableBlocks(fn *ssa.Function) map[*ssa.BasicBlock]b
 		successors := block.Succs
 		if len(block.Instrs) != 0 && len(successors) == 2 {
 			if branch, ok := block.Instrs[len(block.Instrs)-1].(*ssa.If); ok {
-				if condition, exact := coroPhysicalConstantBool(branch.Cond); exact {
+				if condition, exact := coroPhysicalConstantBoolWith(branch.Cond, resolve); exact {
 					if condition {
 						successors = successors[:1]
 					} else {
@@ -369,6 +377,19 @@ func coroPhysicalConstantReachableBlocks(fn *ssa.Function) map[*ssa.BasicBlock]b
 // to a Const. The type checker guarantees that the admitted comparison is
 // valid for its two constant operands.
 func coroPhysicalConstantBool(value ssa.Value) (bool, bool) {
+	return coroPhysicalConstantBoolWith(value, nil)
+}
+
+func coroPhysicalConstantBoolWith(value ssa.Value, resolve func(ssa.Value) (bool, bool)) (bool, bool) {
+	if resolve != nil {
+		if result, exact := resolve(value); exact {
+			return result, true
+		}
+	}
+	if not, ok := value.(*ssa.UnOp); ok && not.Op == token.NOT {
+		result, exact := coroPhysicalConstantBoolWith(not.X, resolve)
+		return !result, exact
+	}
 	if exact, ok := value.(*ssa.Const); ok {
 		if exact.Value == nil || exact.Value.Kind() != constant.Bool {
 			return false, false
@@ -378,6 +399,13 @@ func coroPhysicalConstantBool(value ssa.Value) (bool, bool) {
 	comparison, ok := value.(*ssa.BinOp)
 	if !ok {
 		return false, false
+	}
+	if comparison.Op == token.EQL || comparison.Op == token.NEQ {
+		left, leftExact := coroPhysicalConstantBoolWith(comparison.X, resolve)
+		right, rightExact := coroPhysicalConstantBoolWith(comparison.Y, resolve)
+		if leftExact && rightExact {
+			return (left == right) == (comparison.Op == token.EQL), true
+		}
 	}
 	switch comparison.Op {
 	case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
@@ -545,7 +573,7 @@ func (a *coroPhysicalPureSSAAudit) fieldAddrRequiresImplicitNilFault(field *ssa.
 	// must still own the earlier base-pointer guard so no GEP is formed from a
 	// nil address. Preserve that frame-proof projection in addition to the
 	// direct helper-owned address-of case above.
-	if ssaAddressValueProvenNonNilAt(field.X, field) {
+	if a.ctx.addressValueProvenNonNilAt(field.X, field) {
 		return false, ""
 	}
 	proof := a.currentFrameRetentionProof()
@@ -556,7 +584,7 @@ func (a *coroPhysicalPureSSAAudit) derefRequiresImplicitNilFault(deref *ssa.UnOp
 	if a == nil || deref == nil || deref.Op != token.MUL {
 		return false
 	}
-	if ssaAddressValueProvenNonNilAt(deref.X, deref) {
+	if a.ctx.addressValueProvenNonNilAt(deref.X, deref) {
 		return false
 	}
 	if _, _, synthetic := coroSliceToArrayValueDeref(deref, a.typeOf); synthetic {
@@ -634,7 +662,7 @@ func (a *coroPhysicalPureSSAAudit) storeRequiresImplicitNilFault(store *ssa.Stor
 		// IndexAddr owns all bounds checks and the nullable *array guard.
 		return false, ""
 	}
-	if ssaAddressValueProvenNonNilAt(store.Addr, store) {
+	if a.ctx.addressValueProvenNonNilAt(store.Addr, store) {
 		return false, ""
 	}
 	proof := a.currentFrameRetentionProof()
@@ -824,7 +852,7 @@ func (a *coroPhysicalPureSSAAudit) validateSlice(slice *ssa.Slice) string {
 		// still performs an implicit dereference, which the frozen physical
 		// Slice recipe replaces with its structured nil-fault branch.
 		if _, pointer := types.Unalias(baseType).Underlying().(*types.Pointer); pointer &&
-			emissionArrayPointerNeedsNilCheck(slice.X, slice) {
+			emissionArrayPointerNeedsNilCheck(a.ctx, slice.X, slice) {
 			return a.requireOnlyCompilerElidedRuntimeHelpers(slice, "AssertNilDeref")
 		}
 		return a.requireOnlyCompilerElidedRuntimeHelpers(slice)
@@ -1635,10 +1663,6 @@ func coroReflectHeaderDataAddress(address ssa.Value) bool {
 	return coroReflectHeaderDataAddressOfKind(address, "")
 }
 
-func coroReflectSliceHeaderDataAddress(address ssa.Value) bool {
-	return coroReflectHeaderDataAddressOfKind(address, "SliceHeader")
-}
-
 func coroReflectHeaderDataAddressOfKind(address ssa.Value, required string) bool {
 	field, ok := address.(*ssa.FieldAddr)
 	if !ok || field.X == nil {
@@ -1673,7 +1697,8 @@ func coroReflectHeaderDataAddressOfKind(address ssa.Value, required string) bool
 // its referent stable. OutcomeStructured describes only terminal Return/Panic
 // transport and is therefore harmless in the non-suspending fallback too.
 func (a *coroPhysicalPureSSAAudit) coroPointerUintptrScalarTerminal(value ssa.Value) bool {
-	if a == nil || a.plan == nil || a.fn == nil || !coroPointerUintptrScalarTerminal(value) {
+	if a == nil || a.plan == nil || a.fn == nil ||
+		(!coroPointerUintptrScalarTerminal(value) && !a.coroPointerUintptrGoCallTerminal(value)) {
 		return false
 	}
 	plan, planned := a.plan.FunctionPlan(a.fn)
@@ -1689,6 +1714,67 @@ func (a *coroPhysicalPureSSAAudit) coroPointerUintptrScalarTerminal(value ssa.Va
 	}
 	return planned && !plan.Exec.Contains(coro.NeedsPreempt) &&
 		plan.Effect&^coro.OutcomeStructured == coro.NoSuspend
+}
+
+// coroPointerUintptrGoCallTerminal accepts an integer argument, not an address
+// argument. The frozen ordinary Go edge and exact integer parameter distinguish
+// this from foreign, uintptr-escapes, and borrowed-address calls. Suspension in
+// the callee is harmless: Go uintptr values neither retain nor reconstruct their
+// former referent. This adds no retention fact; a callee or returned integer that
+// is converted back to a pointer must independently pass validateConvert.
+func (a *coroPhysicalPureSSAAudit) coroPointerUintptrGoCallTerminal(value ssa.Value) bool {
+	if a == nil || a.plan == nil || a.universe == nil || a.universe.coroProgramIR == nil {
+		return false
+	}
+	return coroPointerUintptrIntegerChainTerminal(value, true, func(value ssa.Value, use ssa.Instruction) bool {
+		call, ok := use.(*ssa.Call)
+		if !ok || call.Common() == nil || call.Common().IsInvoke() || call.Common().StaticCallee() == nil {
+			return false
+		}
+		plan, planned := a.plan.CallPlan(call)
+		if !planned || plan.Call != call || plan.Kind != coro.CallDirect || plan.Open ||
+			len(plan.Targets) != 1 || plan.RawPlain || plan.InvocationPolicy != "" ||
+			plan.Transport != coro.ManagedTransport {
+			return false
+		}
+		frozen, found, err := a.universe.coroProgramIR.callSitePlan(call)
+		if err != nil || !found || frozen.failure != "" || frozen.workerCertified ||
+			frozen.plan.Intrinsic || frozen.plan.ElidesCall() || frozen.plan.RawPlain ||
+			frozen.plan.ArgumentsBorrowedUntilCompletion || frozen.plan.ManagedStaticTarget != nil {
+			return false
+		}
+		target, found := a.plan.Function(plan.Targets[0])
+		canonical, resolved := a.universe.Resolve(call.Common().StaticCallee())
+		if !found || !resolved || target != canonical || len(target.Blocks) == 0 ||
+			hasUintptrEscapesDirective(target) {
+			return false
+		}
+		targetPlan, planned := a.plan.FunctionPlan(target)
+		background, classified, err := a.universe.FunctionBackground(target)
+		if !planned || targetPlan.External != coro.Defined || err != nil || !classified || background != llssa.InGo {
+			return false
+		}
+		certificate, certified, err := a.universe.CoroCallableContractCertificate(target)
+		if err != nil || (certified && certificate.Contract.Memory != coro.MemoryByValue) {
+			return false
+		}
+		signature, err := a.universe.coroPhysicalSourceSignature(target)
+		if err != nil || signature.Variadic() || signature.Params().Len() != len(call.Common().Args) {
+			return false
+		}
+		matched := false
+		for i, argument := range call.Common().Args {
+			if argument != value {
+				continue
+			}
+			parameter := signature.Params().At(i).Type()
+			if !coroFrameRetentionIntegerLike(parameter) || !types.Identical(a.typeOf(value.Type()), parameter) {
+				return false
+			}
+			matched = true
+		}
+		return matched
+	})
 }
 
 // coroPointerUintptrAtomicTerminal recognizes the other standard forward-only
@@ -1854,7 +1940,7 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
 		visiting[visit] = true
 		path[call]++
 
-		reachable := coroPhysicalConstantReachableBlocks(target)
+		reachable := a.universe.coroProgramIR.coroReachableBlocks(target)
 		returns := 0
 		proved := true
 		for _, block := range target.Blocks {
@@ -1969,10 +2055,11 @@ func coroRuntimeConversionHelper(source, target types.Type) string {
 }
 
 // coroPointerUintptrScalarTerminal recognizes an address word whose complete
-// semantic lifetime ends in an integer comparison, a bounded low-bit alignment
-// mask, a destructive scalar-address difference, as one operand of an exact
-// pointer-distance expression, uintptr(end)-uintptr(start), as a scalar map key
-// or integer store, or at a direct Go return.
+// semantic lifetime ends in an integer comparison, a negated integer
+// comparison, a bounded low-bit alignment mask, a destructive scalar-address
+// difference, as one operand of an exact pointer-distance expression,
+// uintptr(end)-uintptr(start), as a scalar map key or integer store, or at a
+// direct Go return.
 // None of these terminals authorizes pointer reconstruction. A low-bit mask
 // destroys the address identity and its result is an ordinary integer; the
 // source address word must have no other semantic use. If a safepoint splits
@@ -1995,6 +2082,11 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 	for _, reference := range *value.Referrers() {
 		switch instruction := reference.(type) {
 		case *ssa.DebugRef:
+		case *ssa.UnOp:
+			if !coroPointerUintptrNegatedComparisonResult(value, instruction) {
+				return false
+			}
+			uses++
 		case *ssa.BinOp:
 			if instruction.Block() != root.Block() {
 				return false
@@ -2057,6 +2149,21 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 		return uses == 1
 	}
 	return uses != 0
+}
+
+// coroPointerUintptrNegatedComparisonResult recognizes the unsigned wrapping
+// negation used by runtime bounds checks such as mem > -uintptr(pointer). The
+// negated word is accepted only when every semantic use is an integer
+// comparison in the same SSA block. It remains an observation: returning,
+// storing, transporting, or reconstructing a pointer from the derived word is
+// rejected.
+func coroPointerUintptrNegatedComparisonResult(address ssa.Value, operation *ssa.UnOp) bool {
+	producer, ok := address.(ssa.Instruction)
+	return ok && producer.Block() != nil && operation != nil &&
+		operation.Block() == producer.Block() && operation.Op == token.SUB &&
+		operation.X == address && coroFrameRetentionUintptrLike(address.Type()) &&
+		coroFrameRetentionUintptrLike(operation.Type()) &&
+		coroPointerUintptrComparisonResult(operation)
 }
 
 // coroPointerUintptrScalarMinusAddressResult recognizes scalar-address as the
@@ -3988,7 +4095,7 @@ func (a *coroPhysicalPureSSAAudit) requireFrozenStructuredRuntimeHelperInventory
 			return "structured runtime helper " + helper + " does not target one demanded defined body"
 		}
 		if call.RawPlain {
-			if !a.validRawPlainLoweredCall(call, plan) {
+			if !a.plan.HasRawPlainLoweredTarget(call) {
 				return "structured runtime helper " + helper + " has no validated raw/plain closure"
 			}
 			continue
@@ -4129,7 +4236,7 @@ func (a *coroPhysicalPureSSAAudit) allHelpersHaveCoroSafeLowering(helpers []stri
 			return false
 		}
 		if call.RawPlain {
-			if !a.validRawPlainLoweredCall(call, plan) {
+			if !a.plan.HasRawPlainLoweredTarget(call) {
 				return false
 			}
 			continue
@@ -4152,20 +4259,6 @@ func (a *coroPhysicalPureSSAAudit) allHelpersHaveCoroSafeLowering(helpers []stri
 		}
 	}
 	return true
-}
-
-// validRawPlainLoweredCall verifies the plan half of a compiler-owned
-// raw/plain occurrence. The live-closure validator has already proved every
-// reachable Go/C leaf and marks the exact raw body. RawPlainEntry is not
-// required: it is the stronger address-publication capability, whereas this
-// occurrence is one private direct call. Aggregate managed Effect/Exec facts
-// deliberately remain unchanged because a separate managed consumer may still
-// need a coroutine entry.
-func (a *coroPhysicalPureSSAAudit) validRawPlainLoweredCall(call coro.SSALoweredCall, plan coro.FunctionPlan) bool {
-	return a != nil && a.plan != nil && call.RawPlain && !call.NoUnwind && !call.UnwindOnly && !call.ExplicitStatusElided &&
-		call.Target != nil && plan.External == coro.Defined && plan.RawPlainDemand &&
-		a.plan.HasRawPlainVariant(call.Target) &&
-		(plan.Emission == coro.EmitRawPlain || plan.Emission == coro.EmitPlain || plan.Emission == coro.EmitCoroutine)
 }
 
 func (a *coroPhysicalPureSSAAudit) typeOf(typ types.Type) types.Type {

@@ -33,3 +33,9 @@ package syscall
 //llgo:annotate fd_fdstat_set_flags coro noblock
 //llgo:annotate fd_prestat_get coro noblock
 //llgo:annotate fd_prestat_dir_name coro noblock
+
+// proc_exit terminates the instance instead of waiting for scheduler progress.
+// It has no Go callback and never returns; the standard runtime hook keeps an
+// explicit trap if a nonconforming embedding does return.
+//
+//llgo:annotate ProcExit coro noblock

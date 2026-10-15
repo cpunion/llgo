@@ -105,6 +105,7 @@ type Compilation struct {
 	coroFactsValidationErr   error
 	coroCapabilities         sync.Once
 	coroCapabilitiesByFunc   map[*ssa.Function]coro.ProgramCapabilities
+	coroPredicateMasksByFunc map[*ssa.Function]coro.ProgramCapabilities
 	coroCapabilitiesErr      error
 	coroClosedInterfacePlain *coroClosedInterfacePlainPlan
 	coroManagedInterface     *coroManagedInterfaceDispatchPlan
@@ -152,6 +153,25 @@ func (c *Compilation) CoroWorkerSupported() bool {
 
 func (c *Compilation) CoroHostOperationSupported() bool {
 	return c != nil && c.CoroTargetCapabilities.HostOperation()
+}
+
+func (c *Compilation) coroExecutionDomainEmissionEnabled() (bool, error) {
+	return c.coroProgramPredicateEmissionEnabled(coro.ExecutionDomainProgramCapability())
+}
+
+func (c *Compilation) coroProgramPredicateEmissionEnabled(predicate coro.ProgramCapabilities) (bool, error) {
+	values, err := c.CoroProgramPredicateValues()
+	if err != nil {
+		return false, err
+	}
+	if predicate == 0 || c.immutableEmissionUniverse().coroProgramIR.programPredicates.Mask&predicate != predicate {
+		return false, fmt.Errorf("program predicate %#x was not frozen before emission", predicate)
+	}
+	if c.FinalCoroProgramCapabilitiesFrozen &&
+		(!c.FinalCoroProgramCapabilities.Valid() || c.FinalCoroProgramCapabilities&predicate != values&predicate) {
+		return false, fmt.Errorf("program predicate %#x disagrees with final program capabilities", predicate)
+	}
+	return values&predicate != 0, nil
 }
 
 func (c *Compilation) coroPanicBoundaryEmissionEnabled(function *ssa.Function) bool {

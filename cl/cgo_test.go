@@ -12,6 +12,7 @@ import (
 	"go/token"
 	"go/types"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -164,8 +165,35 @@ func _C2func_sum(a int32, b int32) (int32, error) {
 	if !strings.Contains(ir, "cliteErrno") {
 		t.Fatalf("expected cliteErrno call in C2func wrapper, got:\n%s", ir)
 	}
-	if !strings.Contains(ir, "icmp") {
-		t.Fatalf("expected errno check in C2func wrapper, got:\n%s", ir)
+	for _, want := range []string{
+		"icmp ne i32",
+		"sext i32",
+		"_llgo_itab$",
+		"br i1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("C2func wrapper is missing %q:\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, "NewItab") {
+		t.Fatalf("C2func wrapper built a dynamic itab for the statically known syscall.Errno:\n%s", ir)
+	}
+	itab := regexp.MustCompile(`@"_llgo_itab\$[^"]+"`).FindString(ir)
+	if itab == "" {
+		t.Fatalf("C2func wrapper has no static errno itab reference:\n%s", ir)
+	}
+	var itabDefinition string
+	for _, line := range strings.Split(m.String(), "\n") {
+		if strings.Contains(line, itab+" =") {
+			itabDefinition = line
+			break
+		}
+	}
+	if !strings.Contains(itabDefinition, "_llgo_syscall.Errno") {
+		t.Fatalf("C2func errno itab %s is not defined for syscall.Errno:\n%s", itab, itabDefinition)
+	}
+	if got := strings.Count(ir, "ret {"); got != 2 {
+		t.Fatalf("C2func wrapper return paths = %d, want 2:\n%s", got, ir)
 	}
 }
 
@@ -537,7 +565,8 @@ func TestCgoC2Return_ErrnoNeedsConvert(t *testing.T) {
 		t.Fatal(err)
 	}
 	errnoType := syscallPkg.Scope().Lookup("Errno").Type()
-	sig := types.NewSignatureType(nil, nil, nil, nil,
+	sig := types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(types.NewVar(0, nil, "errno", types.Typ[types.Int64])),
 		types.NewTuple(
 			types.NewVar(0, nil, "", types.Typ[types.Int]),
 			types.NewVar(0, nil, "", errType),
@@ -547,9 +576,30 @@ func TestCgoC2Return_ErrnoNeedsConvert(t *testing.T) {
 	b := fn.MakeBody(1)
 
 	ctx := &context{prog: prog, pkg: pkg, fn: fn}
-	ctx.cgoErrnoTy = errnoType // avoid needing goProg while retaining the real error implementation
-	ctx.cgoErrno = b.Const(constant.MakeInt64(1), ctx.type_(types.Typ[types.Int64], llssa.InGo))
+	ctx.cgoErrnoTy = errnoType
+	ctx.cgoErrno = fn.Param(0)
 	ret := b.Const(constant.MakeInt64(7), ctx.type_(types.Typ[types.Int], llssa.InGo))
 
 	ctx.cgoC2Return(b, ret, errType)
+	ir := pkg.Module().String()
+	for _, want := range []string{
+		"trunc i64",
+		"icmp ne i32",
+		"_llgo_syscall.Errno",
+		"_llgo_itab$",
+		"br i1",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("cgoC2Return is missing %q:\n%s", want, ir)
+		}
+	}
+	if strings.Contains(ir, "NewItab") {
+		t.Fatalf("cgoC2Return built a dynamic itab for the statically known syscall.Errno:\n%s", ir)
+	}
+	if got := strings.Count(ir, "ret {"); got != 2 {
+		t.Fatalf("cgoC2Return return paths = %d, want 2:\n%s", got, ir)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("cgoC2Return produced invalid IR: %v\n%s", err, ir)
+	}
 }

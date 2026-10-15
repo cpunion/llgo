@@ -1,36 +1,73 @@
 // LITTEST
+// Scope: common
 package main
 
-import (
-	"github.com/goplus/lib/c"
-	"github.com/goplus/lib/c/sync/atomic"
-)
+import _ "unsafe"
 
+type atomicValue interface {
+	~int | ~uint | ~uintptr | ~int32 | ~uint32 | ~int64 | ~uint64
+}
+
+// llgo:link atomicAdd llgo.atomicAdd
+func atomicAdd[T atomicValue](ptr *T, v T) T { return v }
+
+// llgo:link atomicSub llgo.atomicSub
+func atomicSub[T atomicValue](ptr *T, v T) T { return v }
+
+// llgo:link atomicLoad llgo.atomicLoad
+func atomicLoad[T atomicValue](ptr *T) T { return *ptr }
+
+// llgo:link atomicStore llgo.atomicStore
+func atomicStore[T atomicValue](ptr *T, v T) {}
+
+// llgo:link atomicCompareAndExchange llgo.atomicCmpXchg
+func atomicCompareAndExchange[T atomicValue](ptr *T, old, new T) (T, bool) {
+	return old, false
+}
+
+//go:linkname cstr llgo.cstr
+func cstr(string) *int8
+
+//go:linkname printf C.printf
+func printf(format *int8, __llgo_va_list ...any) int32
+
+// printf makes the enclosing function suspendable; the atomic operations
+// themselves remain inline in the coroutine body and keep seq_cst semantics.
 // CHECK-LABEL: define ptr @"main.main$coro"(
 func main() {
 	var v int64
 
 	// All operations target the same slot and retain sequential consistency.
-	// CHECK: store atomic i64 100, ptr [[ADDR:%[0-9]+]] seq_cst, align 8
-	atomic.Store(&v, 100)
-	// CHECK: load atomic i64, ptr [[ADDR]] seq_cst, align 8
-	c.Printf(c.Str("store: %ld\n"), atomic.Load(&v))
-	// CHECK: atomicrmw add ptr [[ADDR]], i64 1 seq_cst, align 8
-	ret := atomic.Add(&v, 1)
-	c.Printf(c.Str("ret: %ld, v: %ld\n"), ret, v)
+	// CHECK: [[V:%.*]] = call ptr @"{{.*}}AllocZ"(i64 8)
+	// CHECK: store atomic i64 100, ptr [[V]] seq_cst
+	atomicStore(&v, 100)
+	// CHECK: [[LOADED:%.*]] = load atomic i64, ptr [[V]] seq_cst
+	printf(cstr("store: %ld\n"), atomicLoad(&v))
+	// CHECK: [[ADD_OLD:%.*]] = atomicrmw add ptr [[V]], i64 1 seq_cst
+	// CHECK: [[ADD_CURRENT:%.*]] = load i64, ptr [[V]]
+	ret := atomicAdd(&v, 1)
+	printf(cstr("ret: %ld, v: %ld\n"), ret, v)
 
-	// CHECK: cmpxchg ptr [[ADDR]], i64 100, i64 102 seq_cst seq_cst, align 8
-	ret, _ = atomic.CompareAndExchange(&v, 100, 102)
-	c.Printf(c.Str("ret: %ld vs 100, v: %ld\n"), ret, v)
+	// CHECK: [[CAS100:%.*]] = cmpxchg ptr [[V]], i64 100, i64 102 seq_cst seq_cst
+	// CHECK: [[CAS100_OLD:%.*]] = extractvalue { i64, i1 } [[CAS100]], 0
+	// CHECK: [[CAS100_CURRENT:%.*]] = load i64, ptr [[V]]
+	ret, _ = atomicCompareAndExchange(&v, 100, 102)
+	printf(cstr("ret: %ld vs 100, v: %ld\n"), ret, v)
 
-	// CHECK: cmpxchg ptr [[ADDR]], i64 101, i64 102 seq_cst seq_cst, align 8
-	ret, _ = atomic.CompareAndExchange(&v, 101, 102)
-	c.Printf(c.Str("ret: %ld vs 101, v: %ld\n"), ret, v)
+	// CHECK: [[CAS101:%.*]] = cmpxchg ptr [[V]], i64 101, i64 102 seq_cst seq_cst
+	// CHECK: [[CAS101_OLD:%.*]] = extractvalue { i64, i1 } [[CAS101]], 0
+	// CHECK: [[CAS101_CURRENT:%.*]] = load i64, ptr [[V]]
+	ret, _ = atomicCompareAndExchange(&v, 101, 102)
+	printf(cstr("ret: %ld vs 101, v: %ld\n"), ret, v)
 
-	// CHECK: atomicrmw sub ptr [[ADDR]], i64 1 seq_cst, align 8
-	ret = atomic.Sub(&v, 1)
-	// The worker call can be emitted in a later basic block than the atomic
-	// operations even though it executes between them.
-	// CHECK: call i32 @__llgo_coro_os_thread_foreign_call_v1
-	c.Printf(c.Str("ret: %ld, v: %ld\n"), ret, v)
+	// CHECK: [[SUB_OLD:%.*]] = atomicrmw sub ptr [[V]], i64 1 seq_cst
+	// CHECK: [[SUB_CURRENT:%.*]] = load i64, ptr [[V]]
+	// CHECK: call i32 @__llgo_coro_os_thread_foreign_call_v1({{.*}}ptrtoint (ptr @printf to i64)
+	// CHECK: call void @__llgo_coro_worker_park_v1({{.*}}ptrtoint (ptr @printf to i64)
+	ret = atomicSub(&v, 1)
+	printf(cstr("ret: %ld, v: %ld\n"), ret, v)
 }
+
+// Both printf arities retain their typed C varargs thunk ABI.
+// CHECK-DAG: call i32 (ptr, ...) @printf(ptr %{{[0-9]+}}, i64 %{{[0-9]+}})
+// CHECK-DAG: call i32 (ptr, ...) @printf(ptr %{{[0-9]+}}, i64 %{{[0-9]+}}, i64 %{{[0-9]+}})

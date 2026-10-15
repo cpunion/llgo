@@ -130,6 +130,10 @@ func allocRuntimeContext() *runtimeContext {
 
 func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
 	gp := initRuntimeContextUntracked(ctx, callergp, status)
+	gp.goid = nextGoid(gp, callergp)
+	if callergp != nil {
+		gp.parentGoid = callergp.goid
+	}
 	retainG()
 	return gp
 }
@@ -156,7 +160,11 @@ func initCoroRuntimeContextUntracked(ctx *coroRuntimeContext, callergp *g, statu
 // stackless logical G is active, so it must not participate in the logical-G
 // count or the main-Goexit deadlock decision.
 func initRuntimeContextUntracked(ctx *runtimeContext, callergp *g, status uint32) *g {
-	gp := initCoroRuntimeContextUntracked(&ctx.coroRuntimeContext, callergp, status)
+	// A physical executor placeholder is not a logical goroutine. In
+	// particular, bootstrap must not consume the command goroutine's ID 1.
+	gp := &ctx.g
+	gp.atomicstatus = status
+	gp.context = &ctx.coroRuntimeContext
 	mp := &ctx.m
 	pp := &ctx.p
 

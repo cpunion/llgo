@@ -42,6 +42,10 @@ func preemptStore(ptr *uint32, value uint32) {
 	atomic.Store(ptr, value)
 }
 
+func preemptAdd(ptr *uint32, value uint32) {
+	atomic.Add(ptr, value)
+}
+
 func preemptCompareAndSwap(ptr *uint32, old, new uint32) bool {
 	_, swapped := atomic.CompareAndExchange(ptr, old, new)
 	return swapped

@@ -70,8 +70,9 @@ type coroFrameRetentionProof struct {
 }
 
 // This is the sole current root profile. There is intentionally no v1
-// compatibility path. LLVM CoroSplit materializes every SSA pointer live over
-// a suspend in the heap-backed coroutine frame. BDWGC allocates that frame with
+// compatibility path. LLVM CoroSplit materializes every live SSA value over
+// a suspend in the heap-backed coroutine frame, including address-shaped words
+// admitted by the exact uintptr proof. BDWGC allocates that frame with
 // scanned MallocUncollectable storage; tinygogc reaches it through the live
 // scheduler task and conservatively scans it; nogc/WASM have no tracing
 // collector that could reclaim its referent. A future precise or moving
@@ -98,6 +99,9 @@ const (
 	coroFrameRetentionRootClosureFreeVar
 	coroFrameRetentionRootManagedHeapAllocation
 	coroFrameRetentionRootInterfaceParameter
+	coroFrameRetentionRootStringParameter
+	coroFrameRetentionRootLocalString
+	coroFrameRetentionRootReflectedOwner
 )
 
 type coroFrameRetentionExactRoot struct {
@@ -354,14 +358,17 @@ func (a *coroPhysicalPureSSAAudit) proveCurrentFrameRetention() *coroFrameRetent
 	if a.frameRetentionABI == CoroFrameRetentionParkABIV2 {
 		a.proveParkFrameRetention(proof)
 	}
-	terminalAllocations, err := coroStaticTerminalReconstructionAllocations(a.fn)
-	if err != nil {
-		// Static-cleanup preflight reports the precise structural error. Do not
-		// publish a root capability digest from a partial proof in the meantime.
-		return proof
-	}
-	for _, allocation := range terminalAllocations {
-		proof.terminalResultAllocations[allocation] = struct{}{}
+	// Terminal-result relocation is a cleanup-lowering decision, not an
+	// independent property of every syntactic RunDefers/Recover block in SSA.
+	// In particular x/tools keeps unreachable defer scaffolding behind constant
+	// false standard-library debug branches. Re-scanning all blocks here used to
+	// retain those dead result cells even though prepareCoroStaticCleanupPlan had
+	// correctly selected no cleanup. Consume the already-frozen cleanup recipe
+	// so proof and emission have one reachability authority.
+	if a.cleanup != nil {
+		for _, allocation := range a.cleanup.terminalResultAllocations {
+			proof.terminalResultAllocations[allocation] = struct{}{}
+		}
 	}
 	a.proveBorrowedHeapAllocations(proof)
 	a.proveManagedHeapAllocations(proof)
@@ -683,8 +690,8 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 	// arithmetic on, dynamically dispatching, or passing it to an arbitrary
 	// foreign declaration leaves it uncertified. The conversion chain is
 	// deliberately one-way. The standard library's legacy read-only
-	// reflect.SliceHeader observation is the only memory-shaped reverse proof;
-	// arbitrary headers, mutation, escape, and StringHeader remain rejected.
+	// reflect header observation is the only memory-shaped reverse proof;
+	// arbitrary headers, mutation and escape remain rejected.
 	for _, block := range b.audit.fn.Blocks {
 		for _, instruction := range block.Instrs {
 			conversion, ok := instruction.(*ssa.Convert)
@@ -696,7 +703,8 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 				b.proveUintptrKeepalive(conversion)
 			case conversion.X != nil && coroFrameRetentionUintptrLike(conversion.X.Type()) &&
 				coroFrameRetentionPointerLike(conversion.Type()):
-				b.proveReflectSliceHeaderDataRoundtrip(conversion)
+				b.proveReflectHeaderDataRoundtrip(conversion)
+				b.proveReflectAddressResult(conversion)
 			}
 		}
 	}
@@ -1259,48 +1267,293 @@ func (b *coroFrameRetentionRootBuilder) proveUintptrKeepalive(conversion *ssa.Co
 	}
 }
 
-// proveReflectSliceHeaderDataRoundtrip recognizes the standard library's
-// exact read-only slice -> reflect.SliceHeader -> Data -> pointer observation.
-// Requiring two closed, single-initialization local cells prevents this
-// memory-shaped exception from becoming general uintptr provenance.
-func (b *coroFrameRetentionRootBuilder) proveReflectSliceHeaderDataRoundtrip(reconstruction *ssa.Convert) {
+// proveReflectHeaderDataRoundtrip recognizes an exact read-only string/slice
+// viewed through its matching reflect header, either directly or via one
+// copied header. Every cell must be closed and single-initialization. The
+// resulting address word retains the original typed value's provenance under
+// the existing nonmoving-conservative-or-none profile, including suspension.
+func (b *coroFrameRetentionRootBuilder) proveReflectHeaderDataRoundtrip(reconstruction *ssa.Convert) {
 	word, ok := reconstruction.X.(*ssa.UnOp)
 	if !ok || word.Op != token.MUL || !coroSSAInstructionDominates(word, reconstruction) {
 		return
 	}
 	field, ok := word.X.(*ssa.FieldAddr)
-	if !ok || !coroReflectSliceHeaderDataAddress(field) {
+	if !ok || !coroReflectHeaderDataAddress(field) {
 		return
 	}
-	header, ok := field.X.(*ssa.Alloc)
-	if !ok || header.Parent() != b.audit.fn {
+	cell := coroFrameRetentionDirectAllocRoot(field.X, make(map[ssa.Value]bool))
+	if cell == nil || cell.Parent() != b.audit.fn {
+		b.proveImmediateGlobalReflectHeader(reconstruction, word, field)
 		return
 	}
-	headerStore, exact := coroFrameRetentionExactReadOnlyCell(header, word)
+	sourceUse := ssa.Instruction(word)
+	pointer, ok := types.Unalias(cell.Type()).Underlying().(*types.Pointer)
+	if !ok {
+		return
+	}
+	if !coroFrameRetentionSliceLike(pointer.Elem()) && !coroFrameRetentionStringLike(pointer.Elem()) {
+		// Keep the existing copied-header proof exact: no intervening typed
+		// memory reinterpretation or unknown address can stand in for a copy.
+		header, direct := field.X.(*ssa.Alloc)
+		if !direct {
+			return
+		}
+		headerStore, exact := coroFrameRetentionExactReadOnlyCell(header, word)
+		if !exact {
+			return
+		}
+		headerLoad, loaded := headerStore.Val.(*ssa.UnOp)
+		if !loaded || headerLoad.Op != token.MUL {
+			return
+		}
+		cell = coroFrameRetentionDirectAllocRoot(headerLoad.X, make(map[ssa.Value]bool))
+		if cell == nil || cell.Parent() != b.audit.fn {
+			return
+		}
+		sourceUse = headerLoad
+	}
+	pointer, ok = types.Unalias(cell.Type()).Underlying().(*types.Pointer)
+	if !ok {
+		return
+	}
+	headerKind := "SliceHeader"
+	isString := coroFrameRetentionStringLike(pointer.Elem())
+	if isString {
+		headerKind = "StringHeader"
+	} else if !coroFrameRetentionSliceLike(pointer.Elem()) {
+		return
+	}
+	if !coroReflectHeaderDataAddressOfKind(field, headerKind) {
+		return
+	}
+	store, exact := coroFrameRetentionExactReadOnlyCell(cell, sourceUse)
 	if !exact {
 		return
 	}
-	headerLoad, ok := headerStore.Val.(*ssa.UnOp)
-	if !ok || headerLoad.Op != token.MUL {
-		return
+	var trace coroFrameRetentionTrace
+	var traced bool
+	if isString {
+		trace, traced = b.traceString(store.Val)
+	} else {
+		trace, traced = b.traceSlice(store.Val, store, make(map[ssa.Value]bool))
 	}
-	slice := coroFrameRetentionDirectAllocRoot(headerLoad.X, make(map[ssa.Value]bool))
-	if slice == nil || slice.Parent() != b.audit.fn {
-		return
-	}
-	pointer, ok := types.Unalias(slice.Type()).Underlying().(*types.Pointer)
-	if !ok || !coroFrameRetentionSliceLike(pointer.Elem()) {
-		return
-	}
-	sliceStore, exact := coroFrameRetentionExactReadOnlyCell(slice, headerLoad)
-	if !exact || !coroFrameRetentionSliceLike(sliceStore.Val.Type()) {
-		return
-	}
-	trace, traced := b.traceSlice(sliceStore.Val, sliceStore, make(map[ssa.Value]bool))
 	if !traced {
 		return
 	}
 	b.proof.uintptrValues[word] = coroFrameRetentionUintptrFact{roots: b.sortedValues(trace.roots)}
+}
+
+// The unsafe contract of reflect.Value.Pointer/UnsafeAddr permits immediate
+// reconstruction, not an arbitrary uintptr-returning function. Dynamic calls
+// must meet that contract at every existing frozen target; no new target search
+// or signature-shaped inference is performed here. The receiver/interface or
+// closure is the typed owner while the method runs, and the result becomes a
+// pointer before any subsequent source operation can intervene. A compiler
+// preemption poll may still split those adjacent instructions: the live address
+// word is retained/scanned under the existing nonmoving root profile above.
+func (b *coroFrameRetentionRootBuilder) proveReflectAddressResult(reconstruction *ssa.Convert) {
+	call, ok := reconstruction.X.(*ssa.Call)
+	if !ok || !coroImmediatePointerReconstruction(call, reconstruction) {
+		return
+	}
+	common := call.Common()
+	if common == nil {
+		return
+	}
+	if b.audit.plan != nil {
+		planned, found := b.audit.plan.CallPlan(call)
+		if !found || planned.Open || len(planned.Targets) == 0 {
+			return
+		}
+		for _, id := range planned.Targets {
+			target, found := b.audit.plan.Function(id)
+			if !found || !coroExactReflectAddressMethod(target) {
+				return
+			}
+		}
+	} else if !coroExactReflectAddressMethod(common.StaticCallee()) {
+		return
+	}
+	owner := common.Value // Interface dispatch and captured method values.
+	if target := common.StaticCallee(); target != nil && len(target.FreeVars) == 0 {
+		if len(common.Args) != 1 {
+			return
+		}
+		owner = common.Args[0]
+	}
+	if _, local := b.valueOrder[owner]; !local {
+		return
+	}
+	if _, alreadyRoot := b.proof.exactRoots[owner]; !alreadyRoot {
+		b.addExactRoot(owner, coroFrameRetentionRootReflectedOwner)
+	}
+	b.proof.uintptrValues[call] = coroFrameRetentionUintptrFact{roots: []ssa.Value{owner}}
+}
+
+func coroExactReflectAddressMethod(fn *ssa.Function) bool {
+	if fn == nil || fn.Signature == nil {
+		return false
+	}
+	method, ok := fn.Object().(*types.Func)
+	if !ok || method == nil || method.Name() != "Pointer" && method.Name() != "UnsafeAddr" {
+		return false
+	}
+	sig, ok := method.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil || sig.Params().Len() != 0 || sig.Results().Len() != 1 ||
+		!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uintptr]) {
+		return false
+	}
+	named, ok := types.Unalias(sig.Recv().Type()).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil || named.Obj().Name() != "Value" {
+		return false
+	}
+	pkg := named.Obj().Pkg()
+	if pkg.Path() != "reflect" && pkg.Path() != "github.com/xgo-dev/llgo/runtime/internal/lib/reflect" ||
+		pkg.Scope().Lookup("Value") != named.Obj() {
+		return false
+	}
+	declared := false
+	for i := 0; i < named.NumMethods(); i++ {
+		declared = declared || named.Method(i) == method
+	}
+	if !declared {
+		return false
+	}
+	if fn.Signature.Recv() != nil && types.Identical(fn.Signature, sig) && fn.Prog != nil && fn.Prog.FuncValue(method) == fn {
+		return true
+	}
+	return validateCoroExactBoundMethodWrapper(fn) == nil ||
+		validateCoroExactMethodExpressionThunk(fn) == nil || validateCoroExactMethodWrapper(fn) == nil
+}
+
+// This deliberately excludes arithmetic, sibling uses and every intervening
+// source instruction except debug metadata. It is not a no-preemption proof:
+// an inserted poll spills the live address-shaped integer into the scanned
+// frame under the sole nonmoving-conservative-or-none profile. After conversion
+// the reconstructed pointer owns the subsequent lifetime, not a mutable header
+// cell. A precise/moving collector cannot consume this proof unchanged.
+func coroImmediatePointerReconstruction(word ssa.Value, reconstruction *ssa.Convert) bool {
+	instruction, ok := word.(ssa.Instruction)
+	if !ok || instruction.Block() == nil || instruction.Block() != reconstruction.Block() ||
+		word.Referrers() == nil || reconstruction.X != word {
+		return false
+	}
+	uses := 0
+	for _, reference := range *word.Referrers() {
+		if _, debug := reference.(*ssa.DebugRef); debug {
+			continue
+		}
+		if reference != reconstruction {
+			return false
+		}
+		uses++
+	}
+	if uses != 1 {
+		return false
+	}
+	seen := false
+	for _, next := range instruction.Block().Instrs {
+		if next == instruction {
+			seen = true
+			continue
+		}
+		if !seen {
+			continue
+		}
+		if next == reconstruction {
+			return true
+		}
+		if _, debug := next.(*ssa.DebugRef); !debug {
+			return false
+		}
+	}
+	return false
+}
+
+func (b *coroFrameRetentionRootBuilder) proveImmediateGlobalReflectHeader(reconstruction *ssa.Convert, word *ssa.UnOp, field *ssa.FieldAddr) {
+	if !coroImmediatePointerReconstruction(word, reconstruction) {
+		return
+	}
+	address := field.X
+	var projections []ssa.Value
+	for {
+		switch projection := address.(type) {
+		case *ssa.Convert:
+			projections = append(projections, projection)
+			address = projection.X
+		case *ssa.ChangeType:
+			projections = append(projections, projection)
+			address = projection.X
+		default:
+			goto projected
+		}
+	}
+projected:
+	global, ok := address.(*ssa.Global)
+	if !ok || len(projections) == 0 {
+		return
+	}
+	pointer, ok := types.Unalias(global.Type()).(*types.Pointer)
+	if !ok {
+		return
+	}
+	kind := "SliceHeader"
+	if coroFrameRetentionStringLike(pointer.Elem()) {
+		kind = "StringHeader"
+	} else if !coroFrameRetentionSliceLike(pointer.Elem()) {
+		return
+	}
+	if !coroReflectHeaderDataAddressOfKind(field, kind) {
+		return
+	}
+	// Only this read-only address projection may observe the global. In
+	// particular no fabricated/copied header, alias escape or Data write can
+	// acquire provenance through the mutable cell's address.
+	projections = append(projections, field)
+	for _, projection := range projections {
+		if !coroFrameRetentionPointerLike(projection.Type()) || projection.Referrers() == nil {
+			return
+		}
+		for _, reference := range *projection.Referrers() {
+			if _, debug := reference.(*ssa.DebugRef); debug {
+				continue
+			}
+			allowed := reference == word
+			for _, child := range projections {
+				allowed = allowed || reference == child.(ssa.Instruction)
+			}
+			if !allowed {
+				return
+			}
+		}
+	}
+	// No global address is recorded as a keeper for the old backing store.
+	b.proof.uintptrValues[word] = coroFrameRetentionUintptrFact{}
+}
+
+func coroFrameRetentionStringLike(typ types.Type) bool {
+	basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.String
+}
+
+func (b *coroFrameRetentionRootBuilder) traceString(value ssa.Value) (coroFrameRetentionTrace, bool) {
+	trace := newCoroFrameRetentionTrace()
+	if value == nil || !coroFrameRetentionStringLike(b.audit.typeOf(value.Type())) {
+		return trace, false
+	}
+	if _, constant := value.(*ssa.Const); constant {
+		return trace, true // Static string data has no collectable Go owner.
+	}
+	if _, local := b.valueOrder[value]; !local {
+		return trace, false
+	}
+	kind := coroFrameRetentionRootLocalString
+	if _, parameter := value.(*ssa.Parameter); parameter {
+		kind = coroFrameRetentionRootStringParameter
+	}
+	b.addExactRoot(value, kind)
+	trace.addRoot(value)
+	return trace, true
 }
 
 // coroFrameRetentionExactReadOnlyCell freezes one local initialization plus
@@ -1874,7 +2127,7 @@ func (b *coroFrameRetentionRootBuilder) boundedCallInstructionKind(
 					continue
 				}
 				switch site.kind {
-				case coroStaticCleanupCgoWorker, coroStaticCleanupForeignWorker:
+				case coroStaticCleanupGeneratedCgo, coroStaticCleanupForeignWorker:
 					return coroFrameRetentionCallWorkerV1, true
 				default:
 					return coroFrameRetentionCallCleanupCaptureV1, true
@@ -1884,7 +2137,7 @@ func (b *coroFrameRetentionRootBuilder) boundedCallInstructionKind(
 		if b.audit.universe == nil || !b.audit.universe.CoroWorkerSupported() {
 			return coroFrameRetentionCallInvalidV1, false
 		}
-		if _, recognized, err := validateCoroWorkerCgoCall(
+		if _, recognized, err := validateCoroGeneratedCgoCall(
 			b.audit.plan, b.audit.universe, call,
 		); recognized && err == nil {
 			return coroFrameRetentionCallWorkerV1, true
@@ -1961,8 +2214,8 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 	}
 	if b.audit.universe.CoroWorkerSupported() {
 		semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(b.audit.universe, call)
-		if err == nil && intrinsic && semantics == CoroIntrinsicCallInlineForeignSuspend {
-			if _, recognized, cgoErr := validateCoroWorkerCgoErrnoCall(
+		if err == nil && intrinsic && semantics == CoroIntrinsicCallInlineForeignTransaction {
+			if _, recognized, cgoErr := validateCoroGeneratedCgoErrnoCall(
 				b.audit.plan, b.audit.ctx, call,
 			); recognized && cgoErr == nil {
 				return coroFrameRetentionCallWorkerV1, true
@@ -1985,7 +2238,7 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 				return coroFrameRetentionCallWorkerV1, true
 			}
 		}
-		if _, recognized, cgoErr := validateCoroWorkerCgoCall(
+		if _, recognized, cgoErr := validateCoroGeneratedCgoCall(
 			b.audit.plan, b.audit.universe, call,
 		); recognized && cgoErr == nil {
 			return coroFrameRetentionCallWorkerV1, true
@@ -2077,33 +2330,8 @@ func (b *coroFrameRetentionRootBuilder) addExactRoot(value ssa.Value, kind coroF
 }
 
 func (b *coroFrameRetentionRootBuilder) dominatingNonNilEvidence(value ssa.Value, use ssa.Instruction) ([]ssa.Instruction, bool) {
-	if value == nil || use == nil || use.Block() == nil {
-		return nil, false
-	}
-	for _, block := range b.audit.fn.Blocks {
-		if len(block.Instrs) == 0 || len(block.Succs) != 2 {
-			continue
-		}
-		branch, ok := block.Instrs[len(block.Instrs)-1].(*ssa.If)
-		if !ok {
-			continue
-		}
-		comparison, ok := branch.Cond.(*ssa.BinOp)
-		if !ok || (comparison.Op != token.EQL && comparison.Op != token.NEQ) {
-			continue
-		}
-		matches := (comparison.X == value && coroFrameRetentionNilConst(comparison.Y)) ||
-			(comparison.Y == value && coroFrameRetentionNilConst(comparison.X))
-		if !matches {
-			continue
-		}
-		successor := 0
-		if comparison.Op == token.EQL {
-			successor = 1
-		}
-		if block.Succs[successor].Dominates(use.Block()) {
-			return []ssa.Instruction{comparison, branch}, true
-		}
+	if proof, ok := proveSSADominatingNonNil(value, use); ok {
+		return []ssa.Instruction{proof.Comparison, proof.Branch}, true
 	}
 	return nil, false
 }
@@ -2129,7 +2357,7 @@ func (b *coroFrameRetentionRootBuilder) dominatingNonEmptySliceEvidence(value ss
 			continue
 		}
 		successor, proves := coroFrameRetentionPositiveLengthSuccessor(comparison.Op, zeroOnRight)
-		if proves && block.Succs[successor].Dominates(use.Block()) {
+		if proves && ssaConditionalEdgeDominates(block, block.Succs[successor], use.Block()) {
 			return []ssa.Instruction{lenCall, comparison, branch}, true
 		}
 	}
@@ -2172,7 +2400,7 @@ func (b *coroFrameRetentionRootBuilder) dominatingSliceIndexEvidence(
 			continue
 		}
 		lenCall := coroFrameRetentionExactLenCall(comparison.Y, slice)
-		if lenCall == nil || !block.Succs[0].Dominates(use.Block()) {
+		if lenCall == nil || !ssaConditionalEdgeDominates(block, block.Succs[0], use.Block()) {
 			continue
 		}
 		inductionEvidence, ok := coroFrameRetentionNonNegativeRangeIndex(index, block, block.Succs[0], use, 0)
@@ -2211,7 +2439,7 @@ func (b *coroFrameRetentionRootBuilder) dominatingFixedArrayIndexEvidence(
 		comparison, ok := branch.Cond.(*ssa.BinOp)
 		if !ok || comparison.Op != token.LSS || comparison.X != index ||
 			!coroFrameRetentionIntegerAtMost(comparison.Y, bound) ||
-			!block.Succs[0].Dominates(use.Block()) {
+			!ssaConditionalEdgeDominates(block, block.Succs[0], use.Block()) {
 			continue
 		}
 		limit, ok := coroFrameRetentionExactPositiveInteger(comparison.Y)
@@ -2237,7 +2465,7 @@ func coroFrameRetentionNonNegativeRangeIndex(
 	constantUpperBound int64,
 ) ([]ssa.Instruction, bool) {
 	if index == nil || header == nil || trueSuccessor == nil || use == nil || use.Block() == nil ||
-		!trueSuccessor.Dominates(use.Block()) {
+		!ssaConditionalEdgeDominates(header, trueSuccessor, use.Block()) {
 		return nil, false
 	}
 	basic, ok := types.Unalias(index.Type()).Underlying().(*types.Basic)
@@ -2322,7 +2550,7 @@ func coroFrameRetentionNonNegativeRangeIndex(
 			initialCount++
 			continue
 		}
-		if edge != next || !header.Dominates(predecessor) || !trueSuccessor.Dominates(predecessor) {
+		if edge != next || !ssaConditionalEdgeDominates(header, trueSuccessor, predecessor) {
 			return nil, false
 		}
 		if indexIsNext {

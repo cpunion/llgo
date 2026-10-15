@@ -705,6 +705,10 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 		if err != nil {
 			return fmt.Errorf("coroutine library summary: program capabilities for %q: %w", functionPlan.ID, err)
 		}
+		programPredicates, err := p.compilation.CoroFunctionProgramPredicates(function)
+		if err != nil {
+			return fmt.Errorf("coroutine library summary: program predicates for %q: %w", functionPlan.ID, err)
+		}
 		fact := coro.LibraryEffectFunction{
 			ID:                    functionPlan.ID,
 			ABIHash:               abiHash,
@@ -720,6 +724,7 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			PrimarySymbol:         entry.name,
 			RawPlainSymbol:        rawPlainSymbol,
 			ProgramCapabilities:   programCapabilities,
+			ProgramPredicates:     programPredicates,
 			ExportIngress: func() bool {
 				_, ingress := plan.ForeignIngressRoot(function)
 				return ingress

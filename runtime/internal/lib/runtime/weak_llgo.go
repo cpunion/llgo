@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"sync/atomic"
 	"unsafe"
 
 	"github.com/xgo-dev/llgo/runtime/internal/atomiccache"
@@ -23,11 +22,11 @@ func llgoRegisterWeakPointer(p unsafe.Pointer) unsafe.Pointer {
 		return unsafe.Pointer(h)
 	}
 
-	addCleanupPtr(p, func() {
-		// BDWGC only queues this closure. The managed finalizer drain performs
-		// the tombstone store without a lock, allocation, or scheduler lookup.
-		atomic.StoreUint32(&h.Live, 0)
-	})
+	// The collector, not a managed cleanup/finalizer, owns the transition to
+	// dead. p stays a real strong argument until registration has completed.
+	if !llgoWeakRegister(p, &h.Live) {
+		panic("runtime: cannot register weak pointer")
+	}
 	return unsafe.Pointer(h)
 }
 
@@ -36,11 +35,12 @@ func llgoMakeStrongFromWeak(u unsafe.Pointer) unsafe.Pointer {
 	if h == nil {
 		return nil
 	}
-	if atomic.LoadUint32(&h.Live) == 0 {
+	p := llgoWeakStrong(h.Key, &h.Live)
+	if p == nil {
 		weakState.PruneWeak(h.Key)
 		return nil
 	}
-	return llgoWeakKeyPointer(h.Key)
+	return p
 }
 
 // llgoWeakPointerKey is the exact runtime boundary that hides a managed
@@ -49,7 +49,7 @@ func llgoMakeStrongFromWeak(u unsafe.Pointer) unsafe.Pointer {
 // conversion would make the weak reference strong. Registration may suspend
 // only after this leaf has returned the deliberately untraced scalar key.
 func llgoWeakPointerKey(p unsafe.Pointer) uintptr {
-	return uintptr(p)
+	return ^uintptr(p)
 }
 
 // llgoWeakKeyPointer is the exact runtime boundary that reconstructs a strong
@@ -60,7 +60,7 @@ func llgoWeakPointerKey(p unsafe.Pointer) uintptr {
 // weak reachability. This leaf has no call, allocation, or backedge and the
 // returned pointer becomes an ordinary traced strong reference immediately.
 func llgoWeakKeyPointer(key uintptr) unsafe.Pointer {
-	return unsafe.Pointer(key)
+	return unsafe.Pointer(^key)
 }
 
 //go:linkname weak_runtime_registerWeakPointer weak.runtime_registerWeakPointer

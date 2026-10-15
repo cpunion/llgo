@@ -24,10 +24,14 @@ import (
 	catomic "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 )
 
-//export __llgo_coro_sema_prepare_or_abort_v2
-func __llgo_coro_sema_prepare_or_abort_v2(storage, addr unsafe.Pointer) {
+//export __llgo_coro_sema_prepare_or_abort_v3
+func __llgo_coro_sema_prepare_or_abort_v3(storage, addr unsafe.Pointer, durable bool) {
+	var logical uint32
+	if durable {
+		logical = 1
+	}
 	if addr == nil || !coroPrepareKeyedStateV2(
-		(*CoroKeyedParkV2)(storage), coroKeyedParkSemaphoreV2, uintptr(addr), 0,
+		(*CoroKeyedParkV2)(storage), coroKeyedParkSemaphoreV2, uintptr(addr), logical,
 	) {
 		coroKeyedAbortV2("coroutine semaphore prepare failed")
 	}

@@ -18,6 +18,7 @@ package cl
 
 import (
 	"fmt"
+	"go/types"
 	"sort"
 	"strconv"
 
@@ -204,7 +205,7 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 			continue
 		}
 		parsed := defaultCoroForeignDeclarationContract()
-		if isCoroPythonBindingDeclaration(canonical) {
+		if isCoroPythonBindingDeclaration(canonical, u.pythonObjectTypes) {
 			// The base Python binding package's C declarations share CPython's
 			// caller-thread interpreter state. This compiler-owned binding catalog
 			// selects the generic same-M mechanism; no symbol/address lookup is
@@ -366,9 +367,105 @@ func defaultCoroForeignDeclarationContract() coroCallableContractCertificate {
 	}
 }
 
-func isCoroPythonBindingDeclaration(fn *ssa.Function) bool {
-	return fn != nil && fn.Pkg != nil && fn.Pkg.Pkg != nil &&
-		fn.Pkg.Pkg.Path() == llssa.PkgPython
+func (ir *coroProgramIR) coroPythonObjectTypes(functions []*ssa.Function) []types.Type {
+	var objectTypes []types.Type
+	add := func(typ types.Type) {
+		if typ == nil {
+			return
+		}
+		typ = types.Unalias(typ)
+		if _, pointer := typ.(*types.Pointer); !pointer {
+			return
+		}
+		for _, existing := range objectTypes {
+			if types.Identical(existing, typ) {
+				return
+			}
+		}
+		objectTypes = append(objectTypes, typ)
+	}
+	addSignature := func(signature *types.Signature) {
+		if signature == nil {
+			return
+		}
+		// Python-call parameters may include ordinary pointers (for example a
+		// C string adapter). Only returned object handles establish type
+		// provenance; later C parameters/receivers match those exact types.
+		results := signature.Results()
+		if results == nil {
+			return
+		}
+		for index := 0; index < results.Len(); index++ {
+			add(results.At(index).Type())
+		}
+	}
+
+	for _, function := range functions {
+		if function == nil {
+			continue
+		}
+		classification := ir.callableClassifications[function]
+		if classification.classified && classification.background == llssa.InPython {
+			addSignature(function.Signature)
+		}
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(*ssa.Call)
+				if !ok || call.Common() == nil {
+					continue
+				}
+				callee := call.Common().StaticCallee()
+				if callee == nil {
+					continue
+				}
+				classification := ir.callableClassifications[callee]
+				if classification.intrinsic && isCoroPythonIntrinsicOpcode(classification.opcode) {
+					add(call.Type())
+				}
+			}
+		}
+	}
+	return objectTypes
+}
+
+func isCoroPythonBindingDeclaration(fn *ssa.Function, objectTypes []types.Type) bool {
+	if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
+		return false
+	}
+	if fn.Pkg.Pkg.Path() == llssa.PkgPython {
+		return true
+	}
+	kind, _ := pkgKindByScope(fn.Pkg.Pkg.Scope())
+	if kind == PkgPyModule {
+		return true
+	}
+	usesPythonObject := func(typ types.Type) bool {
+		typ = types.Unalias(typ)
+		for _, pythonType := range objectTypes {
+			if types.Identical(pythonType, typ) {
+				return true
+			}
+		}
+		return false
+	}
+	signature := fn.Signature
+	if signature == nil {
+		return false
+	}
+	if recv := signature.Recv(); recv != nil && usesPythonObject(recv.Type()) {
+		return true
+	}
+	for _, tuple := range []*types.Tuple{signature.Params(), signature.Results()} {
+		if tuple == nil {
+			continue
+		}
+		for index := 0; index < tuple.Len(); index++ {
+			if usesPythonObject(tuple.At(index).Type()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func defaultCoroPythonDeclarationContract() coroCallableContractCertificate {

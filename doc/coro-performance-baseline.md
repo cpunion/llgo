@@ -2413,3 +2413,63 @@ adding another dynamic thunk or managed child frame. The matched `-Os`, full
 LTO rebuild keeps `__TEXT` unchanged and reduces `__text` by another 628 bytes;
 its 16-byte file growth is outside mapped segments in Mach-O alignment/signing
 data, not generated program code.
+
+## Closed-executable method-slot DCE (2026-10-16)
+
+The v38 core executable retained `time.parse`, `Time.appendFormat`, and most
+`internal/poll.FD` methods through runtime type descriptors, not actual calls
+from the workload. In particular, `os.init` creates standard files;
+`os.newFile` passes `*os.file` to `runtime.SetFinalizer`; its descriptor refers
+to `poll.FD`, whose deadline method signatures refer to `time.Time`. Keeping
+every callable address in these method tables then retains parsing, formatting,
+and unrelated file operations.
+
+An A/B using unchanged v38 source and the existing semantic method-slot DCE
+(`-O3 -lto=full -globaldce=false -deadcodedrop` in a development compiler)
+produced the following results. Both stripped files used the same native
+strip/sign procedure; this is a code-size experiment, not a new timing result.
+
+| Core artifact | Before | Semantic method-slot DCE |
+| --- | ---: | ---: |
+| Mach-O `__text` | 2,480,148 B | 1,300,236 B (-47.6%) |
+| Original executable | 4,024,896 B | 2,312,880 B |
+| Equally stripped/signed executable | 3,359,344 B | 2,024,784 B |
+
+Method names, counts, and signatures remain intact (`Time`: 49, `*Time`: 61,
+`*poll.FD`: 61). Only proven-unused callable slots become `unreachableMethod`.
+Seven core modes and interface call/go/defer passed. A standalone reflection
+probe passed method counts/names, named and indexed lookup, method expressions,
+interface lookup, `Func.Interface`, pointer mutation, and dynamic
+`Value.MethodByName` followed by `Call`. The complete `test/go/reflectmethod`
+full-LTO link exceeded the configured 12 GiB limit; it was not a passing full
+reflection-suite run.
+
+Production now selects this existing pass by default only for closed final
+full-LTO executables. It reuses `internal/deadcode` and
+`dcepass.EmitStrongTypeOverrides`; no new reachability graph is introduced.
+Libraries, package-only/IR generation, and `importcfg` builds remain
+conservative. Imported coroutine effect records alone are not complete method
+demand summaries. At final linking, any missing package summary retains all
+original method slots; malformed complete summaries still report an error.
+The cache already requires valid package metadata when this pass is requested.
+
+`-deadcodedrop=false` explicitly disables this pass. Explicit `-deadcodedrop`
+also remains available for non-LTO experiments. The development-only LLVM
+`-globaldce` path takes precedence, so the two passes never run together; to
+test the semantic pass in a development full-LTO build, disable `-globaldce`.
+
+Ordinary and `-O3` non-LTO builds retain their memory-bounded staged backend.
+Their package modules have been disposed by final linking, whereas the current
+override emitter reads live modules. Extending the default to these builds
+should reuse staged bitcode for streaming override emission, not retain every
+module in memory or introduce another demand analysis. That staging work is
+not part of this change.
+
+The opt-in `TestCoroSemanticDeadcodeDefaultLinkAcceptance` checks a production
+compiler's ordinary/O3 behavior, full-LTO default, explicit false override,
+interface invocation, and named reflection invocation, including final symbol
+retention. Enable it with `LLGO_CORO_DCE_ACCEPTANCE=1` and `LLGO_TEST_LLGO`;
+the invoking harness must enforce compiler/run memory limits. Host gates cover
+library/producer exclusions, incomplete summaries, cache metadata, and
+mutual exclusion with LLVM DCE. The v38 A/B above is separate evidence from
+this new default-selection gate.

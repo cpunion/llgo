@@ -20,6 +20,7 @@ package coro
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,8 +36,12 @@ func TestRuntimeChannelCommitTransactionsAreProvenBorrowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := packages.Load(&packages.Config{
-		Dir:        runtimeRoot,
-		BuildFlags: []string{"-tags=llgo"},
+		Dir: runtimeRoot,
+		// This target-independent proof only inspects Go SSA. Fix one complete
+		// native LLGo profile rather than mixing runtime source selections from
+		// the machine running this host test.
+		Env:        append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0"),
+		BuildFlags: []string{"-tags=llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer"},
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedTypes |
 			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedTypesSizes,

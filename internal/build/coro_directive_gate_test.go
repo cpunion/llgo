@@ -79,21 +79,32 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 	}
 
 	want := map[string]int{
-		// The eighth bottom contract is the native scheduler doorbell write:
-		// its descriptor is created O_NONBLOCK, a semantic fact unavailable
-		// from the C signature and therefore not soundly compiler-inferable.
+		// The obsolete baremetal syscall.Open wrapper contract is removed.
+		// The native doorbell still needs its O_NONBLOCK ownership contract,
+		// which cannot be inferred from write's C signature.
+		// Darwin clock_gettime_nsec_np is a by-value non-waiting clock read,
+		// including managed time.Now callers. Raw-host-only use inference is
+		// insufficient when the same declaration also has managed callers;
+		// its exact foreign contract must not imply interrupt safety.
 		"contract": 8,
 		// The residual noblock leaves include the bounded native frame-cache
 		// take/put operations, current-G TLS load/store, hosted TLS primitives,
 		// and the Windows UCRT/fault-recursion accessors. Their raw C signatures
 		// cannot express the fixed-size ownership transfer, independent
 		// pthread/FLS lifetime root, or non-waiting access contract.
-		"noblock": 39,
+		// WASI proc_exit is an exact non-returning host leaf; it neither waits
+		// for an I/O completion nor transfers a borrowed frame to a worker.
+		"noblock": 40,
 		// The three additional synchronous leaves cover same-thread BDWGC
 		// unregister plus Windows fault-handler registration and process entropy.
 		// Moving any of them to a worker would change thread ownership or startup
 		// ordering; their C signatures cannot prove those semantics.
-		"sync": 32,
+		// Five additional collector-owned leaves register/reveal/base weak
+		// references and attach/detach collection notification. They may take
+		// GC's allocation lock, but cannot suspend a managed frame or migrate
+		// its collector-critical operation to a worker. Detach joins callbacks
+		// before doorbell reuse. This is not a lock-free/noblock claim.
+		"sync": 37,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf(
@@ -106,8 +117,10 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 	// The Go 1.26 source-patch migration moved the Darwin mmap declaration, and
 	// the hosted thread/sync unification replaced legacy pthread owners. Windows
 	// FLS effects are attached to the raw declarations rather than their Go
-	// wrappers. This digest freezes the reviewed 8/39/32 bottom-contract set.
-	const wantManifestSHA256 = "0f18207bcde95b376a5bec8352b7756ea7d8c5b0033247b977d36ac3222a7161"
+	// wrappers. The weak/notification and WASI exit additions are exact foreign
+	// boundaries, not Go caller coloring. The Darwin clock contract covers one
+	// shared managed/raw declaration. This freezes the reviewed 8/40/37 set.
+	const wantManifestSHA256 = "4ac20417b0c17ed865b1a761c0c20c445035a7fbf2e98e4f90cb7e774cace3f5"
 	manifestSHA256 := fmt.Sprintf(
 		"%x", sha256.Sum256([]byte(strings.Join(manifest, "\n"))),
 	)

@@ -58,8 +58,9 @@ func (c *Compilation) coroFunctionProgramCapabilities() (
 			c.coroCapabilitiesErr = err
 			return
 		}
+		c.coroPredicateMasksByFunc = universe.coroProgramIR.coroLocalProgramPredicateMasks()
 		c.coroCapabilitiesByFunc, c.coroCapabilitiesErr = deriveCoroFunctionProgramCapabilities(
-			plan, local, c.CoroLibraryEffects,
+			plan, local, c.CoroLibraryEffects, c.coroPredicateMasksByFunc,
 		)
 	})
 	return c.coroCapabilitiesByFunc, c.coroCapabilitiesErr
@@ -86,11 +87,18 @@ func deriveCoroFunctionProgramCapabilities(
 	plan *coro.SSAPlan,
 	local map[*ssa.Function]coro.ProgramCapabilities,
 	imported map[*ssa.Function]coro.LibraryEffectFunction,
+	predicateMasks ...map[*ssa.Function]coro.ProgramCapabilities,
 ) (map[*ssa.Function]coro.ProgramCapabilities, error) {
 	if plan == nil {
 		return nil, fmt.Errorf("coroutine function capabilities require an SSA plan")
 	}
 	functions := plan.Functions()
+	// Predicate dependencies share this exact existing edge projection and
+	// fixed point with service demand; they are not another call graph.
+	masks := make(map[*ssa.Function]coro.ProgramCapabilities)
+	if len(predicateMasks) != 0 {
+		masks = predicateMasks[0]
+	}
 	capabilities := make(map[*ssa.Function]coro.ProgramCapabilities, len(functions))
 	reverse := make(map[*ssa.Function]map[*ssa.Function]struct{}, len(functions))
 
@@ -107,6 +115,12 @@ func deriveCoroFunctionProgramCapabilities(
 		}
 		if calleePlan.Emission == coro.EmitNone {
 			return nil
+		}
+		// Local and imported C implementations share the final plan's exact
+		// certificate authority. Seed the caller, not the external declaration:
+		// a code-address-only publication must retain no runtime boundary.
+		if coroCallableNeedsNativeFaultBoundary(plan, callee) {
+			capabilities[caller] |= coro.NativeDefaultFaultBoundaryProgramCapability()
 		}
 		callers := reverse[callee]
 		if callers == nil {
@@ -138,13 +152,24 @@ func deriveCoroFunctionProgramCapabilities(
 		if panicOnFaultAPI {
 			capability |= coro.NewProgramCapabilities(false, true)
 		}
+		if coroExecutionDomainSeed(function) {
+			capability |= coro.ExecutionDomainProgramCapability()
+		}
+		if coroGCObservationSeed(function) {
+			capability |= coro.GCObservationProgramCapability()
+		}
 		if fact, ok := imported[function]; ok {
 			if !fact.ProgramCapabilities.Valid() {
 				return nil, fmt.Errorf("imported function %q has invalid program capabilities %#x", function.Name(), fact.ProgramCapabilities)
 			}
 			capability |= fact.ProgramCapabilities
+			if !fact.ProgramPredicates.Valid() {
+				return nil, fmt.Errorf("imported function %q has invalid program predicates", function.Name())
+			}
+			masks[function] |= fact.ProgramPredicates.Mask
 		}
 		capabilities[function] = capability
+		masks[function] |= 0
 	}
 	for function := range local {
 		if _, planned := capabilities[function]; !planned {
@@ -215,7 +240,7 @@ func deriveCoroFunctionProgramCapabilities(
 
 	queue := make([]*ssa.Function, 0, len(capabilities))
 	for function, capability := range capabilities {
-		if capability != 0 {
+		if capability != 0 || masks[function] != 0 {
 			queue = append(queue, function)
 		}
 	}
@@ -224,15 +249,89 @@ func deriveCoroFunctionProgramCapabilities(
 		queue = queue[1:]
 		for caller := range reverse[callee] {
 			joined := capabilities[caller] | capabilities[callee]
-			if joined == capabilities[caller] {
+			joinedMask := masks[caller] | masks[callee]
+			if joined == capabilities[caller] && joinedMask == masks[caller] {
 				continue
 			}
 			if !joined.Valid() {
 				return nil, fmt.Errorf("function %q acquired invalid program capabilities %#x", caller.Name(), joined)
 			}
 			capabilities[caller] = joined
+			masks[caller] = joinedMask
 			queue = append(queue, caller)
 		}
 	}
 	return capabilities, nil
+}
+
+// Optional semantic services follow invocation demand, not mere body emission:
+// a certified FuncPC observation retains an entry without ever calling it.
+// Reuse the existing per-entry call closure and canonical roots. Raw callback
+// publications and open managed descriptors remain potential external entries,
+// even when their invocation is not represented by a local static call.
+// Physical worker/fault services keep their conservative emitted-body policy.
+func projectCoroProgramCapabilities(plan *coro.SSAPlan, capabilities map[*ssa.Function]coro.ProgramCapabilities) coro.ProgramCapabilities {
+	var result coro.ProgramCapabilities
+	for _, item := range plan.Functions() {
+		if item.Plan.Emission == coro.EmitNone {
+			continue
+		}
+		capability := capabilities[item.Function]
+		result |= capability &^ coro.ProgramPredicateMask()
+		_, root := plan.Root(item.Function)
+		if root || item.Plan.RawPlainDemand || item.Plan.FuncRep == coro.Dispatch {
+			result |= capability & coro.ProgramPredicateMask()
+		}
+	}
+	return result
+}
+
+// Only entering/creating an isolated domain requires its accounting. In
+// particular sync.WaitGroup's IsInBubble query must not enable it for every
+// ordinary program. Both the standard-library declaration and its runtime
+// implementation can own the canonical function after linkname resolution.
+func coroExecutionDomainSeed(function *ssa.Function) bool {
+	if function == nil || function.Pkg == nil || function.Pkg.Pkg == nil {
+		return false
+	}
+	switch llssa.PathOf(function.Pkg.Pkg) {
+	case "runtime":
+		return function.Name() == "synctest_run" || function.Name() == "synctest_inBubble"
+	case "internal/synctest":
+		return function.Name() == "Run" || function.Name() == "inBubble"
+	default:
+		return false
+	}
+}
+
+// Only actual registration requests post-GC observations. The scheduler's
+// query/observer, allocator bootstrap and weak conversion are not seeds.
+func coroGCObservationSeed(function *ssa.Function) bool {
+	return function != nil && function.Pkg != nil && function.Pkg.Pkg != nil &&
+		llssa.PathOf(function.Pkg.Pkg) == "github.com/xgo-dev/llgo/runtime/internal/runtime" &&
+		function.Name() == "EnableGCObserver" && function.Signature.Recv() == nil &&
+		function.Signature.Params().Len() == 0 && function.Signature.Results().Len() == 0
+}
+
+func coroCallableNeedsNativeFaultBoundary(plan *coro.SSAPlan, function *ssa.Function) bool {
+	certificate, ok := plan.CallableContractCertificate(function)
+	return ok && certificate.NativeDefaultFaultBoundary
+}
+
+// coroCallNeedsNativeFaultBoundary reads the same final invocation targets as
+// capability propagation. Imported policies are installed after ProgramIR's
+// source-site freeze, so the final SSA plan owns this declaration fact.
+func coroCallNeedsNativeFaultBoundary(plan *coro.SSAPlan, call ssa.CallInstruction) bool {
+	if call == nil || plan.ElidesCall(call) {
+		return false
+	}
+	if callPlan, ok := plan.CallPlan(call); ok {
+		for _, id := range callPlan.Targets {
+			if target, ok := plan.Function(id); ok && coroCallableNeedsNativeFaultBoundary(plan, target) {
+				return true
+			}
+		}
+		return false
+	}
+	return call.Common() != nil && coroCallableNeedsNativeFaultBoundary(plan, call.Common().StaticCallee())
 }

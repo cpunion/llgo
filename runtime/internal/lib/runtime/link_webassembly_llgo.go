@@ -75,15 +75,6 @@ func syscall_Getpagesize() int {
 	return 64 << 10
 }
 
-//go:linkname syscall_Exit syscall.Exit
-//go:nosplit
-func syscall_Exit(code int) {
-	_ = code
-	c_debugtrap()
-	for {
-	}
-}
-
 //go:linkname syscall_runtime_BeforeFork syscall.runtime_BeforeFork
 func syscall_runtime_BeforeFork() {}
 

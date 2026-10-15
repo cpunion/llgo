@@ -132,6 +132,123 @@ Child的frame可能在parent恢复前销毁，因此非普通终态不能只留�
 
 当前工作树已完成可独立闭环的task-stop和动态cleanup子集：`CompletionRecord`实际发布并逐层消费`Return/Panic/Abort/Shutdown`，另用`ReturnRecovered`提交direct deferred invocation的recover；frame-local terminal status使普通defer返回不会把`Abort/Shutdown`覆盖成`Return`，defer中的panic作为overlay优先，只有精确的`ReturnRecovered`会清除原panic。zero-ticket gate以及Channel/Worker/Timer/Poll/child-await恢复路径都会保留精确cancel kind；取消命中await后仍先消费child completion，并按五种状态重新进入同一个drainer。函数一旦存在循环注册，全部defer site统一进入frame-rooted异构LIFO，typed record在调用前pop/copy/free；无环site（包括可闭合的descriptor defer）仍保留一次注册的typed slot fast path。当前证据覆盖compiler可枚举的owner-local defer与direct recover；range-over-func的跨frame`DeferStack`、`Goexit`、root boundary outcome及完整GOROOT panic/defer矩阵仍未完成。
 
+### 3.6 资源型结果：物理完成不等于调用者接管
+
+当前采用 **typed borrowed output + 预注册普通 Go defer**，复用已有借用、
+physical join 和 cleanup drainer，不增加另一套资源 capsule 框架。2026-10-16
+已完成真实 native adapter 验收；公开 Go 返回交付和各平台标准库接线仍未完成。
+普通 scalar 的 Take/Discard 已闭环，但清除一个 fd、host handle 或 opaque C
+pointer 的数值，不等于释放它代表的资源。当前 worker/host 的成功文件路径可运行，
+仍不能据此宣称资源返回与任意 task cancellation 的组合已经安全。
+
+最初的确定性回归将真实打开的 fd 经过现有 WorkerOperationSource、HostOperationAdapter 和
+ResumePacket。正常消费正例通过；以下两种取消都会留下未关闭的 fd：
+
+- producer 已 Post，owner 尚未物化 packet；
+- packet 已物化、旧 source/adapter 已回收，G 迁移后才取消。
+
+`HostOperationAdapter.Retire` 在 owner materialization 阶段发生，不是最终接管点。
+`TakeResumePacket` 可因晚到的 task stop 抑制已复制的 scalar 并清空 packet。
+不能仅给 Retire 加一个 disposition 参数、延迟一次 host microtask，或禁止迁移
+来修补：这些都没有覆盖全部所有权窗口。原始负例及 optional capsule 的核心
+实验补丁、race 记录已归档；未接入平台的 capsule、binding kind 和 source capture
+接点已移除，不留没有消费者的并行机制。现有生产方案的真实 gate 见下节。
+
+守卫只针对 `open/openat/accept/dup` 等已知 acquisition adapter；未知 C 返回
+不能凭整数或指针类型猜测为资源。不对任意 Go int/unsafe.Pointer 的复制、存储、
+interface 化推导线性所有权；普通 Go 调用继续自动染色，不增加传播性注释。
+logical outcome、取消、winner 和 source retirement 均仍由既有协议唯一决定。
+
+#### Go wrapper 的跨 await 临时所有权
+
+`syscall.Open`/`os.Open` 并不总是在第一次底层 open 返回后立即把 fd 交给用户。
+例如 JS wrapper 随后还会 fstat、处理目录信息或注册自己的 descriptor table；
+native wrapper 也可能继续 fcntl/初始化。取消可落在这些 await 之间。
+
+这里优先使用普通 Go 的临时守卫和 defer，而不是实现一般 resource-effect/SSA
+所有权分析。已知 acquisition wrapper 在调用底层 operation **之前**建立空守卫、
+注册 defer；底层借用该守卫的 typed POD 输出槽写入成功资源。之后 fstat/fcntl
+等普通 await 不改变守卫，defer 自动染色并走现有 cleanup drainer。成功时明确
+transfer，失败/panic/cancel 时释放。不能等一个独立 async helper 已返回 fd 后才
+首次注册 defer：helper 返回前的取消窗口仍无人负责。
+
+同样，成功 return 前简单设置 `owned = false` 并不足够：child frame 销毁后，
+parent 可能尚未读取结果就被取消。现有 `awaitCoroChildWithRecoveryAndConsume`
+已经提供可复用的骨架：ordinary 与 cancellation 两条 lane 都先消费 parent-owned
+CompletionRecord，随后才进入正常结果读取或共享 cleanup。但当前骨架**没有资源
+drop/claim 信息**，不能称为已经完成的 resource-atomic handoff。
+
+公开交付尚在设计中。实现必须满足以下要求，但不预先确定需要新的 record：
+
+1. child return 在取消保护仍有效时，把 custody 放入 parent-owned completion
+   storage；之后才允许销毁 child。不得让资源只存在于即将销毁的 child guard。
+2. parent 的 cancel lane 消费 completion 后 drop；normal lane 在 Return status
+   已验证后，一次性 claim 到预注册的标准库守卫，或提交给普通 Go caller。这里的
+   receipt 只表达资源归属，决议仍只有现有 RunDecision，不另做 winner arbitration。
+3. public `syscall.Open`/`os.Open` 正常结果交付给 Go caller 后，原有 Go 语义恢复：
+   用户负责 Close/自己的 defer；不继续追踪 fd 的任意 int 复制，不替用户猜测释放。
+   标准库内部多 await wrapper 使用前述显式普通 Go 守卫，不靠无限向上推导 contract。
+
+只在有限 produce/transfer/release 边界保留准确事实，不改变普通 Go API 类型，
+不要求给所有调用者加注释。内部 acquisition
+adapter 的 helper 链必须闭合：若在 raw resume 与受保护 wrapper 之间还隔着未声明
+的 coroutine return，验证必须拒绝宣称安全，而不是提前 claim。开放 ABI 的资源
+行为由边界已有明确契约承担；不新增针对任意 Go int 逃逸的编译错误。
+
+release 进入现有 task-cleanup 屏蔽期后，不因新一轮取消再入或提前终止；新的 panic
+或 close error 只改变既有 cleanup outcome，不使同一个资源重复释放。若需要 host
+close callback，只有 callback physical join 后才能撤销 custody。此处要复用已有
+cleanup cancellation shielding，不能另建任务调度/取消状态机。
+
+#### 优先实现：借用输出槽与普通 defer
+
+已知底层 acquire adapter 可以接收指向 caller-owned POD 的输出地址（如
+`open_into(*int32)`），与 read 填充借用 buffer 相同：producer 只写资源值，不访问
+Go frame 元数据、G、recover 状态或另一个调度器。wrapper 在提交前初始化空 guard
+并注册 defer；worker 的 Post/strong join 提供写入到 owner 读取的交接，之后取消
+即使丢弃 scalar 返回值，普通 defer 仍持有成功取得的 fd。close 自动染色，继续使用
+既有 cleanup shielding 和物理 join；同一个 fd 只尝试释放一次，不盲目重试 close。
+
+`runtime/_testgo/coro_resource_borrowed_fd` 已在真实 LLVM native 编译产物上重复
+50 次通过：16 次正常 acquire/close、一次完成前取消、一次后续 await 取消、挂起
+frame 期间 GC，以及两个 close worker 同时等待时另一个 G 仍可执行并释放它们。
+C 侧最终核对 18 次 open/18 次 close 和全部 barrier，再输出完成标记；此证据不依赖
+进程退出隐式关闭 fd，不使用 optional capsule、新 intrinsic、resource effect 或
+额外的 G/packet 字段。对应 opt-in gate 为 `LLGO_CORO_RESOURCE_ACCEPTANCE=1`。
+
+这只闭合 physical operation → **同一个预先受保护 wrapper** 的窗口。不能在 helper
+返回 fd 之后才建立守卫，也不能据此宣称 `syscall.Open`/`os.Open` 的多层 child→parent
+公开结果交付已经完成；该部分仍须按前节独立证明。
+
+Node 的私有 `llgoFSOpenInto` 也已实际验证相同边界：typed `*int32` 初值 -1，
+成功 callback 在 Post 前写入，Post 前取消由 host 先异步 close，Post 后取消
+只有 Go 预注册的 defer 负责。真实六个 fd、fstat 后取消、GC、双 close 等待期间
+另一个 Go cleanup 前进均通过；协议负例覆盖 FD 0、memory.grow、重复 callback
+和失败 close 不 ack。executor turn 使用 host task，避免 runnable Go 循环的
+microtask 链饿死实际 I/O callback。公开 `syscall.Open` 仍保留原调用路径，WASI
+也尚未接入此借用方案；不能把私有 primitive 验收当作两者公开结果交付已经完成。
+
+#### 剩余完成 gate
+
+纯数值、计数、errno、timer、普通 read/write 等不携带资源 custody 的结果仍使用
+现有紧凑 scalar 路径，不增加 packet/G 大小、heap allocation、全局扫描或每次动态
+release 分派。对可以静态证明无取消/跨 await 的边界允许消去守卫，但不能用
+优化代替所有权证明。
+
+生产方案仍优先复用借用输出槽和普通 defer；只有不能由既有交接表达的公开返回窗口，
+才考虑最小可选 delivery recipe。不得同时保留两套没有消费者的完整 custody 框架。
+无论选择哪种表示，以下强制门不变：
+
+1. 正常消费、submit 前取消、Post 前后取消、物化后取消、迁移后取消均逐阶段验证。
+2. wrapper 在 acquire 与 adopt 之间具有两个以上 await，分别在各点取消/panic；
+   child 返回到 parent 后、parent 尚未取结果时取消也不泄漏。
+3. select loser、duplicate callback、stale generation、fd 重用、错误结果、清理自身
+  park/失败/重复请求均不 double close、不丢失 physical join。
+4. native 真 fd、WASI out-pointer fd、Node callback fd 分别真实执行；检查 host
+   handle 表与 fd 生命周期，不以 exit 0 或 host mock 单独证明平台完整通过。
+5. 纯 scalar 编译产物与 frame 布局无额外成本，旧 source 可回收且 P-neutral 迁移
+   不回访旧 owner；现有 cancellation/winner 语义和 raw boundary proof 不放松。
+
 ## 4. Scheduler 与 operation contract
 
 ### 4.1 稳定对象
@@ -474,7 +591,30 @@ Linux共享`RawSyscall` carrier还要求与函数地址证书正交的trap证书
 
 Worker transport的route-aware核心现已完成：仍只有一个进程级固定4线程/1024-job物理池，C11 sequence ring允许多个exact P owner并发预留不同cell；每个reservation在compiler-enforced no-suspend hook内submit或以tombstone cancel。Job不增加Go pointer或全局operation目录，直接使用既有两字`OperationID.SourceSlot`中的route；完成端按compiler-reserved target profile静态选择legacy program或fleet ingress，fleet再完成exact source/request/doorbell投递。owner在把完成发布为可resume winner前seal generation并等待所有已admit producer退出，避免回调release尾与result recycle竞态。C11环已通过route 1/2并发producer、交错wrap、四consumer和stop/join测试；program-level fleet coordinator实际start/stop该池，当前fleet标准库profile不再退回single-P worker transport。
 
-Worker transport现又把compiler-known source C entry作为独立scalar `traceTarget`随job传递，并把completion扩展为互斥的普通三字结果或`{fault kind, ucontext PC, traceTarget}`故障结果。callback-free worker调用中的`SIGSEGV/SIGBUS/SIGFPE`只在C TLS中执行bounded capture和`siglongjmp`；owner G恢复后验证结果、从当前LLVM frame descriptor取得活动Go帧，再与compiler shadow callers组成panic snapshot并进入统一ExplicitStatus fault lowering。连续三次recover、recover后的`debug.Stack`、未recover终端traceback以及bootstrap传播`Panic/Abort/Shutdown/Goexit`均已由Darwin/arm64真实LLGo compile-link-run验证；正式`TestCallerAcceptanceCFaultRecover`、`TestCFaultRecoverable`、`TestCFaultTraceback`全绿。managed C-to-Go reentry明确禁用landing pad，精确ucontext PC当前只覆盖Darwin/Linux arm64与x86-64；其他native架构遇到无法取PC的hardware fault会fail closed，不能把本地证据外推为全平台C fault兼容。
+Worker transport现又把compiler-known source C entry作为独立scalar `traceTarget`随job传递，并把completion扩展为互斥的普通三字结果或`{fault kind, ucontext PC, traceTarget}`故障结果。callback-free worker调用中的`SIGSEGV/SIGBUS/SIGFPE`只在C TLS中执行bounded capture和`siglongjmp`；owner G恢复后验证结果、从当前LLVM frame descriptor取得活动Go帧，再与compiler shadow callers组成panic snapshot并进入统一ExplicitStatus fault lowering。连续三次recover、recover后的`debug.Stack`、未recover终端traceback以及bootstrap传播`Panic/Abort/Shutdown/Goexit`均已由Darwin/arm64真实LLGo compile-link-run验证；正式`TestCallerAcceptanceCFaultRecover`、`TestCFaultRecoverable`、`TestCFaultTraceback`全绿。managed C-to-Go reentry现在进入Go前detach当前C TLS landing scope，普通返回C时rearm；callback的非返回退出不会恢复已失效的C activation。精确ucontext PC当前只覆盖Darwin/Linux arm64与x86-64；其他native架构遇到无法取PC的hardware fault会fail closed，不能把本地证据外推为全平台C fault兼容。
+
+2026-10-13运行验收补齐了两条独立的编译器规则：
+
+- C函数值的managed adapter必须保留在动态调用目标集。静态code-address过滤与publication inventory共用同一份adapter投影，不能因原始C声明被投影成Go wrapper而丢失目标并误选空的plain entry。
+- LLVM executor-leaf证明只授权不阻塞的直接调用，不授权省略故障恢复。证明同时产生独立的`MayFault`事实，绑定完整LLVM call closure、target、ABI和证书identity，并保存为调用证书的`NativeDefaultFaultBoundary`。本地声明与归档导入声明均从最终SSAPlan的实际调用边产生native fault capability seed，再复用已有函数调用图传播和native resume landing。当前 archive v16保留该事实，并携带编译时谓词的消费约束（包括 false）；不兼容的可达归档入口必须重新编译，不能在 consumer 中对无函数体的声明重新染色来修补。地址观察、死分支和已消除调用不产生需求。无需新增源码标注、worker路径或第二套异常模型。
+
+可选 GC 完成通知复用 execution-domain 的冻结谓词通路，而非新增调度层。
+`GCObservation` 仅由可达的 runtime `EnableGCObserver` 注册入口及其归档事实产生；
+弱引用自身、调度器查询、allocator 初始化均不反向开启它。
+`llgo.coroGCObservationEnabled` 在 effect/ABI 分析前绑定，普通 Go 调用链自动传播。
+无 channel timer 时，allocator 的 collector hook、scheduler 的观察调用、tinygc 完成通知、
+native fd detach，以及标准 runtime 的原生导出 wrapper 都在同一冻结 CFG 中裁剪；
+尤其不能让无标准库导入的程序仍引用 `__llgo_coro_gc_observe_v1`。
+两个谓词各自记录消费 mask 和 true/false 值，archive v16 和 plan digest v41 均绑定它们。
+这不增加 G、frame 或 timer 的运行时字段，也不引入 callback registry 或普通 Go 函数标注。
+
+`MayFault`对未知地址读写、atomic、整数除余和其他已接受intrinsic保守处理；确切的普通/TLS global槽、类型匹配且非空的直接alloca槽、纯算术叶子不产生该需求。current-G TLS读取在`-O0/-O2/-Oz`下均有无额外landing的门禁。此事实不声称所有C未定义行为或硬件trap都能转成Go panic，仍受平台信号和`SetPanicOnFault`策略约束。
+
+`TestCallerAcceptanceForeignReentryFaultRecover`已在Darwin/arm64、Go 1.27、LLVM 22下fresh compile-link-run通过：回调先经timer挂起，再分别覆盖返回C后的故障、回调内部动态调用C叶子故障、callback panic逃逸和后续正常调用，连续三轮恢复。该证据只覆盖此纵向路径；完整`test/`、`_demo`和GOROOT验收独立统计，不由单个回归用例推定完成。本阶段按运行验收优先，暂不以`cl/_test*/**`指令golden差异作为阻塞项。
+
+同轮运行验收还固定了故障边界的所有权：物理resume的landing链保存在M，G的`defer_`仅保存逻辑defer链。每个landing沿用已有`Defer.Args`保存进入时的逻辑cursor；panic先执行该cursor以上的普通defer，再进入物理landing。`GetThreadDefer`、`SetThreadDefer`和`ClearThreadDefer`不读取或覆盖M的landing链，正常pop也不改写G的逻辑cursor。这只增加每M一个指针，不增加每G或每coroutine frame的字段。启动时用于TLS的物理G不领取用户goroutine编号，首个逻辑main G仍为1。
+
+2026-10-13的v7本地验收（Darwin/arm64、Go 1.27、LLVM 22）中，`test/llgoext`的23项测试全部通过，包含defer-head隔离和130个G的ID分配；C故障恢复、managed C-to-Go重入、连续恢复和未恢复traceback四项编译运行测试全部通过。此前同轮的`test`、`test/cgo`、`test/syncpool`分别通过41、3、1项，`test/std/runtime`通过5项。上述结果不是完整`test/go`、标准库或跨平台验收的替代。
 
 #### 少量标准库能力探针政策
 

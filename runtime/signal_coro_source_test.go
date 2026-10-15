@@ -128,6 +128,21 @@ func TestRuntimeSignalCoroAdapterIsSignalSafeAndEventDriven(t *testing.T) {
 			t.Errorf("%s retains forbidden blocking/dynamic signal mechanism %q", runtimeSignalCoroSource, forbidden)
 		}
 	}
+	for _, operation := range []string{"Enable", "Disable", "Ignore"} {
+		name := "signal_" + strings.ToLower(operation)
+		start := strings.Index(coro, "func "+name+"(sig uint32) {")
+		if start < 0 {
+			t.Fatalf("missing signal operation %s", name)
+		}
+		body := coro[start:]
+		body = body[:strings.Index(body, "\n}")]
+		lock := strings.Index(body, "locked := cpuProfileSignalLock(sig)")
+		update := strings.Index(body, "coroSignal"+operation+"NativeV1(sig)")
+		unlock := strings.Index(body, "cpuProfileSignalUnlock(locked)")
+		if lock < 0 || update <= lock || unlock <= update {
+			t.Errorf("%s does not coordinate SIGPROF disposition with the profiler", name)
+		}
+	}
 
 	cSource := readRuntimePollFile(t, runtimeSignalCSource)
 	for _, required := range []string{
@@ -292,6 +307,8 @@ func TestRuntimeSignalSourceSelectionUsesCompleteNativeCapability(t *testing.T) 
 		legacySignal bool
 		legacyFault  bool
 		coro         bool
+		windows      bool
+		host         bool
 	}{
 		{name: "ordinary linux", goos: "linux", legacySignal: true, legacyFault: true},
 		{name: "ordinary darwin", goos: "darwin", legacySignal: true, legacyFault: true},
@@ -300,11 +317,17 @@ func TestRuntimeSignalSourceSelectionUsesCompleteNativeCapability(t *testing.T) 
 		{name: "missing timer", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_native_pipe"}, legacySignal: true, legacyFault: true},
 		{name: "complete linux", goos: "linux", buildTags: native, coro: true},
 		{name: "complete darwin", goos: "darwin", buildTags: native, coro: true},
+		{name: "explicit linux host", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_host"}, host: true, legacyFault: true},
+		{name: "explicit darwin host", goos: "darwin", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_host"}, host: true, legacyFault: true},
+		{name: "host with only native pipe", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_host", "llgo_coro_native_pipe"}, host: true, legacyFault: true},
+		{name: "host with only native timer", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_host", "llgo_coro_native_timer"}, host: true, legacyFault: true},
+		{name: "native capabilities take precedence over host tag", goos: "linux", buildTags: append(slices.Clone(native), "llgo_coro_host"), coro: true},
+		{name: "host adapter selects legacy", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_host", "coro_runtime_adapter_test"}, legacySignal: true, legacyFault: true},
 		{name: "adapter selects legacy", goos: "linux", buildTags: append(slices.Clone(native), "coro_runtime_adapter_test"), legacySignal: true, legacyFault: true},
 		{name: "baremetal owns signals", goos: "linux", buildTags: append(slices.Clone(native), "baremetal")},
-		// Windows keeps the legacy signal facade but owns hardware faults through
-		// its vectored-exception implementation instead of fault_unwind_llgo.go.
-		{name: "windows owns faults", goos: "windows", buildTags: native, legacySignal: true},
+		// Windows owns both its console-control signal adapter and vectored
+		// exceptions; neither POSIX signal facade is selected.
+		{name: "windows owns signals and faults", goos: "windows", buildTags: native, windows: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -317,6 +340,8 @@ func TestRuntimeSignalSourceSelectionUsesCompleteNativeCapability(t *testing.T) 
 				filepath.Base(runtimeSignalCoroSource):   test.coro,
 				filepath.Base(runtimeFaultLegacySource):  test.legacyFault,
 				filepath.Base(runtimeFaultCoroSource):    test.coro,
+				"signal_windows_llgo.go":                 test.windows,
+				"signal_host_llgo.go":                    test.host,
 			} {
 				got, err := ctx.MatchFile(filepath.Dir(runtimeSignalCoroSource), file)
 				if err != nil {

@@ -36,7 +36,9 @@ func nextGoid(gp, owner *g) uint64 {
 			pp := mp.p
 			if pp != nil && pp.m == mp {
 				if pp.goidcache == pp.goidcacheend {
-					end := atomic.Add(&sched.goidgen, goidCacheBatch)
+					// Internal atomic.Add returns the previous value, like LLVM
+					// atomicrmw. Reserve (old, old+batch], not the preceding batch.
+					end := atomic.Add(&sched.goidgen, goidCacheBatch) + goidCacheBatch
 					pp.goidcache = end - goidCacheBatch + 1
 					pp.goidcacheend = end + 1
 				}
@@ -46,15 +48,15 @@ func nextGoid(gp, owner *g) uint64 {
 			}
 		}
 	}
-	return atomic.Add(&sched.goidgen, uint64(1))
+	return atomic.Add(&sched.goidgen, uint64(1)) + 1
 }
 
 func nextMid(mp *m) int64 {
-	return atomic.Add(&sched.midgen, int64(1))
+	return atomic.Add(&sched.midgen, int64(1)) + 1
 }
 
 func nextPid(pp *p) int32 {
-	return atomic.Add(&sched.pidgen, int32(1)) - 1
+	return atomic.Add(&sched.pidgen, int32(1))
 }
 
 func retainG() {

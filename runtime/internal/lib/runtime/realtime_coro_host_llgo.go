@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && !baremetal && !coro_runtime_adapter_test && (wasm || tinygo.wasm || llgo_coro_host)
+//go:build llgo && llgo_coro && !coro_runtime_adapter_test && (wasm || tinygo.wasm || baremetal || llgo_coro_host)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -15,10 +15,7 @@ import corort "github.com/xgo-dev/llgo/runtime/internal/runtime"
 func coroRealtime() (sec int64, nsec int32) {
 	sec, nsec, ok := corort.CoroWallTime()
 	if !ok {
-		// Targets without a civil-time source retain the existing bare-metal
-		// convention of the Unix epoch. Monotonic time remains available and
-		// is still attached by time_now for duration and deadline arithmetic.
-		return 0, 0
+		throw("coro wall time requires a published host clock")
 	}
 	return sec, nsec
 }

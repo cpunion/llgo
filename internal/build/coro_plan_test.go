@@ -183,13 +183,7 @@ func calls(fn func()) {
 		t.Fatal(err)
 	}
 	for _, call := range ordinaryCalls {
-		wantElided := false
-		switch exact := call.(type) {
-		case *ssa.Call:
-			wantElided = exact != nil && exact.Common().StaticCallee() != nil && !exact.Common().IsInvoke()
-		case *ssa.Defer:
-			wantElided = exact != nil && exact.DeferStack == nil && exact.Common().StaticCallee() != nil && !exact.Common().IsInvoke()
-		}
+		wantElided := true
 		if got := unevaluatedPlan.ElidesCall(call); got != wantElided {
 			t.Fatalf("frontend-unevaluated %T call elided=%t, want %t: %s", call, got, wantElided, call)
 		}
@@ -562,7 +556,7 @@ func __llgo_coro_foreign_reentry_acquire_v1(*unsafe.Pointer) unsafe.Pointer { re
 func __llgo_coro_foreign_reentry_run_v1(unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_foreign_reentry_failure_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_same_m_foreign_call_v1(unsafe.Pointer, uintptr, uintptr) {}
-func __llgo_coro_same_m_foreign_reentry_call_v2(unsafe.Pointer, uintptr, uintptr, *unsafe.Pointer, *unsafe.Pointer) uint32 { return 0 }
+func __llgo_coro_same_m_foreign_reentry_call_v2(unsafe.Pointer, uintptr, uintptr, uintptr, *unsafe.Pointer, *unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay int64) {}
 func __llgo_coro_timer_park_controlled_v2(g, handle, header, storage, controller unsafe.Pointer, control, ownerRoute *uint32, expected uint32, deadline int64) {}
 func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 { return 1 }
@@ -573,7 +567,7 @@ func __llgo_coro_poll_update_deadline_or_abort_v1(context uintptr, interest uint
 func __llgo_coro_poll_post_closing_or_abort_v1(context uintptr, interest uint32) {}
 func __llgo_coro_keyed_park_v2(g, handle, header, state unsafe.Pointer) {}
 func __llgo_coro_keyed_resume_v2(g, state unsafe.Pointer) uint32 { return 0 }
-func __llgo_coro_sema_prepare_or_abort_v2(state, addr unsafe.Pointer) {}
+func __llgo_coro_sema_prepare_or_abort_v3(state, addr unsafe.Pointer, durable bool) {}
 func __llgo_coro_sema_release_or_abort_v2(addr unsafe.Pointer) {}
 func __llgo_coro_notify_prepare_or_abort_v2(state, notifyAddr unsafe.Pointer, target uint32) {}
 func __llgo_coro_notify_one_or_abort_v2(notifyAddr unsafe.Pointer, waitSnapshot uint32) {}
@@ -825,7 +819,7 @@ func atomicExchange(*uint32, uint32) uint32
 		coroPollPostClosingOrAbortSymbolV1,
 		coroKeyedParkSymbolV2,
 		coroKeyedResumeSymbolV2,
-		coroSemaphorePrepareOrAbortSymbolV2,
+		coroSemaphorePrepareOrAbortSymbolV3,
 		coroSemaphoreReleaseOrAbortSymbolV2,
 		coroNotifyPrepareOrAbortSymbolV2,
 		coroNotifyOneOrAbortSymbolV2,
@@ -870,7 +864,7 @@ func atomicExchange(*uint32, uint32) uint32
 		coroTimerRequestControlledSymbolV2,
 		coroKeyedParkSymbolV2,
 		coroKeyedResumeSymbolV2,
-		coroSemaphorePrepareOrAbortSymbolV2,
+		coroSemaphorePrepareOrAbortSymbolV3,
 		coroSemaphoreReleaseOrAbortSymbolV2,
 		coroNotifyPrepareOrAbortSymbolV2,
 		coroNotifyOneOrAbortSymbolV2,
@@ -941,7 +935,7 @@ func atomicExchange(*uint32, uint32) uint32
 		coroPollPostClosingOrAbortSymbolV1,
 		coroKeyedParkSymbolV2,
 		coroKeyedResumeSymbolV2,
-		coroSemaphorePrepareOrAbortSymbolV2,
+		coroSemaphorePrepareOrAbortSymbolV3,
 		coroSemaphoreReleaseOrAbortSymbolV2,
 		coroNotifyPrepareOrAbortSymbolV2,
 		coroNotifyOneOrAbortSymbolV2,
@@ -1093,7 +1087,7 @@ func atomicExchange(*uint32, uint32) uint32
 	if invalidKeyedResumeErr == nil || !strings.Contains(invalidKeyedResumeErr.Error(), "keyed resume V2 ABI") {
 		t.Fatalf("invalid keyed resume V2 ABI error = %v", invalidKeyedResumeErr)
 	}
-	semaphorePrepareFn := ssaPkg.Func(coroSemaphorePrepareOrAbortSymbolV2)
+	semaphorePrepareFn := ssaPkg.Func(coroSemaphorePrepareOrAbortSymbolV3)
 	originalSemaphorePrepareSignature := semaphorePrepareFn.Signature
 	semaphorePrepareFn.Signature = types.NewSignatureType(nil, nil, nil,
 		types.NewTuple(
@@ -1103,8 +1097,18 @@ func atomicExchange(*uint32, uint32) uint32
 		), types.NewTuple(), false)
 	_, _, _, _, invalidSemaphorePrepareErr := requiredCoroProgramRuntimePlan(timerCtx)
 	semaphorePrepareFn.Signature = originalSemaphorePrepareSignature
-	if invalidSemaphorePrepareErr == nil || !strings.Contains(invalidSemaphorePrepareErr.Error(), "semaphore prepare V2 ABI") {
+	if invalidSemaphorePrepareErr == nil || !strings.Contains(invalidSemaphorePrepareErr.Error(), "semaphore prepare V3 ABI") {
 		t.Fatalf("invalid semaphore prepare ABI error = %v", invalidSemaphorePrepareErr)
+	}
+	semaphorePrepareFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "state", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "addr", types.Typ[types.UnsafePointer]),
+		), types.NewTuple(), false)
+	_, _, _, _, legacySemaphorePrepareErr := requiredCoroProgramRuntimePlan(timerCtx)
+	semaphorePrepareFn.Signature = originalSemaphorePrepareSignature
+	if legacySemaphorePrepareErr == nil || !strings.Contains(legacySemaphorePrepareErr.Error(), "semaphore prepare V3 ABI") {
+		t.Fatalf("legacy two-parameter semaphore prepare ABI error = %v", legacySemaphorePrepareErr)
 	}
 	semaphoreReleaseFn := ssaPkg.Func(coroSemaphoreReleaseOrAbortSymbolV2)
 	originalSemaphoreReleaseSignature := semaphoreReleaseFn.Signature
@@ -2054,7 +2058,7 @@ func install() { bad() }
 	}
 }
 
-func TestRequiredCoroProgramRuntimePlanRejectsPythonOutsideProgramRoot(t *testing.T) {
+func TestRequiredCoroProgramRuntimePlanRejectsPythonInRawBootstrapClosure(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		body string
@@ -2065,11 +2069,12 @@ func TestRequiredCoroProgramRuntimePlanRejectsPythonOutsideProgramRoot(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			fixture := buildRequiredCoroRuntimeFixtureSource(t,
 				requiredCoroPhysicalRuntimeFixture+"//llgo:link bad py.bad\n"+test.body+"func install() { bad() }\n",
-				false,
+				true,
 			)
-			if _, _, _, _, err := requiredCoroProgramRuntimePlan(fixture.ctx); err == nil ||
-				!strings.Contains(err.Error(), "has no compiler-owned program-root owner realm") {
-				t.Fatalf("Python %s required runtime error = %v", test.name, err)
+			_, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
+			if err == nil || !strings.Contains(err.Error(), "raw ABI plain closure") ||
+				!strings.Contains(err.Error(), "wait-foreign") {
+				t.Fatalf("Python %s raw-bootstrap error = %v", test.name, err)
 			}
 		})
 	}

@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	LibraryEffectSummaryVersion = "v13"
+	LibraryEffectSummaryVersion = "v16"
 
 	// LibraryEffectExportIngressABIV1 identifies the compiler-generated exact
 	// C-to-managed adapter published by LibraryEffectExportIngress. It is
@@ -61,7 +61,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 13,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 16,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -116,6 +116,10 @@ type LibraryEffectFunction struct {
 	// what executing the function can require. A consumer propagates them through
 	// its own call graph instead of rescanning unavailable library bodies.
 	ProgramCapabilities ProgramCapabilities `json:"program_capabilities"`
+	// ProgramPredicates records consumed true AND false compilation predicates.
+	// Its mask is propagated through the final call plan, not inferred from a
+	// service-demand bit, symbol name or already-specialized physical body.
+	ProgramPredicates ProgramPredicateRequirements `json:"program_predicates"`
 	// OutcomePlainSymbol is the exact synchronous static-call entry certified by
 	// AtomicCostProof or StaticOutcome. It equals PrimarySymbol when outcome-plain
 	// is primary and names a separate twin when ManagedEntry remains coroutine.
@@ -372,6 +376,9 @@ func (function LibraryEffectFunction) validate() error {
 	}
 	if !function.ProgramCapabilities.Valid() {
 		return fmt.Errorf("coro: library function %q has invalid program capabilities %#x", function.ID, function.ProgramCapabilities)
+	}
+	if !function.ProgramPredicates.Valid() {
+		return fmt.Errorf("coro: library function %q has invalid program predicate requirements %+v", function.ID, function.ProgramPredicates)
 	}
 	if function.Primary == PrimaryExternal {
 		return fmt.Errorf("coro: library function %q has no producer-owned primary", function.ID)

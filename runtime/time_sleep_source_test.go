@@ -116,6 +116,91 @@ func TestTimeTimerSourceSelection(t *testing.T) {
 	}
 }
 
+func TestBaremetalCoroTimerBridgeSelection(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		tags []string
+		coro bool
+	}{
+		{"host reactor", []string{"baremetal", "llgo", "llgo_coro"}, true},
+		{"host reactor with inherited native tags", []string{"baremetal", "llgo", "llgo_coro", "llgo_coro_native_pipe", "llgo_coro_native_timer"}, true},
+		{"adapter", []string{"baremetal", "llgo", "llgo_coro", "coro_runtime_adapter_test"}, false},
+		{"legacy smoke", []string{"baremetal"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := build.Default
+			ctx.GOOS, ctx.GOARCH = "linux", "arm"
+			ctx.BuildTags = test.tags
+			for file, want := range map[string]bool{
+				"time_baremetal_llgo.go":       !test.coro,
+				coroGo123TimerSource:           test.coro,
+				"nanotime_llgo.go":             test.coro,
+				"nanotime_host_llgo.go":        test.coro,
+				"realtime_coro_host_llgo.go":   test.coro,
+				"nanotime_linux_llgo.go":       false,
+				"realtime_coro_native_llgo.go": false,
+				legacyGo123TimerSource:         false,
+				legacyGo123SleepSource:         false,
+			} {
+				selected, err := ctx.MatchFile(timeSleepSourceDir, file)
+				if err != nil || selected != want {
+					t.Errorf("%s selected=%t, want=%t: %v", file, selected, want, err)
+				}
+			}
+			selected, err := ctx.MatchFile("_patch/time", "sleep_coro_native_llgo.go")
+			if err != nil || selected != test.coro {
+				t.Fatalf("standard Sleep/Timer patch selected=%t, want=%t: %v", selected, test.coro, err)
+			}
+		})
+	}
+}
+
+func TestExplicitHostNanotimeUsesExecutorClock(t *testing.T) {
+	for goos, native := range map[string]string{
+		"darwin": "darwin", "linux": "linux", "windows": "windows", "freebsd": "other",
+	} {
+		for _, host := range []bool{false, true} {
+			ctx := build.Default
+			ctx.GOOS, ctx.GOARCH = goos, "arm64"
+			ctx.BuildTags = []string{"llgo", "llgo_coro"}
+			if host {
+				ctx.BuildTags = append(ctx.BuildTags, "llgo_coro_host")
+			}
+			for _, source := range []string{"host", "darwin", "linux", "windows", "other"} {
+				want := host && source == "host" || !host && source == native
+				selected, err := ctx.MatchFile(timeSleepSourceDir, "nanotime_"+source+"_llgo.go")
+				if err != nil || selected != want {
+					t.Errorf("%s host=%t clock=%s selected=%t want=%t: %v", goos, host, source, selected, want, err)
+				}
+			}
+		}
+	}
+}
+
+func TestBaremetalCoroUsesFreestandingDiagnosticBoundary(t *testing.T) {
+	ctx := build.Default
+	ctx.GOOS, ctx.GOARCH = "linux", "arm"
+	ctx.BuildTags = []string{"llgo", "llgo_coro", "baremetal"}
+	for file, want := range map[string]bool{
+		"z_print_freestanding_webassembly.go":         true,
+		"coro_abort_freestanding_webassembly.go":      true,
+		"panic_traceback_freestanding_webassembly.go": true,
+		"z_print_write_default.go":                    false,
+		"z_print.go":                                  false,
+		"z_print_format.go":                           false,
+		"z_print_go126.go":                            false,
+		"z_print_legacy.go":                           false,
+		"coro_abort_libc.go":                          false,
+		"coro_panic_report_libc.go":                   false,
+		"panic_traceback_coro.go":                     false,
+	} {
+		selected, err := ctx.MatchFile("internal/runtime", file)
+		if err != nil || selected != want {
+			t.Errorf("baremetal diagnostic %s selected=%t want=%t: %v", file, selected, want, err)
+		}
+	}
+}
+
 func TestNanotimeUsesFrameSafeFixedLocal(t *testing.T) {
 	for _, file := range []string{"nanotime_linux_llgo.go", "nanotime_other_llgo.go"} {
 		source := readTimeSleepSource(t, file)
@@ -165,12 +250,12 @@ func TestTimeSleepAndTimerImplementationsStayProfileLocal(t *testing.T) {
 		"func llgoCoroControlledTimerWaitV2(",
 		"control, ownerRoute *uint32",
 		"__llgo_coro_timer_request_controlled_v2",
-		"go coroTimerManager(t)",
+		"go coroTimerManager(state)",
 		"state.manager = 0",
 		"coroRunTimerCallback(arg.(func()))",
 		"corort.MarkTimerChannel((*corort.Chan)(cp))",
 		"coroTimerLock(&state.sendLock)",
-		"coroTimerDrainChannel(state.channel)",
+		"coroTimerDrainChannel(t.c)",
 		"coroTimerNextTickerDeadline(when, period, now)",
 	} {
 		if !strings.Contains(coroSource, contract) {
@@ -302,7 +387,6 @@ func TestNativeTimerCapacityIsDemandPagedAndAdmitsStandardLibraryStress(t *testi
 	policy := string(policyData)
 	for _, contract := range []string{
 		"coroNativeSourcePageCountV1 = 16",
-		"coroNativeTimerPageCountV1  = 64",
 		"not eager reservations",
 		"coroNativeFleetValidateOwnedDomainSourcesV1(domain)",
 		"coro.TimerRegistrationConfiguredCapacity(&domain.timers) == coro.TimerRegistrationPageCapacity",
@@ -321,7 +405,6 @@ func TestNativeTimerCapacityIsDemandPagedAndAdmitsStandardLibraryStress(t *testi
 		"coroNativeTimerCapacityV1 = coroRuntimeTimerCapacityV1",
 		"coroNativePollCapacityV1  = coroRuntimePollCapacityV1",
 		"coro.TimerRegistrationConfiguredCapacity(&coroProgramTimerTableV1State) != coro.TimerRegistrationPageCapacity",
-		"coroNativeTimerCapacityV1 != coroNativeTimerPageCountV1*coro.TimerRegistrationPageCapacity",
 	} {
 		if !strings.Contains(source, contract) {
 			t.Errorf("native timer capacity source lacks %q", contract)
@@ -338,7 +421,7 @@ func TestNativeTimerCapacityIsDemandPagedAndAdmitsStandardLibraryStress(t *testi
 	}
 	capacity := string(capacityData)
 	for _, contract := range []string{
-		"coroRuntimeTimerCapacityV1  = 64 * coro.TimerRegistrationPageCapacity",
+		"coroRuntimeTimerCapacityV1  = coro.TimerRegistrationMaximumCapacity",
 		"func ensureCoroTimerOperationCapacityV1(",
 		"page := new(coro.TimerRegistrationPage)",
 		"coro.AttachTimerRegistrationPage(timers, p, page, nil)",

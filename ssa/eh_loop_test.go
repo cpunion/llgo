@@ -26,11 +26,10 @@ import (
 	"testing"
 
 	"github.com/xgo-dev/llgo/ssa"
-	"github.com/xgo-dev/llgo/ssa/ssatest"
 )
 
 func TestDeferInLoopIR(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	callee := pkg.NewFunc("callee", ssa.NoArgsNoRet, ssa.InGo)
@@ -61,7 +60,7 @@ func TestDeferInLoopIR(t *testing.T) {
 }
 
 func TestDeferAtomicInLoopIR(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	int64PtrType := types.NewPointer(types.Typ[types.Int64])
@@ -95,7 +94,7 @@ func TestDeferAtomicInLoopIR(t *testing.T) {
 }
 
 func TestDeferInLoopMaterializesArgsBeforeFree(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	params := types.NewTuple(types.NewParam(token.NoPos, nil, "", types.Typ[types.Int64]))

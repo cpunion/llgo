@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v39"
+const PlanDigestSchema = "llgo.coro.plan-digest.v42"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -118,21 +118,22 @@ const (
 // affect coroutine lowering. TargetABI, TargetCPU, and TargetFeatures use the
 // empty string for the target's canonical default.
 type PlanDigestMetadata struct {
-	CoroABI             string `json:"coro_abi"`
-	SchedulerABI        string `json:"scheduler_abi"`
-	PanicABI            string `json:"panic_abi"`
-	FuncRepABI          string `json:"func_rep_abi"`
-	FrameRetentionABI   string `json:"frame_retention_abi,omitempty"`
-	LoweringFactsSchema string `json:"lowering_facts_schema"`
-	LoweringFactsDigest string `json:"lowering_facts_digest"`
-	ImportedCapsDigest  string `json:"imported_program_capabilities_digest,omitempty"`
-	TargetTriple        string `json:"target_triple"`
-	TargetCPU           string `json:"target_cpu"`
-	TargetFeatures      string `json:"target_features"`
-	TargetABI           string `json:"target_abi"`
-	PointerBits         int    `json:"pointer_bits"`
-	Endianness          string `json:"endianness"`
-	DataLayout          string `json:"data_layout"`
+	ProgramPredicates   ProgramPredicateRequirements `json:"program_predicates"`
+	CoroABI             string                       `json:"coro_abi"`
+	SchedulerABI        string                       `json:"scheduler_abi"`
+	PanicABI            string                       `json:"panic_abi"`
+	FuncRepABI          string                       `json:"func_rep_abi"`
+	FrameRetentionABI   string                       `json:"frame_retention_abi,omitempty"`
+	LoweringFactsSchema string                       `json:"lowering_facts_schema"`
+	LoweringFactsDigest string                       `json:"lowering_facts_digest"`
+	ImportedCapsDigest  string                       `json:"imported_program_capabilities_digest,omitempty"`
+	TargetTriple        string                       `json:"target_triple"`
+	TargetCPU           string                       `json:"target_cpu"`
+	TargetFeatures      string                       `json:"target_features"`
+	TargetABI           string                       `json:"target_abi"`
+	PointerBits         int                          `json:"pointer_bits"`
+	Endianness          string                       `json:"endianness"`
+	DataLayout          string                       `json:"data_layout"`
 }
 
 type planDigestDocument struct {
@@ -411,7 +412,7 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 				if call, ok := instruction.(ssa.CallInstruction); ok {
 					_, builtin := call.Common().Value.(*ssa.Builtin)
 					_, plannedBuiltin := p.callPlans[call]
-					if !builtin || plannedBuiltin {
+					if !builtin || plannedBuiltin || p.ElidesCall(call) {
 						if p.ElidesCall(call) {
 							if _, planned := p.callPlans[call]; planned {
 								return planDigestDocument{}, fmt.Errorf("coro: function %q block %d instruction %d is both elided and assigned a CallPlan", id, blockIndex, digestInstruction)
@@ -725,6 +726,9 @@ func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error)
 }
 
 func (m PlanDigestMetadata) validate() error {
+	if !m.ProgramPredicates.Valid() {
+		return fmt.Errorf("coro: plan digest contains invalid program predicates")
+	}
 	required := []struct {
 		name  string
 		value string

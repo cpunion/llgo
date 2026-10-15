@@ -43,7 +43,7 @@ const (
 	coroStaticCleanupDispatch
 	coroStaticCleanupIntrinsic
 	coroStaticCleanupBuiltin
-	coroStaticCleanupCgoWorker
+	coroStaticCleanupGeneratedCgo
 	coroStaticCleanupForeignWorker
 )
 
@@ -62,7 +62,7 @@ type coroStaticCleanupSitePlan struct {
 	structuredCoroutineOnly bool
 	intrinsic               int
 	builtin                 string
-	cgoWorker               *coroWorkerCgoCallShape
+	generatedCgo            *coroGeneratedCgoCallShape
 	foreignWorker           *coroWorkerForeignCallShape
 	arguments               []ssa.Value
 	tag                     uint32
@@ -255,7 +255,11 @@ func prepareCoroStaticCleanupPlan(
 		scanFunctions = coroExplicitCleanupFamily(fn)
 	}
 	infos := blocks.Infos(fn.Blocks)
-	dynamicCleanup := coroFunctionRequiresDynamicCleanup(fn)
+	var ir *coroProgramIR
+	if universe != nil {
+		ir = universe.coroProgramIR
+	}
+	dynamicCleanup := coroFunctionRequiresDynamicCleanup(fn, ir)
 	if !external && len(scanFunctions) != 1 {
 		for _, candidate := range scanFunctions[1:] {
 			if coroFunctionHasExplicitDeferStack(candidate) {
@@ -274,7 +278,7 @@ func prepareCoroStaticCleanupPlan(
 			return nil, fmt.Errorf("cleanup site function %q has no compilation plan", siteFunction.Name())
 		}
 		siteInfos := blocks.Infos(siteFunction.Blocks)
-		reachable := coroPhysicalConstantReachableBlocks(siteFunction)
+		reachable := ir.coroReachableBlocks(siteFunction)
 		for _, block := range siteFunction.Blocks {
 			if !reachable[block] {
 				continue
@@ -291,16 +295,16 @@ func prepareCoroStaticCleanupPlan(
 					if (instruction.DeferStack != nil || siteInfos[block.Index].InLoop) && dynamicTrigger == nil {
 						dynamicTrigger = instruction
 					}
-					var cgoWorkerShape coroWorkerCgoCallShape
-					var cgoWorker bool
+					var generatedCgoShape coroGeneratedCgoCallShape
+					var generatedCgo bool
 					var foreignWorkerShape coroWorkerForeignCallShape
 					var foreignWorker bool
 					var err error
 					if universe != nil {
-						cgoWorkerShape, cgoWorker, err = validateCoroWorkerCgoCall(
+						generatedCgoShape, generatedCgo, err = validateCoroGeneratedCgoCall(
 							whole, universe, instruction,
 						)
-						if err == nil && !cgoWorker {
+						if err == nil && !generatedCgo {
 							pointerSize := 0
 							if universe.prog != nil {
 								pointerSize = universe.prog.PointerSize()
@@ -322,7 +326,7 @@ func prepareCoroStaticCleanupPlan(
 					var intrinsicOpcode int
 					var intrinsic bool
 					if universe != nil {
-						if !cgoWorker && !foreignWorker {
+						if !generatedCgo && !foreignWorker {
 							intrinsicOpcode, intrinsic, err = universe.coroProgramIR.deferredIntrinsicCleanupRecipe(instruction)
 						}
 					}
@@ -333,14 +337,14 @@ func prepareCoroStaticCleanupPlan(
 					var targetPlan coro.FunctionPlan
 					kind := coroStaticCleanupIntrinsic
 					builtinName := ""
-					if cgoWorker {
-						target = cgoWorkerShape.target
+					if generatedCgo {
+						target = generatedCgoShape.target
 						var planned bool
 						targetPlan, planned = whole.FunctionPlan(target)
 						if !planned {
-							return nil, fmt.Errorf("defer in block %d: cgo worker target has no function plan", block.Index)
+							return nil, fmt.Errorf("defer in block %d: generated-cgo target has no function plan", block.Index)
 						}
-						kind = coroStaticCleanupCgoWorker
+						kind = coroStaticCleanupGeneratedCgo
 					} else if foreignWorker {
 						target = foreignWorkerShape.target
 						var planned bool
@@ -410,9 +414,9 @@ func prepareCoroStaticCleanupPlan(
 							return nil, fmt.Errorf("defer in block %d: captured cleanup target has neither a physical nor an elided environment", block.Index)
 						}
 					}
-					if cgoWorker {
-						shape := cgoWorkerShape
-						site.cgoWorker = &shape
+					if generatedCgo {
+						shape := generatedCgoShape
+						site.generatedCgo = &shape
 					}
 					if foreignWorker {
 						shape := foreignWorkerShape
@@ -522,7 +526,7 @@ func prepareCoroStaticCleanupPlan(
 		return nil, fmt.Errorf("static defer body has no canonical recover block")
 	}
 	implicitReturns := make(map[*ssa.Return]none)
-	reachable := coroPhysicalConstantReachableBlocks(fn)
+	reachable := ir.coroReachableBlocks(fn)
 	for block := range reachable {
 		if block == nil || block == fn.Recover {
 			continue
@@ -552,7 +556,7 @@ func prepareCoroStaticCleanupPlan(
 	if !explicitPanic {
 		return nil, fmt.Errorf("static coroutine defer cleanup requires the explicit-status panic ABI; legacy panic cannot guarantee cleanup")
 	}
-	terminalResultAllocations, err := coroStaticTerminalReconstructionAllocations(fn)
+	terminalResultAllocations, err := coroStaticTerminalReconstructionAllocations(fn, ir)
 	if err != nil {
 		return nil, err
 	}
@@ -712,13 +716,14 @@ func coroDeferRequiresDynamicCleanup(instruction *ssa.Defer) bool {
 // defer in the owner uses the same chain so registration order remains exact;
 // consequently every source defer receives its own AllocU/FreeDeferNode
 // physical placement in SitePlan.
-func coroFunctionRequiresDynamicCleanup(fn *ssa.Function) bool {
+func coroFunctionRequiresDynamicCleanup(fn *ssa.Function, programs ...*coroProgramIR) bool {
 	if fn == nil || len(fn.Blocks) == 0 {
 		return false
 	}
 	infos := blocks.Infos(fn.Blocks)
+	reachable := coroSelectedProgramIR(programs).coroReachableBlocks(fn)
 	for _, block := range fn.Blocks {
-		if block == nil || block.Index < 0 || block.Index >= len(infos) {
+		if block == nil || !reachable[block] || block.Index < 0 || block.Index >= len(infos) {
 			continue
 		}
 		for _, instruction := range block.Instrs {
@@ -861,8 +866,49 @@ func coroStaticRunDefersReconstructionAllocations(
 // eligible: moving a conditional or loop allocation to the coroutine prologue
 // would change its execution count. Stack/frame cells need no special
 // treatment because coroFrameAlloc already defines them in the physical ramp.
-func coroStaticTerminalReconstructionAllocations(fn *ssa.Function) ([]*ssa.Alloc, error) {
+func coroStaticTerminalReconstructionAllocations(fn *ssa.Function, programs ...*coroProgramIR) ([]*ssa.Alloc, error) {
+	ir := coroSelectedProgramIR(programs)
 	if fn == nil {
+		return nil, nil
+	}
+	// x/tools retains entry result cells, RunDefers, and Recover scaffolding for
+	// syntactic defers inside constant-dead branches (notably standard-library
+	// debug assertions). Those cells are ordinary source allocations unless one
+	// reachable defer is actually owned by this cleanup frame. Match the cleanup
+	// planner's explicit-stack family and reachability rules before relocating
+	// any allocation to the coroutine prologue.
+	stackOwner := coroExplicitDeferStackOwner(fn)
+	if stackOwner != nil && stackOwner != fn && coroFunctionHasExplicitDeferStack(fn) {
+		return nil, nil
+	}
+	scanFunctions := []*ssa.Function{fn}
+	if stackOwner == fn {
+		scanFunctions = coroExplicitCleanupFamily(fn)
+	}
+	hasReachableDefer := false
+	for _, siteFunction := range scanFunctions {
+		reachable := ir.coroReachableBlocks(siteFunction)
+		for _, block := range siteFunction.Blocks {
+			if !reachable[block] {
+				continue
+			}
+			for _, instruction := range block.Instrs {
+				deferred, ok := instruction.(*ssa.Defer)
+				if !ok || siteFunction != fn && deferred.DeferStack == nil {
+					continue
+				}
+				hasReachableDefer = true
+				break
+			}
+			if hasReachableDefer {
+				break
+			}
+		}
+		if hasReachableDefer {
+			break
+		}
+	}
+	if !hasReachableDefer {
 		return nil, nil
 	}
 	selected := make(map[*ssa.Alloc]struct{})
@@ -876,7 +922,11 @@ func coroStaticTerminalReconstructionAllocations(fn *ssa.Function) ([]*ssa.Alloc
 		selected[allocation] = struct{}{}
 		return nil
 	}
+	reachable := ir.coroReachableBlocks(fn)
 	for _, block := range fn.Blocks {
+		if !reachable[block] {
+			continue
+		}
 		for instructionIndex, instruction := range block.Instrs {
 			if _, ok := instruction.(*ssa.RunDefers); !ok {
 				continue
@@ -1324,7 +1374,11 @@ func validateCoroStaticCleanupNoUnwind(
 	if err != nil {
 		return "cannot build pure-SSA audit: " + err.Error()
 	}
-	if coroCFGSubsetHasCycle(target.Blocks, audit.reachableBlocks) {
+	var ir *coroProgramIR
+	if universe != nil {
+		ir = universe.coroProgramIR
+	}
+	if coroCFGSubsetHasCycle(target.Blocks, audit.reachableBlocks, ir.coroSuccessors) {
 		return "cyclic cleanup target requires preemption and cancellation masking"
 	}
 	for _, block := range target.Blocks {
@@ -1675,11 +1729,11 @@ func (s *coroStaticCleanupState) registerAt(
 	}
 	if site.plan.kind == coroStaticCleanupIntrinsic {
 		p.observeCoroDeferredIntrinsicCapture()
-	} else if site.plan.kind == coroStaticCleanupCgoWorker {
+	} else if site.plan.kind == coroStaticCleanupGeneratedCgo {
 		// The source defer captures an already-certified raw adapter call but
 		// does not execute it. Account for the frozen call elision here; the
 		// relocated cleanup observer separately owns the later worker helpers.
-		p.observeCoroDeferredCgoWorkerCapture()
+		p.observeCoroDeferredGeneratedCgoCapture()
 	}
 	if s.dynamic {
 		s.pushDynamicTo(p, b, site, dynamicHead, descriptor, closureContext, args, keepalives)
@@ -2178,16 +2232,16 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		default:
 			panic("coroutine deferred builtin lost its frozen operation recipe")
 		}
-	case coroStaticCleanupCgoWorker:
-		if site.plan.cgoWorker == nil {
-			panic("coroutine deferred cgo worker lost its frozen typed shape")
+	case coroStaticCleanupGeneratedCgo:
+		if site.plan.generatedCgo == nil {
+			panic("coroutine deferred generated-cgo call lost its frozen typed shape")
 		}
 		finishSite := func() {}
 		if !siteEmissionActive {
 			finishSite = s.beginRelocatedSiteEmission(p, site)
 		}
-		p.compileCoroWorkerCgoTransaction(
-			b, *site.plan.cgoWorker, args, site.keepalives,
+		p.compileCoroGeneratedCgoTransaction(
+			b, *site.plan.generatedCgo, args, site.keepalives,
 		)
 		finishSite()
 		return true

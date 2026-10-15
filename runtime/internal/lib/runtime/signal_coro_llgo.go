@@ -105,7 +105,9 @@ func ensureCoroSignalInitV1() {
 // application explicitly asks os/signal to intercept a fault signal.
 func signal_enable(sig uint32) {
 	ensureCoroSignalInitV1()
+	locked := cpuProfileSignalLock(sig)
 	coroSignalEnableNativeV1(sig)
+	cpuProfileSignalUnlock(locked)
 }
 
 // signal_disable restores the disposition which preceded signal_enable or
@@ -113,12 +115,16 @@ func signal_enable(sig uint32) {
 // generation/acknowledgement protocol used by signalWaitUntilIdle.
 func signal_disable(sig uint32) {
 	ensureCoroSignalInitV1()
+	locked := cpuProfileSignalLock(sig)
 	coroSignalDisableNativeV1(sig)
+	cpuProfileSignalUnlock(locked)
 }
 
 func signal_ignore(sig uint32) {
 	ensureCoroSignalInitV1()
+	locked := cpuProfileSignalLock(sig)
 	coroSignalIgnoreNativeV1(sig)
+	cpuProfileSignalUnlock(locked)
 }
 
 func signal_ignored(sig uint32) bool {

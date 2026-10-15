@@ -1119,6 +1119,57 @@ func TestCoroPointerUintptrAlignmentObservationIsScalarTerminal(t *testing.T) {
 	}
 }
 
+func TestCoroPointerUintptrNegatedComparisonIsScalarTerminal(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		result     string
+		expression string
+		wantSafe   bool
+	}{
+		{
+			name:       "comparison",
+			result:     "bool",
+			expression: "return scalar > -uintptr(pointer)",
+			wantSafe:   true,
+		},
+		{
+			name:       "returned negation",
+			result:     "uintptr",
+			expression: "return -uintptr(pointer)",
+		},
+		{
+			name:       "pointer reconstruction",
+			result:     "unsafe.Pointer",
+			expression: "return unsafe.Pointer(-uintptr(pointer))",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+import "unsafe"
+func Root(pointer unsafe.Pointer, scalar uintptr) `+test.result+` { `+test.expression+` }
+`)
+			root := ssaPkg.Func("Root")
+			var conversion *ssa.Convert
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					candidate, ok := instruction.(*ssa.Convert)
+					if ok && coroFrameRetentionPointerToUintptr(candidate) {
+						conversion = candidate
+					}
+				}
+			}
+			if conversion == nil {
+				t.Fatal("fixture has no pointer-to-uintptr conversion")
+			}
+			if got := coroPointerUintptrScalarTerminal(conversion); got != test.wantSafe {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, root)
+				t.Fatalf("negated-comparison scalar terminal = %t, want %t\n%s", got, test.wantSafe, dump.String())
+			}
+		})
+	}
+}
+
 func TestCoroPointerUintptrIntegerStoreIsScalarTerminal(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -1511,13 +1562,13 @@ func Root(slice []byte) unsafe.Pointer {
 `,
 		},
 		{
-			name: "string-header",
+			name: "mismatched-string-header",
 			source: `package foo
 import (
 	"reflect"
 	"unsafe"
 )
-func Root(value string) unsafe.Pointer {
+func Root(value []byte) unsafe.Pointer {
 	header := *(*reflect.StringHeader)(unsafe.Pointer(&value))
 	return unsafe.Pointer(header.Data)
 }

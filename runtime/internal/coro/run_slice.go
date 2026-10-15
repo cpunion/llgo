@@ -918,6 +918,9 @@ func ResumedExecutorRun(
 		p.servicePreemptBudget = 0
 		p.action = Action{}
 		activateWaitSetRecordUnchecked(p, g, wait)
+		if ExecutionDomainEnabled() && !parkExecutionDomainTask(g) {
+			return Action{}, false, false
+		}
 		next, ok = Action{Kind: ActionPark}, true
 	} else {
 		next, ok = Resumed(p, g, action)
@@ -1144,6 +1147,9 @@ func CommitExecutorRunDomainDestroy(driver *ExecutorDriver, g *G, receipt Action
 	g.destroyRoot = false
 	if panicking {
 		g.panicUnwind = false
+	}
+	if ExecutionDomainEnabled() && !retireExecutionDomainTask(g) {
+		return Action{}, false
 	}
 	g.state = GDead
 	g.runP = nil

@@ -80,9 +80,10 @@ func (u *EmissionUniverse) CoroErasedFunctionInterface(box *ssa.MakeInterface) (
 }
 
 // compileCoroPythonOperation lowers one source-level Python operation selected
-// by ProgramIR. The high-level operation stays synchronous in Go source; every
-// concrete C-API call it expands into is intercepted by resolveCoroPythonCall
-// and executed in a typed same-M foreign episode.
+// by ProgramIR. The high-level operation stays synchronous in Go source; effect
+// inference gives every containing helper a structured coroutine task, and
+// every concrete C-API call it expands into is intercepted by
+// resolveCoroPythonCall and executed in a typed same-M foreign episode.
 func (p *context) compileCoroPythonOperation(
 	b llssa.Builder,
 	call *ssa.Call,
@@ -90,9 +91,8 @@ func (p *context) compileCoroPythonOperation(
 	opcode int,
 ) llssa.Expr {
 	if p == nil || call == nil || call.Common() == nil ||
-		!p.hasStructuredOutcomePhysicalBody() || p.goFn == nil ||
-		!isCoroProgramManagedEntry(p.goFn) {
-		panic("Python operation requires one physical program-root coroutine call")
+		!p.hasStructuredOutcomePhysicalBody() || p.goFn == nil {
+		panic("Python operation requires one structured physical coroutine call")
 	}
 	if target != nil {
 		if opcode != 0 {
@@ -135,13 +135,13 @@ func (p *context) resolveCoroPythonCall(
 	if p == nil || p.inCoroPythonThunk || !p.hasStructuredOutcomePhysicalBody() {
 		return llssa.Expr{}, false
 	}
-	if p.goFn == nil || !isCoroProgramManagedEntry(p.goFn) {
+	if p.goFn == nil {
 		owner := "<nil>"
 		if p.goFn != nil {
 			owner = p.goFn.Name()
 		}
 		panic(fmt.Errorf(
-			"Python C-API call in %q has no compiler-owned program-root owner realm",
+			"Python C-API call in %q has no structured coroutine owner",
 			owner,
 		))
 	}

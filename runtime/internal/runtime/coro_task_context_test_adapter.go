@@ -24,18 +24,22 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
-// The isolated scheduler/fleet adapter tests do not link the typed hchan
-// implementation. A direct-channel step would therefore be an invalid fixture
-// input; keep the reducer's production dependency explicit and fail closed if
-// a test accidentally manufactures one.
-func coroMaterializeDirectChannelCompletionV1(*coro.DirectChannelCompletion) bool {
-	return false
+// The isolated scheduler/fleet adapter tests use public core park storage and
+// no typed payload. Keep the real snapshot/commit state machine; the separate
+// hchan source island verifies typed cleanup and physical payload delivery.
+func coroMaterializeDirectChannelCompletionV1(completion *coro.DirectChannelCompletion) bool {
+	context, small, _, ok := coro.DirectChannelCompletionSnapshot(completion)
+	return ok && context != nil && coro.CommitDirectChannelCompletion(completion, small)
 }
 
 // Named-source adapters exercise the target-neutral scheduler without loading
 // runtime2.go and platform getg implementations into the host Go runtime.
 // Linked runtime islands separately verify real logical runtime-G ownership.
 type coroRuntimeContext struct{}
+
+// The host scheduler island does not model terminal presentation. Real child
+// panic reporting is exercised by test/go's single-P and peer-P executables.
+func coroReportTaskPanicV1(*coro.G) { coroRuntimeAbort("unhandled coroutine task panic") }
 
 func coroPanicBoundaryCapability(*coro.G) bool { return false }
 

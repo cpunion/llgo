@@ -58,6 +58,7 @@ type coroWorkerForeignCallShape struct {
 	reentry          coro.ReentryClass
 	nilGuard         bool
 	variadic         bool
+	interfaceCall    *coroWorkerForeignInterfaceCallShape
 }
 
 func coroWorkerTypeParamLen(list *types.TypeParamList) int {
@@ -125,13 +126,13 @@ func coroWorkerResultWordType(typ types.Type, pointerSize int) bool {
 
 // coroWorkerForeignRecordValueType accepts values whose exact typed
 // representation can live in the compiler-owned call record until the worker
-// publishes completion. Ordinary Go descriptors (slice, bare string,
-// interface, map, chan, or Go function values) are rejected: copying their
-// bits into a C call would neither be a valid C ABI nor establish their
-// managed lifetime. An explicit string type alias in an exact C declaration is
-// different: bindings use that source form for two-word by-value C++ views
-// such as std::string_view. The typed record preserves that already-supported
-// direct-call ABI and stays live through the worker acknowledgement.
+// publishes completion. A string is admitted because LLGo's C ABI already
+// transports it as the exact two-word value used by an ordinary direct call;
+// placing that value in the typed coroutine-frame record additionally keeps
+// its backing storage live through the worker acknowledgement. Other Go
+// descriptors (slice, interface, map, chan, or Go function values) remain
+// rejected: copying their bits into a C call would neither define a supported
+// C ABI nor establish all of their managed lifetime and mutation rules.
 //
 // Arguments may contain pointers because the record itself remains a typed,
 // traced coroutine-frame object and the ordinary call-site retention proof
@@ -149,7 +150,6 @@ func coroWorkerForeignRecordValueType(
 	if universe == nil || typ == nil {
 		return false
 	}
-	sourceType := typ
 	typ = types.Unalias(typ)
 	if visiting[typ] {
 		// Recursive C values are necessarily recursive through a pointer, which
@@ -162,8 +162,7 @@ func coroWorkerForeignRecordValueType(
 			return false
 		}
 		if underlying.Kind() == types.String {
-			_, explicitForeignView := sourceType.(*types.Alias)
-			return argument && explicitForeignView
+			return true
 		}
 		if underlying.Kind() == types.UnsafePointer {
 			return argument
@@ -259,6 +258,7 @@ func coroWorkerForeignStaticSignaturesCompatible(
 	plan *coro.SSAPlan,
 	call ssa.CallInstruction,
 	callSignature, targetSignature *types.Signature,
+	allowPhysicalPointerFacade bool,
 	allowRawCallbackFacade bool,
 ) bool {
 	if call == nil || call.Common() == nil || callSignature == nil || targetSignature == nil ||
@@ -273,6 +273,10 @@ func coroWorkerForeignStaticSignaturesCompatible(
 		sourceType := callSignature.Params().At(index).Type()
 		targetType := targetSignature.Params().At(index).Type()
 		if types.Identical(sourceType, targetType) {
+			continue
+		}
+		if allowPhysicalPointerFacade &&
+			coroWorkerForeignOpaquePointerFacadeCompatible(sourceType, targetType) {
 			continue
 		}
 		if !allowRawCallbackFacade {
@@ -293,6 +297,34 @@ func coroWorkerForeignStaticSignaturesCompatible(
 		}
 	}
 	return true
+}
+
+// coroWorkerForeignOpaquePointerFacadeCompatible admits the receiver-first
+// view of one already-canonicalized C symbol. A C-linked method may expose a
+// named pointer receiver while a receiver-free declaration of the same symbol
+// exposes another typed pointer. The emission universe has already proved the
+// complete C callable ABI before aliasing those declarations; LLVM opaque
+// pointers erase only this pointee identity. Do not extend this rule to scalar
+// or aggregate lookalikes: those require an explicit conversion recipe.
+func coroWorkerForeignOpaquePointerFacadeCompatible(
+	source, target types.Type,
+) bool {
+	isPointerWord := func(typ types.Type) bool {
+		if typ == nil {
+			return false
+		}
+		switch typ := types.Unalias(typ).Underlying().(type) {
+		case *types.Pointer:
+			return true
+		case *types.Basic:
+			return typ.Kind() == types.UnsafePointer
+		default:
+			return false
+		}
+	}
+	// Both accepted categories always lower to the same one-word opaque
+	// pointer. Unlike function values, neither needs callable classification.
+	return isPointerWord(source) && isPointerWord(target)
 }
 
 func coroWorkerForeignRecordType(
@@ -887,12 +919,6 @@ func validateCoroWorkerForeignCallWithAuthority(
 		return shape, true, fmt.Errorf("target is not one exact frontend C declaration")
 	}
 	shape.background = background
-	if isCoroPythonBindingDeclaration(target) && !isCoroProgramManagedEntry(call.Parent()) {
-		return shape, true, fmt.Errorf(
-			"Python binding call in %q has no compiler-owned program-root owner realm",
-			call.Parent().Name(),
-		)
-	}
 	authorization, authorizationErr := authority.authorize(target)
 	if authorizationErr != nil {
 		return shape, true, authorizationErr
@@ -925,8 +951,10 @@ func validateCoroWorkerForeignCallWithAuthority(
 	}
 	callSignature, ok := ownerContext.patchType(common.Signature()).(*types.Signature)
 	callSignature = coroPhysicalNormalizeSourceSignature(callSignature)
+	physicalPointerFacade := raw != target
 	if !ok || !coroWorkerForeignStaticSignaturesCompatible(
-		plan, call, callSignature, signature, mode == coroForeignCallModeWorker,
+		plan, call, callSignature, signature,
+		physicalPointerFacade, mode == coroForeignCallModeWorker,
 	) {
 		return shape, true, fmt.Errorf("call-site and target effective C signatures differ")
 	}
@@ -954,7 +982,9 @@ func validateCoroWorkerForeignCallWithAuthority(
 		rawCallback, rawCallbackCompatible := coroWorkerForeignRawCallbackCompatibility(
 			plan, argument, argumentType, parameterType,
 		)
-		if !types.Identical(argumentType, parameterType) &&
+		pointerFacadeCompatible := physicalPointerFacade &&
+			coroWorkerForeignOpaquePointerFacadeCompatible(argumentType, parameterType)
+		if !types.Identical(argumentType, parameterType) && !pointerFacadeCompatible &&
 			(mode != coroForeignCallModeWorker || !rawCallbackCompatible) {
 			return shape, true, fmt.Errorf("argument %d type does not match the effective C parameter", index)
 		}
@@ -1206,6 +1236,9 @@ func (p *context) coroWorkerForeignThunk(shape coroWorkerForeignCallShape, targe
 func (p *context) compileCoroWorkerForeignCall(
 	b llssa.Builder, call *ssa.Call, shape coroWorkerForeignCallShape,
 ) llssa.Expr {
+	if shape.interfaceCall != nil {
+		return p.compileCoroWorkerForeignInterfaceCall(b, call, shape)
+	}
 	dynamic := shape.calleeType != nil
 	if p == nil || !p.hasCoroPhysicalBody() || call == nil ||
 		shape.signature == nil || shape.record == nil ||

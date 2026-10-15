@@ -1,4 +1,4 @@
-//go:build baremetal && go1.23
+//go:build baremetal && go1.23 && (!llgo || !llgo_coro || coro_runtime_adapter_test)
 
 package runtime
 

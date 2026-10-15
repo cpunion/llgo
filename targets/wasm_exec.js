@@ -31,6 +31,9 @@
 	if (!global.fs && global.require) {
 		global.fs = require("node:fs");
 	}
+	if (!global.path && global.require) {
+		global.path = require("node:path");
+	}
 
 	const enosys = () => {
 		const err = new Error("not implemented");
@@ -133,6 +136,12 @@
 	let reinterpretBuf = new DataView(new ArrayBuffer(8));
 	var logLine = [];
 	const wasmExit = {}; // thrown to exit via proc_exit (not an error)
+	const coroFSMethods = new Set([
+		"open", "close", "read", "write", "fstat", "stat", "lstat", "readdir",
+		"mkdir", "unlink", "rmdir", "chmod", "fchmod", "chown", "fchown",
+		"lchown", "utimes", "rename", "truncate", "ftruncate", "readlink",
+		"link", "symlink", "fsync",
+	]);
 
 	global.Go = class {
 		constructor() {
@@ -299,6 +308,8 @@
 				}
 				return args;
 			}
+			this._coroJSArgs = loadLLGoJSArgs;
+			this._coroJSHandle = llgoJSHandle;
 
 			const timeOrigin = Date.now() - performance.now();
 			this.importObject = {
@@ -788,6 +799,7 @@
 				operationPtr: scratch + 64,
 				schedule: null,
 				alarm: null,
+				operations: new Map(),
 				disposed: false,
 			};
 			try {
@@ -824,6 +836,7 @@
 			}
 			this._cancelCoroHostActions();
 			state.disposed = true;
+			state.operations.clear();
 			state.api.free(state.scratch);
 		}
 
@@ -841,6 +854,10 @@
 			if (this.exited) {
 				return;
 			}
+			if (this._coroHost && this._coroHost.operations.size !== 0) {
+				this._failCoroHost(new Error("LLGo completed before filesystem operations physically joined"));
+				return;
+			}
 			this.exited = true;
 			this.exitCode = 0;
 			this._disposeCoroHost();
@@ -848,9 +865,13 @@
 		}
 
 		_scheduleCoroTurn(record) {
-			const enqueue = typeof queueMicrotask === "function"
-				? queueMicrotask
-				: (callback) => Promise.resolve().then(callback);
+			// A runnable Go loop can request another bounded slice forever.
+			// Chaining microtasks here would starve Node I/O and browser timers,
+			// including the callbacks needed to unblock another goroutine.
+			// Completion publication remains a microtask; executor turns must
+			// yield to the host task queue using the same exact schedule record.
+			const enqueue = typeof setImmediate === "function"
+				? setImmediate : (callback) => setTimeout(callback, 0);
 			enqueue(() => {
 				const state = this._coroHost;
 				if (!state || this.exited || !record.active || state.schedule !== record) {
@@ -935,6 +956,152 @@
 			}
 		}
 
+		_completeCoroFSCall(record, error, value) {
+			// Node normally completes asynchronously, but browser shims and test
+			// hosts may call back inline. Always leave the submitting Go/host turn
+			// before publishing; only the first physical completion owns results.
+			if (record.joined) return;
+			record.joined = true;
+			const enqueue = typeof queueMicrotask === "function"
+				? queueMicrotask : (callback) => Promise.resolve().then(callback);
+			enqueue(() => {
+				const state = record.state;
+				const alive = () => !state.disposed && !this.exited && this._coroHost === state;
+				if (record.rawFD && error == null && (!Number.isInteger(value) || value < 0 || value > 0x7fffffff)) {
+					this._failCoroHost(new Error("LLGo raw filesystem open returned an invalid descriptor"));
+					return;
+				}
+				let ownsFD = record.name === "open" && error == null;
+				const closeUnclaimed = (done) => {
+					// Physical close owns the release from here. Even a failed close
+					// must not be retried against a possibly reused descriptor.
+					ownsFD = false;
+					let closed = false;
+					const close = (failure) => {
+						if (closed) return;
+						closed = true;
+						enqueue(() => {
+							if (failure) {
+								if (alive()) this._failCoroHost(failure);
+								else console.error("LLGo unclaimed file cleanup failed", failure);
+								return;
+							}
+							done();
+						});
+					};
+					try { global.fs.close(value, close); } catch (failure) { close(failure); }
+				};
+				const publish = () => {
+					if (!alive()) return;
+					try {
+						if (state.operations.get(record.key) !== record) {
+							throw new Error("LLGo filesystem completion lost its exact obligation");
+						}
+						// A canceled source consumes only the physical join, before
+						// inspecting payload. Do not allocate unreachable JS handles.
+						// The pre-registered Go defer owns this borrowed output after
+						// publication, even if a later cancellation discards all scalar
+						// results. Re-read memory after growth; never keep a DataView
+						// across an asynchronous callback or touch guest memory after
+						// physical Post. FD zero is a valid owned resource.
+						if (record.rawFD && !record.canceled && error == null) {
+							const memory = state.api.memory.buffer;
+							if (record.output + 4 > memory.byteLength ||
+								new DataView(memory).getInt32(record.output, true) !== -1) {
+								throw new Error("LLGo borrowed open lost its empty output slot");
+							}
+							new DataView(memory).setInt32(record.output, value, true);
+							ownsFD = false;
+						}
+						const result = record.rawFD
+							? 0
+							: (record.canceled ? 2 : this._coroJSHandle(value));
+						const failure = record.canceled ? 4 : this._coroJSHandle(error ?? null);
+						const failed = record.rawFD && (record.canceled || error != null) ? 1 : 0;
+						if (state.api.__llgo_coro_host_complete_operation_v1(
+							record.slot, record.generation, 0, 3,
+							result, 0, failure, 0, failed, 0,
+						) !== 1) { // WorkerOperationPosted; duplicate/closed/stale are not acknowledgements.
+							throw new Error("LLGo filesystem completion was not acknowledged");
+						}
+						state.operations.delete(record.key);
+						// Publication can enqueue a schedule action. Never drive Go
+						// recursively from an FS callback; the normal host task owns it.
+						this._drainCoroHost();
+					} catch (failure) {
+						if (record.rawFD && ownsFD) {
+							// Pre-store validation failed: Go never owned the new FD.
+							// Join its asynchronous close before rejecting the instance.
+							closeUnclaimed(() => this._failCoroHost(failure));
+						} else {
+							// After the store, even a rejected/trapping Post is fatal,
+							// not a transfer back from the Go guard. Do not double-close.
+							this._failCoroHost(failure);
+						}
+					}
+				};
+				if (record.name === "open" && error == null && (record.canceled || !alive())) {
+					// The canceled caller cannot own a newly opened descriptor.
+					// Release it physically before acknowledging the canceled source.
+					closeUnclaimed(publish);
+				} else {
+					publish();
+				}
+			});
+		}
+
+		_takeCoroOperation(kind, words) {
+			const state = this._coroHost;
+			const [, slot, generation, opcode, argc, reserved] = words;
+			const rawFD = opcode === 0x00040002;
+			if (words.length !== 24 || reserved !== 0 || slot === 0 || generation === 0 ||
+				(opcode !== 0x00040001 && !rawFD) || argc !== (rawFD ? 5 : 4) || (kind !== 1 && kind !== 2)) {
+				throw new Error(`unsupported LLGo JavaScript host operation opcode ${opcode} (kind ${kind})`);
+			}
+			for (let index = 6; index < words.length; index++) {
+				if ((index % 2 !== 0 || index >= (rawFD ? 16 : 14)) && words[index] !== 0) {
+					throw new Error("malformed LLGo filesystem operation arguments");
+				}
+			}
+			const key = `${slot}:${generation}`;
+			if (kind === 2) {
+				const record = state.operations.get(key);
+				if (!record || record.canceled || !words.slice(3).every((word, index) => word === record.words[index + 3])) {
+					throw new Error("LLGo filesystem cancellation has no exact obligation");
+				}
+				record.canceled = true;
+				return;
+			}
+			if (state.operations.has(key)) throw new Error("duplicate LLGo filesystem obligation");
+			const [namePtr, , nameLength, , argsPtr, , count] = words.slice(6);
+			const memory = state.api.memory.buffer;
+			if (namePtr === 0 || nameLength === 0 || namePtr + nameLength > memory.byteLength) {
+				throw new Error("invalid LLGo filesystem method name range");
+			}
+			const name = decoder.decode(new Uint8Array(memory, namePtr, nameLength));
+			if (rawFD && name !== "open") {
+				throw new Error("LLGo raw descriptor operation must name open");
+			}
+			const output = rawFD ? words[14] : 0;
+			if (rawFD && (output === 0 || output % 4 !== 0 || output + 4 > memory.byteLength ||
+				new DataView(memory).getInt32(output, true) !== -1)) {
+				throw new Error("LLGo borrowed open requires an empty aligned output slot");
+			}
+			const args = this._coroJSArgs(argsPtr, count);
+			const record = { state, key, slot, generation, words: words.slice(), name, rawFD, output, canceled: false, joined: false };
+			state.operations.set(key, record);
+			const complete = (error, value) => this._completeCoroFSCall(record, error, value);
+			try {
+				if (!coroFSMethods.has(name) || typeof global.fs[name] !== "function") {
+					complete(enosys());
+				} else {
+					global.fs[name](...args, complete);
+				}
+			} catch (error) {
+				complete(error);
+			}
+		}
+
 		_drainCoroHost() {
 			const state = this._coroHost;
 			for (;;) {
@@ -949,7 +1116,7 @@
 					}
 					break;
 				}
-				throw new Error(`unsupported LLGo JavaScript host operation opcode ${words[3]} (kind ${kind})`);
+				this._takeCoroOperation(kind, words);
 			}
 
 			for (;;) {
@@ -966,7 +1133,7 @@
 				}
 				this._takeCoroAction(kind, words);
 			}
-			return state.schedule !== null || state.alarm !== null;
+			return state.schedule !== null || state.alarm !== null || state.operations.size !== 0;
 		}
 
 		_validateCoroRunResult(status, result) {

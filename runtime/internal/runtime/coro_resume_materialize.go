@@ -59,7 +59,12 @@ const (
 	coroKeyedParkInvalidV2 coroKeyedParkKindV2 = iota
 	coroKeyedParkSemaphoreV2
 	coroKeyedParkNotifyV2
+	coroKeyedParkDomainV1
 )
+
+func validCoroKeyedParkKindV2(kind coroKeyedParkKindV2) bool {
+	return kind >= coroKeyedParkSemaphoreV2 && kind <= coroKeyedParkDomainV1
+}
 
 const (
 	coroKeyedParkPreparedMagicV2     uint32 = 0x4b505250 // KPRP
@@ -140,7 +145,7 @@ var (
 
 func validPreparedCoroKeyedParkV2(state *CoroKeyedParkV2) bool {
 	return state != nil && state.magic == coroKeyedParkPreparedMagicV2 &&
-		(state.kind == coroKeyedParkSemaphoreV2 || state.kind == coroKeyedParkNotifyV2) &&
+		validCoroKeyedParkKindV2(state.kind) &&
 		state.key != 0 && state.wait == (coro.WaitSetRecord{}) &&
 		state.packet == (coro.ResumePacket{}) && state.cleanup == (coro.ResumeCleanupPlan{}) &&
 		state.ticket == (coro.ParkTicket{}) && state.operation == (coro.OperationID{}) &&
@@ -149,7 +154,7 @@ func validPreparedCoroKeyedParkV2(state *CoroKeyedParkV2) bool {
 
 func validActiveCoroKeyedParkV2(state *CoroKeyedParkV2) bool {
 	return state != nil && state.magic == coroKeyedParkActiveMagicV2 &&
-		(state.kind == coroKeyedParkSemaphoreV2 || state.kind == coroKeyedParkNotifyV2) &&
+		validCoroKeyedParkKindV2(state.kind) &&
 		state.key != 0 && state.ticket.Valid() && state.operation.Valid() &&
 		state.operation.Source() == coro.OperationSourceManual &&
 		state.registry.Slot != 0 && state.registry.Generation != 0 &&
@@ -379,8 +384,14 @@ func coroMaterializePrivateResumeCleanupStepV1(step coro.ResumeCleanupStep) bool
 		state.executor = coro.ExecutorHandle{}
 	case coro.ResumeCleanupKeyedPark:
 		state := (*CoroKeyedParkV2)(step.Context)
-		if !validActiveCoroKeyedParkV2(state) ||
-			!coroProgramKeyedRegistryV2State.retire(state.registry, state.operation) {
+		if !validActiveCoroKeyedParkV2(state) {
+			return false
+		}
+		if coro.ExecutionDomainEnabled() && state.kind == coroKeyedParkDomainV1 &&
+			step.Outcome != coro.ParkOutcomeCompleted && !coroCancelDomainParkV1(unsafe.Pointer(state)) {
+			return false
+		}
+		if !coroProgramKeyedRegistryV2State.retire(state.registry, state.operation) {
 			return false
 		}
 		state.registry = coroKeyedRegistryHandleV2{}

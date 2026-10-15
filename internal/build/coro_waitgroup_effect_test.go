@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/xgo-dev/llgo/internal/coro"
-	"golang.org/x/tools/go/ssa"
 )
 
-func TestCoroWaitGroupEffectDiagnostic(t *testing.T) {
+// Exercise the production source, managed-local-export borrow proof and
+// emitter together. Both ordinary and durable waits share one prepare/park
+// span; choosing a prepare entry in separate CFG branches loses that proof.
+func TestCoroWaitGroupParkStateFrameRetention(t *testing.T) {
 	t.Setenv(llgoBuildCache, "off")
 	source := filepath.Join(t.TempDir(), "main.go")
 	if err := os.WriteFile(source, []byte(`package main
@@ -31,42 +31,34 @@ func main() {
 
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
-	seen := make(map[string]bool)
-	conf.CoroPlanObserver = func(_ *ssa.Package, plan *coro.SSAPlan) {
-		for _, function := range plan.Functions() {
-			fn := function.Function
-			if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
-				continue
-			}
-			path := fn.Pkg.Pkg.Path()
-			name := fn.Name()
-			if !strings.Contains(path, "goplus/llgo/runtime/internal/") && path != "sync" {
-				continue
-			}
-			switch name {
-			case "Add", "Done", "semaRelease", "sync_runtime_Semrelease",
-				"llgoCoroSemaphoreReleaseOrAbortV2",
-				"__llgo_coro_sema_release_or_abort_v2",
-				"coroKeyedPostClaimedExternalV2",
-				"coroTargetPostKeyedOperationV2",
-				"coroNativeFleetFinishExecutorRequestV1",
-				"coroNativeMActivateDeferredReplacementV1",
-				"coroNativeMRequestPhysicalOwnerV1",
-				"coroNativeMStartPhysicalOwnerV1",
-				"nativePipeWrite",
-				"nativeCDoorbellWrite",
-				"RequestReuseOwner",
-				"TryReuseOwner",
-				"CreateOwner":
-				key := path + "\x00" + fn.String()
-				if !seen[key] {
-					seen[key] = true
-					t.Logf("%s %s: %+v", path, fn.String(), function.Plan)
-				}
-			}
+	var body string
+	conf.ModuleHook = func(pkg Package) {
+		if pkg.LPkg == nil {
+			return
+		}
+		function := pkg.LPkg.Module().NamedFunction("runtime.semaAcquireWaitGroup$coro")
+		if !function.IsNil() && function.BasicBlocksCount() != 0 {
+			body = function.String()
 		}
 	}
-	if _, err := Do([]string{"file=" + source}, conf); err != nil {
+	packages, err := Do([]string{"file=" + source}, conf)
+	if err != nil {
 		t.Fatalf("build WaitGroup fixture: %v", err)
+	}
+	if len(packages) != 1 || packages[0].LPkg == nil {
+		t.Fatal("production pipeline did not return its program")
+	}
+	defer packages[0].LPkg.Prog.Dispose()
+	if !strings.Contains(body, "alloca %runtime.llgoCoroSemaphoreParkV2") || strings.Contains(body, "AllocZ") {
+		t.Fatalf("production semaphore state is not coroutine-frame-owned:\n%s", body)
+	}
+	for _, call := range []string{
+		"call void @\"" + coroSemaphorePrepareOrAbortSymbolV3 + "$outcome\"(",
+		"call void @" + coroKeyedParkSymbolV2 + "(",
+		"call i32 @" + coroKeyedResumeSymbolV2 + "(",
+	} {
+		if strings.Count(body, call) != 1 {
+			t.Errorf("semaphore body must contain exactly one %s call:\n%s", call, body)
+		}
 	}
 }

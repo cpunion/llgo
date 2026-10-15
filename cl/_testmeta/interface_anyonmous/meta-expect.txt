@@ -12,7 +12,7 @@ __llgo$generated$promoted$M$llgo$promoted$v1$bd734c651f9c74c2a29883b38e325f9c96b
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.00cf932377bad7fc21583f8a912e9b39
+    __llgo_coro_frame_descriptor_v1.39274f6403764e460cf0ab2a0b38ab83
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -33,7 +33,7 @@ __llgo$generated$promoted$N$llgo$promoted$v1$d53c6835ec4e4028ab055149a94770a5d74
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.b21a0cdc86e7c7b7d6e92dda2a0ff347
+    __llgo_coro_frame_descriptor_v1.579833081f6791118f82a025a6e856da
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -84,14 +84,14 @@ __llgo_coro_method_raw_trap_v1.9cc5684865baeb9e546778e56ed803a8:
     llvm.trap
 __llgo_coro_method_raw_trap_v1.d7dda17d2ac3b48760c198622f412d23:
     llvm.trap
-__llgo_coro_root_factory_descriptor_v1.bfa1fe7969171674de42ab91ef1f8bf7:
-    __llgo_coro_root_factory_v1.bfa1fe7969171674de42ab91ef1f8bf7
-__llgo_coro_root_factory_v1.bfa1fe7969171674de42ab91ef1f8bf7:
+__llgo_coro_root_factory_descriptor_v1.c7e68025230baa39f65b06591683dc12:
+    __llgo_coro_root_factory_v1.c7e68025230baa39f65b06591683dc12
+__llgo_coro_root_factory_v1.c7e68025230baa39f65b06591683dc12:
     main.main$coro
-__llgo_coro_root_package_v1.b758097b7a19aa2377e94facd295b1c2:
-    __llgo_coro_root_package_v1.b758097b7a19aa2377e94facd295b1c2.entries
-__llgo_coro_root_package_v1.b758097b7a19aa2377e94facd295b1c2.entries:
-    __llgo_coro_root_factory_descriptor_v1.bfa1fe7969171674de42ab91ef1f8bf7
+__llgo_coro_root_package_v1.994dd4d2615dbe670a11221670f370d3:
+    __llgo_coro_root_package_v1.994dd4d2615dbe670a11221670f370d3.entries
+__llgo_coro_root_package_v1.994dd4d2615dbe670a11221670f370d3.entries:
+    __llgo_coro_root_factory_descriptor_v1.c7e68025230baa39f65b06591683dc12
 _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo:
     _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo$imethods
     github.com/xgo-dev/llgo/runtime/internal/runtime.interequal
@@ -108,8 +108,8 @@ _llgo_main.T:
 llvm.compiler.used:
     __llgo_coro_library_effect_v13.53f759ed056295fdc5edc780b6e64f2d
 llvm.used:
-    __llgo_coro_root_factory_descriptor_v1.bfa1fe7969171674de42ab91ef1f8bf7
-    __llgo_coro_root_package_v1.b758097b7a19aa2377e94facd295b1c2
+    __llgo_coro_root_factory_descriptor_v1.c7e68025230baa39f65b06591683dc12
+    __llgo_coro_root_package_v1.994dd4d2615dbe670a11221670f370d3
 main.init:
     main.init$guard
 main.main$coro:
@@ -119,7 +119,7 @@ main.main$coro:
     __llgo_coro_await_prepare_inline_v4
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.bfa1fe7969171674de42ab91ef1f8bf7
+    __llgo_coro_frame_descriptor_v1.c7e68025230baa39f65b06591683dc12
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -149,7 +149,7 @@ main.use$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
-    __llgo_coro_frame_descriptor_v1.aeba7bf9776d35ce90955b9a7dc9dd4c
+    __llgo_coro_frame_descriptor_v1.28dc98627d5960fdbfc253bc8d2e6998
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1

@@ -17,8 +17,8 @@
 #include <stdio.h>
 
 /*
- * The logical-panic reporter runs only after the command scheduler has
- * returned and released ownership. Keeping this one physical leaf distinct
+ * The logical-panic reporter runs after committing an unhandled task panic
+ * and never resumes managed execution. Keeping this physical leaf distinct
  * from ordinary fputc lets the compiler prove that all of its Go occurrences
  * belong to the raw no-return reporter without assigning fputc a global
  * non-blocking or synchronous contract.

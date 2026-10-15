@@ -1,11 +1,11 @@
 module github.com/xgo-dev/llgo
 
-go 1.25.0
+go 1.27.0
 
 require (
 	github.com/goplus/cobra v1.9.12 //xgo:class
 	github.com/goplus/gogen v1.23.5
-	github.com/goplus/lib v0.3.1
+	github.com/goplus/lib v0.5.0
 	github.com/goplus/mod v0.22.0
 	github.com/mattn/go-tty v0.0.8
 	github.com/qiniu/x v1.18.3
@@ -30,3 +30,6 @@ replace github.com/xgo-dev/llgo/runtime => ./runtime
 replace github.com/xgo-dev/llvm => github.com/cpunion/llvm v0.9.4-0.20260814091229-d916b8fd9c7e
 
 replace github.com/goplus/lib => github.com/cpunion/lib v0.0.0-20260827173821-b993779acb60
+
+// Go 1.27 method wrappers, explicit receiver dereferences, and rangefunc goto fixes.
+replace golang.org/x/tools => github.com/cpunion/tools v0.48.1-0.20261015201615-15d3318a86e1

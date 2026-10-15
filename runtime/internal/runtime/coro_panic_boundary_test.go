@@ -89,6 +89,7 @@ func newCoroPanicBoundaryTestFrame(t *testing.T) (*coro.G, *coroPanicBoundaryTes
 
 func resetCoroPanicBoundaryTestG() {
 	coroPanicBoundaryTestG = g{}
+	coroPanicBoundaryTestG.m = &m{curg: &coroPanicBoundaryTestG}
 	coroPanicBoundaryTestSignalAdmitted = true
 	coroPanicBoundaryTestSignalDepth = 0
 }
@@ -104,7 +105,8 @@ func TestCoroPanicBoundaryNormalAndNestedPop(t *testing.T) {
 		!coroPanicBoundaryPush(task, frame.handle, inner, unsafe.Pointer(envInner)) {
 		t.Fatal("push nested panic boundaries")
 	}
-	if inner.Link != outer || outer.Link != base || getg().defer_ != inner {
+	if inner.Link != outer || outer.Link != nil || getg().m.signalFaultBoundary != inner ||
+		getg().defer_ != base || outer.Args != unsafe.Pointer(base) || inner.Args != unsafe.Pointer(base) {
 		t.Fatal("nested panic-boundary chain is malformed")
 	}
 	if coroPanicBoundaryTestSignalDepth != 2 {
@@ -116,7 +118,7 @@ func TestCoroPanicBoundaryNormalAndNestedPop(t *testing.T) {
 	if got := coroPanicBoundaryPopStatus(task, frame.handle, inner); got != coroPanicBoundaryPopOK {
 		t.Fatalf("inner pop status = %d, want ok", got)
 	}
-	if *inner != (Defer{}) || getg().defer_ != outer {
+	if *inner != (Defer{}) || getg().m.signalFaultBoundary != outer || getg().defer_ != base {
 		t.Fatal("inner pop did not clear and reveal outer boundary")
 	}
 	if coroPanicBoundaryTestSignalDepth != 1 {
@@ -125,7 +127,7 @@ func TestCoroPanicBoundaryNormalAndNestedPop(t *testing.T) {
 	if got := coroPanicBoundaryPopStatus(task, frame.handle, outer); got != coroPanicBoundaryPopOK {
 		t.Fatalf("outer pop status = %d, want ok", got)
 	}
-	if *outer != (Defer{}) || getg().defer_ != base {
+	if *outer != (Defer{}) || getg().m.signalFaultBoundary != nil || getg().defer_ != base {
 		t.Fatal("outer pop did not restore base defer chain")
 	}
 	if coroPanicBoundaryTestSignalDepth != 0 {
@@ -133,6 +135,37 @@ func TestCoroPanicBoundaryNormalAndNestedPop(t *testing.T) {
 	}
 	if got := coroPanicBoundaryPopStatus(task, frame.handle, outer); got != coroPanicBoundaryPopInvalidRecord {
 		t.Fatalf("duplicate pop status = %d, want invalid record", got)
+	}
+}
+
+func TestCoroPanicBoundaryDoesNotReplaceLogicalDeferHead(t *testing.T) {
+	resetCoroPanicBoundaryTestG()
+	task, frame := newCoroPanicBoundaryTestFrame(t)
+	base, logical, boundary := new(Defer), new(Defer), new(Defer)
+	SetThreadDefer(base)
+	if !coroPanicBoundaryPush(task, frame.handle, boundary, unsafe.Pointer(new(byte))) {
+		t.Fatal("push native landing")
+	}
+	if GetThreadDefer() != base || getg().panicDeferTarget(base) != boundary {
+		t.Fatal("native landing exposed as logical defer or lost its saved cursor")
+	}
+	SetThreadDefer(logical)
+	if GetThreadDefer() != logical || getg().panicDeferTarget(logical) != logical {
+		t.Fatal("logical frame inserted inside native landing was bypassed")
+	}
+	getg().setPanicDeferCursor(boundary)
+	if GetThreadDefer() != base || getg().m.signalFaultBoundary != boundary {
+		t.Fatal("fault unwind did not restore the saved logical cursor")
+	}
+	ClearThreadDefer()
+	if GetThreadDefer() != nil || getg().m.signalFaultBoundary != boundary {
+		t.Fatal("clearing logical defers discarded the physical native landing")
+	}
+	if got := coroPanicBoundaryPopStatus(task, frame.handle, boundary); got != coroPanicBoundaryPopOK {
+		t.Fatalf("pop with independently changed logical cursor = %d", got)
+	}
+	if GetThreadDefer() != nil || getg().m.signalFaultBoundary != nil {
+		t.Fatal("physical pop overwrote logical defer state")
 	}
 }
 
@@ -151,7 +184,8 @@ func TestCoroPanicBoundaryStagesExactHandleAndTakesOnce(t *testing.T) {
 	if coroPanicBoundaryStage(task, wrong, boundary) {
 		t.Fatal("mismatched handle staged a panic")
 	}
-	if getg().panic_ != unsafe.Pointer(node) || getg().defer_ != boundary || node.defer_ != boundary {
+	if getg().panic_ != unsafe.Pointer(node) || getg().m.signalFaultBoundary != boundary ||
+		getg().defer_ != base || node.defer_ != boundary {
 		t.Fatal("rejected stage mutated panic ownership")
 	}
 	if got := coroPanicBoundaryPopStatus(task, frame.handle, boundary); got != coroPanicBoundaryPopActivePanic {
@@ -161,14 +195,16 @@ func TestCoroPanicBoundaryStagesExactHandleAndTakesOnce(t *testing.T) {
 	if coroPanicBoundaryStage(task, frame.handle, boundary) {
 		t.Fatal("fault rejected at signal time was staged")
 	}
-	if getg().panic_ != unsafe.Pointer(node) || getg().defer_ != boundary || node.defer_ != boundary {
+	if getg().panic_ != unsafe.Pointer(node) || getg().m.signalFaultBoundary != boundary ||
+		getg().defer_ != base || node.defer_ != boundary {
 		t.Fatal("policy-rejected stage mutated panic ownership")
 	}
 	coroPanicBoundaryTestSignalAdmitted = true
 	if !coroPanicBoundaryStage(task, frame.handle, boundary) {
 		t.Fatal("stage exact panic boundary")
 	}
-	if getg().defer_ != base || node.defer_ != (*Defer)(frame.handle) || *boundary != (Defer{}) {
+	if getg().defer_ != base || getg().m.signalFaultBoundary != nil ||
+		node.defer_ != (*Defer)(frame.handle) || *boundary != (Defer{}) {
 		t.Fatal("stage did not transfer panic ownership to exact handle")
 	}
 	if coroPanicBoundaryTestSignalDepth != 0 {

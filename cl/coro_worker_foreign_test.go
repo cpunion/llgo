@@ -594,7 +594,8 @@ func TestCoroManagedReentryForeignCallUsesStaticCoroutineAdapter(t *testing.T) {
 	if strings.Count(root, "@"+coroSameMForeignReentryCallHookV2) != 1 ||
 		strings.Contains(root, "@"+coroSameMForeignCallHookV1) ||
 		strings.Contains(root, "@"+coroWorkerParkHookV1) ||
-		strings.Contains(root, "@foreign_managed_reentry_probe") {
+		strings.Contains(root, "call i32 @foreign_managed_reentry_probe(") ||
+		!strings.Contains(root, "ptrtoint (ptr @foreign_managed_reentry_probe to i64)") {
 		t.Fatalf("Root did not select the managed-reentry boundary:\n%s", root)
 	}
 
@@ -1176,6 +1177,24 @@ func Root(value string) uintptr { return foreign(value) }
 	}
 }
 
+func TestCoroWorkerDynamicForeignCallAcceptsStringRecordABI(t *testing.T) {
+	const source = `package foreignworker
+//llgo:type C
+type Callback func(string) string
+func Root(callback Callback, value string) string { return callback(value) }
+`
+	fixture := prepareCoroWorkerForeignFixture(t, source, "Root")
+	defer fixture.prog.Dispose()
+	shape, recognized, err := validateCoroWorkerForeignCall(
+		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+	)
+	if !recognized || err != nil || shape.argc != 1 || shape.record == nil ||
+		shape.record.Field(shape.argumentBase).Type().String() != "string" ||
+		shape.result == nil || shape.result.String() != "string" {
+		t.Fatalf("dynamic string worker shape = %+v, recognized=%t, error=%v", shape, recognized, err)
+	}
+}
+
 func TestCoroWorkerForeignCallShapeRejectsUnsafeABIs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1183,10 +1202,8 @@ func TestCoroWorkerForeignCallShapeRejectsUnsafeABIs(t *testing.T) {
 		statement   string
 		want        string
 	}{
-		{"string argument", "func foreign(string) uintptr", "_ = foreign(\"\")", "argument 0 type string cannot be represented in a typed worker call record"},
 		{"slice argument", "func foreign([]byte) uintptr", "_ = foreign(nil)", "argument 0 type []byte cannot be represented in a typed worker call record"},
 		{"Go function argument", "func foreign(func()) uintptr", "_ = foreign(func(){})", "argument 0 type func() cannot be represented in a typed worker call record"},
-		{"string result", "func foreign(uintptr) string", "_ = foreign(1)", "result type string cannot be represented in a declaration-authorized typed worker call record"},
 		{"multiple results", "func foreign(uintptr) (uintptr, uintptr)", "_, _ = foreign(1)", "requires zero or one result"},
 		{"non-LLGo variadic", "func foreign(...uintptr) uintptr", "_ = foreign(1)", "requires the trailing __llgo_va_list ...any ABI"},
 	}

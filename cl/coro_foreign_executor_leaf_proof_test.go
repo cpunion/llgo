@@ -25,6 +25,7 @@ import (
 
 	"github.com/xgo-dev/llgo/internal/coro"
 	llssa "github.com/xgo-dev/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
 func TestEmissionUniverseBindsInferredForeignExecutorLeafProof(t *testing.T) {
@@ -143,6 +144,140 @@ func root(value uintptr) uint64 { return Leaf(value) }
 			"caller mutation changed inferred certificate: %+v, %t, %v; want %+v",
 			again, inferred, err, certificate,
 		)
+	}
+}
+
+func TestInferredForeignLeafFaultCapabilityUsesExactLiveCall(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/faultc", `package faultc
+//go:linkname Pure C.pure_leaf
+func Pure()
+//go:linkname Fault C.fault_leaf
+func Fault()
+//llgo:link funcPCABI0 llgo.funcPCABI0
+func funcPCABI0(fn any) uintptr
+func RunPure() { Pure() }
+func RunFault() { Fault() }
+func RunDead() { if false { Fault() } }
+func RunAddress() uintptr { return funcPCABI0(Fault) }
+func RunElided() { Fault() }
+func Forward() { RunFault() }
+`)
+	testProg.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	proof := CoroForeignExecutorLeafProof{
+		ProducerIdentity: "producer-package",
+		PhysicalSymbol:   "pure_leaf",
+		LLVMABISignature: "void ()",
+		LLVMTargetTriple: prog.TargetSpec().Triple,
+		LLVMDataLayout:   prog.DataLayout(),
+		CallClosure:      []string{"pure_leaf"},
+		ClosureSHA256:    strings.Repeat("1a", 32),
+	}
+	fault := proof
+	fault.PhysicalSymbol = "fault_leaf"
+	fault.CallClosure = []string{"fault_leaf"}
+	fault.MayFault = true
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
+		EmissionUniverseOptions{CoroForeignExecutorLeafProofs: []CoroForeignExecutorLeafProof{proof, fault}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, _, err := universe.CoroCallableContractCertificate(pkg.ssa.Func("Fault"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !certificate.NativeDefaultFaultBoundary {
+		t.Fatal("inferred certificate lost its independent C fault demand")
+	}
+	for _, imported := range []bool{false, true} {
+		t.Run(map[bool]string{false: "local", true: "archive"}[imported], func(t *testing.T) {
+			consumer := universe
+			if imported {
+				consumer, err = prepareStacklessEmissionUniverse(
+					prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				local, _, err := consumer.CoroCallableContractCertificate(pkg.ssa.Func("Fault"))
+				if err != nil || local.NativeDefaultFaultBoundary {
+					t.Fatalf("consumer unexpectedly reconstructed implementation fault demand: %+v, %v", local, err)
+				}
+			}
+			ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, consumer.Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var roots coro.Roots
+			for _, name := range []string{"RunPure", "RunFault", "RunDead", "RunAddress", "RunElided", "Forward"} {
+				roots = append(roots, coro.Root{Function: pkg.ssa.Func(name), Demand: coro.SyncDemand})
+			}
+			plan, err := coro.AnalyzeSSA(testProg.ssa, roots, coro.SSAConfig{
+				EmissionUniverse:     ssaUniverse,
+				FunctionIDs:          consumer.FunctionIDConfig(),
+				MaxPlainInstructions: -1,
+				ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+					// Producer facts can be installed only after source-site freeze.
+					// Imported declarations use precisely the archive policy path.
+					contract, ok, err := universe.CoroCallableContractCertificate(function)
+					if err != nil || !ok {
+						return coro.SSAFunctionPolicy{}, err
+					}
+					identity, _, err := universe.CoroCallableIdentityCertificate(function)
+					if err != nil {
+						return coro.SSAFunctionPolicy{}, err
+					}
+					fact := coro.LibraryEffectForeignCallable{
+						Function: coro.FunctionID(function.Name()), Identity: identity,
+						Contract: contract, HasContract: true,
+					}
+					return fact.ImportedPolicy()
+				},
+				ClassifyElidedCall: func(caller *ssa.Function, call ssa.CallInstruction) (bool, error) {
+					if caller.Name() == "RunElided" {
+						return true, nil
+					}
+					site, found, err := consumer.CoroCallSitePlan(call)
+					return found && site.ElidesCall(), err
+				},
+				ClassifyStaticCodeAddressCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+					return consumer.CoroStaticCodeAddressCallArgument(call, argument)
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			capabilities, err := deriveCoroFunctionProgramCapabilities(plan, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"Pure", "Fault", "RunPure", "RunFault", "RunDead", "RunAddress", "RunElided", "Forward"} {
+				got := capabilities[pkg.ssa.Func(name)]
+				want := name == "RunFault" || name == "Forward"
+				if got.NativeDefaultFaultBoundary() != want || got.Worker() || got.DynamicPanicOnFault() {
+					t.Errorf("%s capability = %#x, want native landing=%t", name, got, want)
+				}
+				for _, block := range pkg.ssa.Func(name).Blocks {
+					for _, instruction := range block.Instrs {
+						if call, ok := instruction.(ssa.CallInstruction); ok {
+							got := coroCallNeedsNativeFaultBoundary(plan, call)
+							if got != (name == "RunFault") {
+								t.Errorf("%s lowering fault demand=%t", name, got)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+	fault.MayFault = false
+	withoutFault, err := inferredCoroExecutorLeafContract(certificate, fault)
+	if err != nil || withoutFault.ID == certificate.ID || withoutFault.NativeDefaultFaultBoundary {
+		t.Fatalf("fault demand must participate in the exact proof identity: %+v, %v", withoutFault, err)
 	}
 }
 

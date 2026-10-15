@@ -2,6 +2,15 @@ package atomic
 
 import _ "unsafe"
 
+// Value's first-store CAS region must not suspend between publishing the
+// in-progress marker and its final type. A native mutex cannot implement this:
+// managed lock acquisition can run on a worker and resume on another thread.
+// The compiler verifies the original stdlib region is balanced, bounded and
+// contains only inline atomics; no exclusion lock or Go wrapper is needed.
+//
+//go:linkname runtime_procPin llgo.coroCriticalPin
+//go:linkname runtime_procUnpin llgo.coroCriticalExit
+
 //go:linkname SwapInt32 llgo.atomicXchg
 //go:linkname SwapInt64 llgo.atomicXchg
 //go:linkname SwapUint32 llgo.atomicXchg

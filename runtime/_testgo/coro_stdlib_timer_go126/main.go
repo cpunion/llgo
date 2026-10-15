@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"syscall"
+	"time"
+)
 
 func fail(message string) {
 	panic(message)
@@ -15,6 +18,38 @@ func noTimerValue(channel <-chan time.Time, message string) {
 }
 
 func main() {
+	// Go 1.23+ timer channels must already participate in select at an expired
+	// deadline. Testing without Gosched forbids relying on a manager G's turn.
+	for i := 0; i < 32; i++ {
+		immediate := time.NewTimer(0)
+		select {
+		case <-immediate.C:
+		default:
+			fail("NewTimer(0) was not immediately readable")
+		}
+		if immediate.Reset(0) {
+			fail("consumed immediate Timer.Reset returned true")
+		}
+		select {
+		case <-immediate.C:
+		default:
+			fail("Reset(0) was not immediately readable")
+		}
+		immediate.Reset(0)
+		if !immediate.Stop() {
+			fail("unread immediate Timer.Stop returned false")
+		}
+		noTimerValue(immediate.C, "Stop retained immediate value")
+	}
+	activeImmediate := time.NewTimer(time.Hour)
+	if !activeImmediate.Reset(0) {
+		fail("active immediate Reset returned false")
+	}
+	select {
+	case <-activeImmediate.C:
+	default:
+		fail("active Reset(0) was not immediately readable")
+	}
 	stopped := time.NewTimer(time.Hour)
 	if len(stopped.C) != 0 || cap(stopped.C) != 0 {
 		fail("Go 1.23+ Timer channel does not report synchronous len/cap")
@@ -120,5 +155,9 @@ func main() {
 	case <-restartedCallback:
 	case <-time.After(2 * time.Second):
 		fail("restarted AfterFunc callback did not run")
+	}
+	const success = "standard Timer/Ticker semantics ok\n"
+	if n, err := syscall.Write(1, []byte(success)); n != len(success) || err != nil {
+		fail("standard timer acceptance completion marker write failed")
 	}
 }

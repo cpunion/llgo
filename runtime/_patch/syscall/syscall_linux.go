@@ -1,4 +1,4 @@
-//go:build linux && !tinygo.wasm
+//go:build linux && !tinygo.wasm && !baremetal
 
 package syscall
 

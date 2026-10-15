@@ -358,3 +358,16 @@ func root() { leaf() }
 		t.Fatal("canonical plan digest omitted the complete callable contract certificate")
 	}
 }
+
+func TestCallableFaultDemandRequiresDeclaration(t *testing.T) {
+	declaration := testCallableContractCertificate(t, CallableContractScopeDeclaration, ProgressExecutorSafe)
+	declaration.NativeDefaultFaultBoundary = true
+	if err := declaration.Validate(); err != nil {
+		t.Fatalf("executor progress incorrectly excluded native fault demand: %v", err)
+	}
+	wrapper := testCallableContractCertificate(t, CallableContractScopeWrapper, ProgressExecutorSafe)
+	wrapper.NativeDefaultFaultBoundary = true
+	if err := wrapper.Validate(); err == nil {
+		t.Fatal("Go wrapper claimed a direct C implementation fault fact")
+	}
+}

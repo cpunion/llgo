@@ -120,62 +120,48 @@ func TestItabCacheUsesCanonicalLockFreePublication(t *testing.T) {
 	}
 }
 
-func TestWeakManagedCleanupIsOneBoundedAtomicTombstone(t *testing.T) {
+func TestWeakCollectorOwnsLivenessBeforeFinalization(t *testing.T) {
 	source := readAtomicMetadataSource(t, weakCacheSource)
-	for _, forbidden := range []string{"pthread", "make(map", "delete(", ".Lock()", ".Unlock()"} {
+	for _, forbidden := range []string{"pthread", "make(map", "delete(", ".Lock()", ".Unlock()", "addCleanupPtr", "StoreUint32"} {
 		if strings.Contains(source, forbidden) {
-			t.Errorf("%s retains forbidden managed-cleanup dependency %q", weakCacheSource, forbidden)
+			t.Errorf("%s retains forbidden weak-liveness dependency %q", weakCacheSource, forbidden)
 		}
 	}
-
 	file := parseAtomicMetadataSource(t, weakCacheSource)
-	var cleanup *ast.FuncLit
 	ast.Inspect(file, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		name, ok := call.Fun.(*ast.Ident)
-		if !ok || name.Name != "addCleanupPtr" || len(call.Args) != 2 {
-			return true
-		}
-		cleanup, _ = call.Args[1].(*ast.FuncLit)
-		return false
-	})
-	if cleanup == nil {
-		t.Fatal("weak registration lacks managed addCleanupPtr closure")
-	}
-	if len(cleanup.Body.List) != 1 {
-		t.Fatalf("managed weak cleanup statements = %d, want exactly one atomic store", len(cleanup.Body.List))
-	}
-	statement, ok := cleanup.Body.List[0].(*ast.ExprStmt)
-	if !ok {
-		t.Fatalf("managed weak cleanup statement = %T, want atomic StoreUint32 call", cleanup.Body.List[0])
-	}
-	call, ok := statement.X.(*ast.CallExpr)
-	if !ok {
-		t.Fatalf("managed weak cleanup expression = %T, want call", statement.X)
-	}
-	selector, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		t.Fatalf("managed weak cleanup target = %T, want atomic.StoreUint32", call.Fun)
-	}
-	packageName, packageOK := selector.X.(*ast.Ident)
-	if !packageOK || packageName.Name != "atomic" || selector.Sel.Name != "StoreUint32" || len(call.Args) != 2 {
-		t.Fatalf("managed weak cleanup call = %#v, want exactly atomic.StoreUint32(&h.Live, 0)", call.Fun)
-	}
-	forbidden := false
-	ast.Inspect(cleanup.Body, func(node ast.Node) bool {
 		switch node.(type) {
 		case *ast.ForStmt, *ast.RangeStmt, *ast.GoStmt, *ast.DeferStmt, *ast.FuncLit:
-			if node != cleanup {
-				forbidden = true
-			}
+			t.Error("weak boundary contains a loop, spawn, defer, or callback closure")
 		}
 		return true
 	})
-	if forbidden {
-		t.Fatal("managed weak cleanup contains a loop, spawn, defer, or nested closure")
+	for _, required := range []string{"llgoWeakRegister(p, &h.Live)", "llgoWeakStrong(h.Key, &h.Live)"} {
+		if !strings.Contains(source, required) {
+			t.Errorf("weak boundary does not consume collector operation %q", required)
+		}
+	}
+	native := readAtomicMetadataSource(t, "internal/clite/bdwgc/_wrap/coro_allocator.c")
+	for _, required := range []string{
+		"GC_general_register_disappearing_link((void **)live, base)", "GC_reachable_here(object)",
+		"GC_call_with_alloc_lock(llgo_weak_reveal_locked, &lookup)", "if (*lookup->live == 0)", "return (void *)~lookup->key;",
+	} {
+		if !strings.Contains(native, required) {
+			t.Errorf("native weak collector boundary lacks %q", required)
+		}
+	}
+	tiny := readAtomicMetadataSource(t, "internal/runtime/tinygogc/gc_tinygo.go")
+	mark := strings.Index(tiny, "\n\tfinishMark()")
+	clear := strings.Index(tiny, "\n\tclearUnmarkedWeakReferences()")
+	resume := strings.Index(tiny, "\n\tgcResumeWorld()")
+	sweep := strings.Index(tiny, "\n\tfreeBytes = sweep()")
+	if mark < 0 || clear <= mark || resume <= clear || sweep <= resume {
+		t.Fatal("tinygc must clear weak references after marking and before resuming/sweeping")
+	}
+	tinyWeak := readAtomicMetadataSource(t, "internal/runtime/tinygogc/weak.go")
+	for _, required := range []string{"hiddenBase uintptr", "record.hiddenBase = hideWeakBase(base)", "return ^uintptr(base)", "if live == nil || *live == 0", "*record.live = 0", "record.live = nil", "record.next = nil"} {
+		if !strings.Contains(tinyWeak, required) {
+			t.Errorf("tinygc weak record lifecycle lacks %q", required)
+		}
 	}
 }
 
@@ -221,7 +207,11 @@ func TestWeakAddressConversionsAreNonSuspendingLeaves(t *testing.T) {
 	if !ok || len(hideReturn.Results) != 1 {
 		t.Fatal("weak pointer hiding leaf is not one scalar return")
 	}
-	hideConversion, ok := hideReturn.Results[0].(*ast.CallExpr)
+	hidden, ok := hideReturn.Results[0].(*ast.UnaryExpr)
+	if !ok || hidden.Op != token.XOR {
+		t.Fatal("weak pointer key must be complemented to evade conservative scanning")
+	}
+	hideConversion, ok := hidden.X.(*ast.CallExpr)
 	if !ok || len(hideConversion.Args) != 1 {
 		t.Fatal("weak pointer hiding leaf is not one uintptr conversion")
 	}
@@ -238,7 +228,7 @@ func TestWeakAddressConversionsAreNonSuspendingLeaves(t *testing.T) {
 			return true
 		}
 		name, ok := call.Fun.(*ast.Ident)
-		if ok && name.Name == "llgoWeakKeyPointer" {
+		if ok && name.Name == "llgoWeakStrong" {
 			usedLeaf = true
 		}
 		if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
@@ -250,7 +240,7 @@ func TestWeakAddressConversionsAreNonSuspendingLeaves(t *testing.T) {
 		return true
 	})
 	if !usedLeaf || directReconstruction {
-		t.Fatal("weak make-strong path must reconstruct its hidden key only through llgoWeakKeyPointer")
+		t.Fatal("weak make-strong path must promote only through the collector's read/reveal boundary")
 	}
 	if reconstruct.Body == nil || len(reconstruct.Body.List) != 1 {
 		t.Fatal("weak key reconstruction leaf must contain exactly one return")
@@ -265,7 +255,11 @@ func TestWeakAddressConversionsAreNonSuspendingLeaves(t *testing.T) {
 	}
 	target, ok := conversion.Fun.(*ast.SelectorExpr)
 	packageName, packageOK := target.X.(*ast.Ident)
-	key, keyOK := conversion.Args[0].(*ast.Ident)
+	revealed, revealOK := conversion.Args[0].(*ast.UnaryExpr)
+	if !revealOK || revealed.Op != token.XOR {
+		t.Fatal("weak key reconstruction must undo the complemented address")
+	}
+	key, keyOK := revealed.X.(*ast.Ident)
 	if !ok || !packageOK || packageName.Name != "unsafe" || target.Sel.Name != "Pointer" ||
 		!keyOK || key.Name != "key" {
 		t.Fatal("weak key reconstruction leaf changed its exact uintptr-to-pointer recipe")

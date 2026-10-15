@@ -18,25 +18,9 @@
 
 package c
 
-import (
-	_ "unsafe"
-)
+// A generic board has neither a /dev filesystem nor implicit FILE streams.
+// An embedding with a real stdio driver may publish handles explicitly. Do
+// not perform filesystem operations while initializing the runtime package.
+const LLGoPackage = true
 
-const (
-	// we want to execute init(), link / decl skips executing init()
-	LLGoPackage = true
-)
-
-// openBaremetalStandardStream is limited to startup registration of the fixed
-// newlib device streams. It creates a FILE handle but performs no data
-// transfer or readiness wait. Keep ordinary Fopen calls conservative: only
-// this exact wrapper edge selects Fopen's executor-safe refinement.
-//
-//llgo:coro contract foreign.v1 scope=wrapper progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return
-func openBaremetalStandardStream(name, mode *Char) FilePtr {
-	return Fopen(name, mode)
-}
-
-var Stdin FilePtr = openBaremetalStandardStream(Str("/dev/stdin"), Str("r"))
-var Stdout FilePtr = openBaremetalStandardStream(Str("/dev/stdout"), Str("w"))
-var Stderr FilePtr = Stdout
+var Stdin, Stdout, Stderr FilePtr

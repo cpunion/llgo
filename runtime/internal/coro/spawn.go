@@ -402,6 +402,9 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 	if !disableGPreempt(child) {
 		return nil, 0, false
 	}
+	if ExecutionDomainEnabled() && !retireExecutionDomainTask(child) {
+		return nil, 0, false
+	}
 	raw, size := child.taskStorage, child.taskSize
 	parent.spawnChild = nil
 	child.spawnParent = nil

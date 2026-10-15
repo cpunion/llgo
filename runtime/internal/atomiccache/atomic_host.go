@@ -31,6 +31,6 @@ func compareAndSwapPointer(address *unsafe.Pointer, old, new unsafe.Pointer) boo
 	return atomic.CompareAndSwapPointer(address, old, new)
 }
 
-func loadUint32(address *uint32) uint32 {
-	return atomic.LoadUint32(address)
+func loadUintptr(address *uintptr) uintptr {
+	return atomic.LoadUintptr(address)
 }

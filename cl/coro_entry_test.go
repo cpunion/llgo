@@ -85,6 +85,7 @@ func newCoroEntryTestContext(t *testing.T, pkg *ssa.Package, compilation *Compil
 // expected to stop in whole-plan preflight before package/codegen validation.
 func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
 	u := &EmissionUniverse{
+		coroProgramIR: newCoroProgramIR(),
 		required:      make(map[*ssa.Function]none),
 		aliases:       make(map[*ssa.Function]*ssa.Function),
 		functionKinds: make(map[emissionFunctionOwnerKey]int),
@@ -99,6 +100,8 @@ func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
 	owners := make(map[*ssa.Package]*preparedEmissionPackage)
 	for _, planned := range plan.Functions() {
 		fn := planned.Function
+		u.coroProgramIR.managedValueReferences[fn] = nil
+		u.coroProgramIR.managedMethodTargets[fn] = fn
 		u.functions = append(u.functions, fn)
 		u.required[fn] = none{}
 		owner := owners[fn.Pkg]

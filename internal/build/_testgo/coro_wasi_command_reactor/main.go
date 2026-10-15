@@ -72,4 +72,8 @@ func main() {
 	if result.finished >= 200*time.Millisecond {
 		panic("WASI reactor did not make concurrent timer and file progress")
 	}
+	const success = "WASI reactor file, timer and inherited stdout ok\n"
+	if n, err := syscall.Write(1, []byte(success)); err != nil || n != len(success) {
+		panic("WASI inherited stdout failed")
+	}
 }

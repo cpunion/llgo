@@ -45,6 +45,47 @@ func TestCompileWithConfigUsesLinkerSpecificNoStdlib(t *testing.T) {
 	}
 }
 
+func TestNamedTargetLibraryCacheBindsToolchainAndABI(t *testing.T) {
+	root := t.TempDir()
+	base := compile.CompileOptions{
+		CC: "/llvm22/bin/clang", Linker: "/llvm22/bin/ld.lld",
+		CCFLAGS: []string{"--target=thumbv7m-unknown-unknown-eabi", "-mfloat-abi=soft"},
+	}
+	build := func(config compile.CompileConfig, options compile.CompileOptions) string {
+		t.Helper()
+		flags, err := compileNamedTargetLibrary(config, root, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, flag := range flags {
+			if strings.HasPrefix(flag, "-L") {
+				return flag
+			}
+		}
+		t.Fatal("compiled library has no search directory")
+		return ""
+	}
+	config := compile.CompileConfig{}
+	want := build(config, base)
+	if build(config, base) != want || want == "-L"+root {
+		t.Fatal("library cache identity is unstable or reused the unversioned archive directory")
+	}
+	for name, change := range map[string]func(*compile.CompileOptions){
+		"compiler": func(o *compile.CompileOptions) { o.CC = "/esp19/bin/clang" },
+		"linker":   func(o *compile.CompileOptions) { o.Linker = "/esp19/bin/ld.lld" },
+		"float ABI": func(o *compile.CompileOptions) {
+			o.CCFLAGS = []string{"--target=thumbv7m-unknown-unknown-eabi", "-mfloat-abi=hard"}
+		},
+		"headers": func(o *compile.CompileOptions) { o.CFLAGS = []string{"-I/another-libc"} },
+	} {
+		o := base
+		change(&o)
+		if build(config, o) == want {
+			t.Errorf("library cache ignored changed %s", name)
+		}
+	}
+}
+
 func TestLinkerHelpSupportsICF(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -406,14 +447,14 @@ func TestUseTarget(t *testing.T) {
 		{
 			name:        "ESP32 Target (Xtensa)",
 			targetName:  "esp32",
-			expectError: false,
+			expectError: true, // No validated LLVM22 Xtensa backend/runtime ABI.
 			expectLLVM:  "xtensa",
 			expectCPU:   "esp32",
 		},
 		{
 			name:        "ESP32-C3 Target (ESP RISC-V)",
 			targetName:  "esp32c3",
-			expectError: false,
+			expectError: true, // ESP prebuilt runtime ABI is not validated with LLVM22.
 			expectLLVM:  "riscv32-esp-elf",
 			expectCPU:   "generic-rv32",
 			expectABI:   "ilp32",
@@ -552,8 +593,12 @@ func TestUseTargetWindowsSystemClang(t *testing.T) {
 	}
 }
 
-func TestUseTargetESPClangDownloadError(t *testing.T) {
-	server := httptest.NewServer(http.NotFoundHandler())
+func TestUseTargetRejectsLegacyESPToolchainBeforeDownload(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.NotFound(w, r)
+	}))
 	t.Cleanup(server.Close)
 
 	llgoRoot := t.TempDir()
@@ -593,27 +638,30 @@ func TestUseTargetESPClangDownloadError(t *testing.T) {
 	})
 
 	_, err := UseTarget("esp-test", optlevel.Oz, lto.Thin)
-	if err == nil || !strings.Contains(err.Error(), "404 Not Found") {
-		t.Fatalf("UseTarget(esp-test) error = %v, want download 404", err)
+	if err == nil || !strings.Contains(err.Error(), "LLVM 22 support is required") {
+		t.Fatalf("UseTarget(esp-test) error = %v, want explicit unsupported target", err)
+	}
+	if requests != 0 {
+		t.Fatalf("unsupported ESP target initiated %d legacy downloads", requests)
 	}
 }
 
-func TestUseSystemClangForTarget(t *testing.T) {
+func TestUseLLVM22ForTarget(t *testing.T) {
 	for _, test := range []struct {
-		goos      string
 		target    string
 		buildTags []string
 		want      bool
 	}{
-		{goos: "windows", target: "thumbv6m-unknown-unknown-eabi", want: true},
-		{goos: "windows", target: "avr", want: true},
-		{goos: "windows", target: "riscv32-esp-elf", buildTags: []string{"esp"}, want: false},
-		{goos: "windows", target: "xtensa", buildTags: []string{"esp32", "esp"}, want: false},
-		{goos: "windows", target: "xtensa", want: false},
-		{goos: "linux", target: "thumbv6m-unknown-unknown-eabi", want: false},
+		{target: "thumbv6m-unknown-unknown-eabi", want: true},
+		{target: "thumbv7m-unknown-unknown-eabi", want: true},
+		{target: "riscv32-unknown-none", want: true},
+		{target: "avr", want: true},
+		{target: "riscv32-esp-elf", buildTags: []string{"esp"}, want: false},
+		{target: "xtensa", buildTags: []string{"esp32", "esp"}, want: false},
+		{target: "xtensa", want: false},
 	} {
-		if got := useSystemClangForTarget(test.goos, test.target, test.buildTags); got != test.want {
-			t.Errorf("useSystemClangForTarget(%q, %q, %v) = %v, want %v", test.goos, test.target, test.buildTags, got, test.want)
+		if got := useLLVM22ForTarget(test.target, test.buildTags); got != test.want {
+			t.Errorf("useLLVM22ForTarget(%q, %v) = %v, want %v", test.target, test.buildTags, got, test.want)
 		}
 	}
 }
@@ -639,13 +687,13 @@ func TestClangDriverTargetForHost(t *testing.T) {
 
 func TestUseWithTarget(t *testing.T) {
 	// Test target-based configuration takes precedence
-	export, err := Use("linux", "amd64", "esp32", false, true, optlevel.Oz, lto.Thin, false)
+	export, err := Use("linux", "amd64", "mps2-an385-qemu", false, true, optlevel.Oz, lto.Thin, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
 	// Check if LLVM target is in CCFLAGS
-	found := slices.Contains(export.CCFLAGS, "-mcpu=esp32")
+	found := slices.Contains(export.CCFLAGS, "-mcpu=cortex-m3")
 	if !found {
 		t.Errorf("Expected CPU generic in CCFLAGS, got %v", export.CCFLAGS)
 	}
@@ -660,7 +708,7 @@ func TestUseWithTarget(t *testing.T) {
 	if runtime.GOOS == "darwin" && len(export.LDFLAGS) == 0 {
 		t.Error("Expected LDFLAGS to be set for native build")
 	}
-	wantDebugInfo := nativeDebugInfoPolicy(nativeToolchain(runtime.GOOS))
+	wantDebugInfo := nativeDebugInfoPolicy(export.Toolchain)
 	if export.DebugInfo.AlwaysOmit != wantDebugInfo.AlwaysOmit ||
 		!slices.Equal(export.DebugInfo.OmitLinkFlags, wantDebugInfo.OmitLinkFlags) ||
 		!slices.Equal(export.DebugInfo.PreserveLinkFlags, wantDebugInfo.PreserveLinkFlags) {
@@ -760,10 +808,14 @@ func TestOptimizationFlagPlacement(t *testing.T) {
 	if !slices.Contains(export.CCFLAGS, "-O3") {
 		t.Fatalf("host CCFLAGS = %v, want -O3", export.CCFLAGS)
 	}
-	if !hasFlagValue(export.CCFLAGS, "-target", llvm.GetTargetTriple(runtime.GOOS, runtime.GOARCH)) {
+	wantTarget := llvm.GetTargetTriple(runtime.GOOS, runtime.GOARCH)
+	if export.Toolchain.TargetTriple != "" {
+		wantTarget = export.Toolchain.TargetTriple
+	}
+	if !hasFlagValue(export.CCFLAGS, "-target", wantTarget) {
 		t.Fatalf("host CCFLAGS = %v, want native -target", export.CCFLAGS)
 	}
-	if !hasFlagValue(export.LDFLAGS, "-target", llvm.GetTargetTriple(runtime.GOOS, runtime.GOARCH)) {
+	if !hasFlagValue(export.LDFLAGS, "-target", wantTarget) {
 		t.Fatalf("host LDFLAGS = %v, want native -target", export.LDFLAGS)
 	}
 }
@@ -927,7 +979,7 @@ func TestNativeWindowsSectionFlags(t *testing.T) {
 			t.Errorf("native Windows CCFLAGS = %v, want %q", ccflags, want)
 		}
 	}
-	for _, want := range []string{"-fdata-sections", "-ffunction-sections", "-Wl,/opt:ref", "-llegacy_stdio_definitions"} {
+	for _, want := range []string{"-fdata-sections", "-ffunction-sections", "--rtlib=compiler-rt", "-Wl,/opt:ref", "-llegacy_stdio_definitions"} {
 		if !slices.Contains(ldflags, want) {
 			t.Errorf("native Windows LDFLAGS = %v, want %q", ldflags, want)
 		}
@@ -948,31 +1000,84 @@ func TestNativeWindowsExportFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if export.Toolchain != nativeToolchain("windows") {
+	wantTriple, err := windowsTargetTriple(runtime.GOARCH, export.Toolchain.ABI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if export.Toolchain.ObjectFormat != ObjectFormatCOFF ||
+		export.Toolchain.Driver != DriverFlavorClangGNU ||
+		export.Toolchain.TargetTriple != wantTriple {
 		t.Fatalf("native Windows toolchain = %+v", export.Toolchain)
 	}
-	for _, want := range []string{
-		"-Wl,/errorlimit:0",
-		"-Wl,/opt:noicf",
-		"-Wl,/opt:ref",
-		"-Wl,/opt:lldlto=2",
-		"-llegacy_stdio_definitions",
-	} {
+	var wanted, unwanted []string
+	switch export.Toolchain.ABI {
+	case PlatformABIMsvc:
+		if export.Toolchain.Linker != LinkerFlavorCOFFLLD ||
+			export.Toolchain.CRT != CRTFlavorUCRT ||
+			export.Toolchain.CXXRuntime != CXXRuntimeMSVC {
+			t.Fatalf("native MSVC toolchain = %+v", export.Toolchain)
+		}
+		wanted = []string{
+			"-Wl,/errorlimit:0",
+			"-Wl,/opt:noicf",
+			"-Wl,/opt:ref",
+			"-Wl,/opt:lldlto=2",
+			"-llegacy_stdio_definitions",
+		}
+		unwanted = []string{
+			"-Wl,--error-limit=0",
+			"-Wl,--icf=none",
+			"--gc-sections",
+		}
+	case PlatformABIGNU:
+		if export.Toolchain.Linker != LinkerFlavorMinGWLLD ||
+			export.Toolchain.CRT != CRTFlavorUnknown ||
+			export.Toolchain.CXXRuntime != CXXRuntimeUnknown {
+			t.Fatalf("native GNU/MinGW toolchain = %+v", export.Toolchain)
+		}
+		wanted = []string{
+			"-Wl,--error-limit=0",
+			"-Wl,--icf=none",
+			"-Wl,--gc-sections",
+			"-Wl,--lto-O2",
+		}
+		unwanted = []string{
+			"-Wl,/errorlimit:0",
+			"-Wl,/opt:noicf",
+			"-Wl,/opt:ref",
+			"-Wl,/opt:lldlto=2",
+			"-llegacy_stdio_definitions",
+		}
+	default:
+		t.Fatalf("unsupported native Windows ABI: %+v", export.Toolchain)
+	}
+	for _, want := range wanted {
 		if !slices.Contains(export.LDFLAGS, want) {
 			t.Errorf("native Windows LDFLAGS = %v, want %q", export.LDFLAGS, want)
 		}
 	}
-	for _, unwanted := range []string{
-		"-Wl,--error-limit=0",
-		"-Wl,--icf=none",
-		"--gc-sections",
-		"-latomic",
-		"-lpthread",
-		"-ldl",
-	} {
-		if slices.Contains(export.LDFLAGS, unwanted) {
-			t.Errorf("native Windows LDFLAGS = %v, do not want %q", export.LDFLAGS, unwanted)
+	for _, flag := range append(unwanted, "-latomic", "-lpthread", "-ldl") {
+		if slices.Contains(export.LDFLAGS, flag) {
+			t.Errorf("native Windows LDFLAGS = %v, do not want %q", export.LDFLAGS, flag)
 		}
+	}
+}
+
+func TestUsesNativePlatformToolchain(t *testing.T) {
+	for _, test := range []struct {
+		name                                   string
+		hostOS, hostArch, targetOS, targetArch string
+		want                                   bool
+	}{
+		{name: "same platform", hostOS: "windows", hostArch: "amd64", targetOS: "windows", targetArch: "amd64", want: true},
+		{name: "cross architecture", hostOS: "windows", hostArch: "amd64", targetOS: "windows", targetArch: "arm64"},
+		{name: "cross OS", hostOS: "windows", hostArch: "amd64", targetOS: "linux", targetArch: "amd64"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := usesNativePlatformToolchain(test.hostOS, test.hostArch, test.targetOS, test.targetArch); got != test.want {
+				t.Fatalf("usesNativePlatformToolchain() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

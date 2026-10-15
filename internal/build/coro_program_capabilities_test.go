@@ -65,10 +65,34 @@ func TestImportedProgramCapabilitiesDigestIsCanonicalAndCapabilitySensitive(t *t
 	if err != nil || nativeDefaultFault == first || nativeDefaultFault == changed {
 		t.Fatalf("native-default-fault imported capability digest = %q, %v; dynamic=%q combined=%q", nativeDefaultFault, err, first, changed)
 	}
+	alphaFact.ProgramCapabilities |= coro.ExecutionDomainProgramCapability()
+	executionDomain, err := coroImportedProgramCapabilitiesDigest(map[*ssa.Function]coro.LibraryEffectFunction{
+		alpha: alphaFact,
+		beta:  betaFact,
+	})
+	if err != nil || executionDomain == nativeDefaultFault {
+		t.Fatalf("execution-domain imported capability did not change digest: %q, %v", executionDomain, err)
+	}
 	zero, err := coroImportedProgramCapabilitiesDigest(map[*ssa.Function]coro.LibraryEffectFunction{
 		alpha: {ID: alphaFact.ID},
 	})
 	if err != nil || zero != "" {
 		t.Fatalf("zero imported capability digest = %q, %v", zero, err)
+	}
+	for _, binding := range []coro.ProgramPredicateRequirements{
+		{Mask: coro.ExecutionDomainProgramCapability()},
+		{Mask: coro.ExecutionDomainProgramCapability(), Values: coro.ExecutionDomainProgramCapability()},
+		{Mask: coro.GCObservationProgramCapability()},
+		{Mask: coro.GCObservationProgramCapability(), Values: coro.GCObservationProgramCapability()},
+		{Mask: coro.ProgramPredicateMask()},
+		{Mask: coro.ProgramPredicateMask(), Values: coro.ProgramPredicateMask()},
+	} {
+		predicateDigest, err := coroImportedProgramCapabilitiesDigest(map[*ssa.Function]coro.LibraryEffectFunction{
+			alpha: {ID: alphaFact.ID, ProgramPredicates: binding},
+		})
+		if err != nil || predicateDigest == "" || predicateDigest == zero {
+			t.Fatalf("consumed predicate %+v was omitted from import digest: %q, %v", binding, predicateDigest, err)
+		}
+		zero = predicateDigest
 	}
 }

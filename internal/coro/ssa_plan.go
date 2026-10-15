@@ -443,6 +443,14 @@ type SSAConfig struct {
 	// before a partial plan can escape.
 	DynamicImplements func(candidate types.Type, iface *types.Interface) (bool, error)
 
+	// DynamicSignature projects both candidate and call-site signatures into
+	// the frozen frontend's source replacement type graph. It must preserve
+	// nominal Go identity and must not perform physical function-value lowering.
+	// A nil callback uses the raw SSA signature. Like DynamicImplements, this
+	// exact, deterministic relation requires EmissionUniverse and fails closed
+	// on any error or nil result.
+	DynamicSignature func(owner *ssa.Function, signature *types.Signature) (*types.Signature, error)
+
 	// Include filters the effective program (for example, after patch/skip
 	// resolution). A static edge to an excluded target becomes an unknown call.
 	Include func(*ssa.Function) (bool, error)
@@ -482,6 +490,13 @@ type SSAConfig struct {
 	// go, dynamic, invoke, alternate-defer-stack, and builtin sites.
 	// Argument-producing SSA instructions remain analyzed independently.
 	ClassifyElidedCall func(caller *ssa.Function, call ssa.CallInstruction) (bool, error)
+
+	// ClassifyUnevaluatedCall is the frontend's frozen CFG proof that this
+	// entire occurrence is unreachable. Unlike inline intrinsic elision it
+	// accepts every call shape, including go, invoke and alternate-stack defer:
+	// no operand, invocation or registration at the site is executed. Local
+	// instruction effects still come from ClassifyLocalBody's same projection.
+	ClassifyUnevaluatedCall func(caller *ssa.Function, call ssa.CallInstruction) (bool, error)
 
 	// ClassifyElidedCallCertificate freezes an optional opaque frontend
 	// capability for one exact elided call occurrence. It is consulted only
@@ -670,6 +685,17 @@ type SSAFunctionBodyFacts struct {
 	Exec             ExecFlags
 	InstructionCount int
 	HasCycle         bool
+	// BoundedCycleCost is a conservative upper bound on the number of local,
+	// evaluated instruction occurrences along any execution of a cyclic body.
+	// Zero means that ProgramIR could not prove a finite bound. Calls count as
+	// local occurrences here; their own suspension/preemption requirements
+	// continue to propagate independently through the call graph.
+	//
+	// The production frontend only sets this after validating a canonical
+	// constant-trip loop against the frozen SSA and semantic SitePlans. It is a
+	// narrow exception to the default rule that every executable CFG cycle owns
+	// a preemption point.
+	BoundedCycleCost uint64
 	// AtomicPath is the ProgramIR-owned block/call projection used for the
 	// path-sensitive no-cut cost proof. It is present for defined body facts
 	// even when the body is not an outcome-plain candidate, so later whole-
@@ -711,6 +737,9 @@ func (facts SSAFunctionBodyFacts) validate(function *ssa.Function) error {
 	}
 	if facts.InstructionCount < 0 {
 		return fmt.Errorf("local body instruction count is negative")
+	}
+	if facts.BoundedCycleCost != 0 && !facts.HasCycle {
+		return fmt.Errorf("bounded cycle cost is present for an acyclic body")
 	}
 	if facts.OutcomePlainCallCount < 0 {
 		return fmt.Errorf("outcome-plain source call count is negative")
@@ -817,7 +846,43 @@ type SSAPlan struct {
 	callableIdentities      map[*ssa.Function]CallableIdentityCertificate
 	callableContracts       map[*ssa.Function]CallableContractCertificate
 	assemblyNoSuspend       map[*ssa.Function]string
-	functionIDs             FunctionIDConfig
+	// boundedCycles contains only ProgramIR proofs that were accepted by this
+	// analysis run's concrete MaxPlainInstructions budget. Keeping the accepted
+	// proof beside SSAPlan lets physical validation distinguish it from a trusted
+	// policy that independently suppressed preemption.
+	boundedCycles map[*ssa.Function]uint64
+	functionIDs   FunctionIDConfig
+	// The frontend relation is frozen with this plan, like FunctionIDConfig's
+	// package identity relation. All callable consumers use the same source
+	// projection as CHA rather than reconstructing raw/physical equivalence.
+	dynamicSignature func(*ssa.Function, *types.Signature) (*types.Signature, error)
+}
+
+// CallableSignature returns the canonical source signature used by this
+// compilation's dynamic target analysis. Physical closure ABI lowering is not
+// part of this relation. The frontend owns its immutable replacement graph.
+func (p *SSAPlan) CallableSignature(owner *ssa.Function, signature *types.Signature) (*types.Signature, error) {
+	if p == nil {
+		return nil, fmt.Errorf("coro: callable source signature requires a compilation plan")
+	}
+	return projectSSACallableSignature(p.dynamicSignature, owner, signature)
+}
+
+func projectSSACallableSignature(project func(*ssa.Function, *types.Signature) (*types.Signature, error), owner *ssa.Function, signature *types.Signature) (*types.Signature, error) {
+	if owner == nil || signature == nil {
+		return nil, fmt.Errorf("coro: callable source signature requires an exact owner and signature")
+	}
+	if project == nil {
+		return signature, nil
+	}
+	projected, err := project(owner, signature)
+	if err != nil {
+		return nil, fmt.Errorf("owner %q: %w", owner.String(), err)
+	}
+	if projected == nil {
+		return nil, fmt.Errorf("owner %q: source signature resolver returned nil", owner.String())
+	}
+	return projected, nil
 }
 
 type ssaFunctionResolution struct {
@@ -1039,6 +1104,36 @@ func (p *SSAPlan) HasRawPlainVariant(fn *ssa.Function) bool {
 	return ok
 }
 
+// HasRawPlainLoweredTarget consumes the existing raw-closure capability for an
+// exact compiler-owned lowered occurrence. It does not authorize a source raw
+// call or infer synchronous behavior from the target's managed effect.
+func (p *SSAPlan) HasRawPlainLoweredTarget(call SSALoweredCall) bool {
+	if p == nil {
+		return false
+	}
+	target, ok := p.FunctionPlan(call.Target)
+	return ok && validSSARawPlainLoweredTarget(call, target, p.HasRawPlainVariant(call.Target))
+}
+
+func validSSARawPlainLoweredTarget(call SSALoweredCall, target FunctionPlan, hasVariant bool) bool {
+	return call.RawPlain && !call.NoUnwind && !call.UnwindOnly && !call.ExplicitStatusElided &&
+		call.Target != nil && target.External == Defined && target.RawPlainDemand && hasVariant &&
+		(target.Emission == EmitRawPlain || target.Emission == EmitPlain || target.Emission == EmitCoroutine)
+}
+
+// BoundedCycleCost returns the ProgramIR-owned local cycle bound only when it
+// was accepted by this exact analysis run's preemption budget. It is a physical
+// validation capability, not a general loop-analysis API: an unproven or
+// over-budget cycle returns false even if another trusted policy removed its
+// scanner seed.
+func (p *SSAPlan) BoundedCycleCost(fn *ssa.Function) (uint64, bool) {
+	if p == nil || fn == nil {
+		return 0, false
+	}
+	cost, ok := p.boundedCycles[fn]
+	return cost, ok
+}
+
 // ForeignNoBlockCertificate returns the opaque frozen frontend certificate
 // attached to one exact external declaration. The certificate is part of the
 // immutable SSA plan and CoroPlanDigest; callers must not infer it from a
@@ -1187,6 +1282,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if config.DynamicImplements != nil && universe == nil {
 		return nil, fmt.Errorf("coro: dynamic implements resolver requires an SSA emission universe")
 	}
+	if config.DynamicSignature != nil && universe == nil {
+		return nil, fmt.Errorf("coro: dynamic signature resolver requires an SSA emission universe")
+	}
 	maxPlain := config.MaxPlainInstructions
 	if maxPlain == 0 {
 		maxPlain = DefaultMaxPlainInstructions
@@ -1287,8 +1385,8 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			if publicationErr != nil {
 				return nil, publicationErr
 			}
-			dynamicCandidates, err = restrictedSSACHACandidatesWithDynamicImplements(
-				universe.functions, implements, managedPublications,
+			dynamicCandidates, err = restrictedSSACHACandidatesWithDynamicTypes(
+				universe.functions, implements, config.DynamicSignature, managedPublications,
 			)
 			if err != nil {
 				return nil, err
@@ -1638,6 +1736,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 	dynamicCandidates, err = filterSSAStaticCodeAddressOnlyCandidates(
 		dynamicCandidates, allFunctions, staticCodeAddressCallArguments, canonicalizer,
+		config.ResolveManagedFunctionValue,
 	)
 	if err != nil {
 		return nil, err
@@ -1777,12 +1876,14 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 				// generated composite/map literal expands into thousands of bounded
 				// stores. Turning that straight-line declaration machinery into one
 				// stackless state per poll dominates generated code and linker memory.
-				// Exempt only its local instruction-count seed. CFG cycles, explicit
-				// policy, and every called function's resulting suspension effect remain
-				// authoritative and continue to propagate through the graph.
+				// Exempt only its local instruction-count seed. Unproven/over-budget
+				// CFG cycles, explicit policy, and every called function's resulting
+				// suspension effect remain authoritative and continue to propagate.
 				budgetNeedsPreempt := maxPlain >= 0 && bodyFacts.InstructionCount > maxPlain &&
 					!isSSAPackageInitializer(fn)
-				if bodyFacts.HasCycle || budgetNeedsPreempt {
+				boundedCycle := bodyFacts.HasCycle && maxPlain >= 0 &&
+					bodyFacts.BoundedCycleCost != 0 && bodyFacts.BoundedCycleCost <= uint64(maxPlain)
+				if (bodyFacts.HasCycle && !boundedCycle) || budgetNeedsPreempt {
 					bodyExec = bodyExec.Join(NeedsPreempt)
 				}
 				if exactNoUnwind[fn] {
@@ -1866,6 +1967,14 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	policies, err := buildPolicies(exactNoUnwind)
 	if err != nil {
 		return nil, err
+	}
+	boundedCycles := make(map[*ssa.Function]uint64)
+	if maxPlain >= 0 {
+		for function, facts := range localBodyFacts {
+			if facts.HasCycle && facts.BoundedCycleCost != 0 && facts.BoundedCycleCost <= uint64(maxPlain) {
+				boundedCycles[function] = facts.BoundedCycleCost
+			}
+		}
 	}
 	evaluatedSourceCalls := make(map[ssa.CallInstruction]bool)
 	for _, facts := range localBodyFacts {
@@ -2216,6 +2325,16 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := applySSARawPlainCallPlans(base, callPlans, rawPlainCalls, ids, canonicalizer); err != nil {
 		return nil, err
 	}
+	// Construct the one raw-variant inventory before representation selection.
+	// Static-outcome closure and physical preflight consume this same capability;
+	// neither may reinterpret a raw occurrence through the managed target body.
+	rawPlainVariants := make(map[*ssa.Function]struct{})
+	for fn, policy := range policies {
+		functionPlan, planned := base.Lookup(ids[fn])
+		if policy.RawPlainVariant || planned && functionPlan.RawPlainDemand && functionPlan.External == Defined {
+			rawPlainVariants[fn] = struct{}{}
+		}
+	}
 	outcomePrimaryUses := classifySSAOutcomePrimaryUses(
 		graph, canonicalRoots, byID, callPlans, loweredCalls, exactInterfaceReceivers,
 	)
@@ -2226,7 +2345,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 	if err := applySSAStaticOutcomePlans(
 		base, byID, localBodyFacts, callPlans, loweredCalls, elidedCalls,
-		exactInterfaceReceivers, outcomePrimaryUses,
+		exactInterfaceReceivers, outcomePrimaryUses, rawPlainVariants,
 	); err != nil {
 		return nil, err
 	}
@@ -2263,7 +2382,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		byFunction:              ids,
 		byID:                    byID,
 		ignoredBodies:           ignoredBodies,
-		rawPlainVariants:        make(map[*ssa.Function]struct{}),
+		rawPlainVariants:        rawPlainVariants,
 		valuePlans:              valuePlans,
 		callPlans:               callPlans,
 		spawnTargets:            spawnTargets,
@@ -2283,13 +2402,11 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		callableIdentities:      make(map[*ssa.Function]CallableIdentityCertificate),
 		callableContracts:       make(map[*ssa.Function]CallableContractCertificate),
 		assemblyNoSuspend:       make(map[*ssa.Function]string),
+		boundedCycles:           boundedCycles,
 		functionIDs:             config.FunctionIDs,
+		dynamicSignature:        config.DynamicSignature,
 	}
 	for fn, policy := range policies {
-		functionPlan, planned := base.Lookup(ids[fn])
-		if policy.RawPlainVariant || planned && functionPlan.RawPlainDemand && functionPlan.External == Defined {
-			result.rawPlainVariants[fn] = struct{}{}
-		}
 		if policy.ForeignNoBlockCertificate != "" {
 			result.foreignNoBlock[fn] = policy.ForeignNoBlockCertificate
 		}
@@ -2664,6 +2781,7 @@ func applySSAStaticOutcomePlans(
 	elidedCalls map[ssa.CallInstruction]bool,
 	exactInterfaceReceivers map[*ssa.Call]ssa.Value,
 	primaryUses ssaOutcomePrimaryUses,
+	rawPlainVariants map[*ssa.Function]struct{},
 ) error {
 	if base == nil {
 		return fmt.Errorf("coro: static-outcome planning requires a complete graph plan")
@@ -2743,8 +2861,19 @@ func applySSAStaticOutcomePlans(
 			}
 			targetID, identified := ids[call.Target]
 			target, found := base.Lookup(targetID)
-			if call.Target == nil || !identified || !found || call.RawPlain {
+			if call.Target == nil || !identified || !found {
 				invalidCall[owner] = true
+				continue
+			}
+			if call.RawPlain {
+				_, hasVariant := rawPlainVariants[call.Target]
+				if !validSSARawPlainLoweredTarget(call, target, hasVariant) {
+					invalidCall[owner] = true
+				}
+				// The frozen occurrence already executes the validated legacy body
+				// on this stack. Its independently managed entry is not a dependency
+				// of this physical call. Bounded atomic-cost selection remains
+				// unchanged: a raw closure supplies no transitive cost certificate.
 				continue
 			}
 			switch target.ManagedEntry {
@@ -4020,8 +4149,9 @@ func classifySSAClosedDynamicCalls(
 					if !bodyFunctions[target] || len(target.Blocks) == 0 || policy.IgnoreBody || (policy.OverrideExternal && policy.External != Defined) {
 						return nil, fmt.Errorf("coro: closed dynamic target %q in %q must be an owned emitted Go body, not an external target", target.Name(), caller.Name())
 					}
-					callSignature := common.Signature()
-					if callSignature == nil || target.Signature == nil || !types.Identical(callSignature, target.Signature) {
+					callSignature, callErr := projectSSACallableSignature(config.DynamicSignature, caller, common.Signature())
+					targetSignature, targetErr := projectSSACallableSignature(config.DynamicSignature, target, target.Signature)
+					if callErr != nil || targetErr != nil || !types.Identical(callSignature, targetSignature) {
 						return nil, fmt.Errorf("coro: closed dynamic target %q in %q has signature %v, want %v", target.Name(), caller.Name(), target.Signature, callSignature)
 					}
 					cloned.Targets = []*ssa.Function{target}
@@ -4035,7 +4165,7 @@ func classifySSAClosedDynamicCalls(
 
 func classifySSAElidedCalls(functions []*ssa.Function, config SSAConfig) (map[ssa.CallInstruction]bool, error) {
 	result := make(map[ssa.CallInstruction]bool)
-	if config.ClassifyElidedCall == nil {
+	if config.ClassifyElidedCall == nil && config.ClassifyUnevaluatedCall == nil {
 		return result, nil
 	}
 	for _, caller := range functions {
@@ -4043,6 +4173,19 @@ func classifySSAElidedCalls(functions []*ssa.Function, config SSAConfig) (map[ss
 			for _, instruction := range block.Instrs {
 				call, ok := instruction.(ssa.CallInstruction)
 				if !ok {
+					continue
+				}
+				if config.ClassifyUnevaluatedCall != nil {
+					unevaluated, err := config.ClassifyUnevaluatedCall(caller, call)
+					if err != nil {
+						return nil, fmt.Errorf("coro: classify frontend-unevaluated call in %q: %w", caller.Name(), err)
+					}
+					if unevaluated {
+						result[call] = true
+						continue
+					}
+				}
+				if config.ClassifyElidedCall == nil {
 					continue
 				}
 				elided, err := config.ClassifyElidedCall(caller, call)
@@ -4482,27 +4625,26 @@ func filterSSADynamicCandidateSites(
 // observations. Such an occurrence emits no managed function value and cannot
 // make the target callable by an unrelated dynamic Go call. Canonicalization
 // is applied to the remaining publication inventory so patched declarations
-// and their emitted definitions retain one identity. An unresolved ordinary
+// and their emitted definitions retain one identity. Managed foreign/intrinsic
+// adapters must use that same projection as initial CHA discovery; otherwise
+// filtering a raw code observation could erase an unrelated Go publication.
+// An unresolved ordinary
 // publication remains eligible and therefore keeps closed-world analysis open.
 func filterSSAStaticCodeAddressOnlyCandidates(
 	candidates map[ssa.CallInstruction]map[*ssa.Function]struct{},
 	functions []*ssa.Function,
 	codeAddressUses []ssaCallArgumentUse,
 	canonicalizer *ssaFunctionCanonicalizer,
+	resolver SSAManagedFunctionValueResolver,
 ) (map[ssa.CallInstruction]map[*ssa.Function]struct{}, error) {
 	if len(candidates) == 0 || len(codeAddressUses) == 0 {
 		return candidates, nil
 	}
-	managedAddresses := make(map[*ssa.Function]struct{})
-	for raw := range restrictedSSAAddressTakenFunctionsExcluding(functions, codeAddressUses) {
-		managedAddresses[raw] = struct{}{}
-		canonical, resolved, err := canonicalizer.resolve(raw)
-		if err != nil {
-			return nil, fmt.Errorf("coro: resolve managed address-taken function %q while filtering code-address-only CHA candidates: %w", raw.Name(), err)
-		}
-		if resolved && canonical != nil {
-			managedAddresses[canonical] = struct{}{}
-		}
+	managedAddresses, err := restrictedSSAManagedAddressTakenFunctionsExcluding(
+		functions, canonicalizer, resolver, codeAddressUses,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coro: filter code-address-only CHA candidates: %w", err)
 	}
 
 	result := make(map[ssa.CallInstruction]map[*ssa.Function]struct{}, len(candidates))
@@ -4513,7 +4655,7 @@ func filterSSAStaticCodeAddressOnlyCandidates(
 		}
 		filtered := make(map[*ssa.Function]struct{}, len(targets))
 		for target := range targets {
-			if _, published := managedAddresses[target]; published {
+			if managedAddresses[target] {
 				filtered[target] = struct{}{}
 			}
 		}

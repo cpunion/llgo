@@ -1,4 +1,4 @@
-//go:build linux && !baremetal && !tinygo.wasm
+//go:build linux && !baremetal && !tinygo.wasm && !(llgo && llgo_coro && llgo_coro_host && !coro_runtime_adapter_test)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

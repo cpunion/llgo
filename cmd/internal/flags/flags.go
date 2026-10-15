@@ -50,6 +50,7 @@ var ForceRebuild bool
 var PrintCommands bool
 var BuildTrace string
 var DeadcodeDrop bool
+var DeadcodeDropSet bool
 var PthreadStackSize byteSizeFlag
 var OptLevel optlevel.Level
 
@@ -211,12 +212,18 @@ func AddOptLevelFlags(fs *flag.FlagSet) {
 
 func AddBuildFlags(fs *flag.FlagSet) {
 	DeadcodeDrop = false
+	DeadcodeDropSet = false
 	PthreadStackSize = 0
 	fs.BoolVar(&ForceRebuild, "a", false, "Force rebuilding of packages that are already up-to-date")
 	fs.BoolVar(&PrintCommands, "x", false, "Print the commands")
-	if buildenv.Dev {
-		fs.BoolVar(&DeadcodeDrop, "deadcodedrop", false, "Enable Go dead code drop")
-	}
+	fs.BoolFunc("deadcodedrop", "Enable semantic method-slot DCE (default: closed full-LTO executables)", func(value string) error {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return err
+		}
+		DeadcodeDrop, DeadcodeDropSet = enabled, true
+		return nil
+	})
 	AddOptLevelFlags(fs)
 	AddLTOFlag(fs)
 	AddGlobalDCEFlag(fs)
@@ -357,8 +364,9 @@ func UpdateConfig(conf *build.Config) error {
 	conf.PrintPackages = false
 	switch conf.Mode {
 	case build.ModeBuild:
-		// Match go build -v: print package names as they are compiled. The
-		// legacy LLGo compiler output is available through -compiler-verbose.
+		// Keep go build -v's package-only output, but report packages only after
+		// successful compilation. The legacy LLGo compiler output is available
+		// through -compiler-verbose.
 		conf.Verbose = CompilerVerbose
 		conf.PrintPackages = Verbose
 	case build.ModeTest:
@@ -368,6 +376,7 @@ func UpdateConfig(conf *build.Config) error {
 	}
 	conf.PrintCommands = PrintCommands
 	conf.DeadcodeDrop = DeadcodeDrop
+	conf.DeadcodeDropSet = DeadcodeDropSet
 	conf.OptLevel = OptLevel
 	conf.Target = Target
 	conf.Port = Port

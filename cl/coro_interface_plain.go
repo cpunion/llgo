@@ -158,7 +158,7 @@ func analyzeCoroClosedInterfacePlainPlan(
 	// through static calls, no descriptor exists at code generation time. Freeze
 	// that exact dormant cause just like an EmitNone interface invoke; the emitted
 	// consumer scan below still rejects any live first-class or dynamic use.
-	if err := freezeCoroDormantManagedMethodValueTargets(plan, universe.CoroPlanningMetadata(), result); err != nil {
+	if err := freezeCoroDormantManagedMethodValueTargets(plan, universe.coroProgramIR, result); err != nil {
 		return nil, err
 	}
 	firstClassUse := make(map[coro.FunctionID]string)
@@ -332,23 +332,28 @@ func analyzeCoroClosedInterfacePlainPlan(
 
 func freezeCoroDormantManagedMethodValueTargets(
 	plan *coro.SSAPlan,
-	metadata CoroPlanningMetadataView,
+	program *coroProgramIR,
 	result *coroClosedInterfacePlainPlan,
 ) error {
-	if plan == nil || result == nil {
-		return fmt.Errorf("dormant managed method values require an exact plan, emission universe, and receiver plan")
+	if plan == nil || program == nil || result == nil {
+		return fmt.Errorf("dormant managed method values require an exact plan, ProgramIR, and receiver plan")
 	}
 	for _, owner := range plan.Functions() {
 		if owner.Function == nil || owner.Plan.Emission != coro.EmitNone {
 			continue
 		}
-		references, err := metadata.ManagedValueReferences(owner.Function)
-		if err != nil {
-			return err
+		references, present := program.managedValueReferences[owner.Function]
+		if !present {
+			return fmt.Errorf("dormant managed method publication owner %q is absent from ProgramIR", owner.Function.Name())
 		}
 		for _, target := range references {
 			if target == nil || target.Signature == nil || target.Signature.Recv() == nil {
 				continue
+			}
+			source := target
+			target, err := program.resolveCoroManagedABIMethodTarget(source)
+			if err != nil {
+				return fmt.Errorf("resolve dormant managed method target %q: %w", source.Name(), err)
 			}
 			targetPlan, found := plan.FunctionPlan(target)
 			if !found || targetPlan.ID == "" {

@@ -82,7 +82,7 @@ func TestLeakingWebAssemblyProfilesExcludeBDWGC(t *testing.T) {
 					[]string{"coro_abort_freestanding_webassembly.go"},
 					[]string{"coro_abort_libc.go"})
 			}
-			assertFiles("github.com/xgo-dev/llgo/runtime/internal/lib/runtime", []string{"runtime_nogc.go", "mfinal_nogc.go", "sync_runtime_procpin_stub_llgo.go"}, []string{"runtime_gc.go", "mfinal.go"})
+			assertFiles("github.com/xgo-dev/llgo/runtime/internal/lib/runtime", []string{"runtime_nogc.go", "mfinal_nogc.go", "sync_runtime_procpin_stub_llgo.go", "weak_gc_nogc.go"}, []string{"runtime_gc.go", "mfinal.go", "weak_gc_bdwgc.go", "weak_gc_tinygogc.go"})
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/thread", []string{"thread_unix_nogc.go"}, []string{"thread_unix_gc.go"})
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/tls", []string{"tls_webassembly.go"}, []string{"tls_common.go", "tls_gc.go", "tls_nogc.go"})
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/os", []string{"os_freestanding.go"}, []string{"os_other.go", "os_darwin.go"})
@@ -153,8 +153,8 @@ func TestConservativeWebAssemblyProfileSelectsTinyGoGC(t *testing.T) {
 	)
 	assertFiles(
 		"github.com/xgo-dev/llgo/runtime/internal/lib/runtime",
-		[]string{"runtime_gc_tinygogc.go", "mfinal_nogc.go"},
-		[]string{"runtime_gc.go", "runtime_nogc.go", "mfinal.go"},
+		[]string{"runtime_gc_tinygogc.go", "mfinal_nogc.go", "weak_gc_tinygogc.go"},
+		[]string{"runtime_gc.go", "runtime_nogc.go", "mfinal.go", "weak_gc_nogc.go", "weak_gc_bdwgc.go"},
 	)
 	assertFiles(
 		"github.com/xgo-dev/llgo/runtime/internal/coroalloc",
@@ -163,7 +163,7 @@ func TestConservativeWebAssemblyProfileSelectsTinyGoGC(t *testing.T) {
 	)
 	assertFiles(
 		"github.com/xgo-dev/llgo/runtime/internal/runtime/tinygogc",
-		[]string{"gc.go", "gc_tinygo.go", "gc_wasm.go", "rooted.go"},
+		[]string{"gc.go", "gc_tinygo.go", "gc_wasm.go", "rooted.go", "weak.go"},
 		nil,
 	)
 	assertFiles(
@@ -238,8 +238,8 @@ func TestFreestandingWebAssemblyProfilesDoNotSelectHostedRuntimeLeaves(t *testin
 				"coro_abort_freestanding_webassembly.go",
 				"panic_slot_single.go",
 				"panic_traceback_freestanding_webassembly.go",
-				"random_freestanding_webassembly.go",
-				"z_freestanding_webassembly.go",
+				"random_freestanding.go",
+				"z_freestanding.go",
 				"z_print_freestanding_webassembly.go",
 			}, []string{
 				"coro_abort_libc.go",
@@ -267,7 +267,7 @@ func TestFreestandingWebAssemblyProfilesDoNotSelectHostedRuntimeLeaves(t *testin
 					[]string{"os_freestanding.go"}, []string{"os_other.go", "os_darwin.go"})
 			}
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/ffi",
-				[]string{"abi_webassembly.go", "ffi_link_webassembly.go"},
+				[]string{"abi_webassembly.go", "ffi_link_freestanding.go"},
 				[]string{"abi.go", "abi_wasm.go", "config_default.go", "config_windows.go", "ffi_link.go"})
 			assertFiles("github.com/xgo-dev/llgo/runtime/internal/clite/tls",
 				[]string{"tls_webassembly.go"}, []string{"tls_common.go", "tls_gc.go", "tls_nogc.go"})

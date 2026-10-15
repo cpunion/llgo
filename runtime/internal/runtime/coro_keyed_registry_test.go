@@ -52,6 +52,58 @@ func keyedRegistryOperation(t *testing.T, slot, generation uint32) coro.Operatio
 	return id
 }
 
+func TestCoroKeyedDomainIdentityDoesNotRequireRouteCapability(t *testing.T) {
+	for _, name := range []string{"same-bubble", "outside-bubble", "other-bubble"} {
+		t.Run(name, func(t *testing.T) {
+			var activity coro.ExecutionDomainActivity
+			task := new(coro.G)
+			context := unsafe.Pointer(&activity)
+			entry := &coro.ExecutionDomainTask{Context: context, Activity: &activity}
+			if !coro.AttachExecutionDomainTask(task, entry, false) {
+				t.Fatal("attach domain task")
+			}
+			defer coro.DetachExecutionDomainTask(task)
+			id := keyedRegistryOperation(t, 1, 1)
+			if !coro.BindExecutionDomainManualWait(task, id) {
+				t.Fatal("bind domain manual wait")
+			}
+			handle, ok := coroProgramKeyedRegistryV2State.register(coroKeyedParkDomainV1, 0x7171, 0, id)
+			if !ok || coroProgramKeyedRegistryV2State.claimExact(handle, id) != coroKeyedRegistryClaimOwnerV2 {
+				t.Fatal("claim domain operation")
+			}
+			defer coroProgramKeyedRegistryV2State.retire(handle, id)
+			savedTask, savedRoute, savedContext := coroCurrentTaskTestV1, coroCurrentTaskRouteTestV1, keyedTestDomainContext
+			defer func() {
+				coroCurrentTaskTestV1, coroCurrentTaskRouteTestV1, keyedTestDomainContext = savedTask, savedRoute, savedContext
+			}()
+			// Match the non-fleet adapter: there is no producer-local routing
+			// capability even though the domain bridge knows the logical G.
+			coroCurrentTaskTestV1, coroCurrentTaskRouteTestV1 = nil, 0
+			switch name {
+			case "same-bubble":
+				keyedTestDomainContext = context
+			case "outside-bubble":
+				keyedTestDomainContext = nil
+			default:
+				keyedTestDomainContext = unsafe.Pointer(new(byte))
+			}
+			var result coroKeyedPostLocalResultV2
+			var failure any
+			func() {
+				defer func() { failure = recover() }()
+				result = coroKeyedPostClaimedLocalV2(handle, id)
+			}()
+			if name == "same-bubble" {
+				if failure != nil || result != coroKeyedPostLocalExternalV2 {
+					t.Fatalf("same bubble without route: result=%d failure=%v", result, failure)
+				}
+			} else if failure != "semaphore wake of synctest goroutine from outside bubble" {
+				t.Fatalf("foreign bubble was not rejected: result=%d failure=%v", result, failure)
+			}
+		})
+	}
+}
+
 func TestCoroKeyedRegistryFIFOAndExactLogicalSelectionV2(t *testing.T) {
 	registry := new(coroKeyedRegistryV2)
 	firstID := keyedRegistryOperation(t, 1, 1)

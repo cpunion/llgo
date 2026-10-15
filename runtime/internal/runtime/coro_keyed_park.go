@@ -60,7 +60,7 @@ func (registry *coroKeyedRegistryV2) register(
 	logical uint32,
 	operation coro.OperationID,
 ) (coroKeyedRegistryHandleV2, bool) {
-	if registry == nil || (kind != coroKeyedParkSemaphoreV2 && kind != coroKeyedParkNotifyV2) ||
+	if registry == nil || !validCoroKeyedParkKindV2(kind) ||
 		key == 0 || !operation.Valid() || operation.Source() != coro.OperationSourceManual {
 		return coroKeyedRegistryHandleV2{}, false
 	}
@@ -178,7 +178,7 @@ func (registry *coroKeyedRegistryV2) claimOne(
 	logical uint32,
 	exact bool,
 ) (coroKeyedRegistryHandleV2, coro.OperationID, bool) {
-	if registry == nil || (kind != coroKeyedParkSemaphoreV2 && kind != coroKeyedParkNotifyV2) || key == 0 {
+	if registry == nil || !validCoroKeyedParkKindV2(kind) || key == 0 {
 		return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
 	}
 	for {
@@ -311,6 +311,20 @@ func coroKeyedPostClaimedLocalV2(
 		return coroKeyedPostLocalCompletedV2
 	case coroKeyedRegistryPublishReadyV2:
 		current, driver, route := coroCurrentTaskV1()
+		if coro.ExecutionDomainEnabled() {
+			owner := coro.ExecutionDomainManualContext(operation)
+			// Domain identity is independent of native-fleet locality. Host and
+			// single-context targets intentionally return no route capability,
+			// but their logical G still belongs to its synctest bubble.
+			context := CurrentExecutionDomainContext()
+			if owner != nil && owner != context {
+				coroKeyedAbortV2("semaphore wake of synctest goroutine from outside bubble")
+				return coroKeyedPostLocalInvalidV2
+			}
+			if !coro.PublishExecutionDomainManual(operation) {
+				return coroKeyedPostLocalInvalidV2
+			}
+		}
 		if current != nil && driver != nil && route == operation.Route() {
 			completion, cleanup, local, localOK := coro.BeginOwnerLocalManualCompletionCurrent(
 				current,
@@ -412,7 +426,7 @@ func coroKeyedAbortV2(message string) {
 
 func coroPrepareKeyedStateV2(state *CoroKeyedParkV2, kind coroKeyedParkKindV2, key uintptr, logical uint32) bool {
 	if state == nil || *state != (CoroKeyedParkV2{}) || key == 0 ||
-		(kind != coroKeyedParkSemaphoreV2 && kind != coroKeyedParkNotifyV2) {
+		!validCoroKeyedParkKindV2(kind) {
 		return false
 	}
 	state.kind = kind
@@ -468,6 +482,13 @@ func __llgo_coro_keyed_park_v2(g, handle, header, storage unsafe.Pointer) {
 	}
 	state.ticket = ticket
 	state.magic = coroKeyedParkActiveMagicV2
+	if coro.ExecutionDomainEnabled() &&
+		(state.kind == coroKeyedParkNotifyV2 || state.kind == coroKeyedParkDomainV1 ||
+			state.kind == coroKeyedParkSemaphoreV2 && state.logical != 0) &&
+		!coro.BindExecutionDomainManualWait(task, operation) {
+		coroKeyedAbortV2("cannot bind durable keyed wait")
+		return
+	}
 	// Publish the scalar key only after the complete P-neutral cleanup
 	// descriptor is bound. A concurrent release can post the Manual fact
 	// immediately, but the current owner cannot suspend this G with a partially
@@ -480,6 +501,12 @@ func __llgo_coro_keyed_park_v2(g, handle, header, storage unsafe.Pointer) {
 		return
 	}
 	state.registry = registry
+	if coro.ExecutionDomainEnabled() && state.kind == coroKeyedParkDomainV1 {
+		if !coroPublishDomainParkV1(task, state) {
+			coroKeyedAbortV2("cannot publish coroutine execution-domain wait")
+		}
+		return
+	}
 
 	ready := state.kind == coroKeyedParkSemaphoreV2 && catomic.Load((*uint32)(unsafe.Pointer(state.key))) != 0 ||
 		state.kind == coroKeyedParkNotifyV2 && coroKeyedTicketLessV2(

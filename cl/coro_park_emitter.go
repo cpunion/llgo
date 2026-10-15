@@ -188,6 +188,9 @@ func (c *coroBodyContext) emitCoroParkOperation(p *context, b llssa.Builder, ope
 	)
 	for index, target := range faultTargets {
 		b.SetBlockEx(target, llssa.AtEnd, false)
+		// Like cancellation, a fault skips the normal resume join. A recovered
+		// send-on-closed panic may immediately run an asynchronous defer.
+		c.activate(b)
 		p.compileCoroTerminalFault(b, operation.faults[index].kind)
 	}
 	b.SetBlock(join)

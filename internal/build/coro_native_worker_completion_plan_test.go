@@ -189,7 +189,7 @@ func __llgo_coro_timer_resume_v2(unsafe.Pointer, unsafe.Pointer) uint32 { return
 func __llgo_coro_timer_request_controlled_v2(uint32) uint32 { return 0 }
 func __llgo_coro_keyed_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_keyed_resume_v2(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
-func __llgo_coro_sema_prepare_or_abort_v2(unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_sema_prepare_or_abort_v3(unsafe.Pointer, unsafe.Pointer, bool) {}
 func __llgo_coro_sema_release_or_abort_v2(unsafe.Pointer) {}
 func __llgo_coro_notify_prepare_or_abort_v2(unsafe.Pointer, unsafe.Pointer, uint32) {}
 func __llgo_coro_notify_one_or_abort_v2(unsafe.Pointer, uint32) {}

@@ -22,6 +22,7 @@ func Rethrow(link *Defer) {
 			return
 		}
 		node := (*panicNode)(ptr)
+		link = gp.panicDeferTarget(link)
 		gp.movePanicToDefer(node, link)
 		if link == nil {
 			TracePanic(node.arg)

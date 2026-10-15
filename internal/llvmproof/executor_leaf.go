@@ -48,6 +48,10 @@ type ExecutorLeafProof struct {
 	DataLayout    string
 	CallClosure   []string
 	ClosureSHA256 string
+	// MayFault is independent of executor progress. It conservatively records
+	// memory, integer division, and intrinsic operations in the exact closure;
+	// a direct call must retain the managed caller's native fault landing.
+	MayFault bool
 }
 
 // LLVM C's opcode enum uses these values in the supported LLVM 22 release. The
@@ -84,6 +88,7 @@ func ProveExecutorLeaf(module llvm.Module, symbol string) (ExecutorLeafProof, er
 	visiting := make(map[llvm.Value]bool)
 	proved := make(map[llvm.Value]bool)
 	closure := make(map[string]llvm.Value)
+	mayFault := false
 	var prove func(llvm.Value) error
 	prove = func(function llvm.Value) error {
 		if proved[function] {
@@ -109,6 +114,12 @@ func ProveExecutorLeaf(module llvm.Module, symbol string) (ExecutorLeafProof, er
 		for block := function.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
 			for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
 				opcode := instruction.InstructionOpcode()
+				switch opcode {
+				case llvm.Load, llvm.Store, llvmOpcodeAtomicCmpXchg, llvmOpcodeAtomicRMW:
+					mayFault = mayFault || executorLeafMemoryMayFault(instruction)
+				case llvm.UDiv, llvm.SDiv, llvm.URem, llvm.SRem:
+					mayFault = true
+				}
 				if !executorLeafOpcode(opcode) {
 					return fmt.Errorf(
 						"function %q contains unsupported LLVM opcode %d",
@@ -126,6 +137,7 @@ func ProveExecutorLeaf(module llvm.Module, symbol string) (ExecutorLeafProof, er
 					)
 				}
 				if callee.IntrinsicID() != 0 {
+					mayFault = mayFault || !executorLeafTLSAddressIntrinsic(callee)
 					if err := validateExecutorLeafIntrinsic(callee); err != nil {
 						return fmt.Errorf(
 							"function %q calls intrinsic %q: %w",
@@ -163,7 +175,44 @@ func ProveExecutorLeaf(module llvm.Module, symbol string) (ExecutorLeafProof, er
 		DataLayout:    module.DataLayout(),
 		CallClosure:   names,
 		ClosureSHA256: closureSHA256,
+		MayFault:      mayFault,
 	}, nil
+}
+
+// Exact scalar slots have storage guaranteed by LLVM's native stack or linker
+// (including TLS). Do not charge current-G TLS reads and unoptimized argument
+// spills for a signal landing. Derived addresses and unknown pointees remain
+// conservative; progress/non-retention alone cannot establish their safety.
+func executorLeafMemoryMayFault(instruction llvm.Value) bool {
+	address := instruction.Operand(0)
+	valueType := instruction.Type()
+	switch instruction.InstructionOpcode() {
+	case llvm.Store:
+		address = instruction.Operand(1)
+		valueType = instruction.Operand(0).Type()
+	case llvmOpcodeAtomicCmpXchg, llvmOpcodeAtomicRMW:
+		valueType = instruction.Operand(1).Type()
+	}
+	if !address.IsACallInst().IsNil() &&
+		executorLeafTLSAddressIntrinsic(address.CalledValue()) && address.OperandsCount() == 2 {
+		address = address.Operand(0)
+	}
+	if global := address.IsAGlobalVariable(); !global.IsNil() &&
+		global.Linkage() != llvm.ExternalWeakLinkage && global.GlobalValueType() == valueType {
+		return false
+	}
+	if !address.IsAAllocaInst().IsNil() && address.AllocatedType() == valueType {
+		count := address.Operand(0)
+		if !count.IsAConstantInt().IsNil() && count.ZExtValue() != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func executorLeafTLSAddressIntrinsic(function llvm.Value) bool {
+	return !function.IsAFunction().IsNil() && function.IntrinsicID() != 0 &&
+		strings.HasPrefix(function.Name(), "llvm.threadlocal.address.")
 }
 
 func executorLeafClosureSHA256(module llvm.Module, names []string, dataLayout string) string {

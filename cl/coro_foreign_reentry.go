@@ -200,6 +200,7 @@ func coroSameMForeignReentryCallSignatureV2() *types.Signature {
 		types.NewParam(token.NoPos, nil, "task", pointer),
 		types.NewParam(token.NoPos, nil, "thunk", types.Typ[types.Uintptr]),
 		types.NewParam(token.NoPos, nil, "record", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "traceTarget", types.Typ[types.Uintptr]),
 		types.NewParam(token.NoPos, nil, "typeOut", pointerPointer),
 		types.NewParam(token.NoPos, nil, "dataOut", pointerPointer),
 	}
@@ -422,6 +423,59 @@ func (p *context) dispatchCoroSameMForeignReentryCompletion(
 	b.SetBlockContinuation(returned)
 }
 
+// emitCoroSameMForeignBoundary is the single compiler-owned transaction for a
+// synchronous foreign call that must remain on the current M. ReentryNone uses
+// the compact detach/restore boundary. Managed callback or ingress calls use
+// the outcome-aware V2 boundary so panic, Goexit, abort, and shutdown cross the
+// C stack without returning through it.
+func (p *context) emitCoroSameMForeignBoundary(
+	b llssa.Builder,
+	thunkWord llssa.Expr,
+	recordWord llssa.Expr,
+	traceTarget llssa.Expr,
+	reentry coro.ReentryClass,
+) llssa.Expr {
+	if p == nil || !p.hasCoroPhysicalBody() || b == nil || b.Func != p.fn ||
+		thunkWord.IsNil() || recordWord.IsNil() || traceTarget.IsNil() ||
+		!types.Identical(thunkWord.RawType(), p.prog.Uintptr().RawType()) ||
+		!types.Identical(recordWord.RawType(), p.prog.Uintptr().RawType()) ||
+		!types.Identical(traceTarget.RawType(), p.prog.Uintptr().RawType()) {
+		panic("same-M foreign boundary requires one active coroutine and uintptr thunk record")
+	}
+	task := p.coroTask()
+	if task.IsNil() {
+		panic("same-M foreign boundary has no active physical task")
+	}
+	switch reentry {
+	case coro.ReentryNone:
+		invoke := p.pkg.NewFunc(
+			coroSameMForeignCallHookV1,
+			coroSameMForeignCallSignature(),
+			llssa.InC,
+		)
+		b.Call(invoke.Expr, task, thunkWord, recordWord)
+		return llssa.Expr{}
+	case coro.ReentryManagedCallback, coro.ReentryManagedIngress:
+		outcome := p.structuredOutcomeScratch()
+		invoke := p.pkg.NewFunc(
+			coroSameMForeignReentryCallHookV2,
+			coroSameMForeignReentryCallSignatureV2(),
+			llssa.InC,
+		)
+		return b.Call(
+			invoke.Expr,
+			task,
+			thunkWord,
+			recordWord,
+			traceTarget,
+			b.FieldAddr(outcome, outcomePlainCompletionTypeWord),
+			b.FieldAddr(outcome, outcomePlainCompletionDataWord),
+		)
+	default:
+		panic("same-M foreign boundary has no exact reentry class")
+	}
+}
+
 func (p *context) compileCoroSameMForeignCall(
 	b llssa.Builder,
 	call *ssa.Call,
@@ -464,42 +518,13 @@ func (p *context) compileCoroSameMForeignCall(
 		b.Store(b.FieldAddr(record, shape.argumentBase+index), argument)
 	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	task := p.coroTask()
-	if task.IsNil() {
-		panic("coroutine same-M foreign call has no active physical body")
-	}
-	var completionStatus llssa.Expr
-	switch shape.reentry {
-	case coro.ReentryNone:
-		invoke := p.pkg.NewFunc(
-			coroSameMForeignCallHookV1,
-			coroSameMForeignCallSignature(),
-			llssa.InC,
-		)
-		b.Call(
-			invoke.Expr,
-			task,
-			b.Convert(p.prog.Uintptr(), thunk.Expr),
-			b.Convert(p.prog.Uintptr(), record),
-		)
-	case coro.ReentryManagedCallback, coro.ReentryManagedIngress:
-		outcome := p.structuredOutcomeScratch()
-		invoke := p.pkg.NewFunc(
-			coroSameMForeignReentryCallHookV2,
-			coroSameMForeignReentryCallSignatureV2(),
-			llssa.InC,
-		)
-		completionStatus = b.Call(
-			invoke.Expr,
-			task,
-			b.Convert(p.prog.Uintptr(), thunk.Expr),
-			b.Convert(p.prog.Uintptr(), record),
-			b.FieldAddr(outcome, outcomePlainCompletionTypeWord),
-			b.FieldAddr(outcome, outcomePlainCompletionDataWord),
-		)
-	default:
-		panic("coroutine same-M foreign lowering has no exact reentry class")
-	}
+	completionStatus := p.emitCoroSameMForeignBoundary(
+		b,
+		b.Convert(p.prog.Uintptr(), thunk.Expr),
+		b.Convert(p.prog.Uintptr(), record),
+		b.Convert(p.prog.Uintptr(), target.Expr),
+		shape.reentry,
+	)
 	p.emitCoroKeepaliveSlots(b, keepaliveSlots)
 	b.KeepAlive(record)
 	if !completionStatus.IsNil() {

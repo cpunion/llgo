@@ -51,6 +51,9 @@ type SSAAtomicBlockFacts struct {
 	LocalCost  uint64
 	Successors []int
 	Calls      []SSAAtomicCallSiteFacts
+	// SelectedSuccessor is zero for the source CFG, or the one-based If
+	// successor selected by ProgramIR's frozen constant-condition proof.
+	SelectedSuccessor uint8
 }
 
 // SSAAtomicPathFacts is an immutable ProgramIR projection. Blocks are dense in
@@ -103,7 +106,7 @@ func (facts *SSAAtomicPathFacts) equal(other *SSAAtomicPathFacts) bool {
 	}
 	for index, left := range facts.Blocks {
 		right := other.Blocks[index]
-		if left.Index != right.Index || left.LocalCost != right.LocalCost ||
+		if left.Index != right.Index || left.LocalCost != right.LocalCost || left.SelectedSuccessor != right.SelectedSuccessor ||
 			!slices.Equal(left.Successors, right.Successors) || len(left.Calls) != len(right.Calls) {
 			return false
 		}
@@ -135,8 +138,19 @@ func (facts *SSAAtomicPathFacts) validate(function *ssa.Function) error {
 		if sourceBlock == nil || sourceBlock.Index != index {
 			return fmt.Errorf("coro: atomic path for %q has no canonical source block %d", function.Name(), index)
 		}
-		expectedSuccessors := make([]int, 0, len(sourceBlock.Succs))
-		for _, successor := range sourceBlock.Succs {
+		sourceSuccessors := sourceBlock.Succs
+		if block.SelectedSuccessor != 0 {
+			if block.SelectedSuccessor > 2 || len(sourceSuccessors) != 2 || len(sourceBlock.Instrs) == 0 {
+				return fmt.Errorf("coro: atomic path block %d has invalid selected successor", index)
+			}
+			if _, branch := sourceBlock.Instrs[len(sourceBlock.Instrs)-1].(*ssa.If); !branch {
+				return fmt.Errorf("coro: atomic path block %d selects a non-conditional successor", index)
+			}
+			selected := int(block.SelectedSuccessor) - 1
+			sourceSuccessors = sourceSuccessors[selected : selected+1]
+		}
+		expectedSuccessors := make([]int, 0, len(sourceSuccessors))
+		for _, successor := range sourceSuccessors {
 			if successor == nil {
 				return fmt.Errorf("coro: atomic path for %q has a nil source successor at block %d", function.Name(), index)
 			}

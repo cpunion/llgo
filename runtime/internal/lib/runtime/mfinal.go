@@ -13,6 +13,7 @@ import (
 
 	"github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 	"github.com/xgo-dev/llgo/runtime/internal/ffi"
 	llruntime "github.com/xgo-dev/llgo/runtime/internal/runtime"
 	"github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
@@ -398,6 +399,20 @@ func runFinalizers() {
 	if !acquired {
 		return
 	}
+	if coro.ExecutionDomainEnabled() && llruntime.SynctestIsInBubble() {
+		// A collector callback does not belong to the caller's synctest
+		// bubble. Transfer the existing exclusive drain to an ordinary G;
+		// changing the caller's context would corrupt its activity ledger and
+		// would not permit a finalizer to start a fresh nested test bubble.
+		llruntime.GoOutsideExecutionDomain(drainFinalizers)
+		return
+	}
+	drainFinalizers()
+}
+
+// The caller has acquired draining. Its ownership may cross the publication
+// of an unbubbled G, but is released only by the G that actually drains.
+func drainFinalizers() {
 	defer releaseFinalizerDrain()
 
 	for {

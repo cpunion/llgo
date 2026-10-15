@@ -27,11 +27,19 @@ import (
 // -----------------------------------------------------------------------------
 
 type goTypes struct {
-	// typs and cvtneed are owned by the single lowering goroutine for one
+	// typs, cvtneed and sources are owned by the single lowering goroutine for one
 	// Program. packageSyntax is prepared before backend lowering and shared
 	// read-only by Programs with independent LLVM contexts.
-	typs          map[unsafe.Pointer]unsafe.Pointer
-	cvtneed       map[*types.Named]conversionRequirement
+	typs    map[unsafe.Pointer]unsafe.Pointer
+	cvtneed map[*types.Named]conversionRequirement
+	// go/types may rebuild the same generic instance with a fresh pointer.
+	// Intern only its lookup key using Go's nominal identity, keeping typs as
+	// the one conversion cache and its recursion-placeholder authority.
+	instances *types.Context
+	// Physical types have their own nominal identity and layout. Source-only
+	// consumers (Go method selection, lexical names) use these exact producer
+	// pairs, never reverse-infer source identity from names or LLVM layouts.
+	sources       map[types.Type]types.Type
 	packageSyntax *packageSyntaxData
 }
 
@@ -44,6 +52,8 @@ func newGoTypes(syntax ...*packageSyntaxData) goTypes {
 	return goTypes{
 		typs:          typs,
 		cvtneed:       make(map[*types.Named]conversionRequirement),
+		instances:     types.NewContext(),
+		sources:       make(map[types.Type]types.Type),
 		packageSyntax: packageSyntax,
 	}
 }
@@ -105,6 +115,39 @@ func (p Program) PhysicalType(typ types.Type, bg Background) types.Type {
 	return typ
 }
 
+// SourceType returns the exact source counterpart recorded by Go-to-physical
+// conversion. A derived pointer may be rebuilt around its recorded source
+// element; other unknown types retain their identity. This projection is for
+// Go SSA/method provenance only, never for physical sizes or emitted layouts.
+func (p Program) SourceType(typ types.Type) types.Type {
+	if typ == nil || p == nil {
+		return typ
+	}
+	typ = types.Unalias(typ)
+	if source := p.gocvt.sources[typ]; source != nil {
+		return source
+	}
+	if pointer, ok := typ.(*types.Pointer); ok {
+		if elem := p.SourceType(pointer.Elem()); elem != pointer.Elem() {
+			return types.NewPointer(elem)
+		}
+	}
+	return typ
+}
+
+func (p goTypes) recordSourceType(physical, source types.Type) {
+	source = types.Unalias(source)
+	if physical != source {
+		if prior := p.sources[physical]; prior != nil {
+			if !types.Identical(prior, source) {
+				panic("ssa: conflicting exact source type for physical conversion")
+			}
+			return // Preserve the first exact canonical source instance.
+		}
+		p.sources[physical] = source
+	}
+}
+
 // FuncDecl converts a Go/C function declaration into raw type.
 func (p Program) FuncDecl(sig *types.Signature, bg Background) Type {
 	raw := p.PhysicalFuncDecl(sig, bg)
@@ -141,8 +184,15 @@ func (p Program) Closure(sig *types.Signature) Type {
 
 func (p goTypes) cvtType(typ types.Type) (raw types.Type, cvt bool) {
 	if raw, ok := cvtGoSSAOpaqueType(typ); ok {
+		// Several SSA-only opaque kinds intentionally collapse to unsafe.Pointer.
+		// This erased representation has no unique source counterpart.
 		return raw, true
 	}
+	defer func() {
+		if cvt {
+			p.recordSourceType(raw, typ)
+		}
+	}()
 	switch t := typ.(type) {
 	case *types.Basic:
 	case *types.Pointer:
@@ -233,9 +283,24 @@ func (p goTypes) shouldConvertNamed(t *types.Named) bool {
 }
 
 func (p goTypes) cvtNamed(t *types.Named) (raw *types.Named, cvt bool) {
-	if v, ok := p.typs[unsafe.Pointer(t)]; ok {
+	key := t
+	if args := t.TypeArgs(); args != nil && args.Len() != 0 {
+		arguments := make([]types.Type, args.Len())
+		for index := range arguments {
+			arguments[index] = args.At(index)
+		}
+		canonical, err := types.Instantiate(p.instances, t.Origin(), arguments, false)
+		if err != nil {
+			panic(fmt.Sprintf("ssa: canonicalize checked generic instance: %v", err))
+		}
+		key = canonical.(*types.Named)
+	}
+	if v, ok := p.typs[unsafe.Pointer(key)]; ok {
 		raw = (*types.Named)(v)
-		cvt = t != raw
+		cvt = !types.Identical(t, raw)
+		if !cvt {
+			raw = t
+		}
 		return
 	}
 	// Decide whether the complete recursive type graph needs conversion before
@@ -245,7 +310,7 @@ func (p goTypes) cvtNamed(t *types.Named) (raw *types.Named, cvt bool) {
 	// closure reachable through a later member could leave an earlier member
 	// permanently cached in its unconverted form.
 	if !p.namedNeedsTypeConversion(t) {
-		p.typs[unsafe.Pointer(t)] = unsafe.Pointer(t)
+		p.typs[unsafe.Pointer(key)] = unsafe.Pointer(t)
 		return t, false
 	}
 	n := t.NumMethods()
@@ -254,7 +319,13 @@ func (p goTypes) cvtNamed(t *types.Named) (raw *types.Named, cvt bool) {
 		m := t.Method(i) // don't need to convert method signature
 		methods[i] = m
 	}
-	origin := types.NewNamed(t.Obj(), types.Typ[types.Int], methods)
+	// A physical named type can have a different underlying representation
+	// (notably func -> descriptor closure). Sharing the source TypeName makes
+	// go/types.Identical report that both shapes are identical, poisoning not
+	// only the named raw-type cache but also signatures and container caches.
+	obj := t.Obj()
+	physicalObj := types.NewTypeName(obj.Pos(), obj.Pkg(), obj.Name(), nil)
+	origin := types.NewNamed(physicalObj, types.Typ[types.Int], methods)
 	if tp := t.TypeParams(); tp != nil {
 		list := make([]*types.TypeParam, tp.Len())
 		for i := 0; i < tp.Len(); i++ {
@@ -269,7 +340,8 @@ func (p goTypes) cvtNamed(t *types.Named) (raw *types.Named, cvt bool) {
 	}
 	// Publish the converted placeholder before descending so every back-edge in
 	// the cycle observes the same conversion decision.
-	p.typs[unsafe.Pointer(t)] = unsafe.Pointer(named)
+	p.typs[unsafe.Pointer(key)] = unsafe.Pointer(named)
+	p.recordSourceType(named, t)
 	tund, _ := p.cvtType(t.Underlying())
 	// Generic instances derive their underlying type lazily from the origin.
 	// Fill the origin before any caller observes named.Underlying(), so a
@@ -409,6 +481,7 @@ func Instantiate(orig types.Type, t *types.Named) (types.Type, bool) {
 }
 
 func (p goTypes) cvtClosure(sig *types.Signature) *types.Struct {
+	source := sig
 	if sig.Recv() != nil {
 		sig = types.NewSignatureType(nil, nil, nil, sig.Params(), sig.Results(), sig.Variadic())
 	}
@@ -417,7 +490,9 @@ func (p goTypes) cvtClosure(sig *types.Signature) *types.Struct {
 		types.NewField(token.NoPos, nil, "$f", raw, false),
 		types.NewField(token.NoPos, nil, "$data", types.Typ[types.UnsafePointer], false),
 	}
-	return types.NewStruct(flds, nil)
+	closure := types.NewStruct(flds, nil)
+	p.recordSourceType(closure, source)
+	return closure
 }
 
 func (p goTypes) cvtFunc(sig *types.Signature, recv *types.Var) (raw *types.Signature) {
@@ -427,7 +502,9 @@ func (p goTypes) cvtFunc(sig *types.Signature, recv *types.Var) (raw *types.Sign
 	params, cvt1 := p.cvtTuple(sig.Params())
 	results, cvt2 := p.cvtTuple(sig.Results())
 	if cvt1 || cvt2 {
-		return types.NewSignatureType(nil, nil, nil, params, results, sig.Variadic())
+		raw = types.NewSignatureType(nil, nil, nil, params, results, sig.Variadic())
+		p.recordSourceType(raw, sig)
+		return raw
 	}
 	return sig
 }

@@ -516,6 +516,23 @@ exercise recoverable panic, `Goexit`, subsequent boundary reuse, and a callback
 that parks on the ordinary scheduler.  Component tests cover the complete
 terminal status set and nesting.
 
+The 2026-08-30 generated-cgo cutover now applies that boundary consistently to
+the compiler-owned cgo protocol.  On a NativeFleet target, ordinary generated
+`_Cfunc_*` wrappers, generated `_C2func_*`/errno wrappers, and their deferred
+forms all freeze one `same-M + managed-ingress` execution certificate.  The
+outer managed call uses the outcome-aware V2 boundary, while the generated Go
+adapter retains one raw/plain implementation.  A physical worker recipe remains
+representable only for a future producer proof with `ReentryNone`; absence of a
+function-typed argument is not such a proof.  Program capability analysis seeds
+the bounded worker only when the frozen physical recipe actually selects that
+worker class, including deferred cleanup.
+
+This is deliberately narrower than changing the default for every source-level
+C declaration.  The compiler owns the exact generated wrapper, raw adapter,
+active reentry landing, argument/result record, and errno snapshot.  Arbitrary
+typed C declarations and open dynamic C target sets still require the ingress
+and metadata work below before they can acquire the same conservative default.
+
 This checkpoint is still not sufficient to make every unannotated C
 declaration callback-capable.  The remaining compatibility work is:
 
@@ -527,11 +544,12 @@ declaration callback-capable.  The remaining compatibility work is:
    whose ABI cannot be proved;
 4. define the equivalent non-return policy for WASM/host, RTOS, and baremetal
    adapters which cannot use the native boundary-owned nonlocal transfer;
-5. only then switch the unannotated typed-C default from the temporary
+5. only then switch the arbitrary unannotated typed-C default from the temporary
    any-thread/no-reentry worker policy to the conservative target policy above.
 
-Changing the default before these gates would remove comments but regress cgo
-semantics.
+Changing that broader default before these gates would remove comments but
+regress foreign-call semantics.  It does not roll back the narrower generated-
+cgo cutover above.
 
 ### 4.4 Legacy directive migration
 

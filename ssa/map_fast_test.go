@@ -1,7 +1,6 @@
 package ssa
 
 import (
-	"go/importer"
 	"go/token"
 	"go/types"
 	"runtime"
@@ -206,13 +205,7 @@ func TestLargeMapLookupUsesFatAccessAndPackageZero(t *testing.T) {
 	prog := NewProgram(nil)
 	defer prog.Dispose()
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("p", "example.com/p")
 
 	buildLookup := func(name string, elem types.Type, commaOK bool) {

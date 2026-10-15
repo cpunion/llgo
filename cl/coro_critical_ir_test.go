@@ -67,12 +67,19 @@ func TestCoroCriticalRegionLoweringNativeAndWasm32(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		target *llssa.Target
+		pin    bool
 	}{
 		{name: "native"},
 		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+		{name: "native-pin", pin: true},
+		{name: "wasm32-pin", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, pin: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			prog, pkg, plan, root, enter, exit := compileCoroCriticalIRFixture(t, test.target)
+			source := coroCriticalIRTestSource
+			if test.pin {
+				source = strings.Replace(source, "llgo.coroCriticalEnter\nfunc criticalEnter()", "llgo.coroCriticalPin\nfunc criticalEnter() int", 1)
+			}
+			prog, pkg, plan, root, enter, exit := compileCoroCriticalIRFixture(t, test.target, source)
 			defer prog.Dispose()
 			module := pkg.Module()
 			defer module.Dispose()
@@ -95,7 +102,7 @@ func TestCoroCriticalRegionLoweringNativeAndWasm32(t *testing.T) {
 				t.Fatalf("verify critical coroutine before CoroSplit: %v\n%s", err, module.String())
 			}
 			body := requireCoroPhysicalFunction(t, module, "foo.Root").String()
-			for _, marker := range []string{"@foo.criticalEnter", "@foo.criticalExit", "@llgo.coroCriticalEnter", "@llgo.coroCriticalExit"} {
+			for _, marker := range []string{"@foo.criticalEnter", "@foo.criticalExit", "@llgo.coroCriticalEnter", "@llgo.coroCriticalPin", "@llgo.coroCriticalExit"} {
 				if strings.Contains(body, marker) {
 					t.Fatalf("source critical marker %q leaked into physical IR:\n%s", marker, body)
 				}
@@ -214,11 +221,15 @@ func TestCoroOSThreadAffinityMarkerLowering(t *testing.T) {
 	}
 }
 
-func compileCoroCriticalIRFixture(t *testing.T, target *llssa.Target) (
+func compileCoroCriticalIRFixture(t *testing.T, target *llssa.Target, sources ...string) (
 	llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.Call, *ssa.Call,
 ) {
 	t.Helper()
-	ssaPkg, _, files := buildGoSSAPkg(t, coroCriticalIRTestSource)
+	source := coroCriticalIRTestSource
+	if len(sources) != 0 {
+		source = sources[0]
+	}
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	var prog llssa.Program
 	if target == nil {
 		prog = newLLSSAProg(t)

@@ -7,12 +7,11 @@ import (
 	"testing"
 
 	"github.com/xgo-dev/llgo/ssa"
-	"github.com/xgo-dev/llgo/ssa/ssatest"
 	"github.com/xgo-dev/llvm"
 )
 
 func TestWasmImportAttributes(t *testing.T) {
-	prog := ssatest.NewProgram(t, &ssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
+	prog := newRuntimeTestProgram(t, &ssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
 	defer prog.Dispose()
 	pkg := prog.NewPackage("foo", "foo")
 	fn := pkg.NewFunc("fdRead", ssa.NoArgsNoRet, ssa.InGo)

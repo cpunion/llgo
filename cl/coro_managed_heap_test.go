@@ -301,11 +301,15 @@ func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			capturedProof := capturedAudit.currentFrameRetentionProof()
 			cleanupPlan, err := prepareCoroStaticCleanupPlan(captured, plan, universe, "", true)
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Match the production physical-plan transaction: the proof consumes
+			// the frozen cleanup recipe, never an independent SSA rescan. Attach
+			// it before the first proof query, which memoizes the exact root set.
+			capturedAudit.cleanup = cleanupPlan
+			capturedProof := capturedAudit.currentFrameRetentionProof()
 			if cleanupPlan == nil || len(cleanupPlan.terminalResultAllocations) != 3 ||
 				!coroTerminalResultAllocationSetMatches(capturedProof, cleanupPlan.terminalResultAllocations) {
 				t.Fatalf("CapturedResults cleanup/proof terminal allocation sets disagree: plan=%v proof=%v",

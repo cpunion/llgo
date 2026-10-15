@@ -20,9 +20,82 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 )
+
+// coroExactWrapperMethod projects the declared method's own type arguments.
+// x/tools has already instantiated receiver parameters on Object; synthetic
+// wrappers have only method arguments in TypeArgs (unlike a method body).
+// Keep the exact name derivation aligned with x/tools/ssa.maybeInstance, without
+// accepting a generic-looking prefix or treating the adapted wrapper signature
+// as the authority for the declaration's parameters/results.
+func coroExactWrapperMethod(fn *ssa.Function, object *types.Func) (string, *types.Signature, error) {
+	method, ok := object.Type().(*types.Signature)
+	if !ok || method.Recv() == nil {
+		return "", nil, fmt.Errorf("declared method has no receiver")
+	}
+	arguments := fn.TypeArgs()
+	if len(arguments) != method.TypeParams().Len() {
+		return "", nil, fmt.Errorf("method arguments do not match the declared type parameters")
+	}
+	name := object.Name()
+	if len(arguments) != 0 {
+		if !coroGroundGenericTypeArgs(arguments) {
+			return "", nil, fmt.Errorf("method arguments are not fully instantiated")
+		}
+		instance, err := types.Instantiate(nil, method, arguments, true)
+		if err != nil {
+			return "", nil, fmt.Errorf("instantiate declared method: %w", err)
+		}
+		method = instance.(*types.Signature)
+		names := make([]string, len(arguments))
+		for index, argument := range arguments {
+			names[index] = argument.String()
+		}
+		name += "[" + strings.Join(names, ", ") + "]"
+	}
+	return name, method, nil
+}
+
+// The receiver and method argument identities matter even when an argument is
+// absent from the physical signature, e.g. M[T]() int. A same-shaped instance
+// must not substitute for the wrapper's exact target.
+func coroExactWrapperCallee(callee *ssa.Function, wrapper *ssa.Function, object *types.Func, method *types.Signature) bool {
+	calleeMethod, _ := calleeObject(callee).(*types.Func)
+	if callee == nil || calleeMethod == nil || callee.Signature == nil || callee.Signature.Recv() == nil ||
+		(calleeMethod != object && (!coroMaterializedGenericInstance(callee) ||
+			calleeMethod.Origin() != object.Origin() || !types.Identical(calleeMethod.Type(), object.Type()))) ||
+		!types.Identical(callee.Signature.Recv().Type(), method.Recv().Type()) ||
+		!types.Identical(callee.Signature, method) {
+		return false
+	}
+	var receiverArguments *types.TypeList
+	receiver := types.Unalias(method.Recv().Type())
+	if pointer, ok := receiver.(*types.Pointer); ok {
+		receiver = types.Unalias(pointer.Elem())
+	}
+	if named, ok := receiver.(*types.Named); ok {
+		receiverArguments = named.TypeArgs()
+	}
+	arguments, methodArguments := callee.TypeArgs(), wrapper.TypeArgs()
+	if len(arguments) != receiverArguments.Len()+len(methodArguments) {
+		return false
+	}
+	for index, argument := range arguments {
+		var expected types.Type
+		if index < receiverArguments.Len() {
+			expected = receiverArguments.At(index)
+		} else {
+			expected = methodArguments[index-receiverArguments.Len()]
+		}
+		if !types.Identical(argument, expected) {
+			return false
+		}
+	}
+	return true
+}
 
 // validateCoroExactMethodWrapper recognizes x/tools/ssa's canonical promoted
 // or implicit-indirection method wrapper. The wrapper has one receiver spill,
@@ -38,11 +111,11 @@ func validateCoroExactMethodWrapper(fn *ssa.Function) error {
 	if !ok || object == nil {
 		return fmt.Errorf("has no exact declared method object")
 	}
-	method, ok := object.Type().(*types.Signature)
-	if !ok || method.Recv() == nil {
-		return fmt.Errorf("declared method has no receiver")
+	name, method, err := coroExactWrapperMethod(fn, object)
+	if err != nil {
+		return err
 	}
-	if fn.Name() != object.Name() || fn.Synthetic != fmt.Sprintf("wrapper for %s", object) {
+	if fn.Name() != name || fn.Synthetic != fmt.Sprintf("wrapper for %s", object) {
 		return fmt.Errorf("has non-canonical method-wrapper identity")
 	}
 	params := coroPhysicalNormalizeSourceSignature(fn.Signature).Params()
@@ -171,8 +244,7 @@ func validateCoroExactMethodWrapper(fn *ssa.Function) error {
 		}
 	} else {
 		callee := common.StaticCallee()
-		calleeObject, _ := calleeObject(callee).(*types.Func)
-		if callee == nil || calleeObject != object || len(common.Args) != len(fn.Params) || !derived(common.Args[0]) {
+		if !coroExactWrapperCallee(callee, fn, object, method) || len(common.Args) != len(fn.Params) || !derived(common.Args[0]) {
 			return fmt.Errorf("concrete wrapper does not call the exact declared method")
 		}
 		for index := 1; index < len(common.Args); index++ {
@@ -204,11 +276,14 @@ func validateCoroExactBoundMethodWrapper(fn *ssa.Function) error {
 	if !ok || object == nil {
 		return fmt.Errorf("has no exact method object")
 	}
-	method, ok := object.Type().(*types.Signature)
-	if !ok || method.Recv() == nil || fn.Signature == nil || fn.Signature.Recv() != nil {
+	name, method, err := coroExactWrapperMethod(fn, object)
+	if err != nil {
+		return err
+	}
+	if fn.Signature == nil || fn.Signature.Recv() != nil {
 		return fmt.Errorf("does not drop exactly one declared method receiver")
 	}
-	if fn.Name() != object.Name()+"$bound" || fn.Synthetic != fmt.Sprintf("bound method wrapper for %s", object) {
+	if fn.Name() != name+"$bound" || fn.Synthetic != fmt.Sprintf("bound method wrapper for %s", object) {
 		return fmt.Errorf("has non-canonical bound-method identity")
 	}
 	if len(fn.FreeVars) != 1 || fn.FreeVars[0] == nil || fn.FreeVars[0].Parent() != fn ||
@@ -272,7 +347,7 @@ func validateCoroExactBoundMethodWrapper(fn *ssa.Function) error {
 			}
 		}
 	} else {
-		if common.IsInvoke() || common.Method != nil || common.StaticCallee() == nil || len(common.Args) != len(fn.Params)+1 || common.Args[0] != receiver {
+		if common.IsInvoke() || common.Method != nil || !coroExactWrapperCallee(common.StaticCallee(), fn, object, method) || len(common.Args) != len(fn.Params)+1 || common.Args[0] != receiver {
 			return fmt.Errorf("concrete receiver does not use one exact receiver-first static call")
 		}
 		for index := range fn.Params {
@@ -303,11 +378,14 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 	if !ok || object == nil {
 		return fmt.Errorf("has no exact method object")
 	}
-	method, ok := object.Type().(*types.Signature)
-	if !ok || method.Recv() == nil || fn.Signature == nil || fn.Signature.Recv() != nil {
+	name, method, err := coroExactWrapperMethod(fn, object)
+	if err != nil {
+		return err
+	}
+	if fn.Signature == nil || fn.Signature.Recv() != nil {
 		return fmt.Errorf("does not expose exactly one method receiver parameter")
 	}
-	if fn.Name() != object.Name()+"$thunk" || fn.Synthetic != fmt.Sprintf("thunk for %s", object) {
+	if fn.Name() != name+"$thunk" || fn.Synthetic != fmt.Sprintf("thunk for %s", object) {
 		return fmt.Errorf("has non-canonical method-expression identity")
 	}
 	if len(fn.FreeVars) != 0 {
@@ -529,14 +607,7 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 		}
 	} else {
 		callee := common.StaticCallee()
-		calleeMethod, _ := calleeObject(callee).(*types.Func)
-		exactCalleeObject := calleeMethod == object
-		if !exactCalleeObject && calleeMethod != nil &&
-			coroMaterializedGenericInstance(callee) && calleeMethod.Origin() == object.Origin() &&
-			types.Identical(calleeMethod.Type(), object.Type()) {
-			exactCalleeObject = true
-		}
-		if common.IsInvoke() || common.Method != nil || callee == nil || !exactCalleeObject ||
+		if common.IsInvoke() || common.Method != nil || !coroExactWrapperCallee(callee, fn, object, method) ||
 			len(common.Args) != len(fn.Params) ||
 			(promotedReceiver && !matchesPromotedReceiver(common.Args[0])) || (!promotedReceiver && common.Args[0] != receiver) {
 			return fmt.Errorf("concrete receiver does not use one exact receiver-first static call")

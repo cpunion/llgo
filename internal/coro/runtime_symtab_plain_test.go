@@ -20,6 +20,7 @@ package coro
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -29,12 +30,26 @@ import (
 )
 
 func TestRuntimeSymtabParsersAreExactPlainIslands(t *testing.T) {
+	for name, tags := range map[string]string{
+		"native": "llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer",
+		"host":   "llgo,llgo_coro,llgo_coro_host",
+	} {
+		t.Run(name, func(t *testing.T) { testRuntimeSymtabParsersAreExactPlainIslands(t, tags) })
+	}
+}
+
+func testRuntimeSymtabParsersAreExactPlainIslands(t *testing.T, tags string) {
 	runtimeRoot, err := filepath.Abs(filepath.Join("..", "..", "runtime"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := packages.Load(&packages.Config{
 		Dir: runtimeRoot,
+		// This is target-independent source analysis, not execution by the
+		// host Go runtime. Both the native and explicit host-owned LLGo runtime
+		// profiles must load and retain the same allocation-free plain parsers.
+		Env:        append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0"),
+		BuildFlags: []string{"-tags=" + tags},
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedTypes |
 			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedTypesSizes,

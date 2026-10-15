@@ -258,7 +258,7 @@ func validateCoroStaticMethodCallOperands(call ssa.CallInstruction, target *ssa.
 	if raw.Signature.Recv() == nil && universe != nil {
 		if pair, ok := universe.goLinknameDefinitions[raw]; ok && pair.key != "" &&
 			universe.canonicalAlias(pair.definition) == target &&
-			universe.managedGoLinknameDefinitionHasKey(target, pair.key) {
+			universe.managedGoLinknameDefinitionHasKey(target, pair.targetKey()) {
 			// Go source can only name an unexported method through a bodyless
 			// receiver-first package function. The frozen managed-linkname pair
 			// proves that this is the same physical callable; it is not a
@@ -769,12 +769,9 @@ func (p *context) flattenCoroTailForwardAwait(
 						entry.plan.ID, argument.sourceParameter, len(args),
 					))
 				}
-				mapped[index] = args[argument.sourceParameter]
-				if argument.retagTransportKey != "" {
-					mapped[index] = b.ChangeType(
-						p.prog.Type(argument.targetType, llssa.InGo), mapped[index],
-					)
-				}
+				mapped[index] = p.compileCoroTailForwardParameter(
+					b, argument, args[argument.sourceParameter],
+				)
 				continue
 			}
 			mapped[index] = p.compileValueAs(b, argument.constant, argument.targetType)
@@ -963,8 +960,9 @@ func (p *context) coroResultSlot(typ llssa.Type) llssa.Expr {
 // cancellation and static-cleanup dispatch may enter one of its continuations
 // without a CFG edge from the source block. Keeping the allocation (and its
 // one-time Go zero initialization) in the ramp makes its address dominate all
-// such compiler-owned entries while still leaving CoroSplit to retain only
-// values that are actually live across a suspension.
+// such compiler-owned entries. Zeroing follows coro.begin, so CoroSplit writes
+// directly into retained frame storage instead of copying a native-stack
+// aggregate. It still precedes publication and the initial suspend.
 func (p *context) coroFrameAlloc(typ llssa.Type) llssa.Expr {
 	if !p.hasCoroPhysicalBody() || p.fn == nil || typ == nil {
 		panic("coroutine frame allocation requires an active physical body and type")
@@ -973,7 +971,9 @@ func (p *context) coroFrameAlloc(typ llssa.Type) llssa.Expr {
 	alloc := p.fn.NewBuilder()
 	defer alloc.Dispose()
 	alloc.SetBlockEx(entry, llssa.AtStart, true)
-	return alloc.AllocaZeroedT(typ)
+	storage := alloc.AllocaT(typ)
+	alloc.ZeroCoroFrameStorage(p.activeCoroHandle(), storage)
+	return storage
 }
 
 // awaitCoroChild completes the scheduler-owned half of one already-created
@@ -1512,6 +1512,29 @@ func (p *context) enterCoroPropagatedGoexit(b llssa.Builder) {
 // not a result-slot struct: preserving that distinction keeps the ordinary
 // Extract lowering and ValuePlan paths identical to a synchronous Go call.
 func (p *context) loadCoroAwaitResult(b llssa.Builder, resultSlot llssa.Expr, results *types.Tuple) llssa.Expr {
+	// Normal completion has transferred these values into LLVM SSA. Retire
+	// copied pointer handles so an already-consumed result slot does not keep
+	// the pointee alive for the rest of the parent's frame lifetime. Aggregate
+	// storage (including headers) remains untouched: later lowering may address
+	// it directly. All tuple fields are loaded before any slot is cleared.
+	defer func() {
+		if results == nil {
+			return
+		}
+		for i := 0; i < results.Len(); i++ {
+			switch typ := types.Unalias(results.At(i).Type()).Underlying().(type) {
+			case *types.Pointer:
+			case *types.Basic:
+				if typ.Kind() != types.UnsafePointer {
+					continue
+				}
+			default:
+				continue
+			}
+			field := b.FieldAddr(resultSlot, i)
+			b.StoreVolatile(field, p.prog.Zero(p.prog.Elem(field.Type)))
+		}
+	}()
 	count := 0
 	if results != nil {
 		count = results.Len()

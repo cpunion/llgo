@@ -29,6 +29,64 @@ type coroManagedGoLinknameCallFacade struct {
 	target *types.Signature
 }
 
+// managedGoLinknameFacadeShape validates the one safe asymmetric Go linkname
+// ABI supported by the managed compiler: a declaration may expose additional
+// trailing parameters which are evaluated by the caller and deliberately not
+// forwarded to a definition with a shorter compatible prefix. A definition
+// may never require an argument absent from the declaration. Results remain
+// exact in arity and transport. Variadic signatures are admitted only for the
+// existing equal-arity facade; changing their fixed boundary would be
+// ambiguous after x/tools packs the final slice.
+func managedGoLinknameFacadeShape(
+	source, target *ssa.Function,
+	physicalSignature func(*ssa.Function) (*types.Signature, error),
+	transportKey func(types.Type) string,
+) (coroManagedGoLinknameCallFacade, bool, error) {
+	if physicalSignature == nil || transportKey == nil || source == nil || target == nil || source == target ||
+		source.Signature == nil || target.Signature == nil {
+		return coroManagedGoLinknameCallFacade{}, false, nil
+	}
+	sourceSignature, err := physicalSignature(source)
+	if err != nil {
+		return coroManagedGoLinknameCallFacade{}, false, fmt.Errorf(
+			"derive managed go:linkname source facade %q: %w", source.Name(), err,
+		)
+	}
+	targetSignature, err := physicalSignature(target)
+	if err != nil {
+		return coroManagedGoLinknameCallFacade{}, false, fmt.Errorf(
+			"derive managed go:linkname target facade %q: %w", target.Name(), err,
+		)
+	}
+	if sourceSignature.Params().Len() < targetSignature.Params().Len() ||
+		sourceSignature.Results().Len() != targetSignature.Results().Len() {
+		return coroManagedGoLinknameCallFacade{}, false, nil
+	}
+	if sourceSignature.Params().Len() != targetSignature.Params().Len() &&
+		(source.Signature.Variadic() || target.Signature.Variadic()) {
+		return coroManagedGoLinknameCallFacade{}, false, nil
+	}
+	validateTuplePrefix := func(sourceTuple, targetTuple *types.Tuple) bool {
+		if sourceTuple == nil || targetTuple == nil || sourceTuple.Len() < targetTuple.Len() {
+			return sourceTuple == targetTuple
+		}
+		for index := 0; index < targetTuple.Len(); index++ {
+			if transportKey(sourceTuple.At(index).Type()) != transportKey(targetTuple.At(index).Type()) {
+				return false
+			}
+		}
+		return true
+	}
+	if !validateTuplePrefix(sourceSignature.Params(), targetSignature.Params()) ||
+		!validateTuplePrefix(sourceSignature.Results(), targetSignature.Results()) {
+		return coroManagedGoLinknameCallFacade{}, false, nil
+	}
+	return coroManagedGoLinknameCallFacade{
+		source: sourceSignature,
+		target: targetSignature,
+	}, true, nil
+}
+
 // managedGoLinknameCallFacade returns the two source-level views of one exact
 // managed go:linkname operation. Pairing already proves the complete
 // structural linkname ABI; this projection additionally checks the concrete
@@ -44,52 +102,23 @@ func (u *EmissionUniverse) managedGoLinknameCallFacade(
 	if !paired || pair.definition == nil || pair.key == "" ||
 		u.canonicalAlias(source) != target ||
 		u.canonicalAlias(pair.definition) != target ||
-		!u.managedGoLinknameDefinitionHasKey(target, pair.key) {
+		!u.managedGoLinknameDefinitionHasKey(target, pair.targetKey()) {
 		return coroManagedGoLinknameCallFacade{}, false, nil
 	}
-	sourceSignature, err := u.coroPhysicalSourceSignature(source)
+	facade, compatible, err := managedGoLinknameFacadeShape(
+		source, target, u.coroPhysicalSourceSignature,
+		func(typ types.Type) string { return coroPhysicalTransportTypeKey(u, typ) },
+	)
 	if err != nil {
-		return coroManagedGoLinknameCallFacade{}, true, fmt.Errorf(
-			"derive managed go:linkname source facade %q: %w", source.Name(), err,
-		)
+		return coroManagedGoLinknameCallFacade{}, true, err
 	}
-	targetSignature, err := u.coroPhysicalSourceSignature(target)
-	if err != nil {
+	if !compatible {
 		return coroManagedGoLinknameCallFacade{}, true, fmt.Errorf(
-			"derive managed go:linkname target facade %q: %w", target.Name(), err,
-		)
-	}
-	if sourceSignature.Params().Len() != targetSignature.Params().Len() ||
-		sourceSignature.Results().Len() != targetSignature.Results().Len() {
-		return coroManagedGoLinknameCallFacade{}, true, fmt.Errorf(
-			"managed go:linkname facade %q -> %q changed parameter/result arity",
+			"managed go:linkname facade %q -> %q has no safe parameter-prefix/result transport",
 			source.Name(), target.Name(),
 		)
 	}
-	validateTuple := func(kind string, sourceTuple, targetTuple *types.Tuple) error {
-		for index := 0; index < sourceTuple.Len(); index++ {
-			sourceType := sourceTuple.At(index).Type()
-			targetType := targetTuple.At(index).Type()
-			if coroPhysicalTransportTypeKey(u, sourceType) !=
-				coroPhysicalTransportTypeKey(u, targetType) {
-				return fmt.Errorf(
-					"managed go:linkname facade %q -> %q has incompatible %s %d transport (%v -> %v)",
-					source.Name(), target.Name(), kind, index, sourceType, targetType,
-				)
-			}
-		}
-		return nil
-	}
-	if err := validateTuple("parameter", sourceSignature.Params(), targetSignature.Params()); err != nil {
-		return coroManagedGoLinknameCallFacade{}, true, err
-	}
-	if err := validateTuple("result", sourceSignature.Results(), targetSignature.Results()); err != nil {
-		return coroManagedGoLinknameCallFacade{}, true, err
-	}
-	return coroManagedGoLinknameCallFacade{
-		source: sourceSignature,
-		target: targetSignature,
-	}, true, nil
+	return facade, true, nil
 }
 
 func (p *context) compileManagedGoLinknameCallArguments(
@@ -107,13 +136,13 @@ func (p *context) compileManagedGoLinknameCallArguments(
 	if !active {
 		return args
 	}
-	if len(args) != facade.target.Params().Len() {
+	if len(args) != facade.source.Params().Len() {
 		panic(fmt.Errorf(
 			"managed go:linkname facade %q -> %q arguments=%d, want %d",
-			source.Name(), target.Name(), len(args), facade.target.Params().Len(),
+			source.Name(), target.Name(), len(args), facade.source.Params().Len(),
 		))
 	}
-	converted := append([]llssa.Expr(nil), args...)
+	converted := append([]llssa.Expr(nil), args[:facade.target.Params().Len()]...)
 	for index := range converted {
 		targetType := facade.target.Params().At(index).Type()
 		if !types.Identical(converted[index].RawType(), targetType) {

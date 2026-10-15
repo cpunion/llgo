@@ -1,4 +1,4 @@
-//go:build !baremetal && !wasm && !tinygo.wasm && !windows && (!llgo || !llgo_coro || !llgo_coro_native_pipe || !llgo_coro_native_timer || (!darwin && !linux) || coro_runtime_adapter_test)
+//go:build !baremetal && !wasm && !tinygo.wasm && !windows && (!llgo || !llgo_coro || !llgo_coro_native_pipe || !llgo_coro_native_timer || (!darwin && !linux) || coro_runtime_adapter_test) && (!llgo || !llgo_coro || !llgo_coro_host || (llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux)) || coro_runtime_adapter_test)
 
 package runtime
 

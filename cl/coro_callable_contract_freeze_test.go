@@ -20,6 +20,7 @@ package cl
 
 import (
 	"go/ast"
+	"go/types"
 	"strings"
 	"testing"
 
@@ -138,6 +139,80 @@ func root(value int) int {
 	again, ok, err := universe.CoroCallableContractCertificate(pkg.ssa.Func("Foreign"))
 	if err != nil || !ok || again != foreign {
 		t.Fatalf("mutated source changed frozen callable contract: %+v, %t, %v; want %+v", again, ok, err, foreign)
+	}
+}
+
+func TestEmissionUniversePythonModuleCDeclarationsDefaultToCallerThread(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/pythonmodule", `package pythonmodule
+const LLGoPackage = "py.builtins"
+//llgo:link NewFloat C.PyFloat_FromDouble
+func NewFloat(float64) *byte { return nil }
+`)
+	testProg.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: "python-module-owner",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	certificate, ok, err := universe.CoroCallableContractCertificate(pkg.ssa.Func("NewFloat"))
+	if err != nil || !ok {
+		t.Fatalf("Python module callable contract = %+v, %t, %v", certificate, ok, err)
+	}
+	if certificate.Contract.Progress != coro.ProgressMayBlock ||
+		certificate.Contract.Affinity != coro.AffinityCallerThread ||
+		certificate.Contract.Reentry != coro.ReentryNone ||
+		certificate.Contract.Memory != coro.MemoryBorrowUntilReturn {
+		t.Fatalf("Python module callable contract = %+v; want caller-thread Python boundary", certificate)
+	}
+}
+
+func TestEmissionUniverseInfersPythonCDeclarationFromObjectTypeFlow(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	pkg := testProg.addPackage(t, "example.com/emission/pythonobjectflow", `package pythonobjectflow
+import _ "unsafe"
+type Object struct{ unused [0]byte }
+//go:linkname list llgo.pyList
+func list(...any) *Object
+//llgo:link (*Object).Str C.PyObject_Str
+func (*Object) Str() *Object { return nil }
+//go:linkname Other C.unrelated_pointer_call
+func Other(*byte)
+func root() { _ = list(1).Str(); Other(nil) }
+`)
+	testProg.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: "python-object-flow-owner",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	str := pkg.ssa.Prog.MethodValue(
+		testProg.ssa.MethodSets.MethodSet(types.NewPointer(pkg.types.Scope().Lookup("Object").Type())).Lookup(pkg.types, "Str"),
+	)
+	python, ok, err := universe.CoroCallableContractCertificate(str)
+	if err != nil || !ok {
+		t.Fatalf("object-bound C contract = %+v, %t, %v", python, ok, err)
+	}
+	if python.Contract.Affinity != coro.AffinityCallerThread ||
+		python.Contract.Memory != coro.MemoryBorrowUntilReturn {
+		t.Fatalf("object-bound C contract = %+v; want inferred Python same-M behavior", python)
+	}
+	unrelated, ok, err := universe.CoroCallableContractCertificate(pkg.ssa.Func("Other"))
+	if err != nil || !ok {
+		t.Fatalf("unrelated C contract = %+v, %t, %v", unrelated, ok, err)
+	}
+	if unrelated.Contract.Affinity != coro.AffinityAnyThread ||
+		unrelated.Contract.Memory != coro.MemoryBorrowUntilComplete {
+		t.Fatalf("unrelated C contract = %+v; Python object inference leaked", unrelated)
 	}
 }
 

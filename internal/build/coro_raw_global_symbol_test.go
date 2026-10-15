@@ -50,6 +50,57 @@ func TestCoroRawLLVMNMFindsVersionedLLVM22Sibling(t *testing.T) {
 	}
 }
 
+func TestCoroRawLLGoFilesInventoryTargetGate(t *testing.T) {
+	crossOS := "windows"
+	if runtime.GOOS == crossOS {
+		crossOS = "linux"
+	}
+	tests := []struct {
+		name   string
+		conf   Config
+		export crosscompile.Export
+		want   bool
+	}{
+		{
+			name: "host",
+			conf: Config{Goos: runtime.GOOS, Goarch: runtime.GOARCH},
+			want: true,
+		},
+		{
+			name: "foreign native without sysroot",
+			conf: Config{Goos: crossOS, Goarch: runtime.GOARCH},
+		},
+		{
+			name:   "foreign native with sysroot",
+			conf:   Config{Goos: crossOS, Goarch: runtime.GOARCH},
+			export: crosscompile.Export{CFLAGS: []string{"--sysroot=/sdk"}},
+			want:   true,
+		},
+		{
+			name: "wasm profile",
+			conf: Config{Goos: "wasip1", Goarch: "wasm"},
+			want: true,
+		},
+		{
+			name: "named target profile",
+			conf: Config{Goos: "linux", Goarch: "arm", Target: "rp2040"},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := &context{buildConf: &tt.conf, crossCompile: tt.export}
+			got, reason := coroRawLLGoFilesInventoryTargetSupported(ctx)
+			if got != tt.want {
+				t.Fatalf("target gate = %t, %q; want %t", got, reason, tt.want)
+			}
+			if !got && !strings.Contains(reason, "no explicit Clang sysroot") {
+				t.Fatalf("target gate reason = %q, want sysroot diagnostic", reason)
+			}
+		})
+	}
+}
+
 func TestCoroRawGlobalSymbolInventoryRequiresCompleteAbsence(t *testing.T) {
 	complete := newCompleteCoroRawGlobalSymbolInventory("fixture")
 	if proved, reason := complete.proveNoDefinitionOrReference("fixture", "syscall.copyenv"); !proved || reason != "" {
@@ -242,6 +293,9 @@ func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
 						"current-G executor-leaf layout = %q, frontend = %q",
 						proof.LLVMDataLayout, prog.DataLayout(),
 					)
+				}
+				if symbol == "__llgo_coro_current_g_load_v1" && proof.MayFault {
+					t.Error("exact current-G TLS slot must not retain native fault landing")
 				}
 			}
 			for _, symbol := range negative {

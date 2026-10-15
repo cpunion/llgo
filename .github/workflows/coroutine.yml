@@ -15,27 +15,30 @@ jobs:
   test:
     name: ${{ matrix.check }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: ${{ (matrix.lane == 'timer-gc' || matrix.lane == 'timer-gc-wasi') && 35 || 20 }}
     env:
       LLGO_ROOT: ${{ github.workspace }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { llvm: 22, go: "1.26.7", lane: "compat", check: "test (LLVM 22, Go 1.26.7)" }
-          - { llvm: 22, go: "1.26.7", lane: "integration", check: "test integration (LLVM 22, Go 1.26.7)" }
-          - { llvm: 22, go: "1.26.7", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.26.7)" }
-          - { llvm: 22, go: "1.26.7", lane: "fault-e2e", check: "test native fault landing E2E (LLVM 22, Go 1.26.7)" }
-          - { llvm: 22, go: "1.26.7", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.26.7)" }
-          - { llvm: 22, go: "1.26.7", lane: "fleet-e2e", check: "test native fleet E2E (LLVM 22, Go 1.26.7)" }
-          - { llvm: 22, go: "1.26.7", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (LLVM 22, Go 1.26.7)" }
-          - { llvm: 22, go: "1.26.7", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (LLVM 22, Go 1.26.7)" }
-          - { llvm: 22, go: "1.26.7", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (LLVM 22, Go 1.26.7)" }
-          - { llvm: 22, go: "1.26.7", lane: "target-core", check: "test target adapters (LLVM 22, Go 1.26.7)" }
-          - { llvm: 22, go: "1.26.7", lane: "target-js-wasm", check: "test JS/WASM command reactor (LLVM 22)" }
-          - { llvm: 22, go: "1.26.7", lane: "target-wasi-command", check: "test WASI command reactor (LLVM 22)" }
-          - { llvm: 22, go: "1.26.7", lane: "target-wasm", wasm_target: "wasip2", check: "test WASM host probes (wasip2, LLVM 22)" }
-          - { llvm: 22, go: "1.26.7", lane: "target-wasm", wasm_target: "wasm-unknown", check: "test WASM host probes (wasm-unknown, LLVM 22)" }
+          - { llvm: 22, go: "1.27.0", lane: "compat", check: "test (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "integration", check: "test integration (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "fault-e2e", check: "test native fault landing E2E (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "fleet-e2e", check: "test native fleet E2E (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "synctest", check: "test synctest and weak object ownership (LLVM 22)" }
+          - { llvm: 22, go: "1.27.0", lane: "timer-gc", check: "test standard timer semantics and GC cancellation (LLVM 22)" }
+          - { llvm: 22, go: "1.27.0", lane: "timer-gc-wasi", check: "test WASI standard timers and TinyGC cancellation (LLVM 22)" }
+          - { llvm: 22, go: "1.27.0", lane: "target-core", check: "test target adapters (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "target-js-wasm", check: "test JS/WASM command reactor (LLVM 22)" }
+          - { llvm: 22, go: "1.27.0", lane: "target-wasi-command", check: "test WASI command reactor (LLVM 22)" }
+          - { llvm: 22, go: "1.27.0", lane: "target-wasm", wasm_target: "wasip2", check: "test WASM host probes (wasip2, LLVM 22)" }
+          - { llvm: 22, go: "1.27.0", lane: "target-wasm", wasm_target: "wasm-unknown", check: "test WASM host probes (wasm-unknown, LLVM 22)" }
     steps:
       - uses: actions/checkout@v7
 
@@ -53,7 +56,7 @@ jobs:
           go-version: ${{ matrix.go }}
 
       - name: Set up Wasmtime
-        if: matrix.lane == 'target-wasi-command'
+        if: matrix.lane == 'target-wasi-command' || matrix.lane == 'timer-gc-wasi'
         uses: bytecodealliance/actions/wasmtime/setup@v1
         with:
           version: "39.0.1"
@@ -71,6 +74,15 @@ jobs:
           go test -race -shuffle=on ./internal/coroalloc -count=1
           go test -race -shuffle=on ./internal/coro -count=1
           go test -race -shuffle=on ./internal/corodoorbell -count=1
+          go test -race -tags=coro_gc_observer_test \
+            ./internal/runtime/coro_gc_observer_llgo.go \
+            ./internal/runtime/coro_gc_observer_test.go -count=1
+          go test -race -tags=coro_signal_host_test \
+            ./internal/lib/runtime/signal_host_llgo.go \
+            ./internal/lib/runtime/signal_host_test.go -count=1
+          go test -race -tags=coro_synctest_timer_test \
+            ./internal/runtime/coro_synctest_timer_llgo.go \
+            ./internal/runtime/coro_synctest_timer_test.go -count=1
           # The run-decision wrapper needs the production coro package but a
           # test-local abort shim, so select its two sources instead of loading
           # the complete LLGo runtime package into the host Go runtime.
@@ -78,7 +90,9 @@ jobs:
             ./internal/runtime/coro_run_decision.go \
             ./internal/runtime/coro_run_decision_test.go \
             -run '^Test(CoroRunDecisionOutputModeV1|NormalCoroRunDecisionWordsV1|CoroRunDecisionWrapperRejectsMalformedNormalOnlyMode)$' -count=1
-          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerV2SourceABI|TestTimeSleep)' -count=1
+          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerV2SourceABI|TestNativeTimerCapacity|TestTimeSleep|TestCoroGCNotification)' -count=1
+          go test -race ./internal/lib/runtime/time_coro_gc_llgo.go \
+            ./internal/lib/runtime/time_coro_gc_test.go -count=1 -timeout=60s
           # The complete LLGo runtime package intentionally owns symbols that
           # collide with the host Go runtime. Use the real production adapter
           # sources plus test-only definitions of the compiler-owned C wrappers
@@ -91,8 +105,10 @@ jobs:
             ./internal/runtime/coro_execution_quota_default.go \
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
+            ./internal/runtime/coro_gc_observer_test_adapter.go \
             ./internal/runtime/coro_executor.go \
             ./internal/runtime/coro_panic_payload.go \
+            ./internal/runtime/coro_panic_trace_nil_test_adapter.go \
             ./internal/runtime/coro_panic_trace_release_test_adapter.go \
             ./internal/runtime/coro_executor_driver_legacy.go \
             ./internal/runtime/coro_ready_distribution_default.go \
@@ -109,6 +125,8 @@ jobs:
             ./internal/runtime/coro_execution_quota_default.go \
             ./internal/runtime/coro_ready_distribution_default.go \
             ./internal/runtime/coro_native_fleet.go \
+            ./internal/runtime/coro_gc_observer_test_adapter.go \
+            ./internal/runtime/coro_gc_observer_nobdwgc.go \
             ./internal/runtime/coro_native_deferred_replacement_default.go \
             ./internal/runtime/coro_native_fleet_reactor.go \
             ./internal/runtime/coro_native_atomic_host.go \
@@ -122,8 +140,10 @@ jobs:
             ./internal/runtime/coro_execution_quota_default.go \
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
+            ./internal/runtime/coro_gc_observer_test_adapter.go \
             ./internal/runtime/coro_executor.go \
             ./internal/runtime/coro_panic_payload.go \
+            ./internal/runtime/coro_panic_trace_nil_test_adapter.go \
             ./internal/runtime/coro_panic_trace_release_test_adapter.go \
             ./internal/runtime/coro_executor_driver_legacy.go \
             ./internal/runtime/coro_ready_distribution_default.go \
@@ -170,6 +190,8 @@ jobs:
             ./internal/runtime/coro_keyed_park.go \
             ./internal/runtime/coro_keyed_post_test.go \
             ./internal/runtime/coro_keyed_registry_test.go \
+            ./internal/runtime/coro_sema_owner_llgo.go \
+            ./internal/runtime/coro_sema_owner_test.go \
             -run '^TestCoroKeyed' -count=1
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
             -tags=coro_sema_owner_test \
@@ -181,6 +203,8 @@ jobs:
             ./internal/runtime/coro_keyed_park.go \
             ./internal/runtime/coro_keyed_post_test.go \
             ./internal/runtime/coro_keyed_registry_test.go \
+            ./internal/runtime/coro_sema_owner_llgo.go \
+            ./internal/runtime/coro_sema_owner_test.go \
             -run '^TestCoroKeyed' -count=1
           go test ./internal/corotimer -run '^TestDeadlineAfter$' -count=1
 
@@ -188,67 +212,75 @@ jobs:
         if: matrix.lane == 'target-wasm'
         env:
           LLGO_WASM_TARGET_SMOKE: "1"
+          WASM_TARGET: ${{ matrix.wasm_target }}
         run: |
           go test -v ./internal/crosscompile -run '^TestFreestandingWasmTargetToolchainSmoke$' -count=1
           go build -o /tmp/llgo-wasm-target ./cmd/llgo
-          for target in '${{ matrix.wasm_target }}'; do
-            output="/tmp/llgo-${target}.wasm"
-            LLGO_BUILD_CACHE=off LDFLAGS='--export=main' \
-              /tmp/llgo-wasm-target build -target="$target" -o "$output" \
-              ./internal/crosscompile/testdata/wasm_allocator
-            test "$(od -An -t x1 -N4 "$output" | tr -d ' \n')" = '0061736d'
-            symbols="$(llvm-nm --defined-only --format=just-symbols "$output")"
-            for symbol in main malloc free sbrk abort; do
-              grep -Fx "$symbol" <<<"$symbols"
-            done
-            ! grep -E '^GC_' <<<"$symbols"
-            test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
-            if command -v wasmtime >/dev/null; then
-              result="$(wasmtime run --invoke main "$output" 0 0)"
-              test "$result" = '0'
-            fi
+          target="$WASM_TARGET"
+          output="/tmp/llgo-${target}.wasm"
+          LLGO_BUILD_CACHE=off LDFLAGS='--export=main' \
+            /tmp/llgo-wasm-target build -target="$target" -o "$output" \
+            ./internal/crosscompile/testdata/wasm_allocator
+          test "$(od -An -t x1 -N4 "$output" | tr -d ' \n')" = '0061736d'
+          symbols="$(llvm-nm --defined-only --format=just-symbols "$output")"
+          for symbol in main malloc free sbrk abort; do
+            grep -Fx "$symbol" <<<"$symbols"
           done
+          if grep -E '^GC_' <<<"$symbols"; then
+            echo 'freestanding binary retained a BDWGC symbol' >&2
+            exit 1
+          fi
+          test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
+          if command -v wasmtime >/dev/null; then
+            result="$(wasmtime run --invoke main "$output" 0 0)"
+            test "$result" = '0'
+          fi
 
           host_exports='--export=main --export=malloc --export=free --export=__llgo_coro_host_next_action_v1 --export=__llgo_coro_host_profile_v1 --export=__llgo_coro_host_publish_time_v1 --export=__llgo_coro_host_publish_wall_time_v1 --export=__llgo_coro_host_continue_slice_v1 --export=__llgo_coro_host_ack_cancel_v1 --export=__llgo_coro_host_next_operation_v1 --export=__llgo_coro_host_complete_operation_v1'
-          for target in '${{ matrix.wasm_target }}'; do
-            output="/tmp/llgo-${target}-stdlib-file.wasm"
-            LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
-              /tmp/llgo-wasm-target build -target="$target" -o "$output" \
-              ./internal/build/_testgo/coro_stdlib_file_rw
-            test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
-            result="$(node ./internal/build/_testgo/coro_host_file_rw/host_runner.mjs "$output")"
-            grep -F '"status":"complete"' <<<"$result"
-            grep -F '"operations":5' <<<"$result"
-          done
-          for target in '${{ matrix.wasm_target }}'; do
-            output="/tmp/llgo-${target}-host-network.wasm"
-            LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
-              /tmp/llgo-wasm-target build -target="$target" -o "$output" \
-              ./internal/build/_testgo/coro_host_network_loopback
-            test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
-            result="$(node ./internal/build/_testgo/coro_host_network_loopback/host_runner.mjs "$output")"
-            grep -F '"status":"complete"' <<<"$result"
-            grep -F '"operations":16' <<<"$result"
-            grep -F '"cancellations":2' <<<"$result"
-          done
-          for target in '${{ matrix.wasm_target }}'; do
-            output="/tmp/llgo-${target}-stdlib-tcp.wasm"
-            LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
-              /tmp/llgo-wasm-target build -target="$target" -o "$output" \
-              ./internal/build/_testgo/coro_stdlib_tcp_loopback
-            test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
-            result="$(node ./internal/build/_testgo/coro_stdlib_tcp_loopback/host_runner.mjs "$output")"
-            grep -F '"status":"complete"' <<<"$result"
-            grep -F '"operations":594' <<<"$result"
-            grep -F '"cancellations":17' <<<"$result"
-            grep -F '"alarms":18' <<<"$result"
-            grep -F '"dnsQueries":[1,28]' <<<"$result"
-          done
+          output="/tmp/llgo-${target}-stdlib-file.wasm"
+          LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
+            /tmp/llgo-wasm-target build -target="$target" -o "$output" \
+            ./internal/build/_testgo/coro_stdlib_file_rw
+          test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
+          result="$(node ./internal/build/_testgo/coro_host_file_rw/host_runner.mjs "$output")"
+          grep -F '"status":"complete"' <<<"$result"
+          grep -F '"operations":5' <<<"$result"
+
+          positional="/tmp/llgo-${target}-positional-file.wasm"
+          LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
+            /tmp/llgo-wasm-target build -target="$target" -o "$positional" \
+            ./internal/build/_testgo/coro_host_file_positional
+          result="$(node ./internal/build/_testgo/coro_host_file_rw/host_runner.mjs "$positional" positional)"
+          grep -F '"status":"complete"' <<<"$result"
+          grep -F '"operations":12' <<<"$result"
+
+          output="/tmp/llgo-${target}-host-network.wasm"
+          LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
+            /tmp/llgo-wasm-target build -target="$target" -o "$output" \
+            ./internal/build/_testgo/coro_host_network_loopback
+          test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
+          result="$(node ./internal/build/_testgo/coro_host_network_loopback/host_runner.mjs "$output")"
+          grep -F '"status":"complete"' <<<"$result"
+          grep -F '"operations":16' <<<"$result"
+          grep -F '"cancellations":2' <<<"$result"
+
+          output="/tmp/llgo-${target}-stdlib-tcp.wasm"
+          LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
+            /tmp/llgo-wasm-target build -target="$target" -o "$output" \
+            ./internal/build/_testgo/coro_stdlib_tcp_loopback
+          test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
+          result="$(node ./internal/build/_testgo/coro_host_network_loopback/host_runner.mjs "$output")"
+          grep -F '"status":"complete"' <<<"$result"
+          grep -F '"operations":594' <<<"$result"
+          grep -F '"cancellations":17' <<<"$result"
+          grep -F '"alarms":18' <<<"$result"
+          grep -F '"dnsQueries":[1,28]' <<<"$result"
 
       - name: Run the built-in JS/WebAssembly command reactor
         if: matrix.lane == 'target-js-wasm'
         run: |
-          go test ./internal/crosscompile -run '^TestJSWasmCommandUsesOnlyHostPullCoroutineReactor$' -count=1
+          go test ./internal/crosscompile -run '^TestJS(WasmCommandUsesOnlyHostPullCoroutineReactor|FSCallOperationProtocol)$' -count=1
+          go test ./internal/build -run '^TestJSFilesystem' -count=1
           go build -o /tmp/llgo-js-wasm ./cmd/llgo
           output=/tmp/llgo-js-wasm-time.wasm
           GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
@@ -260,6 +292,20 @@ jobs:
             <(llvm-nm --undefined-only --format=just-symbols "$output" | sort)
           node targets/wasm_exec.js "$output"
 
+          filesystem=/tmp/llgo-js-wasm-stdlib-file.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-js-wasm build -p=1 -target=wasm -o "$filesystem" \
+            ./internal/build/_testgo/coro_js_stdlib_file
+          result="$(node internal/crosscompile/testdata/coro_js_fs/real_file.cjs targets/wasm_exec.js "$filesystem")"
+          grep -Fx 'Node standard filesystem and Go bookkeeping ok' <<<"$result"
+          grep -F 'Node physical filesystem cleanup ok (' <<<"$result"
+          test ! -e /tmp/llgo-coro-js-stdlib-file
+
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            LLGO_TEST_LLGO=/tmp/llgo-js-wasm LLGO_CORO_JS_RESOURCE_ACCEPTANCE=1 \
+            timeout 12m go test -p=1 ./internal/build \
+            -run '^TestCoroJSBorrowedResourceCleanupAcceptance$' -v -count=1 -timeout=11m
+
       - name: Run the built-in WASI Preview 1 command reactor
         if: matrix.lane == 'target-wasi-command'
         run: |
@@ -267,7 +313,7 @@ jobs:
             -run '^Test(WASICommandReactorUsesOneBoundedHostPullCore|WASIMemoryOwnershipLinkFlags|ResolvedLLVMTargetSpecWASIThreads)$' \
             -count=1
           go test ./internal/build \
-            -run '^Test(WASICommandOwnsSingleThreadedMemory|WASIP1CoroSyscallMetadataSourcePatch)$' \
+            -run '^Test(WASICommandOwnsSingleThreadedMemory|WASIP1CoroSyscallMetadataSourcePatch|WASMMathGenericSourcePatch)$' \
             -count=1
           go build -o /tmp/llgo-wasi-command ./cmd/llgo
           output=/tmp/llgo-wasi-command-reactor.wasm
@@ -275,15 +321,72 @@ jobs:
             /tmp/llgo-wasi-command build -p=1 -target=wasip1 -o "$output" \
             ./internal/build/_testgo/coro_wasi_command_reactor
           test "$(od -An -t x1 -N4 "$output" | tr -d ' \n')" = '0061736d'
-          wasmtime run --dir=/tmp "$output"
+          result="$(wasmtime run --dir=/tmp "$output")"
+          grep -Fx 'WASI reactor file, timer and inherited stdout ok' <<<"$result"
           test ! -e /tmp/llgo-coro-wasi-command-reactor
+
+          positional=/tmp/llgo-wasi-positional-file.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-wasi-command build -p=1 -target=wasip1 -o "$positional" \
+            ./internal/build/_testgo/coro_host_file_positional
+          wasmtime run --dir=/tmp "$positional"
+          test ! -e /tmp/llgo-coro-host-positional
+
+          filesystem=/tmp/llgo-wasi-filesystem.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-wasi-command build -p=1 -target=wasip1 -o "$filesystem" \
+            ./internal/build/_testgo/coro_wasi_filesystem
+          result="$(wasmtime run --dir=/tmp "$filesystem")"
+          grep -Fx 'WASI raw filesystem and Go cwd ok' <<<"$result"
+          test ! -e /tmp/llgo-coro-wasi-filesystem
+
+          stdfile=/tmp/llgo-wasi-stdlib-file.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-wasi-command build -p=1 -target=wasip1 -o "$stdfile" \
+            ./internal/build/_testgo/coro_wasi_stdlib_file
+          result="$(wasmtime run --dir=/tmp "$stdfile")"
+          grep -Fx 'WASI standard file, Root and fmt ok' <<<"$result"
+          test ! -e /tmp/llgo-coro-wasi-stdlib-file
+
+          unsupported=/tmp/llgo-wasi-reflect-unsupported.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-wasi-command build -p=1 -target=wasip1 -o "$unsupported" \
+            ./internal/build/_testgo/coro_wasi_reflect_unsupported
+          result="$(wasmtime run "$unsupported")"
+          grep -Fx 'WASI dynamic reflection fails explicitly' <<<"$result"
+
+          for probe in syscall os; do
+            exit_output="/tmp/llgo-wasi-${probe}-exit.wasm"
+            GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+              /tmp/llgo-wasi-command build -p=1 -target=wasip1 -o "$exit_output" \
+              "./internal/build/_testgo/coro_wasi_${probe}_exit"
+            status=0
+            wasmtime run "$exit_output" || status=$?
+            test "$status" -eq 42
+          done
+
+          math_output=/tmp/llgo-wasi-math.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-wasi-command build -p=1 -target=wasip1 -o "$math_output" \
+            ./internal/build/_testgo/coro_wasm_math
+          result="$(wasmtime run "$math_output")"
+          grep -Fx 'WASM generic math semantics ok' <<<"$result"
+
+          mapfile -t wasi_headers < <(find "$HOME/.llgo/clibs_build" -path '*/sysroot/include/wasm32-wasip1/wasi/api.h')
+          test "${#wasi_headers[@]}" -gt 0
+          LLGO_WASI_REACTOR_SYSROOT="${wasi_headers[0]%/include/wasm32-wasip1/wasi/api.h}" \
+            go test ./internal/crosscompile -run '^TestWASIReactorOperationLifecycle$' -count=1
 
           gc_output=/tmp/llgo-wasi-frame-gc.wasm
           GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
             /tmp/llgo-wasi-command build -p=1 -target=wasip1-gc -o "$gc_output" \
             ./internal/build/_testgo/coro_wasi_frame_gc
           test "$(od -An -t x1 -N4 "$gc_output" | tr -d ' \n')" = '0061736d'
-          ! llvm-nm --defined-only --format=just-symbols "$gc_output" | grep -E '^GC_'
+          gc_symbols="$(llvm-nm --defined-only --format=just-symbols "$gc_output")"
+          if grep -E '^GC_' <<<"$gc_symbols"; then
+            echo 'WASI TinyGC binary retained a BDWGC symbol' >&2
+            exit 1
+          fi
           wasmtime run "$gc_output"
 
       - name: Upload failed WebAssembly coroutine probes
@@ -298,6 +401,11 @@ jobs:
             /tmp/llgo-js-wasm-time.wasm
             /tmp/llgo-wasi-command-reactor.wasm
             /tmp/llgo-wasi-frame-gc.wasm
+            /tmp/llgo-wasi-filesystem.wasm
+            /tmp/llgo-wasi-positional-file.wasm
+            /tmp/llgo-wasi-reflect-unsupported.wasm
+            /tmp/llgo-wasi-math.wasm
+            /tmp/llgo-wasi-*-exit.wasm
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -339,6 +447,10 @@ jobs:
           for test in "${tests[@]}"; do
             go test ./internal/build -run "^${test}$" -timeout=10m -count=1
           done
+
+      - name: Test concurrent native object ownership
+        if: matrix.lane == 'integration-build'
+        run: go test -race ./internal/build -run '^TestNativeObject' -timeout=5m -count=1
 
       - name: Test native coroutine fault landing
         if: matrix.lane == 'fault-e2e'
@@ -382,6 +494,31 @@ jobs:
         if: matrix.lane == 'fleet-e2e'
         run: go test ./internal/build -run '^TestCoroNativeFleet.*E2E$' -timeout=10m -count=1
 
+      - name: Test physical resource cancellation and asynchronous defer cleanup
+        if: matrix.lane == 'native-e2e'
+        env:
+          LLGO_CORO_RESOURCE_ACCEPTANCE: "1"
+          LLGO_TEST_LLGO: /tmp/llgo-resource-cleanup
+          GOMAXPROCS: "2"
+          GOMEMLIMIT: 2GiB
+        run: |
+          # Linux per-process virtual-memory cap also bounds LLVM allocations,
+          # which GOMEMLIMIT alone does not cover. Keep nested builds serial.
+          ulimit -v 6291456
+          go build -p=1 -o "$LLGO_TEST_LLGO" ./cmd/llgo
+          timeout 12m go test -p=1 ./internal/build \
+            -run '^TestCoroBorrowedResourceCleanupAcceptance$' -v -count=1 -timeout=11m
+
+      - name: Test main return racing channel completion
+        if: matrix.lane == 'fleet-e2e'
+        run: |
+          go build -o /tmp/llgo-fleet-regression ./cmd/llgo
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            go test ./test/goroot -run '^TestGoRootRunCases$' -count=1 -v -timeout=8m \
+            -goroot="$(go env GOROOT)" -llgo=/tmp/llgo-fleet-regression \
+            -directive-mode=ci -case='^chan/sieve[12]\.go$' \
+            -build-timeout=3m -run-timeout=1m
+
       - name: Test synchronous stdlib coroutine acceptance
         if: startsWith(matrix.lane, 'stdlib-')
         env:
@@ -399,21 +536,43 @@ jobs:
         if: matrix.lane == 'compat'
         run: go test -v ./internal/build -run '^TestCoroNativeTimeSleepProductionPlanAndCodegen$' -timeout=10m -count=1
 
+      - name: Verify optimized compute loop services elapsed timers
+        if: matrix.lane == 'stdlib-time'
+        run: |
+          go build -o /tmp/llgo-preempt-timer ./cmd/llgo
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-preempt-timer build -O3 -lto=full \
+            -o /tmp/llgo-preempt-timer-gate ./benchmark/coro_core/testdata/preempt_timer
+          # A second P must not conceal a missing safepoint/service poll.
+          for attempt in 1 2 3; do
+            echo "single-P optimized timer progress: attempt $attempt"
+            timeout 30s env GOMAXPROCS=1 /tmp/llgo-preempt-timer-gate
+          done
+
       - name: Test coroutine compiler integration
         if: matrix.lane == 'integration'
         run: |
           go test -race ./cl/ssawrap -count=1
           go test -race ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache|Emission.*)$' -count=1
 
-      - name: Test structured LLVM coroutine builder
+      - name: Test SSA builder and source/physical type boundaries
         if: matrix.lane == 'compat'
-        run: go test -v ./ssa -run '^TestCoro' -count=1
+        run: go test -v ./ssa -count=1
+
+      - name: Test recorded caller line-directive positions
+        if: matrix.lane == 'compat'
+        run: go test ./cl -run '^Test(RuntimeLocationPosition|DirectiveFilename)' -count=1
+
+      - name: Test shared SSA fault and nil-check proofs
+        if: matrix.lane == 'compat'
+        run: go test ./cl -run '^Test(SSA|CompletedFieldAddress|UnevaluatedFieldAddress|DominatedNilChecks)' -count=1
 
       - name: Test canonical coroutine plan digest and cache identity
         if: matrix.lane == 'compat'
         run: |
           go test ./internal/coro -run '^TestCoroPlanDigest' -count=1
           go test ./internal/build -run '^Test(BuildCoroPlanInstallsArchiveDigest|CoroutinePlanInputsAffectFingerprint|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroPhysicalABICacheRegistrationPreservesCollectedFuncInfo)$' -count=1
+          go test ./internal/build -run '^Test(CoroLibraryProgramPredicateProducedArchiveConsumer|BDWGCNotificationAutomaticForeignThreadAndDetach)$' -count=1
           go test ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
       - name: Test coroutine physical ABI and function dispatch lowering
@@ -421,11 +580,44 @@ jobs:
         # Run every compiler test whose name is part of the coroutine contract;
         # in particular this covers pure SSA aggregates/PHI and caller-frame
         # park lowering on native64 and wasm32 before and after CoroSplit.
-        run: go test -v ./cl -run '^Test(Coro|EmissionUniverse(ActiveABIMethodTablesUseFrozenWrapperSymbols|ABIMethodDemandReferencesAreExactRecursiveAndOwnerScoped))' -count=1
+        run: go test -v ./cl -run '^Test(Coro|PhysicalDescriptorPatch|GenericLocal.*Patch|EmissionUniverse(ActiveABIMethodTablesUseFrozenWrapperSymbols|ABIMethodDemandReferencesAreExactRecursiveAndOwnerScoped))' -count=1
+
+      - name: Test real synctest execution and collector ownership
+        if: matrix.lane == 'synctest' && github.repository == 'cpunion/llgo' && github.event.pull_request.base.ref == 'llvm-coro'
+        env:
+          LLGO_CORO_SYNCTEST_ACCEPTANCE: "1"
+          LLGO_TEST_LLGO: /tmp/llgo-synctest
+        run: |
+          go build -o "$LLGO_TEST_LLGO" ./cmd/llgo
+          go test ./internal/build -run '^TestCoroSynctestAcceptance$' -v -count=1 -timeout=18m
+
+      - name: Test real standard timers and GC cancellation
+        if: matrix.lane == 'timer-gc' && github.repository == 'cpunion/llgo' && github.event.pull_request.base.ref == 'llvm-coro'
+        env:
+          LLGO_CORO_TIMER_GC_ACCEPTANCE: "1"
+          LLGO_TEST_LLGO: /tmp/llgo-timer-gc
+        run: |
+          go build -o "$LLGO_TEST_LLGO" ./cmd/llgo
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB go test ./internal/build -run '^TestCoro(TimerGC|GCObservationLink|ReflectHeaderGC)Acceptance$' -v -count=1 -timeout=25m
+
+      - name: Test real WASI timers and TinyGC cancellation
+        if: matrix.lane == 'timer-gc-wasi' && github.repository == 'cpunion/llgo' && github.event.pull_request.base.ref == 'llvm-coro'
+        env:
+          LLGO_CORO_WASI_TIMER_GC_ACCEPTANCE: "1"
+          LLGO_TEST_LLGO: /tmp/llgo-wasi-timer-gc
+        run: |
+          go build -o "$LLGO_TEST_LLGO" ./cmd/llgo
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB go test ./internal/build -run '^TestCoroWASITimerGCAcceptance$' -v -count=1 -timeout=25m
 
       - name: Test coroutine TLS function dispatch proof
         if: matrix.lane == 'compat'
         run: go test -v ./internal/build -run '^TestCoroTLS' -count=1
+
+      - name: Test bounded optimized coroutine instructions and syscall identities
+        if: matrix.lane == 'compat'
+        run: |
+          go test ./ssa -run '^TestVerifyCoroAtomicCostModule' -count=1
+          (cd runtime && go test . -run '^TestDarwinInternalSyscall.*WorkerTargetsAreExact$' -count=1)
 
       - name: Test coroutine registry and control integration
         if: matrix.lane == 'compat'
@@ -440,9 +632,10 @@ jobs:
         run: |
           go test ./internal/xtool/llvm -run '^TestGetTarget(Spec|Triple)$' -count=1
           go test ./internal/crosscompile -run '^Test(UseTarget|UseExportsResolvedLLVMConfig|ResolvedLLVMTargetSpecWASIThreads)$' -count=1
+          go test ./internal/crosscompile -run '^TestMacOSSysroot' -count=1
           go test ./internal/cabi -run '^TestDevLTOGlobalDCETargetArchAndNewTransformerArchSelection$' -count=1
           go test -v ./ssa -run '^Test(ResolvedTargetConfig(|IsAuthoritativeAndFrozen)|TargetDataLegacyLayoutCompatibility|ResolvedPointerWidthMismatchFallsBack|NewProgramDefaultTargetCompatibility|ResolvedExternalBackendCompatibilityFallback|ResolvedTargetABINameControlsRISCVObject)$' -count=1
-          go test ./internal/build -run '^Test(NewLLSSATargetUsesResolvedLLVMConfig|LLVMCPUAndFeaturesAffectBuildFingerprint|DefaultTargetKeepsLegacyCacheIdentity|NonDefaultLLVMFeaturesEnterCacheIdentity|ResolvedTargetCompatibilityAudit|WasmFrontendLayoutMatchesLLVM)$' -count=1
+          go test ./internal/build -run '^Test(NewLLSSATargetUsesResolvedLLVMConfig|LLVMCPUAndFeaturesAffectBuildFingerprint|DefaultTargetKeepsLegacyCacheIdentity|NonDefaultLLVMFeaturesEnterCacheIdentity|ResolvedTargetCompatibilityAudit|WasmFrontendLayoutMatchesLLVM|BaremetalFrontendLayoutMatchesLLVM)$' -count=1
 
       - name: Check llgo-tag build
         if: matrix.lane == 'integration'
@@ -452,11 +645,45 @@ jobs:
         if: matrix.lane == 'integration'
         run: |
           go vet ./internal/coro ./internal/build ./cl/ssawrap ./internal/xtool/llvm ./internal/crosscompile ./internal/cabi
-          # The runtime package has pre-existing unsafe.Pointer findings.
-          (cd runtime && go vet ./internal/coro && go vet -unsafeptr=false ./internal/runtime)
+          # Vet the selected production LLGo runtime, not a nonexistent host-Go
+          # runtime assembled without its compiler-owned bridges. Runtime
+          # source-island tests above check the host adapters independently.
+          (cd runtime && go vet ./internal/coro && go vet -unsafeptr=false -tags='llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer' ./internal/runtime)
           # The compiler package has a pre-existing unsafe.Pointer finding.
           # Disable only that analyzer and keep all other checks enabled.
           go vet -unsafeptr=false ./cl
           # The SSA package has pre-existing sync.Map copylocks findings. Keep
           # every other analyzer active while coroutine slices are integrated.
           go vet -copylocks=false ./ssa
+
+  baremetal-timer:
+    name: test Cortex-M standard timer host protocol (LLVM 22)
+    if: github.repository == 'cpunion/llgo' && github.event.pull_request.base.ref == 'llvm-coro'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      LLGO_ROOT: ${{ github.workspace }}
+      LLGO_CORO_BAREMETAL_ACCEPTANCE: "1"
+      LLGO_TEST_LLGO: /tmp/llgo-baremetal
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install LLVM 22 and Cortex-M emulator
+        run: |
+          echo 'deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends llvm-22-dev clang-22 lld-22 libgc-dev qemu-system-arm
+          echo '/usr/lib/llvm-22/bin' >> "$GITHUB_PATH"
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+        with:
+          go-version: "1.27.0"
+      - name: Validate physical layout and startup
+        run: |
+          go test ./internal/build -run '^(TestWasmFrontendLayoutMatchesLLVM|TestBaremetalFrontendLayoutMatchesLLVM)$' -count=1
+          go test ./internal/targets -run '^TestBaremetal' -count=1
+          (cd runtime && go test . -run '^TestFuncForPCCache' -count=1)
+      - name: Build compiler and execute standard timers on Cortex-M
+        run: |
+          go build -o "$LLGO_TEST_LLGO" ./cmd/llgo
+          go test ./internal/build -run '^TestCoroBaremetalTimerAcceptance$' -count=1 -v -timeout=12m

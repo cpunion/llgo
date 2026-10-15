@@ -8,11 +8,10 @@ import (
 	"testing"
 
 	"github.com/xgo-dev/llgo/ssa"
-	"github.com/xgo-dev/llgo/ssa/ssatest"
 )
 
 func TestSetjmpLongjmpIRPaths(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	fn := pkg.NewFunc("f", ssa.NoArgsNoRet, ssa.InGo)
@@ -43,7 +42,7 @@ func TestSigjmpUsesSetjmpOnExplicitTarget(t *testing.T) {
 	// Specify the resolved target up front instead of inheriting the host OS,
 	// which would incorrectly make this test exercise the Windows UCRT ABI on
 	// a Windows runner.
-	prog := ssatest.NewProgram(t, &ssa.Target{
+	prog := newRuntimeTestProgram(t, &ssa.Target{
 		GOOS: "linux", GOARCH: "arm", Target: "esp32",
 	})
 	pkg := prog.NewPackage("foo", "foo")
@@ -65,7 +64,7 @@ func TestSigjmpUsesSetjmpOnExplicitTarget(t *testing.T) {
 }
 
 func TestTypedProcessControlIR(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	process := pkg.NewFunc("process", ssa.NoArgsNoRet, ssa.InGo)
@@ -104,7 +103,7 @@ func TestTypedProcessControlIR(t *testing.T) {
 func TestWindowsSigjmpBufferAlignment(t *testing.T) {
 	for _, arch := range []string{"386", "amd64", "arm64"} {
 		t.Run(arch, func(t *testing.T) {
-			prog := ssatest.NewProgram(t, &ssa.Target{GOOS: "windows", GOARCH: arch})
+			prog := newRuntimeTestProgram(t, &ssa.Target{GOOS: "windows", GOARCH: arch})
 			pkg := prog.NewPackage("foo", "foo")
 
 			fn := pkg.NewFunc("f", ssa.NoArgsNoRet, ssa.InGo)
@@ -123,17 +122,20 @@ func TestWindowsSigjmpBufferAlignment(t *testing.T) {
 
 func TestWindowsSetjmpABI(t *testing.T) {
 	tests := []struct {
-		arch    string
-		setjmp  string
-		longjmp string
+		name       string
+		arch       string
+		llvmTarget string
+		setjmp     string
+		longjmp    string
 	}{
-		{arch: "386", setjmp: "@_setjmp3", longjmp: "@longjmp"},
-		{arch: "amd64", setjmp: "@_setjmpex", longjmp: "@longjmp"},
-		{arch: "arm64", setjmp: "@llgo_setjmp", longjmp: "@llgo_longjmp"},
+		{name: "386", arch: "386", setjmp: "@_setjmp3", longjmp: "@longjmp"},
+		{name: "amd64-msvc", arch: "amd64", setjmp: "@_setjmpex", longjmp: "@llgo_longjmp"},
+		{name: "amd64-gnu", arch: "amd64", llvmTarget: "x86_64-w64-windows-gnu", setjmp: "@_setjmpex", longjmp: "@llgo_longjmp"},
+		{name: "arm64", arch: "arm64", setjmp: "@llgo_setjmp", longjmp: "@llgo_longjmp"},
 	}
 	for _, test := range tests {
-		t.Run(test.arch, func(t *testing.T) {
-			prog := ssatest.NewProgram(t, &ssa.Target{GOOS: "windows", GOARCH: test.arch})
+		t.Run(test.name, func(t *testing.T) {
+			prog := newRuntimeTestProgram(t, &ssa.Target{GOOS: "windows", GOARCH: test.arch, LLVMTarget: test.llvmTarget})
 			pkg := prog.NewPackage("foo", "foo")
 
 			fn := pkg.NewFunc("f", ssa.NoArgsNoRet, ssa.InGo)
@@ -171,16 +173,19 @@ func TestWindowsSetjmpABI(t *testing.T) {
 
 func TestWindowsDirectSetjmpABI(t *testing.T) {
 	for _, test := range []struct {
-		arch    string
-		setjmp  string
-		longjmp string
+		name       string
+		arch       string
+		llvmTarget string
+		setjmp     string
+		longjmp    string
 	}{
-		{arch: "386", setjmp: "@_setjmp3", longjmp: "@longjmp"},
-		{arch: "amd64", setjmp: "@_setjmpex", longjmp: "@longjmp"},
-		{arch: "arm64", setjmp: "@llgo_setjmp", longjmp: "@llgo_longjmp"},
+		{name: "386", arch: "386", setjmp: "@_setjmp3", longjmp: "@longjmp"},
+		{name: "amd64-msvc", arch: "amd64", setjmp: "@_setjmpex", longjmp: "@llgo_longjmp"},
+		{name: "amd64-gnu", arch: "amd64", llvmTarget: "x86_64-w64-windows-gnu", setjmp: "@_setjmpex", longjmp: "@llgo_longjmp"},
+		{name: "arm64", arch: "arm64", setjmp: "@llgo_setjmp", longjmp: "@llgo_longjmp"},
 	} {
-		t.Run(test.arch, func(t *testing.T) {
-			prog := ssatest.NewProgram(t, &ssa.Target{GOOS: "windows", GOARCH: test.arch})
+		t.Run(test.name, func(t *testing.T) {
+			prog := newRuntimeTestProgram(t, &ssa.Target{GOOS: "windows", GOARCH: test.arch, LLVMTarget: test.llvmTarget})
 			pkg := prog.NewPackage("foo", "foo")
 
 			fn := pkg.NewFunc("f", ssa.NoArgsNoRet, ssa.InGo)
@@ -204,7 +209,7 @@ func TestWindowsDirectSetjmpABI(t *testing.T) {
 }
 
 func TestWindowsSetjmpRejectsUnsupportedArchitecture(t *testing.T) {
-	prog := ssatest.NewProgram(t, &ssa.Target{GOOS: "windows", GOARCH: "mips"})
+	prog := newRuntimeTestProgram(t, &ssa.Target{GOOS: "windows", GOARCH: "mips"})
 	pkg := prog.NewPackage("foo", "foo")
 	fn := pkg.NewFunc("f", ssa.NoArgsNoRet, ssa.InGo)
 	b := fn.MakeBody(1)
@@ -221,7 +226,7 @@ func TestWindowsSetjmpRejectsUnsupportedArchitecture(t *testing.T) {
 }
 
 func TestDeferInLoopContiguousDrainerGeneration(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	c1 := pkg.NewFunc("c1", ssa.NoArgsNoRet, ssa.InGo)

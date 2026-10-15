@@ -53,8 +53,58 @@ no:
 		proof.DataLayout == "" ||
 		len(proof.CallClosure) != 2 ||
 		proof.CallClosure[0] != "helper" || proof.CallClosure[1] != "leaf" ||
-		len(proof.ClosureSHA256) != 64 {
+		len(proof.ClosureSHA256) != 64 || !proof.MayFault {
 		t.Fatalf("executor-leaf proof = %+v", proof)
+	}
+}
+
+func TestExecutorLeafFaultDemandIsIndependentOfProgress(t *testing.T) {
+	module := parseExecutorLeafModule(t, `
+target datalayout = "e-p:64:64-i64:64-n8:16:32:64-S128"
+target triple = "x86_64-unknown-linux-gnu"
+define i32 @pure(i32 %value) {
+  %sum = add i32 %value, 1
+  ret i32 %sum
+}
+@tls = thread_local global ptr null
+declare ptr @llvm.threadlocal.address.p0(ptr) nocallback nofree nosync nounwind willreturn
+define ptr @tls_load() {
+  %address = call ptr @llvm.threadlocal.address.p0(ptr @tls)
+  %value = load ptr, ptr %address
+  ret ptr %value
+}
+define i32 @spill(i32 %value) {
+  %slot = alloca i32
+  store i32 %value, ptr %slot
+  %result = load i32, ptr %slot
+  ret i32 %result
+}
+define internal i32 @load_helper(ptr %cell) {
+  %value = load volatile i32, ptr %cell
+  ret i32 %value
+}
+define i32 @load(ptr %cell) {
+  %value = call i32 @load_helper(ptr %cell)
+  ret i32 %value
+}
+define void @store() {
+  store volatile i32 1, ptr null
+  ret void
+}
+define i32 @divide(i32 %value, i32 %divisor) {
+  %result = sdiv i32 %value, %divisor
+  ret i32 %result
+}`)
+	for _, name := range []string{"pure", "tls_load", "spill", "load", "store", "divide"} {
+		t.Run(name, func(t *testing.T) {
+			proof, err := ProveExecutorLeaf(module, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := name == "load" || name == "store" || name == "divide"; proof.MayFault != want {
+				t.Fatalf("MayFault = %t, want %t", proof.MayFault, want)
+			}
+		})
 	}
 }
 

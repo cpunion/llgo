@@ -8,6 +8,8 @@ import (
 	psync "github.com/xgo-dev/llgo/runtime/internal/sync"
 )
 
+func semaAcquireWaitGroup(addr *uint32, _ bool) { semaAcquire(addr) }
+
 func semaAcquire(addr *uint32) {
 	for {
 		value := latomic.LoadUint32(addr)

@@ -584,6 +584,7 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 	result := coroRunResultV1{}
 	held := false
 	for result.used < budget {
+		coroObserveGCV1()
 		// A slice-held lease already proves that this M owns one managed-
 		// execution slot. Probe/acquire only until that lease exists; calling a
 		// helper merely to return the same true bit on every action was visible in

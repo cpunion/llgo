@@ -79,8 +79,31 @@ func libc_fchown_trampoline()
 //go:linkname libc_ftruncate_trampoline C.ftruncate
 func libc_ftruncate_trampoline()
 
+// futimes and utimes update filesystem metadata through fixed, three-word
+// generated wrappers. Their timeval and pathname storage remains rooted by the
+// suspended Go caller until worker completion.
+//
+//go:linkname libc_futimes_trampoline C.futimes
+func libc_futimes_trampoline()
+
+// These identity queries are executor-safe, but the generic FuncPCABI0
+// carrier does not yet own target-specific inline recipes. Keep their exact
+// code words on the bounded worker route until such recipes are frozen.
+//
+//go:linkname libc_getegid_trampoline C.getegid
+func libc_getegid_trampoline()
+
+//go:linkname libc_geteuid_trampoline C.geteuid
+func libc_geteuid_trampoline()
+
 //go:linkname libc_getcwd_trampoline C.getcwd
 func libc_getcwd_trampoline()
+
+//go:linkname libc_getgid_trampoline C.getgid
+func libc_getgid_trampoline()
+
+//go:linkname libc_getgroups_trampoline C.getgroups
+func libc_getgroups_trampoline()
 
 // getpid is executor-safe on Darwin, but the current FuncPCABI0 word-call
 // carrier has no target-specific inline operation recipe. Route this exact
@@ -92,8 +115,14 @@ func libc_getcwd_trampoline()
 //go:linkname libc_getpid_trampoline C.getpid
 func libc_getpid_trampoline()
 
+//go:linkname libc_getppid_trampoline C.getppid
+func libc_getppid_trampoline()
+
 //go:linkname libc_getrusage_trampoline C.getrusage
 func libc_getrusage_trampoline()
+
+//go:linkname libc_getuid_trampoline C.getuid
+func libc_getuid_trampoline()
 
 //go:linkname libc_getpeername_trampoline C.getpeername
 func libc_getpeername_trampoline()
@@ -162,6 +191,9 @@ func libc_unlink_trampoline()
 
 //go:linkname libc_unlinkat_trampoline C.unlinkat
 func libc_unlinkat_trampoline()
+
+//go:linkname libc_utimes_trampoline C.utimes
+func libc_utimes_trampoline()
 
 //go:linkname libc_write_trampoline C.write
 func libc_write_trampoline()

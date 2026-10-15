@@ -544,6 +544,9 @@ func TestCoroOutcomePlainMemoryAndNilFaultNativeAndWasm32(t *testing.T) {
 				!coroFunctionStoresI32(leafBody, coroAwaitCompletionFaultNil) {
 				t.Fatalf("outcome-plain memory leaf lost its helper-free nil-fault completion:\n%s", leafIR)
 			}
+			if !strings.Contains(leafIR, coroPanicTraceAppendHookV1) || !strings.Contains(leafIR, "i32 2)") {
+				t.Fatalf("outcome-plain nil fault lost its new logical trace (or reused panic(nil) identity):\n%s", leafIR)
+			}
 			parent := requireCoroPhysicalFunction(t, module, "foo.Parent")
 			if !strings.Contains(parent.String(), coroFaultPrepareHookV1) ||
 				strings.Contains(parent.String(), coroFaultPrepareHookV2) {

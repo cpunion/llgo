@@ -61,7 +61,7 @@ func TestRecoverThenDeferredPanicIRTerminatesBlocks(t *testing.T) {
 	assertNoInstructionsAfterUnreachable(t, ir)
 }
 
-func TestCgoDeferredFreeUsesFrameOwnedWorkerCleanup(t *testing.T) {
+func TestCgoDeferredFreeUsesFrameOwnedForeignCleanup(t *testing.T) {
 	if strings.TrimSpace(runGoCmd(t, "", "env", "CGO_ENABLED")) != "1" {
 		t.Skip("cgo is disabled")
 	}
@@ -74,11 +74,11 @@ func TestCgoDeferredFreeUsesFrameOwnedWorkerCleanup(t *testing.T) {
 	// the call shape and semantic suffix instead of depending on that spelling.
 	freeThunk := llvmFunctionBodyContaining(ir, "call [0 x i8] @")
 	if freeThunk == "" || !strings.Contains(freeThunk, "._Cfunc_free") {
-		t.Fatalf("missing deferred C.free worker thunk in IR:\n%s", ir)
+		t.Fatalf("missing deferred C.free foreign thunk in IR:\n%s", ir)
 	}
 	freeThunkSymbol := llvmDefinedFunctionSymbol(freeThunk)
 	if freeThunkSymbol == "" {
-		t.Fatalf("cannot identify deferred C.free worker thunk:\n%s", freeThunk)
+		t.Fatalf("cannot identify deferred C.free foreign thunk:\n%s", freeThunk)
 	}
 	cleanup := llvmFunctionBodyContainingExcluding(
 		ir,
@@ -88,14 +88,24 @@ func TestCgoDeferredFreeUsesFrameOwnedWorkerCleanup(t *testing.T) {
 	if cleanup == "" {
 		t.Fatalf("missing coroutine cleanup that submits %s:\n%s", freeThunkSymbol, ir)
 	}
-	park := indexLineContaining(cleanup, "call void @__llgo_coro_worker_park_v1")
-	resume := indexLineContaining(cleanup, "call i32 @__llgo_coro_worker_resume_v1")
-	retain := indexLineContaining(cleanup, "call void (...) @llvm.fake.use")
-	if park < 0 || resume < 0 || retain < 0 {
+	// This source does not promise nocallback. Generated cgo therefore owns
+	// the same-M reentry boundary, including its retained typed arguments;
+	// it must not silently switch to a callback-unsafe worker transaction.
+	boundary := indexLineContaining(cleanup, "call i32 @__llgo_coro_same_m_foreign_reentry_call_v2")
+	retainedAfterCall := boundary > 0 && indexLineContaining(
+		strings.Join(strings.Split(cleanup, "\n")[boundary:], "\n"),
+		"call void (...) @llvm.fake.use",
+	) > 0
+	if boundary < 0 || !retainedAfterCall {
 		t.Fatalf(
-			"deferred C.free cleanup lacks frame-owned worker lifecycle (park=%d resume=%d retain=%d):\n%s",
-			park, resume, retain, cleanup,
+			"deferred C.free cleanup lacks retained same-M foreign lifecycle (boundary=%d retained=%t):\n%s",
+			boundary, retainedAfterCall, cleanup,
 		)
+	}
+	for _, hook := range []string{"__llgo_coro_worker_park_v1", "__llgo_coro_worker_resume_v1"} {
+		if strings.Contains(cleanup, hook) {
+			t.Fatalf("callback-capable deferred C.free acquired worker hook %s:\n%s", hook, cleanup)
+		}
 	}
 	if indexLineContaining(ir, "call void @", "FreeDeferNode") >= 0 {
 		t.Fatalf("static coroutine cleanup unexpectedly allocated a legacy defer node:\n%s", ir)
@@ -119,6 +129,11 @@ func llgoIRFromProbe(t *testing.T, name, src string) string {
 	mainFile := filepath.Join(dir, "main.go")
 	if err := os.WriteFile(mainFile, []byte(src), 0644); err != nil {
 		t.Fatal(err)
+	}
+	if os.Getenv("LLGO_TEST_LLGEN") != "" {
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module llgo-ir-probe\n\ngo 1.20\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	runGoCmd(t, root, "run", "./chore/llgen", filepath.ToSlash(dir))

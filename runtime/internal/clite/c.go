@@ -247,6 +247,12 @@ func Unreachable()
 //go:linkname Exit llgo.controlExit
 func Exit(Int)
 
+// Trap terminates at the processor boundary without requiring a C process
+// exit ABI or a diagnostic stream. It is valid during allocator bootstrap.
+//
+//go:linkname Trap llgo.controlTrap
+func Trap()
+
 // -----------------------------------------------------------------------------
 
 // rand may serialize libc's process-local PRNG state with an internal lock,

@@ -3088,6 +3088,62 @@ func assertCoroCancellationTerminalStatusPublication(t *testing.T, function llvm
 			t.Fatalf("%s status %d does not converge on shared cleanup/completion:\n%s",
 				function.Name(), status, block.AsValue().String())
 		}
+		// Park cancellation bypasses the operation's normal continuation. Its
+		// shared cleanup entry must restore the compiler-owned header before a
+		// deferred child can validate the active recovery scope.
+		assertCoroResumeHeaderActivation(t, function.Name(), terminator.Successor(0))
+	}
+}
+
+func assertCoroResumeHeaderActivation(t *testing.T, name string, block llvm.BasicBlock) {
+	t.Helper()
+	want := map[uint64]uint64{
+		coroHeaderSuspendReason: coroSuspendNone,
+		coroHeaderLifecycle:     coroLifecycleActive,
+	}
+	for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+		if instruction.InstructionOpcode() == llvm.Call {
+			break // The active header must precede any cleanup or fault hook.
+		}
+		if instruction.InstructionOpcode() != llvm.Store {
+			continue
+		}
+		value, address := instruction.Operand(0), instruction.Operand(1)
+		if value.IsAConstantInt().IsNil() || value.Type().IntTypeWidth() != 16 ||
+			address.IsAGetElementPtrInst().IsNil() || address.OperandsCount() != 3 {
+			continue
+		}
+		field := address.Operand(2)
+		if field.IsAConstantInt().IsNil() {
+			continue
+		}
+		if expected, ok := want[field.ZExtValue()]; ok && value.ZExtValue() == expected {
+			delete(want, field.ZExtValue())
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("%s resume entry lacks header activation fields %v:\n%s", name, want, block.AsValue().String())
+	}
+}
+
+func assertCoroZeroTicketCancellationActivation(t *testing.T, function llvm.Value) {
+	t.Helper()
+	count := 0
+	for _, block := range function.BasicBlocks() {
+		for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if instruction.InstructionOpcode() != llvm.Call || instruction.CalledValue().Name() != coroRunDecisionTakeZeroHookV1 {
+				continue
+			}
+			branch := block.LastInstruction()
+			if branch.InstructionOpcode() != llvm.Br || branch.SuccessorsCount() != 2 {
+				t.Fatalf("%s zero-ticket gate has no normal/cancellation split:\n%s", function.Name(), block.AsValue().String())
+			}
+			assertCoroResumeHeaderActivation(t, function.Name(), branch.Successor(0))
+			count++
+		}
+	}
+	if count == 0 {
+		t.Fatalf("%s has no zero-ticket cancellation gate", function.Name())
 	}
 }
 
@@ -3157,6 +3213,9 @@ func compileCoroDecisionFrameProbe(t *testing.T, target *llssa.Target, scalarGat
 	module := pkg.Module()
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify target=%v scalar-gate=%t probe before CoroSplit: %v\n%s", target, scalarGate, err, module.String())
+	}
+	if scalarGate {
+		assertCoroZeroTicketCancellationActivation(t, module.NamedFunction(name))
 	}
 	runCoroABITestPipeline(t, prog, module)
 	ramp := module.NamedFunction(name)
@@ -3254,6 +3313,7 @@ func compileCoroPreemptCountdownFrameProbe(t *testing.T, target *llssa.Target, g
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify target=%v gated=%t preemption frame probe before CoroSplit: %v\n%s", target, gated, err, module.String())
 	}
+	assertCoroZeroTicketCancellationActivation(t, module.NamedFunction(name))
 	runCoroABITestPipeline(t, prog, module)
 	return coroFrameAllocationSize(t, module.NamedFunction(name), prog.PointerSize()*8)
 }

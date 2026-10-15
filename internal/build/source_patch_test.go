@@ -90,9 +90,54 @@ func TestWASIP1CoroSyscallMetadataSourcePatch(t *testing.T) {
 			t.Errorf("WASI Preview 1 metadata import %s lacks exact noblock annotation", name)
 		}
 	}
-	for _, name := range []string{"fd_read", "fd_write", "sock_accept"} {
+	for _, name := range []string{"fd_read", "fd_write", "fd_pread", "fd_pwrite", "sock_accept"} {
 		if strings.Contains(text, "//llgo:coro noblock\nfunc "+name+"(") {
 			t.Errorf("blocking WASI Preview 1 import %s acquired noblock annotation", name)
+		}
+	}
+	exitSource := string(overlay[filepath.Join(goroot, "src", "syscall", "os_wasip1.go")])
+	if !strings.Contains(exitSource, "//go:wasmimport wasi_snapshot_preview1 proc_exit") ||
+		!strings.Contains(exitSource, "//llgo:coro noblock\nfunc ProcExit(code int32)") {
+		t.Error("WASI process exit lost its exact standard import ABI/progress contract")
+	}
+	positionedPatch := string(overlay[filepath.Join(goroot, "src", "syscall", "z_llgo_patch_fs_wasip1_coro.go")])
+	for _, required := range []string{
+		"func fd_pread(fd int32, iovs *iovec, iovsLen size, offset filesize, nread *size)",
+		"func fd_pwrite(fd int32, iovs *iovec, iovsLen size, offset filesize, nwritten *size)",
+		"coroWASI_fd_pread(3<<16|3,",
+		"coroWASI_fd_pwrite(3<<16|4,",
+		"coroWASI_fd_pread llgo.coroHostOperation",
+		"unsafe.Pointer(iovs)", "unsafe.Pointer(nread)",
+		"uintptr(uint32(offset>>32))",
+	} {
+		if !strings.Contains(positionedPatch, required) {
+			t.Errorf("WASI positional I/O patch lacks %q", required)
+		}
+	}
+	filtered, err := parser.ParseFile(token.NewFileSet(), path, text, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	functions := make(map[string]*ast.FuncDecl)
+	for _, decl := range filtered.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			functions[fn.Name.Name] = fn
+		}
+	}
+	for _, name := range []string{"Open", "Openat", "Chdir", "Read", "Write", "Pread", "Pwrite", "Seek", "Close", "Unlink"} {
+		if functions[name] == nil || functions[name].Body == nil {
+			t.Errorf("WASI public %s must retain the Go standard library body", name)
+		}
+	}
+	for _, name := range []string{"fd_pread", "fd_pwrite", "fd_read", "fd_write", "path_open", "path_filestat_get"} {
+		if functions[name] != nil {
+			t.Errorf("WASI source overlay retained raw blocking import %s", name)
+		}
+	}
+	unixPatch := string(overlay[filepath.Join(goroot, "src", "internal", "syscall", "unix", "z_llgo_patch_fs_wasip1_coro.go")])
+	for _, name := range []string{"path_filestat_get", "path_filestat_set_times", "path_create_directory", "path_unlink_file", "path_remove_directory", "path_rename", "path_link", "path_symlink", "path_readlink"} {
+		if !strings.Contains(unixPatch, "//go:linkname "+name+" syscall."+name) {
+			t.Errorf("internal/syscall/unix.%s does not share the defined syscall adapter", name)
 		}
 	}
 }
@@ -326,7 +371,7 @@ func TestSyscallSourcePatchPreservesTargetImplementations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed || len(files) != 1 || filepath.Base(files[0]) != "syscall_webassembly.go" {
+	if !changed || len(files) != 2 || filepath.Base(files[0]) != "syscall_freestanding_llgo.go" || filepath.Base(files[1]) != "syscall_webassembly.go" {
 		t.Fatalf("wasm syscall patch changed = %v, files = %v, want target-neutral host-operation implementation", changed, files)
 	}
 	wasmPatch := filepath.Join(runtime.GOROOT(), "src", "syscall", "z_llgo_patch_syscall_webassembly.go")
@@ -959,10 +1004,19 @@ func TestCoroBytealgCountUsesPreemptibleGoSourcePatch(t *testing.T) {
 }
 
 func TestNamedWebAssemblyInternalLinuxSyscallFailsClosed(t *testing.T) {
+	testFreestandingInternalLinuxSyscallFailsClosed(t, "tinygo.wasm,wasip2")
+}
+
+func TestBaremetalInternalLinuxSyscallFailsClosed(t *testing.T) {
+	testFreestandingInternalLinuxSyscallFailsClosed(t, "baremetal")
+}
+
+func testFreestandingInternalLinuxSyscallFailsClosed(t *testing.T, tags string) {
+	t.Helper()
 	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       "linux",
 		goarch:     "arm",
-		buildFlags: []string{"-tags=llgo,llgo_coro,tinygo.wasm,wasip2,nogc"},
+		buildFlags: []string{"-tags=llgo,llgo_coro," + tags + ",nogc"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1020,6 +1074,7 @@ func TestNamedWebAssemblySyscallSourcePatchExcludesNativeLinuxAdapters(t *testin
 	}
 	for _, name := range []string{
 		"syscall_webassembly.go",
+		"syscall_freestanding_llgo.go",
 		"socket_flags_webassembly_unix.go",
 	} {
 		if !selected[name] {
@@ -1038,6 +1093,39 @@ func TestNamedWebAssemblySyscallSourcePatchExcludesNativeLinuxAdapters(t *testin
 		injected := filepath.Join(runtime.GOROOT(), "src", "syscall", "z_llgo_patch_"+name)
 		if _, ok := overlay[injected]; ok {
 			t.Errorf("named WebAssembly syscall overlay injected native adapter %s", injected)
+		}
+	}
+}
+
+func TestBaremetalSyscallSourcePatchDoesNotUseNativeLinuxABI(t *testing.T) {
+	for _, baremetal := range []bool{false, true} {
+		tags := "llgo,llgo_coro"
+		if baremetal {
+			tags += ",baremetal"
+		}
+		overlay, files, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+			goos: "linux", goarch: "arm", goversion: runtime.Version(), buildFlags: []string{"-tags=" + tags},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected := make(map[string]bool)
+		for _, file := range files["syscall"] {
+			selected[filepath.Base(file)] = true
+		}
+		for _, file := range []string{"syscall_linux.go", "syscall_linux_coro.go", "syscall_unix.go", "fork_rawcritical_linux_go126.go"} {
+			if selected[file] == baremetal {
+				t.Errorf("baremetal=%t selected native adapter %s = %t", baremetal, file, selected[file])
+			}
+		}
+		if selected["syscall_freestanding_llgo.go"] != baremetal || selected["syscall_webassembly.go"] {
+			t.Fatalf("baremetal=%t selected unexpected syscall surface: %v", baremetal, selected)
+		}
+		if baremetal {
+			patch := overlay[filepath.Join(runtime.GOROOT(), "src", "syscall", "z_llgo_patch_syscall_freestanding_llgo.go")]
+			if bytes.Count(patch, []byte("return ^uintptr(0), 0, ENOSYS")) != 4 {
+				t.Fatalf("freestanding Syscall/RawSyscall arities must all reject kernel traps: %s", patch)
+			}
 		}
 	}
 }

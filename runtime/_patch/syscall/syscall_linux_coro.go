@@ -1,4 +1,4 @@
-//go:build linux && !tinygo.wasm
+//go:build linux && !tinygo.wasm && !baremetal
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

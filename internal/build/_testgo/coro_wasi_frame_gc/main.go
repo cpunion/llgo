@@ -4,6 +4,7 @@ import (
 	"runtime"
 	"time"
 	_ "unsafe"
+	"weak"
 )
 
 const (
@@ -20,9 +21,53 @@ type payload struct {
 }
 
 var (
-	garbage  *payload
-	pressure []*payload
+	garbage    *payload
+	pressure   []*payload
+	weakGlobal uint64
 )
+
+//go:noinline
+func publishWeak(result chan<- weak.Pointer[uint64], done chan<- struct{}) {
+	object := new([128]uint64)
+	object[37] = headMarker
+	w := weak.Make(&object[37])
+	if w != weak.Make(&object[37]) || w == weak.Make(&object[38]) || w.Value() != &object[37] {
+		failWASIFrameGC(104)
+	}
+	runtime.GC()
+	if w.Value() != &object[37] || object[37] != headMarker {
+		failWASIFrameGC(105)
+	}
+	result <- w
+	close(done)
+}
+
+func checkWeakLifecycle() {
+	global := weak.Make(&weakGlobal)
+	result := make(chan weak.Pointer[uint64], 1)
+	done := make(chan struct{})
+	go publishWeak(result, done)
+	w := <-result
+	<-done
+	// Let the producer return and release its coroutine frame. The C helper
+	// then overwrites stale resume-stack pointers, just as for the frame test.
+	time.Sleep(time.Millisecond)
+	for i := 0; i < 8; i++ {
+		if overwriteNativeResumeStack(uintptr(i))&wasmNonPointer == 0 {
+			failWASIFrameGC(106)
+		}
+		runtime.GC()
+	}
+	if w.Value() != nil || global.Value() != &weakGlobal {
+		failWASIFrameGC(107)
+	}
+	// Reusing freed allocation slots must never revive an earlier weak handle.
+	allocatePressure()
+	runtime.GC()
+	if w.Value() != nil {
+		failWASIFrameGC(108)
+	}
+}
 
 //go:noinline
 func retainAcrossSuspend(started chan<- uint64, result chan<- uint64) {
@@ -114,4 +159,5 @@ func main() {
 		stats.Frees <= before.Frees || stats.HeapSys == 0 || stats.GCSys == 0 {
 		failWASIFrameGC(103)
 	}
+	checkWeakLifecycle()
 }

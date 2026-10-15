@@ -23,6 +23,7 @@ import (
 )
 
 type InterfaceType = abi.InterfaceType
+type Kind = abi.Kind
 
 func NoEscape(p unsafe.Pointer) unsafe.Pointer {
 	x := uintptr(p)

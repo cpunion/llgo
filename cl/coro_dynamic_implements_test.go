@@ -25,7 +25,6 @@ import (
 
 	"github.com/xgo-dev/llgo/internal/typepatch"
 	"github.com/xgo-dev/llgo/ssa/abi"
-	"github.com/xgo-dev/llgo/ssa/ssatest"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -43,7 +42,7 @@ func (rtype) hidden() int { return 0 }
 func Materialize() Type { return rtype{} }
 `)
 	testProg.ssa.Build()
-	prog := ssatest.NewProgram(t, nil)
+	prog := newLLSSAProg(t)
 	defer prog.Dispose()
 	universe, err := prepareStacklessEmissionUniverse(prog, Patches{
 		"example.com/emission/p": {Alt: alt.ssa, Types: typepatch.Clone(alt.types)},
@@ -96,9 +95,9 @@ func Materialize() Type { return rtype{} }
 	if owner == nil || universe.loadedPackageSnapshot == nil || !universe.effectiveTypeCacheReady {
 		t.Fatal("prepared universe did not freeze effective-type cache inputs")
 	}
-	first := universe.effectiveType(owner, nil, receiver, false)
+	first := universe.effectiveType(owner, nil, receiver)
 	cacheSize := len(universe.effectiveTypes)
-	second := universe.effectiveType(owner, nil, receiver, false)
+	second := universe.effectiveType(owner, nil, receiver)
 	if first != second {
 		t.Fatal("repeated effective-type projection did not reuse the frozen type graph")
 	}

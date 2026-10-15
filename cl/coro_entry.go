@@ -456,7 +456,11 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			}
 		} else {
 			if err := validateCoroDynamicDispatchTarget(e.function, e.plan, e.emission); err != nil {
-				return fmt.Errorf("coroutine entry resolution: validate descriptor target: %w", err)
+				diagnostic := ""
+				if e.coroPlan != nil && e.plan.Effect.IsOpaque() {
+					diagnostic = "; opaque trace: " + e.coroPlan.OpaqueEffectTrace(e.function)
+				}
+				return fmt.Errorf("coroutine entry resolution: validate descriptor target: %w%s", err, diagnostic)
 			}
 			if e.plan.Emission == coro.EmitPlain {
 				return nil
@@ -512,7 +516,6 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 		}
 		rawMethodToken := e.interfacePlain.acceptsTarget(e.function, e.plan) ||
 			e.managedInterface.acceptsTarget(e.function, e.plan)
-		managedDispatchTarget := e.plan.FuncRep == coro.Dispatch && !rawMethodToken
 		if accept == nil && e.emission != nil && e.emission.coroProgramIR != nil &&
 			e.emission.coroProgramIR.physicalPlansSealed {
 			physical, err := e.sealedPhysicalFunctionPlan()
@@ -521,9 +524,13 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			}
 			return validateOutcomePlainFrozenPlan(physical, e.plan)
 		}
+		// Descriptor call lowering is a body capability, independent of whether
+		// this function itself escapes as a descriptor target. The frozen outcome
+		// verifier still requires every dynamic candidate to publish an exact
+		// synchronous outcome entry with a native-safe result layout.
 		return validateCoroPhysicalABIForOwner(
 			e.function, e.plan, e.coroPlan, e.emission, e.physicalOwner, true, false,
-			false, true, e.frameRetentionABI, false, managedDispatchTarget, rawMethodToken,
+			false, true, e.frameRetentionABI, false, true, rawMethodToken,
 			e.interfacePlain, e.managedInterface, e.libraryForeign,
 			func(plan *coroPhysicalFunctionPlan) error {
 				if err := validateOutcomePlainFrozenPlan(plan, e.plan); err != nil {
@@ -749,18 +756,20 @@ func (c *Compilation) preflightCoroPlan() error {
 						return physicalStage.freezePhysicalFunctionPlan(plan)
 					}); err != nil {
 						c.coroPreflightErr = fmt.Errorf(
-							"%w; demand trace: %s; ABI reference trace: %s",
+							"%w; demand trace: %s; ABI reference trace: %s; suspension trace: %s",
 							err, plan.DemandTrace(function.Function),
 							coroDemandReferenceTrace(universe, function.Function, plan),
+							plan.SuspensionEffectTrace(function.Function, function.Plan.Effect),
 						)
 						return
 					}
 				}
 			} else if err := entry.checkSupported(); err != nil {
 				c.coroPreflightErr = fmt.Errorf(
-					"%w; demand trace: %s; ABI reference trace: %s",
+					"%w; demand trace: %s; ABI reference trace: %s; suspension trace: %s",
 					err, plan.DemandTrace(function.Function),
 					coroDemandReferenceTrace(universe, function.Function, plan),
+					plan.SuspensionEffectTrace(function.Function, function.Plan.Effect),
 				)
 				return
 			}
@@ -823,14 +832,7 @@ func (c *Compilation) CoroProgramCapabilities() (coro.ProgramCapabilities, error
 	if plan == nil {
 		return 0, fmt.Errorf("coroutine program capabilities require an immutable SSA plan")
 	}
-	var result coro.ProgramCapabilities
-	for function, functionCapabilities := range capabilities {
-		functionPlan, planned := plan.FunctionPlan(function)
-		if !planned || functionPlan.Emission == coro.EmitNone {
-			continue
-		}
-		result |= functionCapabilities
-	}
+	result := projectCoroProgramCapabilities(plan, capabilities)
 	if !result.Valid() {
 		return 0, fmt.Errorf("coroutine program capabilities are invalid")
 	}

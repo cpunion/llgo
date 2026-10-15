@@ -326,6 +326,13 @@ func validateCoroCriticalInstruction(
 		if frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend {
 			return fmt.Errorf("critical atomic intrinsic lacks exact inline no-suspend semantics")
 		}
+		// Inline/no-suspend does not imply a fault-free atomic address. Reuse
+		// the same exact source/structural proof as ordinary memory lowering;
+		// a nullable operand cannot acquire a fault edge while the mask is held.
+		// Every validated atomic shape places its address in argument zero.
+		if len(call.Common().Args) == 0 || !audit.ctx.addressValueProvenNonNilAt(call.Common().Args[0], call) {
+			return fmt.Errorf("critical atomic address lacks an exact non-nil proof")
+		}
 		return nil
 	}
 

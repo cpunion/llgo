@@ -46,6 +46,9 @@ func TestPlatformSpecifiedFiles(t *testing.T) {
 		{"riscv32-unknown-elf", 5},
 		{"riscv64-unknown-elf", 27},
 		{"arm-none-eabi", 19},
+		{"thumbv6m-unknown-unknown-eabi", 19},
+		{"thumbv7m-unknown-unknown-eabi", 19},
+		{"aarch64-unknown-none", 0},
 		{"avr-unknown-elf", 6},
 		{"xtensa", 2},
 		{"x86_64-pc-windows", 0},
@@ -59,6 +62,15 @@ func TestPlatformSpecifiedFiles(t *testing.T) {
 				t.Errorf("For target %s, expected %d files, got %d", tt.target, tt.expected, len(result))
 			}
 		})
+	}
+}
+
+func TestThumbCompilerRTContainsArmEABIHelpers(t *testing.T) {
+	config := GetCompilerRTCompileConfig("/compiler-rt", "thumbv7m-unknown-unknown-eabi")
+	for _, helper := range []string{"aeabi_memset.S", "aeabi_memcpy.S", "aeabi_ldivmod.S", "aeabi_uldivmod.S", "aeabi_dcmp.S", "aeabi_fcmp.S"} {
+		if !slices.Contains(config.Groups[0].Files, filepath.Join("/compiler-rt", "lib", "builtins", "arm", helper)) {
+			t.Errorf("Thumb target omitted ARM EABI implementation %s", helper)
+		}
 	}
 }
 

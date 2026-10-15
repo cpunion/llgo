@@ -30,6 +30,12 @@ import (
 // global summaries, physical control and storage projections to this same
 // object rather than creating independently-versioned lowering documents.
 type coroProgramIR struct {
+	programPredicates        coro.ProgramPredicateRequirements
+	callableClassifications  map[*ssa.Function]coroCallableClassification
+	managedMethodTargets     map[*ssa.Function]*ssa.Function
+	managedValueReferences   map[*ssa.Function][]*ssa.Function
+	reachableBlocks          map[*ssa.Function]map[*ssa.BasicBlock]bool
+	constantBranches         map[*ssa.If]bool
 	sitePlans                map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan
 	siteOwners               map[emissionFunctionOwnerKey]none
 	functionPreambles        map[emissionFunctionOwnerKey]coroFunctionPreamblePlan
@@ -44,6 +50,16 @@ type coroProgramIR struct {
 	physicalPlansSealed      bool
 }
 
+// coroCallableClassification is the owner-checked frontend classification of
+// one canonical callable. Downstream inference and call-site planning share
+// this frozen fact instead of rediscovering intrinsic/background identity.
+type coroCallableClassification struct {
+	background llssa.Background
+	classified bool
+	opcode     int
+	intrinsic  bool
+}
+
 // coroProgramIRBuilder is the sole mutable construction capability for hidden
 // function- and instruction-level recipes. It reuses the canonical index so
 // planning cannot acquire a second function-identity authority.
@@ -53,6 +69,11 @@ type coroProgramIRBuilder struct {
 
 func newCoroProgramIR() *coroProgramIR {
 	return &coroProgramIR{
+		callableClassifications:  make(map[*ssa.Function]coroCallableClassification),
+		managedMethodTargets:     make(map[*ssa.Function]*ssa.Function),
+		managedValueReferences:   make(map[*ssa.Function][]*ssa.Function),
+		reachableBlocks:          make(map[*ssa.Function]map[*ssa.BasicBlock]bool),
+		constantBranches:         make(map[*ssa.If]bool),
 		sitePlans:                make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
 		siteOwners:               make(map[emissionFunctionOwnerKey]none),
 		functionPreambles:        make(map[emissionFunctionOwnerKey]coroFunctionPreamblePlan),
@@ -225,7 +246,7 @@ func (ir *coroProgramIR) freezeSiteOwner(
 	}
 	semantic := ir.semanticPlans[key]
 	preamble := ir.functionPreambles[key]
-	facts, err := deriveCoroLocalBodyFacts(prog, function, semantic, preamble.emitsGoBody)
+	facts, err := deriveCoroLocalBodyFacts(prog, function, semantic, preamble.emitsGoBody, ir.coroSuccessors)
 	if err != nil {
 		return err
 	}
@@ -247,6 +268,7 @@ func deriveCoroLocalBodyFacts(
 	function *ssa.Function,
 	semantic map[ssa.Instruction]coroSemanticInstructionPlan,
 	outcomePlainEligible bool,
+	successors func(*ssa.BasicBlock) []*ssa.BasicBlock,
 ) (coro.SSAFunctionBodyFacts, error) {
 	if prog == nil || function == nil {
 		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("local body facts require one exact program and function")
@@ -272,7 +294,14 @@ func deriveCoroLocalBodyFacts(
 	hasRecoverBuiltin := false
 	for _, block := range function.Blocks {
 		blockFacts := coro.SSAAtomicBlockFacts{Index: block.Index}
-		for _, successor := range block.Succs {
+		selectedSuccessors := successors(block)
+		if len(block.Succs) == 2 && len(selectedSuccessors) == 1 {
+			blockFacts.SelectedSuccessor = 1
+			if selectedSuccessors[0] != block.Succs[0] {
+				blockFacts.SelectedSuccessor = 2
+			}
+		}
+		for _, successor := range selectedSuccessors {
 			blockFacts.Successors = append(blockFacts.Successors, successor.Index)
 		}
 		sort.Ints(blockFacts.Successors)
@@ -352,7 +381,13 @@ func deriveCoroLocalBodyFacts(
 			semantic[instruction] = plan
 		}
 	}
-	facts.HasCycle = coroSemanticEvaluatedCFGHasCycle(function.Blocks, semantic)
+	evaluatedBlocks := coroSemanticEvaluatedCFGBlocks(function.Blocks, semantic)
+	facts.HasCycle = coroCFGSubsetHasCycle(function.Blocks, evaluatedBlocks, successors)
+	if facts.HasCycle {
+		if cost, bounded := coroBoundedCycleCost(prog, function, semantic, evaluatedBlocks, atomicBlocks, successors); bounded {
+			facts.BoundedCycleCost = cost
+		}
+	}
 	if len(function.Blocks) != 0 {
 		atomicPath, err := coro.NewSSAAtomicPathFacts(function, atomicBlocks)
 		if err != nil {
@@ -465,12 +500,13 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 				semantics := frozen.plan.IntrinsicSemantics
 				atomic := semantics == CoroIntrinsicCallInlineNoSuspend &&
 					isCoroAtomicIntrinsic(frozen.opcode)
+				predicate := ir.programPredicates.Mask&coroProgramPredicateCapability(frozen.opcode) != 0
 				structured := semantics == CoroIntrinsicCallInlineSuspend ||
 					semantics == CoroIntrinsicCallInlineNativeBlock ||
-					semantics == CoroIntrinsicCallInlineForeignSuspend ||
+					semantics == CoroIntrinsicCallInlineForeignTransaction ||
 					semantics == CoroIntrinsicCallInlineYield ||
 					semantics == CoroIntrinsicCallInlineOutcome
-				if !atomic && !structured {
+				if !atomic && !structured && !predicate {
 					continue
 				}
 				for _, owner := range sortedUseOwners(function) {
@@ -483,7 +519,11 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 						semantic.effect != coro.NoSuspend || semantic.exec != 0 {
 						return fmt.Errorf("intrinsic call %q has an incompatible preliminary semantic recipe", call.String())
 					}
-					if atomic {
+					if predicate {
+						semantic.recipe = coro.RecipeID("cl.intrinsic.program-predicate.constant.v1")
+						semantic.outcomePlainLeaf = true
+						semantic.staticOutcome = true
+					} else if atomic {
 						semantic.recipe = coro.RecipeID("cl.intrinsic.atomic.inline-nosuspend.v1")
 						semantic.outcomePlainLeaf = true
 						semantic.staticOutcome = true
@@ -508,7 +548,7 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 			if !present {
 				return fmt.Errorf("finalize intrinsic body %q: owner %q has no function preamble", function.Name(), owner.identity)
 			}
-			facts, err := deriveCoroLocalBodyFacts(prog, function, ir.semanticPlans[key], preamble.emitsGoBody)
+			facts, err := deriveCoroLocalBodyFacts(prog, function, ir.semanticPlans[key], preamble.emitsGoBody, ir.coroSuccessors)
 			if err != nil {
 				return fmt.Errorf("finalize intrinsic body %q: %w", function.Name(), err)
 			}
@@ -587,10 +627,10 @@ func (ir *coroProgramIR) finalizeRangeYieldCleanupOwners(
 	return nil
 }
 
-func coroSemanticEvaluatedCFGHasCycle(
+func coroSemanticEvaluatedCFGBlocks(
 	blocks []*ssa.BasicBlock,
 	semantic map[ssa.Instruction]coroSemanticInstructionPlan,
-) bool {
+) map[*ssa.BasicBlock]bool {
 	evaluated := make(map[*ssa.BasicBlock]bool)
 	for _, block := range blocks {
 		for _, instruction := range block.Instrs {
@@ -600,7 +640,7 @@ func coroSemanticEvaluatedCFGHasCycle(
 			}
 		}
 	}
-	return coroCFGSubsetHasCycle(blocks, evaluated)
+	return evaluated
 }
 
 // coroCFGSubsetHasCycle is the shared topology gate for the exact block set
@@ -610,6 +650,16 @@ func coroSemanticEvaluatedCFGHasCycle(
 func coroCFGSubsetHasCycle(
 	blocks []*ssa.BasicBlock,
 	included map[*ssa.BasicBlock]bool,
+	successors ...func(*ssa.BasicBlock) []*ssa.BasicBlock,
+) bool {
+	return coroCFGSubsetHasCycleSkippingEdge(blocks, included, nil, nil, successors...)
+}
+
+func coroCFGSubsetHasCycleSkippingEdge(
+	blocks []*ssa.BasicBlock,
+	included map[*ssa.BasicBlock]bool,
+	skipFrom, skipTo *ssa.BasicBlock,
+	successors ...func(*ssa.BasicBlock) []*ssa.BasicBlock,
 ) bool {
 	state := make(map[*ssa.BasicBlock]uint8, len(included))
 	var visit func(*ssa.BasicBlock) bool
@@ -621,7 +671,14 @@ func coroCFGSubsetHasCycle(
 			return false
 		}
 		state[block] = 1
-		for _, successor := range block.Succs {
+		edges := block.Succs
+		if len(successors) != 0 {
+			edges = successors[0](block)
+		}
+		for _, successor := range edges {
+			if block == skipFrom && successor == skipTo {
+				continue
+			}
 			if included[successor] && visit(successor) {
 				return true
 			}

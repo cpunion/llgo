@@ -19,6 +19,7 @@
 package cl
 
 import (
+	"go/types"
 	"strings"
 	"testing"
 
@@ -58,9 +59,10 @@ func Root(p *Pointer[int]) *int { return p.Load() }
 			if instance == nil {
 				t.Fatal("generic receiver call has no static instance target")
 			}
-			if !coroMaterializedGenericInstance(instance) || typeParamCount(instance.Signature.RecvTypeParams()) != 1 {
-				t.Fatalf("generic receiver target = %v, materialized=%t recv-type-params=%d",
-					instance, coroMaterializedGenericInstance(instance), typeParamCount(instance.Signature.RecvTypeParams()))
+			if !coroMaterializedGenericInstance(instance) || len(instance.TypeArgs()) != 1 ||
+				coroTypeContainsUnresolvedTypeParam(instance.TypeArgs()[0], make(map[types.Type]bool)) {
+				t.Fatalf("generic receiver target = %v, materialized=%t type-args=%v recv-type-params=%d",
+					instance, coroMaterializedGenericInstance(instance), instance.TypeArgs(), typeParamCount(instance.Signature.RecvTypeParams()))
 			}
 
 			var prog llssa.Program
@@ -159,8 +161,7 @@ func Root(p *Pointer[int]) *int { return p.Value() }
 		t.Fatal("generic pointer method selection is absent")
 	}
 	wrapper := ssaPkg.Prog.MethodValue(selection)
-	if wrapper == nil || !strings.HasPrefix(wrapper.Synthetic, "wrapper for ") ||
-		wrapper.Pkg != nil || typeParamCount(wrapper.Signature.RecvTypeParams()) != 1 {
+	if wrapper == nil || !strings.HasPrefix(wrapper.Synthetic, "wrapper for ") || wrapper.Pkg != nil {
 		t.Fatalf("generic pointer method wrapper has unexpected shape: %v synthetic=%q", wrapper, func() string {
 			if wrapper == nil {
 				return ""

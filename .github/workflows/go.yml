@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   test:
+    name: test (${{ matrix.os }}${{ matrix.windows_abi && format(', {0}', matrix.windows_abi) || '' }}, LLVM ${{ matrix.llvm }}, Go current)
     # The known-good #172 Windows coverage run took about 56 minutes. Leave
     # room for runner variance and the additional shared-matrix checks without
     # changing the established Linux/macOS budget.
@@ -23,16 +24,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Compiler and repository-tool tests use only the pinned current Go
+        # release. User-code compatibility is covered by LLGo's test matrix.
         include:
           - os: macos-latest
             llvm: 22
-            go: "1.26.7"
           - os: ubuntu-latest
             llvm: 22
-            go: "1.26.7"
           - os: windows-2022
             llvm: 22
-            go: "1.26.7"
+            windows_abi: msvc
+          - os: windows-2022
+            llvm: 22
+            windows_abi: mingw
     runs-on: ${{matrix.os}}
     steps:
       - uses: actions/checkout@v7
@@ -40,6 +44,7 @@ jobs:
         uses: ./.github/actions/setup-deps
         with:
           llvm-version: ${{matrix.llvm}}
+          windows-abi: ${{ matrix.windows_abi || 'msvc' }}
 
       - name: Install embedded dependencies
         uses: ./.github/actions/setup-embed-deps
@@ -53,11 +58,11 @@ jobs:
 
       - name: Set up Go
         uses: ./.github/actions/setup-go
-        with:
-          go-version: ${{ matrix.go }}
 
       - name: Install further optional dependencies for demos
         uses: ./.github/actions/setup-demo-deps
+        with:
+          windows-abi: ${{ matrix.windows_abi || 'msvc' }}
 
       - name: Set LLGO_ROOT
         shell: bash
@@ -92,7 +97,7 @@ jobs:
           )
 
           ffi_include="$(pkg-config --variable=includedir libffi)"
-          clang -target x86_64-pc-windows-msvc -I"$ffi_include" -c \
+          clang -I"$ffi_include" -c \
             runtime/internal/clite/ffi/_wrap/libffi.c \
             -o "$RUNNER_TEMP/llgo-libffi-amd64.obj"
           llvm-readobj --file-headers "$RUNNER_TEMP/llgo-libffi-amd64.obj"
@@ -113,23 +118,30 @@ jobs:
             # Clang driver for the host test binaries instead of excluding
             # those packages from the shared suite.
             go_test+=("-ldflags=-linkmode=external -extldflags=-lsynchronization")
-            export LLGO_REQUIRE_MSVC=1
+            if [[ "${{ matrix.windows_abi }}" == msvc ]]; then
+              export LLGO_REQUIRE_MSVC=1
+            fi
             export LLGO_STDIO_NOBUF=1
           fi
 
-          # test/go intentionally contains compiler edge cases that make the
-          # Go 1.26 printf analyzer panic. Keep the normal go test vet gate
-          # for every other package, and disable vet only for that package.
+          # test/go intentionally contains compiler edge cases that can make
+          # the printf analyzer panic. Keep the normal go test vet gate for
+          # every other package, and disable vet only for that package.
           go list ./... \
             | grep -v '^github.com/xgo-dev/llgo/test/go$' \
+            | grep -v '^github.com/xgo-dev/llgo/cl$' \
             | xargs "${go_test[@]}" -timeout 45m -coverprofile="coverage-main.txt" -covermode=atomic \
                 -bench '^BenchmarkGo126' -benchtime=1x
+
+          # Compiler fixtures owned by cl exercise ssa in-process. Instrument
+          # both packages in this single test binary so coverage follows those
+          # calls without restoring duplicate fixture tests under ssa.
+          "${go_test[@]}" -timeout 45m \
+            -coverpkg=github.com/xgo-dev/llgo/cl,github.com/xgo-dev/llgo/ssa \
+            -coverprofile="coverage-compiler.txt" -covermode=atomic \
+            -bench '^BenchmarkGo126' -benchtime=1x ./cl
           "${go_test[@]}" -timeout 45m -vet=off \
             -coverprofile="coverage-test-go.txt" -covermode=atomic ./test/go
-
-          head -n 1 coverage-main.txt > coverage.txt
-          tail -n +2 coverage-main.txt >> coverage.txt
-          tail -n +2 coverage-test-go.txt >> coverage.txt
 
       - name: Test with embedded emulator env
         env:
@@ -144,6 +156,8 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           token: ${{secrets.CODECOV_TOKEN}}
+          files: coverage-main.txt,coverage-compiler.txt,coverage-test-go.txt
+          disable_search: true
 
   dev-lto-globaldce:
     name: Dev LTO GlobalDCE

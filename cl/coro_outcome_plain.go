@@ -143,7 +143,13 @@ func (body *outcomePlainBodyContext) publish(
 	b.Return()
 }
 
-func (body *outcomePlainBodyContext) publishNilFault(b llssa.Builder) {
+func (body *outcomePlainBodyContext) publishNilFault(b llssa.Builder, line uint32, propagate bool) {
+	mode := coroLogicalPanicTraceNilNew
+	if propagate {
+		mode = coroLogicalPanicTraceNilPropagate
+	}
+	null := b.Prog.Nil(b.Prog.VoidPtr())
+	body.appendPanicTrace(b, null, null, line, mode)
 	body.publish(b, coroAwaitCompletionFaultNil, llssa.Nil, llssa.Nil)
 }
 

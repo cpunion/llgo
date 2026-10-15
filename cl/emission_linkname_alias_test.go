@@ -199,6 +199,137 @@ func llgoRuntimeHook(value int) int { return value + 1 }
 	}
 }
 
+func TestEmissionUniverseAliasesSamePackageBodylessGoLinknameToDefinition(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	pkg := testProg.addPackage(t, "example.com/emission/samelink", `package samelink
+import _ "unsafe"
+func Call() { alias() }
+//go:linkname alias example.com/emission/samelink.implementation
+func alias()
+func implementation() {}
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration := pkg.ssa.Func("alias")
+	definition := pkg.ssa.Func("implementation")
+	if resolved, ok := universe.Resolve(declaration); !ok || resolved != definition {
+		t.Fatalf("Resolve(same-package bodyless go:linkname) = %v, %t; want %v, true", resolved, ok, definition)
+	}
+	if universe.Contains(declaration) || !universe.Contains(definition) {
+		t.Fatalf(
+			"same-package canonical membership = declaration %t, definition %t; want false, true",
+			universe.Contains(declaration), universe.Contains(definition),
+		)
+	}
+}
+
+func TestEmissionUniverseAliasesBodylessGoLinknameTrailingArgumentFacade(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	declaration := testProg.addPackage(t, "example.com/emission/linktrailingdecl", `package linktrailingdecl
+import _ "unsafe"
+//go:linkname hook example.com/emission/linktrailingdef.F
+func hook(a, b, c, d *byte)
+func Call(a, b, c, d *byte) { hook(a, b, c, d) }
+func Box() any { return hook }
+`)
+	definition := testProg.addPackage(t, "example.com/emission/linktrailingdef", `package linktrailingdef
+func F(a, b *byte) {}
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	declared := declaration.ssa.Func("hook")
+	defined := definition.ssa.Func("F")
+	if resolved, ok := universe.Resolve(declared); !ok || resolved != defined {
+		t.Fatalf("Resolve(trailing-argument go:linkname) = %v, %t; want %v, true", resolved, ok, defined)
+	}
+	pair, paired := universe.goLinknameDefinitions[declared]
+	if !paired || pair.definition != defined || pair.key == "" || pair.targetKey() == "" ||
+		pair.key == pair.targetKey() {
+		t.Fatalf("trailing-argument pair = %+v, present=%t; want distinct source/target ABI keys", pair, paired)
+	}
+	facade, active, err := universe.managedGoLinknameCallFacade(declared, defined)
+	if err != nil || !active || facade.source == nil || facade.target == nil ||
+		facade.source.Params().Len() != 4 || facade.target.Params().Len() != 2 {
+		t.Fatalf("trailing-argument facade = %+v, active=%t, error=%v; want 4 -> 2", facade, active, err)
+	}
+}
+
+func TestEmissionUniverseRejectsGoLinknameDefinitionRequiringTrailingArguments(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	declaration := testProg.addPackage(t, "example.com/emission/linkshortdecl", `package linkshortdecl
+import _ "unsafe"
+//go:linkname hook example.com/emission/linkshortdef.F
+func hook(a, b *byte)
+`)
+	definition := testProg.addPackage(t, "example.com/emission/linkshortdef", `package linkshortdef
+func F(a, b, c, d *byte) {}
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := declaration.ssa.Func("hook")
+	if pair, paired := universe.goLinknameDefinitions[declared]; paired {
+		t.Fatalf("short declaration unexpectedly paired with wider definition: %+v", pair)
+	}
+}
+
+func TestEmissionUniverseRejectsAmbiguousGoLinknameTrailingArgumentFacade(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	declaration := testProg.addPackage(t, "example.com/emission/linktrailingambiguous", `package linktrailingambiguous
+import _ "unsafe"
+//go:linkname hook
+func hook(a, b, c *byte)
+`)
+	definition := testProg.addPackage(t, "example.com/emission/linktrailingdefinitions", `package linktrailingdefinitions
+import _ "unsafe"
+//go:linkname first example.com/emission/linktrailingambiguous.hook
+func first(a *byte) {}
+//go:linkname second example.com/emission/linktrailingambiguous.hook
+func second(a, b *byte) {}
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	_, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "multiple emitted Go definitions") {
+		t.Fatalf("ambiguous trailing-argument facade error = %v; want deterministic ambiguity rejection", err)
+	}
+}
+
 func TestEmissionUniverseAliasesOpaquePointerGoLinkname(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
@@ -474,6 +605,57 @@ func Call(value target.Value) *target.ABI { return valueABIType(value) }
 	}
 }
 
+func TestEmissionUniverseAliasesMethodsOfPatchedTypeAlias(t *testing.T) {
+	const path = "example.com/emission/aliasedmethod"
+	testProg := newEmissionTestProgram()
+	original := testProg.addPackage(t, path, `package aliasedmethod
+type Error struct{}
+func (*Error) Error() string { return "original" }
+func (Error) Code() int { return 0 }
+`)
+	implementation := testProg.addPackage(t, "example.com/emission/aliasedmethodimpl", `package aliasedmethodimpl
+type Error struct{}
+func (*Error) Error() string { return "replacement" }
+func (Error) Code() int { return 1 }
+`)
+	alternate := testProg.addPackage(t, abi.PatchPathPrefix+path, `package aliasedmethod
+import impl "example.com/emission/aliasedmethodimpl"
+//llgo:skipall
+type PatchControl struct{}
+type Error = impl.Error
+`)
+	caller := testProg.addPackage(t, "example.com/emission/aliasedmethodcaller", `package aliasedmethodcaller
+import target "example.com/emission/aliasedmethod"
+func Call() string { return new(target.Error).Error() }
+func Code() int { return target.Error{}.Code() }
+`)
+	testProg.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, Patches{
+		path: {Alt: alternate.ssa, Types: typepatch.Clone(alternate.types)},
+	}, []EmissionPackage{
+		{SSA: original.ssa, Files: []*ast.File{original.file, alternate.file}},
+		{SSA: implementation.ssa, Files: []*ast.File{implementation.file}},
+		{SSA: caller.ssa, Files: []*ast.File{caller.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"Error", "Code"} {
+		oldType := types.NewPointer(original.types.Scope().Lookup("Error").Type())
+		newType := types.NewPointer(implementation.types.Scope().Lookup("Error").Type())
+		oldMethod := testProg.ssa.MethodValue(testProg.ssa.MethodSets.MethodSet(oldType).Lookup(original.types, name))
+		newMethod := testProg.ssa.MethodValue(testProg.ssa.MethodSets.MethodSet(newType).Lookup(implementation.types, name))
+		if resolved, ok := universe.Resolve(oldMethod); !ok || resolved != newMethod {
+			t.Fatalf("Resolve(original %s) = %v, %t; want replacement %v", name, resolved, ok, newMethod)
+		}
+		if universe.Contains(oldMethod) || !universe.Contains(newMethod) {
+			t.Fatalf("method %s canonical membership = old %t, replacement %t", name, universe.Contains(oldMethod), universe.Contains(newMethod))
+		}
+	}
+}
+
 func exactStaticCallTo(t *testing.T, caller, callee *ssa.Function) ssa.CallInstruction {
 	t.Helper()
 	if caller != nil {
@@ -687,7 +869,7 @@ func implementation(value int) int { return value + 1 }
 			}
 			definitionOwner := universe.packages[definition.ssa]
 			finalKey := universe.finalKeys[emissionFunctionOwnerKey{function: definitionFn, owner: definitionOwner}]
-			wantPairKey, err := universe.managedGoLinknamePairKey(definitionOwner, definitionFn, finalKey)
+			wantPairKey, err := (emissionCanonicalIndex{universe: universe}).managedGoLinknamePairKeyWithPointerFacade(definitionOwner, definitionFn, finalKey, false)
 			if err != nil {
 				t.Fatal(err)
 			}

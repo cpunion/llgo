@@ -37,6 +37,12 @@ enum {
  * the Go fault path while the profiler ring lock is held. */
 extern int llgo_cpu_profile_fault_recover(void);
 
+/* Optional native-worker island. A foreign landing is native-only and must
+ * win before the managed fault callback; it never crosses llvm.coro.resume.
+ * Weak linkage keeps the worker capability absent from other target profiles. */
+extern int __llgo_coro_worker_try_fault_v1(int, siginfo_t *, void *)
+    __attribute__((weak));
+
 /* Dynamic-libunwind fault unwinding (dynunwind.c); no-ops when disabled
  * (LLGO_DYNUNWIND=0) or no libunwind flavor resolved. */
 extern void llgo_dynunwind_init(void);
@@ -121,6 +127,10 @@ static void llgo_fault_trampoline(int sig, siginfo_t *info, void *uctx)
     ucontext_t *uc = (ucontext_t *)uctx;
     volatile sig_atomic_t *guard = llgo_fault_guard();
     if (llgo_cpu_profile_fault_recover())
+        return;
+    if (llgo_coro_fault_mode && policy != 0 &&
+        __llgo_coro_worker_try_fault_v1 != 0 &&
+        __llgo_coro_worker_try_fault_v1(sig, info, uctx))
         return;
     if (*guard) {
         signal(sig, SIG_DFL);

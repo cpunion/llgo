@@ -454,7 +454,10 @@ func TestAnalyzeUnknownCallMatrix(t *testing.T) {
 						t.Fatalf("unknown foreign call plan = %+v", caller)
 					}
 				case target.managedDispatch():
-					if caller.Effect != AwaitStructured || caller.Exec.Contains(OpaqueExec|IRQUnsafe) {
+					if caller.Effect != AwaitStructured ||
+						!caller.LocalExec.Contains(NeedsRuntimeContext) ||
+						!caller.Exec.Contains(NeedsRuntimeContext) ||
+						caller.Exec.Contains(OpaqueExec|IRQUnsafe) {
 						t.Fatalf("unknown managed dispatch call plan = %+v", caller)
 					}
 				default:

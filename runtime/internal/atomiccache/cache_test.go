@@ -104,7 +104,7 @@ func TestWeakTableConcurrentInternReturnsCanonicalWinner(t *testing.T) {
 	matches := 0
 	for raw := atomic.LoadPointer(table.bucket(key)); raw != nil; {
 		handle := (*WeakHandle)(raw)
-		if handle.Key == key && atomic.LoadUint32(&handle.Live) != 0 {
+		if handle.Key == key && atomic.LoadUintptr(&handle.Live) != 0 {
 			matches++
 		}
 		raw = atomic.LoadPointer(&handle.next)
@@ -123,8 +123,9 @@ func TestWeakTableManagedInternPrunesRawTombstone(t *testing.T) {
 		t.Fatalf("first intern = (%p, %t), want (%p, true)", winner, published, first)
 	}
 
-	// This is the entire operation permitted in the raw finalizer callback.
-	atomic.StoreUint32(&first.Live, 0)
+	// The collector clears the cell before any finalizer can run. A new object
+	// at the same address must receive a fresh identity, not revive first.
+	atomic.StoreUintptr(&first.Live, 0)
 
 	second := &WeakHandle{Key: key, Live: 1}
 	if winner, published := table.InternWeak(second); winner != second || !published {
@@ -135,6 +136,15 @@ func TestWeakTableManagedInternPrunesRawTombstone(t *testing.T) {
 	}
 	if next := atomic.LoadPointer(&second.next); next != nil {
 		t.Fatalf("replacement retained tombstone next = %p, want nil", next)
+	}
+	if atomic.LoadUintptr(&first.Live) != 0 {
+		t.Fatal("replacement revived the earlier weak identity")
+	}
+}
+
+func TestWeakHandleRemainsThreePointerWords(t *testing.T) {
+	if got, want := unsafe.Sizeof(WeakHandle{}), 3*unsafe.Sizeof(uintptr(0)); got != want {
+		t.Fatalf("weak handle size = %d, want %d", got, want)
 	}
 }
 
@@ -158,7 +168,7 @@ func TestWeakTableConcurrentPrunePreservesEveryLiveSuffix(t *testing.T) {
 			}
 		}
 		for index := 0; index < entries; index += 2 {
-			atomic.StoreUint32(&handles[index].Live, 0)
+			atomic.StoreUintptr(&handles[index].Live, 0)
 		}
 
 		results := make([]*WeakHandle, entries)
@@ -179,7 +189,7 @@ func TestWeakTableConcurrentPrunePreservesEveryLiveSuffix(t *testing.T) {
 		reachable := make(map[*WeakHandle]bool, entries)
 		for raw := atomic.LoadPointer(table.bucket(keys[0])); raw != nil; {
 			handle := (*WeakHandle)(raw)
-			if atomic.LoadUint32(&handle.Live) != 0 {
+			if atomic.LoadUintptr(&handle.Live) != 0 {
 				if reachable[handle] {
 					t.Fatalf("round %d reachable chain contains duplicate handle %p", round, handle)
 				}

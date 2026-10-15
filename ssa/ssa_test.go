@@ -23,7 +23,6 @@ import (
 	"bytes"
 	"fmt"
 	"go/constant"
-	"go/importer"
 	"go/token"
 	"go/types"
 	"os"
@@ -34,7 +33,6 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/goplus/gogen/packages"
 	rtabi "github.com/xgo-dev/llgo/runtime/abi"
 	"github.com/xgo-dev/llvm"
 )
@@ -50,12 +48,7 @@ func TestEndDefer(t *testing.T) {
 
 func TestDeferToPendingLoopCasesAndFallback(t *testing.T) {
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("foo", "foo")
 
 	callee := pkg.NewFunc("callee", NoArgsNoRet, InGo)
@@ -118,12 +111,7 @@ func TestUnsafeString(t *testing.T) {
 	os.Chdir("../../runtime")
 	defer os.Chdir(wd)
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("foo", "foo")
 	b := pkg.NewFunc("main", NoArgsNoRet, InC).MakeBody(1)
 	b.Println(b.BuiltinCall("String", b.CStr("hello"), prog.Val(5)))
@@ -139,12 +127,7 @@ func TestTooManyConditionalDefers(t *testing.T) {
 	defer os.Chdir(wd)
 
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 
 	pkg := prog.NewPackage("foo", "foo")
 	target := pkg.NewFunc("f", NoArgsNoRet, InGo)
@@ -762,13 +745,7 @@ func TestDevLTOGlobalDCEConcreteInterfaceAnnotatesSingleRuntimeItab(t *testing.T
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
 	prog.EnableGoGlobalDCE(true)
 	prog.EnableLTOPluginMarkers(true)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkgTypes := types.NewPackage("example.com/staticitab", "staticitab")
 	concrete := types.NewNamed(
 		types.NewTypeName(token.NoPos, pkgTypes, "T", nil),
@@ -937,12 +914,7 @@ func TestDevLTOGlobalDCEAddMethodTypeMetadataMarksIFnAndTFnForReflectContexts(t 
 	requireGoGlobalDCE(t)
 
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	prog.EnableGoGlobalDCE(true)
 	pkg := prog.NewPackage("main", "main")
 	g := pkg.NewVarEx("g", prog.Pointer(prog.Int()))
@@ -1122,13 +1094,7 @@ func TestAbiTypeLazyPtrToThis(t *testing.T) {
 	prog := NewProgram(nil)
 	defer prog.Dispose()
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 
 	goPkg := types.NewPackage("example.com/pkg", "pkg")
 	plain := types.NewNamed(types.NewTypeName(token.NoPos, goPkg, "Plain", nil), types.NewStruct(nil, nil), nil)
@@ -1157,13 +1123,7 @@ func TestRecordMethodSlots(t *testing.T) {
 	prog := NewProgram(nil)
 	defer prog.Dispose()
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 
 	goPkg := types.NewPackage("example.com/pkg", "pkg")
 	named := types.NewNamed(types.NewTypeName(token.NoPos, goPkg, "T", nil), types.NewStruct(nil, nil), nil)
@@ -1271,13 +1231,7 @@ func TestReflectPointerOperationsDemandPointerTypeInit(t *testing.T) {
 func TestRecordUseIface(t *testing.T) {
 	prog := NewProgram(nil)
 	defer prog.Dispose()
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackageEx("pkg", "pkg", true)
 	fn := pkg.NewFunc("caller", types.NewSignatureType(nil, nil, nil, nil, nil, false), InGo)
 	b := fn.MakeBody(1)
@@ -1347,13 +1301,7 @@ func TestDevLTOGlobalDCEAbiTypeFakeUsesRecordedDuringAbiTypeBuild(t *testing.T) 
 
 	prog := NewProgram(nil)
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	prog.EnableGoGlobalDCE(true)
 	pkg := prog.NewPackage("main", "main")
 	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
@@ -1385,13 +1333,7 @@ func TestDevLTOGlobalDCEAbiTypeFakeUsesRecordedDuringAbiTypeBuild(t *testing.T) 
 func TestMapKeyPtrCoverage(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("main", "main")
 	key := types.NewArray(types.Typ[types.Int], 2)
 	keyObj := types.NewTypeName(token.NoPos, nil, "Key", nil)
@@ -1564,12 +1506,7 @@ attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
 
 func TestClosureFuncPtrValue(t *testing.T) {
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	params := types.NewTuple(types.NewVar(0, nil, "x", types.Typ[types.Int]))
@@ -1701,12 +1638,7 @@ func TestConvertNamedStructValue(t *testing.T) {
 
 func TestConvertStringFromWideIntegers(t *testing.T) {
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	params := types.NewTuple(
@@ -1779,12 +1711,7 @@ func TestCallClosureDynamic(t *testing.T) {
 
 func TestMakeClosureWithCtx(t *testing.T) {
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 	ctxFields := []*types.Var{types.NewField(0, nil, "x", types.Typ[types.Int], false)}
 	ctxStruct := types.NewStruct(ctxFields, nil)
@@ -1856,12 +1783,7 @@ func TestCvtClosureDropsRecv(t *testing.T) {
 
 func TestIfaceMethodClosureCallIR(t *testing.T) {
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkgTypes := types.NewPackage("foo/bar", "bar")
 	rawSig := types.NewSignatureType(nil, nil, nil, types.NewTuple(VArg()),
 		types.NewTuple(types.NewVar(0, nil, "", types.Typ[types.Int])), true)
@@ -1937,13 +1859,7 @@ attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
 func TestMakeInterfaceKinds(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	emptyIface := types.NewInterfaceType(nil, nil)
@@ -1996,13 +1912,7 @@ func TestMakeInterfaceKinds(t *testing.T) {
 func TestMakeInterfaceFromConstantUsesImmutableBacking(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 	rawPkg := types.NewPackage("foo/bar", "bar")
 	namedInt := types.NewNamed(
@@ -2062,13 +1972,7 @@ func TestMakeInterfaceFromConstantUsesImmutableBacking(t *testing.T) {
 func TestCheckExprAssignmentConversions(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 	fn := pkg.NewFunc("checkExprAssignmentConversions", NoArgsNoRet, InGo)
 	b := fn.MakeBody(1)
@@ -2101,13 +2005,7 @@ func TestCheckExprAssignmentConversions(t *testing.T) {
 func TestMakeInterfaceFromPtrKinds(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	emptyIface := types.NewInterfaceType(nil, nil)
@@ -2140,13 +2038,7 @@ func TestMakeInterfaceFromPtrKinds(t *testing.T) {
 func TestZeroSizedLoadEmitsNilDerefGuard(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	emptyStruct := types.NewStruct(nil, nil)
@@ -2167,13 +2059,7 @@ func TestZeroSizedLoadEmitsNilDerefGuard(t *testing.T) {
 func TestTypeAssertSingleElemArrayUsesInsertValue(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	emptyIface := types.NewInterfaceType(nil, nil)
@@ -2213,12 +2099,7 @@ func TestInterfaceHelpers(t *testing.T) {
 	}
 
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 	intfType := prog.Type(rawIface, InGo)
 	fn := pkg.NewFunc("call", types.NewSignatureType(nil, nil, nil,
@@ -2746,13 +2627,7 @@ func TestArrayEqualLowering(t *testing.T) {
 	prog := NewProgram(nil)
 	defer prog.Dispose()
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("main", "main")
 	compare := func(name string, elem types.Type, n int64, op token.Token, addrMask uint) llvm.Value {
 		array := types.NewArray(elem, n)
@@ -3010,12 +2885,7 @@ attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
 
 func TestGlobalStrings(t *testing.T) {
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 	typ := types.NewPointer(types.Typ[types.String])
 	a := pkg.NewVar("foo/bar.a", typ, InGo)
@@ -3082,12 +2952,7 @@ func TestZeroSizedGlobalEmitsAliasSymbol(t *testing.T) {
 	// uses a module-local sentinel and has a dedicated test in coff_comdat_test.
 	prog := NewProgram(&Target{GOOS: "linux", GOARCH: "amd64"})
 	defer prog.Dispose()
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 	elem := types.NewArray(types.Typ[types.Int], 0)
 	typ := types.NewPointer(elem)
@@ -3107,12 +2972,7 @@ source_filename = "foo/bar"
 
 func TestGlobalConstLiterals(t *testing.T) {
 	prog := NewProgram(nil)
-	prog.SetRuntime(func() *types.Package {
-		fset := token.NewFileSet()
-		imp := packages.NewImporter(fset)
-		pkg, _ := imp.Import(PkgRuntime)
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	_ = pkg.ConstString("hello")
@@ -3258,13 +3118,7 @@ func TestWindowsTargetTriple(t *testing.T) {
 func TestAbiTables(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	emptyIface := types.NewInterfaceType(nil, nil)
@@ -3325,13 +3179,7 @@ func TestAbiTables(t *testing.T) {
 func TestInitAbiTypesForSubset(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	emptyIface := types.NewInterfaceType(nil, nil)
@@ -3381,10 +3229,7 @@ func TestInitAbiTypesForSubset(t *testing.T) {
 }
 
 func TestRegisterAbiTypesAcrossPrograms(t *testing.T) {
-	runtimePkg, err := importer.For("source", nil).Import(PkgRuntime)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtimePkg := RuntimeTypesForTest(t)
 	newProgram := func() Program {
 		prog := NewProgram(nil)
 		prog.sizes = types.SizesFor("gc", runtime.GOARCH)

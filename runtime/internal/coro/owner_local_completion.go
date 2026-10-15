@@ -504,6 +504,9 @@ func completeOwnerLocalDirectChannelInline(
 	frame.parkWait = nil
 	*wait = WaitSetRecord{}
 	g.waiting = false
+	if ExecutionDomainEnabled() {
+		resumeExecutionDomainTask(g)
+	}
 	g.state = GRunnable
 	appendRunnableUnchecked(p, g)
 	// This is the inline equivalent of a complete serviceExecutorRunLocal

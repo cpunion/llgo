@@ -141,7 +141,7 @@ func gcPanic(s *c.Char) {
 	// has no universal nonblocking diagnostic sink, so fail terminally without
 	// attempting output.
 	_ = s
-	c.Exit(2)
+	c.Trap()
 }
 
 // blockFromAddr returns a block given an address somewhere in the heap (which
@@ -431,6 +431,7 @@ func gc() (freeBytes uintptr) {
 	markRootedAllocations()
 
 	finishMark()
+	clearUnmarkedWeakReferences()
 
 	// If we're using threads, resume all other threads before starting the
 	// sweep.
@@ -440,6 +441,7 @@ func gc() (freeBytes uintptr) {
 	// the next collection cycle.
 	freeBytes = sweep()
 	gcNumGC++
+	gcCompleted()
 
 	return
 }

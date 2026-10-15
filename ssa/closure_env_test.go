@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goplus/gogen/packages"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -565,13 +564,7 @@ func TestClosureObjectCallMatrixAcrossTransports(t *testing.T) {
 
 func setTestRuntime(t *testing.T, prog Program) {
 	t.Helper()
-	fset := token.NewFileSet()
-	imp := packages.NewImporter(fset)
-	runtimePkg, err := imp.Import(PkgRuntime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prog.SetRuntime(runtimePkg)
+	prog.SetRuntime(RuntimeTypesForTest(t))
 }
 
 func newMatrixEnvEntry(pkg Package, name string, sig *types.Signature, envStruct *types.Struct) Function {

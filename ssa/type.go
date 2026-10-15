@@ -682,6 +682,9 @@ func (p Program) retType(raw *types.Signature) Type {
 func (p Program) llvmNameOf(named *types.Named) (name string) {
 	name = NameOf(named)
 	if obj := named.Obj(); obj != nil {
+		if source, ok := p.SourceType(named).(*types.Named); ok {
+			obj = source.Obj()
+		}
 		parent := obj.Parent()
 		pkg := obj.Pkg()
 		if parent != nil && pkg != nil && !isPkgScope(parent, pkg.Scope()) {
@@ -713,7 +716,7 @@ func (p Program) toNamed(raw *types.Named) Type {
 	name := p.llvmNameOf(raw)
 	if typ, ok := p.named[name]; ok {
 		if namedTypeEquivalent(typ.raw.Type, raw) || p.namedStructLayoutEquivalent(typ, raw) {
-			return typ
+			return namedTypeWithLayout(typ, raw)
 		}
 		// Some toolchains produce distinct instantiated named types that share
 		// the same object name (e.g. generic local helper structs in stdlib).
@@ -723,7 +726,7 @@ func (p Program) toNamed(raw *types.Named) Type {
 			name = fmt.Sprintf("%s#%d", base, i)
 			if typ2, ok2 := p.named[name]; ok2 {
 				if namedTypeEquivalent(typ2.raw.Type, raw) || p.namedStructLayoutEquivalent(typ2, raw) {
-					return typ2
+					return namedTypeWithLayout(typ2, raw)
 				}
 				continue
 			}
@@ -743,6 +746,21 @@ func (p Program) toNamed(raw *types.Named) Type {
 	}
 }
 
+func namedTypeWithLayout(existing Type, raw *types.Named) Type {
+	if existing.raw.Type == raw {
+		return existing
+	}
+	// Opaque pointers can make raw and converted structs layout-equivalent
+	// even when their nested named types differ. Share the LLVM body, never
+	// the old semantic type view: derived field/element loads need the exact
+	// requested physical types rather than whichever shape was cached first.
+	kind := vkStruct
+	if st, ok := raw.Underlying().(*types.Struct); ok && IsClosure(st) {
+		kind = vkClosure
+	}
+	return &aType{existing.ll, rawType{raw}, kind}
+}
+
 func namedTypeEquivalent(a, b types.Type) bool {
 	na, okA := types.Unalias(a).(*types.Named)
 	nb, okB := types.Unalias(b).(*types.Named)
@@ -760,10 +778,10 @@ func namedTypeEquivalent(a, b types.Type) bool {
 	if sigA || sigB {
 		return false
 	}
-	// go/types may materialize the same package/type in distinct instances
-	// (e.g. mixed importer paths across toolchains). Reuse LLVM named structs
-	// when full-name and underlying shape are equivalent.
-	return typeStringWithPkg(na.Underlying()) == typeStringWithPkg(nb.Underlying())
+	// Textual shapes hide named field representations: both a raw C function
+	// and its physical Go closure print as the same source name. Distinct
+	// importer identities may still reuse a proven LLVM layout in toNamed.
+	return types.Identical(na.Underlying(), nb.Underlying())
 }
 
 func (p Program) namedStructLayoutEquivalent(existing Type, raw *types.Named) bool {

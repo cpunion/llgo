@@ -1,6 +1,6 @@
 [OrdinaryEdges]
 github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.UseInt$outcome:
-    __llgo_coro_frame_descriptor_v1.5eceb9922e1a7a46861692f6dd318fe8
+    __llgo_coro_frame_descriptor_v1.fbd875dfeea8b8533975792c58058584
     __llgo_coro_panic_trace_append_v1
 github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.init:
     github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/api.init$guard

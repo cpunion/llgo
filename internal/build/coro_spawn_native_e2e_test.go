@@ -228,6 +228,11 @@ func FreeRoot(unsafe.Pointer)
 
 func fatal(message string) { coroRuntimeAbort(message) }
 
+// The closed scheduler islands deliberately omit terminal formatting and
+// symbolization. Unexpected unhandled task panics remain fail-stop here; the
+// test/go caller acceptance probes exercise the production panic reporter.
+func coroReportTaskPanicV1(*coro.G) { coroRuntimeAbort("unhandled coroutine task panic") }
+
 // The closed scheduler islands deliberately omit the caller/symbolization
 // closure. A foreign hardware fault therefore remains fail-closed here; full
 // runtime acceptance tests exercise StoreCoroWorkerFaultPCs itself.

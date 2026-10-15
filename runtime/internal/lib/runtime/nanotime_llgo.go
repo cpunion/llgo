@@ -1,4 +1,4 @@
-//go:build !baremetal
+//go:build !baremetal || (go1.23 && llgo && llgo_coro && !coro_runtime_adapter_test)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

@@ -34,7 +34,6 @@ const (
 	// not eager reservations. Every P starts with the target-neutral inline page
 	// and grows one stable page at a time before an irreversible park transaction.
 	coroNativeSourcePageCountV1 = 16
-	coroNativeTimerPageCountV1  = 64
 )
 
 type coroNativeFleetLifecycleV1 uint8
@@ -916,6 +915,9 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 	if !valid || driver == nil || epoch == 0 || domain.ownerEpoch != epoch || now < 0 || freshNow < now {
 		return coroNativeFleetOwnerWaitPlanV1{}, false
 	}
+	if coroObserveGCV1() {
+		return coroNativeFleetOwnerWaitPlanV1{}, true
+	}
 	entered, compatibilityOK := coro.EnterExecutorRunStandbyCompatibility(driver)
 	if !compatibilityOK {
 		return coroNativeFleetOwnerWaitPlanV1{}, false
@@ -1066,6 +1068,9 @@ func coroNativeFleetRetireBackendV1(handle coro.ExecutorFleetHandle) bool {
 			domain.lifecycle = coroNativeFleetDomainFailedV1
 			return false
 		}
+	}
+	if fd, valid := domain.doorbell.NotificationFD(); valid {
+		coroDetachGCNotificationV1(fd)
 	}
 	if !domain.doorbell.Close() || !domain.ingress.Retire() ||
 		!domain.admission.ResetExecutorAfterStrongJoin(

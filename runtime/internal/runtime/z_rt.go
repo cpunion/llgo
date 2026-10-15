@@ -68,7 +68,7 @@ func (gp *g) movePanicToDefer(node *panicNode, link *Defer) {
 		c.Free(unsafe.Pointer(prev))
 	}
 	node.defer_ = link
-	gp.defer_ = link
+	gp.setPanicDeferCursor(link)
 }
 
 // Recover recovers a panic.
@@ -191,10 +191,10 @@ func Panic(v any) {
 	ptr := (*panicNode)(c.Malloc(unsafe.Sizeof(panicNode{})))
 	ptr.prev = gp.panic_
 	ptr.arg = v
-	ptr.defer_ = gp.defer_
+	ptr.defer_ = gp.panicDeferTarget(gp.defer_)
 	gp.panic_ = unsafe.Pointer(ptr)
 
-	Rethrow(gp.defer_)
+	Rethrow(ptr.defer_)
 }
 
 //go:linkname coroGoexit llgo.coroGoexit

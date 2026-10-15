@@ -1,6 +1,8 @@
 package crosscompile
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -8,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile/compile"
@@ -21,25 +24,34 @@ import (
 )
 
 type Export struct {
-	CC      string // Compiler to use
+	CC      string // C compiler executable
+	CCArgs  []string
+	CXX     string // C++ compiler executable
+	CXXArgs []string
 	CCFLAGS []string
 	CFLAGS  []string
 	LDFLAGS []string
+	// CompilerIdentity values are stable version strings used to keep cached
+	// packages separate when an explicit native toolchain changes.
+	CCIdentity  string
+	CXXIdentity string
 	// Toolchain records the ABI and flag dialect selected for native-format
 	// outputs. It is independent of the host shell and remains empty for named
 	// embedded/WebAssembly targets that drive their linker directly.
 	Toolchain NativeToolchain
 
 	// Additional fields from target configuration
-	BuildTags    []string
-	GC           string // Runtime GC capability: precise, conservative, leaking, or none.
-	GOOS         string
-	GOARCH       string
-	Libc         string
-	Linker       string   // Linker to use (e.g., "ld.lld", "avr-ld")
-	ExtraFiles   []string // Extra files to compile and link (e.g., .s, .c files)
-	ClangRoot    string   // Root directory of custom clang installation
-	ClangBinPath string   // Path to clang binary directory
+	BuildTags      []string
+	GC             string // Runtime GC capability: precise, conservative, leaking, or none.
+	GOOS           string
+	GOARCH         string
+	Libc           string
+	Linker         string // Linker to use (e.g., "ld.lld", "avr-ld")
+	LinkerArgs     []string
+	LinkerIdentity string
+	ExtraFiles     []string // Extra files to compile and link (e.g., .s, .c files)
+	ClangRoot      string   // Root directory of custom clang installation
+	ClangBinPath   string   // Path to clang binary directory
 
 	LLVMTarget   string // Resolved LLVM target triple
 	CPU          string // Resolved LLVM target CPU
@@ -58,10 +70,16 @@ type Export struct {
 // produce a native object. Keep these choices explicit: in particular, a
 // Windows host does not imply either the MSVC or MinGW ABI.
 type NativeToolchain struct {
-	ABI          PlatformABI
-	ObjectFormat ObjectFormat
-	Driver       DriverFlavor
-	Linker       LinkerFlavor
+	ABI            PlatformABI
+	ObjectFormat   ObjectFormat
+	Driver         DriverFlavor
+	Linker         LinkerFlavor
+	TargetTriple   string
+	CRT            CRTFlavor
+	CXXRuntime     CXXRuntimeFlavor
+	SDKVersion     string
+	CRTVersion     string
+	ToolsetVersion string
 }
 
 type PlatformABI string
@@ -92,10 +110,25 @@ const (
 type LinkerFlavor string
 
 const (
-	LinkerFlavorUnknown LinkerFlavor = ""
-	LinkerFlavorELFLLD  LinkerFlavor = "ld.lld"
-	LinkerFlavorMachO   LinkerFlavor = "ld64.lld"
-	LinkerFlavorCOFFLLD LinkerFlavor = "lld-link"
+	LinkerFlavorUnknown  LinkerFlavor = ""
+	LinkerFlavorELFLLD   LinkerFlavor = "ld.lld"
+	LinkerFlavorMachO    LinkerFlavor = "ld64.lld"
+	LinkerFlavorCOFFLLD  LinkerFlavor = "lld-link"
+	LinkerFlavorMinGWLLD LinkerFlavor = "mingw-lld"
+)
+
+type CRTFlavor string
+
+const (
+	CRTFlavorUnknown CRTFlavor = ""
+	CRTFlavorUCRT    CRTFlavor = "ucrt"
+)
+
+type CXXRuntimeFlavor string
+
+const (
+	CXXRuntimeUnknown CXXRuntimeFlavor = ""
+	CXXRuntimeMSVC    CXXRuntimeFlavor = "msvc"
 )
 
 // DebugInfoPolicy describes how a selected linker handles debug information.
@@ -137,7 +170,7 @@ func nativeToolchain(goos string) NativeToolchain {
 
 func nativeDebugInfoPolicy(toolchain NativeToolchain) DebugInfoPolicy {
 	switch toolchain.Linker {
-	case LinkerFlavorMachO, LinkerFlavorELFLLD:
+	case LinkerFlavorMachO, LinkerFlavorELFLLD, LinkerFlavorMinGWLLD:
 		return DebugInfoPolicy{OmitLinkFlags: []string{"-Wl,-S"}}
 	case LinkerFlavorCOFFLLD:
 		return DebugInfoPolicy{
@@ -204,9 +237,25 @@ func getCanonicalArchName(triple string) string {
 	return arch
 }
 
-// getMacOSSysroot returns the macOS SDK path using xcrun
+// getMacOSSysroot honors an explicit SDKROOT before asking xcrun for the
+// default SDK. Passing --sdk macosx unconditionally would silently override a
+// pinned SDK, including one selected for the LLVM linker's TAPI compatibility.
 func getMacOSSysroot() (string, error) {
-	cmd := exec.Command("xcrun", "--sdk", "macosx", "--show-sdk-path")
+	sdk := os.Getenv("SDKROOT")
+	if filepath.IsAbs(sdk) {
+		info, err := os.Stat(sdk)
+		if err != nil {
+			return "", fmt.Errorf("SDKROOT %q: %w", sdk, err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("SDKROOT %q is not a directory", sdk)
+		}
+		return filepath.Clean(sdk), nil
+	}
+	if sdk == "" {
+		sdk = "macosx"
+	}
+	cmd := exec.Command("xcrun", "--sdk", sdk, "--show-sdk-path")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -370,6 +419,25 @@ func compileWithConfig(
 	return
 }
 
+// Named-target source caches are shared across host toolchains. Bind compiled
+// archives to the compiler/linker paths and the complete target ABI/options;
+// switching to LLVM 22 must never reuse an ESP19 or differently configured
+// archive merely because its source release and filename are unchanged.
+func compileNamedTargetLibrary(config compile.CompileConfig, sourceDir string, options compile.CompileOptions) ([]string, error) {
+	identity, err := json.Marshal(struct {
+		Config  compile.CompileConfig
+		Options compile.CompileOptions
+	}{config, options})
+	if err != nil {
+		return nil, err
+	}
+	outputDir := filepath.Join(sourceDir, "llgo-toolchain-v1", fmt.Sprintf("%x", sha256.Sum256(identity)))
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return nil, err
+	}
+	return compileWithConfig(config, outputDir, options)
+}
+
 func linkerSupportsICF(linker string) bool {
 	if linker == "" {
 		return false
@@ -466,9 +534,17 @@ func nativeSectionFlags(toolchain NativeToolchain) (ccflags, ldflags []string) {
 	case ObjectFormatMachO:
 		return nil, []string{"-Xlinker", "-dead_strip"}
 	case ObjectFormatCOFF:
+		if toolchain.ABI == PlatformABIGNU {
+			return []string{"-fdata-sections", "-ffunction-sections"}, []string{
+				"-fdata-sections",
+				"-ffunction-sections",
+				"-Wl,--gc-sections",
+			}
+		}
 		return []string{"-fdata-sections", "-ffunction-sections"}, []string{
 			"-fdata-sections",
 			"-ffunction-sections",
+			"--rtlib=compiler-rt",
 			"-Wl,/opt:ref",
 			// UCRT defines printf-family entry points inline in its headers.
 			// LLGo C linknames use the traditional external symbols supplied by
@@ -495,6 +571,10 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 }
 
 func useWithGOARM(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
+	return useWithGOARMAndToolchain(goos, goarch, goarm, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE, NativeToolchainInput{})
+}
+
+func useWithGOARMAndToolchain(goos, goarch, goarm string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool, nativeInput NativeToolchainInput) (export Export, err error) {
 	targetSpec := resolvedLLVMTargetSpecWithGOARM(goos, goarch, goarm, wasiThreads)
 	targetTriple := targetSpec.Triple
 	export.GOOS = goos
@@ -509,19 +589,24 @@ func useWithGOARM(goos, goarch, goarm string, wasiThreads, forceEspClang bool, l
 		export.GC = "leaking"
 	}
 	llgoRoot := env.LLGoROOT()
+	nativePlatformToolchain := usesNativePlatformToolchain(runtime.GOOS, runtime.GOARCH, goos, goarch)
 
 	// WebAssembly IR is emitted by LLVM 22 and must be consumed by that same
 	// baseline. ESP Clang remains a target backend for non-wasm embedded builds;
-	// it is never an IR compatibility fallback for wasm.
+	// it is never an IR compatibility fallback for wasm. Native Windows resolves
+	// its compiler and dependencies as one coherent profile below.
 	var clangRoot string
-	if goarch == "wasm" {
+	switch {
+	case nativePlatformToolchain && goos == "windows":
+		// resolveWindowsToolchain owns this profile.
+	case goarch == "wasm":
 		var clangBin string
 		clangRoot, clangBin, export.CC, _, err = getLLVM22Toolchain("")
 		if err != nil {
 			return
 		}
 		export.ClangBinPath = clangBin
-	} else {
+	default:
 		clangRoot, err = getESPClangRoot(forceEspClang)
 		if err != nil {
 			return
@@ -535,11 +620,32 @@ func useWithGOARM(goos, goarch, goarm string, wasiThreads, forceEspClang bool, l
 	}
 	export.ClangRoot = clangRoot
 
-	if runtime.GOOS == goos && runtime.GOARCH == goarch {
-		export.Toolchain = nativeToolchain(goos)
+	if nativePlatformToolchain {
+		if goos == "windows" {
+			gc := export.GC
+			export, err = resolveWindowsToolchain(goarch, nativeInput, probeNativeTool)
+			if err != nil {
+				return
+			}
+			targetTriple = export.Toolchain.TargetTriple
+			// Native Windows tool selection is authoritative. An embedded
+			// toolchain cached below LLGO_ROOT must not leak include or library
+			// paths into this profile.
+			clangRoot = ""
+			export.ClangRoot = ""
+			export.GC = gc
+		} else {
+			export.Toolchain = nativeToolchain(goos)
+		}
+		export.GOOS = goos
+		export.GOARCH = goarch
+		export.LLVMTarget = targetTriple
+		export.CPU = targetSpec.CPU
+		export.Features = targetSpec.Features
 		export.DebugInfo = nativeDebugInfoPolicy(export.Toolchain)
 		// not cross compile
 		// Set up basic flags for non-cross-compile
+		externalLDFlags := slices.Clone(export.LDFLAGS)
 		export.LDFLAGS = []string{
 			"-target", targetTriple,
 			"-Qunused-arguments",
@@ -596,6 +702,7 @@ func useWithGOARM(goos, goarch, goarm string, wasiThreads, forceEspClang bool, l
 		ccflags, ldflags := nativeSectionFlags(export.Toolchain)
 		export.CCFLAGS = append(export.CCFLAGS, ccflags...)
 		export.LDFLAGS = append(export.LDFLAGS, ldflags...)
+		export.LDFLAGS = append(export.LDFLAGS, externalLDFlags...)
 		return
 	}
 	if goarch != "wasm" {
@@ -759,6 +866,10 @@ func resolvedLLVMTargetSpecWithGOARM(goos, goarch, goarm string, wasiThreads boo
 	return spec
 }
 
+func usesNativePlatformToolchain(hostGOOS, hostGOARCH, targetGOOS, targetGOARCH string) bool {
+	return hostGOOS == targetGOOS && hostGOARCH == targetGOARCH
+}
+
 // UseTarget loads configuration from a target name (e.g., "rp2040", "wasi")
 func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (export Export, err error) {
 	resolver := targets.NewDefaultResolver()
@@ -781,24 +892,18 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 		return export, fmt.Errorf("target '%s' has incompatible libc/toolchain configuration: %w", targetName, err)
 	}
 
-	// The in-process frontend, every WebAssembly IR consumer, and the general
-	// Windows cross toolchain share LLVM 22. ESP targets retain their dedicated
-	// backend for target instruction support.
+	// Every IR consumer must share the in-process frontend's LLVM 22 major.
+	// Target-specific LLVM 19 bundles are not an IR compatibility fallback.
 	var clangRoot string
 	if strings.HasPrefix(target, "wasm") ||
-		useSystemClangForTarget(runtime.GOOS, target, config.BuildTags) {
+		useLLVM22ForTarget(target, config.BuildTags) {
 		clangRoot, export.ClangBinPath, export.CC, export.Linker, err =
 			getLLVM22Toolchain(config.Linker)
 		if err != nil {
 			return
 		}
 	} else {
-		clangRoot, err = getESPClangRoot(true)
-		if err != nil {
-			return
-		}
-		export.CC = filepath.Join(clangRoot, "bin", "clang++")
-		export.ClangBinPath = filepath.Join(clangRoot, "bin")
+		return export, fmt.Errorf("target %q requires an unvalidated ESP-specific backend/runtime ABI; LLVM 22 support is required and the legacy LLVM 19 toolchain is not supported", targetName)
 	}
 	export.ClangRoot = clangRoot
 	// Convert target config to Export - only export necessary fields
@@ -991,7 +1096,7 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 		if err != nil {
 			return
 		}
-		libcLDFlags, err = compileWithConfig(compileConfig, outputDir, compile.CompileOptions{
+		libcLDFlags, err = compileNamedTargetLibrary(compileConfig, outputDir, compile.CompileOptions{
 			CC:      export.CC,
 			Linker:  export.Linker,
 			CCFLAGS: ccflags,
@@ -1017,7 +1122,7 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 		if err != nil {
 			return
 		}
-		rtLibLDFlags, err = compileWithConfig(compileConfig, outputDir, compile.CompileOptions{
+		rtLibLDFlags, err = compileNamedTargetLibrary(compileConfig, outputDir, compile.CompileOptions{
 			CC:      export.CC,
 			Linker:  export.Linker,
 			CCFLAGS: ccflags,
@@ -1039,8 +1144,11 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	return export, nil
 }
 
-func useSystemClangForTarget(hostGOOS, targetTriple string, buildTags []string) bool {
-	if hostGOOS != "windows" || strings.HasPrefix(targetTriple, "xtensa") {
+// LLVM target support, rather than the build host OS, determines whether the
+// standard toolchain applies. ARM/RISC-V baremetal must use the same LLVM 22
+// compiler and linker as coroutine lowering, even on Darwin or Linux hosts.
+func useLLVM22ForTarget(targetTriple string, buildTags []string) bool {
+	if strings.HasPrefix(targetTriple, "xtensa") {
 		return false
 	}
 	for _, tag := range buildTags {
@@ -1076,8 +1184,14 @@ func Use(goos, goarch, targetName string, wasiThreads, forceEspClang bool, level
 // setting affects native GOARCH=arm clang and linker triples; named targets
 // retain their target configuration's LLVM triple.
 func UseWithGOARM(goos, goarch, goarm, targetName string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
+	return UseWithGOARMAndToolchain(goos, goarch, goarm, targetName, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE, NativeToolchainInput{})
+}
+
+// UseWithGOARMAndToolchain is UseWithGOARM with explicit Go-compatible native
+// compiler commands. Named targets intentionally ignore these host commands.
+func UseWithGOARMAndToolchain(goos, goarch, goarm, targetName string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool, nativeInput NativeToolchainInput) (export Export, err error) {
 	if targetName == "" {
-		return useWithGOARM(goos, goarch, goarm, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+		return useWithGOARMAndToolchain(goos, goarch, goarm, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE, nativeInput)
 	}
 	if !strings.HasPrefix(targetName, "wasm") && !strings.HasPrefix(targetName, "wasi") {
 		return UseTarget(targetName, level, ltoMode)

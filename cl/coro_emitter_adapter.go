@@ -67,6 +67,41 @@ func (p *context) compileCoroInstructionPrologue(b llssa.Builder, instr ssa.Inst
 	if !outerCriticalEnter {
 		body.sourceBlockPollFresh = false
 	}
+	// Keep the source prologue above even when allocation placement changes.
+	// The frozen pair lies in one safepoint interval, so its instruction cost
+	// and original poll remain valid. Materialization owns the Alloc's exact
+	// semantic/helper observation, before the Store opens its own source site.
+	plan := p.coroEmissionPlan()
+	if plan == nil {
+		panic("coroutine allocation placement has no frozen physical plan")
+	}
+	physical, err := plan.instructionPlan(instr)
+	if err != nil {
+		panic(fmt.Errorf("coroutine allocation placement: %w", err))
+	}
+	if physical.deferHeapAllocation {
+		allocation, ok := instr.(*ssa.Alloc)
+		if !ok || physical.materializeHeapAllocation != nil {
+			panic("deferred heap allocation has an invalid source instruction")
+		}
+		if _, exists := p.bvals[allocation]; exists {
+			panic("deferred heap allocation was materialized before its source site")
+		}
+		return true
+	}
+	if physical.materializeHeapAllocation != nil {
+		allocation := physical.materializeHeapAllocation
+		store, ok := instr.(*ssa.Store)
+		original, err := plan.instructionPlan(allocation)
+		if !ok || store.Addr != allocation || store.Val == allocation ||
+			err != nil || !original.deferHeapAllocation || allocation.Block() != store.Block() {
+			panic("deferred heap allocation has no exact initialization site")
+		}
+		if _, exists := p.bvals[allocation]; exists {
+			panic("deferred heap allocation was materialized more than once")
+		}
+		p.compileInstr(b, allocation)
+	}
 	return p.compileCoroValueElisionPrologue(instr)
 }
 
@@ -185,8 +220,10 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 			b, call, instructionPlan.controlTarget, instructionPlan.recoverAlias,
 		), true
 	case coroPhysicalControlNone:
-		if instructionPlan.operation != coroPhysicalOperationWorkerCgo &&
-			instructionPlan.operation != coroPhysicalOperationWorkerCgoErrno &&
+		if instructionPlan.operation != coroPhysicalOperationGeneratedCgoWorker &&
+			instructionPlan.operation != coroPhysicalOperationGeneratedCgoSameM &&
+			instructionPlan.operation != coroPhysicalOperationGeneratedCgoErrnoWorker &&
+			instructionPlan.operation != coroPhysicalOperationGeneratedCgoErrnoSameM &&
 			instructionPlan.operation != coroPhysicalOperationWorkerForeign &&
 			instructionPlan.operation != coroPhysicalOperationSameMForeign &&
 			instructionPlan.operation != coroPhysicalOperationSameMPython {
@@ -194,19 +231,19 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		}
 		p.observeCoroPhysicalOperation(call, instructionPlan.operation)
 		switch instructionPlan.operation {
-		case coroPhysicalOperationWorkerCgo:
-			if instructionPlan.operationCgo == nil {
-				panic("physical coroutine cgo worker call has no frozen typed shape")
+		case coroPhysicalOperationGeneratedCgoWorker, coroPhysicalOperationGeneratedCgoSameM:
+			if instructionPlan.operationGeneratedCgo == nil {
+				panic("physical coroutine generated-cgo call has no frozen typed shape")
 			}
-			return p.compileCoroWorkerCgoCall(b, call, *instructionPlan.operationCgo), true
-		case coroPhysicalOperationWorkerCgoErrno:
-			if instructionPlan.operationCgoErrno == nil {
-				panic("physical coroutine C2 worker call has no frozen typed errno shape")
+			return p.compileCoroGeneratedCgoCall(b, call, *instructionPlan.operationGeneratedCgo), true
+		case coroPhysicalOperationGeneratedCgoErrnoWorker, coroPhysicalOperationGeneratedCgoErrnoSameM:
+			if instructionPlan.operationGeneratedCgoErrno == nil {
+				panic("physical coroutine C2 call has no frozen typed errno shape")
 			}
-			result := p.compileCoroWorkerCgoErrnoCall(b, call, *instructionPlan.operationCgoErrno)
+			result := p.compileCoroGeneratedCgoErrnoCall(b, call, *instructionPlan.operationGeneratedCgoErrno)
 			p.completeCoroIntrinsicCallEmission(
 				llgoCgoCgocall,
-				CoroIntrinsicCallInlineForeignSuspend,
+				CoroIntrinsicCallInlineForeignTransaction,
 			)
 			p.cgoReturn(b, true)
 			p.cgoReturned = true

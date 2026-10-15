@@ -1089,12 +1089,15 @@ func assertCoroProgramHostSliceV2(t *testing.T, module llvm.Module, entryName st
 		"i32 " + strconv.FormatUint(uint64(coroProgramNativeRunBudgetV2), 10),
 		"icmp eq i32",
 		"icmp ule i32",
-		"call void @abort()",
+		"call void @llvm.trap()",
 		"unreachable",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("host V2 program entry missing %q:\n%s", want, body)
 		}
+	}
+	if !module.NamedFunction("abort").IsNil() {
+		t.Fatal("host-pull entry depends on a hosted libc abort ABI")
 	}
 	if got := strings.Count(body, "call i32 @"+coroProgramRunSliceSymbolV2); got != 1 {
 		t.Fatalf("host V2 initial run calls = %d, want exactly one bounded activation:\n%s", got, body)

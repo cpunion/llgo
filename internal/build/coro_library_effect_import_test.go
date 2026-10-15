@@ -502,6 +502,34 @@ func Caller(value uintptr) uintptr { return Foreign(value) + 1 }
 		t.Fatalf("producer callable contract did not color consumer caller: %+v", callerPlan)
 	}
 
+	t.Run("compiler fault demand reaches final consumer plan", func(t *testing.T) {
+		withFault := summary
+		faultFact := fact
+		faultFact.Contract.NativeDefaultFaultBoundary = true
+		withFault.ForeignCallables = []coro.LibraryEffectForeignCallable{faultFact}
+		record, err := withFault.MarshalRecord()
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := coro.ParseLibraryEffectSummaryRecords(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		index, err := coro.NewLibraryEffectIndex(parsed, consumer.metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		imported, err := prepareCoroImportedLibraryForeignCallables(consumer.ctx, index, consumer.metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := consumer.analyzeForeign(t, imported)
+		certificate, found := plan.CallableContractCertificate(consumerForeign)
+		if !found || certificate != faultFact.Contract {
+			t.Fatalf("final consumer plan lost compiler implementation fact: %+v, found=%t", certificate, found)
+		}
+	})
+
 	t.Run("identity-only grants no operation", func(t *testing.T) {
 		identityOnly := fact
 		identityOnly.Contract = coro.CallableContractCertificate{}

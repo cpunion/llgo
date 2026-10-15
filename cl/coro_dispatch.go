@@ -188,6 +188,7 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 		rangeYield = true
 	}
 	managedForeignWrapper := false
+	managedIntrinsicWrapper := false
 	if universe != nil {
 		if _, compilerOwned := universe.managedForeignWrapInfo[fn]; compilerOwned {
 			if err := universe.validateManagedForeignFunctionValueWrapper(fn); err != nil {
@@ -195,14 +196,21 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 			}
 			managedForeignWrapper = true
 		}
+		if _, compilerOwned := universe.callWrapInfo[fn]; compilerOwned {
+			if err := universe.validateManagedIntrinsicFunctionValueWrapper(fn); err != nil {
+				return fail("invalid managed intrinsic function-value adapter: %v", err)
+			}
+			managedIntrinsicWrapper = true
+		}
 	}
-	if fn.Synthetic != "" && !genericInstance && !boundMethod && !methodExpression && !rangeYield && !managedForeignWrapper {
+	if fn.Synthetic != "" && !genericInstance && !boundMethod && !methodExpression && !rangeYield &&
+		!managedForeignWrapper && !managedIntrinsicWrapper {
 		return fail("synthetic function %q is outside the plain dispatch ABI", fn.Synthetic)
 	}
 	if params := fn.TypeParams(); params != nil && params.Len() != 0 && !genericInstance && !rangeYield {
 		return fail("generic declarations are not materialized dispatch bodies")
 	}
-	if (len(fn.TypeArgs()) != 0 || fn.Origin() != nil) && !genericInstance && !rangeYield {
+	if (len(fn.TypeArgs()) != 0 || fn.Origin() != nil) && !genericInstance && !rangeYield && !boundMethod && !methodExpression {
 		return fail("generic instances require a frozen instantiated dispatch ABI")
 	}
 	if err := validateCoroManagedDispatchSignatureShape(fn.Signature); err != nil {
@@ -262,11 +270,11 @@ func validateCoroManagedDispatchSignatureShape(sig *types.Signature) error {
 
 // coroConcreteManagedCallableSignature strips declaration-only generic
 // receiver metadata from one receiver-free function value after proving that
-// every value crossing the descriptor ABI is fully concrete. x/tools retains
-// RecvTypeParams on the type of an instantiated bound method stored in a
-// variable, even though its receiver is already removed and all parameters and
-// results are ground. That metadata neither changes the Go function type nor
-// the physical descriptor ABI and must not manufacture a second signature.
+// every value crossing the descriptor ABI is fully concrete. Some x/tools
+// versions retain RecvTypeParams on the type of an instantiated bound method
+// stored in a variable, while newer versions clear it. The declaration-only
+// metadata neither changes the Go function type nor the physical descriptor ABI
+// and must not manufacture a second signature.
 func coroConcreteManagedCallableSignature(sig *types.Signature) (*types.Signature, error) {
 	if sig == nil {
 		return nil, fmt.Errorf("missing signature")
@@ -450,7 +458,7 @@ func coroCallableEffectiveType(universe *EmissionUniverse, owner *ssa.Function, 
 	if prepared == nil {
 		return typ
 	}
-	return universe.effectiveType(prepared, owner, typ, false)
+	return universe.effectiveType(prepared, owner, typ)
 }
 
 func coroCallableTransportSchema(typ types.Type) []coroCallableTransportLeaf {
@@ -807,8 +815,8 @@ func validateCoroPlainDispatchCall(plan *coro.SSAPlan, owner *ssa.Function, call
 		if err := validateCoroPlainDispatchTarget(targetFn, targetPlan, universe); err != nil {
 			return fail("%v", err)
 		}
-		callSignature, callErr := coroConcreteManagedCallableSignature(common.Signature())
-		targetSignature, targetErr := coroConcreteManagedCallableSignature(targetFn.Signature)
+		callSignature, callErr := coroDynamicCallableSignature(plan.CallableSignature(owner, common.Signature()))
+		targetSignature, targetErr := coroDynamicCallableSignature(plan.CallableSignature(targetFn, targetFn.Signature))
 		if callErr != nil || targetErr != nil || !types.Identical(callSignature, targetSignature) {
 			return fail("call signature %s does not match target %q signature %s", common.Signature(), targetPlan.ID, targetFn.Signature)
 		}
@@ -1429,6 +1437,11 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q target result signature does not match the source ABI", name))
 	}
 	if closureCtx != nil {
+		// The environment is supplied in canonical source form, just like
+		// abi.signature above. Compare only after the same physical lowering
+		// used by the target declaration; nominal source and layout identities
+		// are deliberately distinct for types containing function values.
+		closureCtx = p.prog.PhysicalType(closureCtx, llssa.InGo)
 		if targetSig.Params().Len() <= targetParam {
 			panic(fmt.Errorf(
 				"coroutine dynamic dispatch ABI: thunk %q target closure context is absent, want %s",
@@ -1454,10 +1467,15 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		closureCtx = targetClosureCtx
 		targetParam++
 	}
-	if targetSig.Params().Len()-targetParam != source.Params().Len() {
-		panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q target has %d source parameters, want %d", name, targetSig.Params().Len()-targetParam, source.Params().Len()))
+	targetSourceParams := targetSig.Params().Len() - targetParam
+	if targetSourceParams > source.Params().Len() ||
+		(!abi.goLinknameFunctionFacade && targetSourceParams != source.Params().Len()) {
+		panic(fmt.Errorf(
+			"coroutine dynamic dispatch ABI: thunk %q target has %d source parameters, declaration provides %d (go-linkname-facade=%t)",
+			name, targetSourceParams, source.Params().Len(), abi.goLinknameFunctionFacade,
+		))
 	}
-	for i := 0; i < source.Params().Len(); i++ {
+	for i := 0; i < targetSourceParams; i++ {
 		if !coroDispatchTargetTypeCompatible(
 			targetSig.Params().At(targetParam+i).Type(),
 			source.Params().At(i).Type(),
@@ -1476,7 +1494,7 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		}
 	}
 	b := thunk.MakeBody(1)
-	physicalArgs := make([]llssa.Expr, 0, source.Params().Len()+4)
+	physicalArgs := make([]llssa.Expr, 0, targetSourceParams+4)
 	if emission == coro.EmitCoroutine {
 		physicalArgs = append(physicalArgs, thunk.PhysicalParam(0), thunk.PhysicalParam(1))
 	} else if emission == coro.EmitOutcomePlain {
@@ -1491,7 +1509,7 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		}
 		physicalArgs = append(physicalArgs, b.Convert(p.prog.Type(closureCtx, llssa.InC), thunk.PhysicalParam(envIndex)))
 	}
-	for i := 0; i < source.Params().Len(); i++ {
+	for i := 0; i < targetSourceParams; i++ {
 		argument := thunk.PhysicalParam(thunkSourceBase + i)
 		targetType := targetSig.Params().At(targetParam + i).Type()
 		if !types.Identical(argument.RawType(), targetType) {

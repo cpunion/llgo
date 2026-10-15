@@ -106,31 +106,56 @@ type coroPrintTestPlan struct {
 	calls      map[string]*ssa.Call
 }
 
-func TestCoroPointerDerivedScalarTransformResultsRemainFailClosed(t *testing.T) {
+func TestCoroPointerDerivedScalarTransformResultsAreOnlyValues(t *testing.T) {
 	fixture := prepareCoroPrintTestPlan(t, nil, true, false)
 	defer fixture.prog.Dispose()
 	for _, name := range []string{"returnTransformed", "storeTransformed", "arithmeticTransformed"} {
-		function := fixture.fooPkg.ssa.Func(name)
-		audit, err := newCoroPhysicalPureSSAAudit(fixture.universe, fixture.plan, function, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, block := range function.Blocks {
-			for _, instruction := range block.Instrs {
-				conversion, ok := instruction.(*ssa.Convert)
-				if !ok || !coroFrameRetentionPointerToUintptr(conversion) {
-					continue
-				}
-				found = true
-				if reason := audit.validateConvert(conversion); !strings.Contains(reason, "not bound to an exact managed-child/worker") {
-					t.Fatalf("%s pointer conversion rejection = %q", name, reason)
+		t.Run(name, func(t *testing.T) {
+			function := fixture.fooPkg.ssa.Func(name)
+			audit, err := newCoroPhysicalPureSSAAudit(fixture.universe, fixture.plan, function, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// These calls consume int32 values, not addresses. Their float32
+			// results may be returned, stored, or used in arithmetic, just as the
+			// scalar integer identity call in Go's issue19078 may. Neither the
+			// ordinary Go edge nor its result grants pointer reconstruction or
+			// a keepalive certificate. Print's separate bounded provenance path
+			// below must not be generalized to these escaping numeric results.
+			proof := audit.currentFrameRetentionProof()
+			found := false
+			transformed := false
+			for _, block := range function.Blocks {
+				for _, instruction := range block.Instrs {
+					if value, ok := instruction.(ssa.Value); ok && proof.provesTraceableUintptr(value) {
+						t.Fatalf("numeric result acquired inverse provenance: %s", instruction)
+					}
+					if call, ok := instruction.(*ssa.Call); ok {
+						transformed = true
+						if len(proof.exactCallKeepaliveRoots(call)) != 0 || len(proof.exactCallKeepaliveSources(call)) != 0 {
+							t.Fatalf("ordinary numeric call acquired address-lifetime roots: %s", call)
+						}
+					}
+					conversion, ok := instruction.(*ssa.Convert)
+					if !ok || !coroFrameRetentionPointerToUintptr(conversion) {
+						continue
+					}
+					found = true
+					if !audit.coroPointerUintptrGoCallTerminal(conversion) {
+						t.Fatal("numeric transform lacks an exact frozen Go integer-call terminal")
+					}
+					if reason := audit.validateConvert(conversion); reason != "" {
+						t.Fatalf("ordinary numeric transform rejected: %s", reason)
+					}
 				}
 			}
-		}
-		if !found {
-			t.Fatalf("%s has no pointer-to-uintptr conversion", name)
-		}
+			if !found || !transformed {
+				t.Fatalf("fixture pointer conversion=%t scalar transform=%t", found, transformed)
+			}
+			if len(proof.uintptrValues) != 0 || len(proof.callKeepalives) != 0 {
+				t.Fatal("validating a numeric call manufactured address provenance")
+			}
+		})
 	}
 }
 

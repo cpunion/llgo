@@ -136,7 +136,10 @@ func GetPicolibcCompileConfig(baseDir, target string) compile.CompileConfig {
 					filepath.Join(baseDir, "newlib", "libc", "stdlib", "nano-realloc.c"),
 					filepath.Join(baseDir, "newlib", "libc", "stdlib", "nano-valloc.c"),
 					filepath.Join(baseDir, "newlib", "libc", "stdlib", "rand.c"),
+					filepath.Join(baseDir, "newlib", "libc", "stdlib", "random.c"),
 					filepath.Join(baseDir, "newlib", "libc", "stdlib", "srand.c"),
+					filepath.Join(baseDir, "newlib", "libc", "stdlib", "srandom.c"),
+					filepath.Join(baseDir, "newlib", "libc", "errno", "errno.c"),
 					filepath.Join(baseDir, "newlib", "libc", "stdlib", "nano-free.c"),
 
 					filepath.Join(baseDir, "newlib", "libc", "tinystdio", "printf.c"),

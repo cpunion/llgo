@@ -126,3 +126,38 @@ func Managed(callback func(int) int) {}
 		t.Fatalf("nested raw-C-to-managed descriptor mismatch = %v, want parameter 1 rejection", err)
 	}
 }
+
+func TestCoroPhysicalParameterUsesExactPatchedRepresentation(t *testing.T) {
+	universe, original, _, dispose := preparePatchedEmissionTest(t, `package p
+type Value struct { word uint64; root *int }
+func Forward(value Value) Value { return value }
+`, `package p
+type Value struct { ref uintptr }
+`)
+	defer dispose()
+	fn := original.ssa.Func("Forward")
+	canonical, err := universe.coroPhysicalSourceSignature(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := coroPhysicalNormalizeSourceSignature(fn.Signature)
+	if coroPhysicalTransportTypeKey(universe, raw.Params().At(0).Type()) ==
+		coroPhysicalTransportTypeKey(universe, canonical.Params().At(0).Type()) {
+		t.Fatal("fixture must change the inline representation, not just the named identity")
+	}
+	plan := coro.FunctionPlan{ID: "p.Forward"}
+	if err := validateCoroPhysicalSSAParameterShape(plan, fn, canonical, universe); err != nil {
+		t.Fatalf("exact canonical source-patch representation was rejected: %v", err)
+	}
+	if err := validateCoroPhysicalSSAParameterShape(plan, fn, raw, universe); err == nil ||
+		!strings.Contains(err.Error(), "effective parameter 0") {
+		t.Fatalf("obsolete raw source representation was accepted: %v", err)
+	}
+	wrong := types.NewSignatureType(nil, nil, nil, types.NewTuple(
+		types.NewParam(token.NoPos, nil, "value", types.Typ[types.Uint64]),
+	), canonical.Results(), false)
+	if err := validateCoroPhysicalSSAParameterShape(plan, fn, wrong, universe); err == nil ||
+		!strings.Contains(err.Error(), "effective parameter 0") {
+		t.Fatalf("unrelated effective representation was accepted: %v", err)
+	}
+}

@@ -152,6 +152,39 @@ func TestRecoverOutsideArmedScopeReturnsNil(t *testing.T) {
 	fixture.keepAlive()
 }
 
+func TestRecoverAliasRequiresReactivatedHeaderDuringCancellationCleanup(t *testing.T) {
+	for _, kind := range []TaskCancelKind{TaskCancelAbort, TaskCancelShutdown} {
+		fixture := newAwaitCompletionFixture(t)
+		fixture.g.park.taskCancelKind = kind
+		fixture.g.park.taskCancelPhase = taskCancelCleanup
+		if !RecoverAliasScopeActive(fixture.g) {
+			t.Fatalf("valid cleanup activation rejected for cancellation %d", kind)
+		}
+		for _, reason := range []SuspendReason{SuspendPark, SuspendYield} {
+			fixture.child.header.SuspendReason = uint16(reason)
+			fixture.child.header.Lifecycle = uint16(FrameSuspended)
+			if RecoverAliasScopeActive(fixture.g) {
+				t.Fatalf("cancellation %d accepted stale suspended header %d", kind, reason)
+			}
+			fixture.child.header.SuspendReason = uint16(SuspendNone)
+			if RecoverAliasScopeActive(fixture.g) {
+				t.Fatalf("cancellation %d accepted partially activated header", kind)
+			}
+			fixture.child.header.Lifecycle = uint16(FrameActive)
+			if !RecoverAliasScopeActive(fixture.g) {
+				t.Fatalf("cancellation %d rejected reactivated header", kind)
+			}
+		}
+		fixture.g.park.taskCancelKind = TaskCancelNone
+		fixture.g.park.taskCancelPhase = taskCancelIdle
+		completeRecoverChild(t, fixture)
+		if _, ok := ConsumeAwaitCompletion(fixture.g, fixture.parent.handle); !ok {
+			t.Fatal("consume cleanup activation fixture")
+		}
+		fixture.keepAlive()
+	}
+}
+
 func TestRecoverTransparentAliasTakesExactAncestorScope(t *testing.T) {
 	typeWord := unsafe.Pointer(new(byte))
 	dataWord := unsafe.Pointer(new(byte))

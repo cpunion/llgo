@@ -260,11 +260,12 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 	if !direct && target.Synthetic == "" {
 		return nil, FunctionPlan{}, fmt.Errorf("inline-only spawn target %q is not a compiler-owned synthetic carrier", targetPlan.ID)
 	}
-	if len(target.FreeVars) != 0 || !redirected && target.Synthetic != "" ||
-		target.Origin() != nil || len(target.TypeArgs()) != 0 {
+	genericInstance := MaterializedGenericInstance(target)
+	if len(target.FreeVars) != 0 || !redirected && target.Synthetic != "" && !genericInstance ||
+		(target.Origin() != nil || len(target.TypeArgs()) != 0) && !genericInstance {
 		return nil, FunctionPlan{}, fmt.Errorf("target %q is not an exact non-capturing context-free function", targetPlan.ID)
 	}
-	if params := target.TypeParams(); params != nil && params.Len() != 0 {
+	if params := target.TypeParams(); params != nil && params.Len() != 0 && !genericInstance {
 		return nil, FunctionPlan{}, fmt.Errorf("target %q is a generic declaration", targetPlan.ID)
 	}
 	sig := target.Signature
@@ -273,8 +274,16 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 		(sig.RecvTypeParams() != nil && sig.RecvTypeParams().Len() != 0) {
 		return nil, FunctionPlan{}, fmt.Errorf("target %q must have one non-method, non-generic signature", targetPlan.ID)
 	}
-	if redirected && direct && !types.Identical(common.Signature(), sig) {
-		return nil, FunctionPlan{}, fmt.Errorf("target %q does not preserve the source spawn signature", targetPlan.ID)
+	argumentSignature := sig
+	if redirected && direct {
+		callSignature, callErr := p.CallableSignature(call.Parent(), common.Signature())
+		targetSignature, targetErr := p.CallableSignature(target, sig)
+		if callErr != nil || targetErr != nil || !types.Identical(callSignature, targetSignature) {
+			return nil, FunctionPlan{}, fmt.Errorf("target %q does not preserve the source spawn signature", targetPlan.ID)
+		}
+		// SSA arguments retain the caller's source identities. The equality
+		// above proves that those exact types project to the target's types.
+		argumentSignature = common.Signature()
 	}
 	if len(common.Args) != sig.Params().Len() {
 		return nil, FunctionPlan{}, fmt.Errorf(
@@ -283,7 +292,7 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 		)
 	}
 	for index, argument := range common.Args {
-		if argument == nil || !types.Identical(argument.Type(), sig.Params().At(index).Type()) {
+		if argument == nil || !types.Identical(argument.Type(), argumentSignature.Params().At(index).Type()) {
 			return nil, FunctionPlan{}, fmt.Errorf("target %q spawn argument %d does not preserve its exact type", targetPlan.ID, index)
 		}
 	}
@@ -331,7 +340,10 @@ func (p *SSAPlan) ResolveManagedDispatchSpawn(call *ssa.Go) (SSACallPlan, error)
 	if _, builtin := common.Value.(*ssa.Builtin); builtin {
 		return SSACallPlan{}, fmt.Errorf("builtin spawns are outside the managed descriptor ABI")
 	}
-	sig := common.Signature()
+	sig, err := p.CallableSignature(call.Parent(), common.Signature())
+	if err != nil {
+		return SSACallPlan{}, fmt.Errorf("managed descriptor spawn source signature: %w", err)
+	}
 	if sig == nil || sig.Recv() != nil || sig.Variadic() ||
 		typeParamListLen(sig.TypeParams()) != 0 || typeParamListLen(sig.RecvTypeParams()) != 0 {
 		return SSACallPlan{}, fmt.Errorf("managed descriptor spawn requires a receiver-free, non-variadic, non-generic signature")
@@ -397,7 +409,8 @@ func (p *SSAPlan) ResolveManagedDispatchSpawn(call *ssa.Go) (SSACallPlan, error)
 				targetPlan.FuncRep, targetPlan.Effect, targetPlan.Demand,
 			)
 		}
-		if target.Signature == nil || !types.Identical(sig, target.Signature) {
+		targetSignature, signatureErr := p.CallableSignature(target, target.Signature)
+		if signatureErr != nil || !types.Identical(sig, targetSignature) {
 			return SSACallPlan{}, fmt.Errorf("spawn signature %s does not match target %q signature %s", sig, targetID, target.Signature)
 		}
 	}
