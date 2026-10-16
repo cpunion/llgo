@@ -55,8 +55,14 @@ linked-program result is recorded below. Immutable v70 also completes a new
 whole `test/go` run: **268/268**, zero failures/skips, source-after matching,
 children joined and scratch reclaimed at 08:41:59 UTC. Binary SHA-256 is
 `6813a06a978452cb944ff975e6233efa5c5cea050b0e206877124c5d30db0e17`;
-run peak is 6503.3MiB. Its 73-demo and 180-package stdlib cohorts remain live;
-the v65 eight-shard GOROOT rerun remains ongoing.
+run peak is 6503.3MiB. The same v70 also completes **73/73 native Go demos**,
+zero failures, at 09:13:31 UTC. Every package is freshly compiled and executed;
+the final source-after matches and private scratch is reclaimed after child
+join. Its cohort-manifest SHA-256 is
+`90246b7317c30a9ad6b079f7c368a114b598ed3d9a4f90fc9a3c48037d7227dd`,
+and completed journal SHA-256 is
+`e6ac74c4623a37b3340ad08ee3fab7c592ee2d3c819670a71633e678c6c6eefa`.
+The 180-package stdlib cohort and v65 eight-shard GOROOT rerun remain live.
 
 The cgo follow-up is now [PR #265](https://github.com/cpunion/llgo/pull/265),
 head `bea4a1ff7`, targeting `llvm-coro` only. Immutable v71 completes the
@@ -75,7 +81,12 @@ GOROOT shard 0 completes 136 cases with 135 passes and one `inline_callers.go`
 stdout mismatch on the older v65 source. The unchanged original case passes a
 focused strict v71 rerun (63.49s; matching source before/after, 2835.2MiB peak).
 The older failure remains in its original cohort; this is not an eight-shard
-or final-head full-GOROOT pass.
+or final-head full-GOROOT pass. During shard 1 the older source also rejects
+`noinit.go`'s private gc `main..inittask` symbol, and `rangegen.go` stops at the
+existing 24GiB per-build RSS cap; these are distinct ABI/resource outcomes,
+not new xfails. Its caller-stack failure in unchanged `fixedbugs/bug347.go`
+passes a strict focused v76 rerun (29.18s case / 1491.9MiB peak, matching
+source-after). The live shard's old failure is retained as-is.
 
 Cleanup scope work is isolated from the merged PRs. Review rejects the broad
 all-source-defer experiment: Go main return does not promise completion of
@@ -808,8 +819,8 @@ delivery/performance acceptance.
 | `test/llgoext` | 23 passed | Fixed v54 compiler/source, including defer-head isolation and 130-G ID allocation |
 | `test/std/runtime` | 5 passed | Fixed v35 compiler/source, uncached compile and execution |
 | C fault recovery, foreign reentry, traceback | 4 passed | v7 compiler; probes compile, link and execute with LLGo |
-| Full `test/go` | v60: 268 passed; v64: 266 passed / 2 failed, then both original failures pass on v67 | v60 completed 2026-10-16 06:30 UTC, peak 6439.4 MiB including nested compilers. v64 source-after matches and scratch is reclaimed; its two failures expose the adjusted caller-PC regression fixed on v67. Both original probes pass unchanged with the fix, alongside the native/wasm permanent fixture. A fresh complete post-fix run remains required; no implicit acceptance transfer. |
-| Top-level `_demo/go` | Fixed v46: all 73/73 passed, zero semantic failures | Completed 2026-10-16 01:14 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Disk/monitor interruptions remain in the journal; only completed exact-input package passes were reused. |
+| Full `test/go` | Complete v67 and v70: 268/268 passed each, zero failures/skips | v67 completed at 08:00:52 UTC, v70 at 08:41:59 UTC. Both match source-after, join children and reclaim scratch; v70 run peak is 6503.3MiB. The earlier v64 266-pass / 2-failure cohort is retained; both original caller-PC failures are covered by the later complete runs. These are post-PC-fix cohorts, not acceptance of every subsequent compiler/runtime change. |
+| Top-level `_demo/go` | Fixed v70: all 73/73 passed, zero failures | Completed 2026-10-16 09:13:31 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Every v70 package was freshly built and run; no earlier-version successes were adopted. The previous v46 complete pass remains separate evidence. |
 | `test/std/os`, `test/std/net` | 85 passed; 129 passed / 5 skipped, respectively | Full packages compiled and executed with fixed source snapshot and v35, cache disabled |
 | `test/std/reflect` | v25: 68 passed | Separate real LLGo compile and generated-binary execution; build peak 5768 MiB |
 | `synctest` execution | Run/Wait, inheritance, channel/select/Cond, fake time, heap association and WaitGroup passed | Real LLGo programs also verify detached children, finalizers and AddCleanup outside the bubble; associated objects remain collectible. Host race tests are not LLGo race-instrumentation acceptance. |
