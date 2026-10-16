@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStackReportsCaller(t *testing.T) {
@@ -72,6 +73,29 @@ func TestRuntimeSettings(t *testing.T) {
 
 	debug.SetTraceback("single")
 	debug.FreeOSMemory()
+}
+
+func TestGCStatsMatchCollectorSnapshot(t *testing.T) {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	stats := debug.GCStats{PauseQuantiles: []time.Duration{42, 42, 42, 42, 42}}
+	debug.ReadGCStats(&stats)
+	runtime.ReadMemStats(&after)
+	if stats.NumGC < int64(before.NumGC) || stats.NumGC > int64(after.NumGC) {
+		t.Fatalf("GC count %d is outside collector snapshots [%d,%d]", stats.NumGC, before.NumGC, after.NumGC)
+	}
+	if len(stats.Pause) != len(stats.PauseEnd) {
+		t.Fatal("pause duration and end-time histories have different lengths")
+	}
+	for index, quantile := range stats.PauseQuantiles {
+		if quantile < 0 || index > 0 && quantile < stats.PauseQuantiles[index-1] {
+			t.Fatalf("invalid pause quantiles: %v", stats.PauseQuantiles)
+		}
+		if len(stats.Pause) == 0 && quantile != 0 {
+			t.Fatal("empty collector history retained stale pause quantiles")
+		}
+	}
 }
 
 func TestPanicOnFaultStateIsGoroutineLocal(t *testing.T) {

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"runtime"
 	_ "unsafe"
 
 	llrt "github.com/xgo-dev/llgo/runtime/internal/runtime"
@@ -16,7 +17,36 @@ var (
 func setTraceback(level string) {}
 
 //go:linkname readGCStats runtime/debug.readGCStats
-func readGCStats(_ *[]uint64) {}
+func readGCStats(pauses *[]int64) {
+	// time.Duration is an int64, not uint64. Avoid importing time into the
+	// runtime replacement and use the same collector snapshot as ReadMemStats.
+	var stats runtime.MemStats
+	ReadMemStats(&stats)
+	count := len(stats.PauseNs)
+	if stats.NumGC < uint32(count) {
+		count = int(stats.NumGC)
+	}
+	// Collectors which do not publish pause timestamps have no pause history;
+	// do not synthesize zero-duration pause entries from their real cycle count.
+	if stats.LastGC == 0 {
+		count = 0
+	}
+	length := 2*count + 3
+	if cap(*pauses) < length {
+		*pauses = make([]int64, length)
+	} else {
+		*pauses = (*pauses)[:length]
+	}
+	buffer := *pauses
+	for index := 0; index < count; index++ {
+		slot := (uint64(stats.NumGC) - 1 - uint64(index)) % uint64(len(stats.PauseNs))
+		buffer[index] = int64(stats.PauseNs[slot])
+		buffer[count+index] = int64(stats.PauseEnd[slot])
+	}
+	buffer[2*count] = int64(stats.LastGC)
+	buffer[2*count+1] = int64(stats.NumGC)
+	buffer[2*count+2] = int64(stats.PauseTotalNs)
+}
 
 //go:linkname freeOSMemory runtime/debug.freeOSMemory
 func freeOSMemory() {}
