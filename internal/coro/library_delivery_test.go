@@ -49,6 +49,9 @@ func TestLibraryDeliveryRecordCrossPackageConsumption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !index.HasDelivery() {
+		t.Fatal("private/cross-package producer vanished from the checked inventory")
+	}
 	got, found := index.LookupDelivery(record.Producer)
 	if !found || got != record {
 		t.Fatalf("delivery=%+v present=%t", got, found)
@@ -120,10 +123,17 @@ func TestLibraryDeliveryAbsenceAndVersionAreExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if index.HasDelivery() || (*LibraryEffectIndex)(nil).HasDelivery() {
+		t.Fatal("ordinary or absent archive acquired a resource producer")
+	}
+	empty, err := NewLibraryEffectIndex(nil, summary.Metadata)
+	if err != nil || empty.HasDelivery() {
+		t.Fatalf("empty checked inventory acquired resource delivery: %v", err)
+	}
 	if record, found := index.LookupDelivery(summary.Functions[0].ID); found || !record.IsZero() {
 		t.Fatal("absent producer contract was inferred from an ordinary callable")
 	}
-	summary.Schema = "llgo.coro.library-effect-summary.v16"
+	summary.Schema = "llgo.coro.library-effect-summary.v17"
 	if _, err := summary.MarshalStable(); err == nil {
 		t.Fatal("accepted the preceding schema as an implicit nonresource contract")
 	}

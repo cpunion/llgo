@@ -3904,6 +3904,7 @@ func addSSAReferenceEdges(
 						for _, target := range sortedSSACandidates(flow.materializedTargets(referenceValue), ids, included) {
 							if err := graph.AddReference(ReferenceEdge{
 								Owner: ids[owner], Target: ids[target], SyncOnly: managedSyncOnly || descriptorSyncOnly, RawPlain: rawPlain,
+								ObservationOnly: functionAddress && !rawPlain && !managedSyncOnly && !descriptorSyncOnly,
 							}); err != nil {
 								return fmt.Errorf("coro: add classified SSA function reference from %q to %q: %w", owner.Name(), target.Name(), err)
 							}

@@ -42,6 +42,39 @@ func TestAnalyzeDirectPropagation(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRetainsImmutableSortedReferenceEdges(t *testing.T) {
+	g := NewGraph()
+	mustAddFunction(t, g, FunctionSpec{ID: "owner"})
+	mustAddFunction(t, g, FunctionSpec{ID: "target"})
+	first := ReferenceEdge{Owner: "owner", Target: "target"}
+	second := first
+	second.PhysicalABI = true
+	if err := g.AddReference(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddReference(first); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := g.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := plan.References()
+	if len(refs) != 2 || refs[0] != first || refs[1] != second {
+		t.Fatalf("frozen references: %+v", refs)
+	}
+	refs[0].Target = "mutated"
+	if plan.References()[0] != first {
+		t.Fatal("reference projection exposed mutable plan storage")
+	}
+	if err := g.AddReference(ReferenceEdge{Owner: "owner", Target: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.References()) != 2 {
+		t.Fatal("graph edit changed an already frozen plan")
+	}
+}
+
 func TestAnalyzeRuntimeContextRequirementPropagatesOnlyThroughManagedCalls(t *testing.T) {
 	g := NewGraph()
 	mustAddFunction(t, g, FunctionSpec{ID: "caller"})

@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	LibraryEffectSummaryVersion = "v17"
+	LibraryEffectSummaryVersion = "v18"
 
 	// LibraryEffectExportIngressABIV1 identifies the compiler-generated exact
 	// C-to-managed adapter published by LibraryEffectExportIngress. It is
@@ -61,7 +61,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 17,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 18,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -872,6 +872,7 @@ func (function LibraryEffectFunction) ImportedPolicy() (SSAFunctionPolicy, error
 // metadata compatibility has been checked.
 type LibraryEffectIndex struct {
 	metadata          LibraryEffectMetadata
+	hasDelivery       bool
 	functions         map[FunctionID]LibraryEffectFunction
 	foreignFunctions  map[FunctionID]LibraryEffectForeignCallable
 	foreignIdentities map[string]LibraryEffectForeignCallable
@@ -963,7 +964,15 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 			}
 		}
 	}
+	index.hasDelivery = len(deliveries) != 0
 	return index, nil
+}
+
+// HasDelivery includes private producers without a consumer SSA declaration.
+// Their already-published function values still require conditional custody
+// when crossing an open managed call; the index itself grants no physical ABI.
+func (index *LibraryEffectIndex) HasDelivery() bool {
+	return index != nil && index.hasDelivery
 }
 
 // Metadata returns the exact consumer profile against which this immutable

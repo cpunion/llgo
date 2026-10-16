@@ -450,8 +450,19 @@ func validateManagedEntryPlan(plan FunctionPlan) error {
 // Plan is an immutable, deterministically ordered collection of function
 // plans. Use Functions to obtain a defensive copy.
 type Plan struct {
-	functions []FunctionPlan
-	byID      map[FunctionID]int
+	functions  []FunctionPlan
+	byID       map[FunctionID]int
+	references []ReferenceEdge
+}
+
+// References returns the same frozen demand-only edges used by analysis.
+// Consumers may project optional publication requirements from them without
+// reconstructing value flow or confusing code observation with invocation.
+func (p *Plan) References() []ReferenceEdge {
+	if p == nil {
+		return nil
+	}
+	return append([]ReferenceEdge(nil), p.references...)
 }
 
 // Functions returns all function plans in FunctionID order.

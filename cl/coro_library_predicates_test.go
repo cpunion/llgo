@@ -57,6 +57,78 @@ func TestCoroLibraryPredicatesRequireFinalPlan(t *testing.T) {
 	}
 }
 
+func TestCoroLibraryFactoryPreservesPublishedCallableServices(t *testing.T) {
+	pkg, _, _ := buildGoSSAPkg(t, `package foo
+func Worker() {}
+func Other() {}
+func Factory() func() { return Worker }
+func Aggregate() struct { F func() } { return struct { F func() }{Worker} }
+func address(any) uintptr { return 0 }
+func Observer() uintptr { return address(Worker) }
+func Both() func() { _ = address(Worker); return Worker }
+func DeadFactory() func() { return Other }
+`)
+	plan, err := coro.AnalyzeSSA(pkg.Prog, coro.Roots{
+		{Function: pkg.Func("Factory"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true},
+		{Function: pkg.Func("Aggregate"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true},
+		{Function: pkg.Func("Observer"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true},
+		{Function: pkg.Func("Both"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true},
+	}, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyStaticFunctionReferenceCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return call.Common().StaticCallee() == pkg.Func("address") && argument == 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := pkg.Func("Worker")
+	if entry, found := plan.FunctionPlan(worker); !found || entry.FuncRep != coro.Dispatch || entry.Emission == coro.EmitNone {
+		t.Fatalf("factory did not publish its callable: %+v", entry)
+	}
+	bit := coro.ExecutionDomainProgramCapability()
+	service := coro.NewProgramCapabilities(true, false)
+	masks := map[*ssa.Function]coro.ProgramCapabilities{worker: bit}
+	capabilities, err := deriveCoroFunctionProgramCapabilities(plan,
+		map[*ssa.Function]coro.ProgramCapabilities{worker: service, pkg.Func("Other"): coro.GCObservationProgramCapability()}, nil, masks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"Factory", "Aggregate", "Both"} {
+		if capabilities[pkg.Func(name)] != service || masks[pkg.Func(name)] != bit {
+			for _, block := range pkg.Func(name).Blocks {
+				for _, instruction := range block.Instrs {
+					if ret, ok := instruction.(*ssa.Return); ok {
+						for _, value := range ret.Results {
+							shape, present := plan.ValuePlan(value)
+							t.Logf("%s return %T %s: %+v present=%t", name, value, value, shape, present)
+						}
+					}
+				}
+			}
+			t.Fatalf("%s lost its published callable requirements: services=%#x mask=%#x", name, capabilities[pkg.Func(name)], masks[pkg.Func(name)])
+		}
+	}
+	if capabilities[pkg.Func("Observer")] != 0 || masks[pkg.Func("Observer")] != 0 {
+		t.Fatal("observation inherited a separately published target's services")
+	}
+	var observed, published bool
+	for _, reference := range plan.BasePlan().References() {
+		owner, _ := plan.Function(reference.Owner)
+		target, _ := plan.Function(reference.Target)
+		if owner == pkg.Func("Both") && target == worker {
+			observed = observed || reference.ObservationOnly
+			published = published || !reference.ObservationOnly
+		}
+	}
+	if !observed || !published {
+		t.Fatal("observation and publication of one target were conflated")
+	}
+	if capabilities[pkg.Func("DeadFactory")] != 0 || masks[pkg.Func("DeadFactory")] != 0 {
+		t.Fatal("unreachable factory retained services")
+	}
+}
+
 func TestCoroArchiveOnlyHelpersPropagateCapabilitiesAndPredicates(t *testing.T) {
 	pkg, _, _ := buildGoSSAPkg(t, `package foo
 func Owner() {}

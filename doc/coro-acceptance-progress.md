@@ -863,6 +863,42 @@ and original60FD+6opaque plus three reflection routes/source-after matching
 with peak2752.4MiB. Its73-demo cohort is still running. Current CI/review gates
 for PR277/278/279 remain open; no previous-head CI is substituted.
 
+Subsequently PR [#277](https://github.com/cpunion/llgo/pull/277) merges as
+`058fde057` at19:29:33 UTC: exact head `59dae8a0b` passes18/18 CI jobs in
+run38951481857. PR [#278](https://github.com/cpunion/llgo/pull/278) merges as
+`b3d007869` at19:39:12 UTC: exact head `24074d5a3` passes18/18 jobs in
+run38952004712. Both have freshly empty paginated reviews, inline/issue comments
+and review threads immediately before integration. PR279 head `cf58ec029`
+then passes18/18 jobs in run38954118861 and merges as `faf709261` at19:58:18 UTC,
+also after fresh empty review/comment/thread inventories. Immutable v104 of that exact head
+passes broad compiler129.323s/1309.9MiB, six real archive executions
+53.701s/1218.9MiB and unchanged architecture/build gates0.667s/731.7MiB.
+Its full fresh test/go cohort is running; v103 demos and the older v70 stdlib
+and v65 GOROOT cohorts retain their own source identities and unfinished status.
+
+The next isolated private-callable branch reproduces a missing conditional
+guard when a library factory returns a private resource producer with no
+consumer SSA declaration (0.618s/700.3MiB). The checked archive index now retains
+its delivery inventory predicate, and physical planning consumes the already
+frozen dynamic recipes rather than requiring a visible producer. The existing
+archive fixture adds a third mode with no consumer producer/helper declaration;
+all three modes pass nine actual cancellation/cleanup executions together
+(97.246s/1636.7MiB). This does not add a runtime capsule or a second call engine.
+
+A separate scalar/aggregate factory regression reproduces lost service and
+specialization dependencies (0.628s/1267.6MiB). The sole Graph's immutable sorted
+reference projection now feeds the existing capability/predicate fixed point;
+the plan digest is v44 and library metadata is v18. The initial broad regression
+correctly rejects treating code observation as callable publication; the original
+14 observation/invocation cases then pass after retaining exact ObservationOnly
+classification. The same target's simultaneous observation/publication remains
+distinct, and an observation-only factory retains no target services even if
+another factory publishes that target. Full analysis race passes41.623s/1559.5MiB,
+broad compiler204.815s/528.6MiB and unchanged architecture/build gates
+0.976s/717.6MiB. Final immutable
+feature acceptance and CI remain pending; unit capability seeds alone do not
+establish execution of a private worker/GC factory.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
@@ -1734,12 +1770,13 @@ bound is still explicit.
 ## Remaining work, in order
 
 1. Finish current executable acceptance on immutable compiler/source pairs.
-   Latest integrated v100 `test/go` passes271/271; immutable v101 is running
-   the complete fresh-build cohort for PR277. The earlier v70 native Go demos
-   pass73/73. The single-snapshot v70 180-package stdlib evaluation has124
+   Integrated PR277's v101 `test/go` passes271/271; immutable v104 is running
+   the complete fresh-build cohort for PR279. The earlier v70 native Go demos
+   pass73/73, and v103's73-demo cohort is running. The single-snapshot v70
+   180-package stdlib evaluation has at least128
    completed package passes and no failure so far; it remains active. The older
    fixed v65-source/v64-compiler eight-shard GOROOT evaluation has completed
-   shards0–5 and is running shard6 (117/135 done at this observation).
+   shards0–6 and is running shard7.
    Preserve every older failure/resource stop;
    focused passes on later snapshots do not rewrite those journals or establish
    a final-snapshot whole-suite pass. Keep unchanged inputs, private scratch
