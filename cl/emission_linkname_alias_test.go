@@ -85,8 +85,15 @@ func deleteHandle(handle uintptr) {}
 `)
 	caller := fixture.addPackage(t, "example.com/emission/handlecaller", `package handlecaller
 import "example.com/emission/declhandles"
+func Construct(constructor func(any) declhandles.Handle) declhandles.Handle {
+    return constructor("payload")
+}
 func Root() any {
-    handle := declhandles.NewHandle("payload")
+    handle := Construct(declhandles.NewHandle)
+    bound := handle.Value
+    expression := declhandles.Handle.Value
+    var view interface { Value() any } = handle
+    if bound() != expression(handle) || view.Value() != handle.Value() { panic("facade") }
     value := handle.Value()
     handle.Delete()
     return value
@@ -124,6 +131,19 @@ func Root() any {
 		}
 		if _, paired := u.goLinknameDefinitions[source]; !paired {
 			t.Errorf("declaration-only %s has no exact structural linkname proof", test.source)
+		}
+		adapter, adapted, err := u.CoroManagedFunctionValueTarget(source)
+		if err != nil || !adapted || adapter == nil || !types.Identical(adapter.Signature, source.Signature) {
+			t.Fatalf("%s source callable facade=%v,%t,%v", test.source, adapter, adapted, err)
+		}
+		if u.ownerOf(adapter) != u.packages[definitions.ssa] {
+			t.Errorf("%s callable facade belongs to a non-emitted declaration owner", test.source)
+		}
+		if err := u.validateManagedForeignFunctionValueWrapper(adapter); err != nil {
+			t.Errorf("%s facade lost its exact ordinary Go forwarding proof: %v", test.source, err)
+		}
+		if source.Signature.Recv() != nil && u.coroProgramIR.managedMethodTargets[source] != adapter {
+			t.Errorf("%s metadata lost its receiver-preserving facade", test.source)
 		}
 	}
 }

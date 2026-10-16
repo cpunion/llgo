@@ -1174,6 +1174,10 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	}
 	for alias := range u.aliases {
 		if canonical, frozen := u.Resolve(alias); frozen {
+			if adapter := u.managedForeignWraps[alias]; adapter != nil {
+				u.coroProgramIR.managedMethodTargets[alias] = adapter
+				continue
+			}
 			if target := u.coroProgramIR.managedMethodTargets[canonical]; target != nil {
 				if target == canonical {
 					target = alias // ordinary aliases retain their source receiver view
@@ -4426,12 +4430,20 @@ func (u *EmissionUniverse) selectABITypeMethods(prepared *preparedEmissionPackag
 				return err
 			}
 		}
+		source := fn
 		fn = u.canonicalAlias(fn)
 		if fn == nil {
 			return fmt.Errorf("prepare emission universe: ABI method table for %v reached a cyclic method alias", typ)
 		}
 		if _, frozen := u.required[fn]; !frozen {
 			return fmt.Errorf("prepare emission universe: ABI method table for %v references method %q outside the frozen emission universe", typ, fn.Name())
+		}
+		if source != fn && source.Signature != nil && source.Signature.Recv() != nil {
+			if adapted, err := u.materializeManagedForeignFunctionValueAdapter(source, prepared); err != nil {
+				return err
+			} else if adapted {
+				fn = u.managedForeignWraps[source]
+			}
 		}
 		methods = append(methods, fn)
 		return nil
@@ -6767,7 +6779,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		if directCall {
 			return nil
 		}
-		if adapted, err := u.materializeManagedForeignFunctionValueAdapter(canonicalTarget, owner); err != nil {
+		if adapted, err := u.materializeManagedForeignFunctionValueAdapter(target, owner); err != nil {
 			return err
 		} else if adapted {
 			return nil

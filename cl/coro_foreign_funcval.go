@@ -27,8 +27,10 @@ import (
 
 // materializeManagedForeignFunctionValueAdapter creates the single Go-callable
 // body used when an exact C declaration or C-linked method crosses a managed
-// function-value boundary. Direct calls and raw code-address uses continue to
-// name target. The wrapper's ordinary SSA call lets the existing callable
+// function-value boundary. An exact managed linkname facade also uses this
+// forwarder when aliasing would erase its source receiver or callable type.
+// Direct calls and raw code-address uses continue to name target. The wrapper's
+// ordinary SSA call lets the existing callable
 // contract, worker, same-M, and effect propagation machinery choose its
 // execution protocol. A method wrapper retains the source receiver in its
 // signature; the ordinary method-descriptor path performs the receiver-aware
@@ -40,9 +42,13 @@ func (u *EmissionUniverse) materializeManagedForeignFunctionValueAdapter(
 	if u == nil || target == nil {
 		return false, nil
 	}
+	source := target
 	target = u.canonicalAlias(target)
 	if target == nil {
 		return false, fmt.Errorf("prepare emission universe: managed foreign function-value target has a cyclic alias")
+	}
+	if _, forwarder := u.managedForeignWrapInfo[target]; forwarder {
+		return false, nil // An existing Go carrier needs no second adapter.
 	}
 	// Package-less SSA wrappers are owned by the package that uses the exact
 	// wrapper instance. addResolvedRequired has just frozen its frontend kind
@@ -65,7 +71,17 @@ func (u *EmissionUniverse) materializeManagedForeignFunctionValueAdapter(
 			target.Name(),
 		)
 	}
-	if !isNativeFuncKind(kind) {
+	carrier := target
+	managedFacade := kind == goFunc && source != target && source.Signature != nil &&
+		!types.Identical(source.Signature, target.Signature)
+	if managedFacade {
+		pair, paired := u.goLinknameDefinitions[source]
+		if !paired || u.canonicalAlias(pair.definition) != target || pair.key == "" {
+			return false, nil
+		}
+		carrier = source
+	}
+	if !isNativeFuncKind(kind) && !managedFacade {
 		return false, nil
 	}
 	if target.Signature == nil {
@@ -74,17 +90,17 @@ func (u *EmissionUniverse) materializeManagedForeignFunctionValueAdapter(
 			target.Name(),
 		)
 	}
-	if wrapper := u.managedForeignWraps[target]; wrapper != nil {
+	if wrapper := u.managedForeignWraps[carrier]; wrapper != nil {
 		return true, nil
 	}
-	structuralKey, err := u.managedForeignFunctionValueWrapperStructuralKey(target, owner)
+	structuralKey, err := u.managedForeignFunctionValueWrapperStructuralKey(carrier, owner)
 	if err != nil {
 		return false, err
 	}
-	wrapperName := target.Name() + "$wrapper$llgo$managed-foreign$v1$" + emissionDigest(structuralKey)
-	wrapper := ssawrap.MakeCallWrapperNamed(u.goProg, target, wrapperName)
-	u.managedForeignWraps[target] = wrapper
-	u.managedForeignWrapInfo[wrapper] = target
+	wrapperName := carrier.Name() + "$wrapper$llgo$managed-foreign$v1$" + emissionDigest(structuralKey)
+	wrapper := ssawrap.MakeCallWrapperNamed(u.goProg, carrier, wrapperName)
+	u.managedForeignWraps[carrier] = wrapper
+	u.managedForeignWrapInfo[wrapper] = carrier
 	u.syntheticKeys[wrapper] = structuralKey
 	if err := u.recordFunctionKind(wrapper, owner, goFunc); err != nil {
 		return false, err
@@ -144,7 +160,13 @@ func (u *EmissionUniverse) CoroManagedFunctionValueTarget(
 		// operand into a preparation failure.
 		return source, false, nil
 	}
-	adapter = u.managedForeignWraps[canonical]
+	carrier := canonical
+	adapter = u.managedForeignWraps[source]
+	if adapter != nil {
+		carrier = source
+	} else {
+		adapter = u.managedForeignWraps[canonical]
+	}
 	if adapter == nil {
 		// Intrinsic wrappers belong to the package that materializes the value.
 		// That keeps their body in the same independently-built archive as the
@@ -178,7 +200,7 @@ func (u *EmissionUniverse) CoroManagedFunctionValueTarget(
 		}
 	}
 	_, intrinsicAdapter := u.callWrapInfo[adapter]
-	if (!intrinsicAdapter && u.managedForeignWrapInfo[adapter] != canonical) || u.canonicalAlias(adapter) != adapter {
+	if (!intrinsicAdapter && u.managedForeignWrapInfo[adapter] != carrier) || u.canonicalAlias(adapter) != adapter {
 		return nil, false, fmt.Errorf(
 			"coroutine managed function-value source %q has inconsistent adapter metadata",
 			source.Name(),
@@ -270,7 +292,7 @@ func (u *EmissionUniverse) validateManagedForeignFunctionValueWrapper(
 		return fmt.Errorf("managed foreign function-value forwarding body is invalid: %w", err)
 	}
 	if forward.Common() == nil || forward.Common().StaticCallee() != target {
-		return fmt.Errorf("managed foreign function-value forwarding body does not call its exact C declaration")
+		return fmt.Errorf("managed function-value forwarding body does not call its exact source declaration")
 	}
 	site, frozen, err := u.CoroCallSitePlan(forward)
 	if err != nil || !frozen {
@@ -282,7 +304,7 @@ func (u *EmissionUniverse) validateManagedForeignFunctionValueWrapper(
 	if site.Elision != CoroCallNotElided || site.Intrinsic || site.StaticSpawnTarget != nil ||
 		site.ManagedStaticTarget != nil || site.RawPlain ||
 		(site.GeneratedCgoTarget != nil && site.GeneratedCgoTarget != target) {
-		return fmt.Errorf("managed foreign function-value forwarding recipe is not one exact C call")
+		return fmt.Errorf("managed function-value forwarding recipe is not one exact source call")
 	}
 	return nil
 }
