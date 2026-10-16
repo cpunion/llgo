@@ -11,11 +11,13 @@ Integration is in `coro/sync-main-20260830-r2`. Commit `d0838f492` completes the
 existing merge of parents `97572a91d` and `c4941f9ae`; no newer main was merged.
 Draft PR [cpunion/llgo#260](https://github.com/cpunion/llgo/pull/260) carries this
 checkpoint. Follow-up commit `d93ff685c` fixes dynamic pointer-result consumption.
-Latest integrated CI observation: head `7170ce7a7` in run `38826618373` completed
+Latest completed CI observation: head `09db805cd` in run `38837055083` completed
 all 18 coroutine workflow jobs successfully, with no failure. This includes the
-repaired WASI cache-discovery and host-SSA build-tag lanes. The separate
-resource-delivery branch includes `2ac5ee5fc`; its newer cleanup/source changes are tested
-below and are not silently included in that CI head.
+repaired WASI cache-discovery and host-SSA build-tag lanes, typed delivery source
+facts, automatic hidden-helper coloring, and cleanup-continuation corrections.
+Physical resource-delivery guards remain fail-closed and are not enabled by
+these frontend facts. The following static-image and compiler-cost changes
+require a new CI head; the completed run is not attributed to later commits.
 The destination is `cpunion/llgo:llvm-coro`. The acceptance environment is
 Darwin/arm64, Go 1.27 and LLVM 22. No new upstream-main synchronization is
 required for this work.
@@ -337,6 +339,53 @@ both the source SHA-256 manifest and recursive content comparison before
 removing its expanded copy. Archives, manifests, logs and commands remain;
 this is storage reclamation, not loss of the earlier source evidence.
 
+### Executable compatibility follow-up (03:16 UTC)
+
+The immutable v46 stdlib evaluation has **60 distinct completed package passes**
+at this observation. Two disjoint lanes remain active; two were deliberately
+stopped, joined and reclaimed to reduce concurrent compilation. This is not a
+completed 180-package pass. Three crypto builds hit their 25-minute limits.
+Semantic failures include Darwin x509's floating/pointer boundaries, TLS/expvar
+preflight, hidden embed initialization and the go/types hasher crash. No new
+xfails or instruction-golden changes hide those results.
+
+The embed failure is closed independently on v51, source `0caa65501` (manifest
+SHA-256 `8180af0fd3f0db2fd4ee10affc8a8f9f6b65ae0ac4236dbc31a7c407d1741a86`),
+compiler SHA-256
+`19899027d4d59be88fe8c35fe683949e3bfc105b500d9a1afc5973f44f1acf2a`.
+The complete real `test/std/embed` package compiles and executes successfully;
+binary SHA-256 is
+`203a2b98625206c9c17fbefad3412385423b8f7bce9307f57689c6f211d5ab7f`.
+Children joined, private scratch was reclaimed and source hashes match.
+Compiler-generated FS tables and slice headers are now static read-only data;
+there are no hidden MakeSlice/AllocZ init calls. Native64/wasm32 LLVM gates check
+layout, nil zero FS, separate metadata, and writable nonaliasing embedded byte
+slices. Coro/Emission and selected SSA regressions pass (129.172s / 8.127s).
+The new image test is named `TestCoro*` so the existing CI selection includes it.
+
+A separate compiler-only fast filter rejects ordinary allocations before
+copying their use lists during synthetic-make recognition. Its zero-allocation
+gate and slice/frame-retention regressions pass; an unchanged v48 compile.go
+overlay makes the same gate fail at one allocation per query. The existing
+make-slice identity/type checks are unchanged. This is not a runtime performance
+claim.
+
+Darwin CFData typed-pointer adapters and a static maphash type-ABI adapter remain
+isolated experiments until affected executable gates pass. The minimal bool
+maphash program passes the retained `afe9a540` main baseline; the v46 go/types
+run crashes in TestHashers. The patch reuses existing typehashImpl rather than
+reading a legacy map Hasher callback as a managed descriptor. Source-overlay
+type checks pass on Darwin/arm64, Linux/amd64 and wasm32, and Go control tests
+pass; actual patched package runs remain in progress. Do not count this as a
+full go/types or maphash repair yet.
+
+The fixed v48 full 1082-case GOROOT selection is running from the beginning.
+Earlier missing-sysctl and scratch-scan interruptions are retained separately.
+The new bounded runner retries only transient child ENOENT scan races; RSS,
+disk, timeout and complete-scan checks remain enabled. A separate immutable r6
+package runner fingerprints a configurable compiler Go soft memory limit below
+the unchanged tree-RSS hard cap; generated-program limits are unchanged.
+
 | Gate | Latest observed result | Scope |
 | --- | --- | --- |
 | `test` | 41 passed, 1 skipped | Fixed v47 compiler/source, uncached compile and execution |
@@ -509,8 +558,10 @@ bound is still explicit.
 1. Finish current executable acceptance on immutable compiler/source pairs.
    Fresh v46 `test/go` passes 266/266 and `_demo/go` passes 73/73; v47 basic
    executable packages pass 68 tests with one helper skip. The v46 stdlib
-   evaluation continues in four disjoint remaining-package cohorts after 15
-   initial passes. Keep private cache reclamation, unchanged source/compiler
+   evaluation has 60 completed package passes across fixed cohorts after 15
+   initial passes; two remaining lanes are active and two are joined/stopped.
+   The full v48 GOROOT selection is active, not a complete pass. Keep private
+   cache reclamation, unchanged source/compiler
    inputs and every interrupted receipt. A fresh final GOROOT selection is
    still required; focused fixes do not replace the whole selection.
    Rerun affected executable gates after later fixes;
