@@ -55,8 +55,14 @@ linked-program result is recorded below. Immutable v70 also completes a new
 whole `test/go` run: **268/268**, zero failures/skips, source-after matching,
 children joined and scratch reclaimed at 08:41:59 UTC. Binary SHA-256 is
 `6813a06a978452cb944ff975e6233efa5c5cea050b0e206877124c5d30db0e17`;
-run peak is 6503.3MiB. Its 73-demo and 180-package stdlib cohorts remain live;
-the v65 eight-shard GOROOT rerun remains ongoing.
+run peak is 6503.3MiB. The same v70 also completes **73/73 native Go demos**,
+zero failures, at 09:13:31 UTC. Every package is freshly compiled and executed;
+the final source-after matches and private scratch is reclaimed after child
+join. Its cohort-manifest SHA-256 is
+`90246b7317c30a9ad6b079f7c368a114b598ed3d9a4f90fc9a3c48037d7227dd`,
+and completed journal SHA-256 is
+`e6ac74c4623a37b3340ad08ee3fab7c592ee2d3c819670a71633e678c6c6eefa`.
+The 180-package stdlib cohort and v65 eight-shard GOROOT rerun remain live.
 
 The cgo follow-up is now [PR #265](https://github.com/cpunion/llgo/pull/265),
 head `bea4a1ff7`, targeting `llvm-coro` only. Immutable v71 completes the
@@ -75,7 +81,12 @@ GOROOT shard 0 completes 136 cases with 135 passes and one `inline_callers.go`
 stdout mismatch on the older v65 source. The unchanged original case passes a
 focused strict v71 rerun (63.49s; matching source before/after, 2835.2MiB peak).
 The older failure remains in its original cohort; this is not an eight-shard
-or final-head full-GOROOT pass.
+or final-head full-GOROOT pass. During shard 1 the older source also rejects
+`noinit.go`'s private gc `main..inittask` symbol, and `rangegen.go` stops at the
+existing 24GiB per-build RSS cap; these are distinct ABI/resource outcomes,
+not new xfails. Its caller-stack failure in unchanged `fixedbugs/bug347.go`
+passes a strict focused v76 rerun (29.18s case / 1491.9MiB peak, matching
+source-after). The live shard's old failure is retained as-is.
 
 Cleanup scope work is isolated from the merged PRs. Review rejects the broad
 all-source-defer experiment: Go main return does not promise completion of
@@ -109,8 +120,91 @@ only ordinary or deferred/frozen stops and preserves the receipt across park
 reuse. A 24-combination test covers issued/compatibility preparation and local,
 routed and pre-suspend completion; 14 invalid/interrupting inputs stay
 zero-mutation rejections. Full core race/shuffle and selected Node/wasm core
-tests pass (4.756s / 0.166s, combined peak 369.8MiB). Public resource API seeds
+tests pass (4.756s / 0.166s, combined peak 369.8MiB). Restoring only the old
+compact-channel file through a Go overlay passes all six ordinary controls
+but fails all 18 cleanup combinations, isolating the runtime transition fix
+from unrelated compiler changes. Public resource API seeds
 remain disabled; these gates do not establish public resource delivery.
+
+PR [#266](https://github.com/cpunion/llgo/pull/266) is now merged into
+`llvm-coro` as `890c8b998` (09:48:52 UTC). Exact head `ad5d61b29` completes all
+18 jobs in run `38877870414`; reviews, inline/issue comments and review threads
+were empty immediately before integration. Main remains untouched.
+
+The next isolated branch implements closed static resource delivery in the
+existing cleanup drainer: one active tag per physical frame, existing typed
+result slots, typed env/argument captures, and a separate nil-output producer
+fallback. The normal lane claims only after child completion is consumed;
+panic/cancel uses the same drainer and finite internal drop scope. External
+range-yield defer registration remains separate from yield-owned temporary
+resources. Source recipes now publish exact typed delivery records; an import
+without physical helper binding still rejects them rather than losing custody.
+Helper placement/edge validation and relocation use the existing shared
+gateways; the monotonic architecture budget is unchanged.
+
+Native and wasm32 IR verifies before/after CoroSplit. The broad selection
+passes cl 227.200s, cltest 7.344s and architecture 0.996s (626.1MiB peak).
+Immutable v77 also compiles and runs a real fd fixture covering normal caller
+ownership, a discarded `go` entry, GC while a C acquisition is pending, and
+parent cancellation before delivery. Three opens have exactly three closes;
+user continuation never resumes on the canceled lane. Source-after matches;
+compiler SHA-256 is `09cbd6e13d984204f42bec32a62f1e14bdbbe8054c89d12f76b967a255a4e135`,
+source manifest `4260c9262ab8fc6b11be9a3832c56653eff127abc06c62066b444408bb70b539`,
+binary `066464c7dd0daae1b5b831fb85b185bfcc2d2efd3cb1ae0e3ec77d6bf679ae58`.
+Combined peak is 1183.9MiB. A one-prefix omission negative builds successfully
+but fails with `open=3 close=2` (exit 86), then explicitly reclaims its fd;
+source-after matches. v78 also executes an internal drop interrupted between
+two awaits successfully. These initial prototypes auto-dropped a normal
+discarded entry, so **they do not establish Go-compatible normal-discard
+semantics**. Review corrects that rule: normal discarded raw fd results must
+remain open, while canceled or panicking undelivered results are dropped.
+The fallback stays armed through source RunDefers and is retired only at
+terminal Return commit, using existing status/continuation words. Native and
+wasm32 IR, dynamic/library selections and unchanged architecture gates pass
+(cl 12.585s, architecture 1.530s; 1301.1MiB peak). A new actual cohort covers
+normal-discard preservation, cancellation of an independent nil-output entry,
+parent cancellation and late stop during panic-driven internal drop. This is not yet
+dynamic descriptor, bodyless archive, reflection second-handoff or stdlib
+adoption acceptance; public standard-library seeds remain unchanged.
+
+The corrected immutable v79 linked fd fixture passes all three modes and
+**30/30 repeat runs**: normal discarded results stay open, independent and
+parent-owned canceled acquisitions close exactly once, and a panic-driven
+internal drop finishes its second await despite late shutdown. Source-after
+matches. Compiler SHA-256 is
+`f88b5f727b95acf572e259b9eed8c9720de358e84771b7dbeea27f273eefa361`,
+manifest `e042c061b8a3e12f0546a5b111e12ac69c541ace30b4ae3bb72373e535744495`,
+and linked image
+`8fe73d05a05177a05762cec449635ef8d2474ce1786fe173384484f09b4bed0d`.
+Removing only the compiler's internal shield leaves modes 0/2 passing but
+mode 1 fails with `open=2 close=1` (exit 86, explicit fd reclaim); the existing
+parent-prefix omission negative independently proves parent custody.
+
+Further review removes a synthetic pre-return RunDefers pass for resource-only
+frames: the existing terminal drainer already owns that cleanup. This avoids
+another result spill/copy. Large nil-output fallbacks now allocate only on the
+nil-output branch; a provided parent slot bypasses the allocation. Native and
+wasm32 IR gates require the exact branch, no unconditional aggregate AllocZ,
+no oversized frame, and pre/post-CoroSplit verification. The selected compiler
+gate passes 8.052s and the unchanged architecture gate 1.072s (1286.2MiB peak).
+The next actual cohort adds deferred, range-yield and second-site acquisitions;
+these routes are not yet recorded as passing. Permanent native CI now includes
+the typed resource fixture rather than relying only on local scripts.
+
+The first expanded v80 cohort is retained as a compile failure, not a pass:
+the static-defer invocation had no relocated source occurrence, so its resource
+slot remained unbound when the drop prefix was emitted. The fix routes static
+defer through the existing cleanup emission gateway. A deferred initializer
+and a later undelivered-result drop now occupy distinct frozen SitePlan phases;
+both still use one owner-local drainer and shared helper/await resolver. Large
+deferred result slots reuse the producer's already materialized allocator edge.
+The native/wasm32 gate now verifies both ordinary and deferred large consumers.
+The actual six-mode rerun and unchanged architecture gate remain required.
+
+GOROOT shard 1 also reports `fixedbugs/issue27695b.go` in the reflection/GC
+path. A strict unchanged-case v79 rerun still fails with `invalid zero-ticket
+coroutine run decision` (228.29s case; 2086.2MiB peak, source-after matched).
+This remains a real implementation gap, not an ABI exclusion or a new xfail.
 
 The v58 expvar retry now compiles and executes all four tests successfully.
 It retains source `d5d6c5627`, source-manifest SHA-256
@@ -808,8 +902,8 @@ delivery/performance acceptance.
 | `test/llgoext` | 23 passed | Fixed v54 compiler/source, including defer-head isolation and 130-G ID allocation |
 | `test/std/runtime` | 5 passed | Fixed v35 compiler/source, uncached compile and execution |
 | C fault recovery, foreign reentry, traceback | 4 passed | v7 compiler; probes compile, link and execute with LLGo |
-| Full `test/go` | v60: 268 passed; v64: 266 passed / 2 failed, then both original failures pass on v67 | v60 completed 2026-10-16 06:30 UTC, peak 6439.4 MiB including nested compilers. v64 source-after matches and scratch is reclaimed; its two failures expose the adjusted caller-PC regression fixed on v67. Both original probes pass unchanged with the fix, alongside the native/wasm permanent fixture. A fresh complete post-fix run remains required; no implicit acceptance transfer. |
-| Top-level `_demo/go` | Fixed v46: all 73/73 passed, zero semantic failures | Completed 2026-10-16 01:14 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Disk/monitor interruptions remain in the journal; only completed exact-input package passes were reused. |
+| Full `test/go` | Complete v67 and v70: 268/268 passed each, zero failures/skips | v67 completed at 08:00:52 UTC, v70 at 08:41:59 UTC. Both match source-after, join children and reclaim scratch; v70 run peak is 6503.3MiB. The earlier v64 266-pass / 2-failure cohort is retained; both original caller-PC failures are covered by the later complete runs. These are post-PC-fix cohorts, not acceptance of every subsequent compiler/runtime change. |
+| Top-level `_demo/go` | Fixed v70: all 73/73 passed, zero failures | Completed 2026-10-16 09:13:31 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Every v70 package was freshly built and run; no earlier-version successes were adopted. The previous v46 complete pass remains separate evidence. |
 | `test/std/os`, `test/std/net` | 85 passed; 129 passed / 5 skipped, respectively | Full packages compiled and executed with fixed source snapshot and v35, cache disabled |
 | `test/std/reflect` | v25: 68 passed | Separate real LLGo compile and generated-binary execution; build peak 5768 MiB |
 | `synctest` execution | Run/Wait, inheritance, channel/select/Cond, fake time, heap association and WaitGroup passed | Real LLGo programs also verify detached children, finalizers and AddCleanup outside the bubble; associated objects remain collectible. Host race tests are not LLGo race-instrumentation acceptance. |

@@ -3785,8 +3785,14 @@ func (a *coroPhysicalPureSSAAudit) plannedRuntimeHelpers(instr ssa.Instruction) 
 	}
 	semantic := make([]string, 0, len(site.managedRuntimeHelpers))
 	locality := make([]string, 0, 2)
+	delivery := make([]string, 0, 2)
+	initializer, drop, hasDelivery := a.universe.coroProgramIR.deliverySiteHelpers(instr)
 	for _, planned := range site.managedRuntimeHelpers {
 		helper := planned.name
+		if hasDelivery && (helper == initializer || helper == drop) {
+			delivery = append(delivery, helper)
+			continue
+		}
 		if coroLogicalCallerRuntimeHelper(helper) {
 			continue
 		}
@@ -3801,6 +3807,11 @@ func (a *coroPhysicalPureSSAAudit) plannedRuntimeHelpers(instr ssa.Instruction) 
 			continue
 		}
 		semantic = append(semantic, helper)
+	}
+	if hasDelivery {
+		if reason := a.requireFrozenStructuredRuntimeHelperInventory(instr, delivery, initializer, drop); reason != "" {
+			return nil, "resource delivery helper prefix: " + reason
+		}
 	}
 	if len(locality) != 0 || len(site.localityDispatchers) != 0 {
 		expected := []string{"LocalPackageLogical"}
@@ -4110,7 +4121,7 @@ func (a *coroPhysicalPureSSAAudit) requireFrozenStructuredRuntimeHelperInventory
 		case coro.EmitCoroutine:
 			if plan.Primary != coro.PrimaryCoroutine ||
 				(plan.FuncRep != coro.DirectCoro && plan.FuncRep != coro.Dispatch) ||
-				!plan.Demand.Contains(coro.AsyncDemand) || !plan.Effect.MaySuspend() {
+				!plan.Demand.Contains(coro.AsyncDemand) || (!plan.Effect.MaySuspend() && !plan.HasStaticOutcome()) {
 				return "structured runtime helper " + helper + " is not one demanded coroutine child"
 			}
 			if plan.Exec.Contains(coro.MayUnwind) &&

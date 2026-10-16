@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,61 @@ func TestCoroBorrowedResourceCleanupAcceptance(t *testing.T) {
 		if err != nil || strings.TrimSpace(string(output)) != "borrowed fd cancellation and asynchronous cleanup ok" {
 			t.Fatalf("borrowed resource cleanup run %d: %v\n%s", i, err, output)
 		}
+	}
+}
+
+// The producer writes an actual fd into the caller-owned result slot before
+// its foreign operation completes. These modes distinguish Go's normal
+// discarded-result semantics from cancellation/panic custody, including a stop
+// arriving between two asynchronous steps of the internal drop.
+func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
+	if os.Getenv("LLGO_CORO_RESOURCE_ACCEPTANCE") != "1" {
+		t.Skip("set LLGO_CORO_RESOURCE_ACCEPTANCE=1 for linked typed resource delivery acceptance")
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("native resource delivery fixture requires POSIX descriptors")
+	}
+	compiler := os.Getenv("LLGO_TEST_LLGO")
+	if compiler == "" {
+		t.Fatal("LLGO_TEST_LLGO must identify the compiler being accepted")
+	}
+	compiler, err := filepath.Abs(compiler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := filepath.Join(t.TempDir(), "resource-delivery")
+	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Minute)
+	defer cancel()
+	build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-o", image, "./_testgo/coro_resource_delivery_slot/main.go")
+	build.Dir = filepath.Join(root, "runtime")
+	build.Env = append(os.Environ(), "LLGO_ROOT="+root, "LLGO_BUILD_CACHE=off")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("resource delivery build: %v\n%s", err, output)
+	}
+	for mode, expected := range []string{
+		"typed resource delivery normal, discarded and canceled passed",
+		"typed resource drop survives late cancellation",
+		"typed resource delivery normal, discarded and canceled passed",
+		"typed resource delivery normal, discarded and canceled passed", // Source defer.
+		"typed resource delivery normal, discarded and canceled passed", // Range-yield owner.
+		"typed resource delivery normal, discarded and canceled passed", // Second static site.
+	} {
+		t.Run(strconv.Itoa(mode), func(t *testing.T) {
+			for attempt := 0; attempt < 10; attempt++ {
+				runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
+				run := exec.CommandContext(runCtx, image)
+				run.Env = append(os.Environ(), "LLGO_DELIVERY_FIXTURE_MODE="+strconv.Itoa(mode))
+				output, err := run.CombinedOutput()
+				runCancel()
+				if err != nil || strings.TrimSpace(string(output)) != expected {
+					t.Fatalf("resource delivery run %d: %v\n%s", attempt, err, output)
+				}
+			}
+		})
 	}
 }
 

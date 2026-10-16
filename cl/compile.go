@@ -4087,7 +4087,13 @@ func (p *context) deferRunPos(fallback token.Pos) token.Pos {
 // already have source-level slots that deferred calls are allowed to update.
 func (p *context) prepareImplicitDeferResults(b llssa.Builder, fn *ssa.Function) {
 	p.implicitDeferResults = nil
-	if !p.functionHasExplicitStackDeferInAnon(fn) {
+	var needed bool
+	if physical := p.coroEmissionPlan(); physical != nil {
+		needed = physical.cleanup != nil && len(physical.cleanup.implicitReturns) != 0
+	} else {
+		needed = p.functionHasExplicitStackDeferInAnon(fn)
+	}
+	if !needed {
 		return
 	}
 	results := fn.Signature.Results()

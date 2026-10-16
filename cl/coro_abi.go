@@ -522,6 +522,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		types.TypeString(resultSlotType, qualified),
 	)
 	key += "\x00cleanup-shield=" + coroCleanupShieldBeginHookV1 + "/" + coroCleanupShieldEndHookV1
+	key += "\x00delivery=" + coroDeliveryGuardABI
 	sum := sha256.Sum256([]byte(key))
 	var hash [16]byte
 	copy(hash[:], sum[:len(hash)])
@@ -1511,6 +1512,11 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	var cleanup, externalCleanup *coroStaticCleanupState
 	if cleanupPlan != nil && cleanupPlan.external {
 		externalCleanup = preparedCleanup
+		if cleanupPlan.delivery != nil {
+			// Yield-owned acquisitions must not register temporary ownership in
+			// the source parent's external defer chain.
+			cleanup = p.beginCoroStaticCleanup(b, &coroStaticCleanupPlan{delivery: cleanupPlan.delivery})
+		}
 	} else {
 		cleanup = preparedCleanup
 	}
@@ -1541,6 +1547,9 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	physical.bindCancellationCompletion(b)
 	bodyCapability := newCoroPhysicalBodyCapability(physical)
 	emission.bindManagedPhysicalBody(bodyCapability, sourceBlocks)
+	if physical.cleanup != nil && cleanupPlan != nil {
+		physical.cleanup.bindDelivery(p, cleanupPlan.delivery)
+	}
 	b.SetBlock(physical.coro.InitialResumeBlock())
 	physical.activate(b)
 	b.Jump(sourceBlocks[0])

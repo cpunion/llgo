@@ -1626,8 +1626,18 @@ func emissionIndexNeedsManagedArrayTemporary(ctx *context, index *ssa.Index) boo
 // await; until then the distinct helper remains a conservative managed-only
 // edge and is elided for every non-await control recipe.
 func emissionCallNeedsManagedCoroResultSlot(ctx *context, call *ssa.Call) bool {
-	return ctx != nil && ctx.prog != nil && call != nil && call.Type() != nil &&
-		ctx.prog.LocalGoTypeExceedsNativeStack(ctx.patchType(call.Type()))
+	if ctx == nil || ctx.prog == nil || call == nil || call.Type() == nil {
+		return false
+	}
+	typ := ctx.patchType(call.Type())
+	if opcode, intrinsic := emissionCallIntrinsicInstruction(ctx, &call.Call); intrinsic && opcode == llgoCoroBorrowResult {
+		// The declaration returns a pointer, but a discarded entry may own
+		// its pointee. Plan that conditional allocation before effect analysis.
+		if pointer, ok := types.Unalias(typ).(*types.Pointer); ok {
+			typ = pointer.Elem()
+		}
+	}
+	return ctx.prog.LocalGoTypeExceedsNativeStack(typ)
 }
 
 func coroRuntimeHelperTargetName(logicalName string) string {

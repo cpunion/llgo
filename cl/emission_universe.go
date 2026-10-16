@@ -627,7 +627,15 @@ const (
 	coroRuntimeHelperAtSource coroRuntimeHelperPlacement = iota
 	coroRuntimeHelperAtPrologue
 	coroRuntimeHelperAtCleanup
+	// One deferred invocation can initialize a result, then later re-enter
+	// its owner's drainer to drop that result. They are separate emission
+	// occurrences even though they share the same source Defer instruction.
+	coroRuntimeHelperAtResultDrop
 )
+
+func (placement coroRuntimeHelperPlacement) cleanup() bool {
+	return placement == coroRuntimeHelperAtCleanup || placement == coroRuntimeHelperAtResultDrop
+}
 
 type coroPlannedRuntimeHelper struct {
 	name      string

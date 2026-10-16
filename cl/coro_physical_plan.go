@@ -60,6 +60,7 @@ const (
 	coroPhysicalInstructionFrameAllocaBytes
 	coroPhysicalInstructionHeapCStr
 	coroPhysicalInstructionImmutableCaptureLoad
+	coroPhysicalInstructionBorrowedResult
 )
 
 func (recipe coroPhysicalInstructionRecipe) String() string {
@@ -112,6 +113,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "heap-cstr"
 	case coroPhysicalInstructionImmutableCaptureLoad:
 		return "immutable-capture-load"
+	case coroPhysicalInstructionBorrowedResult:
+		return "borrowed-result"
 	default:
 		return fmt.Sprintf("physical-recipe(%d)", uint8(recipe))
 	}
@@ -414,6 +417,9 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		return true
 	}
 	if helper == coroManagedFrameSlotAllocZCall {
+		if plan.recipe == coroPhysicalInstructionBorrowedResult {
+			return false // Conditional nil-output fallback, not a source await.
+		}
 		switch plan.control {
 		case coroPhysicalControlDirectAwait, coroPhysicalControlDirectOutcome, coroPhysicalControlDispatchAwait,
 			coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait,
@@ -2020,6 +2026,8 @@ func planCoroPhysicalInstruction(
 			}
 			if found && frozen.failure == "" && frozen.plan.Intrinsic {
 				switch {
+				case frozen.opcode == llgoCoroBorrowResult:
+					result.recipe = coroPhysicalInstructionBorrowedResult
 				case frozen.opcode == llgoAlloca &&
 					frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineNoSuspend:
 					if len(instruction.Common().Args) != 1 {
