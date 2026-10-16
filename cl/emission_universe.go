@@ -2192,7 +2192,16 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		if err := u.coroProgramIR.freezeDeliveryProducer(recipe); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
-		return CoroIntrinsicCallInlineNoSuspend, true, nil
+		// Hidden fallback initialization and cleanup are ordinary managed calls.
+		// Freeze them into the same graph as source calls before effect/demand
+		// analysis; a metadata reference alone must not erase their effects.
+		if err := u.recordCoroLoweredCall(recipe.producer, coroDeliveryInitializeCall, recipe.initializer); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		if err := u.recordCoroLoweredCall(recipe.producer, coroDeliveryDropCall, recipe.drop); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
 	case llgoSkip:
 		// The intentionally polymorphic llgo.skip contract has no narrower
 		// signature to validate. The exact-direct-call check above is the full
@@ -3289,7 +3298,7 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// intrinsic emits no call and is valid only in their managed owner.
 		return CoroIntrinsicCallInlineNoSuspend
 	case llgoCoroBorrowResult:
-		return CoroIntrinsicCallInlineNoSuspend
+		return CoroIntrinsicCallInlineWithLoweredCalls
 	case llgoAllocaCStr, llgoAllocaCStrs:
 		// The C-string allocation intrinsics lower their size arithmetic and
 		// storage directly, then call runtime.AllocU/CStrCopy in a physical

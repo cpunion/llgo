@@ -14,7 +14,7 @@ checkpoint. Follow-up commit `d93ff685c` fixes dynamic pointer-result consumptio
 Latest integrated CI observation: head `7170ce7a7` in run `38826618373` completed
 all 18 coroutine workflow jobs successfully, with no failure. This includes the
 repaired WASI cache-discovery and host-SSA build-tag lanes. The separate
-resource-delivery branch is at `73095ebc0`; its newer cleanup changes are tested
+resource-delivery branch includes `2ac5ee5fc`; its newer cleanup/source changes are tested
 below and are not silently included in that CI head.
 The destination is `cpunion/llgo:llvm-coro`. The acceptance environment is
 Darwin/arm64, Go 1.27 and LLVM 22. No new upstream-main synchronization is
@@ -281,7 +281,11 @@ semantic failures, scratch reclaimed and source hashes unchanged. The v47
 four-package executable gate also completed: `test` 41 passed / 1 helper skipped,
 `test/cgo` 3 passed, `test/syncpool` 1 passed, and `test/llgoext` 23 passed
 (4845.7 MiB sampled process-tree peak). The source manifest still matches.
-Full v46 test/go remains running, not a completed package pass. After 15/180
+Full v46 test/go completed at 01:27 UTC: **266/266 passed**, zero failures or
+skips, run peak 6454.0 MiB. The retained binary SHA-256 is
+`789b4c4becb69976fbfdba6f9ac88144a2dfba3994a41b8380afb31040339db9`;
+all children joined, private scratch was reclaimed and source hashes match.
+After 15/180
 stdlib package passes, the sequential runner was deliberately terminated and
 joined to repartition the other 165 packages into four disjoint lanes. Its
 interrupted AES compilation is retained as an infrastructure interruption, not
@@ -299,6 +303,14 @@ adapter. All selected compiler `TestCoro*` / `TestEmission*` regressions pass
 (91.422s / 1162.0 MiB), the complete core race/shuffle suite passes
 (17.733s / 1648.4 MiB), and the architecture/selected build gates pass
 (0.663s / 698.6 MiB). No architecture budget was relaxed.
+Hidden initializer/drop calls are now frozen as ordinary lowered managed calls
+in that same graph, even without explicit source calls. Independent initializer-
+only and drop-only suspension/executor seeds both color producer and caller
+automatically without requiring Dispatch (1.405s / 1239.7 MiB). The architecture
+and affected build gates still pass (0.776s / 324.5 MiB). The broad build-driver rerun
+hit its 4GiB process-tree bound (4098.8 MiB); the diagnostic is retained and the
+whole selection restarts with an 8GiB bound. It is not a semantic failure or a
+completed build-driver pass.
 
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
@@ -314,7 +326,7 @@ this is storage reclamation, not loss of the earlier source evidence.
 | `test/llgoext` | 23 passed | Fixed v47 compiler/source, including defer-head isolation and 130-G ID allocation |
 | `test/std/runtime` | 5 passed | Fixed v35 compiler/source, uncached compile and execution |
 | C fault recovery, foreign reentry, traceback | 4 passed | v7 compiler; probes compile, link and execute with LLGo |
-| Full `test/go` | v42: all 266 top-level tests passed, zero failures/skips | Exact retained binary, source hashes match before/after. Build 236s / 7590.0 MiB; complete run 1678s / 6601.8 MiB, including nested compilers. The original 6GiB run stopped for resources; the 12GiB rerun starts from the beginning and passes. Includes new main-panic peers, generic/static spawn and rangefunc gates, as well as C faults, foreign reentry, logical stacks and reflection Call/MakeFunc. v35's 258-test pass remains historical evidence; newer raw-helper/GC changes are not included in this v42 result. |
+| Full `test/go` | Fixed v46: all 266 top-level tests passed, zero failures/skips | Completed 2026-10-16 01:27 UTC, run peak 6454.0 MiB including nested compilers. Exact retained binary and source hashes match; scratch reclaimed after child join. This entire rerun starts from the beginning rather than adopting 233 interrupted passes. Includes main-panic peers, generic/static spawn, rangefunc, C faults, foreign reentry, logical stacks and reflection Call/MakeFunc. Later v47 cleanup and source-front-end changes have separate affected gates, not an implicit full-v46 acceptance transfer. |
 | Top-level `_demo/go` | Fixed v46: all 73/73 passed, zero semantic failures | Completed 2026-10-16 01:14 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Disk/monitor interruptions remain in the journal; only completed exact-input package passes were reused. |
 | `test/std/os`, `test/std/net` | 85 passed; 129 passed / 5 skipped, respectively | Full packages compiled and executed with fixed source snapshot and v35, cache disabled |
 | `test/std/reflect` | v25: 68 passed | Separate real LLGo compile and generated-binary execution; build peak 5768 MiB |
@@ -476,19 +488,16 @@ bound is still explicit.
 ## Remaining work, in order
 
 1. Finish current executable acceptance on immutable compiler/source pairs.
-   v42 `test/go` now passes all 266 tests; its first run reached a nested
-   compiler's 6GiB process-tree limit, without a preceding assertion failure.
-   The successful second run reuses the exact test binary from the start under
-   a 12GiB tree cap. The
-   180-package `test/std` evaluation retains 20 completed passes and is stopped
-   at its 10GiB disk floor, as is the newest demo cohort after five passes.
-   Resume only after sufficient disk recovery, with private cache reclamation
-   and unchanged source/compiler inputs. Preserve every interrupted run.
-   v35 basic-package and v25 73-demo passes remain dated evidence, not a new
-   final-snapshot claim. Rerun affected executable gates after later fixes;
+   Fresh v46 `test/go` passes 266/266 and `_demo/go` passes 73/73; v47 basic
+   executable packages pass 68 tests with one helper skip. The v46 stdlib
+   evaluation continues in four disjoint remaining-package cohorts after 15
+   initial passes. Keep private cache reclamation, unchanged source/compiler
+   inputs and every interrupted receipt. A fresh final GOROOT selection is
+   still required; focused fixes do not replace the whole selection.
+   Rerun affected executable gates after later fixes;
    do not update instruction goldens to hide runtime failures.
-2. Close the specific stale-GC-root regression found in `typeparam/chans.go`.
-   The production three-file correction passes the GC-only fixed cohort:
+2. Preserve the closed stale-GC-root regression while finishing the final
+   GOROOT evaluation. The production correction passes the GC-only fixed cohort:
    placement is frozen, safepoint/critical cost and exact helper observation
    remain checked, and live-root retention/cancellation gates pass. Combining
    it with the raw-helper optimization exposed a separate static-outcome

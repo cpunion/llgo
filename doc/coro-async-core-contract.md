@@ -253,6 +253,8 @@ microtask 链饿死实际 I/O callback。公开 `syscall.Open` 仍保留原调�
 可确定、无捕获的 Go 函数身份，签名由 producer 的规范化参数/结果机械生成。它们不
 物化为函数值，不从运行时地址反查；普通函数值发布仍保留原有 descriptor 语义。
 精确 recipe 只冻结一次到已有 ProgramIR，普通调用者不继承 acquisition 身份。
+fallback initializer/drop 的隐藏调用也纳入已有 lowered-call 图，不依赖源码额外调用
+helper 来触发染色；两者独立的 suspend/exec 需求均通过原固定点自动传播。
 当前实现只完成源码事实与自动染色的前端验证，物理 guard 未绑定时后端明确拒绝，
 不会因为出现这个声明就把尚未保护的 hidden output 指针交给适配器。
 

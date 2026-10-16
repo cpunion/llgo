@@ -21,8 +21,6 @@ func dropFD(out *Result, _ unsafe.Pointer, _ string) { out.R0 = -1 }
 func borrow(func(*Result), func(*Result, unsafe.Pointer, string)) *Result
 func Acquire(path string) (int, error) {
 	out := borrow(initFD, dropFD)
-	initFD(out)
-	defer dropFD(out, nil, path)
 	return out.R0, out.R1
 }
 func Root() { Acquire("fixture") }
@@ -44,7 +42,7 @@ func TestCoroDeliverySourceFreezesExactTypedHelperIdentities(t *testing.T) {
 	}
 	site, frozen, err := universe.CoroCallSitePlan(recipe.borrow)
 	if err != nil || !frozen || !site.Intrinsic || !site.ElidesCall() ||
-		site.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend {
+		site.IntrinsicSemantics != CoroIntrinsicCallInlineWithLoweredCalls {
 		t.Fatalf("borrow site=%+v frozen=%t error=%v", site, frozen, err)
 	}
 	roots, err := universe.intrinsicCallValueRoots(llgoCoroBorrowResult, recipe.borrow.Common().Args, fnNormal)
@@ -63,6 +61,12 @@ func TestCoroDeliverySourceFreezesExactTypedHelperIdentities(t *testing.T) {
 	if err := universe.coroProgramIR.freezeDeliveryProducer(recipe); err == nil {
 		t.Fatal("source recipe remained mutable after source freeze")
 	}
+	lowered, err := universe.CoroLoweredCalls(producer)
+	if err != nil || len(lowered) != 2 ||
+		lowered[0].LogicalName != coroDeliveryDropCall || lowered[0].Target != recipe.drop ||
+		lowered[1].LogicalName != coroDeliveryInitializeCall || lowered[1].Target != recipe.initializer {
+		t.Fatalf("hidden helper calls were not frozen in the ordinary call graph: %+v error=%v", lowered, err)
+	}
 	ssaUniverse, err := coro.NewSSAEmissionUniverse(pkg.Prog, universe.Functions())
 	if err != nil {
 		t.Fatal(err)
@@ -71,31 +75,35 @@ func TestCoroDeliverySourceFreezesExactTypedHelperIdentities(t *testing.T) {
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
-	plan, err := coro.AnalyzeSSA(pkg.Prog, coro.Roots{{Function: pkg.Func("Root"), Demand: coro.AsyncDemand}}, coro.SSAConfig{
-		EmissionUniverse: ssaUniverse, FunctionIDs: functionIDs, MaxPlainInstructions: -1,
-		OutcomeMode:       coro.OutcomeExplicitStatus,
-		ClassifyLocalBody: universe.CoroLocalBodyFacts,
-		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
-			if function == recipe.drop {
-				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+	var plan *coro.SSAPlan
+	for _, asyncHelper := range []*ssa.Function{recipe.initializer, recipe.drop} {
+		plan, err = coro.AnalyzeSSA(pkg.Prog, coro.Roots{{Function: pkg.Func("Root"), Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			EmissionUniverse: ssaUniverse, FunctionIDs: functionIDs, MaxPlainInstructions: -1,
+			OutcomeMode:       coro.OutcomeExplicitStatus,
+			ClassifyLocalBody: universe.CoroLocalBodyFacts,
+			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if function == asyncHelper {
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly, Exec: coro.NeedsRuntimeContext}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+			ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+				site, found, err := universe.CoroCallSitePlan(call)
+				return found && site.ElidesCall(), err
+			},
+			ClassifyStaticFunctionReferenceCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+				return universe.CoroStaticFunctionReferenceCallArgument(call, argument)
+			},
+			ClassifyLoweredCalls: universe.CoroLoweredCalls,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, function := range []*ssa.Function{producer, pkg.Func("Root")} {
+			fact, found := plan.FunctionPlan(function)
+			if !found || !fact.Effect.Contains(coro.AwaitStructured) || !fact.Exec.Contains(coro.NeedsRuntimeContext) {
+				t.Fatalf("hidden %s did not automatically color %s: %+v present=%t", asyncHelper, function, fact, found)
 			}
-			return coro.SSAFunctionPolicy{}, nil
-		},
-		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
-			site, found, err := universe.CoroCallSitePlan(call)
-			return found && site.ElidesCall(), err
-		},
-		ClassifyStaticFunctionReferenceCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
-			return universe.CoroStaticFunctionReferenceCallArgument(call, argument)
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, function := range []*ssa.Function{producer, pkg.Func("Root")} {
-		fact, found := plan.FunctionPlan(function)
-		if !found || !fact.Effect.Contains(coro.AwaitStructured) {
-			t.Fatalf("drop did not automatically color %s: %+v present=%t", function, fact, found)
 		}
 	}
 	for _, function := range []*ssa.Function{recipe.initializer, recipe.drop} {
@@ -138,7 +146,7 @@ func TestCoroDeliverySourceRejectsUnboundOrInexactShapes(t *testing.T) {
 		{"indirect-init", "borrow(initFD, dropFD)", "borrow(initializer, dropFD)", "exact context-free function"},
 		{"captured-init", "borrow(initFD, dropFD)", "borrow(func(out *Result) { out.R0 = len(path) }, dropFD)", "exact context-free function"},
 		{"non-entry", "out := borrow", "if path == \"\" { return 0, nil }; out := borrow", "source entry block"},
-		{"duplicate", "initFD(out)", "_ = borrow(initFD, dropFD); initFD(out)", "conflicting or repeated"},
+		{"duplicate", "out := borrow(initFD, dropFD)", "out := borrow(initFD, dropFD); _ = borrow(initFD, dropFD)", "conflicting or repeated"},
 		{"foreign-drop", "func dropFD", "//go:linkname dropFD C.llgo_test_delivery_drop\nfunc dropFD", "managed Go helper"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

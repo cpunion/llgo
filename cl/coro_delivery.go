@@ -15,6 +15,11 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+const (
+	coroDeliveryInitializeCall = "coro.delivery.initialize"
+	coroDeliveryDropCall       = "coro.delivery.drop"
+)
+
 // coroSourceDeliveryRecipe is the source half of the existing delivery fact,
 // not a second effect graph or a runtime callback record. Only ProgramIR's
 // source builder writes it; physical binding/publication remain fail-closed.
