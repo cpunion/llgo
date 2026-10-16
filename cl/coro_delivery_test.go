@@ -38,6 +38,7 @@ func drop(out *Result, _ unsafe.Pointer) { out.R0[0] = 0 }
 func borrow(func(*Result), func(*Result, unsafe.Pointer)) *Result
 func Acquire() [131073]byte { out := borrow(initialize, drop); return out.R0 }
 func Root() byte { return Acquire()[0] }
+func Deferred() { defer Acquire() }
 `)
 			source.ssa.Build()
 			prog := newLLSSAProgForTarget(t, target.arch)
@@ -55,7 +56,10 @@ func Root() byte { return Acquire()[0] }
 			}
 			ids := u.FunctionIDConfig()
 			ids.CoroABI, ids.SchedulerABI, ids.ArchiveReady = coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, true
-			plan, err := coro.AnalyzeSSA(foo.ssa.Prog, coro.Roots{{Function: foo.ssa.Func("Root"), Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			plan, err := coro.AnalyzeSSA(foo.ssa.Prog, coro.Roots{
+				{Function: foo.ssa.Func("Root"), Demand: coro.AsyncDemand},
+				{Function: foo.ssa.Func("Deferred"), Demand: coro.AsyncDemand},
+			}, coro.SSAConfig{
 				EmissionUniverse: sources, FunctionIDs: ids, MaxPlainInstructions: -1,
 				OutcomeMode: coro.OutcomeExplicitStatus, ClassifyLocalBody: u.CoroLocalBodyFacts,
 				ClassifyLoweredCalls: u.CoroLoweredCalls,
@@ -117,6 +121,12 @@ func Root() byte { return Acquire()[0] }
 			}
 			if allocations != 1 {
 				t.Fatalf("fallback AllocZ count=%d, want one conditional allocation:\n%s", allocations, producer.String())
+			}
+			for _, name := range []string{"foo.Root", "foo.Deferred"} {
+				consumer := requireCoroPhysicalFunction(t, module, name)
+				if count := countCoroIRDirectCalls(consumer, llssa.PkgRuntime+".AllocZ"); count != 1 {
+					t.Fatalf("%s result allocations=%d, want one planned shared result slot:\n%s", name, count, consumer.String())
+				}
 			}
 			runCoroABITestPipeline(t, prog, module)
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
@@ -185,7 +195,7 @@ func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target) {
 	for _, owner := range universe.sortedUseOwners(producer) {
 		key := emissionFunctionOwnerKey{function: producer, owner: owner}
 		frozen := universe.coroProgramIR.sitePlans[key][recipe.borrow]
-		if source, cleanup := frozen.managedRuntimeHelpersAt(coroRuntimeHelperAtSource), frozen.managedRuntimeHelpersAt(coroRuntimeHelperAtCleanup); len(source) != 1 || source[0] != coroDeliveryInitializeCall || len(cleanup) != 1 || cleanup[0] != coroDeliveryDropCall {
+		if source, cleanup := frozen.managedRuntimeHelpersAt(coroRuntimeHelperAtSource), frozen.managedRuntimeHelpersAt(coroRuntimeHelperAtResultDrop); len(source) != 1 || source[0] != coroDeliveryInitializeCall || len(cleanup) != 1 || cleanup[0] != coroDeliveryDropCall {
 			t.Fatalf("borrow fallback helper placement source=%v cleanup=%v", source, cleanup)
 		}
 	}
@@ -427,14 +437,15 @@ func Unrelated() {}
 					if !sameCoroFrozenCallSitePlan(site.callPlan, frozen) {
 						t.Fatal("consumer and owner SitePlan disagree about one delivery recipe")
 					}
-					source, cleanup := site.managedRuntimeHelpersAt(coroRuntimeHelperAtSource), site.managedRuntimeHelpersAt(coroRuntimeHelperAtCleanup)
+					source, cleanup := site.managedRuntimeHelpersAt(coroRuntimeHelperAtSource), site.managedRuntimeHelpersAt(coroRuntimeHelperAtResultDrop)
 					switch test.name {
 					case "SpawnOnly":
 						if len(source) != 0 || len(cleanup) != 0 {
 							t.Fatalf("spawn executed entry fallback on parent: source=%v cleanup=%v", source, cleanup)
 						}
 					case "Deferred":
-						if len(source) != 0 || len(cleanup) != 2 || cleanup[0] != recipe.consumerDrop || cleanup[1] != recipe.consumerInitialize {
+						initializers := site.managedRuntimeHelpersAt(coroRuntimeHelperAtCleanup)
+						if len(source) != 0 || len(cleanup) != 1 || cleanup[0] != recipe.consumerDrop || len(initializers) != 1 || initializers[0] != recipe.consumerInitialize {
 							t.Fatalf("deferred delivery placement source=%v cleanup=%v", source, cleanup)
 						}
 					default:

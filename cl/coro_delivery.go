@@ -296,7 +296,17 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 						return err
 					}
 				}
-				if err := builder.freezeDeliveryHelperPlacements(ir, call, recipe.consumerInitialize, recipe.consumerDrop); err != nil {
+				var extra []coroPlannedRuntimeHelper
+				if _, deferred := call.(*ssa.Defer); deferred && u.prog != nil && u.prog.LocalGoTypeExceedsNativeStack(recipe.result) {
+					// The producer's nil-output fallback already materialized this
+					// exact helper. Reuse its edge for the deferred consumer's slot.
+					allocator := u.loweredCalls[recipe.producer][coroManagedFrameSlotAllocZCall]
+					if err := u.recordCoroLoweredCall(function, coroManagedFrameSlotAllocZCall, allocator.target); err != nil {
+						return err
+					}
+					extra = append(extra, coroPlannedRuntimeHelper{name: coroManagedFrameSlotAllocZCall, placement: coroRuntimeHelperAtCleanup})
+				}
+				if err := builder.freezeDeliveryHelperPlacements(ir, call, recipe.consumerInitialize, recipe.consumerDrop, extra...); err != nil {
 					return err
 				}
 			}
@@ -308,7 +318,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 // Resource helpers are ordinary frozen managed edges with exact source and
 // cleanup placements, not an emitter-time exception to the SitePlan verifier.
 func (builder coroProgramIRBuilder) freezeDeliveryHelperPlacements(
-	ir *coroProgramIR, call ssa.CallInstruction, initializer, drop string,
+	ir *coroProgramIR, call ssa.CallInstruction, initializer, drop string, extra ...coroPlannedRuntimeHelper,
 ) error {
 	u := builder.canonical.universe
 	if ir == nil || ir.callsFrozen || u == nil || call == nil || initializer == "" || drop == "" {
@@ -326,8 +336,9 @@ func (builder coroProgramIRBuilder) freezeDeliveryHelperPlacements(
 		}
 		site.managedRuntimeHelpers = append(site.managedRuntimeHelpers,
 			coroPlannedRuntimeHelper{name: initializer, placement: placement},
-			coroPlannedRuntimeHelper{name: drop, placement: coroRuntimeHelperAtCleanup},
+			coroPlannedRuntimeHelper{name: drop, placement: coroRuntimeHelperAtResultDrop},
 		)
+		site.managedRuntimeHelpers = append(site.managedRuntimeHelpers, extra...)
 		sort.Slice(site.managedRuntimeHelpers, func(i, j int) bool {
 			first, second := site.managedRuntimeHelpers[i], site.managedRuntimeHelpers[j]
 			if first.name != second.name {

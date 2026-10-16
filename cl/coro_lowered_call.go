@@ -192,7 +192,7 @@ func (p *context) emitCoroResolvedManagedHelper(
 			newOutcomePlainPhysicalABI(sourceSig).resultSlotType,
 		)
 		var cleanup *coroStaticCleanupState
-		if site := p.coroEmissionSite(); site != nil && site.placement == coroRuntimeHelperAtCleanup {
+		if site := p.coroEmissionSite(); site != nil && site.placement.cleanup() {
 			cleanup = p.coroCleanup()
 			if cleanup == nil {
 				panic("lowered outcome cleanup has no active drainer")
@@ -224,7 +224,7 @@ func (p *context) emitCoroResolvedManagedHelper(
 				p.immutablePlan().SuspensionEffectTrace(target, targetPlan.Effect),
 			))
 		}
-		if site := p.coroEmissionSite(); site != nil && site.placement == coroRuntimeHelperAtCleanup {
+		if site := p.coroEmissionSite(); site != nil && site.placement.cleanup() {
 			return p.compileCoroCleanupTargetAwait(b, target, args, keepaliveSlots)
 		}
 		if len(keepaliveSlots) != 0 {

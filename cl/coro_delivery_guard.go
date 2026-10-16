@@ -218,7 +218,7 @@ func (s *coroStaticCleanupState) emitDeliveryPrefix(p *context, b llssa.Builder,
 			args = append(args, b.LoadKnownNonNil(capture))
 		}
 		delivery.claim(b, guard)
-		finish := s.beginRelocatedSiteEmission(p, site.call)
+		finish := s.beginRelocatedSiteEmission(p, site.call, coroRuntimeHelperAtResultDrop)
 		p.compileCoroDeliveryHelper(b, site.recipe.consumerDrop, site.recipe.drop, args)
 		finish()
 		b.Jump(next)
@@ -312,7 +312,7 @@ func (s *coroStaticCleanupState) emitDeliveryFallback(p *context, b llssa.Builde
 	for index := 0; index < recipe.signature.Params().Len(); index++ {
 		args = append(args, p.fn.PhysicalParam(base+index))
 	}
-	finish := s.beginRelocatedSiteEmission(p, recipe.borrow)
+	finish := s.beginRelocatedSiteEmission(p, recipe.borrow, coroRuntimeHelperAtResultDrop)
 	p.compileCoroDeliveryHelper(b, coroDeliveryDropCall, recipe.drop, args)
 	finish()
 	b.Jump(done)

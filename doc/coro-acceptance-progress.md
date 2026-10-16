@@ -191,6 +191,16 @@ The next actual cohort adds deferred, range-yield and second-site acquisitions;
 these routes are not yet recorded as passing. Permanent native CI now includes
 the typed resource fixture rather than relying only on local scripts.
 
+The first expanded v80 cohort is retained as a compile failure, not a pass:
+the static-defer invocation had no relocated source occurrence, so its resource
+slot remained unbound when the drop prefix was emitted. The fix routes static
+defer through the existing cleanup emission gateway. A deferred initializer
+and a later undelivered-result drop now occupy distinct frozen SitePlan phases;
+both still use one owner-local drainer and shared helper/await resolver. Large
+deferred result slots reuse the producer's already materialized allocator edge.
+The native/wasm32 gate now verifies both ordinary and deferred large consumers.
+The actual six-mode rerun and unchanged architecture gate remain required.
+
 GOROOT shard 1 also reports `fixedbugs/issue27695b.go` in the reflection/GC
 path. A strict unchanged-case v79 rerun still fails with `invalid zero-ticket
 coroutine run decision` (228.29s case; 2086.2MiB peak, source-after matched).

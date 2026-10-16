@@ -2119,7 +2119,7 @@ func (s *coroStaticCleanupState) emitDynamic(p *context, b llssa.Builder) {
 				b.LoadKnownNonNil(b.FieldAddrKnownNonNil(node, site.keepaliveField+keepalive)),
 			)
 		}
-		finishSite := s.beginRelocatedSiteEmission(p, site.plan.instruction)
+		finishSite := s.beginRelocatedSiteEmission(p, site.plan.instruction, coroRuntimeHelperAtCleanup)
 		s.releaseDynamicRecord(p, b, site, record)
 		args := make([]llssa.Expr, len(site.args))
 		for argument := range args {
@@ -2154,11 +2154,12 @@ func (s *coroStaticCleanupState) releaseDynamicRecord(p *context, b llssa.Builde
 func (s *coroStaticCleanupState) beginRelocatedSiteEmission(
 	p *context,
 	instruction ssa.Instruction,
+	placement coroRuntimeHelperPlacement,
 ) func() {
 	if s == nil || p == nil || instruction == nil {
 		panic("coroutine cleanup relocated emission has no exact source site")
 	}
-	return p.beginCoroRelocatedSiteEmission(instruction, coroRuntimeHelperAtCleanup)
+	return p.beginCoroRelocatedSiteEmission(instruction, placement)
 }
 
 func (s *coroStaticCleanupState) emitSiteCall(
@@ -2181,6 +2182,10 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		}
 		return true
 	case coroStaticCleanupCoroutine:
+		finishSite := func() {}
+		if !siteEmissionActive {
+			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction, coroRuntimeHelperAtCleanup)
+		}
 		closureContext := llssa.Nil
 		if site.plan.closureEnvironment != nil {
 			if site.closureContext.IsNil() {
@@ -2189,6 +2194,7 @@ func (s *coroStaticCleanupState) emitSiteCall(
 			closureContext = b.Load(site.closureContext)
 		}
 		p.compileCoroTargetAwaitWithContextAndRecovery(b, site.plan.target, closureContext, args, s, nil)
+		finishSite()
 		return true
 	case coroStaticCleanupDispatch:
 		if site.descriptor.IsNil() || site.plan.signature == nil {
@@ -2220,7 +2226,7 @@ func (s *coroStaticCleanupState) emitSiteCall(
 	case coroStaticCleanupBuiltin:
 		finishSite := func() {}
 		if !siteEmissionActive {
-			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction)
+			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction, coroRuntimeHelperAtCleanup)
 		}
 		deferred := site.plan.instruction
 		if deferred == nil {
@@ -2282,7 +2288,7 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		}
 		finishSite := func() {}
 		if !siteEmissionActive {
-			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction)
+			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction, coroRuntimeHelperAtCleanup)
 		}
 		p.compileCoroGeneratedCgoTransaction(
 			b, *site.plan.generatedCgo, args, site.keepalives,
@@ -2295,7 +2301,7 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		}
 		finishSite := func() {}
 		if !siteEmissionActive {
-			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction)
+			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction, coroRuntimeHelperAtCleanup)
 		}
 		p.compileCoroWorkerForeignTransaction(
 			b, *site.plan.foreignWorker, llssa.Nil, args, site.keepalives,
