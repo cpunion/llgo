@@ -32,6 +32,15 @@ func closedCount() int32
 //go:linkname blocked C.llgo_delivery_blocked
 func blocked() int32
 
+//go:linkname closing C.llgo_delivery_closing
+func closing() int32
+
+//go:linkname fixtureMode C.llgo_delivery_fixture_mode
+func fixtureMode() int32
+
+//go:linkname waitClose C.llgo_delivery_wait_close
+func waitClose()
+
 //go:linkname release C.llgo_delivery_release
 func release()
 
@@ -40,10 +49,13 @@ func escaped()
 
 func initialize(out *result) { out.R0 = -1 }
 
-func drop(out *result, _ unsafe.Pointer, _ uint32) {
+func drop(out *result, _ unsafe.Pointer, mode uint32) {
 	fd := out.R0
 	out.R0 = -1
 	if fd >= 0 {
+		if mode == 2 {
+			waitClose()
+		}
 		closeFD(fd)
 	}
 }
@@ -76,15 +88,27 @@ func main() {
 	runtime.GC()
 	checkAlive(fd) // Normal Return transfers ownership; it must not auto-drop.
 	closeFD(fd)
+	ready := make(chan struct{})
+	go sentinel(ready)
+	<-ready
+	if fixtureMode() == 1 {
+		go acquire(2)
+		for closing() == 0 {
+			runtime.Gosched()
+		}
+		runtime.GC()
+		runtime.GC()
+		// A normal discarded-entry drop has already started and is awaiting
+		// waitClose, not the physical close itself. The late task stop must
+		// defer until the second await actually closes the fd.
+		return
+	}
 
 	go acquire(0) // No result sink: the independent entry must own its fallback.
 	for closedCount() != 2 {
 		runtime.Gosched()
 	}
 
-	ready := make(chan struct{})
-	go sentinel(ready)
-	<-ready
 	go canceledOwner()
 	for blocked() == 0 {
 		runtime.Gosched()

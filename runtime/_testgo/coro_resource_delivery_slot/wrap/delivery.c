@@ -9,24 +9,31 @@
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ready = PTHREAD_COND_INITIALIZER;
 static _Atomic int owned = -1;
-static _Atomic int opens, closes, waiting, released;
+static _Atomic int opens, closes, waiting, close_waiting, released, fixture_mode;
 
 static void check_finished(void) {
     int fd = atomic_load(&owned);
-    if (atomic_load(&opens) != 3 || atomic_load(&closes) != 3 || fd != -1 ||
-        !atomic_load(&waiting) || !atomic_load(&released)) {
+    int wanted = atomic_load(&fixture_mode) ? 2 : 3;
+    int waited = atomic_load(&fixture_mode) ? atomic_load(&close_waiting) : atomic_load(&waiting);
+    if (atomic_load(&opens) != wanted || atomic_load(&closes) != wanted || fd != -1 ||
+        !waited || !atomic_load(&released)) {
         /* Negative controls reclaim their own resource before reporting. */
         if (fd >= 0) close(fd);
-        fprintf(stderr, "delivery close mismatch: open=%d close=%d waiting=%d released=%d\n",
+        fprintf(stderr, "delivery close mismatch: open=%d close=%d waiting=%d close_waiting=%d released=%d\n",
                 atomic_load(&opens), atomic_load(&closes),
-                atomic_load(&waiting), atomic_load(&released));
+                atomic_load(&waiting), atomic_load(&close_waiting), atomic_load(&released));
         _Exit(86);
     }
-    static const char marker[] = "typed resource delivery normal, discarded and canceled passed\n";
-    if (write(1, marker, sizeof(marker) - 1) != sizeof(marker) - 1) _Exit(87);
+    static const char normal[] = "typed resource delivery normal, discarded and canceled passed\n";
+    static const char shielded[] = "typed resource drop survives late cancellation\n";
+    const char *marker = atomic_load(&fixture_mode) ? shielded : normal;
+    size_t length = atomic_load(&fixture_mode) ? sizeof(shielded) - 1 : sizeof(normal) - 1;
+    if (write(1, marker, length) != length) _Exit(87);
 }
 
 void llgo_delivery_install(void) {
+    const char *mode = getenv("LLGO_DELIVERY_FIXTURE_MODE");
+    atomic_store(&fixture_mode, mode && mode[0] == '1' && mode[1] == '\0');
     if (atexit(check_finished) != 0) _Exit(88);
 }
 
@@ -35,7 +42,7 @@ void llgo_delivery_open(int32_t *out, uint32_t mode) {
     if (fd < 0 || atomic_exchange(&owned, fd) != -1) _Exit(89);
     *out = fd;
     atomic_fetch_add(&opens, 1);
-    if (mode != 0) {
+    if (mode == 1) {
         pthread_mutex_lock(&lock);
         atomic_store(&waiting, 1);
         while (!atomic_load(&released)) pthread_cond_wait(&ready, &lock);
@@ -55,6 +62,15 @@ void llgo_delivery_check_alive(int32_t fd) {
 
 int32_t llgo_delivery_closed(void) { return atomic_load(&closes); }
 int32_t llgo_delivery_blocked(void) { return atomic_load(&waiting); }
+int32_t llgo_delivery_closing(void) { return atomic_load(&close_waiting); }
+int32_t llgo_delivery_fixture_mode(void) { return atomic_load(&fixture_mode); }
+
+void llgo_delivery_wait_close(void) {
+    pthread_mutex_lock(&lock);
+    atomic_store(&close_waiting, 1);
+    while (!atomic_load(&released)) pthread_cond_wait(&ready, &lock);
+    pthread_mutex_unlock(&lock);
+}
 
 void llgo_delivery_release(void) {
     pthread_mutex_lock(&lock);

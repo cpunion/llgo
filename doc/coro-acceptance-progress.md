@@ -126,6 +126,36 @@ but fails all 18 cleanup combinations, isolating the runtime transition fix
 from unrelated compiler changes. Public resource API seeds
 remain disabled; these gates do not establish public resource delivery.
 
+PR [#266](https://github.com/cpunion/llgo/pull/266) is now merged into
+`llvm-coro` as `890c8b998` (09:48:52 UTC). Exact head `ad5d61b29` completes all
+18 jobs in run `38877870414`; reviews, inline/issue comments and review threads
+were empty immediately before integration. Main remains untouched.
+
+The next isolated branch implements closed static resource delivery in the
+existing cleanup drainer: one active tag per physical frame, existing typed
+result slots, typed env/argument captures, and a separate nil-output producer
+fallback. The normal lane claims only after child completion is consumed;
+panic/cancel uses the same drainer and finite internal drop scope. External
+range-yield defer registration remains separate from yield-owned temporary
+resources. Source recipes now publish exact typed delivery records; an import
+without physical helper binding still rejects them rather than losing custody.
+Helper placement/edge validation and relocation use the existing shared
+gateways; the monotonic architecture budget is unchanged.
+
+Native and wasm32 IR verifies before/after CoroSplit. The broad selection
+passes cl 227.200s, cltest 7.344s and architecture 0.996s (626.1MiB peak).
+Immutable v77 also compiles and runs a real fd fixture covering normal caller
+ownership, a discarded `go` entry, GC while a C acquisition is pending, and
+parent cancellation before delivery. Three opens have exactly three closes;
+user continuation never resumes on the canceled lane. Source-after matches;
+compiler SHA-256 is `09cbd6e13d984204f42bec32a62f1e14bdbbe8054c89d12f76b967a255a4e135`,
+source manifest `4260c9262ab8fc6b11be9a3832c56653eff127abc06c62066b444408bb70b539`,
+binary `066464c7dd0daae1b5b831fb85b185bfcc2d2efd3cb1ae0e3ec77d6bf679ae58`.
+Combined peak is 1183.9MiB. A one-prefix omission negative and a normal drop
+interrupted between two awaits are being tested separately. This is not yet
+dynamic descriptor, bodyless archive, reflection second-handoff or stdlib
+adoption acceptance; public standard-library seeds remain unchanged.
+
 The v58 expvar retry now compiles and executes all four tests successfully.
 It retains source `d5d6c5627`, source-manifest SHA-256
 `4e19f44822bab94594cd031dccfa17ff0d8d9932a909d98ea6f692d1ccf11fe3`
