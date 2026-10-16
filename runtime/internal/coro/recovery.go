@@ -142,6 +142,13 @@ func takeRecover(g *G, childHandle unsafe.Pointer, transparent bool) (snapshot R
 	}
 }
 
+// The active frame/CompletionRecord observation is an owner-only scheduler
+// primitive. It allocates nothing and calls only leaf metadata predicates;
+// yielding here would add the observer's own frame to the chain being read.
+// This local certificate does not suppress callee effects or ordinary Go
+// preemption outside the observation.
+//
+//llgo:nopreempt
 func deferredPanicTraceScope(g *G) (owner *Frame, typeWord, dataWord unsafe.Pointer, ok bool) {
 	// This is a read-only observation used from runtime.Callers, which may be
 	// inside a compiler/runtime critical section. The active-frame and exact
