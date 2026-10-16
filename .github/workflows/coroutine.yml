@@ -290,6 +290,13 @@ jobs:
             <(llvm-nm --undefined-only --format=just-symbols "$output" | sort)
           node targets/wasm_exec.js "$output"
 
+          caller=/tmp/llgo-js-shared-caller-pc.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-js-wasm build -p=1 -target=wasm -o "$caller" \
+            runtime/_testgo/coro_shared_caller_pc/main.go
+          result="$(timeout 30s node --max-old-space-size=256 --unhandled-rejections=strict targets/wasm_exec.js "$caller")"
+          test "$result" = 'shared caller PC identity passed'
+
           filesystem=/tmp/llgo-js-wasm-stdlib-file.wasm
           GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
             /tmp/llgo-js-wasm build -p=1 -target=wasm -o "$filesystem" \
