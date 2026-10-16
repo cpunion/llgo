@@ -252,7 +252,7 @@ func (view CoroPlanningMetadataView) ImportedFunctions() ([]coro.LibraryEffectFu
 	return ret, nil
 }
 
-func (p *context) emitCoroArchiveDeliveryHelperValue(b llssa.Builder, helper coroArchiveDeliveryHelper) llssa.Expr {
+func (p *context) emitCoroArchiveDeliveryHelper(b llssa.Builder, helper coroArchiveDeliveryHelper) coroManagedCallable {
 	whole := p.immutablePlan()
 	if whole == nil || helper.signature == nil {
 		panic("archive helper requires one frozen typed callable")
@@ -282,21 +282,21 @@ func (p *context) emitCoroArchiveDeliveryHelperValue(b llssa.Builder, helper cor
 	if !types.Identical(physical.RawType(), signature) {
 		panic("archive helper conflicts with an existing physical declaration")
 	}
-	return p.emitCoroManagedPrimaryDescriptor(b, plan, abi, physical.Expr, physical.Expr, llssa.Nil, nil, false, llssa.Nil)
+	return p.emitCoroManagedPrimaryDescriptor(b, plan, abi, physical.Expr, physical.Expr, llssa.Nil, nil, false, llssa.Nil, nil)
 }
 
-func (p *context) emitCoroRecipeDeliveryHelperValue(b llssa.Builder, recipe coroSourceDeliveryRecipe, ordinal int, signature *types.Signature) llssa.Expr {
+func (p *context) emitCoroRecipeDeliveryHelper(b llssa.Builder, recipe coroSourceDeliveryRecipe, ordinal int, signature *types.Signature) coroManagedCallable {
 	target := recipe.initializer
 	if ordinal == 1 {
 		target = recipe.drop
 	}
 	if target != nil {
-		return p.emitCoroDeliveryHelperValue(b, target, signature)
+		return p.emitCoroDeliveryHelper(b, target, signature)
 	}
 	if recipe.archive == nil || !types.Identical(recipe.archive.helpers[ordinal].signature, signature) {
 		panic("resource helper has no exact typed source/archive binding")
 	}
-	return p.emitCoroArchiveDeliveryHelperValue(b, recipe.archive.helpers[ordinal])
+	return p.emitCoroArchiveDeliveryHelper(b, recipe.archive.helpers[ordinal])
 }
 
 func (p *context) compileCoroRecipeDeliveryHelper(b llssa.Builder, name string, recipe coroSourceDeliveryRecipe, ordinal int, args []llssa.Expr) {
@@ -321,6 +321,6 @@ func (p *context) compileCoroRecipeDeliveryHelper(b llssa.Builder, name string, 
 	// descriptors can be folded by LLVM; there is no new scheduler or call ABI.
 	invocation := p.coroDeliveryHelperInvocation()
 	invocation.recoverParent = false
-	p.compileCoroManagedDispatchAwaitValueResultWithRecovery(b, p.emitCoroArchiveDeliveryHelperValue(b, helper), args, helper.signature,
+	p.compileCoroManagedDispatchAwaitValueResultWithRecovery(b, p.emitCoroArchiveDeliveryHelper(b, helper).value, args, helper.signature,
 		coroManagedDispatchAwaitOptions{cleanup: invocation, descriptorNonNil: true})
 }

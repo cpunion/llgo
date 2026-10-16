@@ -50,7 +50,9 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 	plan := new(coroDeliveryFunctionPlan)
 	if recipe, present := ir.deliveryProducers[fn]; present {
 		fact, found := whole.FunctionPlan(fn)
-		if !found || fact.FuncRep == coro.Dispatch {
+		if !found || fact.FuncRep == coro.Dispatch && (len(fn.FreeVars) != 0 || fn.Signature.Recv() != nil ||
+			whole.HasRawPlainVariant(fn) || fact.RawPlainOnly ||
+			fact.ManagedEntry != coro.ManagedEntryCoroutine && fact.ManagedEntry != coro.ManagedEntryOutcomePlain) {
 			return nil, fmt.Errorf("llgo.coroBorrowResult requires a bound physical resource-delivery guard for descriptor publication")
 		}
 		if recipe.archive == nil {
@@ -226,8 +228,8 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 			guard.result = p.coroResultSlot(p.prog.Type(guard.plan.resultType(), llssa.InGo))
 		}
 		p.armCoroDynamicDeliveryCall(b, guard, env, args,
-			p.emitCoroRecipeDeliveryHelperValue(b, guard.plan.recipe, 0, initializer),
-			p.emitCoroRecipeDeliveryHelperValue(b, guard.plan.recipe, 1, drop), p.coroDeliveryHelperInvocation())
+			p.emitCoroRecipeDeliveryHelper(b, guard.plan.recipe, 0, initializer).value,
+			p.emitCoroRecipeDeliveryHelper(b, guard.plan.recipe, 1, drop).value, p.coroDeliveryHelperInvocation())
 		return guard
 	}
 	if len(args) != len(guard.args) {

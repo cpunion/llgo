@@ -31,6 +31,43 @@ type coroDynamicDeliveryRecipe struct {
 	largeResult bool
 }
 
+// Publication reads the same frozen recipe as static custody. The cold tail
+// contains ordinary typed helper descriptors, not another result transport or
+// a reverse lookup from the producer's code address.
+func (p *context) coroDeliveryDescriptorOptions(b llssa.Builder, entry plannedFunctionSymbol, signature *types.Signature) *llssa.CoroDispatchDeliveryOptions {
+	recipe, present, err := p.emissionUniverse.coroProgramIR.sourceDelivery(entry.function)
+	if err != nil {
+		panic(err)
+	}
+	if !present {
+		return nil
+	}
+	if entry.plan.FuncRep != coro.Dispatch || len(entry.function.FreeVars) != 0 || entry.function.Signature.Recv() != nil ||
+		entry.plan.ManagedEntry != coro.ManagedEntryCoroutine && entry.plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
+		p.immutablePlan().HasRawPlainVariant(entry.function) || !types.Identical(signature, canonicalCoroPlainDispatchSignature(recipe.signature)) {
+		panic("resource descriptor publication requires its exact guarded context-free managed entry")
+	}
+	_, initializer, drop, err := coro.DeliveryHelperSignatures(recipe.signature)
+	if err != nil {
+		panic(err)
+	}
+	options := &llssa.CoroDispatchDeliveryOptions{Version: llssa.CoroDispatchDeliveryVersionV1}
+	for ordinal, signature := range []*types.Signature{initializer, drop} {
+		abi, err := newCoroPlainDispatchEffectiveABI(p, signature)
+		if err != nil {
+			panic(err)
+		}
+		callable := p.emitCoroRecipeDeliveryHelper(b, recipe, ordinal, signature)
+		helper := llssa.CoroDispatchDeliveryHelper{Descriptor: callable.descriptor, Signature: signature, ABIHash: abi.hash}
+		if ordinal == 0 {
+			options.Initializer = helper
+		} else {
+			options.Drop = helper
+		}
+	}
+	return options
+}
+
 func (builder coroProgramIRBuilder) freezeDynamicDeliveryConsumer(ir *coroProgramIR, call ssa.CallInstruction) (*coroDynamicDeliveryRecipe, error) {
 	u := builder.canonical.universe
 	if call.Common().StaticCallee() != nil || call.Common().IsInvoke() || call.Common().Signature().Results().Len() == 0 {
@@ -175,7 +212,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryHelperCall(owner *ssa.Function
 	return builder.recordLoweredCallTarget(owner, name, coroLoweredCallTarget{target: target, whenResultDeliveryOf: source})
 }
 
-func (p *context) emitCoroDeliveryHelperValue(b llssa.Builder, target *ssa.Function, signature *types.Signature) llssa.Expr {
+func (p *context) emitCoroDeliveryHelper(b llssa.Builder, target *ssa.Function, signature *types.Signature) coroManagedCallable {
 	if target == nil || signature == nil || signature.Recv() != nil || signature.Variadic() || signature.Results().Len() != 0 {
 		panic("resource delivery descriptor requires one exact typed void helper")
 	}
@@ -188,7 +225,7 @@ func (p *context) emitCoroDeliveryHelperValue(b llssa.Builder, target *ssa.Funct
 	if err := validateCoroManagedDescriptorPrimary(entry.function, entry.plan, p.immutableEmissionUniverse()); err != nil {
 		panic(fmt.Errorf("resource delivery helper descriptor: %w", err))
 	}
-	return p.emitCoroManagedPrimaryValue(b, entry, target, nil, signature)
+	return p.emitCoroManagedPrimary(b, entry, target, nil, signature)
 }
 
 func (p *context) coroDynamicDeliveryGuard(call ssa.CallInstruction) *coroDeliveryGuardState {

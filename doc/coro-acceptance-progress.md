@@ -803,8 +803,34 @@ parameters separately reproduce the missing check. A real indexed archive
 still passes three cancellation/cleanup executions (25.357s/722.7MiB), and the
 shared value/parameter/allocation proof race group passes1.418s/346.8MiB.
 The invalid bodyful-C/declaration fixture is rejected by the existing contract
-shape gate, not treated as a causal lifetime failure. Whole-compiler/final
-immutable acceptance of this follow-up remains pending.
+shape gate, not treated as a causal lifetime failure. Immutable v102 then passes
+the full compiler regression146.628s/1264.5MiB and three real archive executions
+32.547s/767.8MiB. The original60FD+6opaque resource runs and all three reflection
+routes also pass, combined peak2815.6MiB and source-after matching. Final whole
+test/go/stdlib/platform acceptance of this follow-up remains pending.
+
+The next isolated experiment publishes guarded context-free resource producer
+descriptors from the same source/archive recipe. Ordinary descriptors keep the
+nine-field base and funcval stays two words; resource-only cold tails reference
+the existing typed initializer/drop descriptors. The emitter carries the exact
+descriptor type beside the function value instead of recovering it from an
+erased code word. Real export-data declarations additionally require the exact
+checked library identity and structural ABI; their synthetic marker alone is
+never authority. Captured/receiver adapters, raw/plain resource publication,
+external defer owners and reflection/FFI second custody handoff remain closed.
+
+An independent API-only probe against immutable v102 reproduces the original
+publication rejection (0.519s/1193.8MiB), then passes on the new implementation
+(1.136s/1218.7MiB); earlier probes with an opaque-call fixture or renamed test
+helper fail for unrelated reasons and are not causal evidence. Native/wasm32
+publication and original missing-guard gates pass1.690s/1239.4MiB. Real static
+and dynamic indexed archives pass six executable runs together
+(64.855s/1250.7MiB); the dynamic child must have a managed Dispatch/ResultDelivery
+CallPlan and an actual capability branch before cancellation, not a silently
+devirtualized call. Each executable checks one cleanup of resource99, both
+async drop steps and no canceled user continuation. Unchanged architecture
+passes0.704s/551.6MiB; broad compiler regression145.278s/1290.7MiB. This experiment is not yet integrated or whole-suite
+accepted.
 
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
