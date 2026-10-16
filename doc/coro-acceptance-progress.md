@@ -777,6 +777,13 @@ declarations pass native/wasm32 pre/post-split physical verification
 matrix and ordinary static helper path. No architecture budget, semantic
 assertion or instruction golden is relaxed.
 
+Immutable v101's exact-source archive gate passes29.509s/740.5MiB,
+full compiler regression131.451s/1205.5MiB,
+analysis race20.749s/1505.6MiB and unchanged architecture/build gates
+0.668s/347.3MiB. Its fresh complete test/go run remains active. The native linked
+CI lane now names the real archive execution test explicitly; the earlier
+18-job workflow did not include that new E2E fixture in its enumerated list.
+
 The first real archive probe exposes an export-data declaration with no SSA
 parameter values: defer operand validation now consumes its complete typed
 signature, and physical ABI context detection no longer mistakes absent body
