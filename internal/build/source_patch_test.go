@@ -371,12 +371,20 @@ func TestSyscallSourcePatchPreservesTargetImplementations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed || len(files) != 2 || filepath.Base(files[0]) != "syscall_freestanding_llgo.go" || filepath.Base(files[1]) != "syscall_webassembly.go" {
+	selectedWasm := make(map[string]bool, len(files))
+	for _, file := range files {
+		selectedWasm[filepath.Base(file)] = true
+	}
+	if !changed || len(files) != 2 || !selectedWasm["syscall_freestanding_llgo.go"] || !selectedWasm["syscall_webassembly.go"] {
 		t.Fatalf("wasm syscall patch changed = %v, files = %v, want target-neutral host-operation implementation", changed, files)
 	}
 	wasmPatch := filepath.Join(runtime.GOROOT(), "src", "syscall", "z_llgo_patch_syscall_webassembly.go")
 	if source := string(overlay[wasmPatch]); !strings.Contains(source, "llgo.coroHostOperation") || strings.Contains(source, `"syscall"`) {
 		t.Fatalf("overlay[%q] is not a self-contained host-operation replacement:\n%s", wasmPatch, source)
+	}
+	rawPatch := filepath.Join(runtime.GOROOT(), "src", "syscall", "z_llgo_patch_syscall_freestanding_llgo.go")
+	if source := string(overlay[rawPatch]); !strings.Contains(source, "ENOSYS") || strings.Contains(source, "llgo.syscall") {
+		t.Fatalf("overlay[%q] does not reject unavailable kernel traps:\n%s", rawPatch, source)
 	}
 }
 
