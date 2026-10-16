@@ -197,6 +197,33 @@ drop/claim 信息**，不能称为已经完成的 resource-atomic handoff。
    用户负责 Close/自己的 defer；不继续追踪 fd 的任意 int 复制，不替用户猜测释放。
    标准库内部多 await wrapper 使用前述显式普通 Go 守卫，不靠无限向上推导 contract。
 
+物理 emission 的空间约束进一步明确如下，仍属于待实现的 public-delivery gate，
+不能用设计替代运行证据：
+
+- 一个 physical frame 同时至多等待一个直接 child，因此所有临时调用守卫共享一个
+  active tag，而不是每个 call site 永久增加一个 bool 或分配一个 runtime guard 对象。
+  各 site 继续使用已有 typed result slot；drop 所需的 env/参数按其规范签名捕获，
+  不从代码地址反查、不额外复制整个结果 tuple。生命周期结束后清除 pointer roots。
+- producer 的 nil-output fallback 可以与它自己的 acquisition child 同时存活，不能
+  与上述 active tag 混为一个标记。它仅在没有 parent-owned 输出槽时启用，初始化后
+  才承担资源；child physical destroy、panic、取消和 discarded `go` entry 均仍受其
+  保护。正常有 parent slot 的入口不得重复初始化或抢先 drop parent 资源。
+- 临时 child guard 的 drop 在共享 cleanup drainer 中先于普通 source defer 执行；
+  fallback 的最后归属则在 source cleanup 之后结算。两者均在调用 drop 前撤销本次
+  active 标记；drop 的 await/panic 重新进入原 drainer 时不能重复执行同一资源记录。
+  drop helper 负责先清空自己的 ownership sentinel，再执行可能挂起的物理 close。
+- initializer/drop 的图边、exact target、typed capture 和 source/cleanup placement
+  都在 ProgramIR freeze 时补齐，再参与原 effect/demand fixed point。static、dynamic
+  descriptor、outcome、spawn/defer、reflect 不得各自创建另一套 cleanup 或 winner。
+  没有资源契约的调用保持零额外 tag、存储和 hook。
+
+启用 seed 前，必须同时具备：producer borrowed-address/fallback、static normal/cancel
+交付、dynamic descriptor 可选契约与 ABI 校验、库元信息消费、defer/go discarded
+entry、reflect 第二次交付，以及标准库 wrapper 的预注册 adoption。range-over-func
+的外部 defer owner 与当前 yield frame 的临时 guard 必须区分，不能错误地把后者
+挂到父函数；缺口应明确拒绝而非借普通函数指针静默绕过。每条路径都要有真实资源
+计数及故意移除 guard 的负对照，最后再启用 public API seed。
+
 只在有限 produce/transfer/release 边界保留准确事实，不改变普通 Go API 类型，
 不要求给所有调用者加注释。内部 acquisition
 adapter 的 helper 链必须闭合：若在 raw resume 与受保护 wrapper 之间还隔着未声明
