@@ -85,6 +85,12 @@ func spawned(r Receiver) { go r.declaration(3) }
 			if !found || !present || len(fact.Targets) != 1 || fact.Targets[0] != id {
 				t.Fatalf("%s lost the exact receiver-preserving target: %+v", owner.Name(), fact)
 			}
+			if spawn, ok := call.(*ssa.Go); ok {
+				resolved, physical, err := plan.ResolveClosedStaticSpawn(spawn)
+				if err != nil || resolved != target || physical.Primary != PrimaryCoroutine {
+					t.Fatalf("receiver-preserving spawn=%v plan=%+v error=%v", resolved, physical, err)
+				}
+			}
 		}
 	}
 }

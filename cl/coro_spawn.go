@@ -61,54 +61,9 @@ func resolveCoroDirectStaticSpawn(
 	if callPlan.Transport == coro.RawCCodePointer {
 		return nil, coro.FunctionPlan{}, fmt.Errorf("raw C code-pointer callee cannot be spawned through the managed coroutine scheduler")
 	}
-	target, targetPlan, directErr := plan.ResolveClosedStaticSpawn(spawn)
-	if directErr == nil {
-		if err := validateCoroDirectSpawnArgumentTransport(plan, spawn, target, managedDispatch); err != nil {
-			return nil, coro.FunctionPlan{}, err
-		}
-		return target, targetPlan, nil
-	}
-	common := spawn.Common()
-	raw, direct := common.Value.(*ssa.Function)
-	if direct && raw != nil && raw.Signature != nil && raw.Signature.Recv() == nil {
-		return nil, coro.FunctionPlan{}, directErr
-	}
-	if !direct || raw == nil || common.StaticCallee() != raw || common.IsInvoke() || common.Method != nil ||
-		raw.Signature == nil || raw.Signature.Recv() == nil {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("requires an exact static function or method operand")
-	}
-	if callPlan.Kind != coro.CallSpawn || callPlan.Rep != coro.DirectCoro ||
-		callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 {
-		return nil, coro.FunctionPlan{}, fmt.Errorf(
-			"requires one closed non-nil DirectCoro spawn target, got kind=%v representation=%s open=%t may-be-nil=%t targets=%d",
-			callPlan.Kind, callPlan.Rep, callPlan.Open, callPlan.MayBeNil, len(callPlan.Targets),
-		)
-	}
-	target, found = plan.Function(callPlan.Targets[0])
-	if !found || target == nil {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("spawn target %q is absent from the compilation plan", callPlan.Targets[0])
-	}
-	targetPlan, found = plan.FunctionPlan(target)
-	if !found || targetPlan.ID != callPlan.Targets[0] || targetPlan.External != coro.Defined ||
-		targetPlan.Emission != coro.EmitCoroutine || targetPlan.Primary != coro.PrimaryCoroutine ||
-		(targetPlan.FuncRep != coro.DirectCoro && targetPlan.FuncRep != coro.Dispatch) ||
-		targetPlan.Demand != coro.AsyncDemand ||
-		!targetPlan.Effect.Contains(coro.YieldOnly) {
-		return nil, coro.FunctionPlan{}, fmt.Errorf(
-			"spawn method target %q is not one demanded preemptible direct-callable coroutine (external=%s emission=%s primary=%s representation=%s demand=%s effect=%s)",
-			callPlan.Targets[0], targetPlan.External, targetPlan.Emission, targetPlan.Primary,
-			targetPlan.FuncRep, targetPlan.Demand, targetPlan.Effect,
-		)
-	}
-	if target.Signature == nil || target.Signature.Recv() == nil || target.Signature.Variadic() ||
-		typeParamCount(target.Signature.TypeParams()) != 0 ||
-		typeParamCount(target.Signature.RecvTypeParams()) != 0 {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("spawn target %q is not an exact non-generic method", targetPlan.ID)
-	}
-	ownerPlan, found := plan.FunctionPlan(spawn.Parent())
-	if !found || ownerPlan.Emission != coro.EmitCoroutine || ownerPlan.Primary != coro.PrimaryCoroutine ||
-		ownerPlan.Demand != coro.AsyncDemand || !ownerPlan.Effect.Contains(coro.YieldOnly) {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("spawn owner is not one demanded preemptible coroutine primary")
+	target, targetPlan, err := plan.ResolveClosedStaticSpawn(spawn)
+	if err != nil {
+		return nil, coro.FunctionPlan{}, err
 	}
 	if err := validateCoroDirectSpawnArgumentTransport(plan, spawn, target, managedDispatch); err != nil {
 		return nil, coro.FunctionPlan{}, err
