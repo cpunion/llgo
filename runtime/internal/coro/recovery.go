@@ -142,7 +142,7 @@ func takeRecover(g *G, childHandle unsafe.Pointer, transparent bool) (snapshot R
 	}
 }
 
-func recoverTraceScope(g *G) (owner *Frame, typeWord, dataWord unsafe.Pointer, ok bool) {
+func deferredPanicTraceScope(g *G) (owner *Frame, typeWord, dataWord unsafe.Pointer, ok bool) {
 	// This is a read-only observation used from runtime.Callers, which may be
 	// inside a compiler/runtime critical section. The active-frame and exact
 	// ancestry validation below are sufficient; requiring the suspension gate
@@ -158,7 +158,7 @@ func recoverTraceScope(g *G) (owner *Frame, typeWord, dataWord unsafe.Pointer, o
 		child.header.Lifecycle != uint16(FrameActive) {
 		return nil, nil, nil, false
 	}
-	// Calls made by the recovering deferred function may themselves be managed
+	// Calls made by the panicking/recovering deferred function may be managed
 	// children (debug.Stack -> runtime.Callers is one real example). Walk the
 	// exact await ancestry until the recovery-owning CompletionRecord appears.
 	for ; child.parent != nil; child = child.parent {
@@ -170,9 +170,9 @@ func recoverTraceScope(g *G) (owner *Frame, typeWord, dataWord unsafe.Pointer, o
 			return nil, nil, nil, false
 		}
 		switch record.status {
-		case completionArmed, completionRecoverArmed:
+		case completionArmed:
 			continue
-		case completionRecoverTaken:
+		case completionRecoverArmed, completionRecoverTaken:
 			if record.typeWord == nil {
 				return nil, nil, nil, false
 			}
@@ -184,32 +184,32 @@ func recoverTraceScope(g *G) (owner *Frame, typeWord, dataWord unsafe.Pointer, o
 	return nil, nil, nil, false
 }
 
-// RecoverTraceActive reports whether the currently executing physical frame
-// is the deferred child which consumed its parent's panic or an exact managed
-// descendant of that child. The CompletionRecord already owns this scope from
-// recover through the child's terminal return, so stackless traceback
+// DeferredPanicTraceActive reports whether the currently executing physical
+// frame is a deferred child entered during panic, or its exact managed
+// descendant. The CompletionRecord owns this scope both before and after
+// recover, through the child's terminal return, so stackless traceback
 // visibility needs no native frame marker, TLS side table, or additional per-G
 // state.
-func RecoverTraceActive(g *G) bool {
-	_, _, _, ok := recoverTraceScope(g)
+func DeferredPanicTraceActive(g *G) bool {
+	_, _, _, ok := deferredPanicTraceScope(g)
 	return ok
 }
 
-// RecoverTraceFrames joins the retained panic path to its still-live recovery
+// DeferredPanicTraceFrames joins the retained panic path to its still-live
 // owner and suspended ancestors. The resulting deepest-to-root sequence is the
 // exact snapshot runtime.Caller needs after panic propagation has destroyed
 // the original LLVM coroutine frames. No second trace is stored in G: callers
-// materialize their target-specific PC view only after recover succeeds.
-func RecoverTraceFrames(g *G, snapshots []PanicTraceFrameSnapshot) (int, bool) {
-	owner, typeWord, dataWord, scopeOK := recoverTraceScope(g)
+// materialize their target-specific PC view only when observed.
+func DeferredPanicTraceFrames(g *G, snapshots []PanicTraceFrameSnapshot) (int, bool) {
+	owner, typeWord, dataWord, scopeOK := deferredPanicTraceScope(g)
 	if !scopeOK || len(snapshots) == 0 {
 		return 0, false
 	}
-	// A panic caught before any physical child is destroyed has no retained
-	// prefix to splice; its complete caller chain is still live. This is a
-	// successful empty snapshot, distinct from a malformed non-empty trace.
+	// Even without destroyed children, the runtime needs the exact owner at
+	// which to insert its logical gopanic frame. Do not hide the scope until
+	// recover: runtime.Caller is valid in a defer before recover is called.
 	if emptyPanicTrace(g) {
-		return 0, true
+		return physicalTraceFrames(g, owner, false, snapshots)
 	}
 	if !activePanicTrace(g) || panicTraceCarrier(g) != owner {
 		return 0, false
