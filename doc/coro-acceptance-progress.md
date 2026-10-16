@@ -969,6 +969,35 @@ result instead of erasing Closed into a boolean. Final actual-program stress
 and integration of this correction remain pending; diagnostic reason codes
 and fprintf are confined to the experiment branch, not production.
 
+PR [#280](https://github.com/cpunion/llgo/pull/280) merges as `be55a5db6`
+at20:48:39 UTC after all18 jobs in run38959102970 pass at exact head
+`a8a423f48`; freshly paginated reviews/comments and review threads are empty.
+The captured/worker follow-up now has immutable v110 execution: all100 fd runs,
+6 opaque controls and3 reflection/GC routes pass (68.637s+144.265s), source-after
+matches, peak2724.9MiB. Broad compiler198.620s/1314.6MiB, exact production-plan/
+architecture gates6.825s/672.1MiB, native fleet race1.378s/191.3MiB and all9
+real archive executions73.335s/1590.6MiB pass. Its separately built persistent
+resource image has SHA-256
+`9367d37a0d182c916c66a18401004e2487ce08ea43228a9357fa66819c8ccc5d`;
+the full10-mode matrix passes **10,000/10,000** executions with exit0, unchanged
+binary hash and matching source-after. Diagnostic codes/printf are not present.
+Merging the predecessor history changes no source file relative to v110.
+
+Immutable v108 completes the four runtime packages with **68 passes and one
+helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
+llgoext23. Source-after20:47:34 matches, children join and private scratch is
+reclaimed. Immutable v103 also completes **73/73 native Go demos**, zero
+failures, source-after20:48:41 matches and scratch is reclaimed. These are
+separate fixed-source cohorts, not a single final-source whole-tree receipt.
+
+The old fixed v65-source/v64-compiler GOROOT cohort has completed all8 shards:
+**1073 passes,9 failures**, zero case skips,1082 selected cases. The9 retained
+failures are inline_callers, noinit, rangegen, bug347, issue27695b/c, issue5856,
+issue75764 and issue29504. Seven already have later unchanged-case passing
+replays recorded above; noinit inspects private gc init-task ABI and rangegen
+hit the24GiB compiler cap in this older cohort. This is not relabeled as a
+final-compiler full-GOROOT pass, and none is converted into a new xfail.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
@@ -1672,14 +1701,14 @@ delivery/performance acceptance.
 
 | Gate | Latest observed result | Scope |
 | --- | --- | --- |
-| `test` | 41 passed, 1 skipped | Fixed v54 compiler/source, uncached compile and execution |
-| `test/cgo` | 3 passed | Fixed v54 compiler/source, uncached compile and execution |
-| `test/syncpool` | 1 passed | Fixed v54 compiler/source, uncached compile and execution |
-| `test/llgoext` | 23 passed | Fixed v54 compiler/source, including defer-head isolation and 130-G ID allocation |
+| `test` | 41 passed, 1 helper skipped | Fixed v108 compiler/source, fresh compile and execution; four-package source-after matches20:47:34 UTC |
+| `test/cgo` | 3 passed | Same v108 four-package cohort, fresh compile and execution |
+| `test/syncpool` | 1 passed | Same v108 four-package cohort, fresh compile and execution |
+| `test/llgoext` | 23 passed | Same v108 four-package cohort, including defer-head isolation and130-G ID allocation; children joined and scratch reclaimed |
 | `test/std/runtime` | 5 passed | Fixed v35 compiler/source, uncached compile and execution |
 | C fault recovery, foreign reentry, traceback | 4 passed | v7 compiler; probes compile, link and execute with LLGo |
 | Full `test/go` | Integrated PR279 v104: 271/271, zero failures/skips | Completed20:14:00 UTC, source-after20:14:04 matches, children joined and private scratch reclaimed. Build/run peaks8389.5/6649.2MiB are separate maxima. Earlier cohorts and failures remain preserved. This is not acceptance of the later private-factory/captured follow-ups. |
-| Top-level `_demo/go` | Fixed v70: all 73/73 passed, zero failures | Completed 2026-10-16 09:13:31 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Every v70 package was freshly built and run; no earlier-version successes were adopted. The previous v46 complete pass remains separate evidence. |
+| Top-level `_demo/go` | Fixed v103: all73/73 passed, zero failures | Source-after20:48:41 UTC matches; private scratch reclaimed after child join. Compiler caps8GiB except the recorded12GiB importer override; generated programs retain2GiB cap. Every package was freshly built/run; earlier-version successes were not adopted. |
 | `test/std/os`, `test/std/net` | 85 passed; 129 passed / 5 skipped, respectively | Full packages compiled and executed with fixed source snapshot and v35, cache disabled |
 | `test/std/reflect` | v25: 68 passed | Separate real LLGo compile and generated-binary execution; build peak 5768 MiB |
 | `synctest` execution | Run/Wait, inheritance, channel/select/Cond, fake time, heap association and WaitGroup passed | Real LLGo programs also verify detached children, finalizers and AddCleanup outside the bubble; associated objects remain collectible. Host race tests are not LLGo race-instrumentation acceptance. |
@@ -1842,12 +1871,12 @@ bound is still explicit.
 1. Finish current executable acceptance on immutable compiler/source pairs.
    Integrated PR279's v104 `test/go` passes271/271; immutable v107 is running
    the next complete fresh-build cohort. The v108 top-level runtime/cgo/
-   syncpool/llgoext cohort is also running. The earlier v70 native Go demos
-   pass73/73, and v103's73-demo cohort is running. The single-snapshot v70
+   syncpool/llgoext cohort passes68+1helper skip. The v103 native Go demos
+   pass73/73. The single-snapshot v70
    180-package stdlib evaluation has at least128
    completed package passes and no failure so far; it remains active. The older
    fixed v65-source/v64-compiler eight-shard GOROOT evaluation has completed
-   shards0–6 and is running shard7.
+   all8 shards with1073 passes/9 retained failures out of1082 selected cases.
    Preserve every older failure/resource stop;
    focused passes on later snapshots do not rewrite those journals or establish
    a final-snapshot whole-suite pass. Keep unchanged inputs, private scratch
