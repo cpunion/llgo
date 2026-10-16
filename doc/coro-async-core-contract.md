@@ -91,6 +91,15 @@ Effect 通过普通 direct/defer/dynamic managed call graph求最小固定点。
 
 Import 时 summary 参与与源码函数相同的固定点；link 时验证版本和 ABI hash。Whole-program cache digest不能替代 producer archive summary。
 
+私有 helper 没有 consumer SSA 声明时，仍以 producer summary 的精确 FunctionID
+加入同一个 Graph，不能补造 `ssa.Function` 或把已知调用降级成 unknown dispatch。
+`SSAPlan.Functions()` 只投影真实源码；`ImportedFunctions()` 投影这些 archive leaf。
+精确 lowered edge 统一传播 effect/demand，producer 已闭包的 service/predicate fact
+在该 edge 上进入现有固定点。Plan digest v43 同时绑定 imported fact（含符号、完整
+ABI hash、true/false predicate mask）及最终 FunctionPlan，未使用的 helper 不成为 root。
+这只完成分析侧协议；typed signature、物理调用、result guard 和真实 archive 链接
+必须全部验证后才可放开 bodyless resource-delivery gate。
+
 ### 3.3 Lowering matrix
 
 | Caller | Callee/值 | Lowering |

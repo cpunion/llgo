@@ -370,6 +370,10 @@ type SSARawPlainCallCertificate struct {
 type SSALoweredCall struct {
 	LogicalName string
 	Target      *ssa.Function
+	// ImportedTarget names an exact archive helper without a source declaration.
+	// The frontend must bind its typed ABI before supplying ImportedFunctions.
+	// It is exclusive with Target and ManagedDispatch; no SSA body is invented.
+	ImportedTarget FunctionID
 	// ManagedDispatch is a typed compiler-inserted descriptor invocation. It
 	// has no invented SSA target and contributes the same conservative managed
 	// call edge as an open source function value. Exact Target and dispatch are
@@ -408,6 +412,11 @@ type SSALoweredCall struct {
 // lowering or runtime switches.
 type SSAConfig struct {
 	FunctionIDs FunctionIDConfig
+	// ImportedFunctions contains compatibility- and ABI-checked archive helpers
+	// which have no source SSA declaration. They are leaves in the same Graph,
+	// reached only through exact ImportedTarget occurrences. Source declarations
+	// remain authoritative and must not also occur in this inventory.
+	ImportedFunctions []LibraryEffectFunction
 
 	// EmissionUniverse restricts analysis to the exact SSA function objects
 	// materialized for this frontend compilation. When non-nil, AnalyzeSSA does
@@ -685,8 +694,8 @@ type SSAConfig struct {
 	// owner, and demand reaches their selected plain or coroutine entry only when
 	// owner itself is demanded.
 	//
-	// LogicalName must be nonempty and unique within owner. Every target must be
-	// a non-nil exact canonical member of the effective emission universe. The
+	// LogicalName must be nonempty and unique within owner. An exact target is
+	// either a canonical source member or a bound ImportedFunctions identity. The
 	// classifier is called only for owned, non-ignored bodies and its result is
 	// copied, validated, and sorted before it becomes part of the immutable plan.
 	ClassifyLoweredCalls func(owner *ssa.Function) ([]SSALoweredCall, error)
@@ -843,6 +852,7 @@ type SSAPlan struct {
 	plan                    *Plan
 	roots                   []SSARootPlan
 	functions               []SSAFunctionPlan
+	importedFunctions       []SSAImportedFunctionPlan
 	byFunction              map[*ssa.Function]FunctionID
 	byID                    map[FunctionID]*ssa.Function
 	ignoredBodies           map[*ssa.Function]struct{}
@@ -1232,7 +1242,7 @@ func (p *SSAPlan) LoweredCalls(owner *ssa.Function) []SSALoweredCall {
 // ok is false when the exact owner has no call with that identity.
 func (p *SSAPlan) ResolveLoweredCall(owner *ssa.Function, logicalName string) (*ssa.Function, bool) {
 	call, ok := p.ResolveLoweredCallRecord(owner, logicalName)
-	if !ok || call.ManagedDispatch {
+	if !ok || call.ManagedDispatch || call.ImportedTarget != "" {
 		return nil, false
 	}
 	return call.Target, true
@@ -1693,6 +1703,10 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		ids[fn] = id
 		byID[id] = fn
 	}
+	importedFunctions, err := freezeSSAImportedFunctions(config.ImportedFunctions, byID)
+	if err != nil {
+		return nil, err
+	}
 	sort.Slice(included, func(i, j int) bool { return ids[included[i]] < ids[included[j]] })
 	canonicalRoots := make([]SSARootPlan, 0, len(rootDemand))
 	for fn, demand := range rootDemand {
@@ -1905,7 +1919,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		resultDeliveryCalls[call] = needed
 		return needed
 	}
-	loweredCalls, err := freezeSSAClassifiedLoweredCalls(bodyFunctions, includedSet, canonicalizer, config, needsResultDelivery)
+	loweredCalls, err := freezeSSAClassifiedLoweredCalls(bodyFunctions, includedSet, canonicalizer, config, importedFunctions, needsResultDelivery)
 	if err != nil {
 		return nil, err
 	}
@@ -2048,6 +2062,16 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 
 	graph := NewGraph()
+	for _, fact := range importedFunctions {
+		if err := graph.AddFunction(FunctionSpec{
+			ID: fact.ID, Seed: fact.Effect, Exec: fact.Exec, External: ExternalKnown,
+			ManagedEntry: fact.ManagedEntry, NeedsDispatch: fact.FuncRep == Dispatch,
+			AtomicCost: fact.AtomicCost, AtomicCostProof: fact.AtomicCostProof,
+			AtomicCostCertificate: fact.AtomicCostCertificate, StaticOutcome: fact.StaticOutcome,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	for _, fn := range included {
 		policy := policies[fn]
 		root := rootDemand[fn]
@@ -2501,6 +2525,10 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		result.conditionalStores[store] = target
 	}
 	for _, functionPlan := range base.Functions() {
+		if fact, imported := importedFunctions[functionPlan.ID]; imported {
+			result.importedFunctions = append(result.importedFunctions, SSAImportedFunctionPlan{Fact: fact, Plan: functionPlan})
+			continue
+		}
 		result.functions = append(result.functions, SSAFunctionPlan{
 			Function: byID[functionPlan.ID],
 			Plan:     functionPlan,
@@ -2615,10 +2643,7 @@ func classifySSAOutcomePrimaryUses(
 	}
 	for _, calls := range loweredCalls {
 		for _, call := range calls {
-			if call.Target == nil {
-				continue
-			}
-			if id, ok := ids[call.Target]; ok {
+			if id, ok := call.targetID(ids); ok {
 				uses.blocked[id] = true
 			}
 		}
@@ -2918,9 +2943,9 @@ func applySSAStaticOutcomePlans(
 			if call.ExplicitStatusElided {
 				continue
 			}
-			targetID, identified := ids[call.Target]
+			targetID, identified := call.targetID(ids)
 			target, found := base.Lookup(targetID)
-			if call.Target == nil || !identified || !found {
+			if !identified || !found {
 				invalidCall[owner] = true
 				continue
 			}
@@ -3250,6 +3275,7 @@ func freezeSSAClassifiedLoweredCalls(
 	included map[*ssa.Function]bool,
 	canonicalizer *ssaFunctionCanonicalizer,
 	config SSAConfig,
+	importedFunctions map[FunctionID]LibraryEffectFunction,
 	needsResultDelivery func(ssa.CallInstruction) bool,
 ) (map[*ssa.Function][]SSALoweredCall, error) {
 	result := make(map[*ssa.Function][]SSALoweredCall)
@@ -3298,8 +3324,17 @@ func freezeSSAClassifiedLoweredCalls(
 				}
 			}
 			if call.ManagedDispatch {
-				if call.Target != nil || call.RawPlain || call.NoUnwind || call.UnwindOnly || call.ExplicitStatusElided {
+				if call.Target != nil || call.ImportedTarget != "" || call.RawPlain || call.NoUnwind || call.UnwindOnly || call.ExplicitStatusElided {
 					return nil, fmt.Errorf("coro: managed-dispatch lowered call %q in %q has an exact target or unsupported shortcut", call.LogicalName, owner.Name())
+				}
+				continue
+			}
+			if call.ImportedTarget != "" {
+				if call.Target != nil || call.RawPlain {
+					return nil, fmt.Errorf("coro: imported lowered call %q in %q has a source target or raw-plain shortcut", call.LogicalName, owner.Name())
+				}
+				if _, found := importedFunctions[call.ImportedTarget]; !found {
+					return nil, fmt.Errorf("coro: imported lowered call %q in %q targets an unbound archive helper %q", call.LogicalName, owner.Name(), call.ImportedTarget)
 				}
 				continue
 			}
@@ -3354,11 +3389,15 @@ func addSSALoweredCallEdges(graph *Graph, functions []*ssa.Function, ids map[*ss
 				}
 				continue
 			}
+			targetID, _ := call.targetID(ids)
 			kind := CallUnwind
 			if call.ExplicitStatusElided {
 				kind = CallExplicitStatusElided
 			} else if !call.UnwindOnly {
-				kind = staticCallKind(CallDirect, policies[call.Target])
+				kind = CallDirect
+				if call.ImportedTarget == "" {
+					kind = staticCallKind(CallDirect, policies[call.Target])
+				}
 				if call.NoUnwind {
 					if kind != CallDirect {
 						return fmt.Errorf(
@@ -3369,8 +3408,8 @@ func addSSALoweredCallEdges(graph *Graph, functions []*ssa.Function, ids map[*ss
 					kind = CallDirectNoUnwind
 				}
 			}
-			if err := graph.AddCall(CallEdge{Caller: ids[owner], Callee: ids[call.Target], Kind: kind}); err != nil {
-				return fmt.Errorf("coro: add lowered call %q from %q to %q: %w", call.LogicalName, owner.Name(), call.Target.Name(), err)
+			if err := graph.AddCall(CallEdge{Caller: ids[owner], Callee: targetID, Kind: kind}); err != nil {
+				return fmt.Errorf("coro: add lowered call %q from %q to %q: %w", call.LogicalName, owner.Name(), targetID, err)
 			}
 		}
 	}
