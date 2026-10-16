@@ -7,6 +7,12 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-16 (Asia/Shanghai)
 
+PR [cpunion/llgo#261](https://github.com/cpunion/llgo/pull/261) is now merged as
+`d292d73d5`, after head `33887a5bd` passed all 18 coroutine CI jobs in run
+`38849290434`; review, inline and issue-comment inventories were empty. It
+closes the maphash/Go-types, Darwin x509 and frozen panic-phi gaps below. This
+remains a development checkpoint, not full-objective completion.
+
 PR [cpunion/llgo#260](https://github.com/cpunion/llgo/pull/260) was merged into
 `llvm-coro` as `941e17146` after head `37b115dbc` completed all 18 coroutine CI
 jobs in run `38844866845`. Review, inline-comment and issue-comment inventories
@@ -482,8 +488,43 @@ intermediate implementation failed LLVM verification because it removed phi
 operands but retained the old conditional edge; the final gate covers that
 consistency requirement. No new frame/runtime state, annotation or effect graph
 is added. Selected cl regressions pass (145.205s), SSA passes (0.718s), and the
-architecture/source-binding gates pass (2.232s). Original TLS/expvar executable
-validation is still in progress on immutable v56, not yet a closed failure.
+architecture/source-binding gates pass (2.232s). Immutable v56 then compiles and
+runs the complete original TLS package: 59 passed, zero skips/failures. Source
+manifest SHA-256 is
+`d2d451647bb88c13326f1c6480c1dd579bc82011e6ebbcc33db2b104e7297d7a`;
+compiler SHA-256 is
+`9ec7b275fc45849dde5ff60e4065f66e631fa30a98e8547ca8206109e1760f79`;
+test binary SHA-256 is
+`29ace0da4a7764a17a80f9d9f26292a9e45891651781d1fb673975b768f5a539`.
+Build/run peaks are 12100.7/80.0 MiB under unchanged hard caps. The same cohort's
+expvar build passes the old phi check but fails strict method ABI matching of
+Go-identical `[]byte` and `[]uint8`; no executable was produced. The Go control
+passes. The cohort joins children, reclaims scratch and matches source-after.
+
+The follow-up canonicalizes predeclared Basic spellings by their existing
+BasicKind, without changing defined-type identity, interface rules or runtime
+dispatch. byte/rune and seven scalar/composite/signature forms pass across all
+five type-key modes; native64/wasm32 real interface modules verify before/after
+CoroSplit. Restoring only the old graph builder fails all four interface cases
+and all fourteen alias-form cases. Different basic kinds and strict named-type
+identity remain distinct. The focused type/IR gate passes (4.926s / 1218.4 MiB).
+No new annotation, runtime field, scheduler or function version is added.
+
+The same follow-up hardens the still-private borrowed-result declaration:
+normal returns must freshly project the protected result tuple, and borrow
+must precede source call/go/defer. Source facts reject stale result caches,
+invented values and cleanup after result evaluation; ordinary Go wrappers are
+unrestricted. All focused producer gates pass (1.712s / 1225.0 MiB); restoring
+only the previous validator loses all ten new negative checks. Physical guards
+still fail closed, so this is not public Open delivery acceptance.
+
+Immutable v57 freezes source `15e8ddeb9`, manifest SHA-256
+`d0f1bae1e244293eb1f5c84289af866cb82822087640363d7e9f7a15747a062e`,
+compiler SHA-256
+`120be9993e3748e6428f08c495c2d06a09d5113535088d7c4bfb3057a7b0bff6`.
+The full `internal/coro` race/shuffle gate passes (38.649s / 1637.4 MiB).
+Broad cl regressions and actual expvar/filepath/SMTP package runs are pending;
+do not transfer the preceding CI pass or count these packages as accepted.
 
 The merged PR checkpoint also has a fresh v54 four-package executable pass:
 68 tests plus one helper skip, tree peak 7192.5 MiB. Source manifest SHA-256
@@ -665,8 +706,9 @@ bound is still explicit.
 1. Finish current executable acceptance on immutable compiler/source pairs.
    Fresh v46 `test/go` passes 266/266 and `_demo/go` passes 73/73; v47 basic
    executable packages pass 68 tests with one helper skip. The v46 stdlib
-   evaluation has 60 completed package passes across fixed cohorts after 15
-   initial passes; two remaining lanes are active and two are joined/stopped.
+   evaluation has 82 distinct completed package passes across fixed v46
+   cohorts; lanes 0/1 remain active. Previously joined lanes 2/3 have restarted
+   as new immutable v56 cohorts, without adopting old-version partial passes.
    The full v48 GOROOT selection is active, not a complete pass. Keep private
    cache reclamation, unchanged source/compiler
    inputs and every interrupted receipt. A fresh final GOROOT selection is
