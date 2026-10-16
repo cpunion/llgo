@@ -63,6 +63,71 @@ func llgoHook(cleanup func()) { cleanup() }
 	}
 }
 
+func TestEmissionUniverseAliasesDeclarationOnlyBodiesAndMethods(t *testing.T) {
+	fixture := newEmissionTestProgram()
+	declarations := fixture.addPackage(t, "example.com/emission/declhandles", `package declhandles
+const LLGoPackage = "decl"
+type Handle uintptr
+func NewHandle(value any) Handle { panic("omitted gc body") }
+func (handle Handle) Value() any { panic("omitted gc method") }
+func (handle Handle) Delete() { panic("omitted gc method") }
+`)
+	definitions := fixture.addPackage(t, "example.com/emission/handleimpl", `package handleimpl
+//llgo:managedlink
+//go:linkname newHandle example.com/emission/declhandles.NewHandle
+func newHandle(value any) uintptr { return 1 }
+//llgo:managedlink
+//go:linkname value example.com/emission/declhandles.Handle.Value
+func value(handle uintptr) any { return handle }
+//llgo:managedlink
+//go:linkname deleteHandle example.com/emission/declhandles.Handle.Delete
+func deleteHandle(handle uintptr) {}
+`)
+	caller := fixture.addPackage(t, "example.com/emission/handlecaller", `package handlecaller
+import "example.com/emission/declhandles"
+func Root() any {
+    handle := declhandles.NewHandle("payload")
+    value := handle.Value()
+    handle.Delete()
+    return value
+}
+`)
+	fixture.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	u, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: declarations.ssa, Files: []*ast.File{declarations.file}, MetadataOnly: true},
+		{SSA: definitions.ssa, Files: []*ast.File{definitions.file}},
+		{SSA: caller.ssa, Files: []*ast.File{caller.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := declarations.types.Scope().Lookup("Handle").Type().(*types.Named)
+	sources := map[string]*ssa.Function{"NewHandle": declarations.ssa.Func("NewHandle")}
+	for index := 0; index < handle.NumMethods(); index++ {
+		method := handle.Method(index)
+		sources[method.Name()] = fixture.ssa.FuncValue(method)
+	}
+	for _, test := range []struct{ source, implementation string }{
+		{"NewHandle", "newHandle"}, {"Value", "value"}, {"Delete", "deleteHandle"},
+	} {
+		source, want := sources[test.source], definitions.ssa.Func(test.implementation)
+		if source == nil || len(source.Blocks) == 0 {
+			t.Fatalf("fixture %s must retain its non-emitted Go SSA body", test.source)
+		}
+		if got, present := u.Resolve(source); !present || got != want {
+			t.Errorf("Resolve(declaration-only %s)=%v,%t, want %v", test.source, got, present, want)
+		}
+		if u.Contains(source) || !u.Contains(want) {
+			t.Errorf("declaration-only %s retained a second managed body", test.source)
+		}
+		if _, paired := u.goLinknameDefinitions[source]; !paired {
+			t.Errorf("declaration-only %s has no exact structural linkname proof", test.source)
+		}
+	}
+}
+
 func TestEmissionUniverseAliasesBodylessGoLinknameToExactDefinition(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	declaration := testProg.addPackage(t, "example.com/emission/linkdecl", `package linkdecl

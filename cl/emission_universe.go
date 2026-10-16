@@ -5786,7 +5786,7 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 				return fmt.Errorf("prepare emission universe: managed Go winner %q for owner %q is not emitted", function.Name(), prepared.identity)
 			}
 
-			if len(function.Blocks) == 0 {
+			if len(function.Blocks) == 0 || bodylessManagedGoDeclaration(function) {
 				continue
 			}
 			pairKeys, err := (emissionCanonicalIndex{
@@ -5830,8 +5830,23 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 		}
 		for _, pkg := range memberPackages {
 			for _, member := range pkg.Members {
-				if function, ok := member.(*ssa.Function); ok {
-					memberSet[function] = none{}
+				switch member := member.(type) {
+				case *ssa.Function:
+					memberSet[member] = none{}
+				case *ssa.Type:
+					kind, _ := PkgKindOf(pkg.Pkg)
+					named, ok := types.Unalias(member.Type()).(*types.Named)
+					if kind != PkgDeclOnly || !ok || named.TypeParams().Len() != 0 {
+						continue
+					}
+					// Methods are not package members. A decl-only package omits
+					// their definitions just as it omits ordinary function bodies;
+					// pair the declared method, never a synthesized method wrapper.
+					for index := 0; index < named.NumMethods(); index++ {
+						if function := u.goProg.FuncValue(named.Method(index)); function != nil {
+							memberSet[function] = none{}
+						}
+					}
 				}
 			}
 		}
@@ -6212,12 +6227,20 @@ func (u *EmissionUniverse) activateBodylessGoLinknameAlias(declaration *ssa.Func
 }
 
 func bodylessManagedGoDeclaration(function *ssa.Function) bool {
-	if function == nil || len(function.Blocks) != 0 || functionNeedsLinkOnce(function) || function.Pkg == nil ||
-		function.Parent() != nil || function.Signature == nil || function.Signature.Recv() != nil {
+	if function == nil || functionNeedsLinkOnce(function) || function.Pkg == nil || function.Pkg.Pkg == nil ||
+		function.Parent() != nil || function.Signature == nil {
 		return false
 	}
 	declaration, _ := function.Syntax().(*ast.FuncDecl)
-	return declaration != nil && declaration.Body == nil
+	if declaration == nil {
+		return false
+	}
+	if kind, _ := PkgKindOf(function.Pkg.Pkg); kind == PkgDeclOnly {
+		// SSA can retain a gc implementation even though the physical frontend
+		// emits declarations only. Its source body is not an LLGo definition.
+		return true
+	}
+	return len(function.Blocks) == 0 && function.Signature.Recv() == nil && declaration.Body == nil
 }
 
 func bodylessGoLinknameDeclaration(function *ssa.Function) (bool, error) {
