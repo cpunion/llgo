@@ -39,6 +39,8 @@ void llgo_normal_cleanup_close(int32_t fd) {
 }
 
 int32_t llgo_normal_cleanup_started(void) { return atomic_load(&started); }
-int32_t llgo_normal_cleanup_released(void) { return atomic_load(&released); }
-void llgo_normal_cleanup_mark_started(void) { atomic_store(&started, 1); }
-void llgo_normal_cleanup_release(void) { atomic_store(&released, 1); }
+void llgo_normal_cleanup_mark(int32_t event) {
+    if (event == 1) atomic_store(&started, 1);
+    else if (event == 2) atomic_store(&released, 1);
+    else _Exit(90);
+}

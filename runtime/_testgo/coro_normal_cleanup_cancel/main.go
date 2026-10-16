@@ -21,37 +21,30 @@ func closeFD(int32)
 //go:linkname started C.llgo_normal_cleanup_started
 func started() int32
 
-//go:linkname released C.llgo_normal_cleanup_released
-func released() int32
+//go:linkname mark C.llgo_normal_cleanup_mark
+func mark(int32)
 
-//go:linkname markStarted C.llgo_normal_cleanup_mark_started
-func markStarted()
-
-//go:linkname release C.llgo_normal_cleanup_release
-func release()
-
-func deferredClose(fd int32) {
-	markStarted()
+func deferredClose(fd int32, release <-chan struct{}) {
+	mark(1)
 	// This defer started during NORMAL return. Main's subsequent shutdown
 	// must not abandon it between these awaits and the final physical close.
-	for released() == 0 {
-		runtime.Gosched()
-	}
+	<-release
 	closeFD(fd)
 }
 
-func owner() {
+func owner(release <-chan struct{}) {
 	fd := openFD()
 	if fd < 0 {
 		panic("normal cleanup fixture could not open its fd")
 	}
-	defer deferredClose(fd)
+	defer deferredClose(fd, release)
 }
 
-func releaseCleanup() { release() }
-
-func sentinel(ready chan<- struct{}) {
-	defer releaseCleanup()
+func sentinel(ready chan<- struct{}, release chan struct{}) {
+	defer func() {
+		close(release)
+		mark(2)
+	}()
 	ready <- struct{}{}
 	for {
 		runtime.Gosched()
@@ -62,9 +55,10 @@ func main() {
 	runtime.GOMAXPROCS(1)
 	install()
 	ready := make(chan struct{})
-	go sentinel(ready)
+	release := make(chan struct{})
+	go sentinel(ready, release)
 	<-ready
-	go owner()
+	go owner(release)
 	for started() == 0 {
 		runtime.Gosched()
 	}
