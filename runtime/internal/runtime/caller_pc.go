@@ -72,7 +72,10 @@ func internSyntheticCallerFrame(frame CallerFrame) *callerSyntheticFrame {
 }
 
 func syntheticFrameForPC(pc uintptr) (CallerFrame, bool) {
-	if tag := pc & callerPCMask; tag != callerPCValue && tag != callersPCValue {
+	// Besides Caller (tag 1) and Callers (tag 3), symbolization accepts the
+	// conventional return-PC - 1 (tag 2), used by panic-spliced Caller and
+	// FuncForPC callers. All three name the same immutable registry entry.
+	if pc&callerPCMask == 0 {
 		return CallerFrame{}, false
 	}
 	id := callerSyntheticPCSequence(pc)

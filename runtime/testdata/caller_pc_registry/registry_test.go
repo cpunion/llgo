@@ -58,8 +58,14 @@ func TestHashCollisionAndInvalidPC(t *testing.T) {
 			t.Fatal("collision lookup returned another frame")
 		}
 	}
-	if _, ok := syntheticFrameForPC(a.frame.PC&^callerPCMask | 2); ok {
-		t.Fatal("unknown PC tag was accepted")
+	// runtime.Caller's panic-splice lane uses the conventional return-PC - 1
+	// adjustment. It must decode the same process-wide identity as Callers.
+	returnPC := a.frame.PC&^callerPCMask | callersPCValue
+	if got, ok := syntheticFrameForPC(returnPC - 1); !ok || !sameSyntheticFrame(got, a.frame) || got.PC != returnPC-1 {
+		t.Fatal("adjusted panic-splice PC lost its immutable frame identity")
+	}
+	if _, ok := syntheticFrameForPC(a.frame.PC &^ callerPCMask); ok {
+		t.Fatal("aligned non-synthetic PC tag was accepted")
 	}
 	if _, ok := syntheticFrameForPC(0); ok {
 		t.Fatal("nil PC was accepted")
