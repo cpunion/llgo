@@ -7,17 +7,16 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-16 (Asia/Shanghai)
 
-Integration is in `coro/sync-main-20260830-r2`. Commit `d0838f492` completes the
-existing merge of parents `97572a91d` and `c4941f9ae`; no newer main was merged.
-Draft PR [cpunion/llgo#260](https://github.com/cpunion/llgo/pull/260) carries this
-checkpoint. Follow-up commit `d93ff685c` fixes dynamic pointer-result consumption.
-Latest completed CI observation: head `09db805cd` in run `38837055083` completed
-all 18 coroutine workflow jobs successfully, with no failure. This includes the
-repaired WASI cache-discovery and host-SSA build-tag lanes, typed delivery source
-facts, automatic hidden-helper coloring, and cleanup-continuation corrections.
-Physical resource-delivery guards remain fail-closed and are not enabled by
-these frontend facts. The following static-image and compiler-cost changes
-require a new CI head; the completed run is not attributed to later commits.
+PR [cpunion/llgo#260](https://github.com/cpunion/llgo/pull/260) was merged into
+`llvm-coro` as `941e17146` after head `37b115dbc` completed all 18 coroutine CI
+jobs in run `38844866845`. Review, inline-comment and issue-comment inventories
+were empty. This is a verified development checkpoint, not completion of the
+full objective. It includes the existing integration merge, dynamic-result and
+cleanup corrections, typed delivery source facts, static embed images and the
+allocation-query fast filter; no newer main was merged and cpunion/main was not
+changed. Physical resource-delivery guards still fail closed. New stdlib
+compatibility changes below require their own affected gates and follow-up CI;
+the preceding green run is not attributed to those changes.
 The destination is `cpunion/llgo:llvm-coro`. The acceptance environment is
 Darwin/arm64, Go 1.27 and LLVM 22. No new upstream-main synchronization is
 required for this work.
@@ -333,6 +332,59 @@ core/build and `-unsafeptr=false` for cl's intentional unsafe-pointer fixtures.
 An initial unrestricted cl vet reports the unchanged builtin fixture at line
 569; no source assertion or CI policy is changed to suppress a new warning.
 
+Fixed v48 source is `09db805cd`, manifest SHA-256
+`de7de50fb475e9baae13ed16499cf951dc10225338250a819a269aecf7d5d344`;
+compiler SHA-256 is
+`bbb7ca35ee684a82c437142087d6cc8887b585246e84ae0c0a8e2404fae22a5e`.
+Real defer-print output passes against Go (53.216s / 804.5 MiB); native borrowed
+FD cleanup passes ten executions and Node three (72.765s / 1298.7 MiB including
+builds). Source and compiler hashes still match. The four-package basic rerun
+completes `test`, `test/cgo` and `test/syncpool`, but is stopped by repeated `ps`
+sampling timeouts while compiling `test/llgoext` (tree peak 5558.5 MiB). This is
+not a complete four-package v48 gate; the v47 complete result is retained.
+
+The v46 stdlib cohorts have 35 distinct package passes at this observation
+(15 original plus 20 disjoint remaining-package passes). `crypto/ecdh`,
+`crypto/ecdsa` and `crypto/elliptic` reach the 25-minute compilation bound;
+`crypto/x509` fails semantic preflight at its unsupported floating-point syscall
+bridge. These are different failure classes. After load rose to 44.57 and `ps`
+sampling repeatedly timed out, remaining-package lanes 2 and 3 were terminated
+and joined; their scratch was reclaimed and source hashes match. Lanes 0/1
+continue. Interrupted hex/hpke compilations and every prior receipt remain;
+no complete package pass is discarded and no resource guard is disabled.
+
+The v48 full 1082-case GOROOT selection has also started, with 24GiB per-case
+and 28GiB outer RSS caps, a 25-minute build timeout, unchanged CI case selection
+and unchanged xfail/not-applicable files. The first attempt's PATH omitted
+`/usr/sbin`, so its memory guard refused `sysctl` before case execution. The
+second attempt appends the system directories and restarts the whole selection;
+it is running and is not a fresh full-GOROOT success claim.
+
+The Darwin x509 development branch uses an exact five-word-plus-float C
+function type at the existing low-level bridge. It reuses typed foreign-worker
+record lowering, rather than extending word-call.v1 or pretending a float is a
+uintptr. The parsed production-source LLVM gate verifies park/resume and the
+actual double C operand; selected typed/raw-worker regressions pass
+(2.533s / 1251.2 MiB). A separate immutable v49 source (`881ab7c0e`, manifest
+`9fc3ac4ffe1c234cc207136b385f15db6e85e247f70a63c9676dce596a4a640b`)
+uses the unchanged v48 compiler. Its real x509 compile passes the FP/opaque
+boundary and next correctly rejects CFDataToSlice's erased uintptr-to-pointer
+conversion. That needs an accurate typed CF pointer adapter, not a permissive
+integer provenance rule. The x509 package is still not accepted.
+The broad source-patch/Darwin selection finishes with one assertion failure:
+the two correct WASM patch files arrived in a different order. The test now
+compares exact membership and also checks raw traps remain ENOSYS; no production
+WASM behavior or instruction golden changes. The complete source-patch selection
+and architecture gate pass on the corrected test (2.196s / 692.5 MiB).
+
+The second full-GOROOT attempt is also retained as an infrastructure stop:
+three scratch scans raced with removal of an owned temporary archive directory.
+The separate v3 local runner permits only that precise child-ENOENT race to
+retry within five seconds, still requires a complete valid scan, and rejects
+other errors immediately. The RSS guard, memory/time caps and frozen v2 runner
+are unchanged. A third whole-selection attempt restarts at the beginning; no
+interrupted GOROOT cases are adopted as completed batch acceptance.
+
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
 both the source SHA-256 manifest and recursive content comparison before
@@ -386,12 +438,67 @@ disk, timeout and complete-scan checks remain enabled. A separate immutable r6
 package runner fingerprints a configurable compiler Go soft memory limit below
 the unchanged tree-RSS hard cap; generated-program limits are unchanged.
 
+### Compatibility closure after PR #260
+
+Immutable v52 closes the maphash/go-types crash: complete `test/std/hash/maphash`
+passes 12 tests and complete `test/std/go/types` passes 18 tests, including the
+original TestHashers failure. Source manifest SHA-256 is
+`708f0357143fe4ccd023ca234f96a288a57498ad20b6237e8928f532ee517a56`;
+compiler SHA-256 is
+`58658b8bd0b0021b3b52e5101d0b87d0023e9d5373c7953a6cf0165956362e15`.
+The retained generated-binary hashes are respectively
+`d7b91d9122b41487f1def9c807e5a65a92febb9d99d14a02bc6208d7e52c1977` and
+`54d3ed6b390ab1915358e2c3055e98929d724c0af3836a34344576c21709729e`.
+The cohort joined all children, reclaimed private scratch and verified source
+hashes. Its static typehashImpl boundary adds no coro directives or callback
+representation, and preserves signed-zero, composite/interface value and
+unhashable-interface panic semantics.
+
+The combined v53 source passes complete embed and x509 packages. Its selected
+compiler/SSA/build gates pass (363.752s / 50.128s / 663.289s), at a combined
+8052.8 MiB tree-RSS peak. A stronger v55 cohort changes only one Darwin test;
+compiler/runtime/registry sources match v53 exactly, so its frozen compiler
+`03702a6431eda06fcbe1e5f752896010eb7ed12e45f55b345110d168abe9fc24`
+is intentionally reused. All 41 x509 tests pass, including actual native
+system-trust verification of an untrusted certificate at a nonzero explicit
+time. This exercises CFDate's floating argument and CFData pointer copying;
+the Go control also passes. Source manifest SHA-256 is
+`a1a3f1941a8fb8268e77c9097d8b78dac212df29429d56f425025e38e54b0282`;
+test binary SHA-256 is
+`98d4211dd40eac26e41d3f29aa94f50aa228bb636015fac8582c7590bb2c230d`.
+Source-after matches, with children joined and private scratch reclaimed. The
+old v50 compiler attempt was deliberately interrupted and reclaimed for the
+aggregate memory budget; it is not a semantic failure or a pass.
+
+The original TLS/expvar failures then advance to an interface-phi panic-payload
+check. A minimal gate reproduces two cases: an entirely dead predecessor and a
+reachable predecessor whose edge is excluded by the frozen CFG. Lifetime
+validation, phi incoming operands and branch emission now consume that same
+projection. Evaluated opaque interface results remain rejected, and an opaque
+call executed before the excluded edge remains emitted. Native64/wasm32 LLVM
+verification passes before/after CoroSplit; restoring only the old audit fails
+all four dead-edge positives while retaining all live-edge negatives. An early
+intermediate implementation failed LLVM verification because it removed phi
+operands but retained the old conditional edge; the final gate covers that
+consistency requirement. No new frame/runtime state, annotation or effect graph
+is added. Selected cl regressions pass (145.205s), SSA passes (0.718s), and the
+architecture/source-binding gates pass (2.232s). Original TLS/expvar executable
+validation is still in progress on immutable v56, not yet a closed failure.
+
+The merged PR checkpoint also has a fresh v54 four-package executable pass:
+68 tests plus one helper skip, tree peak 7192.5 MiB. Source manifest SHA-256
+`95172eda35332a0d8f0f3518de5d40540ab66cd392afc63fed4941bb8a0cdf37`
+matches after execution; compiler SHA-256 is
+`15268f843bb4632bcdb3c953bc49bcf2d940f12d2d272a27e153e5f29c0f569b`.
+These focused passes do not complete full stdlib/GOROOT or public resource
+delivery/performance acceptance.
+
 | Gate | Latest observed result | Scope |
 | --- | --- | --- |
-| `test` | 41 passed, 1 skipped | Fixed v47 compiler/source, uncached compile and execution |
-| `test/cgo` | 3 passed | Fixed v47 compiler/source, uncached compile and execution |
-| `test/syncpool` | 1 passed | Fixed v47 compiler/source, uncached compile and execution |
-| `test/llgoext` | 23 passed | Fixed v47 compiler/source, including defer-head isolation and 130-G ID allocation |
+| `test` | 41 passed, 1 skipped | Fixed v54 compiler/source, uncached compile and execution |
+| `test/cgo` | 3 passed | Fixed v54 compiler/source, uncached compile and execution |
+| `test/syncpool` | 1 passed | Fixed v54 compiler/source, uncached compile and execution |
+| `test/llgoext` | 23 passed | Fixed v54 compiler/source, including defer-head isolation and 130-G ID allocation |
 | `test/std/runtime` | 5 passed | Fixed v35 compiler/source, uncached compile and execution |
 | C fault recovery, foreign reentry, traceback | 4 passed | v7 compiler; probes compile, link and execute with LLGo |
 | Full `test/go` | Fixed v46: all 266 top-level tests passed, zero failures/skips | Completed 2026-10-16 01:27 UTC, run peak 6454.0 MiB including nested compilers. Exact retained binary and source hashes match; scratch reclaimed after child join. This entire rerun starts from the beginning rather than adopting 233 interrupted passes. Includes main-panic peers, generic/static spawn, rangefunc, C faults, foreign reentry, logical stacks and reflection Call/MakeFunc. Later v47 cleanup and source-front-end changes have separate affected gates, not an implicit full-v46 acceptance transfer. |

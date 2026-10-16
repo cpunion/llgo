@@ -2940,13 +2940,31 @@ func validateCoroExplicitStatusPanicInterfaceValue(
 		}
 		return validateCoroExplicitStatusPanicInterfaceValue(audit, value.X, capabilities, visiting)
 	case *ssa.Phi:
-		if len(value.Edges) == 0 {
-			return "interface phi has no incoming values"
+		block := value.Block()
+		if block == nil || len(value.Edges) == 0 || len(value.Edges) != len(block.Preds) {
+			return "interface phi has no matching incoming values and predecessors"
 		}
-		for _, edge := range value.Edges {
+		var program *coroProgramIR
+		if audit.universe != nil {
+			program = audit.universe.coroProgramIR
+		}
+		evaluated := false
+		for index, edge := range value.Edges {
+			predecessor := block.Preds[index]
+			if predecessor == nil {
+				return "interface phi has a nil predecessor"
+			}
+			if len(audit.reachableBlocks) != 0 && !audit.reachableBlocks[predecessor] ||
+				!program.coroSelectedEdge(predecessor, block) {
+				continue
+			}
+			evaluated = true
 			if reason := validateCoroExplicitStatusPanicInterfaceValue(audit, edge, capabilities, visiting); reason != "" {
 				return "interface phi input: " + reason
 			}
+		}
+		if !evaluated {
+			return "interface phi has no evaluated incoming values"
 		}
 		return ""
 	case *ssa.UnOp:
@@ -3186,7 +3204,7 @@ func validateCoroExplicitStatusPanicInterfaceCallResult(
 			}
 		}
 	}
-	return "interface call result is not one exact managed child or non-unwinding owned plain call"
+	return fmt.Sprintf("interface call result %q is not one exact managed child or non-unwinding owned plain call", call.String())
 }
 
 func isCoroProgramManagedEntry(fn *ssa.Function) bool {

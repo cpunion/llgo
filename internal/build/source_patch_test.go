@@ -58,6 +58,67 @@ func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 	}
 }
 
+func TestDarwinX509PointerSourcePatchKeepsExactTypes(t *testing.T) {
+	const pkgPath = "crypto/x509/internal/macos"
+	if !llruntime.HasSourcePatchPkg(pkgPath) || llruntime.HasAltPkg(pkgPath) {
+		t.Fatal("macos must keep the standard library package with a narrow source patch")
+	}
+	for _, goarch := range []string{"amd64", "arm64"} {
+		t.Run(goarch, func(t *testing.T) {
+			changed, overlay, files, err := applySourcePatchForPkg(nil, nil, env.LLGoRuntimeDir(), runtime.GOROOT(), pkgPath,
+				sourcePatchBuildContext{goos: "darwin", goarch: goarch, goversion: runtime.Version()})
+			if err != nil || !changed || len(files) != 1 {
+				t.Fatalf("Darwin pointer patch changed=%t files=%v error=%v", changed, files, err)
+			}
+			dir := filepath.Join(runtime.GOROOT(), "src", filepath.FromSlash(pkgPath))
+			original, err := parser.ParseFile(token.NewFileSet(), "corefoundation.go", overlay[filepath.Join(dir, "corefoundation.go")], 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, decl := range original.Decls {
+				if function, ok := decl.(*ast.FuncDecl); ok && function.Name.Name == "CFDataToSlice" {
+					t.Fatal("erased-pointer implementation remained alongside the typed replacement")
+				}
+			}
+			patch := string(overlay[filepath.Join(dir, "z_llgo_patch_corefoundation_llgo.go")])
+			for _, want := range []string{"func llgoCFDataGetBytePtr(data CFRef) *byte", "func CFDataToSlice(data CFRef) []byte", "bytes.Clone(unsafe.Slice(ptr, length))"} {
+				if !strings.Contains(patch, want) {
+					t.Fatalf("typed CF adapter omitted %q:\n%s", want, patch)
+				}
+			}
+			if strings.Contains(patch, "unsafe.Pointer") || strings.Contains(patch, "//llgo:coro") {
+				t.Fatal("typed CF adapter reconstructed an integer pointer or added a Go coloring annotation")
+			}
+			pkgs, err := packages.LoadEx(nil, func(types.Sizes, string, string) types.Sizes {
+				return &types.StdSizes{WordSize: 8, MaxAlign: 8}
+			}, &packages.Config{
+				Mode: loadSyntax | packages.NeedDeps | packages.NeedExportFile,
+				Env:  append(os.Environ(), "GOOS=darwin", "GOARCH="+goarch, "CGO_ENABLED=0"),
+				Fset: token.NewFileSet(), Overlay: overlay,
+			}, pkgPath)
+			if err != nil || len(pkgs) != 1 {
+				t.Fatalf("load patched macos package: count=%d error=%v", len(pkgs), err)
+			}
+			if pkgs[0].IllTyped {
+				logPackageErrors(t, pkgs[0], make(map[string]bool))
+				t.Fatal("patched macos package does not type-check")
+			}
+			scope := pkgs[0].Types.Scope()
+			signature := scope.Lookup("llgoCFDataGetBytePtr").Type().(*types.Signature)
+			pointer, ok := signature.Results().At(0).Type().(*types.Pointer)
+			if !ok || !types.Identical(pointer.Elem(), types.Typ[types.Uint8]) ||
+				!types.Identical(signature.Params().At(0).Type(), scope.Lookup("CFRef").Type()) {
+				t.Fatalf("CF pointer adapter lost its exact source types: %s", signature)
+			}
+		})
+	}
+	changed, _, files, err := applySourcePatchForPkg(nil, nil, env.LLGoRuntimeDir(), runtime.GOROOT(), pkgPath,
+		sourcePatchBuildContext{goos: "linux", goarch: "amd64", goversion: runtime.Version()})
+	if err != nil || changed || len(files) != 0 {
+		t.Fatalf("Darwin CF adapter leaked into Linux: changed=%t files=%v error=%v", changed, files, err)
+	}
+}
+
 func TestWASIP1CoroSyscallMetadataSourcePatch(t *testing.T) {
 	goroot := runtime.GOROOT()
 	overlay, _, err := buildSourcePatchOverlayForGOROOT(
@@ -371,12 +432,20 @@ func TestSyscallSourcePatchPreservesTargetImplementations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed || len(files) != 2 || filepath.Base(files[0]) != "syscall_freestanding_llgo.go" || filepath.Base(files[1]) != "syscall_webassembly.go" {
+	selectedWasm := make(map[string]bool, len(files))
+	for _, file := range files {
+		selectedWasm[filepath.Base(file)] = true
+	}
+	if !changed || len(files) != 2 || !selectedWasm["syscall_freestanding_llgo.go"] || !selectedWasm["syscall_webassembly.go"] {
 		t.Fatalf("wasm syscall patch changed = %v, files = %v, want target-neutral host-operation implementation", changed, files)
 	}
 	wasmPatch := filepath.Join(runtime.GOROOT(), "src", "syscall", "z_llgo_patch_syscall_webassembly.go")
 	if source := string(overlay[wasmPatch]); !strings.Contains(source, "llgo.coroHostOperation") || strings.Contains(source, `"syscall"`) {
 		t.Fatalf("overlay[%q] is not a self-contained host-operation replacement:\n%s", wasmPatch, source)
+	}
+	rawPatch := filepath.Join(runtime.GOROOT(), "src", "syscall", "z_llgo_patch_syscall_freestanding_llgo.go")
+	if source := string(overlay[rawPatch]); !strings.Contains(source, "ENOSYS") || strings.Contains(source, "llgo.syscall") {
+		t.Fatalf("overlay[%q] does not reject unavailable kernel traps:\n%s", rawPatch, source)
 	}
 }
 

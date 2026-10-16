@@ -93,9 +93,15 @@ func (ir *coroProgramIR) freezeCoroPredicateCFG(ctx *context, fn *ssa.Function) 
 }
 
 func (ir *coroProgramIR) coroSuccessors(block *ssa.BasicBlock) []*ssa.BasicBlock {
-	if ir != nil && len(block.Instrs) != 0 && len(block.Succs) == 2 {
+	if len(block.Instrs) != 0 && len(block.Succs) == 2 {
 		if branch, ok := block.Instrs[len(block.Instrs)-1].(*ssa.If); ok {
-			if value, known := ir.constantBranches[branch]; known {
+			var value, known bool
+			if ir != nil {
+				value, known = ir.constantBranches[branch]
+			} else {
+				value, known = coroPhysicalConstantBool(branch.Cond)
+			}
+			if known {
 				if value {
 					return block.Succs[:1]
 				}
@@ -104,6 +110,22 @@ func (ir *coroProgramIR) coroSuccessors(block *ssa.BasicBlock) []*ssa.BasicBlock
 		}
 	}
 	return block.Succs
+}
+
+// coroSelectedEdge reads the same constant-CFG projection as effect analysis.
+// A reachable predecessor may still have an excluded edge into a reachable phi
+// block. Callers separately check block reachability; neither lifetime proofs
+// nor phi emission may restore that excluded incoming value.
+func (ir *coroProgramIR) coroSelectedEdge(from, to *ssa.BasicBlock) bool {
+	if from == nil || to == nil {
+		return false
+	}
+	for _, successor := range ir.coroSuccessors(from) {
+		if successor == to {
+			return true
+		}
+	}
+	return false
 }
 
 func (ir *coroProgramIR) coroReachableBlocks(fn *ssa.Function) map[*ssa.BasicBlock]bool {
