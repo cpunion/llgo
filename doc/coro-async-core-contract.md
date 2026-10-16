@@ -234,8 +234,10 @@ compact channel 的旧 fast path 只接受 None/Idle，不能用于已领取或�
 只让不会中断当前 operation 的状态完成；真正 Requested 仍走原取消处理，非法组合
 拒绝且不修改 spill。兼容 prepare 重建 ParkState 时保留 task receipt，不重置其原因。
 24 种准备/完成组合、14 个非法或 interrupting 输入、全 core race/shuffle 和 Node/wasm
-测试通过；真实 linked 回归与 public delivery 仍须分别验收。此原型不表示公开资源
-返回、标准库 adoption 或全部平台已经闭环。
+测试通过。冻结 v76 的真实 linked regression 和 10 次重复运行通过，旧 v75 compiler/
+runtime 跑相同 v76 leaf fixture 则 abort；两侧 source-after 均匹配。这个回归验证已
+领取取消原因的 channel cleanup，不能代替 public delivery 的端到端验收。此原型不
+表示公开资源返回、标准库 adoption 或全部平台已经闭环。
 
 真实 fd 的 `TestResourceDeliveryBoundary` 是这个差异的永久 core oracle：child physical
 destroy 后再取消，normal/cancel lane 消费完全相同的 nil-payload Return；parent guard

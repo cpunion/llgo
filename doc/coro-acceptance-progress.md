@@ -84,7 +84,17 @@ an oracle for a Go semantic violation. Its exit 86 and reclaimed fd remain
 recorded; the broad v75 attempt also retains its channel-close failure. The
 new executable regression instead tests LLGo's existing structured shutdown:
 both tasks claim their stop before entering cleanup, then rendezvous through
-channels and close an actual fd exactly once. Its linked rerun is still pending.
+channels and close an actual fd exactly once. Immutable v76 compiles and passes
+the linked regression and ten repeat executions, with source-before/after
+matching. Compiler SHA-256 is
+`26e7cd871d0b228ba7b469f6044c8c19c25c71460938a89360f7cb49da6c3015`;
+manifest is `08a0ae19243378716969d3e92b82b9f8ca76a0be4bb1dd069915921a694b21dc`;
+binary is `a824efcc8a9487ab87086daf4e7a51ffb31b01c5e77e386d123e7e4dd8068f71`.
+The same v76 leaf fixture with the older v75 compiler/runtime aborts; both
+source manifests remain unchanged. This explicit mixed-version negative is
+not a same-snapshot acceptance pass. The permanent native CI table now runs
+the new fixture. A fresh broad compiler selection also passes: cl 113.108s,
+cltest 6.833s and build/bootstrap/architecture 0.681s, peak 670.4MiB.
 
 The private finite internal-cleanup scope now uses the shared static/dynamic
 await reconciliation; source Go defers do not acquire this mask. Native and
