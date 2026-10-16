@@ -1116,6 +1116,35 @@ build follows complete freeze and source verification. Older failed cohorts
 remain retained. Receiver/reflect resource adapters, public Open seeds and
 final whole-suite/platform/performance gates remain open.
 
+The large-result/recovery follow-up is [PR #283](https://github.com/cpunion/llgo/pull/283),
+initial head `381a2b723`, stacked on #282 with CI run `38972363387` queued.
+The separate v113 full `test/go` cohort now completes **271/271**, zero failures/
+skips, including nested compiler probes. Source-after matches at21:55:25 UTC;
+children join and private scratch is reclaimed. Its binary SHA-256 is
+`5b1fb2b3d197d5de2dc746af414ac7883a6cef12b5ad2066a7e2dcade09eed28`
+(25931536bytes), separate build/run peaks8247.2/6616.6MiB. This validates the
+range-owner snapshot, not the later large-result compiler changes.
+
+A new isolated return-alias experiment removes a redundant borrowed-output
+copy. The existing frozen producer proof requires every source Return to load
+the exact borrowed fields unchanged; BorrowResult has already selected the
+incoming sink or the independent nil-output fallback. Physical Return therefore
+keeps arity/status/completion and cancellation custody but does not copy those
+fields back to their identical sink. Ordinary Go returns and archive consumers
+retain their original publication path. No new SSA scan, runtime branch/state,
+ABI mode or ownership shortcut is introduced. The existing mandatory aggregate
+lowerer removes the resulting unused large load.
+
+The new native/wasm no-self-copy gate fails before that optimization. Working
+compiler delivery gates then pass10.528s/1284.6MiB, and all18 small/large archive
+executions pass147.513s/1883.9MiB, including a no-snapshot-allocation assertion.
+The retained old131080-byte producer IR has one AllocU and two memcpy calls
+for this redundant snapshot; the optimized producer has no such allocation.
+This is a concrete code-generation saving, not a general throughput claim.
+Immutable FD/GC/cleanup and optimization-mode replays are still required before
+folding the experiment into #283; the separate branch remains available for
+comparison.
+
 Immutable v108 completes the four runtime packages with **68 passes and one
 helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
 llgoext23. Source-after20:47:34 matches, children join and private scratch is

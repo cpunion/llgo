@@ -332,7 +332,19 @@ func (p *context) compileCoroTerminalOutcome(
 	}
 	switch outcome {
 	case coroPhysicalOutcomeReturn:
-		p.storeCoroLeafResult(b, body.abi, body.resultSlot, results)
+		plan := p.coroEmissionPlan()
+		borrowed := plan != nil && plan.cleanup != nil && plan.cleanup.delivery != nil && plan.cleanup.delivery.fallback != nil
+		if borrowed {
+			// The frozen producer proof requires every Return to project the
+			// borrowed output cells unchanged. BorrowResult already selected
+			// this exact incoming sink or the nil-output fallback; copying back
+			// would only snapshot a large value and store it into itself.
+			if len(results) != body.abi.resultCount {
+				panic("borrowed coroutine return lost its exact result arity")
+			}
+		} else {
+			p.storeCoroLeafResult(b, body.abi, body.resultSlot, results)
+		}
 		b.Jump(body.completion)
 	case coroPhysicalOutcomeGoexit:
 		if len(results) != 0 || body.terminalStatus.IsNil() || !p.coroEmissionExplicitStatus() {

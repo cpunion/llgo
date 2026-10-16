@@ -257,6 +257,19 @@ func AssertNilDeref(value bool) { if value { abort() } }
 		// lowering before CoroSplit. Feeding a 128KiB scalarized aggregate
 		// directly to SelectionDAG is not the production backend contract.
 		llabi.LowerLargeAggregates(prog.TargetData(), module)
+		if large && producer {
+			name := "Acquire"
+			if factory {
+				name = "acquire"
+			}
+			body := module.NamedFunction(libraryPath + "." + name + "$coro")
+			if body.IsNil() {
+				t.Fatal("large borrowed producer has no physical coroutine body")
+			}
+			if strings.Contains(body.String(), llssa.PkgRuntime+".AllocU") {
+				t.Fatalf("borrowed resource return retained a redundant aggregate snapshot allocation:\n%s", body.String())
+			}
+		}
 		records, err := cl.CoroLibraryEffectSummaryRecords(pkg)
 		if err != nil || len(records) == 0 {
 			t.Fatalf("actual producer records: %v (%d bytes)", err, len(records))
