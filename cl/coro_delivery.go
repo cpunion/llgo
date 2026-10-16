@@ -23,9 +23,9 @@ const (
 	coroDeliveryDropCall       = "coro.delivery.drop"
 )
 
-// coroSourceDeliveryRecipe is the source half of the existing delivery fact,
-// not a second effect graph or a runtime callback record. Only ProgramIR's
-// source builder writes it; physical binding/publication remain fail-closed.
+// coroSourceDeliveryRecipe binds one source-visible producer, either to its
+// owned borrow site or to checked archive helpers. Only the ProgramIR builder
+// writes it; it is not another effect graph or a runtime callback record.
 type coroSourceDeliveryRecipe struct {
 	producer           *ssa.Function
 	borrow             *ssa.Call
@@ -35,6 +35,7 @@ type coroSourceDeliveryRecipe struct {
 	result             *types.Struct
 	consumerInitialize string
 	consumerDrop       string
+	archive            *coroArchiveDeliveryRecipe
 }
 
 type coroDeliverySourceUniverse interface {
@@ -212,6 +213,9 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 	if ir == nil || u == nil || u.coroProgramIR != ir || ir.callsFrozen {
 		return fmt.Errorf("delivery consumers require the active ProgramIR builder")
 	}
+	if err := builder.freezeArchiveDeliveryProducers(ir); err != nil {
+		return err
+	}
 	if len(ir.deliveryProducers) == 0 {
 		return nil
 	}
@@ -220,8 +224,10 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 		recipe.consumerInitialize = coroDeliveryInitializeCall + ":" + identity
 		recipe.consumerDrop = coroDeliveryDropCall + ":" + identity
 		ir.deliveryProducers[producer] = recipe
-		if err := builder.freezeDeliveryHelperPlacements(ir, recipe.borrow, coroDeliveryInitializeCall, coroDeliveryDropCall); err != nil {
-			return err
+		if recipe.archive == nil {
+			if err := builder.freezeDeliveryHelperPlacements(ir, recipe.borrow, coroDeliveryInitializeCall, coroDeliveryDropCall); err != nil {
+				return err
+			}
 		}
 	}
 	requireCleanup := func(function *ssa.Function, producer bool) error {
@@ -244,7 +250,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 		if function == nil {
 			continue
 		}
-		if _, producer := ir.deliveryProducers[function]; producer {
+		if recipe, producer := ir.deliveryProducers[function]; producer && recipe.archive == nil {
 			if err := requireCleanup(function, true); err != nil {
 				return err
 			}
@@ -289,23 +295,39 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 				if err := requireCleanup(function, false); err != nil {
 					return err
 				}
-				for _, helper := range []struct {
+				for ordinal, helper := range []struct {
 					name   string
 					target *ssa.Function
 				}{
 					{recipe.consumerInitialize, recipe.initializer},
 					{recipe.consumerDrop, recipe.drop},
 				} {
-					if err := u.recordCoroLoweredCall(function, helper.name, helper.target); err != nil {
+					var err error
+					if helper.target != nil {
+						err = u.recordCoroLoweredCall(function, helper.name, helper.target)
+					} else {
+						err = builder.recordLoweredCallTarget(function, helper.name, coroLoweredCallTarget{importedTarget: recipe.archive.helpers[ordinal].fact.ID})
+					}
+					if err != nil {
 						return err
 					}
 				}
 				var extra []coroPlannedRuntimeHelper
 				if _, deferred := call.(*ssa.Defer); deferred && u.prog != nil && u.prog.LocalGoTypeExceedsNativeStack(recipe.result) {
 					// The producer's nil-output fallback already materialized this
-					// exact helper. Reuse its edge for the deferred consumer's slot.
-					allocator := u.loweredCalls[recipe.producer][coroManagedFrameSlotAllocZCall]
-					if err := u.recordCoroLoweredCall(function, coroManagedFrameSlotAllocZCall, allocator.target); err != nil {
+					// helper for a source definition. An archive-only producer has
+					// no local fallback, so bind the same typed runtime dependency
+					// from this compilation's already frozen function inventory.
+					allocator := u.loweredCalls[recipe.producer][coroManagedFrameSlotAllocZCall].target
+					if recipe.archive != nil {
+						if runtime := u.byPath[llssa.PkgRuntime]; runtime != nil && !u.pathDup[llssa.PkgRuntime] {
+							allocator = u.canonicalAlias(runtime.ssa.Func(coroRuntimeHelperTargetName(coroManagedFrameSlotAllocZCall)))
+						}
+					}
+					if allocator == nil {
+						return fmt.Errorf("large delivery requires its exact frozen consumer result allocator")
+					}
+					if err := u.recordCoroLoweredCall(function, coroManagedFrameSlotAllocZCall, allocator); err != nil {
 						return err
 					}
 					extra = append(extra, coroPlannedRuntimeHelper{name: coroManagedFrameSlotAllocZCall, placement: coroRuntimeHelperAtCleanup})

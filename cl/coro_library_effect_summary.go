@@ -342,12 +342,14 @@ func (view CoroLibraryEffectView) ValidateForeignCallable(
 // a stale fact, attaches it to another SSA pointer, or lets consumer analysis
 // change a producer-owned physical capability.
 func (c *Compilation) validateCoroLibraryEffects() error {
-	if c == nil ||
-		len(c.CoroLibraryEffects) == 0 &&
-			len(c.CoroLibraryForeignCallables) == 0 {
+	if c == nil {
 		return nil
 	}
 	plan := c.immutablePlan()
+	if len(c.CoroLibraryEffects) == 0 && len(c.CoroLibraryForeignCallables) == 0 &&
+		(plan == nil || len(plan.ImportedFunctions()) == 0) {
+		return nil
+	}
 	universe := c.immutableEmissionUniverse()
 	if plan == nil || universe == nil {
 		return fmt.Errorf("coroutine library effects require one frozen plan and emission universe")
@@ -369,6 +371,20 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 	}
 	if err := coro.ValidateLibraryEffectCompatibility(c.CoroLibraryEffectMetadata, consumer); err != nil {
 		return fmt.Errorf("coroutine library effect compilation metadata: %w", err)
+	}
+	frozenImports, err := universe.CoroPlanningMetadata().ImportedFunctions()
+	if err != nil {
+		return err
+	}
+	imports := plan.ImportedFunctions()
+	if len(frozenImports) != len(imports) {
+		return fmt.Errorf("coroutine archive helper preflight coverage mismatch")
+	}
+	for index, entry := range imports {
+		helper := universe.coroProgramIR.archiveDeliveryHelpers[entry.Fact.ID]
+		if entry.Fact != frozenImports[index] || universe.libraryEffects.signatureABIHash(helper.signature, consumer) != entry.Fact.ABIHash {
+			return fmt.Errorf("coroutine archive helper %q differs from frozen typed ABI input", entry.Fact.ID)
+		}
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = consumer.CoroABI

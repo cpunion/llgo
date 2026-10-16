@@ -53,7 +53,9 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 		if !found || fact.FuncRep == coro.Dispatch {
 			return nil, fmt.Errorf("llgo.coroBorrowResult requires a bound physical resource-delivery guard for descriptor publication")
 		}
-		plan.fallback = &recipe
+		if recipe.archive == nil {
+			plan.fallback = &recipe
+		}
 	}
 	reachable := ir.coroReachableBlocks(fn)
 	for _, block := range fn.Blocks {
@@ -215,8 +217,8 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 			guard.result = p.coroResultSlot(p.prog.Type(guard.plan.resultType(), llssa.InGo))
 		}
 		p.armCoroDynamicDeliveryCall(b, guard, env, args,
-			p.emitCoroDeliveryHelperValue(b, guard.plan.recipe.initializer, initializer),
-			p.emitCoroDeliveryHelperValue(b, guard.plan.recipe.drop, drop), p.coroDeliveryHelperInvocation())
+			p.emitCoroRecipeDeliveryHelperValue(b, guard.plan.recipe, 0, initializer),
+			p.emitCoroRecipeDeliveryHelperValue(b, guard.plan.recipe, 1, drop), p.coroDeliveryHelperInvocation())
 		return guard
 	}
 	if len(args) != len(guard.args) {
@@ -239,7 +241,7 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 		b.StoreKnownNonNil(guard.args[index], argument)
 	}
 	b.StoreKnownNonNil(guard.result, p.prog.Zero(p.prog.Elem(guard.result.Type)))
-	p.compileCoroDeliveryHelper(b, guard.plan.recipe.consumerInitialize, guard.plan.recipe.initializer, []llssa.Expr{guard.result})
+	p.compileCoroRecipeDeliveryHelper(b, guard.plan.recipe.consumerInitialize, guard.plan.recipe, 0, []llssa.Expr{guard.result})
 	b.StoreKnownNonNil(cleanup.delivery.active, p.prog.IntVal(uint64(guard.plan.tag), p.prog.Uint32()))
 	return guard
 }
@@ -303,7 +305,7 @@ func (s *coroStaticCleanupState) emitDeliveryPrefix(p *context, b llssa.Builder,
 		if site.dynamic != nil {
 			p.compileCoroDynamicDeliveryHelper(b, site.dynamic.release, drop, site.dynamic.drop, args, coroCleanupInvocation{state: s})
 		} else {
-			p.compileCoroDeliveryHelper(b, site.recipe.consumerDrop, site.recipe.drop, args)
+			p.compileCoroRecipeDeliveryHelper(b, site.recipe.consumerDrop, site.recipe, 1, args)
 		}
 		finish()
 		b.Jump(next)

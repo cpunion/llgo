@@ -108,6 +108,9 @@ type CoroGlobalPhysicalIdentity struct {
 // only to a complete whole-program frontend. Report-only and single-package
 // callers should use the zero value.
 type EmissionUniverseOptions struct {
+	// CoroLibraryEffects is the compatibility-checked archive input. Typed
+	// delivery helpers are bound before the call-site/effect plan is frozen.
+	CoroLibraryEffects *coro.LibraryEffectIndex
 	// CompleteRuntimeABI requires the exact LLGo runtime package and freezes
 	// every compiler-inserted runtime helper edge. Missing runtime helpers fail
 	// construction instead of being left to the legacy LLVM symbol resolver.
@@ -259,6 +262,7 @@ func (p *preparedEmissionPackage) compilerSourcePatchDeclaration(fn *ssa.Functio
 // the aliases that codegen may use to reach them. Its public accessors return
 // copies; construction completes all permitted lazy SSA materialization.
 type EmissionUniverse struct {
+	libraryImports     *coro.LibraryEffectIndex
 	prog               llssa.Program
 	goProg             *ssa.Program
 	goroot             string
@@ -463,6 +467,7 @@ type CoroForeignWorkerCertificate struct {
 
 type coroLoweredCallTarget struct {
 	target               *ssa.Function
+	importedTarget       coro.FunctionID
 	whenResultDeliveryOf ssa.CallInstruction
 	noUnwind             bool
 	unwindOnly           bool
@@ -915,6 +920,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		effectiveTypes:          make(map[emissionEffectiveTypeKey]types.Type),
 	}
 	u.libraryEffects.index.universe = u
+	u.libraryImports = options.CoroLibraryEffects
 	u.coroProgramIR.programPredicates = options.CoroProgramPredicates
 	for i, input := range inputs {
 		if input.SSA == nil || input.SSA.Prog == nil || input.SSA.Pkg == nil {
@@ -1672,6 +1678,16 @@ func (u *EmissionUniverse) CoroLoweredCalls(owner *ssa.Function) ([]coro.SSALowe
 		if logicalName == "" || !utf8.ValidString(logicalName) || strings.IndexByte(logicalName, 0) >= 0 {
 			return nil, fmt.Errorf("coroutine lowered-call owner %q has invalid logical name %q", owner.Name(), logicalName)
 		}
+		if frozen.importedTarget != "" {
+			if target != nil || frozen.whenResultDeliveryOf != nil || frozen.rawPlain || frozen.noUnwind || frozen.unwindOnly || frozen.explicitStatusElided {
+				return nil, fmt.Errorf("coroutine imported lowered call %q in %q has mixed invocation domains", logicalName, owner.Name())
+			}
+			if _, present := u.coroProgramIR.archiveDeliveryHelpers[frozen.importedTarget]; !present {
+				return nil, fmt.Errorf("coroutine imported lowered call %q in %q lost its typed archive binding", logicalName, owner.Name())
+			}
+			calls = append(calls, coro.SSALoweredCall{LogicalName: logicalName, ImportedTarget: frozen.importedTarget})
+			continue
+		}
 		if source := frozen.whenResultDeliveryOf; source != nil {
 			if frozen.noUnwind || frozen.unwindOnly || frozen.explicitStatusElided || frozen.rawPlain ||
 				source.Parent() != owner || source.Common() == nil || source.Common().StaticCallee() != nil {
@@ -1732,7 +1748,7 @@ func (u *EmissionUniverse) ResolveCoroLoweredCallRecord(owner *ssa.Function, log
 // ResolveCoroLoweredCallRecord so RawPlain cannot be lost.
 func (u *EmissionUniverse) ResolveCoroLoweredCall(owner *ssa.Function, logicalName string) (*ssa.Function, bool, error) {
 	call, ok, err := u.ResolveCoroLoweredCallRecord(owner, logicalName)
-	return call.Target, ok && !call.ManagedDispatch, err
+	return call.Target, ok && !call.ManagedDispatch && call.ImportedTarget == "", err
 }
 
 // ResolveCoroPlainLoweredCall returns one helper occurrence emitted by an
@@ -1876,8 +1892,8 @@ func (builder coroProgramIRBuilder) recordLoweredCallTarget(owner *ssa.Function,
 			}
 			return nil
 		}
-		if previous.target != record.target {
-			return fmt.Errorf("prepare emission universe: lowered call %q in %q resolves to both %q and %q", logicalName, owner.Name(), previous.target.Name(), record.target.Name())
+		if previous.target != record.target || previous.importedTarget != record.importedTarget {
+			return fmt.Errorf("prepare emission universe: lowered call %q in %q resolves to both conflicting source/archive targets", logicalName, owner.Name())
 		}
 		if previous.rawPlain != record.rawPlain {
 			return fmt.Errorf("prepare emission universe: lowered call %q in %q mixes managed and raw/plain occurrences", logicalName, owner.Name())
@@ -4356,7 +4372,26 @@ func (u *EmissionUniverse) ValidatePlanCoverage(plan *coro.SSAPlan) error {
 
 // ValidateCoroPlan is the build-facing name for ValidatePlanCoverage.
 func (u *EmissionUniverse) ValidateCoroPlan(plan *coro.SSAPlan) error {
-	return u.ValidatePlanCoverage(plan)
+	if err := u.ValidatePlanCoverage(plan); err != nil {
+		return err
+	}
+	imports := plan.ImportedFunctions()
+	if len(imports) == 0 && (u.coroProgramIR == nil || len(u.coroProgramIR.archiveDeliveryHelpers) == 0) {
+		return nil // No archive stage may shadow an unrelated preflight failure.
+	}
+	facts, err := u.CoroPlanningMetadata().ImportedFunctions()
+	if err != nil {
+		return err
+	}
+	if len(facts) != len(imports) {
+		return fmt.Errorf("coroutine archive helper plan coverage mismatch")
+	}
+	for index, fact := range facts {
+		if imports[index].Fact != fact {
+			return fmt.Errorf("coroutine archive helper %q differs from frozen typed input", fact.ID)
+		}
+	}
+	return nil
 }
 
 func (u *EmissionUniverse) selectPackage(prepared *preparedEmissionPackage, pkg *ssa.Package, state pkgState, skips map[string]none, fromPatch bool) error {

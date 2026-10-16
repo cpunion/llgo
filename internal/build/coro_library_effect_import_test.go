@@ -31,6 +31,47 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func TestCoroBuilderCannotInventArchiveHelperFacts(t *testing.T) {
+	_, err := (CoroPlanInput{}).Analyze(nil, coro.SSAConfig{
+		ImportedFunctions: []coro.LibraryEffectFunction{{ID: "forged"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "outside the frozen typed import inventory") {
+		t.Fatalf("builder bypassed frontend archive binding: %v", err)
+	}
+}
+
+func TestCoroBuilderHiddenCallsCompareCompleteInvocationDomain(t *testing.T) {
+	pkg, _ := buildCoroPlanTestPackage(t, "example/helpers", `package helpers
+func Target() {}
+func Owner(f func()) { f() }
+func Other(f func()) { f() }
+`, nil)
+	call := onlyBuildTestCall(t, pkg.Func("Owner"))
+	base := coro.SSALoweredCall{LogicalName: "delivery.drop", ManagedDispatch: true, WhenResultDeliveryOf: call}
+	imported := coro.SSALoweredCall{LogicalName: "delivery.initialize", ImportedTarget: "archive-helper"}
+	if !sameExactCoroLoweredCalls([]coro.SSALoweredCall{base, imported}, []coro.SSALoweredCall{imported, base}) {
+		t.Fatal("matching exact invocation domains depend on classifier order")
+	}
+	for name, mutate := range map[string]func(*coro.SSALoweredCall){
+		"target":      func(c *coro.SSALoweredCall) { c.Target = pkg.Func("Target") },
+		"archive":     func(c *coro.SSALoweredCall) { c.ImportedTarget = imported.ImportedTarget },
+		"dispatch":    func(c *coro.SSALoweredCall) { c.ManagedDispatch = false },
+		"condition":   func(c *coro.SSALoweredCall) { c.WhenResultDeliveryOf = onlyBuildTestCall(t, pkg.Func("Other")) },
+		"no-unwind":   func(c *coro.SSALoweredCall) { c.NoUnwind = true },
+		"unwind-only": func(c *coro.SSALoweredCall) { c.UnwindOnly = true },
+		"elision":     func(c *coro.SSALoweredCall) { c.ExplicitStatusElided = true },
+		"raw":         func(c *coro.SSALoweredCall) { c.RawPlain = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			mutate(&changed)
+			if sameExactCoroLoweredCalls([]coro.SSALoweredCall{base}, []coro.SSALoweredCall{changed}) {
+				t.Fatal("builder changed a frozen invocation field")
+			}
+		})
+	}
+}
+
 func TestReadImportCfgPackageFiles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "importcfg")
 	if err := os.WriteFile(path, []byte(`

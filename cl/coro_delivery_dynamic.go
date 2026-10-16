@@ -180,7 +180,8 @@ func (p *context) emitCoroDeliveryHelperValue(b llssa.Builder, target *ssa.Funct
 		panic("resource delivery descriptor requires one exact typed void helper")
 	}
 	entry := p.mustFunctionSymbol(target)
-	if entry.ftype != goFunc || len(entry.function.FreeVars) != 0 || entry.plan.External != coro.Defined || entry.plan.Demand == coro.NoDemand ||
+	if entry.ftype != goFunc || len(entry.function.FreeVars) != 0 ||
+		entry.plan.External != coro.Defined && !(entry.importedLibrary && entry.plan.External == coro.ExternalKnown) || entry.plan.Demand == coro.NoDemand ||
 		entry.plan.ManagedEntry == coro.ManagedEntryNone || entry.plan.RawPlainOnly {
 		panic("resource delivery descriptor requires a demanded context-free managed primary")
 	}
@@ -277,7 +278,7 @@ func (p *context) compileCoroDynamicDeliveryHelper(
 		panic(fmt.Errorf("dynamic delivery helper %q disagrees with its frozen source signature", name))
 	}
 	frozen, plainOnly := p.resolveCoroPhysicalHelperRecord(name)
-	if plainOnly || !frozen.ManagedDispatch || frozen.Target != nil || frozen.WhenResultDeliveryOf != site.instruction || frozen.NoUnwind {
+	if plainOnly || !frozen.ManagedDispatch || frozen.Target != nil || frozen.ImportedTarget != "" || frozen.WhenResultDeliveryOf != site.instruction || frozen.NoUnwind {
 		panic(fmt.Errorf("dynamic delivery helper %q lost its frozen conditional managed edge", name))
 	}
 	activeAtSite, err := p.emissionUniverse.coroProgramIR.deliveryHelperActive(p.immutablePlan(), site.instruction, name)

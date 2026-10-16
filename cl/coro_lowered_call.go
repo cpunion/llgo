@@ -163,7 +163,7 @@ func (p *context) resolveCoroPhysicalHelperRecord(helper string) (coro.SSALowere
 			panic(fmt.Errorf("coroutine lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
 		}
 	}
-	if !ok || frozen.Target == nil && !frozen.ManagedDispatch {
+	if !ok || frozen.Target == nil && !frozen.ManagedDispatch && frozen.ImportedTarget == "" {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q is absent from the frozen emission universe", helper, p.goFn.Name()))
 	}
 	if !plainOnly {
@@ -199,9 +199,24 @@ func (p *context) emitCoroResolvedManagedHelper(
 		).value
 	}
 
-	switch targetPlan.Emission {
+	physicalEmission := targetPlan.Emission
+	imported := false
+	if physicalEmission == coro.EmitExternal {
+		entry := p.mustFunctionSymbol(target)
+		plain, structured := coroExternalManagedDescriptorEntry(targetPlan)
+		if !entry.importedLibrary || !plain && !structured {
+			panic(fmt.Errorf("coroutine lowered runtime call %q requires an exact imported managed primary", helper))
+		}
+		imported = true
+		if plain {
+			physicalEmission = coro.EmitPlain
+		} else if targetPlan.ManagedEntry == coro.ManagedEntryCoroutine {
+			physicalEmission = coro.EmitCoroutine
+		}
+	}
+	switch physicalEmission {
 	case coro.EmitPlain:
-		if targetPlan.External != coro.Defined || targetPlan.Demand == coro.NoDemand || targetPlan.Effect.MaySuspend() || targetPlan.FuncRep == coro.DirectCoro {
+		if targetPlan.External != coro.Defined && !imported || targetPlan.Demand == coro.NoDemand || targetPlan.Effect.MaySuspend() || targetPlan.FuncRep == coro.DirectCoro {
 			panic(fmt.Errorf("coroutine lowered runtime call %q in %q cannot call suspending target %q through a plain entry", helper, p.goFn.Name(), targetPlan.ID))
 		}
 		fn, _, kind := p.compileFunction(target)

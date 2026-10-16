@@ -47,7 +47,7 @@ func Present() {}
 		progSSA:   ssaPkg.Prog,
 		buildConf: &Config{},
 	}
-	if err := prepareCoroEmissionUniverse(ctx, []*aPackage{pkg}); err != nil {
+	if err := prepareCoroEmissionUniverse(ctx, []*aPackage{pkg}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if ctx.coroEmission == nil || !ctx.coroEmission.CompleteRuntimeABI() {
@@ -92,7 +92,7 @@ func Present() {}
 		Package: &packages.Package{ID: llssa.PkgRuntime, PkgPath: llssa.PkgRuntime, Types: completePkg.Pkg, Syntax: completeFiles},
 		SSA:     completePkg,
 	}
-	if err := prepareCoroEmissionUniverse(completeCtx, []*aPackage{completeAPkg}); err != nil {
+	if err := prepareCoroEmissionUniverse(completeCtx, []*aPackage{completeAPkg}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !completeCtx.coroEmission.CompleteRuntimeABI() {

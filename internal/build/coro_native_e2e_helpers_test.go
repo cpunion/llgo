@@ -95,6 +95,7 @@ func coroNativeTaskContextRuntimeSources() []string {
 	return []string{
 		filepath.Join(root, "coro_task_allocation.go"),
 		filepath.Join(root, "coro_task_context.go"),
+		filepath.Join(root, "coro_cleanup_shield.go"),
 		filepath.Join(root, "coro_domain_context.go"),
 		filepath.Join(root, "coro_synctest_state_llgo.go"),
 		filepath.Join(root, "coro_synctest_channel_llgo.go"),
@@ -119,6 +120,7 @@ func TestCoroNativeRuntimeIslandIncludesOptionalServiceBoundaries(t *testing.T) 
 	// the authority for managed startup, GC, and synctest controller behavior.
 	files := coroNativeTaskContextRuntimeSources()
 	for _, name := range []string{
+		"coro_cleanup_shield.go",
 		"coro_domain_context.go", "coro_synctest_state_llgo.go",
 		"coro_synctest_channel_llgo.go", "coro_synctest_timer_llgo.go",
 		"coro_gc_observer_llgo.go", "coro_gc_observer_nobdwgc.go",

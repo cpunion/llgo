@@ -573,6 +573,7 @@ func buildCoroSpawnNativeE2EEntry(
 	prog llssa.Program,
 	temp, anchor string,
 	capabilities coro.ProgramCapabilities,
+	decorators ...func(llssa.Package),
 ) string {
 	t.Helper()
 	conf := &Config{
@@ -627,6 +628,9 @@ func buildCoroSpawnNativeE2EEntry(
 	entryMain.SetName(coroSpawnNativeE2EEntry)
 	if err := lowerCoroControlWrappers(ctx, entry.LPkg); err != nil {
 		t.Fatal(err)
+	}
+	for _, decorate := range decorators {
+		decorate(entry.LPkg)
 	}
 	return emitCoroSpawnNativeE2EObject(t, prog, entry.LPkg.Module(), filepath.Join(temp, "entry.o"))
 }

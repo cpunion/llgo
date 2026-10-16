@@ -47,6 +47,7 @@ type coroProgramIR struct {
 	wasmImports              map[*ssa.Function]wasmImportSpec
 	cgoDirectReturns         map[*ssa.Return]ssa.Value
 	deliveryProducers        map[*ssa.Function]coroSourceDeliveryRecipe
+	archiveDeliveryHelpers   map[coro.FunctionID]coroArchiveDeliveryHelper
 	physicalPlans            map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan
 	physicalPlansSealed      bool
 }
@@ -85,6 +86,7 @@ func newCoroProgramIR() *coroProgramIR {
 		wasmImports:              make(map[*ssa.Function]wasmImportSpec),
 		cgoDirectReturns:         make(map[*ssa.Return]ssa.Value),
 		deliveryProducers:        make(map[*ssa.Function]coroSourceDeliveryRecipe),
+		archiveDeliveryHelpers:   make(map[coro.FunctionID]coroArchiveDeliveryHelper),
 		physicalPlans:            make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
 	}
 }

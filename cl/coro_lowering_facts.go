@@ -310,9 +310,17 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 		}
 		var targetID coro.FunctionID
 		if planned.ManagedDispatch {
-			if planned.Target != nil || planned.WhenResultDeliveryOf != instruction || planned.NoUnwind ||
+			if planned.Target != nil || planned.ImportedTarget != "" || planned.WhenResultDeliveryOf != instruction || planned.NoUnwind ||
 				planned.RawPlain || planned.UnwindOnly || planned.ExplicitStatusElided {
 				return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q lost its exact conditional managed-dispatch identity", logicalName)
+			}
+		} else if planned.ImportedTarget != "" {
+			if planned.Target != nil || planned.RawPlain {
+				return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q has conflicting archive/source domains", logicalName)
+			}
+			targetID = planned.ImportedTarget
+			if _, bound := u.coroProgramIR.archiveDeliveryHelpers[targetID]; !bound {
+				return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q has no typed archive binding", logicalName)
 			}
 		} else {
 			if planned.Target == nil {
