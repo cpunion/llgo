@@ -364,3 +364,78 @@ func Allocate() int { return 0 }
 		t.Fatal("conditional exact helper borrowed a caller no-unwind shortcut")
 	}
 }
+
+func TestCoroDeferredDiscardedLargeResultNeedsNoSink(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			// No runtime allocator declaration exists. Merely discarding a
+			// deferred result must not introduce one. Target need not return
+			// for this ABI-only gate; linked runtime semantics are separate.
+			pkg, _, files := buildGoSSAPkg(t, `package foo
+func Target() [131073]byte { for {} }
+func Static() { defer Target() }
+func Dynamic(f func() [131073]byte) { defer f() }
+`)
+			prog := newLLSSAProgForTarget(t, target.arch)
+			defer prog.Dispose()
+			u, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			universe, err := coro.NewSSAEmissionUniverse(pkg.Prog, u.Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := u.FunctionIDConfig()
+			ids.CoroABI, ids.SchedulerABI, ids.ArchiveReady = coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, true
+			plan, err := coro.AnalyzeSSA(pkg.Prog, coro.Roots{
+				{Function: pkg.Func("Static"), Demand: coro.AsyncDemand},
+				{Function: pkg.Func("Dynamic"), Demand: coro.AsyncDemand},
+			}, coro.SSAConfig{
+				EmissionUniverse: universe, FunctionIDs: ids, OutcomeMode: coro.OutcomeExplicitStatus,
+				ClassifyLocalBody: u.CoroLocalBodyFacts, ClassifyLoweredCalls: u.CoroLoweredCalls,
+				ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+					if fn == pkg.Func("Target") {
+						return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+					}
+					return coro.SSAFunctionPolicy{}, nil
+				},
+				ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (coro.UnknownTarget, error) {
+					return coro.UnknownManagedDispatch, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: u}
+			enableCoroPreemptCompilation(compilation)
+			compilation.PanicABI, compilation.FuncRepABI = coro.PanicExplicitStatusABIV0, coro.FuncRepABIV2
+			compiled, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, pkg, files, goembed.VarMap{}, PackageOptions{Compilation: compilation})
+			if err != nil {
+				t.Fatal(err)
+			}
+			module := compiled.Module()
+			defer module.Dispose()
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("discarded large defer before split: %v", err)
+			}
+			for _, name := range []string{"foo.Static", "foo.Dynamic"} {
+				body := requireCoroPhysicalFunction(t, module, name).String()
+				if strings.Contains(body, "AllocZ") || regexp.MustCompile(`alloca[^\n]*131073`).MatchString(body) {
+					t.Fatalf("%s allocated an unused deferred result:\n%s", name, body)
+				}
+				if !regexp.MustCompile(`call ptr [^\n]*\(ptr [^,\n]+, ptr null`).MatchString(body) {
+					t.Fatalf("%s did not use the nil-output child ABI:\n%s", name, body)
+				}
+			}
+			runCoroABITestPipeline(t, prog, module)
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("discarded large defer after split: %v", err)
+			}
+		})
+	}
+}

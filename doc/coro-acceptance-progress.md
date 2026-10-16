@@ -498,6 +498,21 @@ Core focused tests pass0.450s/365.6MiB, full core race passes24.606s/1555.5MiB,
 frontend metadata tests pass2.766s/1214.7MiB and the unchanged architecture
 gate passes0.944s/696.1MiB. This is a core/metadata checkpoint only: large dynamic
 defer physical allocation is not yet wired, and the branch is not integrated.
+
+The same isolated follow-up removes a distinct unnecessary allocation:
+nonresource source-defer calls pass a nil output to their static or descriptor
+child, since Go discards deferred results. They join the same child transaction
+but do not load/copy an unused aggregate. Resource guards still provide their
+protected result slot and claim only after completion. A compile-time invocation
+option records discard semantics independently of recover permission; no
+runtime task/frame field is added. Native/wasm32 pre/post-CoroSplit gates with
+a 131073-byte result prove that neither static nor dynamic parents introduce
+an allocator or large alloca (0.525s/1293.7MiB). Existing delivery/defer/cleanup
+regressions pass14.822s/1305.2MiB, the unchanged architecture gate passes
+0.929s/743.9MiB, and the new ordinary Go control (yielding large return, LIFO loop
+defer, panic/recover) passes0.312s. Its actual LLGo linked execution is pending;
+this follow-up remains unintegrated. Resource-bearing large dynamic defer
+still needs its exact conditional allocator and does not silently fall back.
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;

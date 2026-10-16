@@ -261,6 +261,11 @@ result allocator 是准确的静态 target；两者消费同一个 occurrence �
 条件不能同时携带 raw/no-unwind/unwind-only/terminal-elision shortcut；exact target
 照常验证 canonical inventory、需求和 effect 传播，并把 target 与条件共同绑定到
 digest。这个核心/前端元信息扩展不代表大型动态 defer 的物理 allocator 已接通。
+源码 defer 明确丢弃返回值时，非资源 static/descriptor child 使用已有 nil-output ABI，
+不分配或加载只为丢弃而存在的结果 aggregate。discard 是编译期 invocation 语义，
+与直接 recover 权限正交；内部 helper 不因丢弃 void result 而获得 recover 权限。
+有资源 guard 的 defer 仍传入受保护结果槽，completion 消费后才 claim；不能把
+nil-output 优化用来绕过资源保管或条件 allocator。
 物理 consumer 复用原结果槽、每 frame 一个 active tag、原 cleanup drainer 与 child
 transaction；仅额外保存 drop descriptor、producer env 和准确参数。helper env 固定
 为 nil，不保存冗余 word。初始化完成才 arm，completion 消费和 result load 后才
