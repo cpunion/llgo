@@ -193,6 +193,7 @@ type planDigestFunction struct {
 	RawPlainOnly                 bool                         `json:"raw_plain_only"`
 	RawPlainEntry                bool                         `json:"raw_plain_entry"`
 	RawPlainVariant              bool                         `json:"raw_plain_variant"`
+	ResultDelivery               bool                         `json:"result_delivery,omitempty"`
 }
 
 type planDigestCall struct {
@@ -214,6 +215,7 @@ type planDigestCall struct {
 	InvocationContract     ContractID       `json:"invocation_contract,omitempty"`
 	InvocationABI          string           `json:"invocation_abi,omitempty"`
 	InvocationCertificate  string           `json:"invocation_certificate,omitempty"`
+	ResultDelivery         bool             `json:"result_delivery,omitempty"`
 }
 
 type planDigestLoweredCall struct {
@@ -224,6 +226,9 @@ type planDigestLoweredCall struct {
 	RawPlain             bool       `json:"raw_plain"`
 	UnwindOnly           bool       `json:"unwind_only"`
 	ExplicitStatusElided bool       `json:"explicit_status_elided"`
+	ManagedDispatch      bool       `json:"managed_dispatch,omitempty"`
+	DeliveryBlock        *int       `json:"delivery_block,omitempty"`
+	DeliveryInstruction  *int       `json:"delivery_instruction,omitempty"`
 }
 
 type planDigestElidedCall struct {
@@ -702,7 +707,11 @@ func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error)
 				return nil, fmt.Errorf("coro: lowered call %q in %q mixes no-unwind with raw-plain or unwind-only semantics", call.LogicalName, ownerID)
 			}
 			targetID, ok := p.byFunction[call.Target]
-			if !ok {
+			if call.ManagedDispatch {
+				if call.Target != nil || call.NoUnwind || call.RawPlain || call.UnwindOnly || call.ExplicitStatusElided {
+					return nil, fmt.Errorf("coro: malformed managed-dispatch lowered call %q in %q", call.LogicalName, ownerID)
+				}
+			} else if !ok || call.WhenResultDeliveryOf != nil {
 				return nil, fmt.Errorf("coro: lowered call %q in %q targets a function outside the plan", call.LogicalName, ownerID)
 			}
 			ret = append(ret, planDigestLoweredCall{
@@ -713,7 +722,27 @@ func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error)
 				RawPlain:             call.RawPlain,
 				UnwindOnly:           call.UnwindOnly,
 				ExplicitStatusElided: call.ExplicitStatusElided,
+				ManagedDispatch:      call.ManagedDispatch,
 			})
+			if source := call.WhenResultDeliveryOf; source != nil {
+				if err := validateSSADeliveryCallCondition(owner, source); err != nil {
+					return nil, err
+				}
+				plan, present := p.callPlans[source]
+				if !present || !plan.ResultDelivery {
+					return nil, fmt.Errorf("coro: lowered call %q lost its active result-delivery condition", call.LogicalName)
+				}
+				block, instruction := source.Block().Index, 0
+				for _, candidate := range source.Block().Instrs {
+					if candidate == source {
+						break
+					}
+					if _, debug := candidate.(*ssa.DebugRef); !debug {
+						instruction++
+					}
+				}
+				ret[len(ret)-1].DeliveryBlock, ret[len(ret)-1].DeliveryInstruction = &block, &instruction
+			}
 		}
 	}
 	sort.Slice(ret, func(i, j int) bool {
@@ -886,6 +915,11 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 	if p.plan == nil {
 		return nil, fmt.Errorf("coro: CoroPlanDigest requires a base plan")
 	}
+	for function, present := range p.resultDeliveryProducers {
+		if _, found := p.byFunction[function]; !found || !present || function.Signature == nil || function.Signature.Results().Len() == 0 {
+			return nil, fmt.Errorf("coro: result-delivery producer is absent from the typed function inventory")
+		}
+	}
 	baseFunctions := p.plan.Functions()
 	if len(p.functions) != len(baseFunctions) || len(p.functions) != len(p.byFunction) || len(p.functions) != len(p.byID) {
 		return nil, fmt.Errorf("coro: SSA function-plan coverage mismatch")
@@ -942,6 +976,7 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 			RawPlainOnly:            plan.RawPlainOnly,
 			RawPlainEntry:           plan.RawPlainEntry,
 			RawPlainVariant:         p.HasRawPlainVariant(function.Function),
+			ResultDelivery:          p.resultDeliveryProducers[function.Function],
 		})
 		if certificate, ok := p.ForeignNoBlockCertificate(function.Function); ok {
 			ret[len(ret)-1].ForeignNoBlockCertificate = certificate
@@ -1216,6 +1251,32 @@ func (p *SSAPlan) canonicalDigestCall(id FunctionID, block, instruction int, cal
 	if err := plan.Transport.Validate(); err != nil {
 		return planDigestCall{}, err
 	}
+	if plan.ResultDelivery {
+		if err := validateSSADeliveryCallCondition(call.Parent(), call); err != nil {
+			return planDigestCall{}, err
+		}
+		owner, present := p.plan.Lookup(p.byFunction[call.Parent()])
+		if !present || !owner.Exec.Contains(NeedsCleanupFrame) || plan.Transport != ManagedTransport || plan.RawPlain ||
+			plan.Kind != CallDirect && plan.Kind != CallDefer {
+			return planDigestCall{}, fmt.Errorf("coro: result-delivery call lost its managed local-cleanup plan")
+		}
+		if !plan.Open {
+			resource := false
+			for _, target := range plan.Targets {
+				resource = resource || p.resultDeliveryProducers[p.byID[target]]
+			}
+			if !resource {
+				return planDigestCall{}, fmt.Errorf("coro: closed result-delivery call lost its producer contract")
+			}
+		}
+		bound := false
+		for _, helper := range p.loweredCalls[call.Parent()] {
+			bound = bound || helper.ManagedDispatch && helper.WhenResultDeliveryOf == call
+		}
+		if !bound {
+			return planDigestCall{}, fmt.Errorf("coro: result-delivery call lost its conditional managed helper")
+		}
+	}
 	if plan.Transport == RawCCodePointer {
 		common := call.Common()
 		if common == nil || common.StaticCallee() != nil || common.IsInvoke() || common.Method != nil ||
@@ -1304,6 +1365,7 @@ func (p *SSAPlan) canonicalDigestCall(id FunctionID, block, instruction int, cal
 		InvocationContract:     plan.InvocationContract,
 		InvocationABI:          plan.InvocationABI,
 		InvocationCertificate:  plan.InvocationCertificate,
+		ResultDelivery:         plan.ResultDelivery,
 	}, nil
 }
 

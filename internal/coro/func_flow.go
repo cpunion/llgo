@@ -97,6 +97,9 @@ type SSACallPlan struct {
 	// RawCritical policy; it never publishes a raw address.
 	RawPlain            bool
 	RawPlainCertificate string
+	// ResultDelivery binds temporary caller custody to this exact occurrence,
+	// independently of the callee's suspension effect or value representation.
+	ResultDelivery bool
 	// InvocationPolicy is empty for ordinary calls. Trusted-inline calls retain
 	// the exact target-neutral contract, structural ABI, and frozen certificate
 	// identity that authorized this edge's foreign-wait suppression and selected

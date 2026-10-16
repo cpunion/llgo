@@ -234,6 +234,15 @@ structured-only fast path 要求无 delivery 的冻结证明，不能拿该证�
 这只是物理 ABI 基元；在调用图、frame guard、library helper 和 reflect 第二次交付
 全部绑定前，source producer 的 descriptor publication 继续明确拒绝，public seed 不启用。
 
+隐藏的 typed initializer/drop 调用同样进入已有 `SSALoweredCall` 清单和 effect 图，
+不伪造 SSA 函数，也不为发布冷元信息强迫静态 helper 改为 Dispatch。动态调用的
+临时 custody 条件在 effect fixed point 之前消费已有 scalar/CHA/开放目标证明；
+闭合且无资源的目标族（包括 nil-only）删除隐藏 helper，并保持原 FunctionPlan。
+未知 managed 目标只保守增加已有 managed-call effect 和 owner-local cleanup，
+不向普通 Go 调用链传播“资源所有权”。producer 身份来自冻结的本地 body fact
+或校验后的 archive delivery record；exact source occurrence、producer fact 和
+隐藏 helper 的条件关系全部进入 plan digest。物理 emitter 不重新推导这些事实。
+
 启用 seed 前，必须同时具备：producer borrowed-address/fallback、static normal/cancel
 交付、dynamic descriptor 可选契约与 ABI 校验、库元信息消费、defer/go discarded
 entry、reflect 第二次交付，以及标准库 wrapper 的预注册 adoption。range-over-func
