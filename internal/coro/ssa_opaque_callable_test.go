@@ -15,6 +15,10 @@ func TestSSAClosedCHARequiresCompleteCallableDomain(t *testing.T) {
 	for _, producer := range []struct{ name, body string }{
 		{"assertion", "return value.(func() *byte)"},
 		{"comma-ok-assertion", "fn, _ := value.(func() *byte); return fn"},
+		{"struct-assertion", "box := value.(struct{ Callback func() *byte }); return box.Callback"},
+		{"slice-assertion", "return value.([]func() *byte)[0]"},
+		{"map-assertion", "return value.(map[int]func() *byte)[0]"},
+		{"channel-assertion", "return <-value.(chan func() *byte)"},
 		{"external-result", "return external()"},
 		{"unsafe-load", "return *(*func() *byte)(pointer)"},
 	} {

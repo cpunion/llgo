@@ -223,6 +223,19 @@ the compiler selection passes 38.732s, unchanged architecture 0.807s, and
 native/wasm32 open-vs-closed-family CoroSplit gate 3.369s. Actual unchanged
 GOROOT execution is still required before calling the reflection bug fixed.
 
+The unchanged original GOROOT `fixedbugs/issue27695b.go` now passes a strict
+immutable v82 rerun (54.988s LLGo build, 302ms run; 2027.2MiB peak), with
+matching source-after. Compiler SHA-256 is
+`d08c1a825f7db497a927319ee8725ced9bfd44b7427e7c923d643b8295399184`;
+manifest is `f5c0d8e4fbf91ecc6d2d6c18862f7e8e613470397543e3d4a69ab81fededd1ed`.
+An isolated v82 compiler overlay removes only opaque-domain retention for a
+same-runtime actual negative; that run is pending. A fresh complete v82
+`test/go` cohort is also active. Review extends the same existing function-leaf
+schema to opaque struct/slice/map/channel values, rather than fixing scalar
+assertions alone; all eight origin regressions and full core race pass
+(73.659s, 1578.5MiB peak). That aggregate extension needs its own final
+executable/IR acceptance; v82's scalar result is not relabeled as testing it.
+
 GOROOT shard 1 also reports `fixedbugs/issue27695b.go` in the reflection/GC
 path. A strict unchanged-case v79 rerun still fails with `invalid zero-ticket
 coroutine run decision` (228.29s case; 2086.2MiB peak, source-after matched).
@@ -1086,19 +1099,16 @@ bound is still explicit.
 ## Remaining work, in order
 
 1. Finish current executable acceptance on immutable compiler/source pairs.
-   Fresh v46 `test/go` passes 266/266 and `_demo/go` passes 73/73; v47 basic
-   executable packages pass 68 tests with one helper skip. The v46 stdlib
-   evaluation has 94 distinct completed package passes and 20 distinct failed
-   packages (including resource stops) across fixed v46 cohorts; lanes 0/1
-   have now completed, joined children, reclaimed scratch and matched
-   source-after. Previously joined lanes 2/3 have restarted
-   as new immutable v56 cohorts, without adopting old-version partial passes.
-   The full v48 GOROOT selection is active, not a complete pass. Keep private
-   cache reclamation, unchanged source/compiler
-   inputs and every interrupted receipt. A fresh final GOROOT selection is
-   still required; focused fixes do not replace the whole selection.
-   Rerun affected executable gates after later fixes;
-   do not update instruction goldens to hide runtime failures.
+   Complete v67/v70 `test/go` cohorts pass 268/268 each; v70 native Go demos
+   pass 73/73. A fresh v82 `test/go` is active after the opaque-callable fix.
+   The single-snapshot v70 180-package stdlib evaluation has 39 completed
+   package passes and no failure so far; it remains active. The older fixed
+   v65-source/v64-compiler eight-shard GOROOT evaluation has completed shards
+   0/1 and is running shard 2. Preserve every older failure/resource stop;
+   focused passes on later snapshots do not rewrite those journals or establish
+   a final-snapshot whole-suite pass. Keep unchanged inputs, private scratch
+   reclamation and child joins. Do not update instruction goldens or xfails
+   to hide runtime failures.
 2. Preserve the closed stale-GC-root regression while finishing the final
    GOROOT evaluation. The production correction passes the GC-only fixed cohort:
    placement is frozen, safepoint/critical cost and exact helper observation
@@ -1111,14 +1121,21 @@ bound is still explicit.
    subsequent focused passing
    executions; four need extended compiler budgets and two remaining tests
    depend on private gc binary/trace behavior. Final integrated evaluation is
-   still required, without silently adding xfails.
+   still required, without silently adding xfails. The newly observed original
+   reflection/GC case `issue27695b.go` passes on v82 after correcting the
+   source-only closed-callable-domain assumption; retain its universal dispatch
+   and unaffected exact/static-family gates through final integration.
 3. Finish public resource-result cancellation handoff. Typed borrowed output
    plus pre-registered ordinary defer is already verified on native and Node;
    public `syscall.Open`/`os.Open` child-to-parent result delivery and platform
    wrapper adoption are not covered by that primitive. Reuse existing
    completion/cleanup ownership, without a second resource-capsule framework.
-   The shared result tuple now has a source-expressible anonymous alias; retain
-   exact types and use existing compiler-inserted helper demand where needed.
+   Closed-static physical guards now pass all six actual native routes and
+   60/60 executions on v81, including source defer, range-yield and nil-output
+   roots; PR #267 is awaiting CI. Large fallbacks avoid a duplicate allocation,
+   and resource-only cleanup avoids another result spill/copy. The shared
+   result tuple has a source-expressible anonymous alias; retain exact types
+   and use existing compiler-inserted helper demand where needed.
    Do not add a generic representation-cast or synthetic-SSA framework for
    helper field names. Typed recipe/model tests are passing, but no public
    seed may be enabled until static, dynamic and library consumption are wired.

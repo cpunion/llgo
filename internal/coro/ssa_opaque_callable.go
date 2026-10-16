@@ -30,15 +30,21 @@ func (f *ssaFuncFlow) retainOpaqueCallableDomains(
 	}
 	var opaque typeutil.Map
 	mark := func(owner *ssa.Function, typ types.Type) error {
-		signature, callable := types.Unalias(typ).Underlying().(*types.Signature)
-		if !callable {
-			return nil
+		// Reuse the representation schema: an opaque struct/container can
+		// carry a callable just as an opaque scalar can. Only looking at the
+		// outer type would incorrectly close a later Field/Index/receive.
+		for _, path := range f.pathsForType(typ) {
+			leaf, found := funcLeafTypeAtPath(typ, path)
+			if !found {
+				return fmt.Errorf("opaque callable source in %q has an invalid function leaf", owner.Name())
+			}
+			signature := types.Unalias(leaf).Underlying().(*types.Signature)
+			signature, err := projectSSACallableSignature(project, owner, signature)
+			if err != nil {
+				return fmt.Errorf("opaque callable source in %q: %w", owner.Name(), err)
+			}
+			opaque.Set(signature, true)
 		}
-		signature, err := projectSSACallableSignature(project, owner, signature)
-		if err != nil {
-			return fmt.Errorf("opaque callable source in %q: %w", owner.Name(), err)
-		}
-		opaque.Set(signature, true)
 		return nil
 	}
 	body := make(map[*ssa.Function]bool, len(functions))
