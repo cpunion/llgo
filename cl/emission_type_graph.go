@@ -278,7 +278,10 @@ func (b *emissionTypeGraphBuilder) describe(typ types.Type) emissionTypeGraphNod
 			text("opaque-pointer")
 			break
 		}
-		text("basic", strconv.Itoa(int(typ.Kind())), typ.Name())
+		// byte/rune are predeclared aliases represented by distinct Basic
+		// objects, not types.Alias. Their spelling cannot change Go identity
+		// or any of the structural ABI modes used by managed descriptors.
+		text("basic", strconv.Itoa(int(typ.Kind())), types.Typ[typ.Kind()].Name())
 	case *types.Pointer:
 		if b.options.opaquePointers {
 			text("opaque-pointer")
