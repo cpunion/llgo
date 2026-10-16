@@ -2825,9 +2825,9 @@ func applySSAStaticOutcomePlans(
 				exactInterface && callPlan.Rep == Dispatch)
 		// A closed managed descriptor call is equally exact for unbounded
 		// static-outcome closure when every frozen candidate publishes a
-		// synchronous outcome capability. The descriptor (including an interface
-		// itab descriptor) selects one candidate at run time and preserves the nil
-		// fault, but no candidate can park.
+		// single synchronous capability (plain or outcome). The descriptor,
+		// including an interface itab descriptor, selects one candidate at run time
+		// and preserves the nil fault, but no candidate can park.
 		// Bounded atomic-cost planning remains singleton/direct until its
 		// certificate schema can bind a complete target set and worst-case cost.
 		exactDispatch := call != nil && common != nil && !exactInterface && common.StaticCallee() == nil &&
@@ -2946,18 +2946,26 @@ func applySSAStaticOutcomePlans(
 		for id := range eligible {
 			for _, call := range outgoing[id] {
 				callAvailable := len(call.targets) != 0
+				dispatchEntry := ManagedEntryNone
 				for _, targetID := range call.targets {
 					target, found := base.Lookup(targetID)
 					available := found && target.ManagedEntry != ManagedEntryNone
 					if call.dispatch {
-						// A v2 descriptor publishes one structured ABI. A coroutine
+						// A v2 descriptor publishes one primary ABI. A coroutine
 						// primary may own an exact-call outcome twin, but that twin is
 						// not stored in the descriptor and therefore cannot close a
-						// synchronous dynamic caller. Plain/outcome mixing is likewise
-						// left to a future explicit non-coroutine dispatch recipe.
-						available = available &&
-							target.ManagedEntry == ManagedEntryOutcomePlain &&
-							target.HasStaticOutcome()
+						// synchronous dynamic caller. Uniform plain/outcome families
+						// select their existing typed entry without child transactions;
+						// mixed families retain universal coroutine dispatch.
+						plain := target.ManagedEntry == ManagedEntryPlain &&
+							target.Effect == NoSuspend && !target.Exec.Contains(MayUnwind)
+						outcome := target.ManagedEntry == ManagedEntryOutcomePlain && target.HasStaticOutcome()
+						available = available && (plain || outcome)
+						if dispatchEntry == ManagedEntryNone {
+							dispatchEntry = target.ManagedEntry
+						} else if dispatchEntry != target.ManagedEntry {
+							available = false
+						}
 					} else {
 						plainUnsafe := target.ManagedEntry == ManagedEntryPlain &&
 							(target.Effect.MaySuspend() || target.Exec.Contains(MayUnwind))

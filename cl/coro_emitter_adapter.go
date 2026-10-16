@@ -181,7 +181,7 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		if physical := p.coroEmissionPlan(); physical != nil {
 			staticOutcome = physical.staticOutcome
 		}
-		structuredOutcomeCall := instructionPlan.structuredOutcomeOnly &&
+		structuredOutcomeCall := coroManagedEntryIsSynchronous(instructionPlan.dispatchEntry) &&
 			(instructionPlan.control == coroPhysicalControlDispatchAwait ||
 				instructionPlan.control == coroPhysicalControlManagedInterfaceAwait ||
 				instructionPlan.control == coroPhysicalControlClosedInterfaceAwait)

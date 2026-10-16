@@ -29,7 +29,31 @@ Restoring only the old key builder fails the new positive cases while retaining
 the private/tag/named negative distinctions. The new executable `test/go`
 regression covers interface calls, bound method values and reflection with an
 actual channel suspension and a by-value aggregate. Its Go control passes all
-three subtests; LLGo execution is still pending a fresh compiler snapshot.
+three subtests. Immutable v59 now also compiles and executes all three through
+LLGo, with source-manifest SHA-256
+`bc21bb7e11a3ce7c826c6b9282f71740987d6f6dcedb5c3222f77c08c782d486`
+and compiler SHA-256
+`21b1ba92c1668b659c31cb8a7bc818dd8d221105a4c78a586e0a8a90c12ac034`.
+The fresh 267-test whole-package run (including nested compiler probes) is
+still active; its early successes are not a completed suite result.
+
+The next compiler correction closes another real rejection: a closed dynamic
+call with only plain targets used to manufacture an unreachable coroutine
+branch, despite its correctly non-awaiting effect. Publication now selects one
+existing ManagedEntryKind; one shared emitter handles ordinary function,
+interface and deferred descriptor calls. This replaces mutually exclusive
+boolean facts instead of adding another dispatch engine. Uniform plain
+families also close the existing static-outcome graph and need no caller
+coroutine frame; mixed/open families and coroutine descriptors with optional
+outcome twins retain their original paths. Nil faults still enter the same
+structured cleanup, and results are claimed once. Native64/wasm32 nullable,
+aggregate, interface and deferred-call IR gates pass (eight cases, 4.492s),
+as do the full internal/coro race/shuffle gate (25.232s) and monotonic
+architecture gate (0.997s). Restoring only the preceding inference rejects all
+eight new frame-free assertions; the deferred plain cases remain passing.
+The original native/wasm32 fixture separately reproduces the old invented-await
+rejection. A new executable aggregate/nil/deferred-callback regression passes
+its Go control; LLGo execution and final broad regressions are pending.
 
 PR [cpunion/llgo#261](https://github.com/cpunion/llgo/pull/261) is now merged as
 `d292d73d5`, after head `33887a5bd` passed all 18 coroutine CI jobs in run
