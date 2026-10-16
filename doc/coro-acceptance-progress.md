@@ -1065,6 +1065,31 @@ broader gates and CI are still pending. A possible redundant copy when a
 borrowed producer returns its already-aliased result remains a separate
 code-generation optimization to review, not an optimization claimed here.
 
+Immutable v114 (`1f443819a`) passes broad compiler gates134.850s/1312.7MiB,
+ABI/build gates0.786s/661.1MiB, and all six small/large archive functions
+(18 executions)152.782s/1936.1MiB. Its120 fd runs plus6 opaque controls pass
+49.641s, and3 reflection/GC routes pass204.591s, source-after matching,
+peak2781.8MiB. Compiler SHA-256 is
+`28fc197c2aeccb7c42c2802ac240fc7eea7ef260e0b4ba01e183e59a05ff7db6`;
+source manifest is
+`e11abffdae2ea297e183561374b6ee513f55802b63d3f7fc5e0595f0a367ccb8`.
+
+The new full-runtime large-recovery case correctly remains **FAIL** on v114:
+frontend verification reports a non-dominating AllocZ pointer in the unnamed
+return reconstruction before any object emission (12.290s/830.8MiB, matching
+source-after). The existing relocation collector only recognized SSA Heap;
+oversized source-local result cells are also promoted to managed storage by
+target layout. They now consume the same existing allocation predicate and
+terminal-result ramp recipe, with the exact effective type owner passed from
+physical planning. Small locals retain inline frame storage and ordinary
+conditional/loop allocations stay at their source sites. Target-size native/
+wasm unit gates pass0.557s/1260.6MiB; the affected compiler selection passes
+30.615s/1318.4MiB. A new immutable actual-program rerun is required.
+
+Read-only upstream inspection finds that current main (`1e93b1548`) already
+contains large zero-store lowering. No duplicate issue is filed, no upstream
+code is changed, and main is not synchronized into this branch.
+
 Immutable v108 completes the four runtime packages with **68 passes and one
 helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
 llgoext23. Source-after20:47:34 matches, children join and private scratch is

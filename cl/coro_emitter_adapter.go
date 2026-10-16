@@ -275,8 +275,8 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 
 func (p *context) compileCoroTerminalResultAllocation(allocation *ssa.Alloc) llssa.Expr {
 	body := p.coroBody()
-	if body == nil || allocation == nil || !allocation.Heap || allocation.Block() == nil || allocation.Block().Index != 0 {
-		panic("coroutine terminal-result allocation lost its source-entry heap identity")
+	if body == nil || allocation == nil || !coroAllocationUsesManagedStorage(p, allocation) || allocation.Block() == nil || allocation.Block().Index != 0 {
+		panic("coroutine terminal-result allocation lost its source-entry managed identity")
 	}
 	value := body.terminalResultAllocs[allocation]
 	if value.IsNil() {
