@@ -332,3 +332,35 @@ func Spawn(f func() int) { go f() }
 		}
 	}
 }
+
+func TestCoroDeliveryConditionalExactHelperRetainsItsRealTarget(t *testing.T) {
+	pkg, _, files := buildGoSSAPkg(t, `package foo
+func Owner(f func() int) int { return f() }
+func Allocate() int { return 0 }
+`)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	u, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, target := pkg.Func("Owner"), pkg.Func("Allocate")
+	call := onlyCoroManagedDispatchValidationCall(t, owner)
+	builder := coroProgramIRBuilder{canonical: emissionCanonicalIndex{universe: u}}
+	record := coroLoweredCallTarget{target: target, whenResultDeliveryOf: call}
+	if err := builder.recordLoweredCallTarget(owner, "delivery.allocate", record); err != nil {
+		t.Fatal(err)
+	}
+	actual, present, err := u.ResolveCoroLoweredCallRecord(owner, "delivery.allocate")
+	if err != nil || !present || actual.ManagedDispatch || actual.Target != target || actual.WhenResultDeliveryOf != call {
+		t.Fatalf("conditional exact helper became a fabricated/open target: %+v %t %v", actual, present, err)
+	}
+	if got, present, err := u.ResolveCoroLoweredCall(owner, "delivery.allocate"); err != nil || !present || got != target {
+		t.Fatalf("conditional exact target lost lookup identity: %v %t %v", got, present, err)
+	}
+	record.noUnwind = true
+	u.loweredCalls[owner]["delivery.allocate"] = record
+	if _, err := u.CoroLoweredCalls(owner); err == nil {
+		t.Fatal("conditional exact helper borrowed a caller no-unwind shortcut")
+	}
+}

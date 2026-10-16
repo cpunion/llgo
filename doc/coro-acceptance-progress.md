@@ -463,6 +463,41 @@ handoff and standard-library adoption remain required before public seeds.
 The full compiler and immutable linked-program regressions are tracked
 separately. The ongoing older v70 stdlib cohort now has **76/180** complete,
 all passing; the older GOROOT eight-shard run remains in shard 4.
+
+This cohort is now draft [PR #272](https://github.com/cpunion/llgo/pull/272),
+exact head `a2f727c5b`, targeting `llvm-coro` only. Immutable v90 compiler
+SHA-256 is `a5c4cd0f052dbd91b8822dcf989cac579f5fe96dceb1ba049b8939182c11acde`,
+manifest `cb646fec2c18f245bec8ad8ceca9e2f2571f163f77c8f076f3ddba810340d6a5`.
+The six existing resource modes pass **60/60** (48.093s); all original
+reflection/GC, cgo and claimed-channel routes pass (205.550s), source-after
+matches, peak2808.7MiB. These establish regression safety, not a publishable
+dynamic resource producer. Host race selection passes24.916s/1315.3MiB, full
+SSA14.220s and cltest14.207s pass/1032.6MiB, and the existing broad
+coro/emission compiler selection passes204.070s/382.8MiB. CI `38917619760`
+is still running at this checkpoint (16/18 successful, no failure observed);
+initial paginated review/comments and GraphQL threads are empty. The new
+isolated full `test/go` build completes and its runtime suite is running.
+
+An extra **unfiltered** `go test ./cl` is not a passing receipt: legacy tests
+fail to load a complete runtime profile (undefined coro GC/synctest hooks),
+then the package's default10m timeout fires inside
+`TestRunAndTestFromTestgo/cgocfiles`. The same profile failure is reproduced by
+unchanged v89 `TestRewriteGlobalStrings` (2.323s/1223.1MiB), before this
+consumer increment. The duplicate unfiltered v90 run is stopped, its processes
+are joined, and the failure record is retained. No test/golden/xfail is changed.
+This phase's broad compiler gate is the explicit coro/emission selection,
+while runtime compatibility is exercised by the separately isolated full
+`test/go` suite; instruction goldens remain outside the requested phase scope.
+
+The next isolated branch generalizes the existing delivery condition to exact
+managed helpers, so a statically known allocator and dynamically selected
+initializer/drop share the same predicate and sole effect graph. Exact target
+identity, demand, effects and conditional source all remain digest-bound;
+raw/no-unwind/unwind-only/terminal-elision combinations still fail closed.
+Core focused tests pass0.450s/365.6MiB, full core race passes24.606s/1555.5MiB,
+frontend metadata tests pass2.766s/1214.7MiB and the unchanged architecture
+gate passes0.944s/696.1MiB. This is a core/metadata checkpoint only: large dynamic
+defer physical allocation is not yet wired, and the branch is not integrated.
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;

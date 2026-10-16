@@ -256,6 +256,11 @@ source facade identity 与 canonical physical primary 的区别，不能丢失 g
 无需手工登记。最终 `CallPlan.ResultDelivery` 同时决定 pointer-free ledger 和 source、
 cleanup、result-drop 三种 placement 的 helper 是否保留；仅从清单中找不到 helper
 不能作为省略依据。普通 Go body 的 `nounwind` 证书也不能借给动态选择的 helper。
+条件与调用域正交：initializer/drop 可以是 managed descriptor invocation，而
+result allocator 是准确的静态 target；两者消费同一个 occurrence 条件并进入原调用图。
+条件不能同时携带 raw/no-unwind/unwind-only/terminal-elision shortcut；exact target
+照常验证 canonical inventory、需求和 effect 传播，并把 target 与条件共同绑定到
+digest。这个核心/前端元信息扩展不代表大型动态 defer 的物理 allocator 已接通。
 物理 consumer 复用原结果槽、每 frame 一个 active tag、原 cleanup drainer 与 child
 transaction；仅额外保存 drop descriptor、producer env 和准确参数。helper env 固定
 为 nil，不保存冗余 word。初始化完成才 arm，completion 消费和 result load 后才

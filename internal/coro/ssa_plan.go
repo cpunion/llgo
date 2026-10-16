@@ -375,7 +375,7 @@ type SSALoweredCall struct {
 	// call edge as an open source function value. Exact Target and dispatch are
 	// mutually exclusive; raw/no-unwind/terminal-elision shortcuts cannot apply.
 	ManagedDispatch bool
-	// WhenResultDeliveryOf binds this hidden initialization/drop invocation to
+	// WhenResultDeliveryOf binds this hidden initialization/drop/allocation invocation to
 	// one source dynamic call. Existing value flow decides whether that call
 	// can publish an undelivered resource result before the effect fixed point.
 	// A closed nonresource family removes the helper, cleanup tag and effects.
@@ -3289,19 +3289,19 @@ func freezeSSAClassifiedLoweredCalls(
 			if call.ExplicitStatusElided && !call.UnwindOnly {
 				return nil, fmt.Errorf("coro: lowered call %q in %q is ExplicitStatus-elided but not unwind-only", call.LogicalName, owner.Name())
 			}
+			if source := call.WhenResultDeliveryOf; source != nil {
+				if call.RawPlain || call.NoUnwind || call.UnwindOnly || call.ExplicitStatusElided {
+					return nil, fmt.Errorf("coro: conditional result-delivery helper %q has an unsupported occurrence shortcut", call.LogicalName)
+				}
+				if err := validateSSADeliveryCallCondition(owner, source); err != nil {
+					return nil, err
+				}
+			}
 			if call.ManagedDispatch {
 				if call.Target != nil || call.RawPlain || call.NoUnwind || call.UnwindOnly || call.ExplicitStatusElided {
 					return nil, fmt.Errorf("coro: managed-dispatch lowered call %q in %q has an exact target or unsupported shortcut", call.LogicalName, owner.Name())
 				}
-				if source := call.WhenResultDeliveryOf; source != nil {
-					if err := validateSSADeliveryCallCondition(owner, source); err != nil {
-						return nil, err
-					}
-				}
 				continue
-			}
-			if call.WhenResultDeliveryOf != nil {
-				return nil, fmt.Errorf("coro: result-delivery condition requires a managed-dispatch lowered call")
 			}
 			target := call.Target
 			if target == nil {
