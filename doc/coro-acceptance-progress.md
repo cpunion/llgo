@@ -52,8 +52,36 @@ as do the full internal/coro race/shuffle gate (25.232s) and monotonic
 architecture gate (0.997s). Restoring only the preceding inference rejects all
 eight new frame-free assertions; the deferred plain cases remain passing.
 The original native/wasm32 fixture separately reproduces the old invented-await
-rejection. A new executable aggregate/nil/deferred-callback regression passes
-its Go control; LLGo execution and final broad regressions are pending.
+rejection. Broad cl selection passes (163.256s / 1237.0MiB), SSA selection
+passes (0.589s) and broad host build selection passes (576.659s / 8096.3MiB).
+The latter host selection spans the working-tree follow-up; it is not an
+immutable whole-source executable gate. Immutable v60 freezes compiler source
+`3b9571606`, source-manifest SHA-256
+`9089511effe3e59af0ad6f2313ab031dd8eb1f618cb19476721c680af0915ebc`
+and compiler SHA-256
+`ea0af20049350841d443d90a3787e03f035e1396e9d746ee2fa4f24de0b224ab`.
+The new aggregate/nil/deferred-callback regression and the cross-package
+interface/method-value/reflection regression pass 100 executions each (200
+top-level passes), under a 4GiB tree cap; sampled peak is 24.1MiB. Source and
+binary SHA-256 match before/after; binary SHA-256 is
+`888387e61c3ea7ab684e6ee55e036543fed04affa12fdffac711a879016ff5c1`.
+The complete 268-test v60 run including nested compiler probes remains active.
+PR [cpunion/llgo#263](https://github.com/cpunion/llgo/pull/263) is draft, based
+on #262 and targeting llvm-coro only. Neither current-head CI nor the full
+package is claimed complete.
+
+A separate runtime follow-up replaces the unbound uint64/empty
+runtime/debug.readGCStats stub with the signed-duration buffer protocol and
+the existing collector's ReadMemStats snapshot. It reports real cycle counts
+and available pause data only; collectors without pause timestamps retain an
+empty history rather than invented zero-duration pauses. The consistency and
+stale-quantile Go control passes ten repetitions. Runtime source v61 is frozen
+as `80755b9f9`, manifest SHA-256
+`56904406135fd8bd24f88fc5994f692e869328d158f1c96bc8cb8d6b7e88db17`.
+It reuses the unchanged v60 compiler with explicit LLGO_ROOT, and its actual
+complete runtime/debug package evaluation is pending. This does not implement
+unavailable collector pause telemetry or the other debug setting/heap-dump
+stubs, and is not a full runtime/debug semantic compatibility claim.
 
 PR [cpunion/llgo#261](https://github.com/cpunion/llgo/pull/261) is now merged as
 `d292d73d5`, after head `33887a5bd` passed all 18 coroutine CI jobs in run
@@ -783,8 +811,10 @@ bound is still explicit.
 1. Finish current executable acceptance on immutable compiler/source pairs.
    Fresh v46 `test/go` passes 266/266 and `_demo/go` passes 73/73; v47 basic
    executable packages pass 68 tests with one helper skip. The v46 stdlib
-   evaluation has 82 distinct completed package passes across fixed v46
-   cohorts; lanes 0/1 remain active. Previously joined lanes 2/3 have restarted
+   evaluation has 94 distinct completed package passes and 20 distinct failed
+   packages (including resource stops) across fixed v46 cohorts; lanes 0/1
+   have now completed, joined children, reclaimed scratch and matched
+   source-after. Previously joined lanes 2/3 have restarted
    as new immutable v56 cohorts, without adopting old-version partial passes.
    The full v48 GOROOT selection is active, not a complete pass. Keep private
    cache reclamation, unchanged source/compiler
