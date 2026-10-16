@@ -527,11 +527,11 @@ func libc_getrlimit_trampoline()
 		t.Fatalf("patched getrlimit target resolved to %v, %t; want exact alternate %v", resolved, ok, alternateTarget)
 	}
 	getrlimitPC := exactIntrinsicOpcodeCall(t, universe, original.ssa.Func("Getrlimit"), llgoFuncPCABI0)
-	if observed, err := universe.CoroStaticCodeAddressCallArgument(getrlimitPC, 0); err != nil || !observed {
+	if observed, err := universe.CoroStaticFunctionReferenceCallArgument(getrlimitPC, 0); err != nil || !observed {
 		t.Fatalf("inferred patch adapter FuncPCABI0 operand = %t, %v; want exact code-address-only publication", observed, err)
 	}
 	forkPC := exactIntrinsicOpcodeCall(t, universe, original.ssa.Func("Fork"), llgoFuncPCABI0)
-	if observed, err := universe.CoroStaticCodeAddressCallArgument(forkPC, 0); err != nil || !observed {
+	if observed, err := universe.CoroStaticFunctionReferenceCallArgument(forkPC, 0); err != nil || !observed {
 		t.Fatalf("uncertified trampoline FuncPCABI0 operand = %t, %v; want exact address-only observation", observed, err)
 	}
 	call := exactWorkerSyscallCall(t, universe, original.ssa.Func("rawSyscall"))

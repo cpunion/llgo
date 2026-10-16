@@ -385,7 +385,7 @@ func RawSyscall(trap, a0, a1, a2 uintptr) uintptr {
 	// the exact target without materializing a managed interface. It is not a
 	// worker-call capability: the independent callable shadow and operation
 	// certificate checks above and below must still reject this dispatcher.
-	if observed, err := universe.CoroStaticCodeAddressCallArgument(producer, 0); err != nil || !observed {
+	if observed, err := universe.CoroStaticFunctionReferenceCallArgument(producer, 0); err != nil || !observed {
 		t.Fatalf("arbitrary trap dispatcher static code-address occurrence = %t, %v; want true, nil", observed, err)
 	}
 	call := exactWorkerSyscallCall(t, universe, pkg.ssa.Func("RawSyscall"))

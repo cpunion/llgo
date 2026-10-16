@@ -276,6 +276,30 @@ Full test/go rebuilds and reruns the entire package, rather than adopting the
 233 interrupted test results; demos/stdlib reuse only completed package passes.
 The preserved full-test scratch/lock and its manual inspection receipt remain.
 
+The resumed v46 demo cohort completed at 01:14 UTC: **73/73 passed**, zero
+semantic failures, scratch reclaimed and source hashes unchanged. The v47
+four-package executable gate also completed: `test` 41 passed / 1 helper skipped,
+`test/cgo` 3 passed, `test/syncpool` 1 passed, and `test/llgoext` 23 passed
+(4845.7 MiB sampled process-tree peak). The source manifest still matches.
+Full v46 test/go remains running, not a completed package pass. After 15/180
+stdlib package passes, the sequential runner was deliberately terminated and
+joined to repartition the other 165 packages into four disjoint lanes. Its
+interrupted AES compilation is retained as an infrastructure interruption, not
+a semantic failure. All four lanes keep the same source/compiler and per-stage
+limits; their aggregate compile bound is 48GiB, plus 12GiB for full test/go.
+
+The typed borrowed-result source frontend now freezes exact initializer/drop
+identities and canonical result types in the existing ProgramIR. Its compiler-
+only function operands reuse the static-reference analysis capability instead
+of manufacturing runtime funcvals or descriptor demand; ordinary publication
+of the same function still retains managed dynamic-call semantics. Invalid
+shapes and a missing physical guard fail closed. This is source planning only:
+it does not expose an unprotected output pointer or enable a public acquisition
+adapter. All selected compiler `TestCoro*` / `TestEmission*` regressions pass
+(91.422s / 1162.0 MiB), the complete core race/shuffle suite passes
+(17.733s / 1648.4 MiB), and the architecture/selected build gates pass
+(0.663s / 698.6 MiB). No architecture budget was relaxed.
+
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
 both the source SHA-256 manifest and recursive content comparison before
@@ -284,14 +308,14 @@ this is storage reclamation, not loss of the earlier source evidence.
 
 | Gate | Latest observed result | Scope |
 | --- | --- | --- |
-| `test` | 41 passed, 1 skipped | Fixed v35 compiler/source, uncached compile and execution |
-| `test/cgo` | 3 passed | Fixed v35 compiler/source, uncached compile and execution |
-| `test/syncpool` | 1 passed | Fixed v35 compiler/source, uncached compile and execution |
-| `test/llgoext` | 23 passed | Fixed v35 compiler/source, including defer-head isolation and 130-G ID allocation |
+| `test` | 41 passed, 1 skipped | Fixed v47 compiler/source, uncached compile and execution |
+| `test/cgo` | 3 passed | Fixed v47 compiler/source, uncached compile and execution |
+| `test/syncpool` | 1 passed | Fixed v47 compiler/source, uncached compile and execution |
+| `test/llgoext` | 23 passed | Fixed v47 compiler/source, including defer-head isolation and 130-G ID allocation |
 | `test/std/runtime` | 5 passed | Fixed v35 compiler/source, uncached compile and execution |
 | C fault recovery, foreign reentry, traceback | 4 passed | v7 compiler; probes compile, link and execute with LLGo |
 | Full `test/go` | v42: all 266 top-level tests passed, zero failures/skips | Exact retained binary, source hashes match before/after. Build 236s / 7590.0 MiB; complete run 1678s / 6601.8 MiB, including nested compilers. The original 6GiB run stopped for resources; the 12GiB rerun starts from the beginning and passes. Includes new main-panic peers, generic/static spawn and rangefunc gates, as well as C faults, foreign reentry, logical stacks and reflection Call/MakeFunc. v35's 258-test pass remains historical evidence; newer raw-helper/GC changes are not included in this v42 result. |
-| Top-level `_demo/go` | Fixed v25 run: all 73/73 passed, zero semantic failures | Source hashes match before/after; each demo compiles and runs in its own copied directory. Final run took 3004s, reusing 11 verified successes with identical compiler/source/SDK and rebuilding/running 62. `embedunexport-1598` hit the original 6 GiB compile cap, then passed at 8 GiB; maximum compile RSS was 7621.8 MiB (`goimporter-1389`). Generated runs retain a 2 GiB cap. This is v25 acceptance, not a v35 whole-demo claim. |
+| Top-level `_demo/go` | Fixed v46: all 73/73 passed, zero semantic failures | Completed 2026-10-16 01:14 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Disk/monitor interruptions remain in the journal; only completed exact-input package passes were reused. |
 | `test/std/os`, `test/std/net` | 85 passed; 129 passed / 5 skipped, respectively | Full packages compiled and executed with fixed source snapshot and v35, cache disabled |
 | `test/std/reflect` | v25: 68 passed | Separate real LLGo compile and generated-binary execution; build peak 5768 MiB |
 | `synctest` execution | Run/Wait, inheritance, channel/select/Cond, fake time, heap association and WaitGroup passed | Real LLGo programs also verify detached children, finalizers and AddCleanup outside the bubble; associated objects remain collectible. Host race tests are not LLGo race-instrumentation acceptance. |

@@ -46,6 +46,7 @@ type coroProgramIR struct {
 	callsFrozen              bool
 	wasmImports              map[*ssa.Function]wasmImportSpec
 	cgoDirectReturns         map[*ssa.Return]ssa.Value
+	deliveryProducers        map[*ssa.Function]coroSourceDeliveryRecipe
 	physicalPlans            map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan
 	physicalPlansSealed      bool
 }
@@ -83,6 +84,7 @@ func newCoroProgramIR() *coroProgramIR {
 		erasedFunctionInterfaces: make(map[*ssa.MakeInterface]none),
 		wasmImports:              make(map[*ssa.Function]wasmImportSpec),
 		cgoDirectReturns:         make(map[*ssa.Return]ssa.Value),
+		deliveryProducers:        make(map[*ssa.Function]coroSourceDeliveryRecipe),
 		physicalPlans:            make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
 	}
 }

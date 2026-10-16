@@ -249,6 +249,13 @@ microtask 链饿死实际 I/O callback。公开 `syscall.Open` 仍保留原调�
 守卫，不能因为调用了 Open 就被认定为资源生产函数。未知 C 的 int/pointer 返回仍不
 猜测所有权。`Dup2(oldfd, oldfd)` 不产生新资源，不能套用 Dup 的 acquire 契约。
 
+源码侧使用私有 `llgo.coroBorrowResult(init, drop)` 声明借用，两个参数必须是编译期
+可确定、无捕获的 Go 函数身份，签名由 producer 的规范化参数/结果机械生成。它们不
+物化为函数值，不从运行时地址反查；普通函数值发布仍保留原有 descriptor 语义。
+精确 recipe 只冻结一次到已有 ProgramIR，普通调用者不继承 acquisition 身份。
+当前实现只完成源码事实与自动染色的前端验证，物理 guard 未绑定时后端明确拒绝，
+不会因为出现这个声明就把尚未保护的 hidden output 指针交给适配器。
+
 初始化空槽也消费已有 callable effect/exec 事实，不能为了要求 initializer 是 plain
 而新增 no-panic/no-suspend 标注：普通 typed pointer store 就可能保守包含 nil fault。
 先把含指针的结果存储清零，再按已有 plain/outcome/coro 路径调用 initializer；只有

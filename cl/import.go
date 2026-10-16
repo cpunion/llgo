@@ -1008,6 +1008,9 @@ const (
 	// adapter uses the same balanced critical-region proof as CriticalEnter;
 	// it does not expose a processor identity or add a native lock.
 	llgoCoroCriticalPin = llgoInstrBase + 0x61
+	// Typed compiler-only resource recipe seed. Its operands are exact helper
+	// identities, never runtime function values or code-address lookups.
+	llgoCoroBorrowResult = llgoInstrBase + 0x62
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )

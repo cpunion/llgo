@@ -332,7 +332,7 @@ func coroCompilerElidedFunctionAddressBox(plan *coro.SSAPlan, universe *Emission
 		direct.Common().Args[0] != box || !plan.ElidesCall(direct) {
 		return false
 	}
-	if plan.StaticCodeAddressArgument(direct, 0) {
+	if plan.StaticFunctionReferenceArgument(direct, 0) {
 		target, exact := coroFuncPCABI0ExactStaticOperand(direct)
 		return exact && target == box.X && universe.validateCoroFuncPCABI0CallSite(direct) == nil
 	}

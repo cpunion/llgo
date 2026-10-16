@@ -846,6 +846,7 @@ var llgoInstrs = map[string]int{
 	"coroOSThreadUnlock":         llgoCoroOSThreadUnlock,
 	"coroFFICall":                llgoCoroFFICall,
 	"coroCurrentTask":            llgoCoroCurrentTask,
+	"coroBorrowResult":           llgoCoroBorrowResult,
 	"coroExecutionDomainEnabled": llgoCoroExecutionDomainEnabled,
 	"coroGCObservationEnabled":   llgoCoroGCObservationEnabled,
 	"coroPropagatePanic":         llgoCoroPropagatePanic,
@@ -3529,6 +3530,11 @@ func (p *context) callEx(
 			if ret.IsNil() {
 				panic("llgo.coroCurrentTask requires an active physical coroutine")
 			}
+		case llgoCoroBorrowResult:
+			// A typed frontend seed is not yet a physical custody proof. Keep
+			// this closed until parent/entry guards and descriptor publication
+			// consume the same frozen recipe; never hand out an unguarded ABI slot.
+			panic("llgo.coroBorrowResult requires a bound physical resource-delivery guard")
 		case llgoCoroHostOperation:
 			if act != llssa.Call || ds != nil {
 				panic("llgo.coroHostOperation requires an exact direct call")

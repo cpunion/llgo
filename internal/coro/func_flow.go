@@ -564,15 +564,15 @@ func (p *SSAPlan) RawFunctionAddressTarget(call ssa.CallInstruction, argument in
 	return target, ok && target != nil
 }
 
-// StaticCodeAddressArgument reports whether the exact call argument is lowered
-// as an observation of a selected function entry address. It is intentionally
-// distinct from RawFunctionAddressArgument: observing a PC never authorizes a
-// synchronous call through that pointer.
-func (p *SSAPlan) StaticCodeAddressArgument(call ssa.CallInstruction, argument int) bool {
+// StaticFunctionReferenceArgument reports whether the exact call argument is
+// compiler-only metadata or a selected entry-address observation. It is intentionally
+// distinct from RawFunctionAddressArgument: metadata/PC observations never
+// authorize a synchronous call through a pointer.
+func (p *SSAPlan) StaticFunctionReferenceArgument(call ssa.CallInstruction, argument int) bool {
 	if p == nil || call == nil || argument < 0 {
 		return false
 	}
-	_, ok := p.codeAddressArgs[ssaCallArgumentUse{call: call, argument: argument}]
+	_, ok := p.staticReferenceArgs[ssaCallArgumentUse{call: call, argument: argument}]
 	return ok
 }
 
@@ -1427,15 +1427,15 @@ func (f *ssaFuncFlow) validateRawFunctionAddressCallArguments(uses []ssaCallArgu
 		if use.call == nil || use.call.Common() == nil || use.argument < 0 || use.argument >= len(use.call.Common().Args) {
 			return fmt.Errorf("invalid raw function-address call argument index %d", use.argument)
 		}
-		boxed, ok := use.call.Common().Args[use.argument].(*ssa.MakeInterface)
-		if !ok {
-			return fmt.Errorf("raw function-address call argument %d in %q is not a MakeInterface", use.argument, use.call.Parent().Name())
+		value := use.call.Common().Args[use.argument]
+		if boxed, ok := value.(*ssa.MakeInterface); ok {
+			value = boxed.X
 		}
-		target, exact := exactSSAContextFreeFunctionValue(boxed.X)
+		target, exact := exactSSAContextFreeFunctionValue(value)
 		if !exact {
 			return fmt.Errorf("raw function-address call argument %d in %q does not contain one exact context-free function value", use.argument, use.call.Parent().Name())
 		}
-		index, ok := f.index[boxed.X]
+		index, ok := f.index[value]
 		if !ok {
 			return fmt.Errorf("raw function-address target %q in %q has no function-value flow component", target.Name(), use.call.Parent().Name())
 		}
