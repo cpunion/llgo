@@ -226,6 +226,24 @@ contract: internal drops cannot recover a parent's panic, and discarded-result
 entry ownership must remain protected until actual terminal Return rather than
 an early source-level commit followed by a compiler preemption poll.
 
+The shared static/descriptor await path now carries explicit emission-only
+cleanup ownership and parent-recover permission separately. Generated helpers
+for deferred builtins use the former without the latter: they pass no parent
+panic payload, publish no recover alias, and reject ReturnRecovered, while
+retaining strong join and the existing cleanup panic/cancellation reconciliation.
+Native/wasm32 pre/post-CoroSplit deferred-print gates pass alongside source
+defer/recover, dynamic cleanup and parent-drain regressions (2.857s / 1221.5 MiB).
+There are no new runtime/frame fields. Actual resource guard insertion and the
+discarded-result entry guard are still pending.
+All selected `TestCoro*` / `TestEmission*` compiler tests then pass (93.136s /
+1263.6 MiB), followed by the monotonic architecture gate (0.602s / 686.6 MiB).
+The final targeted positive run passes (1.341s / 408.3 MiB). An isolated Go
+overlay changing only the internal helper back to source-defer permission
+fails both native/wasm32 cases at the actual handoff's leaked panic authority
+(0.477s / 1228.6 MiB); production sources are not reverted. Earlier attempts
+to add a source panic hit missing runtime-type helpers in the small test
+fixture and are retained as setup failures, not the negative control.
+
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
 both the source SHA-256 manifest and recursive content comparison before

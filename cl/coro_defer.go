@@ -2153,7 +2153,7 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
 			b, b.Load(site.descriptor), args, site.plan.signature,
 			coroManagedDispatchAwaitOptions{
-				cleanup:                 s,
+				cleanup:                 coroSourceDeferInvocation(s),
 				recoverAliasChild:       site.plan.interfaceReceiver != nil,
 				trustedDescriptor:       site.plan.structuredCoroutineOnly,
 				structuredCoroutineOnly: site.plan.structuredCoroutineOnly,

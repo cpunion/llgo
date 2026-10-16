@@ -9,10 +9,14 @@
 package cl
 
 import (
+	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 	"testing"
 
+	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/goembed"
 	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
@@ -70,5 +74,67 @@ func TestCoroCleanupCompletionWithoutSourceRecover(t *testing.T) {
 	}
 	if switches != 1 || traps != 1 {
 		t.Fatalf("completion switches=%d traps=%d, want one exact complete case and one invalid-continuation trap", switches, traps)
+	}
+}
+
+// A deferred builtin is already a real compiler-owned cleanup invocation:
+// its generated PrintBatch helper is shielded, but is not a Go deferred
+// function and must not receive direct-recover authority. Resource drops use
+// this same invocation/child transaction rather than a new await protocol.
+func TestCoroInternalCleanupAwaitDoesNotGrantParentRecover(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			source := strings.Replace(coroPrintFixture, "\tword := uintptr(pointer)", "\tdefer println(\"cleanup\")\n\tword := uintptr(pointer)", 1)
+			fixture := prepareCoroPrintTestPlanSource(t, target.arch, source, true, false)
+			defer fixture.prog.Dispose()
+			compilation := &Compilation{CoroPlan: fixture.plan, EmissionUniverse: fixture.universe}
+			enableCoroChildAwaitCompilation(compilation)
+			compilation.PanicABI = coro.PanicExplicitStatusABIV0
+			pkg, _, err := NewPackageExWithEmbedOptions(
+				fixture.prog, nil, nil, nil, fixture.fooPkg.ssa, []*ast.File{fixture.fooPkg.file}, goembed.VarMap{},
+				PackageOptions{Compilation: compilation},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			module := pkg.Module()
+			defer module.Dispose()
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify compiler-owned cleanup: %v\n%s", err, module.String())
+			}
+			check := func(fn llvm.Value) {
+				t.Helper()
+				awaits := 0
+				for _, block := range fn.BasicBlocks() {
+					for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+						if instruction.InstructionOpcode() != llvm.Call || instruction.CalledValue().Name() != coroAwaitPrepareInlineHookV4 {
+							continue
+						}
+						awaits++
+						mode := instruction.Operand(3)
+						if mode.IsAConstantInt().IsNil() || mode.ZExtValue() != coroAwaitRecoverNone ||
+							!instruction.Operand(4).IsNull() || !instruction.Operand(5).IsNull() {
+							t.Fatalf("compiler helper inherited parent panic authority:\n%s", instruction.String())
+						}
+					}
+				}
+				if awaits != 3 {
+					t.Fatalf("awaits=%d, want two ordinary prints and one shielded deferred print:\n%s", awaits, fn.String())
+				}
+				if countCoroIRDirectCalls(fn, coroRecoverAliasBeginHookV1) != 0 {
+					t.Fatalf("internal cleanup published a direct-recover alias:\n%s", fn.String())
+				}
+			}
+			check(requireCoroPhysicalFunction(t, module, "foo.Root"))
+			runCoroABITestPipeline(t, fixture.prog, module)
+			check(module.NamedFunction("foo.Root$coro.resume"))
+		})
 	}
 }
