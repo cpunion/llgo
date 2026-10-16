@@ -463,61 +463,68 @@ entry:
   ret ptr %root
 }
 `
-	ctx := llvm.NewContext()
-	defer ctx.Dispose()
-	path := filepath.Join(t.TempDir(), "large_projections.ll")
-	if err := os.WriteFile(path, []byte(testIR), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	buf, err := llvm.NewMemoryBufferFromFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mod, err := ctx.ParseIR(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer mod.Dispose()
-	td := llvm.NewTargetData("e-m:o-i64:64-i128:128-n32:64-S128")
-	defer td.Dispose()
-	LowerLargeAggregates(td, mod)
-	for _, name := range []string{"loaded_projection", "call_projection"} {
-		body := mod.NamedFunction(name).String()
-		if strings.Contains(body, "load %Rooted") || strings.Contains(body, "store %Rooted") ||
-			strings.Contains(body, "extractvalue") || !strings.Contains(body, "load ptr") ||
-			strings.Contains(body, "load [65537 x i8]") || strings.Contains(body, "store [65537 x i8]") ||
-			strings.Count(body, "call ptr @\""+runtimeAllocU+"\"") != 1 {
-			t.Fatalf("%s did not project from its one immutable result cell:\n%s", name, body)
-		}
-		if name == "loaded_projection" && strings.Index(body, "call void @llvm.memcpy") >= strings.Index(body, "store ptr null") {
-			t.Fatalf("projection snapshot was moved after source mutation:\n%s", body)
-		}
-	}
-	if body := mod.NamedFunction("volatile_projection").String(); !strings.Contains(body, "load volatile %Rooted") || strings.Contains(body, "llvm.memcpy") {
-		t.Fatalf("observable projection load was rewritten:\n%s", body)
-	}
-	if body := mod.NamedFunction("packed_projection").String(); strings.Contains(body, "extractvalue") || !strings.Contains(body, "load ptr") || !strings.Contains(body, "align 1") {
-		t.Fatalf("packed projection lost its conservative alignment:\n%s", body)
-	}
-	for _, name := range []string{"unsupported_nested_user", "volatile_nested_store"} {
-		if body := mod.NamedFunction(name).String(); !strings.Contains(body, "load %Rooted") || strings.Contains(body, "llvm.memcpy") {
-			t.Fatalf("%s was only partially rewritten:\n%s", name, body)
-		}
-	}
-	for _, name := range []string{"repacked_projection", "discarded_repacked_load"} {
-		body := mod.NamedFunction(name).String()
-		if strings.Contains(body, "insertvalue") || strings.Contains(body, "extractvalue") ||
-			strings.Contains(body, "load [65537 x i8]") || strings.Contains(body, "store [65537 x i8]") {
-			t.Fatalf("%s hid a large copy behind a redundant tuple:\n%s", name, body)
-		}
-	}
-	if body := mod.NamedFunction("partial_container_overwrite").String(); !strings.Contains(body, "extractvalue %Rooted") {
-		t.Fatalf("partial overwrite was incorrectly replaced by its old container:\n%s", body)
-	}
-	if body := mod.NamedFunction("nested_insert_projection").String(); strings.Contains(body, "extractvalue") || !strings.Contains(body, "ret ptr %owner") {
-		t.Fatalf("nested exact projection lost its original SSA value:\n%s", body)
-	}
-	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
-		t.Fatalf("projection module is invalid: %v\n%s", err, mod.String())
+	for _, target := range []struct{ name, layout string }{
+		{"native64", "e-m:o-i64:64-i128:128-n32:64-S128"},
+		{"wasm32", "e-m:e-p:32:32-i64:64-n32:64-S128"},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			ctx := llvm.NewContext()
+			defer ctx.Dispose()
+			path := filepath.Join(t.TempDir(), "large_projections.ll")
+			if err := os.WriteFile(path, []byte(testIR), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			buf, err := llvm.NewMemoryBufferFromFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mod, err := ctx.ParseIR(buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mod.Dispose()
+			td := llvm.NewTargetData(target.layout)
+			defer td.Dispose()
+			LowerLargeAggregates(td, mod)
+			for _, name := range []string{"loaded_projection", "call_projection"} {
+				body := mod.NamedFunction(name).String()
+				if strings.Contains(body, "load %Rooted") || strings.Contains(body, "store %Rooted") ||
+					strings.Contains(body, "extractvalue") || !strings.Contains(body, "load ptr") ||
+					strings.Contains(body, "load [65537 x i8]") || strings.Contains(body, "store [65537 x i8]") ||
+					strings.Count(body, "call ptr @\""+runtimeAllocU+"\"") != 1 {
+					t.Fatalf("%s did not project from its one immutable result cell:\n%s", name, body)
+				}
+				if name == "loaded_projection" && strings.Index(body, "call void @llvm.memcpy") >= strings.Index(body, "store ptr null") {
+					t.Fatalf("projection snapshot was moved after source mutation:\n%s", body)
+				}
+			}
+			if body := mod.NamedFunction("volatile_projection").String(); !strings.Contains(body, "load volatile %Rooted") || strings.Contains(body, "llvm.memcpy") {
+				t.Fatalf("observable projection load was rewritten:\n%s", body)
+			}
+			if body := mod.NamedFunction("packed_projection").String(); strings.Contains(body, "extractvalue") || !strings.Contains(body, "load ptr") || !strings.Contains(body, "align 1") {
+				t.Fatalf("packed projection lost its conservative alignment:\n%s", body)
+			}
+			for _, name := range []string{"unsupported_nested_user", "volatile_nested_store"} {
+				if body := mod.NamedFunction(name).String(); !strings.Contains(body, "load %Rooted") || strings.Contains(body, "llvm.memcpy") {
+					t.Fatalf("%s was only partially rewritten:\n%s", name, body)
+				}
+			}
+			for _, name := range []string{"repacked_projection", "discarded_repacked_load"} {
+				body := mod.NamedFunction(name).String()
+				if strings.Contains(body, "insertvalue") || strings.Contains(body, "extractvalue") ||
+					strings.Contains(body, "load [65537 x i8]") || strings.Contains(body, "store [65537 x i8]") {
+					t.Fatalf("%s hid a large copy behind a redundant tuple:\n%s", name, body)
+				}
+			}
+			if body := mod.NamedFunction("partial_container_overwrite").String(); !strings.Contains(body, "extractvalue %Rooted") {
+				t.Fatalf("partial overwrite was incorrectly replaced by its old container:\n%s", body)
+			}
+			if body := mod.NamedFunction("nested_insert_projection").String(); strings.Contains(body, "extractvalue") || !strings.Contains(body, "ret ptr %owner") {
+				t.Fatalf("nested exact projection lost its original SSA value:\n%s", body)
+			}
+			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("projection module is invalid: %v\n%s", err, mod.String())
+			}
+		})
 	}
 }
