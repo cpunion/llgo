@@ -243,6 +243,16 @@ structured-only fast path 要求无 delivery 的冻结证明，不能拿该证�
 或校验后的 archive delivery record；exact source occurrence、producer fact 和
 隐藏 helper 的条件关系全部进入 plan digest。物理 emitter 不重新推导这些事实。
 
+前端的 exact/conditional helper 共用 ProgramIR builder 的一个记录与合并入口。
+pointer-free `ManagedEdge` 以显式 `managed_dispatch` 区分 typed descriptor 调用
+和 exact FunctionID；后者缺少 target 仍是错误，前者禁止混用 exact target、
+no-unwind 或 terminal-elision shortcut。它不引入 synthetic SSA 函数或第二张调用图。
+冷 helper 元信息复用普通 descriptor/typed-thunk 的同一 primary 构造器，不能
+为此将静态 initializer/drop 染成 Dispatch 或复制函数体。共享构造器仍须保留
+source facade identity 与 canonical physical primary 的区别，不能丢失 go:linkname
+函数值的 source signature。当前已验证这些独立接点；consumer frame guard、
+source placement 自动接入和动态 publication 的完整闭环尚未完成，拒绝门不撤销。
+
 启用 seed 前，必须同时具备：producer borrowed-address/fallback、static normal/cancel
 交付、dynamic descriptor 可选契约与 ABI 校验、库元信息消费、defer/go discarded
 entry、reflect 第二次交付，以及标准库 wrapper 的预注册 adoption。range-over-func

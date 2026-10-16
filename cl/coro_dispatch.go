@@ -56,6 +56,16 @@ type coroPlainDispatchABI struct {
 // primary publishes HasPlain, an explicit-status primary publishes HasOutcome,
 // and a coroutine primary publishes HasCoro.
 func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan, universes ...*EmissionUniverse) error {
+	if fn != nil && plan.FuncRep != coro.Dispatch && !plan.RawPlainOnly {
+		return fmt.Errorf("coroutine dynamic dispatch ABI: function %q (%s): requires descriptor representation, got %s", fn, plan.ID, plan.FuncRep)
+	}
+	return validateCoroManagedDescriptorPrimary(fn, plan, universes...)
+}
+
+// A private typed helper can describe its already demanded static primary
+// without changing source value flow to Dispatch. Public function values still
+// pass the separate representation/publication check above.
+func validateCoroManagedDescriptorPrimary(fn *ssa.Function, plan coro.FunctionPlan, universes ...*EmissionUniverse) error {
 	var universe *EmissionUniverse
 	if len(universes) != 0 {
 		universe = universes[0]
@@ -106,9 +116,6 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 	}
 	rawPlainOnly := plan.RawPlainOnly && plan.ManagedDemand == coro.NoDemand && plan.RawPlainDemand &&
 		plan.Emission == coro.EmitRawPlain && plan.Primary == coro.PrimaryPlain && plan.FuncRep == coro.DirectPlain
-	if plan.FuncRep != coro.Dispatch && !rawPlainOnly {
-		return fail("requires descriptor representation, got %s", plan.FuncRep)
-	}
 	if plan.Effect.IsOpaque() || plan.Exec.IsOpaque() {
 		return fail("opaque effect/execution policy requires an open boundary, got effect=%s exec=%s", plan.Effect, plan.Exec)
 	}
@@ -223,11 +230,7 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 // It remains no-capture/plain-only for the compact synchronous call path;
 // capability-aware managed dispatch uses validateCoroDynamicDispatchTarget.
 func validateCoroPlainDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan, universes ...*EmissionUniverse) error {
-	var universe *EmissionUniverse
-	if len(universes) != 0 {
-		universe = universes[0]
-	}
-	if err := validateCoroDynamicDispatchTarget(fn, plan, universe); err != nil {
+	if err := validateCoroDynamicDispatchTarget(fn, plan, universes...); err != nil {
 		return err
 	}
 	fail := func(format string, args ...any) error {
@@ -1189,12 +1192,21 @@ func (p *context) emitCoroDynamicDispatchValue(
 	if err := validateCoroDynamicDispatchTarget(entry.function, entry.plan, p.immutableEmissionUniverse()); err != nil {
 		panic(fmt.Errorf("emit coroutine dynamic descriptor: %w", err))
 	}
+	return p.emitCoroManagedPrimaryValue(b, entry, target, bindings, nil)
+}
+
+// This is the shared descriptor/thunk factory, not another source-function
+// emission path. requiredSignature is the exact typed contract of a private
+// helper; public function values derive their signature from their frozen ABI.
+func (p *context) emitCoroManagedPrimaryValue(
+	b llssa.Builder, entry plannedFunctionSymbol, source *ssa.Function, bindings []llssa.Expr, requiredSignature *types.Signature,
+) llssa.Expr {
 	var (
 		abi coroPlainDispatchABI
 		err error
 	)
 	sourceSignature, goLinknameFacade, sourceErr :=
-		p.goLinknameFunctionValueSignature(target)
+		p.goLinknameFunctionValueSignature(source)
 	if sourceErr != nil {
 		panic(sourceErr)
 	}
@@ -1206,6 +1218,9 @@ func (p *context) emitCoroDynamicDispatchValue(
 	}
 	if err != nil {
 		panic(err)
+	}
+	if requiredSignature != nil && !types.Identical(abi.signature, requiredSignature) {
+		panic(fmt.Errorf("coroutine private helper descriptor: target %q has ABI %s, want %s", entry.plan.ID, abi.signature, requiredSignature))
 	}
 	// Descriptor construction is capability-complete and independent of the
 	// body currently being emitted. In particular a raw/plain twin may publish

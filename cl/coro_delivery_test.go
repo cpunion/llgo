@@ -321,6 +321,47 @@ func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target, p
 	}
 	module := compiled.Module()
 	defer module.Dispose()
+	// Cold delivery metadata reuses the already demanded primary; publishing
+	// it must not fabricate a Dispatch value-flow fact or compile a second body.
+	helperContext, err := universe.functionABIContext(producer, universe.ownerOf(producer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperContext.pkg, helperContext.compilation = compiled, compilation
+	_, initializeSignature, dropSignature, err := coro.DeliveryHelperSignatures(recipe.signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, helper := range []*ssa.Function{recipe.initializer, recipe.drop} {
+		before, _ := plan.FunctionPlan(helper)
+		signature := initializeSignature
+		if index == 1 {
+			signature = dropSignature
+		}
+		publisherSignature := types.NewSignatureType(nil, nil, nil, nil,
+			types.NewTuple(types.NewParam(0, nil, "", types.Typ[types.UnsafePointer])), false)
+		publisher := compiled.NewFunc("foo.privateDeliveryHelper."+helper.Name(), publisherSignature, llssa.InGo)
+		body := publisher.MakeBody(1)
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("private helper metadata accepted a different typed ABI")
+				}
+			}()
+			wrong := dropSignature
+			if index == 1 {
+				wrong = initializeSignature
+			}
+			helperContext.emitCoroDeliveryHelperValue(body, helper, wrong)
+		}()
+		value := helperContext.emitCoroDeliveryHelperValue(body, helper, signature)
+		body.Return(body.Field(value, 0))
+		body.EndBuild()
+		body.Dispose()
+		if after, _ := plan.FunctionPlan(helper); after != before || after.FuncRep == coro.Dispatch {
+			t.Fatalf("private helper metadata changed its static primary plan: before=%+v after=%+v", before, after)
+		}
+	}
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify guarded source delivery: %v\n%s", err, module.String())
 	}

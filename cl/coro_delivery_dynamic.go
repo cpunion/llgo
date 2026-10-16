@@ -8,9 +8,12 @@ package cl
 
 import (
 	"fmt"
+	"go/types"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -43,4 +46,19 @@ func (builder coroProgramIRBuilder) freezeDeliveryHelperCall(owner *ssa.Function
 		return fmt.Errorf("conditional delivery helper cannot own a spawned invocation")
 	}
 	return builder.recordLoweredCallTarget(owner, name, coroLoweredCallTarget{whenResultDeliveryOf: source})
+}
+
+func (p *context) emitCoroDeliveryHelperValue(b llssa.Builder, target *ssa.Function, signature *types.Signature) llssa.Expr {
+	if target == nil || signature == nil || signature.Recv() != nil || signature.Variadic() || signature.Results().Len() != 0 {
+		panic("resource delivery descriptor requires one exact typed void helper")
+	}
+	entry := p.mustFunctionSymbol(target)
+	if entry.ftype != goFunc || len(entry.function.FreeVars) != 0 || entry.plan.External != coro.Defined || entry.plan.Demand == coro.NoDemand ||
+		entry.plan.ManagedEntry == coro.ManagedEntryNone || entry.plan.RawPlainOnly {
+		panic("resource delivery descriptor requires a demanded context-free managed primary")
+	}
+	if err := validateCoroManagedDescriptorPrimary(entry.function, entry.plan, p.immutableEmissionUniverse()); err != nil {
+		panic(fmt.Errorf("resource delivery helper descriptor: %w", err))
+	}
+	return p.emitCoroManagedPrimaryValue(b, entry, target, nil, signature)
 }
