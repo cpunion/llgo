@@ -21,6 +21,7 @@ func TestSSAClosedCHARequiresCompleteCallableDomain(t *testing.T) {
 		{"channel-assertion", "return <-value.(chan func() *byte)"},
 		{"external-result", "return external()"},
 		{"unsafe-load", "return *(*func() *byte)(pointer)"},
+		{"unsafe-storage-wrapper", "return *storage(pointer)"},
 	} {
 		t.Run(producer.name, func(t *testing.T) {
 			prog, pkg := buildCoroTestSSA(t, "opaque.go", `package coroid
@@ -29,18 +30,24 @@ var pointer unsafe.Pointer
 var published = func() *byte { return nil }
 func other() *byte { return nil }
 func external() func() *byte
+func storage(p unsafe.Pointer) *func() *byte { return (*func() *byte)(p) }
 func produce(value any) func() *byte { `+producer.body+` }
 func apply(fn func() *byte) *byte { return fn() }
 func root(value any) *byte { return apply(produce(value)) }
 func exact(second bool) *byte {
  fn := other; if second { fn = func() *byte { return nil } }; return fn()
 }
+type Mapper struct { Call func(uintptr) (uintptr, error) }
+func mapped(value uintptr) (uintptr, error) { return value, nil }
+var mapper = &Mapper{Call: mapped}
+func typedStorage(value uintptr) (uintptr, error) { return mapper.Call(value) }
 `)
 			apply := packageFunction(t, pkg, "apply")
 			exact := packageFunction(t, pkg, "exact")
 			plan, err := AnalyzeSSA(prog, Roots{
 				{Function: packageFunction(t, pkg, "root"), Demand: AsyncDemand},
 				{Function: exact, Demand: AsyncDemand},
+				{Function: packageFunction(t, pkg, "typedStorage"), Demand: AsyncDemand},
 			}, SSAConfig{
 				DynamicResolution: DynamicCHAClosed, OutcomeMode: OutcomeExplicitStatus,
 				MaxPlainInstructions: -1,
@@ -65,6 +72,10 @@ func exact(second bool) *byte {
 			exactCall := onlyNonBuiltinCall(t, exact)
 			if exactFact, found := plan.CallPlan(exactCall); !found || exactFact.Open || len(exactFact.Targets) != 2 {
 				t.Fatalf("opaque sibling destroyed exact local scalar-flow closure: %+v present=%t", exactFact, found)
+			}
+			typedCall := onlyNonBuiltinCall(t, packageFunction(t, pkg, "typedStorage"))
+			if typedFact, found := plan.CallPlan(typedCall); !found || typedFact.Open || len(typedFact.Targets) == 0 {
+				t.Fatalf("ordinary typed storage became an opaque callable source: %+v present=%t", typedFact, found)
 			}
 		})
 	}

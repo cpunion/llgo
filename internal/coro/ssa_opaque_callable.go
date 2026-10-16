@@ -30,6 +30,16 @@ func (f *ssaFuncFlow) retainOpaqueCallableDomains(
 	}
 	var opaque typeutil.Map
 	mark := func(owner *ssa.Function, typ types.Type) error {
+		// Opaque producers can expose pointer-backed callable storage too.
+		seen := make(map[types.Type]bool)
+		for !seen[typ] {
+			seen[typ] = true
+			pointer, indirect := types.Unalias(typ).Underlying().(*types.Pointer)
+			if !indirect {
+				break
+			}
+			typ = pointer.Elem()
+		}
 		// Reuse the representation schema: an opaque struct/container can
 		// carry a callable just as an opaque scalar can. Only looking at the
 		// outer type would incorrectly close a later Field/Index/receive.
@@ -60,11 +70,15 @@ func (f *ssaFuncFlow) retainOpaqueCallableDomains(
 						return err
 					}
 				case *ssa.UnOp:
-					if source.Op == token.MUL {
-						if _, exact := exactSSAContextFreeFunctionValue(source); !exact {
-							if err := mark(owner, source.Type()); err != nil {
-								return err
-							}
+					if source.Op == token.MUL && opaqueSSACallableStorage(source.X, make(map[ssa.Value]bool)) {
+						if err := mark(owner, source.Type()); err != nil {
+							return err
+						}
+					}
+				case *ssa.Convert:
+					if basic, raw := types.Unalias(source.X.Type()).Underlying().(*types.Basic); raw && basic.Kind() == types.UnsafePointer {
+						if err := mark(owner, source.Type()); err != nil {
+							return err
 						}
 					}
 				case *ssa.Call:
@@ -102,4 +116,39 @@ func (f *ssaFuncFlow) retainOpaqueCallableDomains(
 		}
 	}
 	return nil
+}
+
+// Ordinary typed Go field loads do not manufacture entries outside the source
+// domain. Preserve their CHA candidates (notably syscall's immutable mmapper
+// callbacks); only an unsafe address or an opaque returned address adds a new
+// domain. This is a source proof, never reverse lookup from a native PC.
+func opaqueSSACallableStorage(value ssa.Value, seen map[ssa.Value]bool) bool {
+	if value == nil || seen[value] {
+		return false
+	}
+	seen[value] = true
+	if basic, raw := types.Unalias(value.Type()).Underlying().(*types.Basic); raw && basic.Kind() == types.UnsafePointer {
+		return true
+	}
+	switch value := value.(type) {
+	case *ssa.Convert:
+		return opaqueSSACallableStorage(value.X, seen)
+	case *ssa.ChangeType:
+		return opaqueSSACallableStorage(value.X, seen)
+	case *ssa.FieldAddr:
+		return opaqueSSACallableStorage(value.X, seen)
+	case *ssa.IndexAddr:
+		return opaqueSSACallableStorage(value.X, seen)
+	case *ssa.UnOp:
+		return value.Op == token.MUL && opaqueSSACallableStorage(value.X, seen)
+	case *ssa.Phi:
+		for _, edge := range value.Edges {
+			if opaqueSSACallableStorage(edge, seen) {
+				return true
+			}
+		}
+	case *ssa.Call:
+		return true
+	}
+	return false
 }

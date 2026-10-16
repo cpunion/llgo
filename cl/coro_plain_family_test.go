@@ -124,9 +124,9 @@ func TestCoroOpaqueCallableFamilyKeepsUniversalEntry(t *testing.T) {
 			prog, pkg, plan, source := compileCoroOutcomePlainSourceWithResolution(t, target.arch, `package foo
 func Candidate() *byte { return nil }
 var published = Candidate
-var dynamic func() *byte
+func Unbox(value any) func() *byte { return value.(func() *byte) }
 func Apply(callback func() *byte) *byte { return callback() }
-func Root() *byte { return Apply(dynamic) }
+func Root(value func() *byte) *byte { return Apply(value) }
 `, "Root", -1, coro.DynamicCHAClosed, func(config *coro.SSAConfig) {
 				config.ClassifyUnknownCall = func(_ *ssa.Function, call ssa.CallInstruction) (coro.UnknownTarget, error) {
 					if call.Common().StaticCallee() == nil && !call.Common().IsInvoke() {
