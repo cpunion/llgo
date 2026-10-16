@@ -250,7 +250,7 @@ func (r *Rectangle) validate() bool { return r.Width > 0 && r.Height > 0 }
 // CHECK-NEXT:   %[[TMP27:[0-9]+]] = load ptr, ptr %[[TMP26]], align 8
 // CHECK-NEXT:   %[[TMP28:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP5]], i32 0, i32 2
 // CHECK-NEXT:   %[[TMP29:[0-9]+]] = load ptr, ptr %[[TMP28]], align 8
-// CHECK-NEXT:   call void @__llgo_coro_panic_trace_append_v1(ptr %[[TMP0]], ptr @__llgo_coro_frame_descriptor_v1.6266c21980e5c47fc26258744fd8938f, ptr %[[TMP27]], ptr %[[TMP29]], i32 285, i32 1)
+// CHECK-NEXT:   call void @__llgo_coro_panic_trace_append_v1(ptr %[[TMP0]], ptr @__llgo_coro_frame_descriptor_v1.6ede084d6bbdae4e227ca861baf58cab, ptr %[[TMP27]], ptr %[[TMP29]], i32 285, i32 1)
 // CHECK-NEXT:   %[[TMP30:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 1
 // CHECK-NEXT:   store ptr %[[TMP27]], ptr %[[TMP30]], align 8
 // CHECK-NEXT:   %[[TMP31:[0-9]+]] = getelementptr inbounds nuw { i32, ptr, ptr }, ptr %[[TMP2]], i32 0, i32 2

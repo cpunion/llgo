@@ -95,6 +95,12 @@ func coroNativeTaskContextRuntimeSources() []string {
 	return []string{
 		filepath.Join(root, "coro_task_allocation.go"),
 		filepath.Join(root, "coro_task_context.go"),
+		filepath.Join(root, "coro_domain_context.go"),
+		filepath.Join(root, "coro_synctest_state_llgo.go"),
+		filepath.Join(root, "coro_synctest_channel_llgo.go"),
+		filepath.Join(root, "coro_synctest_timer_llgo.go"),
+		filepath.Join(root, "coro_gc_observer_llgo.go"),
+		filepath.Join(root, "coro_gc_observer_nobdwgc.go"),
 		filepath.Join(root, "recover_frame.go"),
 		filepath.Join(root, "runtime_context.go"),
 		filepath.Join(root, "runtime2.go"),
@@ -103,6 +109,21 @@ func coroNativeTaskContextRuntimeSources() []string {
 		filepath.Join(root, "g_pthread.go"),
 		filepath.Join(root, "foreign_thread_stub_default.go"),
 		filepath.Join(root, "local_context.go"),
+	}
+}
+
+func TestCoroNativeRuntimeIslandIncludesOptionalServiceBoundaries(t *testing.T) {
+	// Closed ABI fixtures still compile the real context/observation/cleanup
+	// boundaries. Whole-program predicates, not substitute fixture bodies,
+	// remove services the fixture does not use. Full-runtime acceptance remains
+	// the authority for managed startup, GC, and synctest controller behavior.
+	files := coroNativeTaskContextRuntimeSources()
+	for _, name := range []string{
+		"coro_domain_context.go", "coro_synctest_state_llgo.go",
+		"coro_synctest_channel_llgo.go", "coro_synctest_timer_llgo.go",
+		"coro_gc_observer_llgo.go", "coro_gc_observer_nobdwgc.go",
+	} {
+		requireCoroRuntimeIslandProductionSource(t, files, name)
 	}
 }
 

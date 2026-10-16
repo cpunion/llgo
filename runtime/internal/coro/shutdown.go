@@ -402,6 +402,9 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 	}
 	g.destroyRoot = false
 	g.root = nil
+	if ExecutionDomainEnabled() && !retireExecutionDomainTask(g) {
+		return Action{}, false
+	}
 	g.state = GDead
 	g.runP = nil
 	p.current = nil

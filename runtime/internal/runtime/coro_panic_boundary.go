@@ -25,27 +25,28 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
-// coroPanicBoundaryPush installs one synthetic legacy defer frame around an
-// exact physical coroutine resume. boundary and env have native activation
-// lifetime and must not survive a coroutine suspension.
+// coroPanicBoundaryPush installs one M-owned fault boundary around an exact
+// physical coroutine resume and saves the G's logical defer cursor. boundary
+// and env have native activation lifetime and must not survive a suspension.
 func coroPanicBoundaryPush(task *coro.G, handle unsafe.Pointer, boundary *Defer, env unsafe.Pointer) bool {
 	if task == nil || handle == nil || boundary == nil || env == nil ||
 		*boundary != (Defer{}) || !coro.ResumePanicBoundaryActive(task, handle) {
 		return false
 	}
 	gp := getg()
-	if gp == nil {
+	if gp == nil || gp.m == nil || gp.m.curg != gp {
 		return false
 	}
 	*boundary = Defer{
 		Addr: env,
-		Link: gp.defer_,
+		Link: gp.m.signalFaultBoundary,
 		Reth: handle,
 		Rund: unsafe.Pointer(task),
+		Args: unsafe.Pointer(gp.defer_),
 	}
-	gp.defer_ = boundary
+	gp.m.signalFaultBoundary = boundary
 	if !signalFaultBoundaryEnter() {
-		gp.defer_ = boundary.Link
+		gp.m.signalFaultBoundary = boundary.Link
 		*boundary = Defer{}
 		return false
 	}
@@ -54,8 +55,9 @@ func coroPanicBoundaryPush(task *coro.G, handle unsafe.Pointer, boundary *Defer,
 
 func validCoroPanicBoundary(task *coro.G, handle unsafe.Pointer, boundary *Defer, gp *g) bool {
 	return task != nil && handle != nil && boundary != nil && gp != nil &&
-		gp.defer_ == boundary && boundary.Addr != nil && boundary.Bits == 0 &&
-		boundary.Reth == handle && boundary.Rund == unsafe.Pointer(task) && boundary.Args == nil &&
+		gp.m != nil && gp.m.curg == gp && gp.m.signalFaultBoundary == boundary &&
+		boundary.Addr != nil && boundary.Bits == 0 &&
+		boundary.Reth == handle && boundary.Rund == unsafe.Pointer(task) &&
 		signalFaultBoundaryActive()
 }
 
@@ -82,7 +84,7 @@ func coroPanicBoundaryPopStatus(task *coro.G, handle unsafe.Pointer, boundary *D
 	if !signalFaultBoundaryExit() {
 		return coroPanicBoundaryPopInvalidRecord
 	}
-	gp.defer_ = boundary.Link
+	gp.m.signalFaultBoundary = boundary.Link
 	*boundary = Defer{}
 	return coroPanicBoundaryPopOK
 }
@@ -91,13 +93,14 @@ func coroPanicBoundaryPop(task *coro.G, handle unsafe.Pointer, boundary *Defer) 
 	return coroPanicBoundaryPopStatus(task, handle, boundary) == coroPanicBoundaryPopOK
 }
 
-// coroPanicBoundaryStage owns the siglongjmp return. Rethrow has already moved
-// the top panic node and the legacy unwind cursor to boundary. Replace that
-// temporary stack address with the exact coroutine handle, pop the boundary,
-// and leave the node rooted until the compiler resume landing consumes it.
+// coroPanicBoundaryStage owns the siglongjmp return. Rethrow has selected this
+// boundary after reaching its saved logical defer cursor. Replace the panic
+// node's temporary stack address with the exact coroutine handle, pop the
+// physical boundary, and keep the node rooted until the resume landing takes it.
 func coroPanicBoundaryStage(task *coro.G, handle unsafe.Pointer, boundary *Defer) bool {
 	gp := getg()
 	if !validCoroPanicBoundary(task, handle, boundary, gp) ||
+		gp.defer_ != (*Defer)(boundary.Args) ||
 		!signalFaultPanicAdmitted() ||
 		!coro.ResumePanicBoundaryMayLand(task, handle) || gp.panic_ == nil {
 		return false
@@ -110,7 +113,7 @@ func coroPanicBoundaryStage(task *coro.G, handle unsafe.Pointer, boundary *Defer
 	if !signalFaultBoundaryExit() {
 		return false
 	}
-	gp.defer_ = boundary.Link
+	gp.m.signalFaultBoundary = boundary.Link
 	node.defer_ = (*Defer)(handle)
 	*boundary = Defer{}
 	return true

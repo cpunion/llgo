@@ -16,6 +16,27 @@
 
 package runtime
 
+// panicDeferTarget stops legacy unwinding at the innermost native resume's
+// saved logical cursor. Physical signal landings must not be observable or
+// replaceable through Get/SetThreadDefer.
+func (gp *g) panicDeferTarget(link *Defer) *Defer {
+	if mp := gp.m; mp != nil && mp.curg == gp {
+		if boundary := mp.signalFaultBoundary; boundary != nil &&
+			link == (*Defer)(boundary.Args) {
+			return boundary
+		}
+	}
+	return link
+}
+
+func (gp *g) setPanicDeferCursor(link *Defer) {
+	if mp := gp.m; mp != nil && mp.curg == gp && mp.signalFaultBoundary == link && link != nil {
+		gp.defer_ = (*Defer)(link.Args)
+		return
+	}
+	gp.defer_ = link
+}
+
 // SetPanicOnFault updates the fault behavior requested by the current
 // goroutine and reports its previous value.
 func SetPanicOnFault(in bool) (out bool) {

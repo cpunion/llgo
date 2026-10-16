@@ -2077,12 +2077,14 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
   Goexit和allocation-free nil fault继续复用各自既有terminal路径。真实
   `reflect.Value.Call`用例已覆盖普通结果和外层`recover`，因此没有libffi/C frame跨越
   outcome传播，也没有为单用途consumer创建额外child coroutine。
-- ForeignWait已统一复用一个有界worker park/resume事务。编译器在冻结阶段从forward
-  provenance生成typed record与exact certificate，不在runtime从函数地址反查语义。
-  ordinary generated `_Cfunc_*`、C method、varargs和静态C pointer result已进入该路径；
-  generated `_C2func_*`只把精确C调用与同线程`errno`快照放到同一worker transaction，
-  `(result,error)`的Go构造在原coroutine恢复后完成。未证明ABI、callback/reentry、
-  affinity、retention或pointer provenance的动态C调用继续fail closed。
+- ForeignWait统一复用一个typed foreign transaction，执行类别由冻结certificate选择，不在
+  runtime从函数地址反查语义。2026-08-30的generated-cgo切换使NativeFleet上的ordinary
+  generated `_Cfunc_*`、generated `_C2func_*`/errno及defer默认使用
+  `same-M + managed-ingress` outcome-aware边界；generated Go adapter仍只有一个raw/plain实现，
+  `(result,error)`的Go构造在原coroutine恢复后完成。bounded-worker recipe只保留给未来能够
+  证明`ReentryNone`的producer元信息，不能因参数表中没有函数值就推断nocallback。C method、
+  varargs、静态C pointer result及其他动态C调用仍分别服从其现有证书；未证明ABI、
+  callback/reentry、affinity、retention或pointer provenance的边界继续fail closed。
 - compiler runtime现独占`poll.c`及scheduler-facing符号，轻量runtime不再依赖标准库
   runtime patch间接带入该对象。`llgo.allocaCStrs`在coroutine body中改用managed
   storage，exported runtime hook同时进入LLVM optimizer与final-link retention。
@@ -2527,7 +2529,7 @@ Libuv 可成为 Native 平台 adapter，但 wasm、WASI、RTOS 和 baremetal 需
 
 以下不改变总体架构，但需通过原型确定细节：
 
-- LLVM 19 各 target 上获取最终 frame alignment 的最佳方式：intrinsic 或 post-CoroSplit descriptor pass。
+- LLVM 22各target的最终frame alignment继续由CoroSplit后descriptor/object gate验证；不能为旧LLVM保留另一条推导或兼容路径。
 - Native 第一个 poller 使用 portable poll+wake pipe，还是直接按 OS 使用 epoll/kqueue。
 - Async panic reference backend 采用 LLVM EH 还是显式 cleanup edge；baremetal 必须有不跨 suspend 保存 jump buffer 的实现。
 - Interface method descriptor 是直接扩展 itab header，还是独立 versioned side table。
@@ -3235,3 +3237,32 @@ owner 的硬门槛。
 - queued-cancel、dispatch-wins、handoff return、shutdown 各竞态重复通过；
 - direct-only 跨 route 依赖必须由 request-driven replacement 闭环，不得用
   常驻 waiter eager compensation 掩盖。
+
+### GC 完成通知与不可达 channel timer 回收
+
+GC 不运行 timer 扫描，也不进入 Go 调度器。进程只持有一个 12-byte
+`GCObservation`（enabled、epoch、seen），不向 G、frame 或 weak handle 增加字段。
+第一个 channel timer 发布前启用观察；后续启用调用只检查 atomic enabled，
+不得持有 timer-list 锁进入 collector 配置。
+
+- Native BDWGC 在 allocator bootstrap 链接已有 collection callback。只有启用后，
+  `GC_EVENT_END` 才 release-increment epoch，并向已有 coordinator doorbell 写入
+  一个非阻塞 byte；EINTR 重试有界，不分配、不持 Go 锁、不调用 Go observer。
+- 注册和解除 write fd 都在 collector allocation lock 内完成；解除在关闭任意
+  pipe endpoint 之前发生。这样 collector callback 与 fd close/reuse 之间有 strong
+  join，不依赖检查 descriptor 数值“看起来仍有效”。epoch 存储保持进程生命周期。
+- tinygc 在 weak clearing、sweep 和 NumGC 更新后调用同一语义的 atomic publication，
+  即使此时仍持 gcMutex，也不会进入 observer、锁、分配或 suspend。
+- Executor 的稳定 reduction 边界消费 epoch，调用无分配 observer。观察者 list
+  TryLock 失败或通知未成功时不确认 epoch，并保留一次后续 owner request。
+  PrepareSleep/standby 再检查 pending，不能在 advisory request 被源扫描消费后睡眠。
+  成功扫描用 CAS 确认自己读到的 epoch；并行 owner 的旧确认不能覆盖新确认，扫描
+  期间发生的新 collection 仍需下一轮处理。
+- host-pull 复用已有 `next_action`/Continue 边界。同步 tinygc 的通知在返回 host 后
+  的 action 查询仍可见；显式 native host profile 若由外线程主动触发 BDWGC，仍需
+  embedding 调用现有 pull API。这里不宣称宿主停止泵事件时新增了异步中断能力。
+
+Gate 分别覆盖 actual BDWGC foreign-thread allocation-triggered GC（不是仅调用
+`runtime.GC`）、doorbell 唤醒、旧 callback chaining、fd detach 后复用无误写、
+busy observer 有界重试/禁止睡眠、扫描中再次 GC 和过期并行确认。真正的 timer/
+ticker 弱回收及 manager 退休由单独 linked-program gate 验收，不能以通知单测替代。

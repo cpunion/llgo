@@ -113,6 +113,9 @@ type m struct {
 	// 64-bit targets and survives synchronous defer execution until the boundary
 	// stages this exact fault.
 	signalFaultState uint32
+	// Native landing activations follow the physical M stack, independently
+	// of the logical G's user/legacy defer chain. No per-goroutine slot is added.
+	signalFaultBoundary *Defer
 }
 
 // p represents the scheduling resources attached to an M. The host-thread backend

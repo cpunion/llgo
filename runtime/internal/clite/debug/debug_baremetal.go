@@ -5,6 +5,7 @@ package debug
 import (
 	"unsafe"
 
+	"github.com/xgo-dev/llgo/runtime/abi"
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
@@ -21,6 +22,12 @@ func Address() uintptr {
 
 func Addrinfo(addr uintptr, info *Info) c.Int {
 	panic("not implemented")
+}
+
+// Baremetal has no dynamic loader. Static LLGo function metadata supplies
+// symbol information; a dynamic lookup correctly reports no match.
+func Symbol(name *c.Char) abi.Text {
+	return abi.Text(nil)
 }
 
 type Frame struct {

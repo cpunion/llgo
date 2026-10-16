@@ -58,6 +58,18 @@ func coroNativeMActivateDeferredReplacementV1(
 				coroNativeMActiveOwnerV1(domain.driverOwnerV1())
 			if !activeOK || active != parent || resolved != domain ||
 				activeSlot != parentSlot {
+				// Another accepted request may win BeginStart after this
+				// caller observed Armed, then publish the replacement as the
+				// active owner before this validation. The gate transition is
+				// ordered before physical dispatch, so only a second snapshot
+				// which has left Armed proves that benign race. Re-enter the
+				// loop to coalesce Starting/Queued/Started (or an already
+				// completed Idle); an unchanged Armed gate remains an invariant
+				// failure rather than masking a corrupt directory.
+				_, nextPhase, nextValid := parent.deferred.Observe()
+				if nextValid && nextPhase != coro.DeferredExecutorHandoffArmed {
+					continue
+				}
 				return false
 			}
 			if slot != 0 || !parent.deferred.BeginStart() {

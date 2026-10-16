@@ -26,10 +26,13 @@ import (
 )
 
 // materializeManagedForeignFunctionValueAdapter creates the single Go-callable
-// body used when an exact C declaration crosses a managed function-value
-// boundary. Direct calls and raw code-address uses continue to name target.
-// The wrapper's ordinary SSA call lets the existing callable contract, worker,
-// same-M, and effect propagation machinery choose its execution protocol.
+// body used when an exact C declaration or C-linked method crosses a managed
+// function-value boundary. Direct calls and raw code-address uses continue to
+// name target. The wrapper's ordinary SSA call lets the existing callable
+// contract, worker, same-M, and effect propagation machinery choose its
+// execution protocol. A method wrapper retains the source receiver in its
+// signature; the ordinary method-descriptor path performs the receiver-aware
+// normalization when the value is published.
 func (u *EmissionUniverse) materializeManagedForeignFunctionValueAdapter(
 	target *ssa.Function,
 	useOwner *preparedEmissionPackage,
@@ -65,9 +68,9 @@ func (u *EmissionUniverse) materializeManagedForeignFunctionValueAdapter(
 	if !isNativeFuncKind(kind) {
 		return false, nil
 	}
-	if target.Signature == nil || target.Signature.Recv() != nil {
+	if target.Signature == nil {
 		return false, fmt.Errorf(
-			"prepare emission universe: C function-value target %q must have one receiver-free signature",
+			"prepare emission universe: C function-value target %q must have one signature",
 			target.Name(),
 		)
 	}
@@ -110,7 +113,7 @@ func (u *EmissionUniverse) managedForeignFunctionValueWrapperStructuralKey(
 	if identity == "" || identity == "<nil>" || identity == "<cyclic-alias>" {
 		return "", fmt.Errorf("managed foreign function-value target %q has no exact identity", target.Name())
 	}
-	effective := u.effectiveType(owner, target, target.Signature, false)
+	effective := u.effectiveType(owner, target, target.Signature)
 	return framedEmissionKey(
 		"llgo-managed-foreign-function-value-wrapper-v1",
 		owner.identity,
@@ -143,9 +146,39 @@ func (u *EmissionUniverse) CoroManagedFunctionValueTarget(
 	}
 	adapter = u.managedForeignWraps[canonical]
 	if adapter == nil {
-		return nil, false, nil
+		// Intrinsic wrappers belong to the package that materializes the value.
+		// That keeps their body in the same independently-built archive as the
+		// descriptor which references it. The analyzer resolver is deliberately
+		// occurrence-independent, so the active universe must expose one exact
+		// owner wrapper for this source declaration. Restrict this bridge to the
+		// atomics whose wrapper lifetime and no-suspend behavior are exact; other
+		// intrinsics can carry current-frame or structural semantics.
+		intrinsicOwner := u.ownerOf(canonical)
+		opcode, exactAtomic := u.intrinsicOps[emissionFunctionOwnerKey{
+			function: canonical,
+			owner:    intrinsicOwner,
+		}]
+		for key, candidate := range u.callWraps {
+			if key.intrinsic != canonical || candidate == nil {
+				continue
+			}
+			if intrinsicOwner == nil || !exactAtomic || !isCoroAtomicIntrinsic(opcode) {
+				continue
+			}
+			if adapter != nil && adapter != candidate {
+				return nil, false, fmt.Errorf(
+					"coroutine managed function-value source %q has owner-dependent intrinsic wrappers",
+					source.Name(),
+				)
+			}
+			adapter = candidate
+		}
+		if adapter == nil {
+			return nil, false, nil
+		}
 	}
-	if u.managedForeignWrapInfo[adapter] != canonical || u.canonicalAlias(adapter) != adapter {
+	_, intrinsicAdapter := u.callWrapInfo[adapter]
+	if (!intrinsicAdapter && u.managedForeignWrapInfo[adapter] != canonical) || u.canonicalAlias(adapter) != adapter {
 		return nil, false, fmt.Errorf(
 			"coroutine managed function-value source %q has inconsistent adapter metadata",
 			source.Name(),
@@ -158,6 +191,57 @@ func (u *EmissionUniverse) CoroManagedFunctionValueTarget(
 		)
 	}
 	return adapter, true, nil
+}
+
+// validateManagedIntrinsicFunctionValueWrapper proves that wrapper is the
+// package-owned Go carrier for one exact inline atomic declaration. Unlike a
+// native adapter this body is deliberately owned by the use package, so its
+// descriptor and definition are emitted into the same archive.
+func (u *EmissionUniverse) validateManagedIntrinsicFunctionValueWrapper(wrapper *ssa.Function) error {
+	if u == nil || wrapper == nil {
+		return fmt.Errorf("managed intrinsic function-value wrapper requires a universe and function")
+	}
+	info, compilerOwned := u.callWrapInfo[wrapper]
+	if !compilerOwned || info.intrinsic == nil {
+		return fmt.Errorf("function %q is not a compiler-owned intrinsic wrapper", wrapper.Name())
+	}
+	owner := u.packages[info.owner]
+	if owner == nil || u.ownerOf(wrapper) != owner {
+		return fmt.Errorf("managed intrinsic function-value wrapper has no exact use-package owner")
+	}
+	structuralKey, err := u.intrinsicWrapperStructuralKey(info)
+	if err != nil {
+		return err
+	}
+	if wrapper.Synthetic != "wrapper" || wrapper.Parent() != nil || len(wrapper.FreeVars) != 0 ||
+		wrapper.Origin() != nil || len(wrapper.TypeArgs()) != 0 || wrapper.Signature == nil ||
+		wrapper.Signature.Recv() != nil || wrapper.Signature.Variadic() ||
+		!types.Identical(wrapper.Signature, info.intrinsic.Signature) ||
+		u.syntheticKeys[wrapper] != structuralKey || u.callWraps[info] != wrapper {
+		return fmt.Errorf("managed intrinsic function-value wrapper lost its exact identity or signature")
+	}
+	forward, err := validateCoroExactSyntheticForwarder(wrapper, info.intrinsic)
+	if err != nil || forward.Common() == nil || forward.Common().StaticCallee() != info.intrinsic {
+		if err == nil {
+			err = fmt.Errorf("forwarding call does not target the exact intrinsic declaration")
+		}
+		return fmt.Errorf("managed intrinsic function-value forwarding body is invalid: %w", err)
+	}
+	frozen, found, err := u.coroProgramIR.callSitePlan(forward)
+	if err != nil || !found || frozen.failure != "" ||
+		frozen.plan.Elision != CoroCallElidedIntrinsic || !frozen.plan.Intrinsic ||
+		frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend ||
+		frozen.plan.StaticSpawnTarget != nil || frozen.plan.ManagedStaticTarget != nil ||
+		frozen.plan.GeneratedCgoTarget != nil || frozen.plan.RawPlain ||
+		!isCoroAtomicIntrinsic(frozen.opcode) {
+		if err == nil && !found {
+			err = fmt.Errorf("forwarding call is absent from ProgramIR")
+		} else if err == nil && frozen.failure != "" {
+			err = fmt.Errorf("forwarding call failed classification: %s", frozen.failure)
+		}
+		return fmt.Errorf("managed intrinsic function-value forwarding recipe is invalid: %v", err)
+	}
+	return nil
 }
 
 func (u *EmissionUniverse) validateManagedForeignFunctionValueWrapper(
@@ -177,7 +261,7 @@ func (u *EmissionUniverse) validateManagedForeignFunctionValueWrapper(
 	}
 	if wrapper.Synthetic != "wrapper" || wrapper.Parent() != nil || len(wrapper.FreeVars) != 0 ||
 		wrapper.Origin() != nil || len(wrapper.TypeArgs()) != 0 || wrapper.Signature == nil ||
-		wrapper.Signature.Recv() != nil || !types.Identical(wrapper.Signature, target.Signature) ||
+		!types.Identical(wrapper.Signature, target.Signature) ||
 		u.syntheticKeys[wrapper] != key || u.managedForeignWraps[target] != wrapper {
 		return fmt.Errorf("managed foreign function-value wrapper lost its exact identity or signature")
 	}
@@ -197,7 +281,7 @@ func (u *EmissionUniverse) validateManagedForeignFunctionValueWrapper(
 	}
 	if site.Elision != CoroCallNotElided || site.Intrinsic || site.StaticSpawnTarget != nil ||
 		site.ManagedStaticTarget != nil || site.RawPlain ||
-		(site.CgoWorkerTarget != nil && site.CgoWorkerTarget != target) {
+		(site.GeneratedCgoTarget != nil && site.GeneratedCgoTarget != target) {
 		return fmt.Errorf("managed foreign function-value forwarding recipe is not one exact C call")
 	}
 	return nil

@@ -18,8 +18,8 @@ package build
 
 import (
 	"errors"
-	"go/importer"
 	"go/types"
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -91,16 +91,45 @@ func TestBackendProgramsStayOwnedByPackagesUntilExplicitDispose(t *testing.T) {
 }
 
 func TestBackendAbiTypesFollowLinkedPackageOrder(t *testing.T) {
-	runtimePkg, err := importer.For("source", nil).Import(llssa.PkgRuntime)
+	source := filepath.Join(t.TempDir(), "main.go")
+	writeFile(t, source, "package main\nfunc main() {}\n")
+	conf := NewDefaultConf(ModeGen)
+	conf.ForceRebuild = true
+	var runtimePkg *types.Package
+	conf.ModuleHook = func(pkg Package) {
+		if pkg.Package != nil && pkg.PkgPath == llssa.PkgRuntime {
+			runtimePkg = pkg.Types
+		}
+	}
+	loaded, err := Do([]string{source}, conf)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(loaded) == 0 || loaded[0].LPkg == nil || runtimePkg == nil {
+		t.Fatal("production pipeline did not load runtime types")
+	}
+	loaded[0].LPkg.Prog.Dispose()
 	newBackend := func(path, name string, raw types.Type) (llssa.Program, *aPackage) {
 		prog := llssa.NewProgram(nil)
+		defer prog.Dispose()
 		prog.SetRuntime(runtimePkg)
 		pkg := prog.NewPackage("p", path)
-		pkg.RegisterAbiTypes([]llssa.AbiTypeInfo{{Name: name, Raw: raw}})
-		return prog, &aPackage{LPkg: pkg}
+		fn := pkg.NewFunc("producer", llssa.NoArgsNoRet, llssa.InC)
+		body := fn.MakeBody(1)
+		body.MakeInterface(prog.Any(), prog.Zero(prog.Type(raw, llssa.InGo)))
+		body.Return()
+		for _, info := range prog.AbiTypes() {
+			if types.Identical(info.Raw, raw) {
+				info.Name = name
+				target := llssa.NewProgram(nil)
+				target.SetRuntime(runtimePkg)
+				targetPkg := target.NewPackage("p", path)
+				targetPkg.RegisterAbiTypes([]llssa.AbiTypeInfo{info})
+				return target, &aPackage{LPkg: targetPkg}
+			}
+		}
+		t.Fatal("producer did not emit the requested ABI type")
+		return nil, nil
 	}
 
 	coordinator := llssa.NewProgram(nil)

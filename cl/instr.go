@@ -30,6 +30,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/xgo-dev/llgo/internal/genmethod"
 	llssa "github.com/xgo-dev/llgo/ssa"
 )
 
@@ -445,6 +446,12 @@ func (p *context) funcPCABI0Value(b llssa.Builder, v ssa.Value) llssa.Expr {
 			if _, ok := t.Underlying().(*types.Interface); ok {
 				data := b.InterfaceData(p.compileValue(b, v))
 				uptr := p.type_(types.Typ[types.Uintptr], llssa.InGo)
+				if p.immutablePlan() != nil {
+					descriptorPtr := b.Convert(p.prog.Pointer(p.prog.VoidPtr()), data)
+					descriptor := b.Load(descriptorPtr)
+					code := b.CoroDispatchTrustedCodeEntry(descriptor)
+					return b.Convert(uptr, code)
+				}
 				uptrPtr := p.prog.Pointer(uptr)
 				codePtr := b.Convert(uptrPtr, data)
 				return b.Load(codePtr)
@@ -808,52 +815,56 @@ func (p *context) boolToUint8(b llssa.Builder, args []llssa.Expr) llssa.Expr {
 // -----------------------------------------------------------------------------
 
 var llgoInstrs = map[string]int{
-	"cstr":                    llgoCstr,
-	"advance":                 llgoAdvance,
-	"index":                   llgoIndex,
-	"alloca":                  llgoAlloca,
-	"allocCStr":               llgoAllocCStr,
-	"allocaCStr":              llgoAllocaCStr,
-	"allocaCStrs":             llgoAllocaCStrs,
-	"string":                  llgoString,
-	"stringData":              llgoStringData,
-	"funcAddr":                llgoFuncAddr,
-	"funcPCABI0":              llgoFuncPCABI0,
-	"funcPCABIInternal":       llgoFuncPCABI0,
-	"skip":                    llgoSkip,
-	"syscall":                 llgoSyscall,
-	"syscall32":               llgoSyscall32,
-	"syscallPtr":              llgoSyscallPtr,
-	"boolToUint8":             llgoBoolToUint8,
-	"closureEnv":              llgoClosureEnv,
-	"coroPark":                llgoCoroPark,
-	"coroYield":               llgoCoroYield,
-	"coroTimerSleep":          llgoCoroTimerSleep,
-	"coroPollWait":            llgoCoroPollWait,
-	"coroControlledTimerWait": llgoCoroControlledTimerWait,
-	"coroCriticalEnter":       llgoCoroCriticalEnter,
-	"coroCriticalExit":        llgoCoroCriticalExit,
-	"coroGoexit":              llgoCoroGoexit,
-	"coroOSThreadLock":        llgoCoroOSThreadLock,
-	"coroOSThreadUnlock":      llgoCoroOSThreadUnlock,
-	"coroFFICall":             llgoCoroFFICall,
-	"coroCurrentTask":         llgoCoroCurrentTask,
-	"coroPropagatePanic":      llgoCoroPropagatePanic,
-	"coroHostOperation":       llgoCoroHostOperation,
-	"controlExit":             llgoControlExit,
-	"controlTrap":             llgoControlTrap,
-	"controlFork":             llgoControlFork,
-	"controlExecve":           llgoControlExecve,
-	"pystr":                   llgoPyStr,
-	"pyList":                  llgoPyList,
-	"pyTuple":                 llgoPyTuple,
-	"sigjmpbuf":               llgoSigjmpbuf,
-	"sigsetjmp":               llgoSigsetjmp,
-	"siglongjmp":              llgoSiglongjmp,
-	"setjmp":                  llgoSetjmp,
-	"longjmp":                 llgoLongjmp,
-	"deferData":               llgoDeferData,
-	"unreachable":             llgoUnreachable,
+	"cstr":                       llgoCstr,
+	"advance":                    llgoAdvance,
+	"index":                      llgoIndex,
+	"alloca":                     llgoAlloca,
+	"allocCStr":                  llgoAllocCStr,
+	"allocaCStr":                 llgoAllocaCStr,
+	"allocaCStrs":                llgoAllocaCStrs,
+	"string":                     llgoString,
+	"stringData":                 llgoStringData,
+	"funcAddr":                   llgoFuncAddr,
+	"funcPCABI0":                 llgoFuncPCABI0,
+	"funcPCABIInternal":          llgoFuncPCABI0,
+	"skip":                       llgoSkip,
+	"syscall":                    llgoSyscall,
+	"syscall32":                  llgoSyscall32,
+	"syscallPtr":                 llgoSyscallPtr,
+	"boolToUint8":                llgoBoolToUint8,
+	"closureEnv":                 llgoClosureEnv,
+	"coroPark":                   llgoCoroPark,
+	"coroYield":                  llgoCoroYield,
+	"coroTimerSleep":             llgoCoroTimerSleep,
+	"coroPollWait":               llgoCoroPollWait,
+	"coroControlledTimerWait":    llgoCoroControlledTimerWait,
+	"coroCriticalEnter":          llgoCoroCriticalEnter,
+	"coroCriticalPin":            llgoCoroCriticalPin,
+	"coroCriticalExit":           llgoCoroCriticalExit,
+	"coroGoexit":                 llgoCoroGoexit,
+	"coroOSThreadLock":           llgoCoroOSThreadLock,
+	"coroOSThreadUnlock":         llgoCoroOSThreadUnlock,
+	"coroFFICall":                llgoCoroFFICall,
+	"coroCurrentTask":            llgoCoroCurrentTask,
+	"coroBorrowResult":           llgoCoroBorrowResult,
+	"coroExecutionDomainEnabled": llgoCoroExecutionDomainEnabled,
+	"coroGCObservationEnabled":   llgoCoroGCObservationEnabled,
+	"coroPropagatePanic":         llgoCoroPropagatePanic,
+	"coroHostOperation":          llgoCoroHostOperation,
+	"controlExit":                llgoControlExit,
+	"controlTrap":                llgoControlTrap,
+	"controlFork":                llgoControlFork,
+	"controlExecve":              llgoControlExecve,
+	"pystr":                      llgoPyStr,
+	"pyList":                     llgoPyList,
+	"pyTuple":                    llgoPyTuple,
+	"sigjmpbuf":                  llgoSigjmpbuf,
+	"sigsetjmp":                  llgoSigsetjmp,
+	"siglongjmp":                 llgoSiglongjmp,
+	"setjmp":                     llgoSetjmp,
+	"longjmp":                    llgoLongjmp,
+	"deferData":                  llgoDeferData,
+	"unreachable":                llgoUnreachable,
 
 	"atomicLoad":         llgoAtomicLoad,
 	"atomicStore":        llgoAtomicStore,
@@ -1814,7 +1825,11 @@ func collectRuntimeCallerMethods(pkg *ssa.Package, runtimeTypes []types.Type) []
 	addMethods := func(typ types.Type) {
 		methodSet := pkg.Prog.MethodSets.MethodSet(typ)
 		for i := 0; i < methodSet.Len(); i++ {
-			fn := pkg.Prog.MethodValue(methodSet.At(i))
+			meth := methodSet.At(i)
+			if genmethod.SupportsGenericMethods && genmethod.IsGenericMethod(meth.Type()) {
+				continue
+			}
+			fn := pkg.Prog.MethodValue(meth)
 			if fn != nil && !seen[fn] {
 				seen[fn] = true
 				methods = append(methods, fn)
@@ -2135,6 +2150,9 @@ func (a *runtimeCallerAnalysis) methodTargetsForType(typ types.Type, method *typ
 		if sel.Obj().Name() != method.Name() {
 			continue
 		}
+		if genmethod.SupportsGenericMethods && genmethod.IsGenericMethod(sel.Type()) {
+			continue
+		}
 		fn := a.pkg.Prog.MethodValue(sel)
 		if fn == nil {
 			return nil, false
@@ -2388,7 +2406,10 @@ func runtimeLocationPosition(fset *token.FileSet, pos token.Pos) (token.Position
 		return token.Position{}, false
 	}
 	position := fset.Position(pos)
-	return position, position.Filename != "" && position.Line > 0
+	// An empty //line filename is valid and is normalized to "??" by the
+	// caller. Rejecting it here drops both the planned location helper and
+	// its emitted update, leaving the previous function-entry location live.
+	return position, position.Line > 0
 }
 
 // coroCurrentSourceLine returns the immutable source line owned by the active
@@ -3447,11 +3468,14 @@ func (p *context) callEx(
 				panic("llgo.coroControlledTimerWait requires an exact direct call")
 			}
 			ret = p.compileCoroControlledTimerWait(b, args)
-		case llgoCoroCriticalEnter:
+		case llgoCoroCriticalEnter, llgoCoroCriticalPin:
 			if act != llssa.Call || ds != nil || len(args) != 0 {
 				panic("llgo.coroCriticalEnter requires an exact direct zero-argument call")
 			}
 			p.compileCoroCriticalEnter(b, call)
+			if ftype == llgoCoroCriticalPin {
+				ret = b.Const(constant.MakeInt64(0), p.type_(types.Typ[types.Int], llssa.InGo))
+			}
 		case llgoCoroCriticalExit:
 			if act != llssa.Call || ds != nil || len(args) != 0 {
 				panic("llgo.coroCriticalExit requires an exact direct zero-argument call")
@@ -3489,6 +3513,15 @@ func (p *context) callEx(
 			}
 			args := p.compileValues(b, args, kind)
 			p.compileCoroFFICall(b, args)
+		case llgoCoroExecutionDomainEnabled, llgoCoroGCObservationEnabled:
+			if act != llssa.Call || ds != nil || len(args) != 0 {
+				panic("llgo program predicate requires an exact direct zero-argument call")
+			}
+			enabled, err := p.compilation.coroProgramPredicateEmissionEnabled(coroProgramPredicateCapability(ftype))
+			if err != nil {
+				panic(err)
+			}
+			ret = b.Const(constant.MakeBool(enabled), p.type_(types.Typ[types.Bool], llssa.InGo))
 		case llgoCoroCurrentTask:
 			if act != llssa.Call || ds != nil || len(args) != 0 {
 				panic("llgo.coroCurrentTask requires an exact direct zero-argument call")
@@ -3497,6 +3530,11 @@ func (p *context) callEx(
 			if ret.IsNil() {
 				panic("llgo.coroCurrentTask requires an active physical coroutine")
 			}
+		case llgoCoroBorrowResult:
+			// A typed frontend seed is not yet a physical custody proof. Keep
+			// this closed until parent/entry guards and descriptor publication
+			// consume the same frozen recipe; never hand out an unguarded ABI slot.
+			panic("llgo.coroBorrowResult requires a bound physical resource-delivery guard")
 		case llgoCoroHostOperation:
 			if act != llssa.Call || ds != nil {
 				panic("llgo.coroHostOperation requires an exact direct call")
@@ -3522,6 +3560,9 @@ func (p *context) callEx(
 			p.compileCoroOSThreadAffinity(b, false)
 		case llgoUnreachable: // func unreachable()
 			b.Unreachable()
+			if p.isDirectTailUnreachableCallAt(sourceCall) {
+				break
+			}
 			// x/tools models this compiler intrinsic as an ordinary call, so the
 			// source block can still contain a Return or Jump after it. Keep that
 			// structurally unreachable tail in a separate physical block: emitting
@@ -3597,7 +3638,7 @@ func reflectStaticCallABIInitKind(call *ssa.CallCommon) int {
 			return llssa.ReflectMapOf
 		case "PointerTo", "PtrTo", "New", "NewAt":
 			return llssa.ReflectPointerTo
-		case "SliceOf":
+		case "SliceOf", "SliceAt":
 			return llssa.ReflectSliceOf
 		case "StructOf":
 			return llssa.ReflectStructOf

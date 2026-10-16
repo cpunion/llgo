@@ -96,7 +96,9 @@ var sourcePatchPkgs = map[string]struct{}{
 	"internal/runtime/sys":           {},
 	"internal/runtime/syscall/linux": {},
 	"internal/sync":                  {},
+	"internal/syscall/unix":          {},
 	"iter":                           {},
+	"math":                           {},
 	"net":                            {},
 	"runtime":                        {},
 	"runtime/metrics":                {},
@@ -111,6 +113,7 @@ var sourcePatchAsmPkgs = map[string]map[string]struct{}{
 	"internal/bytealg":        {"wasm": {}},
 	"internal/chacha8rand":    {"wasm": {}},
 	"internal/runtime/atomic": {"arm": {}, "wasm": {}},
+	"math":                    {"wasm": {}},
 	"sync/atomic":             {"*": {}},
 	"syscall":                 {"*": {}},
 }

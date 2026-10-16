@@ -293,12 +293,22 @@ func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemantic
 			return plan, err
 		}
 		if common := instruction.Common(); common != nil {
-			if builtin, ok := common.Value.(*ssa.Builtin); ok && builtin.Name() == "panic" {
-				plan.class = coro.OpControl
-				plan.exec = coro.MayUnwind
-				plan.materialized = true
-				plan.recipe = coro.RecipeID("cl.ssa.builtin-panic.v0")
-				plan.staticOutcome = true
+			if builtin, ok := common.Value.(*ssa.Builtin); ok {
+				switch builtin.Name() {
+				case "panic":
+					plan.class = coro.OpControl
+					plan.exec = coro.MayUnwind
+					plan.materialized = true
+					plan.recipe = coro.RecipeID("cl.ssa.builtin-panic.v0")
+				case "close":
+					// Closing does not suspend, but its current task-bound channel
+					// recipe requires the full coroutine body's fault/continuation
+					// ABI. A synchronous raw helper is not a certificate that this
+					// source operation has an outcome-only implementation.
+					plan.class = coro.OpChannel
+					plan.materialized = true
+					plan.staticOutcome = false
+				}
 			}
 		}
 		return plan, nil

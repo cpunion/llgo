@@ -995,6 +995,30 @@ func (c *CoroBuilder) Handle() Expr {
 	return c.handle
 }
 
+// ZeroCoroFrameStorage initializes a ramp-local slot after coro.begin and
+// before frame publication. Initializing before coro.begin makes CoroSplit
+// copy the native-stack aggregate into the frame, which SROA can expand into
+// one load/store per element. The alloca still dominates all resume/cleanup
+// entries, and the frame is fully initialized before its first suspension.
+// The caller's current insertion point is not changed.
+func (b Builder) ZeroCoroFrameStorage(handle, storage Expr) {
+	if handle.IsNil() || handle.impl.IsACallInst().IsNil() ||
+		handle.impl.CalledValue().Name() != "llvm.coro.begin" ||
+		handle.impl.InstructionParent().Parent() != b.Func.impl ||
+		storage.IsNil() || storage.impl.IsAAllocaInst().IsNil() ||
+		storage.impl.InstructionParent() != b.Func.Block(0).first {
+		panic("ssa: coroutine frame zeroing requires this function's begin and local storage")
+	}
+	next := llvm.NextInstruction(handle.impl)
+	if next.IsNil() {
+		panic("ssa: coroutine frame zeroing requires a completed ramp prologue")
+	}
+	init := b.Func.NewBuilder()
+	defer init.Dispose()
+	init.impl.SetInsertPointBefore(next)
+	init.zeroinit(storage, SizeOf(b.Prog, b.Prog.Elem(storage.Type)))
+}
+
 // InitialResumeBlock returns the block in which the source coroutine body must
 // begin. It is distinct from the ramp entry block, which has already emitted
 // allocation, coro.begin, and the initial suspend.

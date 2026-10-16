@@ -197,6 +197,11 @@ type CallableContractCertificate struct {
 	TypedABISignature           string                `json:"typed_abi_signature"`
 	PhysicalSymbol              string                `json:"physical_symbol,omitempty"`
 	PhysicalABISignature        string                `json:"physical_abi_signature,omitempty"`
+	// NativeDefaultFaultBoundary is compiler-proven demand from an exact C
+	// implementation, independent of its progress contract. An executor-safe
+	// leaf may still fault. This fact is consumed only on live invocation edges;
+	// publishing a code address does not require a signal landing boundary.
+	NativeDefaultFaultBoundary bool `json:"native_default_fault_boundary"`
 }
 
 func (certificate CallableContractCertificate) IsZero() bool {
@@ -291,6 +296,9 @@ func (certificate CallableContractCertificate) Validate() error {
 			return fmt.Errorf("coro: callable declaration physical ABI differs from its typed ABI")
 		}
 	case CallableContractScopeWrapper:
+		if certificate.NativeDefaultFaultBoundary {
+			return fmt.Errorf("coro: callable wrapper certificate must not claim a C implementation fault boundary")
+		}
 		if certificate.PhysicalSymbol != "" || certificate.PhysicalABISignature != "" {
 			return fmt.Errorf("coro: callable wrapper certificate must not claim a physical C ABI")
 		}

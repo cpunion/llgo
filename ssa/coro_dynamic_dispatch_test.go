@@ -427,6 +427,41 @@ func TestCoroDispatchStructuredOnlySelectionLoadsOnlyRequiredWords(t *testing.T)
 	}
 }
 
+func TestCoroDispatchTrustedCodeEntryLoadsOnlyIdentityWord(t *testing.T) {
+	fixture := newCoroDynamicDispatchTestFixture(t)
+	fn := fixture.pkg.NewFunc(
+		"trusted_descriptor_code_entry",
+		coroPlainDispatchTestSignature(
+			[]types.Type{types.Typ[types.UnsafePointer]},
+			[]types.Type{types.Typ[types.UnsafePointer]},
+		),
+		InGo,
+	)
+	b := fn.MakeBody(1)
+	b.Return(b.CoroDispatchTrustedCodeEntry(fn.Param(0)))
+	b.EndBuild()
+	b.Dispose()
+
+	body := coroPlainDispatchIRFunction(fixture.pkg.String(), fn.Name())
+	if body == "" || !strings.Contains(body, "getelementptr inbounds") ||
+		!strings.Contains(body, "i32 0, i32 8") {
+		t.Fatalf("trusted code identity does not load descriptor field 8:\n%s", body)
+	}
+	for _, forbidden := range []string{
+		"coro.dispatch.version.invalid",
+		"coro.dispatch.hash.invalid",
+		"coro.dispatch.result.size.invalid",
+		"coro.dispatch.capability.missing",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("trusted code identity unexpectedly revalidates %q:\n%s", forbidden, body)
+		}
+	}
+	if err := llvm.VerifyModule(fixture.pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify trusted code identity module: %v\n%s", err, fixture.pkg.String())
+	}
+}
+
 func TestCoroDynamicDispatchAcceptsPackedVariadicSignature(t *testing.T) {
 	Initialize(InitAll)
 	prog := NewProgram(nil)

@@ -100,6 +100,7 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 				"runtime.SetDefaultGOMAXPROCS()",
 				"debug.SetMaxThreads(64)",
 				"go publish()", "cond.Wait()", "cond.Signal()", "group.Wait()",
+				"atomicValueFirstPublication()", "value.Store(7)", "value.Swap(7)", "value.CompareAndSwap(nil, 7)",
 			},
 			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 			wantGo:           true,

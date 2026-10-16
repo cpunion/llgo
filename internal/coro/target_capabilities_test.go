@@ -46,3 +46,26 @@ func TestProgramCapabilitiesKeepWorkerAndFaultDemandsOrthogonal(t *testing.T) {
 		t.Fatalf("unknown capability %#x was accepted", invalid)
 	}
 }
+
+func TestExecutionDomainCapabilityIsOrthogonal(t *testing.T) {
+	capabilities := ExecutionDomainProgramCapability()
+	if !capabilities.Valid() || !capabilities.ExecutionDomain() || capabilities.Worker() || capabilities.PanicOnFault() {
+		t.Fatalf("execution-domain capability includes unrelated services: %#x", capabilities)
+	}
+	if NewProgramCapabilities(true, true).ExecutionDomain() {
+		t.Fatal("ordinary worker/fault support enabled execution-domain accounting")
+	}
+}
+
+func TestGCObservationCapabilityIsOrthogonal(t *testing.T) {
+	capabilities := GCObservationProgramCapability()
+	if !capabilities.Valid() || !capabilities.GCObservation() || capabilities.ExecutionDomain() || capabilities.Worker() || capabilities.PanicOnFault() {
+		t.Fatalf("GC observation includes unrelated services: %#x", capabilities)
+	}
+	if (ExecutionDomainProgramCapability() | NewProgramCapabilities(true, true)).GCObservation() {
+		t.Fatal("unrelated services enabled post-GC observations")
+	}
+	if ProgramPredicateMask() != ExecutionDomainProgramCapability()|GCObservationProgramCapability() {
+		t.Fatal("program predicate mask does not exactly cover its compile-time queries")
+	}
+}

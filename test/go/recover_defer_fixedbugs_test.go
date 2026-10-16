@@ -3,7 +3,6 @@ package gotest
 import (
 	"reflect"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -138,6 +137,62 @@ func TestRecoverNestedDeferredBuiltinBeforeInnerRecover(t *testing.T) {
 	if outer != "outer" {
 		t.Fatalf("outer recover = %v, want outer", outer)
 	}
+}
+
+// These cases came from the nesteddeferpanic compiler fixture. They are
+// runtime state-machine semantics, so keep them here instead of duplicating
+// three nearly identical recover/defer CFG snapshots in cl/_testgo.
+func TestRecoverSupersededPanics(t *testing.T) {
+	t.Run("deferred panic replaces active panic", func(t *testing.T) {
+		got := any(nil)
+		func() {
+			defer func() { got = recover() }()
+			func() {
+				for {
+					defer func() { defer panic(5) }()
+					break
+				}
+				panic(4)
+			}()
+		}()
+		if got != 5 {
+			t.Fatalf("replacement panic = %v, want 5", got)
+		}
+	})
+
+	t.Run("recover inner resumes outer panic", func(t *testing.T) {
+		outer, inner := any(nil), any(nil)
+		func() {
+			defer func() { outer = recover() }()
+			func() {
+				defer func() {
+					defer func() { inner = recover() }()
+					panic(2)
+				}()
+				panic(1)
+			}()
+		}()
+		if inner != 2 || outer != 1 {
+			t.Fatalf("recovered inner/outer = %v/%v, want 2/1", inner, outer)
+		}
+	})
+
+	t.Run("recover then deferred panic", func(t *testing.T) {
+		outer, old := any(nil), any(nil)
+		func() {
+			defer func() { outer = recover() }()
+			func() {
+				defer func() {
+					old = recover()
+					defer panic(3)
+				}()
+				panic(2)
+			}()
+		}()
+		if old != 2 || outer != 3 {
+			t.Fatalf("recovered old/outer = %v/%v, want 2/3", old, outer)
+		}
+	})
 }
 
 type fixedbugNestedPanicInterface interface {
@@ -401,75 +456,4 @@ func TestRecoverFixedbug8047bNilDeferredCallReplacesPanic(t *testing.T) {
 	if got == 1 {
 		t.Fatal("recover observed the original panic after the nil deferred call replaced it")
 	}
-}
-
-var fixedbug73916Recovered bool
-
-func fixedbug73916CallRecover() {
-	if recover() != nil {
-		fixedbug73916Recovered = true
-	}
-}
-
-func fixedbug73916Deferred(int) {
-	fixedbug73916CallRecover()
-}
-
-func fixedbug73916MustPanic(t *testing.T, fn func()) any {
-	t.Helper()
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("deferred indirect recover swallowed panic")
-		}
-	}()
-	fn()
-	return nil
-}
-
-func TestRecoverFixedbug73916IndirectRecoverDoesNotRecover(t *testing.T) {
-	skipBeforeGo126(t)
-	fixedbug73916Recovered = false
-	fixedbug73916MustPanic(t, func() {
-		defer fixedbug73916Deferred(1)
-		panic("fixedbug73916")
-	})
-	if fixedbug73916Recovered {
-		t.Fatal("indirect recover returned non-nil")
-	}
-}
-
-var fixedbug73916bRecovered bool
-
-func fixedbug73916bCallRecover() {
-	func() {
-		if recover() != nil {
-			fixedbug73916bRecovered = true
-		}
-	}()
-}
-
-func fixedbug73916bDeferred() int {
-	fixedbug73916bCallRecover()
-	return 0
-}
-
-func TestRecoverFixedbug73916NestedRecoverDoesNotRecover(t *testing.T) {
-	skipBeforeGo126(t)
-	fixedbug73916bRecovered = false
-	fixedbug73916MustPanic(t, func() {
-		defer fixedbug73916bDeferred()
-		panic("fixedbug73916b")
-	})
-	if fixedbug73916bRecovered {
-		t.Fatal("nested recover returned non-nil")
-	}
-}
-
-func skipBeforeGo126(t *testing.T) {
-	t.Helper()
-	version := runtime.Version()
-	if strings.HasPrefix(version, "go1.26") || strings.HasPrefix(version, "devel") {
-		return
-	}
-	t.Skip("requires Go 1.26 recover semantics")
 }

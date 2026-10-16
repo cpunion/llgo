@@ -903,6 +903,12 @@ Native上的Go兼容入口是`runtime.LockOSThread`。它不能继续是空实�
 - compiler marker、runtime owner选择、嵌套lock/unlock、terminal logical lease cleanup和
   architecture-debt gate都有独立测试。
 
+上面“ordinary generated-cgo使用any-thread worker”的描述记录的是2026-07-24阶段状态，
+已被2026-08-30的generated-cgo切换取代：NativeFleet上的`_Cfunc_*`、`_C2func_*`/errno和
+defer默认冻结为`same-M + managed-ingress`，以覆盖显式callback参数以及C通过全局状态调用
+`//export`入口的情况。worker执行类别只允许由明确的`ReentryNone` producer证明选择；
+Python等显式affinity contract仍可独立选择owner-preserving same-M路径。
+
 这仍不是完整Go affinity语义。当前locked foreign call已在同一P上创建temporary replacement；
 locked G若未unlock就终止，也会通过target-neutral retire receipt和clean-factory succession
 物理退休/替换program、peer或replacement M。真实TLS destructor E2E已证明旧pthread退出；

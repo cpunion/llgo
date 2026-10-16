@@ -43,8 +43,11 @@ type Chan struct {
 	// that storage, while the observable len/cap builtins must both report 0.
 	// It is set once before time.NewTimer publishes the channel.
 	timerSync bool
-	recvx     int
-	sendx     int
+	// synctest occupies existing flag padding. Only a bubbled channel allocates
+	// the trailing association word; the ordinary Chan allocation is unchanged.
+	synctest bool
+	recvx    int
+	sendx    int
 
 	sendq chanWaitq
 	recvq chanWaitq
@@ -172,7 +175,13 @@ func NewChan(eltSize, cap int) *Chan {
 	if overflow || mem > maxAlloc {
 		panicMakeChanSize()
 	}
-	ret := new(Chan)
+	var ret *Chan
+	if coro.ExecutionDomainEnabled() {
+		ret = newSynctestChan()
+	}
+	if ret == nil {
+		ret = new(Chan)
+	}
 	ret.elemsize = eltSize
 	ret.dataqsiz = cap
 	if cap > 0 {
@@ -534,6 +543,9 @@ func chanTrySendLockedWithContext(
 	eltSize int,
 	context *coroChanExternalCommitContextV1,
 ) (tryOK bool, closed bool) {
+	if coro.ExecutionDomainEnabled() {
+		coroCheckSynctestChan(p, context, "send on synctest channel from outside bubble")
+	}
 	elemSize := p.elemsize
 	if p.closed {
 		return false, true
@@ -625,6 +637,9 @@ func chanTryRecvLockedWithContext(
 	eltSize int,
 	context *coroChanExternalCommitContextV1,
 ) (recvOK bool, tryOK bool) {
+	if coro.ExecutionDomainEnabled() {
+		coroCheckSynctestChan(p, context, "receive on synctest channel from outside bubble")
+	}
 	elemSize := p.elemsize
 	if p.dataqsiz == 0 {
 		if dequeueSendAndRecvWithContext(p, v, elemSize, context) {
@@ -716,6 +731,9 @@ func coroChanTryCloseWithContext(
 ) uint32 {
 	if p == nil {
 		return coroChanCloseNil
+	}
+	if coro.ExecutionDomainEnabled() {
+		coroCheckSynctestChan(p, context, "close of synctest channel from outside bubble")
 	}
 	p.mutex.Lock()
 	if p.closed {
@@ -954,6 +972,11 @@ func (l *selectChanList) add(ch *Chan) {
 // TrySelect executes a non-blocking select operation.
 func TrySelect(ops ...ChanOp) (isel int, recvOK, tryOK bool) {
 	n := len(ops)
+	if coro.ExecutionDomainEnabled() {
+		for _, op := range ops {
+			coroCheckSynctestChan(op.C, nil, "select on synctest channel from outside bubble")
+		}
+	}
 	if n == 0 {
 		return
 	}

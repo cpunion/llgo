@@ -41,6 +41,17 @@ func TestWASICommandReactorUsesOneBoundedHostPullCore(t *testing.T) {
 		"__WASI_SUBCLOCKFLAGS_SUBSCRIPTION_CLOCK_ABSTIME",
 		"llgo_host_operation_capacity_v1 = 64",
 		"llgo_run_budget_v2 = 1024",
+		"llgo_host_wasi_fd_pread_v1 = (3u << 16) | 3u",
+		"llgo_host_wasi_fd_pwrite_v1 = (3u << 16) | 4u",
+		"error = __wasi_fd_pread(descriptor,",
+		"error = __wasi_fd_pwrite(descriptor,",
+		"LLGO_WASI_IMPORT(path_open)",
+		"llgo_wasi_path_open_v1(ARG(0), ARG(1),",
+		"uint64_t capabilities[2]",
+		"buffer_operation ? 3 : argument_counts[verb]",
+		"operation->arg_count != arg_count",
+		"llgo_host_file_read_v1 = (1u << 16) | 2u",
+		"llgo_host_file_write_v1 = (1u << 16) | 3u",
 		"return llgo_fail_operation_v1(operation, ENOSYS)",
 	} {
 		if !strings.Contains(reactor, required) {
@@ -50,6 +61,7 @@ func TestWASICommandReactorUsesOneBoundedHostPullCore(t *testing.T) {
 	for _, forbidden := range []string{
 		"pthread_", "uv_", "GC_", "ASYNCIFY", "asyncify",
 		"malloc(", "calloc(", "realloc(", "free(",
+		"llgo_copy_path", "llgo_translate_open_flags", "llgo_host_file_open_", "llgo_host_file_unlink_",
 	} {
 		if strings.Contains(reactor, forbidden) {
 			t.Fatalf("WASI command reactor contains forbidden second-runtime mechanism %q", forbidden)
@@ -85,6 +97,15 @@ func TestWASICommandReactorUsesOneBoundedHostPullCore(t *testing.T) {
 	} {
 		if !strings.Contains(fixture, required) {
 			t.Fatalf("WASI command integration fixture lacks %q", required)
+		}
+	}
+	positioned := read("internal/build/_testgo/coro_host_file_positional/main.go")
+	for _, required := range []string{
+		"syscall.Pread(", "syscall.Pwrite(", "1<<32|3", "syscall.EINVAL",
+		"syscall.EBADF", "syscall.Seek(fd, 0, 1)", "positional short read",
+	} {
+		if !strings.Contains(positioned, required) {
+			t.Fatalf("positional I/O fixture lacks %q", required)
 		}
 	}
 }

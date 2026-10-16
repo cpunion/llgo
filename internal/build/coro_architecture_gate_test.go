@@ -273,7 +273,6 @@ var allowedRawNoInitPlanFiles = map[string]bool{
 }
 
 var allowedRawIntrinsicOpcodeFiles = map[string]bool{
-	"cl/coro_call_site_plan.go":            true,
 	"cl/coro_callable_shadow.go":           true,
 	"cl/coro_worker_syscall_capability.go": true,
 	"cl/emission_universe.go":              true,

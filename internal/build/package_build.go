@@ -308,6 +308,8 @@ func (ctx *context) newBackendTask(session backendSession) *context {
 		plan9asmReady:   true,
 		plan9asmMode:    ctx.plan9asmMode,
 		plan9asmPkgs:    ctx.plan9asmPkgs,
+
+		nativeObjectsOwner: ctx.nativeObjectWorkspace(),
 	}
 }
 

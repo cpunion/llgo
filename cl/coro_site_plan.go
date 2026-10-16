@@ -609,8 +609,8 @@ func (p *context) observeCoroPhysicalOperation(instruction ssa.Instruction, actu
 		panic(fmt.Errorf("coroutine emission site %q emitted its physical operation recipe more than once", instruction.String()))
 	}
 	observer.seenPhysicalOperation = true
-	if actual == coroPhysicalOperationWorkerCgo {
-		p.recordCoroCallElision(CoroCallElidedCgoWorker)
+	if actual == coroPhysicalOperationGeneratedCgoWorker || actual == coroPhysicalOperationGeneratedCgoSameM {
+		p.recordCoroCallElision(CoroCallElidedGeneratedCgo)
 	} else if actual == coroPhysicalOperationSameMPython {
 		p.recordCoroCallElision(CoroCallElidedPython)
 	}
@@ -651,17 +651,17 @@ func (p *context) observeCoroDeferredIntrinsicCapture() {
 	p.recordCoroCallElision(CoroCallElidedIntrinsic)
 }
 
-func (p *context) observeCoroDeferredCgoWorkerCapture() {
+func (p *context) observeCoroDeferredGeneratedCgoCapture() {
 	observer := p.coroEmissionSite()
 	if observer == nil || !observer.observeFrozenSite {
 		return
 	}
 	if _, deferred := observer.instruction.(*ssa.Defer); !deferred ||
-		observer.expectedElision != CoroCallElidedCgoWorker ||
+		observer.expectedElision != CoroCallElidedGeneratedCgo ||
 		observer.expectedIntrinsic {
-		panic("deferred cgo worker capture has no exact relocated SitePlan")
+		panic("deferred generated-cgo capture has no exact relocated SitePlan")
 	}
-	p.recordCoroCallElision(CoroCallElidedCgoWorker)
+	p.recordCoroCallElision(CoroCallElidedGeneratedCgo)
 }
 
 // recordCoroCallElision is shared by source-level frontend elisions and

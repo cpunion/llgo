@@ -387,7 +387,7 @@ func coroInterfaceDispatchEffectiveCallableSignature(
 		if owner == nil {
 			return nil, fmt.Errorf("function %q is absent from the emission universe", caller.Name())
 		}
-		typ = universe.effectiveType(owner, caller, typ, false)
+		typ = universe.effectiveType(owner, caller, typ)
 	}
 	signature, _ := types.Unalias(typ).(*types.Signature)
 	return coroInterfaceDispatchCanonicalSignature(coroInterfaceDispatchCallableSignature(signature)), nil

@@ -64,6 +64,10 @@ func coroBindRuntimeContextAt(task *coro.G, parentG *g, ctx *coroRuntimeContext,
 	if ctx == nil || ctx.g.context != nil || embedded != (parentG != nil) {
 		return false
 	}
+	if coro.ExecutionDomainEnabled() && parentG != nil &&
+		!coroInheritExecutionDomainTask(task, (*coro.G)(parentG.startarg)) {
+		return false
+	}
 	gp := initCoroRuntimeContext(ctx, parentG, _Grunnable)
 	gp.localContext = &ctx.local
 	gp.isMain = !embedded
@@ -71,6 +75,13 @@ func coroBindRuntimeContextAt(task *coro.G, parentG *g, ctx *coroRuntimeContext,
 	if coro.BindTaskLocal(task, unsafe.Pointer(ctx)) {
 		gp.startarg = unsafe.Pointer(task)
 		return true
+	}
+	if coro.ExecutionDomainEnabled() {
+		// This child is still private. The spawning parent is active (or the
+		// controller has not yet armed its wait), so rollback cannot own a wake.
+		if post, ok := coro.DetachExecutionDomainTask(task); !ok || post.Valid() {
+			coroRuntimeAbort("cannot roll back execution-domain inheritance")
+		}
 	}
 	discardCoroRuntimeContext(ctx, !embedded)
 	return false
@@ -145,6 +156,9 @@ func coroInitializeTaskAllocationRuntimeContextCompiler(
 
 	if ctx != &(*coroTaskAllocation)(unsafe.Pointer(task)).context ||
 		ctx.g.context != nil || ctx.g.localContext != nil {
+		return false
+	}
+	if coro.ExecutionDomainEnabled() && !coroInheritExecutionDomainTask(task, parent) {
 		return false
 	}
 	gp := initCoroRuntimeContext(ctx, parentG, _Grunnable)

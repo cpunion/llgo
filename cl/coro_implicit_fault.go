@@ -578,7 +578,7 @@ func (p *context) compileBoundsDisabledSlice(
 		if !ok {
 			return llssa.Expr{}, false
 		}
-		if emissionArrayPointerNeedsNilCheck(operation.X, operation) {
+		if emissionArrayPointerNeedsNilCheck(p, operation.X, operation) {
 			return llssa.Expr{}, false
 		}
 		limit = b.Prog.IntVal(uint64(array.Len()), b.Prog.Int())
@@ -647,7 +647,7 @@ func (p *context) compileCoroTerminalFaultWithOperands(
 			panic("outcome-plain terminal fault escaped its physical body")
 		}
 		if kind == coroFaultNilV1 && operands == nil {
-			p.outcomePlainBody().publishNilFault(b)
+			p.outcomePlainBody().publishNilFault(b, p.coroCurrentSourceLine(), false)
 			return
 		}
 		typeWord, dataWord := p.materializeCoroFaultPayloadWithOperands(b, kind, operands)
@@ -766,16 +766,16 @@ func (p *context) coroFaultPayloadSlots(b llssa.Builder) (typeSlot, dataSlot lls
 	return b.AllocaT(p.prog.VoidPtr()), b.AllocaT(p.prog.VoidPtr())
 }
 
-// enterCoroPropagatedNilFault transports the allocation-free nil-fault status
-// through synchronous outcome bodies. The first full coroutine parent uses
-// its existing V1 terminal-fault path, so certified outcome functions contain
-// no hidden helper call and do not pull parameterized V2 runtime support.
+// enterCoroPropagatedNilFault transports the compact nil-fault status through
+// synchronous outcome bodies. Only the terminal cold path appends a logical
+// trace. The first full coroutine parent uses its existing V1 fault path, so
+// certified outcome bodies need no payload slots or V2 runtime support.
 func (p *context) enterCoroPropagatedNilFault(b llssa.Builder) {
 	if p == nil || !p.hasStructuredOutcomePhysicalBody() || b == nil || b.Func != p.fn {
 		panic("propagated nil fault escaped its structured parent body")
 	}
 	if outcome := p.outcomePlainBody(); outcome != nil {
-		outcome.publishNilFault(b)
+		outcome.publishNilFault(b, p.coroCurrentSourceLine(), true)
 		return
 	}
 	p.compileCoroTerminalFault(b, coroFaultNilV1)

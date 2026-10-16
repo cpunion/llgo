@@ -45,8 +45,8 @@ func sync_runtime_SemacquireRWMutex(addr *uint32, _ bool, _ int) {
 
 //llgo:managedlink
 //go:linkname sync_runtime_SemacquireWaitGroup sync.runtime_SemacquireWaitGroup
-func sync_runtime_SemacquireWaitGroup(addr *uint32, _ bool) {
-	semaAcquire(addr)
+func sync_runtime_SemacquireWaitGroup(addr *uint32, durable bool) {
+	semaAcquireWaitGroup(addr, durable)
 }
 
 // runtime_SemacquireMutex is used by internal/sync via linkname.

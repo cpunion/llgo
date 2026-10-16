@@ -323,7 +323,7 @@ func ParkRoot() { <-blocked }
 	}
 }
 
-func TestCoroGeneratedWorkerElisionPublishesExactRawAdapter(t *testing.T) {
+func TestCoroGeneratedCgoElisionPublishesExactRawAdapter(t *testing.T) {
 	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/cgoworkerraw", `package cgoworkerraw
 func Adapter(value uint64) uint64 { return value + 1 }
 func Root(value uint64) uint64 { return Adapter(value) }
@@ -334,7 +334,7 @@ func Root(value uint64) uint64 { return Adapter(value) }
 	if len(calls) != 1 {
 		t.Fatalf("Root calls = %d, want one generated-adapter call", len(calls))
 	}
-	workerCall := calls[0]
+	generatedCall := calls[0]
 	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{root, adapter})
 	if err != nil {
 		t.Fatal(err)
@@ -349,13 +349,13 @@ func Root(value uint64) uint64 { return Adapter(value) }
 			return nil, nil
 		},
 		callSitePlan: func(call ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error) {
-			if call != workerCall {
+			if call != generatedCall {
 				return cl.CoroCallSitePlan{}, false, nil
 			}
 			return cl.CoroCallSitePlan{
-				Elision:            cl.CoroCallElidedCgoWorker,
-				ElisionCertificate: "exact-cgo-worker",
-				CgoWorkerTarget:    adapter,
+				Elision:            cl.CoroCallElidedGeneratedCgo,
+				ElisionCertificate: "exact-generated-cgo",
+				GeneratedCgoTarget: adapter,
 			}, true, nil
 		},
 	}
@@ -368,8 +368,8 @@ func Root(value uint64) uint64 { return Adapter(value) }
 	}
 	rootPlan := functionPlanForBuildTest(t, plan, root)
 	if !rootPlan.Effect.Contains(coro.WaitForeign) || rootPlan.Emission != coro.EmitCoroutine ||
-		!plan.ElidesCall(workerCall) {
-		t.Fatalf("managed cgo caller plan = %+v, elided=%t; want coroutine worker wait", rootPlan, plan.ElidesCall(workerCall))
+		!plan.ElidesCall(generatedCall) {
+		t.Fatalf("managed cgo caller plan = %+v, elided=%t; want coroutine foreign wait", rootPlan, plan.ElidesCall(generatedCall))
 	}
 	adapterPlan := functionPlanForBuildTest(t, plan, adapter)
 	if adapterPlan.ManagedDemand != coro.NoDemand || !adapterPlan.RawPlainDemand ||
@@ -377,13 +377,13 @@ func Root(value uint64) uint64 { return Adapter(value) }
 		adapterPlan.Emission != coro.EmitRawPlain || adapterPlan.Primary != coro.PrimaryPlain ||
 		!plan.HasRawPlainVariant(adapter) {
 		t.Fatalf(
-			"generated cgo adapter plan = %+v, variant=%t; want exact raw-only worker entry",
+			"generated cgo adapter plan = %+v, variant=%t; want exact raw-only foreign entry",
 			adapterPlan, plan.HasRawPlainVariant(adapter),
 		)
 	}
 }
 
-func TestCoroDeferredGeneratedWorkerElisionPublishesExactRawAdapter(t *testing.T) {
+func TestCoroDeferredGeneratedCgoElisionPublishesExactRawAdapter(t *testing.T) {
 	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/cgoworkerdeferraw", `package cgoworkerdeferraw
 func Adapter(value uint64) uint64 { return value + 1 }
 func Root(value uint64) { defer Adapter(value) }
@@ -394,7 +394,7 @@ func Root(value uint64) { defer Adapter(value) }
 	if len(calls) != 1 {
 		t.Fatalf("Root calls = %d, want one deferred generated-adapter call", len(calls))
 	}
-	workerDefer, deferred := calls[0].(*ssa.Defer)
+	generatedDefer, deferred := calls[0].(*ssa.Defer)
 	if !deferred {
 		t.Fatalf("Root call = %T, want *ssa.Defer", calls[0])
 	}
@@ -412,13 +412,13 @@ func Root(value uint64) { defer Adapter(value) }
 			return nil, nil
 		},
 		callSitePlan: func(call ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error) {
-			if call != workerDefer {
+			if call != generatedDefer {
 				return cl.CoroCallSitePlan{}, false, nil
 			}
 			return cl.CoroCallSitePlan{
-				Elision:            cl.CoroCallElidedCgoWorker,
-				ElisionCertificate: "exact-deferred-cgo-worker",
-				CgoWorkerTarget:    adapter,
+				Elision:            cl.CoroCallElidedGeneratedCgo,
+				ElisionCertificate: "exact-deferred-generated-cgo",
+				GeneratedCgoTarget: adapter,
 			}, true, nil
 		},
 	}
@@ -431,10 +431,10 @@ func Root(value uint64) { defer Adapter(value) }
 	}
 	rootPlan := functionPlanForBuildTest(t, plan, root)
 	if !rootPlan.Effect.Contains(coro.WaitForeign) || rootPlan.Emission != coro.EmitCoroutine ||
-		!plan.ElidesCall(workerDefer) {
+		!plan.ElidesCall(generatedDefer) {
 		t.Fatalf(
-			"deferred managed cgo caller plan = %+v, elided=%t; want coroutine worker wait",
-			rootPlan, plan.ElidesCall(workerDefer),
+			"deferred managed cgo caller plan = %+v, elided=%t; want coroutine foreign wait",
+			rootPlan, plan.ElidesCall(generatedDefer),
 		)
 	}
 	adapterPlan := functionPlanForBuildTest(t, plan, adapter)
@@ -443,7 +443,7 @@ func Root(value uint64) { defer Adapter(value) }
 		adapterPlan.Emission != coro.EmitRawPlain || adapterPlan.Primary != coro.PrimaryPlain ||
 		!plan.HasRawPlainVariant(adapter) {
 		t.Fatalf(
-			"deferred generated cgo adapter plan = %+v, variant=%t; want exact raw-only worker entry",
+			"deferred generated cgo adapter plan = %+v, variant=%t; want exact raw-only foreign entry",
 			adapterPlan, plan.HasRawPlainVariant(adapter),
 		)
 	}

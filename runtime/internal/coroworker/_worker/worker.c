@@ -633,9 +633,31 @@ struct llgo_coro_worker_fault_tls_v1 {
     volatile sig_atomic_t handling;
 };
 
-static _Thread_local struct llgo_coro_worker_fault_tls_v1
+static _Thread_local struct llgo_coro_worker_fault_tls_v1 *
     llgo_coro_worker_fault_tls_v1;
 static _Thread_local int llgo_coro_worker_fault_signals_ready_v1;
+
+uintptr_t __llgo_coro_worker_fault_suspend_v1(void) {
+    struct llgo_coro_worker_fault_tls_v1 *state = llgo_coro_worker_fault_tls_v1;
+    if (state == NULL || state->active == 0 || state->handling != 0) {
+        return 0;
+    }
+    llgo_coro_worker_fault_tls_v1 = NULL;
+    state->active = 0;
+    return (uintptr_t)state;
+}
+
+bool __llgo_coro_worker_fault_resume_v1(uintptr_t scope) {
+    struct llgo_coro_worker_fault_tls_v1 *state =
+        (struct llgo_coro_worker_fault_tls_v1 *)scope;
+    if (state == NULL || llgo_coro_worker_fault_tls_v1 != NULL ||
+        state->active != 0 || state->handling != 0 || state->landing == NULL) {
+        return false;
+    }
+    state->active = 1;
+    llgo_coro_worker_fault_tls_v1 = state;
+    return true;
+}
 
 struct llgo_coro_worker_fault_action_v1 {
     int signal;
@@ -705,13 +727,17 @@ static void llgo_coro_worker_forward_fault_v1(
     _exit(128 + signum);
 }
 
-static void llgo_coro_worker_fault_handler_v1(
+/* The managed runtime may install its signal trampoline after the first
+ * worker call during package init. Both trampolines consult this same TLS
+ * landing, so installation order cannot strand an armed foreign operation. */
+int __llgo_coro_worker_try_fault_v1(
     int signum,
     siginfo_t *info,
     void *context) {
-    struct llgo_coro_worker_fault_tls_v1 *state =
-        &llgo_coro_worker_fault_tls_v1;
-    if (state->active != 0 && state->handling == 0 && state->landing != NULL) {
+    struct llgo_coro_worker_fault_tls_v1 *state = llgo_coro_worker_fault_tls_v1;
+    if (state != NULL && state->active != 0 &&
+        state->handling == 0 && state->landing != NULL &&
+        (info == NULL || info->si_code > 0)) {
         state->handling = 1;
         state->fault = signum == SIGFPE ?
             LLGO_CORO_WORKER_FAULT_DIVIDE_V1 :
@@ -719,6 +745,16 @@ static void llgo_coro_worker_fault_handler_v1(
         state->signal_number = signum;
         state->fault_pc = llgo_coro_worker_fault_pc_v1(context);
         siglongjmp(*state->landing, 1);
+    }
+    return 0;
+}
+
+static void llgo_coro_worker_fault_handler_v1(
+    int signum,
+    siginfo_t *info,
+    void *context) {
+    if (__llgo_coro_worker_try_fault_v1(signum, info, context)) {
+        return;
     }
     llgo_coro_worker_forward_fault_v1(signum, info, context);
 }
@@ -801,10 +837,10 @@ static bool llgo_coro_worker_call_array_v1(
 
     memset(result, 0, sizeof(*result));
     sigjmp_buf landing;
-    struct llgo_coro_worker_fault_tls_v1 *fault_state =
-        &llgo_coro_worker_fault_tls_v1;
+    struct llgo_coro_worker_fault_tls_v1 scope;
+    struct llgo_coro_worker_fault_tls_v1 *fault_state = &scope;
     if (trace_target != 0) {
-        if (fault_state->active != 0) {
+        if (llgo_coro_worker_fault_tls_v1 != NULL) {
             return false;
         }
         /*
@@ -830,6 +866,7 @@ static bool llgo_coro_worker_call_array_v1(
         fault_state->handling = 0;
         if (sigsetjmp(landing, 0) != 0) {
             int fault_signal = (int)fault_state->signal_number;
+            llgo_coro_worker_fault_tls_v1 = NULL;
             fault_state->active = 0;
             fault_state->landing = NULL;
             result->fault = (uintptr_t)fault_state->fault;
@@ -845,6 +882,7 @@ static bool llgo_coro_worker_call_array_v1(
                     result->fault == LLGO_CORO_WORKER_FAULT_DIVIDE_V1);
         }
         fault_state->active = 1;
+        llgo_coro_worker_fault_tls_v1 = fault_state;
     }
 
     errno = 0;
@@ -881,15 +919,16 @@ static bool llgo_coro_worker_call_array_v1(
         r1 = ((llgo_coro_worker_fn9_v1)function)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
         break;
     default:
-        fault_state->active = 0;
-        fault_state->landing = NULL;
         return false;
     }
 
-    fault_state->active = 0;
-    fault_state->landing = NULL;
-    fault_state->trace_target = 0;
-    fault_state->signal_number = 0;
+    if (trace_target != 0) {
+        if (llgo_coro_worker_fault_tls_v1 != fault_state) {
+            return false;
+        }
+        llgo_coro_worker_fault_tls_v1 = NULL;
+        fault_state->active = 0;
+    }
 
     /*
      * This leaf returns raw worker-local errno. The compiler-owned

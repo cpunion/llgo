@@ -427,6 +427,13 @@ func projectCoroAtomicLLVMFunction(
 				if isCoroAtomicFixedIntegerIntrinsic(instruction) {
 					continue
 				}
+				if cost, bounded := coroAtomicFixedVectorReductionCost(instruction); bounded {
+					if math.MaxUint64-projected.localCost < cost {
+						return projection, fmt.Errorf("ssa: atomic-cost LLVM work overflows at %q", function.Name())
+					}
+					projected.localCost += cost
+					continue
+				}
 				bounded, err := isCoroAtomicBoundedCompilerCall(instruction, boundedCompilerCallKind)
 				if err != nil {
 					return projection, fmt.Errorf("ssa: atomic-cost LLVM function %q: %w", function.Name(), err)
@@ -539,6 +546,37 @@ func isCoroAtomicFixedIntegerIntrinsic(call llvm.Value) bool {
 		return true
 	}
 	return false
+}
+
+// coroAtomicFixedVectorReductionCost covers the integer add reduction which
+// SLP may form from a finite scalar sum. Charge N extracts and N-1 scalar adds
+// in addition to the call instruction; this remains bounded without assuming
+// target SIMD support. Unlike multiplication or wide integers, these ordinary
+// <=64-bit adds cannot introduce an unproven compiler-rt arithmetic call.
+// Scalable vectors have no static lane bound and deliberately fail this proof.
+func coroAtomicFixedVectorReductionCost(call llvm.Value) (uint64, bool) {
+	const intrinsic = "llvm.vector.reduce.add"
+	callee := call.CalledValue()
+	if callee.IsNil() || callee.IsAFunction().IsNil() || callee.IntrinsicID() != llvm.LookupIntrinsicID(intrinsic) {
+		return 0, false
+	}
+	functionType := call.CalledFunctionType()
+	if functionType.IsNil() || functionType.TypeKind() != llvm.FunctionTypeKind || functionType.IsFunctionVarArg() {
+		return 0, false
+	}
+	parameters := functionType.ParamTypes()
+	result := functionType.ReturnType()
+	if len(parameters) != 1 || parameters[0].TypeKind() != llvm.VectorTypeKind ||
+		result.TypeKind() != llvm.IntegerTypeKind || result.IntTypeWidth() == 0 || result.IntTypeWidth() > 64 ||
+		parameters[0].ElementType() != result || call.Type() != result ||
+		call.OperandsCount() != 2 || call.Operand(0).Type() != parameters[0] {
+		return 0, false
+	}
+	lanes := parameters[0].VectorSize()
+	if lanes <= 0 || callee.Name() != fmt.Sprintf("%s.v%di%d", intrinsic, lanes, result.IntTypeWidth()) {
+		return 0, false
+	}
+	return uint64(lanes)*2 - 1, true
 }
 
 func isCoroAtomicBoundedCompilerCall(call llvm.Value, metadataKind int) (bool, error) {

@@ -463,8 +463,11 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 			result.g,
 			result.action,
 		)
-		if !committed || completed.Kind == coro.ActionPanicComplete {
+		if !committed {
 			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer destroy commit failed")
+		}
+		if completed.Kind == coro.ActionPanicComplete {
+			coroReportTaskPanicV1(result.g)
 		}
 		return true
 	case coroRunIdleV1:

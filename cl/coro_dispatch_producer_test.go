@@ -379,8 +379,8 @@ func Generic[T any](fn func(T), value T) { fn(value) }
 			}
 			dynamicCalls++
 			signature := call.Common().Signature()
-			if typeParamCount(signature.TypeParams()) != 0 || typeParamCount(signature.RecvTypeParams()) != 1 {
-				t.Fatalf("instantiated bound call signature metadata = %v; want one stale receiver parameter only", signature)
+			if signature.Recv() != nil || typeParamCount(signature.TypeParams()) != 0 {
+				t.Fatalf("instantiated bound call is not one receiver-free concrete callable: %v", signature)
 			}
 			concrete, err := coroConcreteManagedCallableSignature(signature)
 			if err != nil || typeParamCount(concrete.RecvTypeParams()) != 0 || concrete.Params().Len() != 0 || concrete.Results().Len() != 1 ||
@@ -818,7 +818,7 @@ func TestCoroDynamicDispatchProducerCoroThunkDropsNilEnvironment(t *testing.T) {
 	targetBody.EndBuild()
 	targetBody.Dispose()
 	resultSlot := types.NewStruct([]*types.Var{
-		types.NewField(token.NoPos, nil, "r0", types.Typ[types.Int], false),
+		types.NewField(token.NoPos, nil, "R0", types.Typ[types.Int], false),
 	}, nil)
 	abi := coroPlainDispatchABI{signature: logical, resultSlotType: resultSlot}
 	ctx := &context{prog: prog, pkg: pkg}
@@ -911,7 +911,7 @@ func TestCoroDynamicDispatchProducerCapturedCoroThunkInsertsEnvironment(t *testi
 	targetBody.EndBuild()
 	targetBody.Dispose()
 	resultSlot := types.NewStruct([]*types.Var{
-		types.NewField(token.NoPos, nil, "r0", types.Typ[types.Int], false),
+		types.NewField(token.NoPos, nil, "R0", types.Typ[types.Int], false),
 	}, nil)
 	abi := coroPlainDispatchABI{signature: logical, resultSlotType: resultSlot}
 	ctx := &context{prog: prog, pkg: pkg}

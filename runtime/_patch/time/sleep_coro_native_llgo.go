@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && !baremetal && !coro_runtime_adapter_test && ((llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux)) || wasm || tinygo.wasm || llgo_coro_host)
+//go:build llgo && llgo_coro && !coro_runtime_adapter_test && ((llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux)) || wasm || tinygo.wasm || baremetal || llgo_coro_host)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -22,6 +22,9 @@ import "unsafe"
 
 //go:linkname llgoCoroTimerSleep llgo.coroTimerSleep
 func llgoCoroTimerSleep(delay int64)
+
+//go:linkname llgoSynctestSleep runtime.llgoSynctestSleep
+func llgoSynctestSleep(delay int64) bool
 
 // These bridges deliberately expose only unsafe.Pointer across the time/runtime
 // package boundary. The bodyful wrappers below retain the exact standard-library
@@ -57,6 +60,9 @@ func resetTimer(timer *Timer, when, period int64) bool {
 // the call to one stackless park/resume transaction in the current frame.
 func Sleep(d Duration) {
 	if d <= 0 {
+		return
+	}
+	if llgoSynctestSleep(int64(d)) {
 		return
 	}
 	llgoCoroTimerSleep(int64(d))

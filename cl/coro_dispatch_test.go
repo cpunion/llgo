@@ -133,8 +133,8 @@ func TestCoroPlainDispatchValidationIgnoresDebugRefFunctionOperands(t *testing.T
 				}
 				return certificate.ID, nil
 			},
-			ClassifyStaticCodeAddressCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
-				return universe.CoroStaticCodeAddressCallArgument(call, argument)
+			ClassifyStaticFunctionReferenceCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+				return universe.CoroStaticFunctionReferenceCallArgument(call, argument)
 			},
 		},
 	)

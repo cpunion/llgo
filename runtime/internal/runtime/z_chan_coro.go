@@ -1397,6 +1397,13 @@ func CoroChanSelectTry(g unsafe.Pointer, ops ...ChanOp) (isel int, recvOK, tryOK
 	if len(ops) == 0 {
 		return
 	}
+	if coro.ExecutionDomainEnabled() {
+		// All cases are checked before selecting a ready one: a foreign
+		// bubble channel is illegal even when another case can proceed.
+		for i := range ops {
+			coroSynctestChanDurable(ops[i].C, task, "select on synctest channel from outside bubble")
+		}
+	}
 	start := selectStart(len(ops))
 	for offset := 0; offset < len(ops); offset++ {
 		index := (start + offset) % len(ops)
@@ -1514,6 +1521,19 @@ func prepareCoroChanSelectV1(
 		coroRuntimeAbort("invalid coroutine channel select park ABI")
 		return
 	}
+	task := (*coro.G)(g)
+	if coro.ExecutionDomainEnabled() {
+		durable := true
+		for i := range ops {
+			if !coroSynctestChanDurable(ops[i].C, task, "select on synctest channel from outside bubble") {
+				durable = false
+			}
+		}
+		if durable && !coro.PrepareExecutionDomainDurableWait(task) {
+			coroRuntimeAbort("cannot prepare durable channel select")
+			return
+		}
+	}
 	physical := uint32(0)
 	for index := range ops {
 		op := &ops[index]
@@ -1534,7 +1554,6 @@ func prepareCoroChanSelectV1(
 		count:      uintptr(len(ops)),
 		magic:      coroChanSelectMagicV1,
 	}
-	task := (*coro.G)(g)
 	frameHeader := (*coro.HeaderV1)(header)
 	if physical == 0 {
 		ticket, ok := coro.PrepareEmptyChannelPark(task, handle, frameHeader, &state.wait, fastrand())
@@ -1758,6 +1777,15 @@ func prepareCoroChanParkV1(
 	state.waiter = chanWaiter{
 		ch: ch, elem: elem, size: size, send: send, direct: &state.Completion,
 	}
+	foreignMessage := "receive on synctest channel from outside bubble"
+	if send {
+		foreignMessage = "send on synctest channel from outside bubble"
+	}
+	if coro.ExecutionDomainEnabled() && coroSynctestChanDurable(ch, task, foreignMessage) &&
+		!coro.PrepareExecutionDomainDurableWait(task) {
+		coroRuntimeAbort("cannot prepare synctest channel wait")
+		return
+	}
 	driver, route := coro.PrepareCurrentDirectChannelPark(
 		task,
 		handle,
@@ -1842,6 +1870,14 @@ func prepareCoroChanParkStateV2(
 	if state == nil || state.magic != 0 || state.Ticket.Valid() {
 		return nil, 0
 	}
+	foreignMessage := "receive on synctest channel from outside bubble"
+	if send {
+		foreignMessage = "send on synctest channel from outside bubble"
+	}
+	if coro.ExecutionDomainEnabled() && coroSynctestChanDurable(ch, task, foreignMessage) &&
+		!coro.PrepareExecutionDomainDurableWait(task) {
+		return nil, 0
+	}
 	frameHeader.SuspendReason = uint16(coro.SuspendPark)
 	frameHeader.Lifecycle = uint16(coro.FrameSuspended)
 	frameHeader.Line = line
@@ -1883,6 +1919,9 @@ func __llgo_coro_chan_send_buffer_try_v1(channel, elem unsafe.Pointer, eltSize u
 		return coroChanResumeInvalid
 	}
 	ch := (*Chan)(channel)
+	if coro.ExecutionDomainEnabled() {
+		coroCheckSynctestChan(ch, nil, "send on synctest channel from outside bubble")
+	}
 	size := int(eltSize)
 	if ch.dataqsiz == 0 || size != ch.elemsize {
 		return coroChanResumeInvalid
@@ -1920,6 +1959,9 @@ func __llgo_coro_chan_recv_buffer_try_v1(channel, elem unsafe.Pointer, eltSize u
 		return coroChanResumeInvalid
 	}
 	ch := (*Chan)(channel)
+	if coro.ExecutionDomainEnabled() {
+		coroCheckSynctestChan(ch, nil, "receive on synctest channel from outside bubble")
+	}
 	size := int(eltSize)
 	if ch.dataqsiz == 0 || size != ch.elemsize {
 		return coroChanResumeInvalid

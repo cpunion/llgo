@@ -8,9 +8,16 @@ import (
 )
 
 // LLGoPackage instructs the LLGo linker to wrap C standard library memory allocation
-// functions (malloc, realloc, calloc) so they use the tinygogc allocator instead.
+// functions (malloc, free, realloc, calloc) so they use the tinygogc allocator instead.
 // This ensures all memory allocations go through the GC, including C library calls.
-const LLGoPackage = "link: --wrap=malloc --wrap=realloc --wrap=calloc"
+const LLGoPackage = "link: --wrap=malloc --wrap=free --wrap=realloc --wrap=calloc"
+
+// C may release an allocation while Go still has an alias. As on WebAssembly,
+// reclamation remains the conservative collector's responsibility; a pointer
+// allocated by tinygogc must never reach picolibc's unrelated malloc arena.
+//
+//export __wrap_free
+func __wrap_free(unsafe.Pointer) {}
 
 //export __wrap_malloc
 func __wrap_malloc(size uintptr) unsafe.Pointer {

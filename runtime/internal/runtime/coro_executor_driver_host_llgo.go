@@ -26,11 +26,11 @@ func CoroMonotonicNano() (int64, bool) {
 	return coroHostClockV1State.Snapshot()
 }
 
-// CoroWallTime exposes the most recent embedding-owned Unix wall-clock sample.
-// Its availability is independent from the mandatory monotonic scheduler
-// clock so targets without an RTC can still run timers deterministically.
+// CoroWallTime prefers the embedding-owned Unix wall-clock sample. Without an
+// RTC, the monotonic clock supplies elapsed time from the Unix epoch, including
+// Go time.Now's initial monotonic-zero case.
 func CoroWallTime() (sec int64, nsec int32, ok bool) {
-	return coroHostWallV1State.Snapshot()
+	return coroHostWallV1State.SnapshotOrMonotonic(&coroHostClockV1State)
 }
 
 // The host profile deliberately keeps the inline fixed-capacity pages. This is
@@ -66,6 +66,9 @@ func coroProgramNextRunStepV1(
 }
 
 func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool, deadline int64, hasDeadline, ok bool) {
+	if coroObserveGCV1() {
+		return false, 0, false, true
+	}
 	now, ok := coroHostClockV1State.Snapshot()
 	if !ok {
 		return false, 0, false, false

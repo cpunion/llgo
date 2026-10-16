@@ -19,6 +19,7 @@ package cl
 import (
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -44,6 +45,7 @@ type CoroForeignExecutorLeafProof struct {
 	LLVMDataLayout   string
 	CallClosure      []string
 	ClosureSHA256    string
+	MayFault         bool
 }
 
 func coroLLVMTargetArchitecture(triple string) string {
@@ -174,6 +176,7 @@ func inferredCoroExecutorLeafContract(
 	frozen := base
 	frozen.Contract = contract
 	frozen.ContractDigest = digest
+	frozen.NativeDefaultFaultBoundary = proof.MayFault
 	frozen.ID = emissionDigest(framedEmissionKey(
 		coroInferredExecutorLeafCertificateDomain,
 		base.CanonicalFunctionIdentity,
@@ -188,6 +191,7 @@ func inferredCoroExecutorLeafContract(
 		proof.LLVMTargetTriple,
 		proof.LLVMDataLayout,
 		proof.ClosureSHA256,
+		strconv.FormatBool(proof.MayFault),
 	))
 	if err := frozen.Validate(); err != nil {
 		return CoroCallableContractCertificate{}, fmt.Errorf(

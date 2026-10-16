@@ -14,7 +14,7 @@ func init() {
 	// Coroutine entry performs this before runtime initialization. Keep legacy
 	// and embedded entry paths idempotent and fail closed.
 	if !coroalloc.Bootstrap() {
-		c.Exit(2)
+		c.Trap()
 	}
 }
 

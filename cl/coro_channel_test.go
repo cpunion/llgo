@@ -179,11 +179,19 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 				}
 			}
 			for _, name := range []string{"SendWithCleanup", "SelectWithCleanup"} {
-				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
+				function := requireCoroPhysicalFunction(t, module, "foo."+name)
+				body := function.String()
 				if strings.Count(body, "call void @"+coroFaultPayloadHookV1+"(i32 3") != 1 ||
 					!strings.Contains(body, "call void @"+coroPanicPrepareHookV1) ||
 					strings.Contains(body, "call void @"+coroFaultPrepareHookV1) {
 					t.Fatalf("%s did not materialize send-closed into the recoverable cleanup overlay:\n%s", name, body)
+				}
+				for _, block := range function.BasicBlocks() {
+					for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+						if instruction.InstructionOpcode() == llvm.Call && instruction.CalledValue().Name() == coroFaultPayloadHookV1 {
+							assertCoroResumeHeaderActivation(t, name, block)
+						}
+					}
 				}
 			}
 			for _, forbidden := range []string{"runtime.ChanSend\"", "runtime.ChanRecv\"", "runtime.Select\"", "Future", "Promise", "Task"} {

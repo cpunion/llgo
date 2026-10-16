@@ -29,7 +29,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xgo-dev/llgo/internal/buildenv"
 	"github.com/xgo-dev/llgo/internal/lto"
 	llpackages "github.com/xgo-dev/llgo/internal/packages"
 	llssa "github.com/xgo-dev/llgo/ssa"
@@ -91,6 +90,54 @@ func TestPackageLinkSnapshotSurvivesModuleDisposal(t *testing.T) {
 	}
 }
 
+func TestStagedLinkSnapshotPreservesAlternateDependencyClosure(t *testing.T) {
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+
+	base := &llpackages.Package{ID: "base", PkgPath: "example.com/base", ExportFile: "/base.a"}
+	altOnly := &llpackages.Package{ID: "alt-only", PkgPath: "example.com/alt-only", ExportFile: "/alt-only.a"}
+	root := &llpackages.Package{
+		ID:         "root",
+		PkgPath:    "example.com/root",
+		ExportFile: "/root.a",
+		Imports:    map[string]*llpackages.Package{base.PkgPath: base},
+	}
+	alt := &llpackages.Package{
+		ID:      "alt-root",
+		PkgPath: root.PkgPath,
+		Imports: map[string]*llpackages.Package{altOnly.PkgPath: altOnly},
+	}
+	rootPkg := &aPackage{
+		Package: root,
+		AltPkg:  &llpackages.Cached{Package: alt},
+		LPkg:    prog.NewPackage(root.PkgPath, root.PkgPath),
+	}
+	basePkg := &aPackage{Package: base}
+	altOnlyPkg := &aPackage{Package: altOnly}
+	ctx := &context{
+		pkgs: map[*llpackages.Package]Package{
+			root: rootPkg, base: basePkg, altOnly: altOnlyPkg,
+		},
+		pkgByID: map[string]Package{
+			root.ID: rootPkg, base.ID: basePkg, altOnly.ID: altOnlyPkg,
+		},
+	}
+
+	freezePackageLinkSnapshot(rootPkg)
+	releaseBuiltPackageSource(rootPkg)
+	if rootPkg.AltPkg != nil {
+		t.Fatal("alternate frontend graph survived staged release")
+	}
+	linked := linkedPackageClosure(ctx, root, []*aPackage{rootPkg, basePkg, altOnlyPkg})
+	got := make([]string, len(linked))
+	for index, pkg := range linked {
+		got[index] = pkg.ID
+	}
+	if want := []string{"alt-only", "base", "root"}; !slices.Equal(got, want) {
+		t.Fatalf("staged linked package closure = %v, want %v", got, want)
+	}
+}
+
 func TestStagedNativeBackendGateIsExact(t *testing.T) {
 	if runtime.GOARCH == "wasm" {
 		t.Skip("host-native staged backend is unavailable on wasm")
@@ -121,9 +168,7 @@ func TestStagedNativeBackendGateIsExact(t *testing.T) {
 	checkDisabled("ModeGen", func(ctx *context) { ctx.mode = ModeGen })
 	checkDisabled("C shared", func(ctx *context) { ctx.buildConf.BuildMode = BuildModeCShared })
 	checkDisabled("LTO", func(ctx *context) { ctx.buildConf.LTO = lto.Full })
-	if buildenv.Dev {
-		checkDisabled("deadcode drop", func(ctx *context) { ctx.buildConf.DeadcodeDrop = true })
-	}
+	checkDisabled("explicit non-LTO deadcode drop", func(ctx *context) { ctx.buildConf.DeadcodeDrop = true })
 	checkDisabled("GenLL", func(ctx *context) { ctx.buildConf.GenLL = true })
 	checkDisabled("named target", func(ctx *context) { ctx.buildConf.Target = "fixture" })
 	checkDisabled("cross GOOS", func(ctx *context) { ctx.buildConf.Goos = runtime.GOOS + "-other" })

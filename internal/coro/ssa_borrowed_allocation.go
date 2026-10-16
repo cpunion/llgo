@@ -29,7 +29,10 @@ import (
 // dynamic calls, goroutines, defers, returns, stores outside the same tainted
 // object, and body-less declarations fail closed.
 //
-// This is a storage-lifetime proof only. The physical planner still decides
+// A repeatable allocation additionally needs per-execution identity: an address
+// carried around a loop or retained in other local memory cannot share one
+// reusable slot merely because it dies before the owning function returns.
+// The physical planner still decides
 // whether the object belongs in an LLVM coroutine frame or on an outcome-plain
 // native stack, and separately enforces the target's stack-size/root profile.
 type SSABorrowedAllocationProof struct {
@@ -98,7 +101,7 @@ func ProveSSABorrowedAllocationWithConfig(
 	config SSABorrowedAllocationConfig,
 ) (SSABorrowedAllocationProof, bool) {
 	proof := SSABorrowedAllocationProof{Allocation: allocation}
-	if allocation == nil || !allocation.Heap || allocation.Parent() == nil ||
+	if allocation == nil || !allocation.Heap || allocation.Parent() == nil || allocation.Block() == nil ||
 		allocation.Referrers() == nil {
 		return proof, false
 	}
@@ -182,6 +185,8 @@ func (analyzer *ssaBorrowedAllocationAnalyzer) proveAddressValue(
 		return false
 	}
 	analyzer.functions[function] = struct{}{}
+	allocation, fresh := root.(*ssa.Alloc)
+	repeated := fresh && ssaBorrowAllocationMayRepeat(allocation)
 
 	// Values in tainted carry the root address itself or an aggregate which may
 	// contain its exact Go pointer type. A fresh allocation's unrelated pointer
@@ -219,6 +224,14 @@ func (analyzer *ssaBorrowedAllocationAnalyzer) proveAddressValue(
 			if store, ok := reference.(*ssa.Store); ok && store.Val == value &&
 				ssaBorrowTypeMayCarryRoot(value.Type(), root.Type()) {
 				if scratch, ok := ssaBorrowLocalScratchAllocation(function, store.Addr); ok && !tainted[scratch] {
+					// Other local storage can retain several executions' addresses
+					// without escaping this function (for example pointers[i] = &x).
+					// Its memory lifetime is not a per-iteration lifetime proof.
+					// Ordinary synchronous callee borrows remain eligible: their
+					// scratch belongs to that separate call's bounded invocation.
+					if repeated {
+						return false
+					}
 					tainted[scratch] = true
 					interior[scratch] = true
 					queue = append(queue, scratch)
@@ -227,6 +240,12 @@ func (analyzer *ssaBorrowedAllocationAnalyzer) proveAddressValue(
 			derived, ok := ssaBorrowDerivedValue(reference, value, root.Type())
 			if !ok || derived == nil || tainted[derived] {
 				continue
+			}
+			if phi, merged := derived.(*ssa.Phi); repeated && merged && !ssaInstructionDominates(allocation, phi) {
+				// A loop-carried address denotes an earlier fresh object. A merge
+				// dominated by this execution's Alloc is still a same-iteration
+				// observation and does not by itself prevent slot reuse.
+				return false
 			}
 			tainted[derived] = true
 			if interior[value] && ssaBorrowDerivedInteriorAddress(reference, value) {
@@ -302,6 +321,35 @@ func (analyzer *ssaBorrowedAllocationAnalyzer) proveAddressValue(
 		}
 	}
 	return true
+}
+
+// ssaBorrowAllocationMayRepeat asks whether control can return to this exact
+// allocation's block, including conditional and irreducible cycles. Counting
+// backedges or merely finding some loop in the function would not establish
+// this allocation's dynamic lifetime.
+func ssaBorrowAllocationMayRepeat(allocation *ssa.Alloc) bool {
+	if allocation == nil || allocation.Block() == nil {
+		return false
+	}
+	start := allocation.Block()
+	if len(start.Preds) == 0 || len(start.Succs) == 0 {
+		return false
+	}
+	pending := append([]*ssa.BasicBlock(nil), start.Succs...)
+	seen := make(map[*ssa.BasicBlock]bool)
+	for len(pending) != 0 {
+		block := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if block == start {
+			return true
+		}
+		if block == nil || seen[block] {
+			continue
+		}
+		seen[block] = true
+		pending = append(pending, block.Succs...)
+	}
+	return false
 }
 
 // ssaBorrowLocalScratchAllocation recognizes only an address rooted in one

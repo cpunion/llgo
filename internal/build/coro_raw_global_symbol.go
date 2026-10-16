@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strings"
 
@@ -160,6 +161,7 @@ func (i *coroRawGlobalSymbolInventory) addForeignExecutorLeafProof(proof cl.Coro
 			previous.LLVMTargetTriple == proof.LLVMTargetTriple &&
 			previous.LLVMDataLayout == proof.LLVMDataLayout &&
 			previous.ClosureSHA256 == proof.ClosureSHA256 &&
+			previous.MayFault == proof.MayFault &&
 			slices.Equal(previous.CallClosure, proof.CallClosure) {
 			return
 		}
@@ -447,6 +449,9 @@ func inventoryCoroRawLLGoFiles(
 		len(pkg.GoFiles) == 0 || strings.TrimSpace(ctx.crossCompile.CC) == "" {
 		return fmt.Errorf("target compiler or package source root is unavailable")
 	}
+	if supported, reason := coroRawLLGoFilesInventoryTargetSupported(ctx); !supported {
+		return fmt.Errorf("target compiler cannot prove raw object symbols: %s", reason)
+	}
 	dir := filepath.Dir(pkg.GoFiles[0])
 	args := make([]string, 0, 16)
 	if strings.HasPrefix(files, "$") {
@@ -515,6 +520,62 @@ func inventoryCoroRawLLGoFiles(
 	return nil
 }
 
+// coroRawLLGoFilesInventoryTargetSupported prevents a speculative object
+// inventory from compiling a foreign native target against the host headers.
+// That result would not be proof: at best it fails noisily, and at worst it
+// records symbols from an ABI-incompatible object. Named targets and wasm own
+// complete compiler profiles; direct foreign GOOS/GOARCH targets must provide
+// an explicit sysroot before this optional optimization is allowed. Returning
+// false leaves the package profile incomplete, so private-global lowering
+// remains fail closed without making ordinary effect analysis depend on a
+// cross libc SDK.
+func coroRawLLGoFilesInventoryTargetSupported(ctx *context) (bool, string) {
+	if ctx == nil || ctx.buildConf == nil {
+		return false, "missing target build configuration"
+	}
+	conf := ctx.buildConf
+	if conf.Target != "" || conf.Goarch == "wasm" {
+		return true, ""
+	}
+	goos, goarch := conf.Goos, conf.Goarch
+	if goos == "" {
+		goos = goruntime.GOOS
+	}
+	if goarch == "" {
+		goarch = goruntime.GOARCH
+	}
+	if goos == goruntime.GOOS && goarch == goruntime.GOARCH {
+		return true, ""
+	}
+	for _, flags := range [][]string{
+		ctx.crossCompile.CCArgs,
+		ctx.crossCompile.CCFLAGS,
+		ctx.crossCompile.CFLAGS,
+	} {
+		if clangFlagsProvideSysroot(flags) {
+			return true, ""
+		}
+	}
+	return false, fmt.Sprintf(
+		"direct cross target %s/%s has no explicit Clang sysroot",
+		goos, goarch,
+	)
+}
+
+func clangFlagsProvideSysroot(flags []string) bool {
+	for _, flag := range flags {
+		switch {
+		case flag == "--sysroot", flag == "-isysroot", flag == "-imsvc":
+			return true
+		case strings.HasPrefix(flag, "--sysroot="),
+			strings.HasPrefix(flag, "-isysroot="),
+			strings.HasPrefix(flag, "-imsvc="):
+			return true
+		}
+	}
+	return false
+}
+
 // inferCoroRawLLGoFileExecutorLeaves is an optional, fail-closed producer
 // analysis. Raw-symbol inventory remains authoritative even when LLVM IR
 // emission or parsing is unavailable; in that case no execution capability is
@@ -581,6 +642,7 @@ func inferCoroRawLLGoFileExecutorLeaves(
 			LLVMDataLayout:   proof.DataLayout,
 			CallClosure:      append([]string(nil), proof.CallClosure...),
 			ClosureSHA256:    proof.ClosureSHA256,
+			MayFault:         proof.MayFault,
 		})
 	}
 }

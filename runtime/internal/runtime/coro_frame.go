@@ -140,11 +140,11 @@ func __llgo_coro_frame_free_v1(g, storage unsafe.Pointer, size, align uintptr, d
 	if !ok {
 		coroRuntimeAbort("invalid coroutine frame destruction")
 	}
-	// A managed child panic remains recoverable by its parent, so every logical
-	// G may retain that pending frame. Only the static command G may retain a
-	// terminal frame chain because its native entry owns the no-return report.
+	// A managed child panic remains recoverable by its parent. An unhandled
+	// task panic also retains its terminal chain: every native executor owner
+	// uses the same no-return reporter, not only the static command G.
 	if coro.RetainPendingPanicTraceFrameCompiler(task, metadata, raw, total) ||
-		task == &coroProgramGV1State && coro.RetainPanicTraceFrameCompiler(task, metadata, raw, total) {
+		coro.RetainPanicTraceFrameCompiler(task, metadata, raw, total) {
 		return
 	}
 	if !coroalloc.FreeFrame(raw, total) {

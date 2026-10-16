@@ -19,11 +19,14 @@ package build
 import (
 	"encoding/hex"
 	"fmt"
+	"go/constant"
+	"go/types"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -144,6 +147,12 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 	m.common.ObjectFormat = string(c.crossCompile.Toolchain.ObjectFormat)
 	m.common.DriverFlavor = string(c.crossCompile.Toolchain.Driver)
 	m.common.LinkerFlavor = string(c.crossCompile.Toolchain.Linker)
+	m.common.TargetTriple = c.crossCompile.Toolchain.TargetTriple
+	m.common.CRTFlavor = string(c.crossCompile.Toolchain.CRT)
+	m.common.CXXRuntime = string(c.crossCompile.Toolchain.CXXRuntime)
+	m.common.SDKVersion = c.crossCompile.Toolchain.SDKVersion
+	m.common.CRTVersion = c.crossCompile.Toolchain.CRTVersion
+	m.common.ToolsetVersion = c.crossCompile.Toolchain.ToolsetVersion
 	m.common.GoGlobalDCE = c.buildConf.goGlobalDCEEnabled()
 	if c.coroPlanDigest != "" {
 		metadata := c.coroPlanMetadata
@@ -175,6 +184,17 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 	if c.crossCompile.CC != "" {
 		m.common.CC = c.crossCompile.CC
 	}
+	if len(c.crossCompile.CCArgs) > 0 {
+		m.common.CCArgs = slices.Clone(c.crossCompile.CCArgs)
+	}
+	m.common.CCIdentity = c.crossCompile.CCIdentity
+	if c.crossCompile.CXX != "" {
+		m.common.CXX = c.crossCompile.CXX
+	}
+	if len(c.crossCompile.CXXArgs) > 0 {
+		m.common.CXXArgs = slices.Clone(c.crossCompile.CXXArgs)
+	}
+	m.common.CXXIdentity = c.crossCompile.CXXIdentity
 	if len(c.crossCompile.CCFLAGS) > 0 {
 		m.common.CCFlags = append([]string(nil), c.crossCompile.CCFLAGS...)
 	}
@@ -187,6 +207,10 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 	if c.crossCompile.Linker != "" {
 		m.common.Linker = c.crossCompile.Linker
 	}
+	if len(c.crossCompile.LinkerArgs) > 0 {
+		m.common.LinkerArgs = slices.Clone(c.crossCompile.LinkerArgs)
+	}
+	m.common.LinkerIdentity = c.crossCompile.LinkerIdentity
 
 	// Extra files from target configuration
 	if len(c.crossCompile.ExtraFiles) > 0 {
@@ -234,6 +258,17 @@ func (c *context) collectPackageInputs(m *manifestBuilder, pkg *aPackage) error 
 		}
 		m.pkg.OtherFiles = otherList
 	}
+	// LLGoFiles may select native sources outside the package directory, where
+	// go list does not include them in OtherFiles. Both owners contribute object
+	// members to this archive, including a replacement package's source island.
+	if err := collectLLGoFileInputs(m, p); err != nil {
+		return err
+	}
+	if pkg.AltPkg != nil {
+		if err := collectLLGoFileInputs(m, pkg.AltPkg.Package); err != nil {
+			return err
+		}
+	}
 
 	// Rewrite vars
 	if len(pkg.rewriteVars) > 0 {
@@ -247,6 +282,37 @@ func (c *context) collectPackageInputs(m *manifestBuilder, pkg *aPackage) error 
 	// Add metadata fields if available (for cache saving)
 	// (LINK_ARGS/NEED_RT/NEED_PY_INIT are appended later in saveToCache)
 
+	return nil
+}
+
+func collectLLGoFileInputs(m *manifestBuilder, pkg *packages.Package) error {
+	if pkg == nil || pkg.Types == nil {
+		return nil
+	}
+	object, ok := pkg.Types.Scope().Lookup("LLGoFiles").(*types.Const)
+	if !ok || object.Val().Kind() != constant.String {
+		return nil
+	}
+	if len(pkg.GoFiles) == 0 {
+		return fmt.Errorf("digest LLGoFiles for %s: missing package source directory", pkg.PkgPath)
+	}
+	files := constant.StringVal(object.Val())
+	if strings.HasPrefix(files, "$") {
+		pos := strings.IndexByte(files, ':')
+		if pos <= 0 {
+			return fmt.Errorf("digest LLGoFiles for %s: malformed compiler flags", pkg.PkgPath)
+		}
+		files = files[pos+1:]
+	}
+	dir := filepath.Dir(pkg.GoFiles[0])
+	for _, file := range strings.Split(files, ";") {
+		path := filepath.Join(dir, strings.TrimSpace(file))
+		digest, err := digestFile(path)
+		if err != nil {
+			return fmt.Errorf("digest LLGoFiles for %s (%s): %w", pkg.PkgPath, path, err)
+		}
+		m.pkg.LLGoFiles = m.pkg.LLGoFiles.Add(path, digest)
+	}
 	return nil
 }
 

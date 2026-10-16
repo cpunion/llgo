@@ -18,6 +18,7 @@ package cl
 
 import (
 	"fmt"
+	"go/types"
 	"slices"
 	"strconv"
 
@@ -315,14 +316,14 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						patchRedirect = true
 						frozenPatchRedirect = coroPatchInitRedirect{logicalName: logicalName, target: patchTarget}
 					}
-					var cgoWorkerCertificate CoroCgoWorkerCallCertificate
-					var cgoWorkerTarget *ssa.Function
-					cgoWorkerCertified := false
-					var cgoErrnoCertificate CoroCgoWorkerCallCertificate
+					var generatedCgoCertificate CoroGeneratedCgoCallCertificate
+					var generatedCgoTarget *ssa.Function
+					generatedCgoCertified := false
+					var cgoErrnoCertificate CoroGeneratedCgoCallCertificate
 					cgoErrnoCertified := false
 					if !frontendUnevaluated && !noInit && !patchRedirect && classifyErr == nil {
-						cgoWorkerCertificate, cgoWorkerTarget, cgoWorkerCertified, classifyErr =
-							u.freezeCoroCgoWorkerCallCertificate(ctx, call)
+						generatedCgoCertificate, generatedCgoTarget, generatedCgoCertified, classifyErr =
+							u.freezeCoroGeneratedCgoCallCertificate(ctx, call)
 					}
 					semantics, intrinsic, opcode := CoroIntrinsicCallUnsupported, false, 0
 					controlOperation := CoroControlNone
@@ -331,7 +332,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 					var hostOperation coroHostOperationCallShape
 					var workerCertificate CoroWorkerSyscallCertificate
 					workerCertified := false
-					if !frontendUnevaluated && !noInit && !patchRedirect && !cgoWorkerCertified && classifyErr == nil {
+					if !frontendUnevaluated && !noInit && !patchRedirect && !generatedCgoCertified && classifyErr == nil {
 						callee := call.Common().StaticCallee()
 						if callee != nil {
 							// ProgramIR inventories fallback bodies even when their
@@ -340,14 +341,14 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 							// emission universe. Preserve the source site, but only
 							// classify an intrinsic edge for a frozen target.
 							if resolved, frozen := u.Resolve(callee); frozen {
-								background, classified, backgroundErr := u.FunctionBackground(resolved)
-								if backgroundErr != nil {
-									classifyErr = fmt.Errorf("classify frozen Python operation: %w", backgroundErr)
-								} else if classified && background == llssa.InPython {
+								classification, present := ir.callableClassifications[resolved]
+								if !present {
+									classifyErr = fmt.Errorf("frozen callable %q has no frontend classification", resolved.Name())
+								} else if classification.classified && classification.background == llssa.InPython {
 									pythonOperation = true
 									pythonTarget = resolved
 								} else {
-									opcode, intrinsic, classifyErr = u.coroIntrinsicOpcode(resolved)
+									opcode, intrinsic = classification.opcode, classification.intrinsic
 									if intrinsic && isCoroPythonIntrinsicOpcode(opcode) {
 										pythonOperation = true
 										intrinsic = false
@@ -360,16 +361,11 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						if classifyErr == nil && pythonOperation {
 							if _, direct := call.(*ssa.Call); !direct {
 								classifyErr = fmt.Errorf("Python operation requires one exact direct call")
-							} else if !isCoroProgramManagedEntry(function) {
-								classifyErr = fmt.Errorf(
-									"Python operation in %q has no compiler-owned program-root owner realm",
-									function.Name(),
-								)
 							}
 						}
 						if classifyErr == nil && intrinsic && opcode == llgoCgoCgocall {
 							cgoErrnoCertificate, cgoErrnoCertified, classifyErr =
-								ctx.freezeCoroCgoErrnoWorkerCallCertificate(call)
+								ctx.freezeCoroGeneratedCgoErrnoCallCertificate(call)
 						}
 						if classifyErr == nil && intrinsic && opcode == llgoCoroHostOperation {
 							direct, ok := call.(*ssa.Call)
@@ -410,19 +406,25 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 					}
 					var managedStaticTarget *ssa.Function
 					var managedStaticCertificate coroLocalExportBindingCertificate
-					managedStaticTarget, managedStaticCertificate, managedStatic, managedStaticErr :=
-						coroLocalExportManagedCallTarget(
+					var managedStatic bool
+					var managedStaticErr error
+					// A frozen unevaluated occurrence has no invocation edge. In
+					// particular, loading a standard-library package may publish a
+					// matching C export without reviving its disabled runtime call.
+					if !frontendUnevaluated {
+						managedStaticTarget, managedStaticCertificate, managedStatic, managedStaticErr = coroLocalExportManagedCallTarget(
 							u.localExportBindings,
 							u.required,
 							u.canonicalAlias,
 							call,
 						)
+					}
 					if classifyErr == nil && managedStaticErr != nil {
 						classifyErr = managedStaticErr
 					}
 					if managedStatic && classifyErr == nil &&
 						(frontendUnevaluated || noInit || patchRedirect ||
-							cgoWorkerCertified || pythonOperation || intrinsic) {
+							generatedCgoCertified || pythonOperation || intrinsic) {
 						classifyErr = fmt.Errorf(
 							"local-export managed call redirect overlaps an elided, patched, worker, or intrinsic recipe",
 						)
@@ -478,12 +480,12 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						}
 					}
 					if rawCertificate := u.rawCriticalCalls[call]; rawCertificate != "" {
-						if frontendUnevaluated || noInit || patchRedirect || cgoWorkerCertified ||
+						if frontendUnevaluated || noInit || patchRedirect || generatedCgoCertified ||
 							pythonOperation || intrinsic || managedStatic {
 							classifyErr = fmt.Errorf(
-								"raw-critical call %q overlaps an elided, redirected, generated-worker, or intrinsic recipe (frontend-unevaluated=%t no-init=%t patch-redirect=%t cgo-worker=%t python=%t intrinsic=%t managed-static=%t)",
+								"raw-critical call %q overlaps an elided, redirected, generated-cgo, or intrinsic recipe (frontend-unevaluated=%t no-init=%t patch-redirect=%t generated-cgo=%t python=%t intrinsic=%t managed-static=%t)",
 								call.String(), frontendUnevaluated, noInit, patchRedirect,
-								cgoWorkerCertified, pythonOperation, intrinsic, managedStatic,
+								generatedCgoCertified, pythonOperation, intrinsic, managedStatic,
 							)
 						} else {
 							plan.RawPlain = true
@@ -516,10 +518,10 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						plan.Elision = CoroCallElidedNoInit
 					case patchRedirect:
 						plan.Elision = CoroCallElidedPatchRedirect
-					case cgoWorkerCertified:
-						plan.Elision = CoroCallElidedCgoWorker
-						plan.ElisionCertificate = cgoWorkerCertificate.ID
-						plan.CgoWorkerTarget = cgoWorkerTarget
+					case generatedCgoCertified:
+						plan.Elision = CoroCallElidedGeneratedCgo
+						plan.ElisionCertificate = generatedCgoCertificate.ID
+						plan.GeneratedCgoTarget = generatedCgoTarget
 					case pythonOperation:
 						plan.Elision = CoroCallElidedPython
 					case intrinsic && classifyErr == nil && semantics.ElidesManagedCall() && plan.StaticSpawnTarget == nil:
@@ -544,12 +546,18 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						hostOperation:      hostOperation,
 						workerCertificate:  workerCertificate,
 						workerCertified:    workerCertified,
-						cgoWorker:          cgoWorkerCertificate,
+						generatedCgo:       generatedCgoCertificate,
 						patchRedirect:      frozenPatchRedirect,
 						patchAttempted:     redirected || redirectErr != nil,
 					}
+					if common := call.Common(); common.IsInvoke() && common.Method != nil {
+						signature, _ := ctx.patchType(common.Signature()).(*types.Signature)
+						frozenCall.interfaceMethodKey = coroManagedInterfaceMethodKey(
+							common.Method, signature, u.emissionTypeKeys.strictABI,
+						)
+					}
 					if cgoErrnoCertified {
-						frozenCall.cgoWorker = cgoErrnoCertificate
+						frozenCall.generatedCgo = cgoErrnoCertificate
 					}
 					if workerCertified {
 						frozenCall.workerOwners = cloneCoroWorkerOwnerSet(u.workerSyscallOwners[call])
@@ -615,10 +623,11 @@ func cloneCoroWorkerIncomingEdges(source []coroWorkerSyscallIncomingEdge) []coro
 
 func sameCoroFrozenCallSitePlan(first, second coroFrozenCallSitePlan) bool {
 	if first.plan != second.plan || first.failure != second.failure || first.opcode != second.opcode ||
+		first.interfaceMethodKey != second.interfaceMethodKey ||
 		first.intrinsicPlacement != second.intrinsicPlacement ||
 		first.hostOperation != second.hostOperation ||
 		first.workerCertificate != second.workerCertificate || first.workerCertified != second.workerCertified ||
-		first.cgoWorker != second.cgoWorker ||
+		first.generatedCgo != second.generatedCgo ||
 		first.patchRedirect != second.patchRedirect || first.patchAttempted != second.patchAttempted ||
 		len(first.workerOwners) != len(second.workerOwners) || len(first.workerIncoming) != len(second.workerIncoming) {
 		return false

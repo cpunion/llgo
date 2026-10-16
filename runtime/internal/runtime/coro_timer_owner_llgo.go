@@ -101,11 +101,15 @@ func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay 
 	_, owner, timers, wantExecutor, wantRoute, ok := coro.CurrentExecutorTimerSource(task)
 	now, clockOK := CoroMonotonicNano()
 	deadline, deadlineOK := corotimer.DeadlineAfter(now, delay)
+	if !ok || !clockOK || !deadlineOK {
+		coroTimerAbortV2("cannot resolve coroutine Timer V2 owner or deadline")
+		return
+	}
 	reservation, capacityOK := ensureCoroTimerSourceCapacityV1(
 		owner, timers, coroRuntimeTimerCapacityV1,
 	)
-	if !ok || !clockOK || !deadlineOK || !capacityOK {
-		coroTimerAbortV2("cannot resolve coroutine Timer V2 owner or deadline")
+	if !capacityOK {
+		coroTimerAbortV2("coroutine Timer V2 source capacity exhausted")
 		return
 	}
 	_, timer, operation, prepared := coro.PrepareSingleTimerParkReserved(

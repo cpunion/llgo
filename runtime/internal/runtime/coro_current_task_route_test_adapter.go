@@ -18,12 +18,18 @@
 
 package runtime
 
-import "github.com/xgo-dev/llgo/runtime/internal/coro"
+import (
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"unsafe"
+)
 
 var (
 	coroCurrentTaskTestV1      *coro.G
 	coroCurrentTaskRouteTestV1 coro.RouteID
 )
+
+// Named source-island tests do not install optional execution domains.
+func coroCancelDomainParkV1(state unsafe.Pointer) bool { return false }
 
 func coroCurrentTaskV1() (*coro.G, *coro.ExecutorDriver, coro.RouteID) {
 	if coroCurrentTaskTestV1 == nil {

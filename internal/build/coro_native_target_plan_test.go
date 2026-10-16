@@ -241,6 +241,31 @@ func TestEffectiveBuildTagsSelectsUniqueNativeFleet(t *testing.T) {
 	}
 }
 
+func TestEffectiveBuildTagsHostExcludesNativeClockAndRejectsForgedMix(t *testing.T) {
+	conf := &Config{Goos: "linux", Goarch: "arm64", Tags: "llgo_coro_host"}
+	tags, err := effectiveBuildTags(conf, crosscompile.Export{})
+	if err != nil || !hostCoroPullRuntimeABI(conf) || strings.Contains(tags, coroNativePipeBuildTag) || strings.Contains(tags, coroNativeTimerBuildTag) {
+		t.Fatalf("host-pull selected conflicting runtime clocks: tags=%q error=%v", tags, err)
+	}
+	for _, tag := range []string{coroNativePipeBuildTag, coroNativeTimerBuildTag} {
+		for source := 0; source < 3; source++ {
+			mixed := *conf
+			export := crosscompile.Export{}
+			switch source {
+			case 0:
+				mixed.Tags += "," + tag
+			case 1:
+				mixed.GoBuildFlags = []string{"-tags=" + tag}
+			case 2:
+				export.BuildTags = []string{tag}
+			}
+			if _, err := effectiveBuildTags(&mixed, export); err == nil || !strings.Contains(err.Error(), "compiler-reserved capability") {
+				t.Fatalf("source %d accepted host plus native tag %s: %v", source, tag, err)
+			}
+		}
+	}
+}
+
 func TestEffectiveBuildTagsRejectsForgedNativeTimerCapability(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -867,7 +892,7 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			{path: runtimePath, name: "coroTargetBeginExecutorCloseV1"},
 			{path: runtimePath, name: coroKeyedParkSymbolV2},
 			{path: runtimePath, name: coroKeyedResumeSymbolV2},
-			{path: runtimePath, name: coroSemaphorePrepareOrAbortSymbolV2},
+			{path: runtimePath, name: coroSemaphorePrepareOrAbortSymbolV3},
 			{path: runtimePath, name: coroSemaphoreReleaseOrAbortSymbolV2},
 			{path: runtimePath, name: coroNotifyPrepareOrAbortSymbolV2},
 			{path: runtimePath, name: coroNotifyOneOrAbortSymbolV2},

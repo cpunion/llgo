@@ -71,6 +71,8 @@ const (
 	programCapabilityWorker ProgramCapabilities = 1 << iota
 	programCapabilityDynamicPanicOnFault
 	programCapabilityNativeDefaultFaultBoundary
+	programCapabilityExecutionDomain
+	programCapabilityGCObservation
 )
 
 // NewProgramCapabilities constructs the worker and dynamic-fault service
@@ -98,6 +100,33 @@ func NewProgramCapabilities(worker, dynamicPanicOnFault bool) ProgramCapabilitie
 // this landing without adding hooks to unrelated coroutines.
 func NativeDefaultFaultBoundaryProgramCapability() ProgramCapabilities {
 	return programCapabilityNativeDefaultFaultBoundary
+}
+
+// ExecutionDomainProgramCapability requests optional isolated execution-domain
+// accounting. Queries of domain membership alone do not request the service.
+func ExecutionDomainProgramCapability() ProgramCapabilities {
+	return programCapabilityExecutionDomain
+}
+
+func (capabilities ProgramCapabilities) ExecutionDomain() bool {
+	return capabilities&programCapabilityExecutionDomain != 0
+}
+
+// GCObservationProgramCapability requests post-collection owner observations.
+// Weak pointers alone do not require this service: collectors clear them
+// directly. Channel timers request it to cancel an unreachable pending wait.
+func GCObservationProgramCapability() ProgramCapabilities {
+	return programCapabilityGCObservation
+}
+
+func (capabilities ProgramCapabilities) GCObservation() bool {
+	return capabilities&programCapabilityGCObservation != 0
+}
+
+// ProgramPredicateMask is the set of services whose queries are frozen before
+// effect analysis. Other service demands are not source-level predicates.
+func ProgramPredicateMask() ProgramCapabilities {
+	return programCapabilityExecutionDomain | programCapabilityGCObservation
 }
 
 func (capabilities ProgramCapabilities) Worker() bool {
@@ -128,6 +157,8 @@ func (capabilities ProgramCapabilities) PanicOnFault() bool {
 func (capabilities ProgramCapabilities) Valid() bool {
 	const known = programCapabilityWorker |
 		programCapabilityDynamicPanicOnFault |
-		programCapabilityNativeDefaultFaultBoundary
+		programCapabilityNativeDefaultFaultBoundary |
+		programCapabilityExecutionDomain |
+		programCapabilityGCObservation
 	return capabilities&^known == 0
 }

@@ -40,6 +40,7 @@ import (
 func walkEmissionABITypeDemandEx(
 	root types.Type,
 	normalize func(types.Type) types.Type,
+	sourceType func(types.Type) types.Type,
 	physicalMethodSignature func(types.Type) types.Type,
 	implicitTypes func(types.Type) []types.Type,
 	visit func(types.Type) error,
@@ -89,6 +90,9 @@ func walkEmissionABITypeDemandEx(
 		return nil
 	}
 	visitMethodSignature = func(typ types.Type) error {
+		if sourceType != nil {
+			typ = sourceType(typ)
+		}
 		if physicalMethodSignature != nil {
 			typ = physicalMethodSignature(typ)
 		}
@@ -170,7 +174,6 @@ func walkEmissionABITypeDemandEx(
 			}
 		}
 
-		unaliased := types.Unalias(typ)
 		if implicitTypes != nil {
 			for _, implicit := range implicitTypes(typ) {
 				if err := visitABI(implicit); err != nil {
@@ -180,21 +183,34 @@ func walkEmissionABITypeDemandEx(
 		}
 
 		// abiUncommonMethods embeds a descriptor for every method signature.
-		// Only the cases below can have an uncommon method table.
-		switch underlying := unaliased.(type) {
+		// Method selection belongs to the source type, not the nominally
+		// distinct physical closure/aggregate used for descriptor layout.
+		methodType := typ
+		if sourceType != nil {
+			methodType = sourceType(typ)
+		}
+		switch underlying := types.Unalias(methodType).(type) {
 		case *types.Named:
 			if _, isInterface := underlying.Underlying().(*types.Interface); !isInterface {
-				mset := types.NewMethodSet(typ)
+				mset := types.NewMethodSet(methodType)
 				for index := 0; index < mset.Len(); index++ {
-					if err := visitMethodSignature(mset.At(index).Type()); err != nil {
+					selection := mset.At(index)
+					if !emissionABIIncludesMethod(selection) {
+						continue
+					}
+					if err := visitMethodSignature(selection.Type()); err != nil {
 						return err
 					}
 				}
 			}
 		case *types.Struct, *types.Pointer:
-			mset := types.NewMethodSet(typ)
+			mset := types.NewMethodSet(methodType)
 			for index := 0; index < mset.Len(); index++ {
-				if err := visitMethodSignature(mset.At(index).Type()); err != nil {
+				selection := mset.At(index)
+				if !emissionABIIncludesMethod(selection) {
+					continue
+				}
+				if err := visitMethodSignature(selection.Type()); err != nil {
 					return err
 				}
 			}
@@ -228,6 +244,8 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 		callerTracking = NewCallerTracking()
 	}
 	return &context{
+		// ABI analysis starts from canonical source identities. Layout demand
+		// explicitly applies PhysicalType/Type after this patch projection.
 		prog:                 u.prog,
 		goFn:                 fn,
 		fset:                 u.goProg.Fset,
@@ -263,10 +281,12 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 		return llabi.PublicType(u.prog.PhysicalType(typ, llssa.InGo))
 	}
 	var implicitTypes func(types.Type) []types.Type
+	sourceType := func(typ types.Type) types.Type { return typ }
 	if u.prog != nil {
 		implicitTypes = u.prog.ABITypeImplicitDescriptorTypes
+		sourceType = u.prog.SourceType
 	}
-	return walkEmissionABITypeDemandEx(root, ctx.patchType, physicalMethodSignature, implicitTypes, func(typ types.Type) error {
+	return walkEmissionABITypeDemandEx(root, ctx.patchPhysicalType, sourceType, physicalMethodSignature, implicitTypes, func(typ types.Type) error {
 		var references []*ssa.Function
 		var managedValues []*ssa.Function
 		var synchronous []*ssa.Function
@@ -282,12 +302,13 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 				}
 			}
 		}
-		if emissionABITypeMayHaveMethods(typ) {
+		methodType := sourceType(typ)
+		if emissionABITypeMayHaveMethods(methodType) {
 			methodState, methodFromPatch := state.state, state.fromPatch
-			if exactState, exactFromPatch, known := u.typeProvenance(owner, typ); known {
+			if exactState, exactFromPatch, known := u.typeProvenance(owner, methodType); known {
 				methodState, methodFromPatch = exactState, exactFromPatch
 			}
-			methods, err := u.selectABITypeMethods(owner, typ, methodState, methodFromPatch)
+			methods, err := u.selectABITypeMethods(owner, methodType, methodState, methodFromPatch)
 			if err != nil {
 				return err
 			}
@@ -310,6 +331,22 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 				}
 				methods[index] = method
 			}
+			// A C-linked method is a raw foreign declaration when called
+			// directly, but the same source method becomes a managed callable
+			// when its ABI table publishes an ifn/tfn entry. Materialize the one
+			// compiler-owned Go forwarder here, at the exact publication site;
+			// later SSA value-flow resolution replaces only the managed reference
+			// and leaves direct/raw occurrences untouched.
+			for _, method := range methods {
+				if adapted, err := u.materializeManagedForeignFunctionValueAdapter(method, owner); err != nil {
+					return fmt.Errorf(
+						"ABI type %v managed method adapter %q: %w",
+						typ, method.Name(), err,
+					)
+				} else if adapted {
+					continue
+				}
+			}
 			references = append(references, methods...)
 			managedValues = append(managedValues, methods...)
 		}
@@ -326,8 +363,8 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 
 // physicalFunctionABIType mirrors context.type_: body roots first pass through
 // the function-aware patcher and Go-to-raw type conversion. Recursive abiType
-// references start from that raw type and only apply Program.patchType, which
-// is why materializeABITypeDemand intentionally uses ctx.patchType alone.
+// references start from that raw type and use the shared physical patcher;
+// they do not lower an existing raw function signature as a new Go funcval.
 func (u *EmissionUniverse) physicalFunctionABIType(ctx *context, typ types.Type) types.Type {
 	typ = ctx.patchType(typ)
 	if u.prog == nil {

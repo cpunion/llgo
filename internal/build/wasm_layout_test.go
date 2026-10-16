@@ -55,6 +55,25 @@ func TestWasmFrontendLayoutMatchesLLVM(t *testing.T) {
 	}
 }
 
+func TestBaremetalFrontendLayoutMatchesLLVM(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name, triple, cpu string
+	}{
+		{name: "native-arm"},
+		{name: "cortex-m3", triple: "thumbv7m-unknown-unknown-eabi", cpu: "cortex-m3"},
+		{name: "riscv32", triple: "riscv32-unknown-unknown-eabi", cpu: "generic-rv32"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := &llssa.Target{GOOS: "linux", GOARCH: "arm"}
+			if test.triple != "" {
+				target.Resolved = &llssa.TargetSpec{Triple: test.triple, CPU: test.cpu}
+			}
+			testWasmFrontendLayoutMatchesLLVM(t, target, "arm", test.triple)
+		})
+	}
+}
+
 func testWasmFrontendLayoutMatchesLLVM(t *testing.T, target *llssa.Target, frontend, llvmTarget string) {
 	t.Helper()
 	prog := llssa.NewProgram(target)
@@ -63,10 +82,10 @@ func testWasmFrontendLayoutMatchesLLVM(t *testing.T, target *llssa.Target, front
 	sizes := prog.TypeSizes(llgoTargetTypeSizes(types.SizesFor("gc", frontend), "gc", frontend, llvmTarget))
 	pointer := types.NewPointer(types.Typ[types.Byte])
 	if got := sizes.Sizeof(pointer); got != 4 {
-		t.Fatalf("wasm frontend pointer size = %d, want 4", got)
+		t.Fatalf("frontend pointer size = %d, want 4", got)
 	}
 	if got := sizes.Alignof(types.Typ[types.Uint64]); got != 8 {
-		t.Fatalf("wasm frontend uint64 alignment = %d, want LLVM ABI alignment 8", got)
+		t.Fatalf("frontend uint64 alignment = %d, want LLVM ABI alignment 8", got)
 	}
 
 	callback := types.NewSignatureType(nil, nil, nil, nil, nil, false)
@@ -88,6 +107,23 @@ func testWasmFrontendLayoutMatchesLLVM(t *testing.T, target *llssa.Target, front
 		types.NewField(token.NoPos, nil, "Root", pointer, false),
 	}, nil)
 	assertWasmPhysicalLayout(t, prog, sizes, "nested", nested)
+
+	// Match the failure shape of the G sidecar: scalar status precedes 64-bit
+	// IDs, and a pointer-bearing local context follows the embedded G. On ARM,
+	// gc's 4-byte uint64 alignment previously underallocated the entire object.
+	g := types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, nil, "Pointers", types.NewArray(pointer, 6), false),
+		types.NewField(token.NoPos, nil, "Status", types.Typ[types.Uint32], false),
+		types.NewField(token.NoPos, nil, "ID", types.Typ[types.Uint64], false),
+		types.NewField(token.NoPos, nil, "ParentID", types.Typ[types.Uint64], false),
+		types.NewField(token.NoPos, nil, "Tail", types.NewArray(pointer, 4), false),
+		types.NewField(token.NoPos, nil, "Flags", types.NewArray(types.Typ[types.Bool], 4), false),
+	}, nil)
+	context := types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, nil, "G", g, false),
+		types.NewField(token.NoPos, nil, "Local", pointer, false),
+	}, nil)
+	assertWasmPhysicalLayout(t, prog, sizes, "runtime-context", context)
 }
 
 func assertWasmPhysicalLayout(t *testing.T, prog llssa.Program, sizes types.Sizes, name string, structure *types.Struct) {
@@ -101,13 +137,13 @@ func assertWasmPhysicalLayout(t *testing.T, prog llssa.Program, sizes types.Size
 	offsets := sizes.Offsetsof(fields)
 	for index, want := range offsets {
 		if got := int64(prog.OffsetOf(physical, index)); got != want {
-			t.Fatalf("wasm %s field %d LLVM offset = %d, frontend offset = %d", name, index, got, want)
+			t.Fatalf("%s field %d LLVM offset = %d, frontend offset = %d", name, index, got, want)
 		}
 	}
 	if got, want := int64(prog.SizeOf(physical)), sizes.Sizeof(structure); got != want {
-		t.Fatalf("wasm %s LLVM struct size = %d, frontend size = %d", name, got, want)
+		t.Fatalf("%s LLVM struct size = %d, frontend size = %d", name, got, want)
 	}
 	if got, want := int64(prog.AlignOf(physical)), sizes.Alignof(structure); got != want {
-		t.Fatalf("wasm %s LLVM struct alignment = %d, frontend alignment = %d", name, got, want)
+		t.Fatalf("%s LLVM struct alignment = %d, frontend alignment = %d", name, got, want)
 	}
 }

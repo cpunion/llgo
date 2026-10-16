@@ -53,7 +53,7 @@ func Use() uintptr { return FuncPCABI0(target) }
 	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || raw {
 		t.Fatalf("funcPCABI0 raw invocation operand = %v, %v; want false, nil", raw, err)
 	}
-	if observed, err := universe.CoroStaticCodeAddressCallArgument(call, 0); err != nil || !observed {
+	if observed, err := universe.CoroStaticFunctionReferenceCallArgument(call, 0); err != nil || !observed {
 		t.Fatalf("funcPCABI0 code-address operand = %v, %v; want true, nil", observed, err)
 	}
 }
@@ -114,7 +114,7 @@ func Access() uintptr { return FuncPCABI0(libc_access_trampoline) }
 	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || raw {
 		t.Fatalf("C trampoline managed raw operand = %v, %v; want false, nil", raw, err)
 	}
-	if observed, err := universe.CoroStaticCodeAddressCallArgument(call, 0); err != nil || !observed {
+	if observed, err := universe.CoroStaticFunctionReferenceCallArgument(call, 0); err != nil || !observed {
 		t.Fatalf("C trampoline static code-address operand = %v, %v; want true, nil", observed, err)
 	}
 	if universe.Contains(target) {
@@ -259,7 +259,7 @@ func Use(fn any) uintptr { return FuncPCABI0(fn) }
 	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || raw {
 		t.Fatalf("dynamic funcPCABI0 raw operand = %v, %v; want false, nil", raw, err)
 	}
-	if observed, err := universe.CoroStaticCodeAddressCallArgument(call, 0); err != nil || observed {
+	if observed, err := universe.CoroStaticFunctionReferenceCallArgument(call, 0); err != nil || observed {
 		t.Fatalf("dynamic funcPCABI0 code-address operand = %v, %v; want false, nil", observed, err)
 	}
 }
@@ -351,7 +351,7 @@ func FuncPCABI0(fn any) uintptr
 	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || raw {
 		t.Fatalf("patched FuncPCABI0 raw invocation operand = %v, %v; want false, nil", raw, err)
 	}
-	if observed, err := universe.CoroStaticCodeAddressCallArgument(call, 0); err != nil || !observed {
+	if observed, err := universe.CoroStaticFunctionReferenceCallArgument(call, 0); err != nil || !observed {
 		t.Fatalf("patched FuncPCABI0 code-address operand = %v, %v; want true, nil", observed, err)
 	}
 }
@@ -387,7 +387,7 @@ func FuncPCABIInternal(fn any) uintptr
 	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || raw {
 		t.Fatalf("FuncPCABIInternal raw invocation operand = %v, %v; want false, nil", raw, err)
 	}
-	if observed, err := universe.CoroStaticCodeAddressCallArgument(call, 0); err != nil || !observed {
+	if observed, err := universe.CoroStaticFunctionReferenceCallArgument(call, 0); err != nil || !observed {
 		t.Fatalf("FuncPCABIInternal code-address operand = %v, %v; want true, nil", observed, err)
 	}
 }

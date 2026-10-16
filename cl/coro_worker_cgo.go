@@ -29,35 +29,39 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-const coroWorkerCgoThunkPrefixV1 = "__llgo_coro_worker_cgo_thunk_v1_"
+const coroGeneratedCgoThunkPrefixV2 = "__llgo_coro_generated_cgo_thunk_v2_"
 
-// CoroCgoWorkerCallCertificate binds one managed source call to the exact
-// compiler-generated synchronous cgo adapter that may execute on a bounded
-// worker. The certificate authorizes only this call-site replacement. It does
-// not classify arbitrary C code as callback-free, cancellable, or safe to run
-// on an executor.
-type CoroCgoWorkerCallCertificate struct {
+// CoroGeneratedCgoCallCertificate binds one managed source call to the exact
+// compiler-generated synchronous cgo adapter and its frozen execution class.
+// The certificate may select either a bounded worker or a same-M foreign
+// episode. It authorizes only this call-site replacement and never classifies
+// arbitrary C code as callback-free.
+type CoroGeneratedCgoCallCertificate struct {
 	ID             string
 	TargetIdentity string
 	ABISignature   string
+	mode           coroForeignCallMode
+	reentry        coro.ReentryClass
 }
 
-type coroWorkerCgoCallShape struct {
+type coroGeneratedCgoCallShape struct {
 	target      *ssa.Function
 	signature   *types.Signature
 	record      *types.Struct
 	argc        int
 	result      types.Type
 	resultField int
-	certificate CoroCgoWorkerCallCertificate
+	mode        coroForeignCallMode
+	reentry     coro.ReentryClass
+	certificate CoroGeneratedCgoCallCertificate
 }
 
-// coroWorkerCgoErrnoCallShape is the managed half of Go's generated
+// coroGeneratedCgoErrnoCallShape is the managed half of Go's generated
 // _C2func_* protocol. The source wrapper stays a coroutine so construction of
 // its (result, error) pair happens on the logical G. Only the exact C function
 // pointer, typed arguments, primary result, and same-thread errno snapshot
-// cross the bounded-worker transaction.
-type coroWorkerCgoErrnoCallShape struct {
+// cross the frozen worker or same-M transaction.
+type coroGeneratedCgoErrnoCallShape struct {
 	function     ssa.Value
 	signature    *types.Signature
 	record       *types.Struct
@@ -67,10 +71,23 @@ type coroWorkerCgoErrnoCallShape struct {
 	result       types.Type
 	resultField  int
 	errnoField   int
-	certificate  CoroCgoWorkerCallCertificate
+	mode         coroForeignCallMode
+	reentry      coro.ReentryClass
+	certificate  CoroGeneratedCgoCallCertificate
 }
 
-func isGeneratedCgoWorkerAdapterName(name string) bool {
+func validCoroGeneratedCgoExecution(mode coroForeignCallMode, reentry coro.ReentryClass) bool {
+	switch mode {
+	case coroForeignCallModeWorker:
+		return reentry == coro.ReentryNone
+	case coroForeignCallModeSameM:
+		return reentry == coro.ReentryNone || reentry == coro.ReentryManagedIngress
+	default:
+		return false
+	}
+}
+
+func isGeneratedCgoAdapterName(name string) bool {
 	return isCgoCfunc(name) || isCgoCmacro(name) || isCgoCMalloc(name)
 }
 
@@ -180,18 +197,18 @@ func (ctx *context) verifyCoroCMallocWrapperShape(fn *ssa.Function) error {
 	return nil
 }
 
-// coroCgoErrnoWorkerCallShape freezes the exact generated _C2func_* boundary.
+// coroGeneratedCgoErrnoCallShape freezes the exact generated _C2func_* boundary.
 // It is intentionally stricter than name recognition: the compiler directive,
 // intrinsic ABI, first-block lowering occurrence, C function cell, source ABI,
 // and target configuration all participate in the certificate. No function
 // pointer is reverse-classified at runtime.
-func (ctx *context) coroCgoErrnoWorkerCallShape(
+func (ctx *context) coroGeneratedCgoErrnoCallShape(
 	call *ssa.Call,
-) (shape coroWorkerCgoErrnoCallShape, recognized bool, err error) {
+) (shape coroGeneratedCgoErrnoCallShape, recognized bool, err error) {
 	shape.resultField = -1
 	shape.errnoField = -1
 	if ctx == nil || ctx.emissionUniverse == nil || call == nil || call.Common() == nil ||
-		ctx.goFn != call.Parent() || !ctx.emissionUniverse.CoroWorkerSupported() {
+		ctx.goFn != call.Parent() || !ctx.emissionUniverse.coroCapabilities.NativeFleet() {
 		return shape, false, nil
 	}
 	u := ctx.emissionUniverse
@@ -295,7 +312,7 @@ func (ctx *context) coroCgoErrnoWorkerCallShape(
 	result := sourceSignature.Results().At(0).Type()
 	if !coroWorkerForeignRecordValueType(u, result, true, make(map[types.Type]bool)) {
 		return shape, true, fmt.Errorf(
-			"generated C2 adapter %q result type %s has no typed worker-record representation",
+			"generated C2 adapter %q result type %s has no typed record representation",
 			parent.Name(), result,
 		)
 	}
@@ -304,7 +321,7 @@ func (ctx *context) coroCgoErrnoWorkerCallShape(
 		parameter := params.At(index).Type()
 		if !coroWorkerForeignRecordValueType(u, parameter, true, make(map[types.Type]bool)) {
 			return shape, true, fmt.Errorf(
-				"generated C2 adapter %q argument %d type %s has no typed worker-record representation",
+				"generated C2 adapter %q argument %d type %s has no typed record representation",
 				parent.Name(), index, parameter,
 			)
 		}
@@ -349,11 +366,14 @@ func (ctx *context) coroCgoErrnoWorkerCallShape(
 	)
 	abi := u.emissionTypeKeys.cFunctionABI(directSignature)
 	targetSpec := u.prog.TargetSpec()
-	certificate := CoroCgoWorkerCallCertificate{
+	mode, reentry := coroForeignCallModeSameM, coro.ReentryManagedIngress
+	certificate := CoroGeneratedCgoCallCertificate{
 		ID: emissionDigest(framedEmissionKey(
-			"llgo-coro-cgo-errno-worker-call-v1",
+			"llgo-coro-cgo-errno-same-m-reentry-call-v2",
 			targetIdentity,
 			abi,
+			fmt.Sprintf("%d", mode),
+			string(reentry),
 			targetSpec.Triple,
 			targetSpec.CPU,
 			targetSpec.Features,
@@ -362,8 +382,10 @@ func (ctx *context) coroCgoErrnoWorkerCallShape(
 		)),
 		TargetIdentity: targetIdentity,
 		ABISignature:   abi,
+		mode:           mode,
+		reentry:        reentry,
 	}
-	shape = coroWorkerCgoErrnoCallShape{
+	shape = coroGeneratedCgoErrnoCallShape{
 		function:     functionLoad,
 		signature:    directSignature,
 		record:       types.NewStruct(fields, nil),
@@ -373,21 +395,23 @@ func (ctx *context) coroCgoErrnoWorkerCallShape(
 		result:       result,
 		resultField:  resultField,
 		errnoField:   errnoField,
+		mode:         mode,
+		reentry:      reentry,
 		certificate:  certificate,
 	}
 	return shape, true, nil
 }
 
-func (ctx *context) freezeCoroCgoErrnoWorkerCallCertificate(
+func (ctx *context) freezeCoroGeneratedCgoErrnoCallCertificate(
 	call ssa.CallInstruction,
-) (CoroCgoWorkerCallCertificate, bool, error) {
+) (CoroGeneratedCgoCallCertificate, bool, error) {
 	direct, ok := call.(*ssa.Call)
 	if !ok {
-		return CoroCgoWorkerCallCertificate{}, false, nil
+		return CoroGeneratedCgoCallCertificate{}, false, nil
 	}
-	shape, recognized, err := ctx.coroCgoErrnoWorkerCallShape(direct)
+	shape, recognized, err := ctx.coroGeneratedCgoErrnoCallShape(direct)
 	if err != nil || !recognized {
-		return CoroCgoWorkerCallCertificate{}, recognized, err
+		return CoroGeneratedCgoCallCertificate{}, recognized, err
 	}
 	return shape.certificate, true, nil
 }
@@ -397,8 +421,8 @@ func (ctx *context) freezeCoroCgoErrnoWorkerCallCertificate(
 // classifyCoroIntrinsicCallSite; this helper verifies only the generated
 // adapter shape. It never licenses a managed caller to invoke C on an
 // executor: only the dedicated raw _Cfunc_* lowering may inline this compiler
-// intrinsic, while freezeCoroCgoWorkerCallCertificate replaces the outer
-// managed call with a worker transaction.
+// intrinsic, while freezeCoroGeneratedCgoCallCertificate replaces the outer
+// managed call with its frozen worker or same-M foreign transaction.
 func (u *EmissionUniverse) verifyCoroRawCgocallShape(
 	ctx *context,
 	call *ssa.Call,
@@ -410,7 +434,7 @@ func (u *EmissionUniverse) verifyCoroRawCgocallShape(
 	}
 	parent := call.Parent()
 	if parent == nil || ctx.goFn != parent || parent.Parent() != nil ||
-		!isGeneratedCgoWorkerAdapterName(parent.Name()) || isCgoC2func(parent.Name()) {
+		!isGeneratedCgoAdapterName(parent.Name()) || isCgoC2func(parent.Name()) {
 		return fmt.Errorf("_cgo_runtime_cgocall is synchronous only inside one exact generated cgo adapter")
 	}
 	marker, err := exactCgoUnsafeArgsDirective(parent)
@@ -480,11 +504,12 @@ func (u *EmissionUniverse) verifyCoroRawCgocallShape(
 	return nil
 }
 
-func (u *EmissionUniverse) freezeCoroCgoWorkerCallCertificate(
+func (u *EmissionUniverse) freezeCoroGeneratedCgoCallCertificate(
 	ctx *context,
 	call ssa.CallInstruction,
-) (certificate CoroCgoWorkerCallCertificate, target *ssa.Function, certified bool, err error) {
-	if u == nil || ctx == nil || call == nil || call.Common() == nil || !u.CoroWorkerSupported() {
+) (certificate CoroGeneratedCgoCallCertificate, target *ssa.Function, certified bool, err error) {
+	if u == nil || ctx == nil || call == nil || call.Common() == nil ||
+		!u.coroCapabilities.NativeFleet() {
 		return certificate, nil, false, nil
 	}
 	switch call.(type) {
@@ -494,11 +519,11 @@ func (u *EmissionUniverse) freezeCoroCgoWorkerCallCertificate(
 		// It must not also park its source owner on a bounded worker.
 		return certificate, nil, false, nil
 	}
-	// A generated adapter is already the synchronous transaction body executed
-	// by the bounded worker. Calls inside that body stay ordinary raw calls;
-	// recursively replacing them with another worker transaction would both
-	// park a native worker and incorrectly color the adapter as managed.
-	if owner := call.Parent(); owner != nil && isGeneratedCgoWorkerAdapterName(owner.Name()) {
+	// A generated adapter is already the raw synchronous transaction body.
+	// Calls inside that body stay ordinary raw calls; recursively replacing them
+	// with another foreign transaction would nest the scheduler boundary and
+	// incorrectly color the adapter as managed.
+	if owner := call.Parent(); owner != nil && isGeneratedCgoAdapterName(owner.Name()) {
 		return certificate, nil, false, nil
 	}
 	common := call.Common()
@@ -507,7 +532,7 @@ func (u *EmissionUniverse) freezeCoroCgoWorkerCallCertificate(
 		return certificate, nil, false, nil
 	}
 	target, resolved := u.Resolve(raw)
-	if !resolved || target == nil || target != raw || !isGeneratedCgoWorkerAdapterName(target.Name()) ||
+	if !resolved || target == nil || target != raw || !isGeneratedCgoAdapterName(target.Name()) ||
 		isCgoC2func(target.Name()) {
 		return certificate, nil, false, nil
 	}
@@ -532,14 +557,14 @@ func (u *EmissionUniverse) freezeCoroCgoWorkerCallCertificate(
 		coroWorkerTypeParamLen(target.Signature.TypeParams()) != 0 ||
 		coroWorkerTypeParamLen(target.Signature.RecvTypeParams()) != 0 ||
 		target.Origin() != nil || len(target.TypeArgs()) != 0 {
-		return certificate, nil, false, fmt.Errorf("generated cgo worker target %q has an unsupported function shape", target.Name())
+		return certificate, nil, false, fmt.Errorf("generated-cgo target %q has an unsupported function shape", target.Name())
 	}
 	background, classified, backgroundErr := u.FunctionBackground(target)
 	if backgroundErr != nil {
 		return certificate, nil, false, backgroundErr
 	}
 	if !classified || background != llssa.InGo {
-		return certificate, nil, false, fmt.Errorf("generated cgo worker target %q is not one exact Go adapter body", target.Name())
+		return certificate, nil, false, fmt.Errorf("generated-cgo target %q is not one exact Go adapter body", target.Name())
 	}
 	directive, directiveErr := coroRawABIDirective(target, u)
 	if directiveErr != nil {
@@ -551,7 +576,7 @@ func (u *EmissionUniverse) freezeCoroCgoWorkerCallCertificate(
 	}
 	if directive != expectedDirective {
 		return certificate, nil, false, fmt.Errorf(
-			"generated cgo worker target %q has raw ABI directive %q, want %q",
+			"generated-cgo target %q has raw ABI directive %q, want %q",
 			target.Name(), directive, expectedDirective,
 		)
 	}
@@ -562,21 +587,21 @@ func (u *EmissionUniverse) freezeCoroCgoWorkerCallCertificate(
 	}
 	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
 		signature.Params().Len() != len(common.Args) || signature.Results().Len() > 1 {
-		return certificate, nil, false, fmt.Errorf("generated cgo worker target %q has an unsupported effective signature", target.Name())
+		return certificate, nil, false, fmt.Errorf("generated-cgo target %q has an unsupported effective signature", target.Name())
 	}
 	callSignature, ok := ctx.patchType(common.Signature()).(*types.Signature)
 	if !ok || !types.Identical(coroPhysicalNormalizeSourceSignature(callSignature), signature) {
-		return certificate, nil, false, fmt.Errorf("generated cgo worker call and target %q have different effective signatures", target.Name())
+		return certificate, nil, false, fmt.Errorf("generated-cgo call and target %q have different effective signatures", target.Name())
 	}
 	for index, argument := range common.Args {
 		if argument == nil {
-			return certificate, nil, false, fmt.Errorf("generated cgo worker call argument %d is nil", index)
+			return certificate, nil, false, fmt.Errorf("generated-cgo call argument %d is nil", index)
 		}
 		parameter := signature.Params().At(index).Type()
 		if !types.Identical(ctx.patchType(argument.Type()), parameter) ||
 			!coroWorkerForeignRecordValueType(u, parameter, true, make(map[types.Type]bool)) {
 			return certificate, nil, false, fmt.Errorf(
-				"generated cgo worker call argument %d type %s has no typed worker-record representation",
+				"generated-cgo call argument %d type %s has no typed record representation",
 				index, parameter,
 			)
 		}
@@ -589,7 +614,7 @@ func (u *EmissionUniverse) freezeCoroCgoWorkerCallCertificate(
 		// completion.
 		if !coroWorkerForeignRecordValueType(u, result, true, make(map[types.Type]bool)) {
 			return certificate, nil, false, fmt.Errorf(
-				"generated cgo worker result type %s has no typed worker-record representation",
+				"generated-cgo result type %s has no typed record representation",
 				result,
 			)
 		}
@@ -597,16 +622,19 @@ func (u *EmissionUniverse) freezeCoroCgoWorkerCallCertificate(
 	linkIdentity := u.linkIdentities[target]
 	targetIdentity := u.finalIdentity(target)
 	if linkIdentity == "" || targetIdentity == "" || targetIdentity == "<nil>" || targetIdentity == "<cyclic-alias>" {
-		return certificate, nil, false, fmt.Errorf("generated cgo worker target %q has no frozen identity", target.Name())
+		return certificate, nil, false, fmt.Errorf("generated-cgo target %q has no frozen identity", target.Name())
 	}
 	abi := u.emissionTypeKeys.strictABI(signature)
 	targetSpec := u.prog.TargetSpec()
-	certificate = CoroCgoWorkerCallCertificate{
+	mode, reentry := coroForeignCallModeSameM, coro.ReentryManagedIngress
+	certificate = CoroGeneratedCgoCallCertificate{
 		ID: emissionDigest(framedEmissionKey(
-			"llgo-coro-cgo-worker-call-v1",
+			"llgo-coro-cgo-same-m-reentry-call-v2",
 			targetIdentity,
 			linkIdentity,
 			abi,
+			fmt.Sprintf("%d", mode),
+			string(reentry),
 			targetSpec.Triple,
 			targetSpec.CPU,
 			targetSpec.Features,
@@ -615,15 +643,17 @@ func (u *EmissionUniverse) freezeCoroCgoWorkerCallCertificate(
 		)),
 		TargetIdentity: targetIdentity,
 		ABISignature:   abi,
+		mode:           mode,
+		reentry:        reentry,
 	}
 	return certificate, target, true, nil
 }
 
-func validateCoroWorkerCgoCall(
+func validateCoroGeneratedCgoCall(
 	plan *coro.SSAPlan,
 	universe *EmissionUniverse,
 	call ssa.CallInstruction,
-) (shape coroWorkerCgoCallShape, recognized bool, err error) {
+) (shape coroGeneratedCgoCallShape, recognized bool, err error) {
 	shape.resultField = -1
 	if plan == nil || universe == nil || call == nil || call.Common() == nil ||
 		universe.coroProgramIR == nil {
@@ -633,18 +663,18 @@ func validateCoroWorkerCgoCall(
 	if frozenErr != nil {
 		return shape, false, frozenErr
 	}
-	if !found || frozen.plan.Elision != CoroCallElidedCgoWorker {
+	if !found || frozen.plan.Elision != CoroCallElidedGeneratedCgo {
 		return shape, false, nil
 	}
 	recognized = true
 	if frozen.failure != "" {
 		return shape, true, fmt.Errorf("%s", frozen.failure)
 	}
-	if frozen.cgoWorker.ID == "" || frozen.plan.CgoWorkerTarget == nil ||
-		frozen.plan.ElisionCertificate != frozen.cgoWorker.ID {
-		return shape, true, fmt.Errorf("frozen cgo worker call has no exact certificate and target")
+	if frozen.generatedCgo.ID == "" || frozen.plan.GeneratedCgoTarget == nil ||
+		frozen.plan.ElisionCertificate != frozen.generatedCgo.ID {
+		return shape, true, fmt.Errorf("frozen generated-cgo call has no exact certificate and target")
 	}
-	target := frozen.plan.CgoWorkerTarget
+	target := frozen.plan.GeneratedCgoTarget
 	targetPlan, planned := plan.FunctionPlan(target)
 	if !planned || targetPlan.External != coro.Defined || !targetPlan.RawPlainOnly ||
 		targetPlan.Emission != coro.EmitRawPlain || targetPlan.Primary != coro.PrimaryPlain ||
@@ -659,31 +689,36 @@ func validateCoroWorkerCgoCall(
 	if signatureErr != nil {
 		return shape, true, signatureErr
 	}
-	if universe.emissionTypeKeys.strictABI(signature) != frozen.cgoWorker.ABISignature {
-		return shape, true, fmt.Errorf("generated cgo worker ABI differs from its frozen certificate")
+	if universe.emissionTypeKeys.strictABI(signature) != frozen.generatedCgo.ABISignature {
+		return shape, true, fmt.Errorf("generated-cgo ABI differs from its frozen certificate")
+	}
+	if !validCoroGeneratedCgoExecution(frozen.generatedCgo.mode, frozen.generatedCgo.reentry) {
+		return shape, true, fmt.Errorf("generated cgo call has an invalid frozen execution class")
 	}
 	result := types.Type(nil)
 	if signature.Results().Len() == 1 {
 		result = signature.Results().At(0).Type()
 	}
 	record, resultField := coroWorkerForeignRecordType(signature, result)
-	shape = coroWorkerCgoCallShape{
+	shape = coroGeneratedCgoCallShape{
 		target:      target,
 		signature:   signature,
 		record:      record,
 		argc:        signature.Params().Len(),
 		result:      result,
 		resultField: resultField,
-		certificate: frozen.cgoWorker,
+		mode:        frozen.generatedCgo.mode,
+		reentry:     frozen.generatedCgo.reentry,
+		certificate: frozen.generatedCgo,
 	}
 	return shape, true, nil
 }
 
-func validateCoroWorkerCgoErrnoCall(
+func validateCoroGeneratedCgoErrnoCall(
 	plan *coro.SSAPlan,
 	ctx *context,
 	call *ssa.Call,
-) (shape coroWorkerCgoErrnoCallShape, recognized bool, err error) {
+) (shape coroGeneratedCgoErrnoCallShape, recognized bool, err error) {
 	shape.resultField = -1
 	shape.errnoField = -1
 	if plan == nil || ctx == nil || ctx.emissionUniverse == nil ||
@@ -697,7 +732,7 @@ func validateCoroWorkerCgoErrnoCall(
 		return shape, false, frozenErr
 	}
 	if !found || !frozen.plan.Intrinsic || frozen.opcode != llgoCgoCgocall ||
-		frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineForeignSuspend {
+		frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineForeignTransaction {
 		return shape, false, nil
 	}
 	recognized = true
@@ -705,9 +740,9 @@ func validateCoroWorkerCgoErrnoCall(
 		return shape, true, fmt.Errorf("%s", frozen.failure)
 	}
 	if frozen.plan.Elision != CoroCallElidedIntrinsic || !plan.ElidesCall(call) ||
-		frozen.cgoWorker.ID == "" || frozen.cgoWorker.TargetIdentity == "" ||
-		frozen.cgoWorker.ABISignature == "" {
-		return shape, true, fmt.Errorf("frozen C2 cgo call has no exact intrinsic worker certificate")
+		frozen.generatedCgo.ID == "" || frozen.generatedCgo.TargetIdentity == "" ||
+		frozen.generatedCgo.ABISignature == "" {
+		return shape, true, fmt.Errorf("frozen C2 cgo call has no exact intrinsic foreign certificate")
 	}
 	parent := call.Parent()
 	parentPlan, planned := plan.FunctionPlan(parent)
@@ -721,28 +756,31 @@ func validateCoroWorkerCgoErrnoCall(
 			parent.Name(), parentPlan,
 		)
 	}
-	derived, exact, shapeErr := ctx.coroCgoErrnoWorkerCallShape(call)
+	derived, exact, shapeErr := ctx.coroGeneratedCgoErrnoCallShape(call)
 	if shapeErr != nil {
 		return shape, true, shapeErr
 	}
 	if !exact {
-		return shape, true, fmt.Errorf("frozen C2 cgo call no longer has its generated worker shape")
+		return shape, true, fmt.Errorf("frozen C2 cgo call no longer has its generated foreign shape")
 	}
-	if derived.certificate != frozen.cgoWorker ||
-		universe.emissionTypeKeys.cFunctionABI(derived.signature) != frozen.cgoWorker.ABISignature {
-		return shape, true, fmt.Errorf("generated C2 cgo call differs from its frozen worker certificate")
+	if derived.certificate != frozen.generatedCgo ||
+		universe.emissionTypeKeys.cFunctionABI(derived.signature) != frozen.generatedCgo.ABISignature {
+		return shape, true, fmt.Errorf("generated C2 cgo call differs from its frozen foreign certificate")
+	}
+	if !validCoroGeneratedCgoExecution(derived.mode, derived.reentry) {
+		return shape, true, fmt.Errorf("generated C2 cgo call has an invalid frozen execution class")
 	}
 	return derived, true, nil
 }
 
-func validateCoroCgoErrnoWorkerOwner(
+func validateCoroGeneratedCgoErrnoOwner(
 	plan *coro.SSAPlan,
 	ctx *context,
 	fn *ssa.Function,
 ) error {
 	if plan == nil || ctx == nil || ctx.emissionUniverse == nil ||
 		fn == nil || ctx.goFn != fn || !isCgoC2func(fn.Name()) {
-		return fmt.Errorf("C2 worker owner validation requires one exact generated C2 function")
+		return fmt.Errorf("C2 foreign owner validation requires one exact generated C2 function")
 	}
 	count := 0
 	for _, block := range fn.Blocks {
@@ -751,7 +789,7 @@ func validateCoroCgoErrnoWorkerOwner(
 			if !ok {
 				continue
 			}
-			_, recognized, err := validateCoroWorkerCgoErrnoCall(plan, ctx, call)
+			_, recognized, err := validateCoroGeneratedCgoErrnoCall(plan, ctx, call)
 			if err != nil {
 				return err
 			}
@@ -761,17 +799,17 @@ func validateCoroCgoErrnoWorkerOwner(
 		}
 	}
 	if count != 1 {
-		return fmt.Errorf("generated C2 function %q has %d typed errno worker operations, want 1", fn.Name(), count)
+		return fmt.Errorf("generated C2 function %q has %d typed errno foreign operations, want 1", fn.Name(), count)
 	}
 	return nil
 }
 
-func (p *context) coroWorkerCgoThunk(shape coroWorkerCgoCallShape, target llssa.Function) llssa.Function {
+func (p *context) coroGeneratedCgoThunk(shape coroGeneratedCgoCallShape, target llssa.Function) llssa.Function {
 	if p == nil || shape.target == nil || shape.signature == nil || shape.record == nil || target == nil {
-		panic("coroutine cgo worker thunk requires an exact target, signature, and call record")
+		panic("coroutine generated-cgo thunk requires an exact target, signature, and call record")
 	}
-	name := coroWorkerCgoThunkPrefixV1 + emissionDigest(framedEmissionKey(
-		"cl-coro-worker-cgo-thunk-v1",
+	name := coroGeneratedCgoThunkPrefixV2 + emissionDigest(framedEmissionKey(
+		"cl-coro-generated-cgo-thunk-v2",
 		shape.certificate.ID,
 		target.Name(),
 		p.cachedStrictEmissionABITypeKey(shape.signature),
@@ -792,7 +830,7 @@ func (p *context) coroWorkerCgoThunk(shape coroWorkerCgoCallShape, target llssa.
 	ret := b.Call(target.Expr, args...)
 	if shape.result != nil {
 		if shape.resultField < 0 {
-			panic("coroutine cgo worker thunk lost its result field")
+			panic("coroutine generated-cgo thunk lost its result field")
 		}
 		b.Store(b.FieldAddr(recordPointer, shape.resultField), ret)
 	}
@@ -802,14 +840,14 @@ func (p *context) coroWorkerCgoThunk(shape coroWorkerCgoCallShape, target llssa.
 	return thunk
 }
 
-func (p *context) coroWorkerCgoErrnoThunk(shape coroWorkerCgoErrnoCallShape) llssa.Function {
+func (p *context) coroGeneratedCgoErrnoThunk(shape coroGeneratedCgoErrnoCallShape) llssa.Function {
 	if p == nil || shape.function == nil || shape.signature == nil || shape.record == nil ||
 		shape.result == nil || shape.calleeField < 0 || shape.argumentBase < 0 ||
 		shape.resultField < 0 || shape.errnoField < 0 {
-		panic("coroutine C2 worker thunk requires one exact typed errno record")
+		panic("coroutine generated C2 thunk requires one exact typed errno record")
 	}
-	name := coroWorkerCgoThunkPrefixV1 + emissionDigest(framedEmissionKey(
-		"cl-coro-worker-cgo-errno-thunk-v1",
+	name := coroGeneratedCgoThunkPrefixV2 + emissionDigest(framedEmissionKey(
+		"cl-coro-generated-cgo-errno-thunk-v2",
 		shape.certificate.ID,
 		p.cachedCFunctionABITypeKey(shape.signature),
 	))
@@ -843,17 +881,63 @@ func (p *context) coroWorkerCgoErrnoThunk(shape coroWorkerCgoErrnoCallShape) lls
 	return thunk
 }
 
-func (p *context) compileCoroWorkerCgoErrnoCall(
+// compileCoroGeneratedCgoBoundary is the common scheduler transaction for all
+// compiler-owned cgo records. Record construction and result interpretation
+// stay typed at their source sites; only the frozen execution class, lifetime
+// fence, and outcome transfer are shared here.
+func (p *context) compileCoroGeneratedCgoBoundary(
+	b llssa.Builder,
+	mode coroForeignCallMode,
+	reentry coro.ReentryClass,
+	thunkWord llssa.Expr,
+	workerIdentity llssa.Expr,
+	recordWord llssa.Expr,
+	record llssa.Expr,
+	keepaliveSlots []llssa.Expr,
+) {
+	if p == nil || !p.hasCoroPhysicalBody() || b == nil || b.Func != p.fn ||
+		thunkWord.IsNil() || recordWord.IsNil() || record.IsNil() ||
+		!validCoroGeneratedCgoExecution(mode, reentry) {
+		panic("coroutine generated-cgo boundary escaped its frozen execution class")
+	}
+	switch mode {
+	case coroForeignCallModeWorker:
+		if workerIdentity.IsNil() {
+			panic("coroutine generated-cgo worker boundary lost its exact identity")
+		}
+		p.compileCoroWorkerWordCall(
+			b,
+			thunkWord,
+			workerIdentity,
+			[]llssa.Expr{recordWord},
+			keepaliveSlots,
+			nil,
+		)
+	case coroForeignCallModeSameM:
+		status := p.emitCoroSameMForeignBoundary(b, thunkWord, recordWord, workerIdentity, reentry)
+		p.emitCoroKeepaliveSlots(b, keepaliveSlots)
+		b.KeepAlive(record)
+		if !status.IsNil() {
+			p.dispatchCoroSameMForeignReentryCompletion(b, status)
+		}
+		return
+	default:
+		panic("coroutine generated-cgo boundary selected an unknown execution class")
+	}
+	b.KeepAlive(record)
+}
+
+func (p *context) compileCoroGeneratedCgoErrnoCall(
 	b llssa.Builder,
 	call *ssa.Call,
-	shape coroWorkerCgoErrnoCallShape,
+	shape coroGeneratedCgoErrnoCallShape,
 ) llssa.Expr {
 	if p == nil || !p.hasCoroPhysicalBody() || call == nil ||
 		p.goFn == nil || p.goFn != call.Parent() ||
 		shape.function == nil || shape.signature == nil || shape.record == nil ||
 		shape.argc != len(p.goFn.Params) || shape.resultField < 0 ||
-		shape.errnoField < 0 {
-		panic("coroutine C2 worker lowering escaped its frozen typed errno recipe")
+		shape.errnoField < 0 || !validCoroGeneratedCgoExecution(shape.mode, shape.reentry) {
+		panic("coroutine generated C2 lowering escaped its frozen typed errno recipe")
 	}
 	functionCell := p.compileValue(b, shape.function)
 	functionCell.Type = p.prog.Pointer(p.type_(shape.signature, llssa.InC))
@@ -867,80 +951,108 @@ func (p *context) compileCoroWorkerCgoErrnoCall(
 	for index, argument := range arguments {
 		b.Store(b.FieldAddr(record, shape.argumentBase+index), argument)
 	}
-	thunk := p.coroWorkerCgoErrnoThunk(shape)
-	p.compileCoroWorkerWordCall(
+	thunk := p.coroGeneratedCgoErrnoThunk(shape)
+	thunkWord := b.Convert(p.prog.Uintptr(), thunk.Expr)
+	recordWord := b.Convert(p.prog.Uintptr(), record)
+	p.compileCoroGeneratedCgoBoundary(
 		b,
-		b.Convert(p.prog.Uintptr(), thunk.Expr),
+		shape.mode,
+		shape.reentry,
+		thunkWord,
 		b.Convert(p.prog.Uintptr(), callee),
-		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
-		nil,
+		recordWord,
+		record,
 		nil,
 	)
-	b.KeepAlive(record)
 	p.cgoRet = b.LoadKnownNonNil(b.FieldAddr(record, shape.resultField))
 	p.cgoErrno = b.LoadKnownNonNil(b.FieldAddr(record, shape.errnoField))
 	return p.cgoErrno
 }
 
-func (p *context) compileCoroWorkerCgoCall(
+func (p *context) compileCoroGeneratedCgoCall(
 	b llssa.Builder,
 	call *ssa.Call,
-	shape coroWorkerCgoCallShape,
+	shape coroGeneratedCgoCallShape,
 ) llssa.Expr {
 	if p == nil || !p.hasCoroPhysicalBody() || call == nil || shape.target == nil ||
-		shape.signature == nil || shape.record == nil {
-		panic("coroutine cgo worker lowering escaped its frozen physical operation recipe")
+		shape.signature == nil || shape.record == nil ||
+		!validCoroGeneratedCgoExecution(shape.mode, shape.reentry) {
+		panic("coroutine generated-cgo lowering escaped its frozen physical operation recipe")
 	}
 	compiled := p.compileValues(b, call.Common().Args, fnNormal)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	return p.compileCoroWorkerCgoTransaction(b, shape, compiled, keepaliveSlots)
+	return p.compileCoroGeneratedCgoTransaction(b, shape, compiled, keepaliveSlots)
 }
 
-// compileCoroWorkerCgoTransaction is the single physical operation shared by
+// compileCoroGeneratedCgoTransaction is the single physical operation shared by
 // an ordinary generated-cgo call and a deferred generated-cgo cleanup. The
 // source-specific lowering owns evaluation/capture; this helper owns only the
-// typed worker record, exact raw adapter thunk, and common park/resume
-// transaction.
-func (p *context) compileCoroWorkerCgoTransaction(
+// typed record, exact raw adapter thunk, and frozen worker/same-M transaction.
+func (p *context) compileCoroGeneratedCgoTransaction(
 	b llssa.Builder,
-	shape coroWorkerCgoCallShape,
+	shape coroGeneratedCgoCallShape,
 	compiled []llssa.Expr,
 	keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
 	if p == nil || !p.hasCoroPhysicalBody() || shape.target == nil ||
 		shape.signature == nil || shape.record == nil || len(compiled) != shape.argc {
-		panic("coroutine cgo worker transaction escaped its frozen typed recipe")
+		panic("coroutine generated-cgo transaction escaped its frozen typed recipe")
 	}
 	target, py, kind := p.compileRawPlainFunction(shape.target)
 	if kind != goFunc || target == nil || py != nil {
-		panic("coroutine cgo worker lowering lost its exact raw Go adapter")
+		panic("coroutine generated-cgo lowering lost its exact raw Go adapter")
 	}
 	record := p.coroFrameAlloc(p.type_(shape.record, llssa.InGo))
 	for index, argument := range compiled {
 		b.Store(b.FieldAddr(record, index), argument)
 	}
-	thunk := p.coroWorkerCgoThunk(shape, target)
-	p.compileCoroWorkerWordCall(
+	thunk := p.coroGeneratedCgoThunk(shape, target)
+	thunkWord := b.Convert(p.prog.Uintptr(), thunk.Expr)
+	recordWord := b.Convert(p.prog.Uintptr(), record)
+	p.compileCoroGeneratedCgoBoundary(
 		b,
-		b.Convert(p.prog.Uintptr(), thunk.Expr),
+		shape.mode,
+		shape.reentry,
+		thunkWord,
 		b.Convert(p.prog.Uintptr(), target.Expr),
-		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
+		recordWord,
+		record,
 		keepaliveSlots,
-		nil,
 	)
-	b.KeepAlive(record)
 	if shape.result == nil {
 		return llssa.Expr{}
 	}
 	if shape.resultField < 0 {
-		panic("coroutine cgo worker lowering lost its result field")
+		panic("coroutine generated-cgo lowering lost its result field")
 	}
 	return b.LoadKnownNonNil(b.FieldAddr(record, shape.resultField))
 }
 
-func generatedCgoWorkerCallRecipeID(certificate CoroCgoWorkerCallCertificate) coro.RecipeID {
+func generatedCgoCallRecipeID(certificate CoroGeneratedCgoCallCertificate) coro.RecipeID {
 	if certificate.ID == "" {
 		return ""
 	}
-	return coro.RecipeID("cl.cgo.worker-call.v1")
+	switch {
+	case certificate.mode == coroForeignCallModeWorker && certificate.reentry == coro.ReentryNone:
+		return coro.RecipeID("cl.cgo.worker-call.v1")
+	case certificate.mode == coroForeignCallModeSameM && certificate.reentry == coro.ReentryNone:
+		return coro.RecipeID("cl.cgo.same-m-call.v1")
+	case certificate.mode == coroForeignCallModeSameM && certificate.reentry == coro.ReentryManagedIngress:
+		return coro.RecipeID("cl.cgo.same-m-reentry-call.v2")
+	default:
+		return ""
+	}
+}
+
+func generatedCgoCallContractID(certificate CoroGeneratedCgoCallCertificate) coro.ContractID {
+	switch {
+	case certificate.mode == coroForeignCallModeWorker && certificate.reentry == coro.ReentryNone:
+		return coro.ContractID("llgo.coro.cgo-worker-call.v1")
+	case certificate.mode == coroForeignCallModeSameM && certificate.reentry == coro.ReentryNone:
+		return coro.ContractID("llgo.coro.cgo-same-m-call.v1")
+	case certificate.mode == coroForeignCallModeSameM && certificate.reentry == coro.ReentryManagedIngress:
+		return coro.ContractID("llgo.coro.cgo-same-m-reentry-call.v2")
+	default:
+		return ""
+	}
 }

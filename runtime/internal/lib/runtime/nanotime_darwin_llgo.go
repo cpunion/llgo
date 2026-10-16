@@ -1,4 +1,4 @@
-//go:build darwin && !baremetal
+//go:build darwin && !baremetal && !(llgo && llgo_coro && llgo_coro_host && !coro_runtime_adapter_test)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -29,9 +29,11 @@ import (
 const _CLOCK_UPTIME_RAW = 8
 
 // clock_gettime_nsec_np reads one kernel-maintained monotonic counter. It does
-// not wait for an external event or invoke a callback. The exact runtime clock
-// occurrence is inferred as raw-host and retains IRQUnsafe.
+// not wait for an external event or invoke a callback. This C boundary contract
+// applies to managed time.Now callers as well as raw scheduler clock reads;
+// the Go callers remain inferred. It does not certify interrupt safety.
 //
+//llgo:coro contract foreign.v1 progress=executor-safe affinity=any-thread reentry=none memory=by-value
 //go:linkname c_clock_gettime_nsec_np C.clock_gettime_nsec_np
 func c_clock_gettime_nsec_np(clockID int32) uint64
 

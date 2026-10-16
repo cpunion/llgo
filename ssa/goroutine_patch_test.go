@@ -9,12 +9,11 @@ import (
 	"testing"
 
 	"github.com/xgo-dev/llgo/ssa"
-	"github.com/xgo-dev/llgo/ssa/ssatest"
 	"github.com/xgo-dev/llvm"
 )
 
 func TestGoClosureStartupUsesGCManagedMemory(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	ctxFields := []*types.Var{
@@ -58,7 +57,7 @@ func TestGoClosureStartupUsesGCManagedMemory(t *testing.T) {
 }
 
 func TestGoInstallsContextForContextBackedLocals(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	prog.SetLocalityInfo("example.com/state.Value", ssa.LocalityInfo{Locality: ssa.GoroutineLocal})
 	prog.SetLocalStorage("example.com/state.Value", ssa.LocalStoragePackage)
 	pkg := prog.NewPackage("bar", "foo/bar")
@@ -78,7 +77,7 @@ func TestGoInstallsContextForContextBackedLocals(t *testing.T) {
 }
 
 func TestGoPanicRoutineDoesNotReturnAfterUnreachable(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	outer := pkg.NewFunc("outer", ssa.NoArgsNoRet, ssa.InGo)
@@ -103,7 +102,7 @@ func TestGoPanicRoutineDoesNotReturnAfterUnreachable(t *testing.T) {
 }
 
 func TestGoPassesConfiguredStackSizeToRuntime(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	prog.SetPthreadStackSize(32 << 20)
 	pkg := prog.NewPackage("bar", "foo/bar")
 
@@ -127,7 +126,7 @@ func TestGoPassesConfiguredStackSizeToRuntime(t *testing.T) {
 }
 
 func TestGoPassesZeroStackSizeToRuntimeByDefault(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("bar", "foo/bar")
 
 	outer := pkg.NewFunc("outer", ssa.NoArgsNoRet, ssa.InGo)

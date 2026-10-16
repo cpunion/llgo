@@ -32,8 +32,8 @@ type llgoCoroSemaphoreParkV2 struct {
 	storage [256 - unsafe.Sizeof(uintptr(0))]byte
 }
 
-//go:linkname llgoCoroSemaphorePrepareOrAbortV2 C.__llgo_coro_sema_prepare_or_abort_v2
-func llgoCoroSemaphorePrepareOrAbortV2(state, addr unsafe.Pointer)
+//go:linkname llgoCoroSemaphorePrepareOrAbortV3 C.__llgo_coro_sema_prepare_or_abort_v3
+func llgoCoroSemaphorePrepareOrAbortV3(state, addr unsafe.Pointer, durable bool)
 
 //go:linkname llgoCoroSemaphoreReleaseOrAbortV2 C.__llgo_coro_sema_release_or_abort_v2
 func llgoCoroSemaphoreReleaseOrAbortV2(addr unsafe.Pointer)
@@ -46,6 +46,10 @@ func llgoCoroSemaphoreSuspendV2(state *llgoCoroSemaphoreParkV2, reserved uint32)
 // after wake it retires that exact generation and retries the CAS because a
 // different runnable goroutine is allowed to consume the released token.
 func semaAcquire(addr *uint32) {
+	semaAcquireWaitGroup(addr, false)
+}
+
+func semaAcquireWaitGroup(addr *uint32, durable bool) {
 	for {
 		value := latomic.LoadUint32(addr)
 		if value != 0 && latomic.CompareAndSwapUint32(addr, value, value-1) {
@@ -53,7 +57,9 @@ func semaAcquire(addr *uint32) {
 		}
 
 		var state llgoCoroSemaphoreParkV2
-		llgoCoroSemaphorePrepareOrAbortV2(unsafe.Pointer(&state), unsafe.Pointer(addr))
+		// One prepare/park span lets the compiler prove this opaque state is
+		// frame-owned for both ordinary and synctest-durable waits.
+		llgoCoroSemaphorePrepareOrAbortV3(unsafe.Pointer(&state), unsafe.Pointer(addr), durable)
 		llgoCoroSemaphoreSuspendV2(&state, 0)
 	}
 }

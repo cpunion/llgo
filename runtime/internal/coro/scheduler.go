@@ -1641,6 +1641,9 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		} else if !enqueueParkSet(p, g) {
 			return Action{}, false
 		}
+		if ExecutionDomainEnabled() && !parkExecutionDomainTask(g) {
+			return Action{}, false
+		}
 		return Action{Kind: ActionPark}, true
 	}
 	if destroy != nil {
@@ -1760,6 +1763,9 @@ func commitRootDestroyedCompatibility(p *P, g *G, kind ActionKind) (Action, bool
 	if panicking {
 		g.panicUnwind = false
 	}
+	if ExecutionDomainEnabled() && !retireExecutionDomainTask(g) {
+		return Action{}, false
+	}
 	g.state = GDead
 	g.runP = nil
 	p.current = nil
@@ -1820,6 +1826,9 @@ func finishBoundedRootDestroy(p *P, g *G, wasRoot, panicking bool) (Action, bool
 	g.destroyRoot = false
 	if panicking {
 		g.panicUnwind = false
+	}
+	if ExecutionDomainEnabled() && !retireExecutionDomainTask(g) {
+		return Action{}, false
 	}
 	g.state = GDead
 	g.runP = nil

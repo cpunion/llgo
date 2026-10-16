@@ -421,6 +421,10 @@ func FinishDirectChannelCompletion(
 		preemptLoad(&completion.state) != uint32(directChannelCompletionEffect) {
 		return nil, 0, false
 	}
+	if ExecutionDomainEnabled() &&
+		(completion.wait == nil || !PublishExecutionDomainTask(completion.wait.g)) {
+		return nil, 0, false
+	}
 	preemptStore(&completion.small, uint32(small))
 	preemptStore(&completion.preferred, uint32(preferred))
 	if !preemptCompareAndSwap(

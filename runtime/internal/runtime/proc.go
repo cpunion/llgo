@@ -133,10 +133,18 @@ func GMPForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, ps
 	mp := gp.m
 	pp := mp.p
 	core := gp.context
-	ctx := (*runtimeContext)(unsafe.Pointer(core))
-	return gp.goid, gp.parentGoid, mp.id, pp.id, readgstatus(gp), readpstatus(pp),
-		mp.curg == gp && pp.m == mp && core != nil &&
-			&ctx.coroRuntimeContext == core && &ctx.g == gp && &ctx.m == mp && &ctx.p == pp
+	linked = mp.curg == gp && pp.m == mp && core != nil && &core.g == gp
+	if linked && gp.startarg == nil {
+		// Native Gs and executor placeholders own their M/P in one complete
+		// runtimeContext allocation.
+		ctx := (*runtimeContext)(unsafe.Pointer(core))
+		linked = &ctx.coroRuntimeContext == core && &ctx.m == mp && &ctx.p == pp
+	} else if linked {
+		// A stackless logical G owns only coroRuntimeContext and temporarily
+		// borrows the executor's M/P while its physical frame is resumed.
+		linked = gp.localContext == &core.local
+	}
+	return gp.goid, gp.parentGoid, mp.id, pp.id, readgstatus(gp), readpstatus(pp), linked
 }
 
 // GStateForTesting reports the packed scheduler state without changing it.

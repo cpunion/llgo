@@ -1,8 +1,10 @@
 // LITTEST
+// Scope: common
 package main
 
 import (
 	"reflect"
+	"unsafe"
 
 	"github.com/xgo-dev/llgo/cl/_testrt/ptrtothislazy/dep"
 )
@@ -11,7 +13,20 @@ type Local struct {
 	N int
 }
 
+type PlainNew struct {
+	N int
+}
+
+// Reflection operations can suspend through method lookup/call, so the owner
+// is a coroutine and every pointer-construction path uses its managed entry.
 // CHECK-LABEL: define ptr @"main.main$coro"(
+// CHECK: call token @llvm.coro.id
+// CHECK-DAG: call ptr @"reflect.PointerTo$coro"
+// CHECK-DAG: call ptr @"reflect.New$coro"
+// CHECK-DAG: call ptr @"reflect.NewAt$coro"
+// CHECK-DAG: call ptr @"reflect.Value.Addr$coro"
+// CHECK-DAG: call ptr @"reflect.Value.MethodByName$coro"
+// CHECK-DAG: call ptr @"reflect.Value.Call$coro"
 func main() {
 	pointerTo := reflect.PointerTo
 
@@ -21,6 +36,21 @@ func main() {
 	localPtr := pointerTo(local)
 	if localPtr.Kind() != reflect.Pointer || localPtr.Elem() != local {
 		panic("failed to synthesize methodless pointer type")
+	}
+
+	// Keep the exact New/NewAt/Addr canonicalization shape from the historical
+	// ptrtothislazynew regression in this broader owner.
+	plainNew := reflect.TypeOf(PlainNew{})
+	wantNew := reflect.TypeOf((*PlainNew)(nil))
+	if reflect.New(plainNew).Type() != wantNew {
+		panic("New returned a non-canonical local pointer type")
+	}
+	var localValue PlainNew
+	if reflect.NewAt(plainNew, unsafe.Pointer(&localValue)).Type() != wantNew {
+		panic("NewAt returned a non-canonical local pointer type")
+	}
+	if reflect.ValueOf(&localValue).Elem().Addr().Type() != wantNew {
+		panic("Addr returned a non-canonical local pointer type")
 	}
 
 	// Plain comes from an imported package while *Plain is independently
@@ -34,6 +64,9 @@ func main() {
 		panic("New returned a non-canonical pointer type")
 	}
 	var value dep.Plain
+	if reflect.NewAt(plain, unsafe.Pointer(&value)).Type() != plainPtr {
+		panic("NewAt returned a non-canonical pointer type")
+	}
 	if reflect.ValueOf(&value).Elem().Addr().Type() != plainPtr {
 		panic("Addr returned a non-canonical pointer type")
 	}

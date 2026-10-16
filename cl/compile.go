@@ -33,6 +33,7 @@ import (
 	"github.com/xgo-dev/llgo/cl/blocks"
 	"github.com/xgo-dev/llgo/cl/ssawrap"
 	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/genmethod"
 	"github.com/xgo-dev/llgo/internal/goembed"
 	"github.com/xgo-dev/llgo/internal/typepatch"
 	"golang.org/x/tools/go/ssa"
@@ -204,10 +205,6 @@ type context struct {
 	// so helper inventory, analysis, and codegen agree about dead blocks.
 	physicalReachable    map[*ssa.BasicBlock]bool
 	coroOwnerBodySymbols map[string]none
-	// preservePatchedNamed keeps an alternate package's named type intact
-	// while constructing source-level ABI certificates. Ordinary codegen
-	// immediately lowers that replacement to its physical raw shape.
-	preservePatchedNamed bool
 	coroRootFactories    []coroRootFactoryRegistration
 	coroPlainDescriptors map[string]llssa.Expr
 	options              Options
@@ -239,7 +236,6 @@ type context struct {
 	cgoSymbols  []string
 	rewrites    map[string]string
 	embedMap    goembed.VarMap
-	embedInits  []embedInit
 
 	trackCallerFrames bool
 	staticGlobalInits map[*ssa.Global]llssa.Expr
@@ -410,6 +406,9 @@ func (p *context) compileMethodsIf(pkg llssa.Package, typ types.Type, keep func(
 	mthds := prog.MethodSets.MethodSet(typ)
 	for i, n := 0, mthds.Len(); i < n; i++ {
 		mthd := mthds.At(i)
+		if genmethod.SupportsGenericMethods && genmethod.IsGenericMethod(mthd.Type()) {
+			continue
+		}
 		if ssaMthd := p.methodValue(mthd); ssaMthd != nil {
 			if keep != nil && !keep(ssaMthd) {
 				continue
@@ -902,7 +901,11 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			p.goFn = f
 			p.patchOriginalInitIf = patchOriginalInitIf
 			p.rawPlainBody = rawPlain
-			p.physicalReachable = coroPhysicalConstantReachableBlocks(f)
+			var program *coroProgramIR
+			if universe := p.immutableEmissionUniverse(); universe != nil {
+				program = universe.coroProgramIR
+			}
+			p.physicalReachable = program.coroReachableBlocks(f)
 			p.locality.function = localityFunction{}
 			p.state = state // restore pkgState when compiling funcBody
 			oldCoroValueAddrs := p.coroValueAddrs
@@ -1358,9 +1361,6 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 
 	if doModInit {
 		p.initializeLocalGuardsWithCoroPlan(b)
-		if p.state != pkgInPatch {
-			p.applyEmbedInits(b)
-		}
 		if pyModInit = p.pyMod != ""; pyModInit {
 			last = len(instrs) - 1
 			instrs = instrs[:last]
@@ -1455,6 +1455,15 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 			}
 		} else {
 			p.compileInstr(b, instr)
+			// llgo.unreachable is an LLVM terminator. Go SSA still appends a
+			// synthetic Return for a direct tail call, so do not lower that
+			// Return into the already-terminated LLVM block. Restrict this to
+			// the tail form; branching successors can carry phis and need a
+			// separate control-flow rewrite rather than silently dropping an
+			// edge here.
+			if p.isDirectTailUnreachableCall(instr, instrs[i+1:]) {
+				break
+			}
 		}
 		if isTerminatingInstruction(instr) {
 			continue
@@ -1491,6 +1500,54 @@ end:
 		b.Jump(jumpTo)
 	}
 	return ret
+}
+
+func (p *context) isDirectTailUnreachableCall(instr ssa.Instruction, tail []ssa.Instruction) bool {
+	call, ok := instr.(*ssa.Call)
+	if !ok || call.Call.IsInvoke() {
+		return false
+	}
+	fn, ok := call.Call.Value.(*ssa.Function)
+	if !ok {
+		return false
+	}
+	_, name, kind := p.funcName(fn)
+	if kind != llgoInstr || llgoInstrs[name] != llgoUnreachable {
+		return false
+	}
+	sawRunDefers := false
+	for _, instr := range tail {
+		switch instr.(type) {
+		case *ssa.DebugRef:
+		case *ssa.RunDefers:
+			if sawRunDefers {
+				return false
+			}
+			sawRunDefers = true
+		case *ssa.Return:
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// isDirectTailUnreachableCallAt proves that call is the terminal source
+// operation in its SSA block, apart from the synthetic RunDefers/Return tail
+// that x/tools appends. Lowering uses this before creating a physical dead
+// continuation so the common tail form emits exactly one LLVM block and one
+// terminator.
+func (p *context) isDirectTailUnreachableCallAt(call *ssa.Call) bool {
+	if call == nil || call.Block() == nil {
+		return false
+	}
+	for i, instr := range call.Block().Instrs {
+		if instr == call {
+			return p.isDirectTailUnreachableCall(call, call.Block().Instrs[i+1:])
+		}
+	}
+	return false
 }
 
 const (
@@ -1634,6 +1691,12 @@ func (p *context) checkVArgs(v *ssa.Alloc, t *types.Pointer) bool {
 }
 
 func (p *context) skipSyntheticMakeSliceAlloc(v *ssa.Alloc) bool {
+	// syntheticMakeSliceCap requires this source identity too. Reject ordinary
+	// allocations before copying their (potentially very large) use lists in
+	// each frame-retention trace.
+	if v == nil || v.Comment != "makeslice" {
+		return false
+	}
 	refs, ok := nonDebugReferrers(v)
 	if !ok || len(refs) != 1 {
 		return false
@@ -2533,7 +2596,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				return
 			}
 			if unused {
-				if ssaAddressValueProvenNonNilAt(v.X, v) {
+				if p.addressValueProvenNonNilAt(v.X, v) {
 					// The unused load has no observable memory result. Preserve
 					// evaluation of its address producer (including bounds and
 					// other side effects), but do not manufacture a nil fault for
@@ -2666,7 +2729,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			x = p.compileCoroImplicitNilFieldAddrGuard(b, v, x)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("FieldAddr selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
-		} else if (!physicalPlanned || !p.coroUsesExplicitStatusFaults()) && p.isAddressOfFieldAddr(v) && !ssaAddressValueProvenNonNilAt(v.X, v) {
+		} else if (!physicalPlanned || !p.coroUsesExplicitStatusFaults()) && p.isAddressOfFieldAddr(v) && !p.addressValueProvenNonNilAt(v.X, v) {
 			b.AssertNilDeref(x)
 		}
 		if guardedFieldAddr {
@@ -2758,13 +2821,13 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			panic(fmt.Sprintf("IndexAddr selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
 		} else if b.Prog.BoundsChecksDisabled() {
 			if _, pointer := types.Unalias(p.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
-				emissionArrayPointerNeedsNilCheck(v.X, v) {
+				emissionArrayPointerNeedsNilCheck(p, v.X, v) {
 				b.AssertNilDeref(x)
 			}
 			ret = b.IndexAddrUnchecked(x, idx)
 		} else if p.frozenSafeFixedArrayIndex(v, v.X, v.Index) {
 			if _, pointer := types.Unalias(p.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
-				emissionArrayPointerNeedsNilCheck(v.X, v) {
+				emissionArrayPointerNeedsNilCheck(p, v.X, v) {
 				// Bounds safety says nothing about the implicit *array
 				// dereference. Keep its ordinary nil fault, routing it through
 				// the explicit outcome only in a physical coroutine body.
@@ -2808,7 +2871,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			case *types.Slice:
 				ret = b.Load(b.IndexAddrUnchecked(x, idx))
 			case *types.Pointer:
-				if emissionArrayPointerNeedsNilCheck(v.X, v) {
+				if emissionArrayPointerNeedsNilCheck(p, v.X, v) {
 					b.AssertNilDeref(x)
 				}
 				ret = b.Load(b.IndexAddrUnchecked(x, idx))
@@ -2820,7 +2883,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			case *types.Array:
 				ret = b.IndexUnchecked(x, idx, takeArrayAddr)
 			case *types.Pointer:
-				if emissionArrayPointerNeedsNilCheck(v.X, v) {
+				if emissionArrayPointerNeedsNilCheck(p, v.X, v) {
 					b.AssertNilDeref(x)
 				}
 				ret = b.Load(b.IndexAddrUnchecked(x, idx))
@@ -4349,7 +4412,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	}
 	ctx.initPyModule()
 	ctx.initFiles(pkgPath, files, pkgName == "C")
-	ctx.prog.SetPatch(ctx.patchType)
+	ctx.prog.SetPatch(ctx.patchPhysicalType)
 	ctx.prog.SetCompileMethods(ctx.checkCompileMethods)
 	ret.SetResolveLinkname(ctx.resolveLinkname)
 	if opts.Compilation != nil {
@@ -4587,37 +4650,75 @@ func (p *context) patchType(typ types.Type) (r types.Type) {
 }
 
 func (p *context) _patchType(typ types.Type) (types.Type, bool) {
+	return p.rewritePatchedType(typ, nil)
+}
+
+// patchPhysicalType is the shared descriptor/derived-layout patch boundary.
+// An exact inverse from Go lowering permits patching the source and lowering
+// it again, retaining source ownership for anonymous/promoted method sets.
+// Otherwise the graph may be raw C: only replaced named nodes are lowered,
+// never unrelated callback signatures. A proven Go declaration signature is
+// restored as a declaration, not a new closure. No names infer this domain.
+func (p *context) patchPhysicalType(typ types.Type) types.Type {
+	if p.prog == nil {
+		return p.patchType(typ)
+	}
+	if source := p.prog.SourceType(typ); source != typ {
+		patched := p.patchType(source)
+		if patched == source {
+			return typ
+		}
+		if _, declaration := types.Unalias(typ).(*types.Signature); declaration {
+			return p.prog.PhysicalFuncDecl(patched.(*types.Signature), llssa.InGo)
+		}
+		return p.prog.PhysicalType(patched, llssa.InGo)
+	}
+	r, _ := p.rewritePatchedType(typ, func(named types.Type) types.Type {
+		return p.prog.PhysicalType(named, llssa.InGo)
+	})
+	return r
+}
+
+// rewritePatchedType is the sole patch traversal. Source identity is the
+// default; physical consumers explicitly project only a named replacement.
+func (p *context) rewritePatchedType(typ types.Type, projectNamed func(types.Type) types.Type) (types.Type, bool) {
 	original := typ
 	if universe := p.immutableEmissionUniverse(); universe != nil {
 		typ, _ = universe.patchEmissionTypeGraph(p, typ)
 	}
+	project := func(replacement types.Type) types.Type {
+		if projectNamed != nil {
+			return projectNamed(replacement)
+		}
+		return replacement
+	}
 	switch typ := typ.(type) {
 	case *types.Alias:
 		actual := types.Unalias(typ)
-		if patched, ok := p._patchType(actual); ok {
+		if patched, ok := p.rewritePatchedType(actual, projectNamed); ok {
 			return patched, true
 		}
 	case *types.Pointer:
-		if t, ok := p._patchType(typ.Elem()); ok {
+		if t, ok := p.rewritePatchedType(typ.Elem(), projectNamed); ok {
 			return types.NewPointer(t), true
 		}
 	case *types.Slice:
-		if t, ok := p._patchType(typ.Elem()); ok {
+		if t, ok := p.rewritePatchedType(typ.Elem(), projectNamed); ok {
 			return types.NewSlice(t), true
 		}
 	case *types.Array:
-		if t, ok := p._patchType(typ.Elem()); ok {
+		if t, ok := p.rewritePatchedType(typ.Elem(), projectNamed); ok {
 			return types.NewArray(t, typ.Len()), true
 		}
 	case *types.Map:
 		var patched bool
 		key := typ.Key()
 		elem := typ.Elem()
-		if t, ok := p._patchType(key); ok {
+		if t, ok := p.rewritePatchedType(key, projectNamed); ok {
 			key = t
 			patched = true
 		}
-		if t, ok := p._patchType(elem); ok {
+		if t, ok := p.rewritePatchedType(elem, projectNamed); ok {
 			elem = t
 			patched = true
 		}
@@ -4625,7 +4726,7 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 			return types.NewMap(key, elem), true
 		}
 	case *types.Chan:
-		if t, ok := p._patchType(typ.Elem()); ok {
+		if t, ok := p.rewritePatchedType(typ.Elem(), projectNamed); ok {
 			return types.NewChan(typ.Dir(), t), true
 		}
 	case *types.Struct:
@@ -4634,7 +4735,7 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 		tags := make([]string, typ.NumFields())
 		for i := 0; i < typ.NumFields(); i++ {
 			v := typ.Field(i)
-			if t, ok := p._patchType(v.Type()); ok {
+			if t, ok := p.rewritePatchedType(v.Type(), projectNamed); ok {
 				vars[i] = types.NewField(v.Pos(), v.Pkg(), v.Name(), t, v.Anonymous())
 				patched = true
 			} else {
@@ -4652,7 +4753,7 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 		patched := false
 		for index := range methods {
 			method := typ.ExplicitMethod(index)
-			methodType, ok := p._patchType(method.Type())
+			methodType, ok := p.rewritePatchedType(method.Type(), projectNamed)
 			if ok {
 				methods[index] = types.NewFunc(method.Pos(), method.Pkg(), method.Name(), methodType.(*types.Signature))
 				patched = true
@@ -4662,7 +4763,7 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 		}
 		for index := range embeddeds {
 			embedded := typ.EmbeddedType(index)
-			if replacement, ok := p._patchType(embedded); ok {
+			if replacement, ok := p.rewritePatchedType(embedded, projectNamed); ok {
 				embeddeds[index] = replacement
 				patched = true
 			} else {
@@ -4678,7 +4779,7 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 		}
 	case *types.Named:
 		if t, ok := p.patchLocalGenericNamed(typ); ok {
-			return t, true
+			return project(t), true
 		}
 		o := typ.Obj()
 		if pkg := o.Pkg(); pkg != nil {
@@ -4694,20 +4795,21 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 					if replacement == typ {
 						break
 					}
-					if p.preservePatchedNamed {
-						return replacement, true
-					}
-					raw := p.prog.Type(replacement, llssa.InGo).RawType()
-					return raw, typ != raw
+					// Patching is a source-identity projection. Physical layout
+					// consumers explicitly apply Type/PhysicalType afterwards.
+					return project(replacement), true
 				}
 			}
+		}
+		if typ != original {
+			return project(typ), true
 		}
 	case *types.Tuple:
 		var patched bool
 		vars := make([]*types.Var, typ.Len())
 		for i := 0; i < typ.Len(); i++ {
 			v := typ.At(i)
-			if t, ok := p._patchType(v.Type()); ok {
+			if t, ok := p.rewritePatchedType(v.Type(), projectNamed); ok {
 				vars[i] = types.NewVar(v.Pos(), v.Pkg(), v.Name(), t)
 				patched = true
 			} else {
@@ -4718,8 +4820,8 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 			return types.NewTuple(vars...), true
 		}
 	case *types.Signature:
-		params, ok1 := p._patchType(typ.Params())
-		results, ok2 := p._patchType(typ.Results())
+		params, ok1 := p.rewritePatchedType(typ.Params(), projectNamed)
+		results, ok2 := p.rewritePatchedType(typ.Results(), projectNamed)
 		if ok1 || ok2 {
 			return types.NewSignature(typ.Recv(), params.(*types.Tuple), results.(*types.Tuple), typ.Variadic()), true
 		}

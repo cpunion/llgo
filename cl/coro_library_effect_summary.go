@@ -221,6 +221,13 @@ func (view CoroLibraryEffectView) ValidateFunction(
 			fact.ID, base, fact.RawPlainSymbol,
 		)
 	}
+	// Transport/index validation does not authorize ownership lowering. Until
+	// the exact typed initializer/drop and parent cleanup recipe are bound in
+	// ProgramIR, neither imports nor producer publication may silently discard
+	// this capability and emit an ordinary result transfer.
+	if !fact.Delivery.IsZero() {
+		return fmt.Errorf("coroutine library function %q requires a bound physical resource-delivery recipe", fact.ID)
+	}
 	return nil
 }
 
@@ -705,6 +712,10 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 		if err != nil {
 			return fmt.Errorf("coroutine library summary: program capabilities for %q: %w", functionPlan.ID, err)
 		}
+		programPredicates, err := p.compilation.CoroFunctionProgramPredicates(function)
+		if err != nil {
+			return fmt.Errorf("coroutine library summary: program predicates for %q: %w", functionPlan.ID, err)
+		}
 		fact := coro.LibraryEffectFunction{
 			ID:                    functionPlan.ID,
 			ABIHash:               abiHash,
@@ -720,6 +731,7 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			PrimarySymbol:         entry.name,
 			RawPlainSymbol:        rawPlainSymbol,
 			ProgramCapabilities:   programCapabilities,
+			ProgramPredicates:     programPredicates,
 			ExportIngress: func() bool {
 				_, ingress := plan.ForeignIngressRoot(function)
 				return ingress

@@ -85,6 +85,8 @@ func TestCoroHardCutoverRejectsLegacyProductionSurface(t *testing.T) {
 		"__llgo_coro_timer_prepare_after_v1",
 		"__llgo_coro_timer_retire_completed_v1",
 		"__llgo_coro_sema_prepare_or_abort_v1",
+		"__llgo_coro_sema_prepare_or_abort_v2",
+		"__llgo_coro_sema_prepare_durable_or_abort_v1",
 		"__llgo_coro_sema_retire_completed_or_abort_v1",
 		"__llgo_coro_sema_release_or_abort_v1",
 		"__llgo_coro_notify_prepare_or_abort_v1",

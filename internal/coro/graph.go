@@ -489,6 +489,13 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 			execFlags[call.Caller] = execFlags[call.Caller].Join(IRQUnsafe)
 		} else if call.Target.managedDispatch() {
 			effect = AwaitStructured
+			// An open descriptor call can select a managed target that requires the
+			// current logical Go context. The scheduler installs the caller's
+			// physical frame before descriptor selection, so the target cannot add
+			// that ambient context after dispatch. Keep it on the caller unless a
+			// closed target proof replaced this open boundary with exact edges.
+			localExec[call.Caller] = localExec[call.Caller].Join(NeedsRuntimeContext)
+			execFlags[call.Caller] = execFlags[call.Caller].Join(NeedsRuntimeContext)
 		} else {
 			effect = OpaqueSuspend
 			localExec[call.Caller] = localExec[call.Caller].Join(OpaqueExec)

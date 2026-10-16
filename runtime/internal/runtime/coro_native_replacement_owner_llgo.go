@@ -165,9 +165,7 @@ func coroNativeReplacementCommitDestroyV1(
 			)
 		}
 		if completed.Kind == coro.ActionPanicComplete {
-			return coroNativeFleetPhysicalOwnerFailV1(
-				"native replacement peer task panic",
-			)
+			coroReportTaskPanicV1(result.g)
 		}
 		return true
 	}
@@ -205,9 +203,8 @@ func coroNativeReplacementCommitDestroyV1(
 		}
 		return true
 	case coro.ActionPanicComplete:
-		return coroNativeFleetPhysicalOwnerFailV1(
-			"native replacement program task panic",
-		)
+		coroReportTaskPanicV1(result.g)
+		return false // terminal reporter cannot return
 	default:
 		return coroNativeFleetPhysicalOwnerFailV1(
 			"native replacement destroy receipt result invalid",

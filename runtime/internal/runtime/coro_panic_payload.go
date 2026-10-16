@@ -31,6 +31,14 @@ import (
 var coroPanicNilErrorV1 PanicNilError
 var coroPanicNilPayloadV1 any = &coroPanicNilErrorV1
 
+// Compiler-private trace transport modes; the core trace model still has only
+// New and Propagate. These two adapters use the canonical memory-fault identity
+// without requiring interface payload cells in a synchronous outcome body.
+const (
+	coroLogicalTraceNilNewV1       uint32 = 2
+	coroLogicalTraceNilPropagateV1 uint32 = 3
+)
+
 // coroNormalizePanicPayloadV1 returns the concrete empty-interface words used
 // by the explicit-status scheduler ABI. A nil type word is Go's untyped nil
 // panic value and is normalized to the Go 1.21+ *PanicNilError payload. A
@@ -95,7 +103,18 @@ func __llgo_coro_panic_trace_append_v1(
 	g, descriptor, typeWord, dataWord unsafe.Pointer,
 	line, mode uint32,
 ) {
-	typeWord, dataWord = coroNormalizePanicPayloadV1(typeWord, dataWord)
+	if mode == coroLogicalTraceNilNewV1 || mode == coroLogicalTraceNilPropagateV1 {
+		// Modes 2/3 are the compact nil-memory-fault counterparts of New /
+		// Propagate. A nil pair here means a memory error, not panic(nil).
+		// Normalization stays on the cold path and adds no task/frame fields.
+		if typeWord != nil || dataWord != nil {
+			coroRuntimeAbort("invalid compact nil-fault trace payload")
+		}
+		typeWord, dataWord = coroNilFaultPayloadV1()
+		mode -= coroLogicalTraceNilNewV1
+	} else {
+		typeWord, dataWord = coroNormalizePanicPayloadV1(typeWord, dataWord)
+	}
 	task := (*coro.G)(g)
 	traceMode := coro.LogicalPanicTraceMode(mode)
 	if typeWord == nil || !coro.PrepareLogicalPanicTrace(task, traceMode, typeWord, dataWord) {
@@ -191,12 +210,15 @@ func __llgo_coro_await_inline_destroy_consume_v4(g, parent, child, typeOut, data
 //export __llgo_coro_recover_alias_begin_v1
 func __llgo_coro_recover_alias_begin_v1(g, expected, token unsafe.Pointer, active bool) unsafe.Pointer {
 	task := (*coro.G)(g)
-	if token == nil || !coro.RecoverAliasScopeActive(task) {
-		coroRuntimeAbort("invalid coroutine recover alias begin")
+	if token == nil {
+		coroRuntimeAbort("invalid coroutine recover alias token")
+	}
+	if !coro.RecoverAliasScopeActive(task) {
+		coroRuntimeAbort("invalid coroutine recover alias activation")
 	}
 	previous, ok := coroBeginRecoverAliasRuntimeV1(task, expected, token, active)
 	if !ok {
-		coroRuntimeAbort("invalid coroutine recover alias begin")
+		coroRuntimeAbort("invalid coroutine recover alias runtime context")
 	}
 	return previous
 }

@@ -22,7 +22,7 @@ import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
-const LLGoFiles = "$(pkg-config --cflags bdw-gc): _wrap/coro_allocator.c"
+const LLGoFiles = "$(pkg-config --cflags bdw-gc): _wrap/coro_allocator.c; _wrap/coro_gc_notify.c"
 
 const (
 	Success = iota
@@ -70,6 +70,22 @@ func UnregisterMyThread() c.Int
 
 //go:linkname Malloc C.GC_malloc
 func Malloc(size uintptr) c.Pointer
+
+// The weak-pointer operations synchronize only with collector internals;
+// they never execute Go callbacks or transfer work to another executor. Live
+// is a collector-stable pointer-width cell, never a borrowed caller stack slot.
+//
+//llgo:coro sync
+//go:linkname RegisterWeak C.__llgo_coro_gc_register_weak_v1
+func RegisterWeak(object c.Pointer, live *uintptr) c.Int
+
+//llgo:coro sync
+//go:linkname StrongFromWeak C.__llgo_coro_gc_weak_strong_v1
+func StrongFromWeak(key uintptr, live *uintptr) c.Pointer
+
+//llgo:coro sync
+//go:linkname WeakHeapBase C.__llgo_coro_gc_weak_base_v1
+func WeakHeapBase(object c.Pointer) c.Pointer
 
 // MallocUncollectable allocates scanned memory that is not reclaimed until
 // Free. Coroutine frames and task records use this explicit-root storage; the

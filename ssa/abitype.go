@@ -25,6 +25,7 @@ import (
 	"go/types"
 	"sort"
 
+	"github.com/xgo-dev/llgo/internal/genmethod"
 	"github.com/xgo-dev/llgo/ssa/abi"
 	"github.com/xgo-dev/llvm"
 )
@@ -109,7 +110,7 @@ func abiTypeExtendedShape(t types.Type) types.Type {
 // fields without duplicating target-size or method-set decisions.
 func (p Program) ABITypeImplicitDescriptorTypes(t types.Type) []types.Type {
 	ret := make([]types.Type, 0, 2)
-	if ptr, static := staticPtrToThis(t); static {
+	if ptr, static := p.staticPtrToThis(t); static {
 		ret = append(ret, ptr)
 	}
 	shape := abiTypeExtendedShape(t)
@@ -140,12 +141,12 @@ func directIfaceType(t types.Type) bool {
 // staticPtrToThis reports whether *T must have a statically generated type
 // descriptor. Runtime reflection can synthesize descriptors for methodless
 // pointer types, but it cannot synthesize their method metadata.
-func staticPtrToThis(t types.Type) (types.Type, bool) {
+func (p Program) staticPtrToThis(t types.Type) (types.Type, bool) {
 	if _, ok := types.Unalias(t).(*types.Pointer); ok {
 		return nil, false
 	}
 	ptr := types.NewPointer(t)
-	return ptr, types.NewMethodSet(ptr).Len() != 0
+	return ptr, types.NewMethodSet(p.SourceType(ptr)).Len() != 0
 }
 
 func (b Builder) abiCommonFields(t types.Type, name string, hasUncommon bool, global llvm.Value) (fields []llvm.Value) {
@@ -198,7 +199,7 @@ func (b Builder) abiCommonFields(t types.Type, name string, hasUncommon bool, gl
 	// Str_       string
 	fields = append(fields, b.Str(ab.Str(t)).impl)
 	// PtrToThis_ *Type
-	ptr, static := staticPtrToThis(t)
+	ptr, static := prog.staticPtrToThis(t)
 	if !static {
 		fields = append(fields, prog.Nil(prog.AbiTypePtr()).impl)
 	} else {
@@ -285,7 +286,7 @@ func (b Builder) abiInterfaceImethods(t *types.Interface, name string) llvm.Valu
 				name = abi.FullName(f.Pkg(), name)
 			}
 			values = append(values, b.Str(name).impl)
-			ftyp := funcType(prog, f.Type())
+			ftyp := funcType(prog, prog.SourceType(f.Type()))
 			values = append(values, b.abiType(ftyp).impl)
 			fields[i] = llvm.ConstNamedStruct(ft.ll, values)
 		}
@@ -426,7 +427,7 @@ func (b Builder) directTypeChildren(t types.Type) []types.Type {
 	children := b.structuralTypeChildren(t)
 	// Runtime reflection can lazily derive methodless *T descriptors. Keep the
 	// type-child edge only when the static descriptor carries method metadata.
-	if ptr, static := staticPtrToThis(t); static {
+	if ptr, static := b.Prog.staticPtrToThis(t); static {
 		children = append(children, ptr)
 	}
 	return children
@@ -501,6 +502,9 @@ func reflectPkgPath(pkg *types.Package) string {
 
 func (b Builder) abiUncommonMethodSet(t types.Type) (mset *types.MethodSet, ok bool) {
 	prog := b.Prog
+	// ABI storage is physical, but its Go method selections and compilation
+	// demands must retain their exact source receiver and defining scope.
+	t = prog.SourceType(t)
 	switch t := types.Unalias(t).(type) {
 	case *types.Named:
 		if _, b := t.Underlying().(*types.Interface); b {
@@ -695,6 +699,9 @@ func (b Builder) abiInterfaceMethods(mset *types.MethodSet) []*types.Selection {
 	methods := make([]*types.Selection, 0, n)
 	for i := 0; i < n; i++ {
 		m := mset.At(i)
+		if genmethod.SupportsGenericMethods && genmethod.IsGenericMethod(m.Type()) {
+			continue
+		}
 		fn, _ := m.Obj().(*types.Func)
 		if b.Prog.isNoInterfaceMethod(fn) {
 			continue
@@ -846,7 +853,7 @@ func (p Program) AbiTypes() []AbiTypeInfo {
 	ret := make([]AbiTypeInfo, 0, len(names))
 	for _, name := range names {
 		sym := p.abiSymbol[name]
-		ret = append(ret, AbiTypeInfo{Name: name, Raw: sym.Raw})
+		ret = append(ret, AbiTypeInfo{Name: name, Raw: sym.Raw, source: p.SourceType(sym.Raw)})
 	}
 	return ret
 }
@@ -860,12 +867,28 @@ func (p Package) RegisterAbiTypes(infos []AbiTypeInfo) {
 		if info.Raw == nil {
 			continue
 		}
-		if _, ok := p.Prog.abiSymbol[info.Name]; ok {
+		if info.source == nil {
+			panic("ssa: imported ABI type has no exact source identity")
+		}
+		prior, declared := p.Prog.abiSymbol[info.Name]
+		if declared {
+			if !types.Identical(p.Prog.SourceType(prior.Raw), info.source) {
+				panic("ssa: conflicting source identities for imported ABI type")
+			}
+		}
+		if known := p.Prog.gocvt.sources[info.Raw]; known != nil {
+			if !types.Identical(known, info.source) {
+				panic("ssa: imported ABI type conflicts with its exact source projection")
+			}
+		} else {
+			p.Prog.gocvt.recordSourceType(info.Raw, info.source)
+		}
+		if declared {
 			continue
 		}
 
 		t := info.Raw
-		mset, hasUncommon := abiUncommonMethodSetForDeclaration(t)
+		mset, hasUncommon := abiUncommonMethodSetForDeclaration(info.source)
 		var methods []*types.Selection
 		if hasUncommon {
 			methods = builder.abiInterfaceMethods(mset)

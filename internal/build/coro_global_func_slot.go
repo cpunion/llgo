@@ -162,6 +162,17 @@ func proveCoroGlobalFunctionSlotClosedDynamicCalls(
 				if !ok || !coroGlobalFunctionSlotSignature(global, call.Common().Signature()) {
 					continue
 				}
+				site, planned, err := ctx.coroEmission.CoroCallSitePlan(call)
+				if err != nil {
+					return nil, nil, fmt.Errorf("resolve global function-slot reader in %q: %w", owner.Name(), err)
+				}
+				if planned && site.Elision == cl.CoroCallElidedFrontendUnevaluated {
+					// The same frozen CFG projection removes this source call
+					// before effect analysis and emission. Do not manufacture a
+					// Dispatch certificate (or conditional Store demand) for it.
+					// An EmitNone owner alone is deliberately not sufficient.
+					continue
+				}
 				identity, certified, err := ctx.coroEmission.CoroGlobalPhysicalIdentity(global)
 				if err != nil {
 					return nil, nil, fmt.Errorf("resolve global function slot %q physical identity: %w", global.Name(), err)

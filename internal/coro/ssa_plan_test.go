@@ -1325,7 +1325,7 @@ func owner() uintptr { return observePC(codeTarget) }
 		t.Fatal("owner has no observePC call")
 	}
 	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
-		ClassifyStaticCodeAddressCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+		ClassifyStaticFunctionReferenceCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
 			return caller == owner && call == observedCall && argument == 0, nil
 		},
 		MaxPlainInstructions: -1,
@@ -1333,7 +1333,7 @@ func owner() uintptr { return observePC(codeTarget) }
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !plan.StaticCodeAddressArgument(observedCall, 0) || plan.RawFunctionAddressArgument(observedCall, 0) {
+	if !plan.StaticFunctionReferenceArgument(observedCall, 0) || plan.RawFunctionAddressArgument(observedCall, 0) {
 		t.Fatal("code-address observation was not kept distinct from a raw invocation capability")
 	}
 	got := functionPlanFor(t, plan, target)
@@ -1347,8 +1347,10 @@ func TestAnalyzeSSAStaticCodeAddressOnlyTargetDoesNotEnterManagedCHA(t *testing.
 		name                string
 		ordinaryPublication string
 		wantRep             FuncRep
+		bareIdentity        bool
 	}{
 		{name: "code address only", wantRep: DirectCoro},
+		{name: "compiler identity only", bareIdentity: true, wantRep: DirectCoro},
 		{
 			name: "ordinary publication remains managed",
 			ordinaryPublication: `
@@ -1357,22 +1359,34 @@ func publish() { published = codeTarget }
 `,
 			wantRep: Dispatch,
 		},
+		{
+			name: "compiler identity plus ordinary publication",
+			ordinaryPublication: `
+var published func()
+func publish() { published = codeTarget }
+`,
+			bareIdentity: true, wantRep: Dispatch,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			prog, pkg := buildCoroTestSSA(t, "static_code_address_cha.go", `package coroid
+			source := `package coroid
 var channel chan int
 func codeTarget() { <-channel }
 func observePC(any) uintptr { return 0 }
 func owner() uintptr { return observePC(codeTarget) }
 func dormant(callback func()) { callback() }
-`+test.ordinaryPublication)
+` + test.ordinaryPublication
+			if test.bareIdentity {
+				source = strings.Replace(source, "observePC(any)", "observePC(func())", 1)
+			}
+			prog, pkg := buildCoroTestSSA(t, "static_code_address_cha.go", source)
 			owner := packageFunction(t, pkg, "owner")
 			target := packageFunction(t, pkg, "codeTarget")
 			observer := packageFunction(t, pkg, "observePC")
 			observedCall := onlyNonBuiltinCall(t, owner)
 			plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
 				DynamicResolution: DynamicCHAOpen,
-				ClassifyStaticCodeAddressCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+				ClassifyStaticFunctionReferenceCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
 					return caller == owner && call == observedCall && call.Common().StaticCallee() == observer && argument == 0, nil
 				},
 				MaxPlainInstructions: -1,
@@ -1614,6 +1628,56 @@ func straight(a int) int { a++; a++; a++; return a }
 	}
 	if got := functionPlanFor(t, plan, straight); !got.Exec.Contains(NeedsPreempt) || !got.Effect.Contains(YieldOnly) {
 		t.Fatalf("static cost did not seed preemption: %+v", got)
+	}
+}
+
+func TestAnalyzeSSABoundedCycleCostSuppressesOnlyCoveredPreemptionSeed(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "bounded_cycle.go", `package coroid
+func bounded() int {
+	total := 0
+	for i := 0; i < 4; i++ {
+		total += i
+	}
+	return total
+}
+`)
+	bounded := packageFunction(t, pkg, "bounded")
+	baseFacts := scanSSAFunctionBody(bounded)
+	if !baseFacts.HasCycle {
+		t.Fatal("bounded fixture has no SSA cycle")
+	}
+	bound := uint64(baseFacts.InstructionCount + 8)
+	analyze := func(budget int) (*SSAPlan, FunctionPlan) {
+		t.Helper()
+		plan, err := AnalyzeSSA(prog, Roots{{Function: bounded, Demand: AsyncDemand}}, SSAConfig{
+			MaxPlainInstructions: budget,
+			ClassifyLocalBody: func(function *ssa.Function) (SSAFunctionBodyFacts, error) {
+				facts := scanSSAFunctionBody(function)
+				if function == bounded {
+					facts.BoundedCycleCost = bound
+				}
+				return facts, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan, functionPlanFor(t, plan, bounded)
+	}
+
+	coveredPlan, covered := analyze(int(bound))
+	if covered.Exec.Contains(NeedsPreempt) || covered.Effect.Contains(YieldOnly) || covered.Emission != EmitPlain {
+		t.Fatalf("covered bounded cycle plan = %+v, want plain without a poll", covered)
+	}
+	if cost, ok := coveredPlan.BoundedCycleCost(bounded); !ok || cost != bound {
+		t.Fatalf("accepted bounded cycle capability = %d, %t; want %d, true", cost, ok, bound)
+	}
+	uncoveredPlan, uncovered := analyze(int(bound - 1))
+	if !uncovered.Exec.Contains(NeedsPreempt) || !uncovered.Effect.Contains(YieldOnly) || uncovered.Emission != EmitCoroutine {
+		t.Fatalf("cycle above proven budget plan = %+v, want preemptible coroutine", uncovered)
+	}
+	if cost, ok := uncoveredPlan.BoundedCycleCost(bounded); ok || cost != 0 {
+		t.Fatalf("over-budget bounded cycle capability = %d, %t; want 0, false", cost, ok)
 	}
 }
 
@@ -2092,13 +2156,17 @@ func TestAnalyzeSSACHAClosedIncludesEffectiveManagedPublication(t *testing.T) {
 func foreign()
 func adapter() {}
 func invoke(fn func()) { fn() }
-func seed() { invoke(foreign) }
+func codeTarget() {}
+func observePC(any) uintptr { return 0 }
+func seed() { observePC(codeTarget); invoke(foreign) }
 `)
 	foreign := packageFunction(t, pkg, "foreign")
 	adapter := packageFunction(t, pkg, "adapter")
 	invoke := packageFunction(t, pkg, "invoke")
 	seed := packageFunction(t, pkg, "seed")
-	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{adapter, invoke, seed})
+	observer := packageFunction(t, pkg, "observePC")
+	codeTarget := packageFunction(t, pkg, "codeTarget")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{adapter, invoke, seed, observer, codeTarget})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2133,6 +2201,9 @@ func seed() { invoke(foreign) }
 			config := SSAConfig{
 				DynamicResolution: DynamicCHAClosed,
 				EmissionUniverse:  universe,
+				ClassifyStaticFunctionReferenceCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+					return caller == seed && call.Common().StaticCallee() == observer && argument == 0, nil
+				},
 				ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {
 					if call.Common().StaticCallee() == nil {
 						return UnknownManagedDispatch, nil

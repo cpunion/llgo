@@ -49,6 +49,7 @@ type coroNativeForeignBoundaryV1 struct {
 	baton               coro.ExecutionDomainHandoffHandle
 	landing             unsafe.Pointer
 	escape              coro.CompletionSnapshot
+	callbackFaultScope  uintptr
 	replacementQueued   bool
 	replacementDeferred bool
 	callbackAcquired    bool
@@ -66,8 +67,8 @@ var (
 // coroworker.Result which remains live for this exact call; the compiler's
 // frozen foreign borrow contract keeps that scratch result in the native or
 // coroutine frame instead of the collector heap. traceTarget is used only for
-// fault attribution; zero disables the hardware-fault landing pad for a
-// reentry-capable boundary which cannot be abandoned by siglongjmp.
+// fault attribution; zero disables the hardware-fault landing pad. Managed
+// reentry suspends that landing until the callback has completed its resume.
 //
 //go:linkname coroWorkerCallWordsV2 C.__llgo_coro_worker_call_words_v2
 func coroWorkerCallWordsV2(
@@ -76,6 +77,12 @@ func coroWorkerCallWordsV2(
 	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 	resultAddress uintptr,
 ) bool
+
+//go:linkname coroWorkerFaultSuspendV1 C.__llgo_coro_worker_fault_suspend_v1
+func coroWorkerFaultSuspendV1() uintptr
+
+//go:linkname coroWorkerFaultResumeV1 C.__llgo_coro_worker_fault_resume_v1
+func coroWorkerFaultResumeV1(scope uintptr) bool
 
 // coroNativeForeignBoundaryTLSStartV1 makes the process-global pthread key an
 // explicit part of native-fleet startup. Runtime-only archives and other
@@ -482,7 +489,7 @@ func (boundary *coroNativeForeignBoundaryV1) restartReplacementV1() bool {
 }
 
 func (boundary *coroNativeForeignBoundaryV1) finishV1() bool {
-	if boundary == nil || boundary.callbackAcquired || boundary.landing != nil ||
+	if boundary == nil || boundary.callbackAcquired || boundary.callbackFaultScope != 0 || boundary.landing != nil ||
 		boundary.escape != (coro.CompletionSnapshot{}) {
 		return false
 	}
@@ -551,12 +558,14 @@ func coroNativeForeignBoundaryRestoreTLSV1(
 //
 //export __llgo_coro_foreign_reentry_acquire_v1
 func __llgo_coro_foreign_reentry_acquire_v1(parentOut *unsafe.Pointer) unsafe.Pointer {
+	faultScope := coroWorkerFaultSuspendV1()
 	if !coroNativeForeignBoundaryTLSReadyV1 {
 		coroRuntimeAbort("synchronous foreign callback TLS is unavailable")
 	}
 	boundary := coroNativeForeignBoundaryTLSV1.Get()
 	if parentOut == nil || boundary == nil || !boundary.active ||
 		boundary.landing == nil || boundary.callbackAcquired ||
+		boundary.callbackFaultScope != 0 || faultScope == 0 ||
 		boundary.escape != (coro.CompletionSnapshot{}) ||
 		!boundary.reclaimReplacementV1() {
 		coroRuntimeAbort("invalid synchronous foreign callback acquire")
@@ -566,6 +575,7 @@ func __llgo_coro_foreign_reentry_acquire_v1(parentOut *unsafe.Pointer) unsafe.Po
 		coroRuntimeAbort("synchronous foreign callback lost parent context")
 	}
 	boundary.callbackAcquired = true
+	boundary.callbackFaultScope = faultScope
 	*parentOut = parent
 	return unsafe.Pointer(task)
 }
@@ -622,6 +632,17 @@ func coroNativeForeignReentryRunV1(
 				coroRuntimeAbort("synchronous foreign callback completion reconciliation failed")
 			}
 			boundary.callbackAcquired = false
+			faultScope := boundary.callbackFaultScope
+			boundary.callbackFaultScope = 0
+			// A failed child escapes the C activation instead of returning to
+			// it. Keep its abandoned landing detached; only a normal callback
+			// return may rearm it, after all managed resumes have completed.
+			if snapshot.Status == coro.CompletionReturn ||
+				snapshot.Status == coro.CompletionReturnRecovered {
+				if !coroWorkerFaultResumeV1(faultScope) {
+					coroRuntimeAbort("synchronous foreign callback fault scope restore failed")
+				}
+			}
 			return snapshot
 		default:
 			coroRuntimeAbort("synchronous foreign callback runner stopped unexpectedly")
@@ -706,11 +727,11 @@ func __llgo_coro_foreign_reentry_failure_v1(
 //export __llgo_coro_same_m_foreign_reentry_call_v2
 func __llgo_coro_same_m_foreign_reentry_call_v2(
 	g unsafe.Pointer,
-	thunk, record uintptr,
+	thunk, record, traceTarget uintptr,
 	typeOut, dataOut *unsafe.Pointer,
 ) uint32 {
 	task := (*coro.G)(g)
-	if thunk == 0 || record == 0 || typeOut == nil || dataOut == nil ||
+	if thunk == 0 || record == 0 || traceTarget == 0 || typeOut == nil || dataOut == nil ||
 		typeOut == dataOut {
 		coroRuntimeAbort("invalid same-M foreign reentry call")
 	}
@@ -726,14 +747,11 @@ func __llgo_coro_same_m_foreign_reentry_call_v2(
 	if boundary.landing == nil {
 		coroRuntimeAbort("same-M foreign reentry call cannot allocate landing")
 	}
+	var result coroworker.Result
 	landed := c.Sigsetjmp(boundary.landing, c.Int(0))
 	if landed == 0 {
-		// A reentry-capable boundary cannot be abandoned by the signal-fault
-		// landing pad. The zero trace target preserves the process disposition;
-		// only the explicit callback outcome hook may reach this setjmp.
-		var result coroworker.Result
 		if !coroWorkerCallWordsV2(
-			thunk, 0, 1,
+			thunk, traceTarget, 1,
 			record, 0, 0, 0, 0, 0, 0, 0, 0,
 			uintptr(unsafe.Pointer(&result)),
 		) {
@@ -759,6 +777,23 @@ func __llgo_coro_same_m_foreign_reentry_call_v2(
 	}
 	if !boundary.finishV1() {
 		coroRuntimeAbort("same-M foreign reentry call cannot restore active resume")
+	}
+	if landed == 0 && result.Fault != coroworker.FaultNone {
+		// Deliver only after restoring the exact detached resume. No signal
+		// handler or C landing may unwind through llvm.coro.resume.
+		if !StoreCoroWorkerFaultPCs(task, result.FaultPC, result.FaultTarget) {
+			coroRuntimeAbort("same-M foreign fault has no traceback identity")
+		}
+		kind := uint32(coroFaultNilV1)
+		switch result.Fault {
+		case coroworker.FaultMemory:
+		case coroworker.FaultDivide:
+			kind = coroFaultIntegerDivideByZeroV1
+		default:
+			coroRuntimeAbort("same-M foreign call returned unknown fault")
+		}
+		snapshot.Status = coro.CompletionPanic
+		snapshot.TypeWord, snapshot.DataWord = coroFaultPayloadV1(kind)
 	}
 	*typeOut = snapshot.TypeWord
 	*dataOut = snapshot.DataWord

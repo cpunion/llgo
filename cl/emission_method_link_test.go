@@ -574,10 +574,10 @@ func UseString() int { return Generic[string]() }
 		if !owned {
 			continue
 		}
-		variant := variantOf(universe.effectiveType(owner, fn, fn.Signature, false))
+		variant := variantOf(universe.effectiveType(owner, fn, fn.Signature))
 		if variant == "" {
 			for _, free := range fn.FreeVars {
-				variant = variantOf(universe.effectiveType(owner, fn, free.Type(), false))
+				variant = variantOf(universe.effectiveType(owner, fn, free.Type()))
 				if variant != "" {
 					break
 				}

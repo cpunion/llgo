@@ -243,11 +243,76 @@ func Worker(enabled bool) {
 		t.Fatalf("reachable native syscall capability = (%t, %v), want no worker", seeds[function].Worker(), err)
 	}
 
-	plan.operation = coroPhysicalOperationWorkerCgo
+	for _, operation := range []coroPhysicalOperationRecipe{
+		coroPhysicalOperationGeneratedCgoSameM,
+		coroPhysicalOperationGeneratedCgoErrnoSameM,
+	} {
+		plan.operation = operation
+		physical.instructions[reachable] = plan
+		seeds, err = commit().programCapabilitySeeds()
+		if err != nil || seeds[function].Worker() {
+			t.Fatalf("reachable %s capability = (%t, %v), want no worker", operation, seeds[function].Worker(), err)
+		}
+	}
+
+	plan.operation = coroPhysicalOperationGeneratedCgoWorker
 	physical.instructions[reachable] = plan
 	seeds, err = commit().programCapabilitySeeds()
 	if err != nil || !seeds[function].Worker() {
 		t.Fatalf("reachable worker capability = (%t, %v), want worker", seeds[function].Worker(), err)
+	}
+}
+
+func TestCoroProgramCapabilitiesExcludeSameMGeneratedCgoCleanup(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+func adapter()
+func Root() { defer adapter() }
+`)
+	function := ssaPkg.Func("Root")
+	var deferred *ssa.Defer
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.Defer); ok {
+				deferred = candidate
+			}
+		}
+	}
+	if deferred == nil {
+		t.Fatal("same-M generated-cgo cleanup fixture has no defer")
+	}
+	owner := &preparedEmissionPackage{identity: "foo"}
+	physical := &coroPhysicalFunctionPlan{
+		function:        function,
+		owner:           owner,
+		reachableBlocks: coroPhysicalConstantReachableBlocks(function),
+		instructions:    make(map[ssa.Instruction]coroPhysicalInstructionPlan),
+		cleanup: &coroStaticCleanupPlan{sites: []*coroStaticCleanupSitePlan{{
+			instruction: deferred,
+			kind:        coroStaticCleanupGeneratedCgo,
+			generatedCgo: &coroGeneratedCgoCallShape{
+				mode:    coroForeignCallModeSameM,
+				reentry: coro.ReentryManagedIngress,
+			},
+		}}},
+	}
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			physical.instructions[instruction] = coroPhysicalInstructionPlan{}
+		}
+	}
+	stage := newCoroPhysicalPlanStage()
+	if err := stage.freezePhysicalFunctionPlan(physical); err != nil {
+		t.Fatal(err)
+	}
+	ir := newCoroProgramIR()
+	ir.callsFrozen = true
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	if err := ir.commitPhysicalFunctionPlans(stage, map[emissionFunctionOwnerKey]none{key: {}}); err != nil {
+		t.Fatal(err)
+	}
+	seeds, err := ir.programCapabilitySeeds()
+	if err != nil || seeds[function].Worker() {
+		t.Fatalf("same-M generated-cgo cleanup capability = (%#x, %v), want no worker", seeds[function], err)
 	}
 }
 
@@ -303,8 +368,9 @@ func TestCoroProgramCapabilitiesIncludeRangeYieldWorkerCleanup(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
 func seq(yield func(int) bool) { _ = yield(1) }
 func foreign(int)
+func ownerCleanup(int) {}
 func Root() {
-	defer foreign(-1)
+	defer ownerCleanup(-1)
 	for value := range seq {
 		defer foreign(value)
 	}
@@ -348,7 +414,12 @@ func Root() {
 		reachableBlocks: coroPhysicalConstantReachableBlocks(function),
 		instructions:    make(map[ssa.Instruction]coroPhysicalInstructionPlan),
 		cleanup: &coroStaticCleanupPlan{
-			sites:      []*coroStaticCleanupSitePlan{workerSite(ownerDefer), workerSite(yieldDefer)},
+			// Only the nested yield needs a worker. The owner's ordinary defer
+			// must not conceal a lost yield capability in the final assertion.
+			sites: []*coroStaticCleanupSitePlan{
+				{instruction: ownerDefer, kind: coroStaticCleanupPlain, target: ssaPkg.Func("ownerCleanup")},
+				workerSite(yieldDefer),
+			},
 			stackOwner: function,
 			dynamic:    true,
 		},
@@ -368,6 +439,13 @@ func Root() {
 	if err := ir.commitPhysicalFunctionPlans(stage, map[emissionFunctionOwnerKey]none{key: {}}); err != nil {
 		t.Fatal(err)
 	}
+	// A range-yield cleanup belongs to Root's stack but must consume the yield
+	// function's already-frozen CFG projection. An incomplete transaction must
+	// fail closed rather than silently drop its worker demand or rescan SSA.
+	if _, err := ir.programCapabilitySeeds(); err == nil || !strings.Contains(err.Error(), "incomplete cleanup site 1") {
+		t.Fatalf("range-yield cleanup without a frozen CFG = %v, want rejection", err)
+	}
+	ir.reachableBlocks[yield] = coroPhysicalConstantReachableBlocks(yield)
 	seeds, err := ir.programCapabilitySeeds()
 	if err != nil || !seeds[function].Worker() {
 		t.Fatalf("range-yield worker cleanup capability = (%#x, %v), want worker", seeds[function], err)
@@ -515,14 +593,14 @@ func Dead() {}
 			leaf: coro.NewProgramCapabilities(true, false),
 		},
 		map[*ssa.Function]coro.LibraryEffectFunction{
-			leaf: {ProgramCapabilities: coro.NativeDefaultFaultBoundaryProgramCapability()},
+			leaf: {ProgramCapabilities: coro.NativeDefaultFaultBoundaryProgramCapability() | coro.ExecutionDomainProgramCapability()},
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if root := capabilities[ssaPkg.Func("Root")]; !root.Worker() ||
-		!root.NativeDefaultFaultBoundary() || root.DynamicPanicOnFault() {
+		!root.NativeDefaultFaultBoundary() || root.DynamicPanicOnFault() || !root.ExecutionDomain() {
 		t.Fatalf("root capabilities = %#x, want imported panic + physical worker closure", root)
 	}
 	if dead := capabilities[ssaPkg.Func("Dead")]; dead != 0 {

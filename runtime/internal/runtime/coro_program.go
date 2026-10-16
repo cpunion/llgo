@@ -295,11 +295,20 @@ func coroProgramBeginV1(manifest, expectedFactory unsafe.Pointer) (unsafe.Pointe
 }
 
 func coroProgramFinishPanicV1(g *coroG, action coro.Action) coroProgramDriveStatusV1 {
-	if g == nil || action.Kind != coro.ActionPanicComplete || action.Handle != nil {
+	if g == nil || action.Kind != coro.ActionPanicComplete || action.Handle != nil || !coro.DeadG(g) {
 		return coroProgramFailV1()
 	}
 	if _, published := coro.LoadPanicRecord(g); !published {
 		return coroProgramFailV1()
+	}
+	if g != &coroProgramGV1State || coroProgramExecutorBoundV1State {
+		// An unhandled task panic terminates the process, not just that G.
+		// Main can commit its panic while ready/parked peers still own the
+		// executor; this is not a completed program-wide terminal close.
+		// Report the committed G directly, as child/peer/replacement owners do,
+		// without claiming the command reporter's retired-executor authority.
+		coroReportTaskPanicV1(g)
+		return coroProgramFailV1() // terminal reporter cannot return
 	}
 	_ = coroProgramDriveAdmissionV1State.RevokeEpoch()
 	coroProgramLifecycleV1State = coroProgramFailedV1
@@ -339,9 +348,6 @@ func coroProgramConfirmTerminalJoinV1() coroProgramDriveStatusV1 {
 		}
 		return coroProgramFinishMainV1()
 	case coro.ActionPanicComplete:
-		if g != &coroProgramGV1State {
-			return coroProgramFailV1()
-		}
 		return coroProgramFinishPanicV1(g, action)
 	default:
 		return coroProgramFailV1()

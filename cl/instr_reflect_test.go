@@ -122,6 +122,7 @@ func Use(value reflect.Value, typ reflect.Type, pointer unsafe.Pointer) {
 	_ = reflect.PointerTo(typ)
 	_ = reflect.PtrTo(typ)
 	_ = reflect.SliceOf(typ)
+	_ = reflect.SliceAt(typ, pointer, 0)
 	_ = reflect.StructOf(nil)
 }
 `
@@ -150,6 +151,7 @@ func Use(value reflect.Value, typ reflect.Type, pointer unsafe.Pointer) {
 		"reflect.PointerTo":      llssa.ReflectPointerTo,
 		"reflect.PtrTo":          llssa.ReflectPointerTo,
 		"reflect.SliceOf":        llssa.ReflectSliceOf,
+		"reflect.SliceAt":        llssa.ReflectSliceOf,
 		"reflect.StructOf":       llssa.ReflectStructOf,
 	} {
 		if got[name] != want {

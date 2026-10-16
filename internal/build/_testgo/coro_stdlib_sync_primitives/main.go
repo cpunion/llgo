@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -35,6 +36,49 @@ func awaitDemandGate(gate, ready, done *sync.WaitGroup) {
 	ready.Done()
 	gate.Wait()
 	done.Done()
+}
+
+// All three Value writers use the stdlib first-publication pin region. Mixed
+// contenders cover its failed-CAS retry as well as normal publication, while
+// readers must never observe the transient type marker. In particular these
+// operations must not acquire a native mutex on a worker and unlock it after
+// resuming on an executor thread.
+func atomicValueFirstPublication() {
+	var readers sync.WaitGroup
+	for round := 0; round < 8; round++ {
+		readers.Add(12)
+		for reader := 0; reader < 12; reader++ {
+			go func() {
+				var value atomic.Value
+				var writers sync.WaitGroup
+				writers.Add(3)
+				for mode := 0; mode < 3; mode++ {
+					go func() {
+						switch mode {
+						case 0:
+							value.Store(7)
+						case 1:
+							value.Swap(7)
+						case 2:
+							value.CompareAndSwap(nil, 7)
+						}
+						writers.Done()
+					}()
+				}
+				for read := 0; read < 1000; read++ {
+					if got := value.Load(); got != nil && got != 7 {
+						panic("atomic.Value exposed an incomplete publication")
+					}
+				}
+				writers.Wait()
+				if value.Load() != 7 {
+					panic("atomic.Value lost its completed publication")
+				}
+				readers.Done()
+			}()
+		}
+		readers.Wait()
+	}
 }
 
 func main() {
@@ -79,4 +123,9 @@ func main() {
 		demandGates[index].Done()
 	}
 	demandDone.Wait()
+	for _, procs := range []int{1, 2} {
+		runtime.GOMAXPROCS(procs)
+		atomicValueFirstPublication()
+	}
+	runtime.GOMAXPROCS(previous)
 }

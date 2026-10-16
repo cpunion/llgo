@@ -22,6 +22,7 @@ import (
 	"unsafe"
 
 	"github.com/xgo-dev/llgo/runtime/internal/clite/bdwgc"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 const backendKind = "bdwgc"
@@ -29,6 +30,9 @@ const backendAllocationsAreZeroed = true
 
 func backendBootstrap() bool {
 	bdwgc.Init()
+	if coro.GCObservationEnabled() {
+		bdwgc.InitGCNotification()
+	}
 	return true
 }
 

@@ -96,3 +96,18 @@ func TestPointerNilInput(t *testing.T) {
 		t.Errorf("Make(nil).Value() = %v, want nil", val)
 	}
 }
+
+func TestPointerInteriorAndInterning(t *testing.T) {
+	object := new([128]int)
+	object[37] = 91
+	first := weak.Make(&object[37])
+	second := weak.Make(&object[37])
+	other := weak.Make(&object[38])
+	if first != second || first == other {
+		t.Fatal("weak identity did not preserve the exact interior address")
+	}
+	if got := first.Value(); got != &object[37] || *got != 91 {
+		t.Fatal("weak conversion did not return the exact live interior pointer")
+	}
+	runtime.KeepAlive(object)
+}

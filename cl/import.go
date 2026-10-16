@@ -30,6 +30,7 @@ import (
 
 	"github.com/xgo-dev/llgo/internal/directive"
 	"github.com/xgo-dev/llgo/internal/env"
+	"github.com/xgo-dev/llgo/internal/genmethod"
 	"github.com/xgo-dev/llgo/internal/locality"
 	llssa "github.com/xgo-dev/llgo/ssa"
 )
@@ -806,6 +807,11 @@ func funcName(pkg *types.Package, fn *ssa.Function, org bool) string {
 		// will diverge for promoted unexported methods.
 		if method, ok := fn.Object().(*types.Func); ok {
 			fnName = llssa.MethodSymbolName(pkg, method, fnName)
+			if genmethod.SupportsGenericMethods && genmethod.IsGenericMethod(method.Type()) {
+				if targs := fn.TypeArgs(); len(targs) > 0 {
+					fnName += llssa.TypeArgs(targs)
+				}
+			}
 		}
 		// Synthesized $thunk/$bound functions have no Object. Their references
 		// are produced through this same funcName path, so the wrapper name is
@@ -994,6 +1000,17 @@ const (
 	// does not start or replace a logical panic trace; typed-FFI outcome
 	// consumers use it after a synchronous descriptor has published Panic.
 	llgoCoroPropagatePanic = llgoInstrBase + 0x5e
+	// Optional execution-domain accounting is a closed-program constant, not
+	// a runtime flag or a field added to each goroutine.
+	llgoCoroExecutionDomainEnabled = llgoInstrBase + 0x5f
+	llgoCoroGCObservationEnabled   = llgoInstrBase + 0x60
+	// The stdlib atomic.Value pin declaration returns an unused int. This
+	// adapter uses the same balanced critical-region proof as CriticalEnter;
+	// it does not expose a processor identity or add a native lock.
+	llgoCoroCriticalPin = llgoInstrBase + 0x61
+	// Typed compiler-only resource recipe seed. Its operands are exact helper
+	// identities, never runtime function values or code-address lookups.
+	llgoCoroBorrowResult = llgoInstrBase + 0x62
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )
@@ -1165,7 +1182,7 @@ func (p *context) funcName(fn *ssa.Function) (*types.Package, string, int) {
 	// intrinsics before the generic-origin path. _Cfunc__CMalloc is the one
 	// deliberate exception: Go 1.26 gives it a real wrapper body which calls
 	// the //go:cgo_unsafe_args _cgo_cmalloc adapter, so retaining that body lets
-	// the ordinary bounded-worker cgo protocol own the blocking allocation.
+	// the ordinary generated-cgo foreign transaction own the allocation.
 	if fname, intrinsic := cgoIntrinsicFunctionName(fn); intrinsic {
 		return nil, fname, llgoInstr
 	}

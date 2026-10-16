@@ -199,6 +199,11 @@ const (
 const (
 	coroLogicalPanicTraceNew uint64 = iota
 	coroLogicalPanicTracePropagate
+	// Compact nil-fault completion carries no interface words. The cold trace
+	// hook materializes their canonical identity without adding payload slots
+	// or a helper call to the synchronous outcome body.
+	coroLogicalPanicTraceNilNew
+	coroLogicalPanicTraceNilPropagate
 )
 
 const (
@@ -402,11 +407,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	faultPrepareArgsHook := coroFaultPrepareHookV2
 	faultPayloadArgsHook := coroFaultPayloadHookV2
 	completePrepareHook := coroCompletePrepareHookV2
-	resultFields := make([]*types.Var, sourceSig.Results().Len())
-	for i := range resultFields {
-		resultFields[i] = types.NewField(token.NoPos, nil, fmt.Sprintf("r%d", i), sourceSig.Results().At(i).Type(), false)
-	}
-	resultSlotType := types.NewStruct(resultFields, nil)
+	resultSlotType := coro.ResultSlotType(sourceSig.Results())
 	physicalParams := make([]*types.Var, 0, sourceSig.Params().Len()+2)
 	physicalParams = append(physicalParams,
 		types.NewParam(token.NoPos, nil, "__llgo_g", types.Typ[types.UnsafePointer]),
@@ -1200,6 +1201,10 @@ func (c *coroBodyContext) bindCancellationCompletion(b llssa.Builder) {
 		panic("coroutine cancellation resume gate requires a completion block")
 	}
 	b.SetBlock(c.cancelRunDecision)
+	// Cancellation bypasses the normal post-suspend continuation, including
+	// its header activation. Cleanup can immediately await a deferred child;
+	// publish the same active physical frame before any cleanup hook runs.
+	c.activate(b)
 	if c.cleanup == nil {
 		b.Jump(c.completion)
 	} else {
@@ -1616,6 +1621,26 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	emission.completeManagedPhysicalBody(bodyCapability)
 }
 
+// compileCoroTailForwardParameter applies the already-validated value-only
+// projection shared by a public forwarding ramp and a flattened static caller.
+func (p *context) compileCoroTailForwardParameter(
+	b llssa.Builder,
+	argument coroPhysicalTailForwardArgument,
+	value llssa.Expr,
+) llssa.Expr {
+	if p == nil || b == nil || b.Func != p.fn || argument.sourceParameter < 0 ||
+		argument.targetType == nil || value.Type == nil {
+		panic("coroutine tail-forward parameter projection requires one frozen source value")
+	}
+	for _, field := range argument.fieldPath {
+		value = b.Field(value, field)
+	}
+	if argument.retagTransportKey != "" {
+		value = b.ChangeType(p.prog.Type(argument.targetType, llssa.InGo), value)
+	}
+	return value
+}
+
 // compileCoroTailForwardPhysicalBody emits a stable coroutine entry ramp that
 // owns no coroutine frame. The frozen physical plan guarantees that its source
 // body is exactly one static call followed by an unchanged return, so passing
@@ -1654,10 +1679,7 @@ func (p *context) compileCoroTailForwardPhysicalBody(
 	for _, argument := range forward.args {
 		if argument.sourceParameter >= 0 {
 			value := p.fn.PhysicalParam(sourceParamBase + argument.sourceParameter)
-			if argument.retagTransportKey != "" {
-				value = b.ChangeType(p.prog.Type(argument.targetType, llssa.InGo), value)
-			}
-			args = append(args, value)
+			args = append(args, p.compileCoroTailForwardParameter(b, argument, value))
 			continue
 		}
 		args = append(args, p.compileValueAs(b, argument.constant, argument.targetType))
@@ -1890,17 +1912,17 @@ func validateCoroPhysicalABIForOwner(
 			return fail("static cleanup recover block: %v", err)
 		}
 	}
-	cgoErrnoWorker := isCgoC2func(fn.Name())
+	generatedCgoErrno := isCgoC2func(fn.Name())
 	directive, directiveErr := coroRawABIDirective(fn, universe)
 	if directiveErr != nil {
 		return fail("classify ABI directive: %v", directiveErr)
 	}
 	_, exportIngress := whole.ForeignIngressRoot(fn)
 	if directive != "" && !(plan.RawPlainEntry && rawVariant) && !exportIngress &&
-		!(cgoErrnoWorker && directive == "//go:cgo_unsafe_args") {
+		!(generatedCgoErrno && directive == "//go:cgo_unsafe_args") {
 		return fail("ABI directive %q requires a root or foreign adapter", directive)
 	}
-	if isCgoExternSymbol(fn) && !cgoErrnoWorker {
+	if isCgoExternSymbol(fn) && !generatedCgoErrno {
 		return fail("cgo entry requires a foreign adapter")
 	}
 	programEntry := hasCoroProgramManagedEntryCapability(fn, whole, programRun)
@@ -1938,6 +1960,14 @@ func validateCoroPhysicalABIForOwner(
 	intrinsicSpawnCarrier := false
 	if universe != nil && whole != nil {
 		if wrapperInfo, compilerWrapper := universe.callWrapInfo[fn]; compilerWrapper {
+			if err := universe.validateManagedIntrinsicFunctionValueWrapper(fn); err != nil {
+				return fail("compiler intrinsic function-value carrier: %v", err)
+			}
+			intrinsicSpawnCarrier = true
+			forward, err := validateCoroExactSyntheticForwarder(fn, wrapperInfo.intrinsic)
+			if err != nil || !whole.ElidesCall(forward) {
+				return fail("compiler intrinsic function-value carrier forwarding body is invalid: %v", err)
+			}
 			spawnUses := make([]*ssa.Go, 0, 1)
 			for source, frozen := range universe.coroProgramIR.callPlans {
 				if frozen.plan.StaticSpawnTarget != fn {
@@ -1961,7 +1991,6 @@ func validateCoroPhysicalABIForOwner(
 				spawnUses = append(spawnUses, spawn)
 			}
 			if len(spawnUses) != 0 {
-				intrinsicSpawnCarrier = true
 				structuralKey, err := universe.intrinsicWrapperStructuralKey(wrapperInfo)
 				if err != nil {
 					return fail("compiler intrinsic spawn carrier identity: %v", err)
@@ -2004,7 +2033,7 @@ func validateCoroPhysicalABIForOwner(
 			if err != nil || !found || !builtinSource || builtin == nil ||
 				sourcePlan.Elision != CoroCallNotElided || sourcePlan.Intrinsic ||
 				sourcePlan.StaticSpawnTarget != fn || sourcePlan.ManagedStaticTarget != nil ||
-				sourcePlan.CgoWorkerTarget != nil || sourcePlan.RawPlain {
+				sourcePlan.GeneratedCgoTarget != nil || sourcePlan.RawPlain {
 				if err == nil && !found {
 					err = fmt.Errorf("source spawn is absent from ProgramIR")
 				}
@@ -2027,7 +2056,7 @@ func validateCoroPhysicalABIForOwner(
 				wrapperInfo,
 				wrapperOwner,
 				universe.finalIdentity(spawn.Parent()),
-				universe.effectiveType(wrapperOwner, spawn.Parent(), signature, false),
+				universe.effectiveType(wrapperOwner, spawn.Parent(), signature),
 			)
 			if err != nil {
 				return fail("compiler builtin spawn carrier identity: %v", err)
@@ -2051,7 +2080,7 @@ func validateCoroPhysicalABIForOwner(
 			forwardPlan, found, err := universe.CoroCallSitePlan(forward)
 			if err != nil || !found || forwardPlan.Elision != CoroCallNotElided || forwardPlan.Intrinsic ||
 				forwardPlan.StaticSpawnTarget != nil || forwardPlan.ManagedStaticTarget != nil ||
-				forwardPlan.CgoWorkerTarget != nil || forwardPlan.RawPlain {
+				forwardPlan.GeneratedCgoTarget != nil || forwardPlan.RawPlain {
 				if err == nil && !found {
 					err = fmt.Errorf("forwarding call is absent from ProgramIR")
 				}
@@ -2081,7 +2110,7 @@ func validateCoroPhysicalABIForOwner(
 	if list := fn.Signature.RecvTypeParams(); list != nil && list.Len() != 0 && !genericInstance && !rangeYield {
 		return fail("generic receivers are not materialized coroutine bodies")
 	}
-	if list := fn.TypeArgs(); len(list) != 0 && !genericInstance && !rangeYield {
+	if list := fn.TypeArgs(); len(list) != 0 && !genericInstance && !rangeYield && !boundMethodWrapper && !methodExpressionThunk {
 		return fail("generic instances require a frozen instantiated ABI")
 	}
 	if isCoroProgramManagedEntry(fn) && !programEntry && !staticPackageInitOutcome {
@@ -2111,9 +2140,9 @@ func validateCoroPhysicalABIForOwner(
 	// keepalive slot merely to prove that lifetime.
 	pureSSA.cleanup = cleanupPlan
 	pureSSA.libraryForeign = libraryForeign
-	if cgoErrnoWorker {
-		if err := validateCoroCgoErrnoWorkerOwner(whole, pureSSA.ctx, fn); err != nil {
-			return fail("generated C2 worker adapter: %v", err)
+	if generatedCgoErrno {
+		if err := validateCoroGeneratedCgoErrnoOwner(whole, pureSSA.ctx, fn); err != nil {
+			return fail("generated C2 foreign adapter: %v", err)
 		}
 	}
 	// Nullable FieldAddr values are accepted only under the target-wide
@@ -2125,8 +2154,26 @@ func validateCoroPhysicalABIForOwner(
 	if cleanupPlan != nil {
 		terminalResultAllocations = cleanupPlan.terminalResultAllocations
 	}
-	if !coroTerminalResultAllocationSetMatches(pureSSA.currentFrameRetentionProof(), terminalResultAllocations) {
-		return fail("static cleanup and frame-retention proofs disagree on terminal-result allocations")
+	frameRetention := pureSSA.currentFrameRetentionProof()
+	if !coroTerminalResultAllocationSetMatches(frameRetention, terminalResultAllocations) {
+		details := make([]string, 0, len(terminalResultAllocations))
+		for _, allocation := range terminalResultAllocations {
+			if allocation == nil {
+				details = append(details, "<nil>")
+				continue
+			}
+			_, reason := pureSSA.managedHeapAllocationCapability(allocation)
+			_, terminal := frameRetention.terminalResultAllocations[allocation]
+			_, managed := frameRetention.managedHeapAllocations[allocation]
+			details = append(details, fmt.Sprintf(
+				"%s(terminal=%t managed=%t capability=%q)",
+				allocation.Name(), terminal, managed, reason,
+			))
+		}
+		return fail(
+			"static cleanup and frame-retention proofs disagree on terminal-result allocations: %s",
+			strings.Join(details, ", "),
+		)
 	}
 	critical, criticalErr := proveCoroCriticalRegions(universe, whole, pureSSA)
 	if criticalErr != nil {
@@ -2174,9 +2221,10 @@ func validateCoroPhysicalABIForOwner(
 				if site.callPlan.Open || coroDispatchCallHasCoroutineTarget(whole, site.callPlan) {
 					awaits++
 				}
-			case coroStaticCleanupCgoWorker:
-				if site.cgoWorker == nil {
-					return fail("deferred cgo worker cleanup has no frozen typed operation")
+			case coroStaticCleanupGeneratedCgo:
+				if site.generatedCgo == nil ||
+					!validCoroGeneratedCgoExecution(site.generatedCgo.mode, site.generatedCgo.reentry) {
+					return fail("deferred generated-cgo cleanup has no frozen typed operation")
 				}
 				foreignWaits++
 			case coroStaticCleanupForeignWorker:
@@ -2187,15 +2235,23 @@ func validateCoroPhysicalABIForOwner(
 			}
 		}
 	}
-	hasCyclicBlock := coroCFGSubsetHasCycle(fn.Blocks, physical.reachableBlocks)
+	var ir *coroProgramIR
+	if universe != nil {
+		ir = universe.coroProgramIR
+	}
+	hasCyclicBlock := coroCFGSubsetHasCycle(fn.Blocks, physical.reachableBlocks, ir.coroSuccessors)
 	// A RawPlainVariant with a cyclic body can lack NeedsPreempt only when the
 	// frontend's exact compiler-runtime island policy suppressed the scanner
 	// seed. Its raw execution is an intentionally atomic/bounded scheduler
 	// transaction; ordinary source callbacks are not given that policy and keep
-	// NeedsPreempt. The managed primary otherwise requires normal poll lowering.
+	// NeedsPreempt. A ProgramIR-proven constant-trip loop is the other exact
+	// exception: AnalyzeSSA records it only when its repeated local cost fits the
+	// concrete compilation budget. The managed primary otherwise requires normal
+	// poll lowering.
 	// ProgramIR's constant-reachable subset is authoritative here: raw SSA can
 	// retain a dead loop that neither local effect analysis nor codegen executes.
-	if hasCyclicBlock && !plan.Exec.Contains(coro.NeedsPreempt) && !rawVariant {
+	_, boundedCycle := whole.BoundedCycleCost(fn)
+	if hasCyclicBlock && !plan.Exec.Contains(coro.NeedsPreempt) && !rawVariant && !boundedCycle {
 		return fail("cyclic CFG requires needs-preempt execution classification")
 	}
 	for _, block := range fn.Blocks {
@@ -2333,7 +2389,7 @@ func validateCoroPhysicalABIForOwner(
 						}
 						callPlan := frozen.plan
 						semantics, intrinsic := callPlan.IntrinsicSemantics, callPlan.Intrinsic
-						cgoWorker := callPlan.Elision == CoroCallElidedCgoWorker
+						generatedCgo := callPlan.Elision == CoroCallElidedGeneratedCgo
 						pythonOperation := callPlan.Elision == CoroCallElidedPython
 						if intrinsic && callPlan.ControlOperation.NativeActivationBound() {
 							return coroLeafInstructionError(fn, plan, instr,
@@ -2347,15 +2403,20 @@ func validateCoroPhysicalABIForOwner(
 						// child handoff. Only the erased intrinsic declaration
 						// itself disappears.
 						if cleanupPlan != nil && callPlan.Elision != CoroCallElidedNoInit &&
-							!cgoWorker && !pythonOperation && (!intrinsic || !semantics.ElidesManagedCall()) {
+							!generatedCgo && !pythonOperation && (!intrinsic || !semantics.ElidesManagedCall()) {
 							return coroLeafInstructionError(fn, plan, instr, "elided intrinsic has no cleanup-safe no-unwind contract")
 						}
-						if cgoWorker {
+						if generatedCgo {
 							if intrinsic {
-								return coroLeafInstructionError(fn, plan, instr, "generated cgo worker call is also classified as an intrinsic")
+								return coroLeafInstructionError(fn, plan, instr, "generated cgo call is also classified as an intrinsic")
 							}
-							if instructionPlan.operation != coroPhysicalOperationWorkerCgo || instructionPlan.operationCgo == nil {
-								return coroLeafInstructionError(fn, plan, instr, "generated cgo worker call has no frozen typed operation recipe")
+							if instructionPlan.operationGeneratedCgo == nil ||
+								!coroGeneratedCgoOperationMatches(
+									instructionPlan.operation,
+									instructionPlan.operationGeneratedCgo.mode,
+									false,
+								) {
+								return coroLeafInstructionError(fn, plan, instr, "generated cgo call has no matching frozen typed operation recipe")
 							}
 							foreignWaits++
 							continue
@@ -2383,10 +2444,14 @@ func validateCoroPhysicalABIForOwner(
 							return coroLeafInstructionError(fn, plan, instr,
 								"typed control intrinsic has no matching frozen physical operation")
 						}
-						if intrinsic && semantics == CoroIntrinsicCallInlineForeignSuspend {
+						if intrinsic && semantics == CoroIntrinsicCallInlineForeignTransaction {
 							if frozen.opcode != llgoCgoCgocall ||
-								instructionPlan.operation != coroPhysicalOperationWorkerCgoErrno ||
-								instructionPlan.operationCgoErrno == nil {
+								instructionPlan.operationGeneratedCgoErrno == nil ||
+								!coroGeneratedCgoOperationMatches(
+									instructionPlan.operation,
+									instructionPlan.operationGeneratedCgoErrno.mode,
+									true,
+								) {
 								return coroLeafInstructionError(fn, plan, instr,
 									"generated C2 foreign suspend has no frozen typed errno operation")
 							}
@@ -2581,7 +2646,7 @@ func validateCoroPhysicalABIForOwner(
 		return fail("park/native-block body lacks may-park final effect: %s", plan.Effect)
 	}
 	if foreignWaits != 0 && !plan.Effect.Contains(coro.WaitForeign) {
-		return fail("bounded worker body lacks wait-foreign final effect: %s", plan.Effect)
+		return fail("foreign transaction body lacks wait-foreign final effect: %s", plan.Effect)
 	}
 	if yields != 0 && (!plan.DeclaredEffect.Contains(coro.YieldOnly) || !plan.LocalEffect.Contains(coro.YieldOnly) || !plan.Effect.Contains(coro.YieldOnly)) {
 		return fail("structured-yield body lacks yield-only owner effect: declared=%s local=%s final=%s", plan.DeclaredEffect, plan.LocalEffect, plan.Effect)
@@ -2598,7 +2663,7 @@ func validateCoroPhysicalABIForOwner(
 		return fail("declared may-park effect has no exact structured park or native blocking intrinsic")
 	}
 	if plan.DeclaredEffect.Contains(coro.WaitForeign) && foreignWaits == 0 {
-		return fail("declared wait-foreign effect has no exact bounded worker operation")
+		return fail("declared wait-foreign effect has no exact foreign transaction")
 	}
 	// WaitForeign may be inherited from a structured child. An ordinary local
 	// foreign edge was counted and shape-checked above; the effect bit alone can
@@ -3237,85 +3302,12 @@ func hasCoroDeclaredPackageInitOutcomeCapability(fn *ssa.Function, whole *coro.S
 }
 
 func coroMaterializedGenericInstance(fn *ssa.Function) bool {
-	if fn == nil || fn.Origin() == nil || fn.Origin() == fn || !hasGenericInstantiation(fn) {
-		return false
-	}
-	typeArgs := fn.TypeArgs()
-	if parent := fn.Parent(); parent != nil {
-		// Current x/tools materializes a function literal inside each
-		// instantiated generic body. A generic-function child repeats its parent's
-		// TypeParams/TypeArgs, while a generic-receiver-method child keeps the
-		// substitution exclusively on Parent(). Bind both current representations
-		// to the complete parent/Origin/AnonFuncs graph; an arbitrary nested
-		// function cannot acquire a dispatch ABI merely from concrete-looking
-		// value types.
-		if !coroMaterializedGenericInstance(parent) || fn.Synthetic != "" || fn.Object() != nil {
-			return false
-		}
-		switch {
-		case len(typeArgs) == 0:
-			if typeParamCount(fn.TypeParams()) != 0 {
-				return false
-			}
-			typeArgs = parent.TypeArgs()
-		case len(typeArgs) == len(parent.TypeArgs()):
-			if typeParamCount(fn.TypeParams()) != len(typeArgs) {
-				return false
-			}
-			for index, argument := range typeArgs {
-				if !types.Identical(argument, parent.TypeArgs()[index]) {
-					return false
-				}
-			}
-		default:
-			return false
-		}
-		if _, ok := fn.Syntax().(*ast.FuncLit); !ok {
-			return false
-		}
-		originParent := fn.Origin().Parent()
-		if originParent == nil || originParent != parent.Origin() {
-			return false
-		}
-		found := false
-		for _, child := range parent.AnonFuncs {
-			if child == fn {
-				if found {
-					return false
-				}
-				found = true
-			}
-		}
-		if !found {
-			return false
-		}
-	} else if !strings.HasPrefix(fn.Synthetic, "instance of ") {
-		return false
-	}
-	if !coroGroundGenericTypeArgs(typeArgs) {
-		return false
-	}
-	// x/tools erases ordinary declaration type parameters from an instantiated
-	// callable signature. For an instantiated generic receiver method, and for
-	// its parentless method body only, it keeps the origin's RecvTypeParams
-	// metadata even though Recv and every physical parameter/result are already
-	// concrete. Judge materialization from that callable value shape, not from
-	// the stale declaration metadata alone.
-	if params := fn.Signature.TypeParams(); params != nil && params.Len() != 0 {
-		return false
-	}
-	if params := fn.Signature.RecvTypeParams(); params != nil && params.Len() != 0 &&
-		(fn.Parent() != nil || fn.Signature.Recv() == nil) {
+	if !coro.MaterializedGenericInstance(fn) {
 		return false
 	}
 	normalized := coroPhysicalNormalizeSourceSignature(fn.Signature)
-	if normalized == nil || normalized.Params().Len() != len(fn.Params) {
+	if normalized == nil {
 		return false
-	}
-	for index, parameter := range fn.Params {
-		if parameter == nil || !types.Identical(parameter.Type(), normalized.Params().At(index).Type()) {
-			return false
-		}
 	}
 	for _, tuple := range []*types.Tuple{normalized.Params(), normalized.Results()} {
 		for index := 0; index < tuple.Len(); index++ {
@@ -3325,8 +3317,7 @@ func coroMaterializedGenericInstance(fn *ssa.Function) bool {
 		}
 	}
 	for _, free := range fn.FreeVars {
-		if free == nil || coroTypeContainsUnresolvedTypeParam(free.Type(), make(map[types.Type]bool)) ||
-			validateCoroPhysicalValueType(free.Type(), make(map[types.Type]bool)) != nil {
+		if validateCoroPhysicalValueType(free.Type(), make(map[types.Type]bool)) != nil {
 			return false
 		}
 	}
@@ -3357,7 +3348,7 @@ func CoroMaterializedGenericInstance(
 // parameters, and sole callee are fully concrete. This covers both pointer
 // adaptation and promotion through a non-generic embedding type. Keep the proof
 // separate from ordinary generic instances so an arbitrary synthetic body
-// cannot acquire a physical ABI from stale RecvTypeParams metadata.
+// cannot acquire a physical ABI from generic-looking receiver metadata.
 func coroMaterializedGenericCallable(fn *ssa.Function) bool {
 	return coroMaterializedGenericInstance(fn) || coroMaterializedGenericMethodWrapper(fn)
 }
@@ -3366,8 +3357,7 @@ func coroMaterializedGenericMethodWrapper(fn *ssa.Function) bool {
 	if fn == nil || fn.Pkg != nil || fn.Parent() != nil || len(fn.FreeVars) != 0 ||
 		fn.Signature == nil || fn.Signature.Recv() == nil ||
 		!strings.HasPrefix(fn.Synthetic, "wrapper for ") || !hasGenericInstantiation(fn) ||
-		typeParamCount(fn.Signature.TypeParams()) != 0 ||
-		typeParamCount(fn.Signature.RecvTypeParams()) == 0 || len(fn.Blocks) != 1 {
+		typeParamCount(fn.Signature.TypeParams()) != 0 || len(fn.Blocks) != 1 {
 		return false
 	}
 	var nilCheck *ssa.Call
@@ -3452,102 +3442,11 @@ func coroMaterializedGenericMethodWrapper(fn *ssa.Function) bool {
 }
 
 func coroGroundGenericTypeArgs(arguments []types.Type) bool {
-	if len(arguments) == 0 {
-		return false
-	}
-	for _, argument := range arguments {
-		if coroTypeContainsUnresolvedTypeParam(argument, make(map[types.Type]bool)) {
-			return false
-		}
-	}
-	return true
+	return coro.GroundGenericTypeArgs(arguments)
 }
 
-// coroTypeContainsUnresolvedTypeParam is deliberately deeper than the
-// physical-value validator: a pointer has a fixed transport width, but
-// *Box[T] is still not a materialized generic identity. This proof is used
-// only for instantiation identity and therefore follows referents and named
-// underlying types all the way to a TypeParam.
 func coroTypeContainsUnresolvedTypeParam(typ types.Type, visiting map[types.Type]bool) bool {
-	if typ == nil {
-		return true
-	}
-	typ = types.Unalias(typ)
-	if visiting[typ] {
-		return false
-	}
-	visiting[typ] = true
-	defer delete(visiting, typ)
-
-	switch value := typ.(type) {
-	case *types.TypeParam:
-		return true
-	case *types.Named:
-		if arguments := value.TypeArgs(); arguments != nil {
-			for index := 0; index < arguments.Len(); index++ {
-				if coroTypeContainsUnresolvedTypeParam(arguments.At(index), visiting) {
-					return true
-				}
-			}
-		}
-		return coroTypeContainsUnresolvedTypeParam(value.Underlying(), visiting)
-	case *types.Pointer:
-		return coroTypeContainsUnresolvedTypeParam(value.Elem(), visiting)
-	case *types.Array:
-		return coroTypeContainsUnresolvedTypeParam(value.Elem(), visiting)
-	case *types.Slice:
-		return coroTypeContainsUnresolvedTypeParam(value.Elem(), visiting)
-	case *types.Chan:
-		return coroTypeContainsUnresolvedTypeParam(value.Elem(), visiting)
-	case *types.Map:
-		return coroTypeContainsUnresolvedTypeParam(value.Key(), visiting) ||
-			coroTypeContainsUnresolvedTypeParam(value.Elem(), visiting)
-	case *types.Struct:
-		for index := 0; index < value.NumFields(); index++ {
-			if coroTypeContainsUnresolvedTypeParam(value.Field(index).Type(), visiting) {
-				return true
-			}
-		}
-	case *types.Signature:
-		if typeParamCount(value.TypeParams()) != 0 || typeParamCount(value.RecvTypeParams()) != 0 {
-			return true
-		}
-		if value.Recv() != nil && coroTypeContainsUnresolvedTypeParam(value.Recv().Type(), visiting) {
-			return true
-		}
-		for _, tuple := range []*types.Tuple{value.Params(), value.Results()} {
-			for index := 0; index < tuple.Len(); index++ {
-				if coroTypeContainsUnresolvedTypeParam(tuple.At(index).Type(), visiting) {
-					return true
-				}
-			}
-		}
-	case *types.Tuple:
-		for index := 0; index < value.Len(); index++ {
-			if coroTypeContainsUnresolvedTypeParam(value.At(index).Type(), visiting) {
-				return true
-			}
-		}
-	case *types.Interface:
-		value.Complete()
-		for index := 0; index < value.NumMethods(); index++ {
-			if coroTypeContainsUnresolvedTypeParam(value.Method(index).Type(), visiting) {
-				return true
-			}
-		}
-		for index := 0; index < value.NumEmbeddeds(); index++ {
-			if coroTypeContainsUnresolvedTypeParam(value.EmbeddedType(index), visiting) {
-				return true
-			}
-		}
-	case *types.Union:
-		for index := 0; index < value.Len(); index++ {
-			if coroTypeContainsUnresolvedTypeParam(value.Term(index).Type(), visiting) {
-				return true
-			}
-		}
-	}
-	return false
+	return coro.TypeContainsUnresolvedTypeParam(typ, visiting)
 }
 
 // resolveCoroStaticPlainCall proves the synchronous island allowed inside a
@@ -3879,6 +3778,21 @@ func validateCoroPhysicalSSAParameterShape(plan coro.FunctionPlan, fn *ssa.Funct
 	if source.Params().Len() != len(fn.Params) {
 		return fail("normalized source parameters=%d do not match SSA parameters=%d", source.Params().Len(), len(fn.Params))
 	}
+	// SSA parameters retain their original Go types. Physical entries use the
+	// exact frontend replacement, which may intentionally change a type's
+	// representation (for example syscall/js.Value). Keep the SSA identity
+	// proof below, but validate transport against that canonical replacement.
+	canonical := source
+	if universe != nil && universe.goProg != nil {
+		var err error
+		canonical, err = universe.coroPhysicalSourceSignature(fn)
+		if err != nil {
+			return fail("derive canonical source parameters: %v", err)
+		}
+		if canonical.Params().Len() != len(fn.Params) {
+			return fail("canonical source parameters=%d do not match SSA parameters=%d", canonical.Params().Len(), len(fn.Params))
+		}
+	}
 	offset := effective.Params().Len() - len(fn.Params)
 	if offset < 0 || offset > 1 {
 		return fail("effective entry parameters=%d have invalid hidden-context offset from SSA parameters=%d", effective.Params().Len(), len(fn.Params))
@@ -3924,10 +3838,10 @@ func validateCoroPhysicalSSAParameterShape(plan coro.FunctionPlan, fn *ssa.Funct
 			return fail("SSA parameter %d type %v does not match normalized source parameter %v", index, parameterType(parameter), source.Params().At(index).Type())
 		}
 		effectiveType := effective.Params().At(index + offset).Type()
-		sourceType := source.Params().At(index).Type()
+		sourceType := canonical.Params().At(index).Type()
 		if !types.Identical(effectiveType, sourceType) &&
 			(universe == nil || coroPhysicalTransportTypeKey(universe, effectiveType) != coroPhysicalTransportTypeKey(universe, sourceType)) {
-			return fail("effective parameter %d type %v is not ABI-compatible with normalized source parameter %v", index, effectiveType, sourceType)
+			return fail("effective parameter %d type %v is not ABI-compatible with canonical source parameter %v", index, effectiveType, sourceType)
 		}
 	}
 	return nil

@@ -30,13 +30,14 @@ import (
 // then be released before LLVM instruction selection starts, so frontend and
 // backend peaks do not overlap.
 type packageLinkSnapshot struct {
-	needAbiInit         int
-	methodByIndex       []int
-	methodByName        []string
-	funcInfo            []funcInfoRecord
-	pcLineInfo          []pcLineRecord
-	definedGlobals      []string
-	exportFunctionNames []string
+	effectiveDependencyIDs []string
+	needAbiInit            int
+	methodByIndex          []int
+	methodByName           []string
+	funcInfo               []funcInfoRecord
+	pcLineInfo             []pcLineRecord
+	definedGlobals         []string
+	exportFunctionNames    []string
 }
 
 func freezePackageLinkSnapshot(pkg *aPackage) {
@@ -49,6 +50,9 @@ func freezePackageLinkSnapshot(pkg *aPackage) {
 		needAbiInit: lpkg.NeedAbiInit,
 		funcInfo:    readFuncInfo(mod),
 		pcLineInfo:  readPCLineInfo(mod),
+	}
+	for _, dependency := range effectiveDependencies(pkg) {
+		snapshot.effectiveDependencyIDs = append(snapshot.effectiveDependencyIDs, dependency.ID)
 	}
 	pkg.setNeedRuntimeOrPyInit(lpkg.NeedRuntime, lpkg.NeedPyInit)
 
@@ -79,6 +83,18 @@ func freezePackageLinkSnapshot(pkg *aPackage) {
 	}
 	sort.Strings(snapshot.exportFunctionNames)
 	pkg.LinkSnapshot = snapshot
+}
+
+func packageEffectiveDependencyIDs(pkg *aPackage) []string {
+	if snapshot := packageLinkSnapshotOf(pkg); snapshot != nil {
+		return snapshot.effectiveDependencyIDs
+	}
+	dependencies := effectiveDependencies(pkg)
+	ids := make([]string, 0, len(dependencies))
+	for _, dependency := range dependencies {
+		ids = append(ids, dependency.ID)
+	}
+	return ids
 }
 
 func packageLinkSnapshotOf(pkg *aPackage) *packageLinkSnapshot {

@@ -135,6 +135,9 @@ var (
 )
 
 func appendMakeFuncFFIType(args []*ffi.Type, typ *abi.Type) []*ffi.Type {
+	if size, _ := llgoABITypeLayout(typ); size == 0 {
+		return args
+	}
 	if ffiCallSliceAsTriple && typ.Kind() == abi.Slice {
 		return append(args, ffi.TypePointer, ffi.TypeInt, ffi.TypeInt)
 	}
@@ -178,6 +181,12 @@ func copyMakeFuncArgs(fd *funcData, args *unsafe.Pointer) unsafe.Pointer {
 	ins := unsafe.Slice((*Value)(values), fd.nin)
 	index := uintptr(3)
 	for i, typ := range fd.ftyp.In {
+		if size, _ := llgoABITypeLayout(typ); size == 0 {
+			// The native ABI omitted this argument, but MakeFunc's callback
+			// still observes the complete logical parameter list.
+			ins[i] = Zero(toType(fd.tin[i]))
+			continue
+		}
 		if ffiCallSliceAsTriple && typ.Kind() == abi.Slice {
 			header := (*unsafeheaderSlice)(llruntime.AllocZ(unsafe.Sizeof(unsafeheaderSlice{})))
 			header.Data = *(*unsafe.Pointer)(ffi.Index(args, index))

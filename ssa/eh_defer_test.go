@@ -8,11 +8,10 @@ import (
 	"testing"
 
 	"github.com/xgo-dev/llgo/ssa"
-	"github.com/xgo-dev/llgo/ssa/ssatest"
 )
 
 func TestExplicitDeferStackIR(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	callee := pkg.NewFunc("callee", ssa.NoArgsNoRet, ssa.InGo)
@@ -43,7 +42,7 @@ func TestExplicitDeferStackIR(t *testing.T) {
 }
 
 func TestExplicitDeferStackFallbackAndNilBuiltin(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	callee := pkg.NewFunc("callee", ssa.NoArgsNoRet, ssa.InGo)
@@ -68,7 +67,7 @@ func TestExplicitDeferStackFallbackAndNilBuiltin(t *testing.T) {
 }
 
 func TestExplicitDeferStackDrainWithoutLoopCases(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	fn := pkg.NewFunc("main", ssa.NoArgsNoRet, ssa.InGo)
@@ -91,7 +90,7 @@ func TestExplicitDeferStackDrainWithoutLoopCases(t *testing.T) {
 }
 
 func TestExplicitDeferStackDrainWithoutRecoverNoop(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	fn := pkg.NewFunc("main", ssa.NoArgsNoRet, ssa.InGo)
@@ -107,7 +106,7 @@ func TestExplicitDeferStackDrainWithoutRecoverNoop(t *testing.T) {
 }
 
 func TestPlainDeferWithoutSavedArgsIR(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	callee := pkg.NewFunc("callee", ssa.NoArgsNoRet, ssa.InGo)
@@ -133,7 +132,7 @@ func TestPlainDeferWithoutSavedArgsIR(t *testing.T) {
 }
 
 func TestConditionalDeferIR(t *testing.T) {
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	pkg := prog.NewPackage("foo", "foo")
 
 	callee := pkg.NewFunc("callee", ssa.NoArgsNoRet, ssa.InGo)
@@ -170,7 +169,7 @@ func TestDeferContinuationDispatch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			prog := ssatest.NewProgram(t, tt.target)
+			prog := newRuntimeTestProgram(t, tt.target)
 			for _, field := range []int{3, 4} {
 				if got := prog.Field(prog.Defer(), field); got != prog.VoidPtr() {
 					t.Fatalf("runtime.Defer field %d type = %v, want unsafe.Pointer", field, got)

@@ -4,6 +4,7 @@ import (
 	"go/version"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 )
@@ -16,6 +17,12 @@ type Invocation struct {
 	Args   []string
 	Config *Config
 	Dir    string
+
+	// compileOnly and disableMultiFallback are used by the multi-package
+	// failure recovery path. They are intentionally not part of Config: a
+	// caller-visible ModeBuild still has normal cmd/go output semantics.
+	compileOnly          bool
+	disableMultiFallback bool
 }
 
 // commandEnv is the per-invocation process-execution state. It deliberately
@@ -29,6 +36,19 @@ func (e commandEnv) configure(cmd *exec.Cmd) *exec.Cmd {
 	cmd.Dir = e.dir
 	cmd.Env = slices.Clone(e.environ)
 	return cmd
+}
+
+func (e commandEnv) lookup(name string) string {
+	for i := len(e.environ) - 1; i >= 0; i-- {
+		key, value, ok := strings.Cut(e.environ[i], "=")
+		if !ok {
+			continue
+		}
+		if key == name || runtime.GOOS == "windows" && strings.EqualFold(key, name) {
+			return value
+		}
+	}
+	return ""
 }
 
 func resolveOutputs(dir string, out *OutFmtDetails) {

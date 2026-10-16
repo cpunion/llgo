@@ -146,7 +146,7 @@ func (u *EmissionUniverse) freezeCoroClosureEnvironment(
 		owner,
 		canonical,
 		func(typ types.Type) types.Type {
-			return u.effectiveType(owner, canonical, typ, false)
+			return u.effectiveType(owner, canonical, typ)
 		},
 	)
 }

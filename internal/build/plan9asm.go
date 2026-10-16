@@ -499,14 +499,14 @@ func plan9asmEnabledByDefault(conf *Config, pkgPath string) bool {
 	if conf == nil {
 		return false
 	}
-	// The freestanding wasm32 named targets intentionally use the 32-bit ARM
-	// Go frontend for standard-library layout compatibility, while emitting a
-	// WebAssembly LLVM module. internal/bytealg therefore selects the bounded
-	// ARM Plan9 assembly declarations. Translate that package so the existing
+	// Freestanding named targets use the 32-bit ARM Go frontend, including
+	// wasm32 and RV32 for standard-library layout compatibility. bytealg thus
+	// selects bounded ARM Plan9 assembly declarations even when the emitted
+	// LLVM module uses another instruction set. Translate that package so its
 	// exact no-suspend proof accompanies each leaf; leaving the declarations
 	// bodyless would incorrectly turn pure byte scans into opaque scheduler
 	// boundaries.
-	if conf.Goarch == "arm" && configHasBuildTag(conf, "tinygo.wasm") &&
+	if conf.Goarch == "arm" && (configHasBuildTag(conf, "tinygo.wasm") || configHasBuildTag(conf, "baremetal")) &&
 		pkgPath == "internal/bytealg" {
 		return true
 	}
@@ -606,10 +606,10 @@ func shouldSkipPlan9AsmSFilesForTarget(conf *Config, pkgPath string) bool {
 	if pkgPath == "syscall" {
 		return true
 	}
-	if !configHasBuildTag(conf, "tinygo.wasm") {
+	if !configHasBuildTag(conf, "tinygo.wasm") && !configHasBuildTag(conf, "baremetal") {
 		return false
 	}
 	// The internal/runtime/syscall/linux patch fails closed with ENOSYS instead
-	// of emitting a Linux SWI into a freestanding WebAssembly module.
+	// of emitting a Linux SWI into a freestanding module.
 	return pkgPath == "internal/runtime/syscall/linux"
 }

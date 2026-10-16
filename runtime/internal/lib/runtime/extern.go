@@ -26,6 +26,7 @@ func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 	if !ensureRuntimePCLN() {
 		return 0, "", 0, false
 	}
+	logical := rtdebug.CallerStackActive()
 	// A visible panic snapshot overlays the ordinary stack. It must be spliced
 	// before consulting the compiler shadow stack; the latter is intentionally
 	// non-empty for stackless coroutines but cannot contain frames already
@@ -33,7 +34,7 @@ func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 	if len(panicSplicePCs()) != 0 {
 		var pcs [1]uintptr
 		count := 0
-		if rtdebug.CoroPanicRecoverActive() {
+		if logical {
 			var current [128]uintptr
 			if n := rtdebug.Callers(0, current[:]); n > 0 {
 				count = copyPanicSplicedCallers(current[:n], skip+1, pcs[:])
@@ -47,10 +48,16 @@ func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 			file, line = callerLocation(sym.file, sym.line)
 			return pc, file, line, true
 		}
+		if logical {
+			return 0, "", 0, false
+		}
 	}
 	if frame, ok := rtdebug.Caller(skip); ok {
 		file, line = callerLocation(frame.File, frame.Line)
 		return frame.PC, file, line, true
+	}
+	if logical {
+		return 0, "", 0, false
 	}
 	if fpUnwindAvailable() {
 		var pcs [1]uintptr
@@ -78,9 +85,10 @@ func Callers(skip int, pc []uintptr) int {
 	if !ensureRuntimePCLN() {
 		return 0
 	}
+	logical := rtdebug.CallerStackActive()
 	if len(panicSplicePCs()) != 0 {
 		n := 0
-		if rtdebug.CoroPanicRecoverActive() {
+		if logical {
 			var current [128]uintptr
 			if currentN := rtdebug.Callers(0, current[:]); currentN > 0 {
 				n = copyPanicSplicedCallers(current[:currentN], skip, pc)
@@ -88,11 +96,11 @@ func Callers(skip int, pc []uintptr) int {
 		} else if fpUnwindAvailable() {
 			n = callersWithPanicSplice(skip, pc)
 		}
-		if n > 0 {
+		if n > 0 || logical {
 			return n
 		}
 	}
-	if n := rtdebug.Callers(skip, pc); n > 0 {
+	if n := rtdebug.Callers(skip, pc); n > 0 || logical {
 		return n
 	}
 	if fpUnwindAvailable() {

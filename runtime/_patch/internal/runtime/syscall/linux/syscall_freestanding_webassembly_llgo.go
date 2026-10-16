@@ -1,4 +1,4 @@
-//go:build tinygo.wasm
+//go:build tinygo.wasm || baremetal
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -22,7 +22,7 @@ package linux
 
 const enosys = 38
 
-// Named freestanding WebAssembly targets reuse Linux/ARM source declarations
+// Freestanding WebAssembly and baremetal targets reuse Linux/ARM declarations
 // for 32-bit Go layout only. They have no Linux kernel trap ABI, so preserve
 // the exact internal syscall signature and fail closed synchronously.
 func Syscall6(num, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, errno uintptr) {

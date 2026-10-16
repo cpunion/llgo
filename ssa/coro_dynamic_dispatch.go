@@ -411,6 +411,23 @@ func (b Builder) CoroDispatchCodeEntry(fn Expr, opts CoroDispatchCallOptions) Ex
 	return b.prepareCoroDispatchCall(fn, nil, opts, 0).code
 }
 
+// CoroDispatchTrustedCodeEntry loads the compiler-injected physical identity
+// from a descriptor whose provenance has already been established by a Go
+// function carrier. It is intentionally narrower than dynamic dispatch: the
+// result is metadata for FuncPCABI0/reflection and must never be called. The
+// intrinsic contract supplies a trusted non-nil Go function carrier; since the
+// erased interface boundary no longer carries the logical signature, this
+// operation does not re-derive a signature hash or result layout.
+func (b Builder) CoroDispatchTrustedCodeEntry(descriptor Expr) Expr {
+	if descriptor.IsNil() || descriptor.Type.ll.Context().C != b.Prog.ctx.C ||
+		descriptor.Type.ll.TypeKind() != llvm.PointerTypeKind {
+		panic("ssa: trusted coroutine descriptor must be a pointer from the same program")
+	}
+	descriptor = b.Convert(b.Prog.VoidPtr(), descriptor)
+	typed := Expr{descriptor.impl, b.Prog.Pointer(b.Prog.coroDispatchDescriptorType())}
+	return b.LoadKnownNonNil(b.FieldAddrKnownNonNil(typed, 8))
+}
+
 // CallCoroDispatchCoro validates a dynamic descriptor and invokes its typed
 // coroutine entry. The returned handle is deliberately not awaited here;
 // frontend lowering owns child registration, suspension, and result loading.

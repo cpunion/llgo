@@ -1,4 +1,4 @@
-//go:build !wasip1 && !wasip2 && !wasm_unknown
+//go:build !wasip1 && !wasip2 && !wasm_unknown && !baremetal
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -34,7 +34,8 @@ const coroTerminalPanicFrameLimit = 4096
 // fail-stop adapters; this occurrence exists only in the raw no-return command
 // reporter after scheduler ownership has ended. The closed-use planner can
 // therefore infer its conservative raw-host-only contract without adding a
-// source annotation or mixing the two execution domains.
+// source annotation or mixing the two execution domains. Committed unhandled
+// child panics use the same no-return path on their owning executor.
 //
 //go:linkname coroPanicTerminalFputc C.__llgo_coro_panic_fputc_v1
 func coroPanicTerminalFputc(ch c.Int, fp c.FilePtr) c.Int
@@ -322,7 +323,7 @@ func coroTerminalWritePanicFrames(g *coro.G, ctx *coroRuntimeContext) {
 	coroTerminalWriteWorkerFaultFrames(ctx)
 	cursor := coro.FirstPanicTraceFrame(g)
 	if cursor == nil {
-		coroRuntimeAbort("coroutine program panic trace is empty")
+		coroRuntimeAbort("coroutine task panic trace is empty")
 	}
 	for count := uint32(0); cursor != nil; count++ {
 		if count >= coroTerminalPanicFrameLimit {
@@ -351,23 +352,11 @@ func coroTerminalWritePanicFrames(g *coro.G, ctx *coroRuntimeContext) {
 	}
 }
 
-// __llgo_coro_program_report_panic_v1 is the native command's sole terminal
-// owner for a canonical V2 Panic result. It runs only after the bounded
-// scheduler call returned and every LLVM coroutine frame was destroyed. The
-// published task record and task-local logical caller stack therefore provide
-// all input without re-entering managed code, allocating, or invoking a user
-// Error/String method.
-//
-//export __llgo_coro_program_report_panic_v1
-func __llgo_coro_program_report_panic_v1(gPointer unsafe.Pointer) {
-	g := (*coro.G)(gPointer)
-	if g != &coroProgramGV1State ||
-		coroProgramLifecycleV1State != coroProgramFailedV1 ||
-		coroProgramExecutorBoundV1State ||
-		coroProgramContinuationV1State != coroProgramContinuationNoneV1 ||
-		!coroProgramDriveAdmissionV1State.CanRelease() {
-		coroRuntimeAbort("invalid coroutine program panic report")
-	}
+// coroReportTaskPanicV1 terminates for any committed unhandled task panic,
+// including tasks running on a peer or replacement M. Its frames have been
+// destroyed, but its published record and task-local trace remain rooted. No
+// managed resume or user Error/String method is re-entered by this reporter.
+func coroReportTaskPanicV1(g *coro.G) {
 	record, published := coro.LoadPanicRecord(g)
 	ctx := (*coroRuntimeContext)(coro.TaskLocal(g))
 	if !published || record.Status != coro.ExplicitStatusPanic ||
@@ -381,4 +370,20 @@ func __llgo_coro_program_report_panic_v1(gPointer unsafe.Pointer) {
 	c.Exit(2)
 	for {
 	}
+}
+
+// __llgo_coro_program_report_panic_v1 validates the command coordinator's
+// terminal ownership before using the same reporter as an unhandled peer G.
+//
+//export __llgo_coro_program_report_panic_v1
+func __llgo_coro_program_report_panic_v1(gPointer unsafe.Pointer) {
+	g := (*coro.G)(gPointer)
+	if g != &coroProgramGV1State ||
+		coroProgramLifecycleV1State != coroProgramFailedV1 ||
+		coroProgramExecutorBoundV1State ||
+		coroProgramContinuationV1State != coroProgramContinuationNoneV1 ||
+		!coroProgramDriveAdmissionV1State.CanRelease() {
+		coroRuntimeAbort("invalid coroutine program panic report")
+	}
+	coroReportTaskPanicV1(g)
 }

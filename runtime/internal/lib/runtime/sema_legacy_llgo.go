@@ -55,6 +55,8 @@ func getSemaState(addr *uint32) *semaState {
 	return st
 }
 
+func semaAcquireWaitGroup(addr *uint32, _ bool) { semaAcquire(addr) }
+
 func semaAcquire(addr *uint32) {
 	for {
 		value := latomic.LoadUint32(addr)

@@ -1098,6 +1098,12 @@ func (admission *channelExternalCommitAdmission) publishExternallyCommittedAtRou
 		return ChannelOperationPostInvalid
 	}
 	source, slot, id := admission.source, admission.slot, admission.id
+	// The held admission and select claim pin this exact wait through the
+	// irreversible physical transfer. Account before publishing its mailbox,
+	// including multi-case select and a producer on another P.
+	if ExecutionDomainEnabled() && !PublishExecutionDomainTask(slot.record.link.wait.g) {
+		return ChannelOperationPostInvalid
+	}
 	result := source.publishExternallyCommittedHeld(slot, id, route, small)
 	if result == ChannelOperationPosted {
 		admission.posted = true
@@ -1987,6 +1993,10 @@ func (transaction *ChannelExternalCommit) CommitOwnerLocalDirectWithResult(
 	releaseAdmission := !transaction.ownerLocalUnadmitted
 	if releaseAdmission {
 		endpoint.posted = true
+	}
+	if ExecutionDomainEnabled() && !PublishExecutionDomainTask(wait.g) {
+		transaction.phase = channelExternalCommitPairBroken
+		return ChannelOwnerLocalCommitInvalid
 	}
 	if PublishExternallyCommittedReadyThenCandidate(&slot.record, id) != OperationCompletionPublished ||
 		!publishExternalSelectClaim(transaction.claim) {

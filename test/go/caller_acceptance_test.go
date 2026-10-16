@@ -140,6 +140,36 @@ func TestCallerAcceptancePanicTraceback(t *testing.T) {
 	}
 }
 
+func TestCallerAcceptanceGoroutinePanicTraceback(t *testing.T) {
+	const source = `package main
+import "runtime"
+//go:noinline
+func child() { panic("peer-panic-payload") } // CHILD_PANIC_MARK
+func main() {
+    runtime.GOMAXPROCS(ACCEPTANCE_PROCS)
+    go child()
+    select {}
+}
+`
+	for _, procs := range []int{1, 2} {
+		t.Run(strconv.Itoa(procs), func(t *testing.T) {
+			probe, dir := prepareCallerAcceptanceProbe(t, strings.ReplaceAll(source, "ACCEPTANCE_PROCS", strconv.Itoa(procs)))
+			out, err := runLLGoProbe(t, dir)
+			if err == nil {
+				t.Fatalf("child panic unexpectedly succeeded:\n%s", out)
+			}
+			for _, want := range []string{"panic: peer-panic-payload", "main.child(...)", "main.go:" + markerLineOf(t, probe, "CHILD_PANIC_MARK")} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("child panic traceback missing %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "goroutine 1844674407370955") {
+				t.Fatalf("child goroutine ID underflowed:\n%s", out)
+			}
+		})
+	}
+}
+
 // Scenario: the FP walker starts from a live caller frame even when O0 and
 // DWARF make the C helper's returned stack slot easy to overwrite.
 const shallowPanicAcceptanceProbe = `package main
@@ -386,9 +416,10 @@ func runLLGoProbeWithFlags(t *testing.T, dir string, flags ...string) (string, e
 	t.Helper()
 	repoRoot := findRepoRoot(t)
 	t.Setenv("LLGO_ROOT", repoRoot)
-	args := append([]string{"run", "./cmd/llgo", "run", "-a"}, flags...)
-	cmd := exec.Command("go", append(args, filepath.Join(dir, "main.go"))...)
-	cmd.Dir = repoRoot
+	llgo := acceptanceLLGoBinary(t)
+	args := append([]string{"run", "-a"}, flags...)
+	cmd := exec.Command(llgo, append(args, "main.go")...)
+	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -643,6 +674,89 @@ void cexc_segv(int32_t depth) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("recovered stack missing fault frame %q:\n%s", want, out)
 		}
+	}
+}
+
+// A same-M C boundary must suspend its native fault landing while Go runs,
+// then rearm it after a callback returns. Nested C faults and callback panic
+// escapes must not leave TLS pointing at an abandoned native activation.
+func TestCallerAcceptanceForeignReentryFaultRecover(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("native POSIX fault landing")
+	}
+	dir := t.TempDir()
+	const source = `package main
+import (
+    "os"
+    "time"
+    _ "unsafe"
+)
+const LLGoFiles = "wrap/reentry.c"
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=managed-callback memory=borrow-until-return
+//go:linkname reenter C.acceptance_reentry
+func reenter(func(int32) int32, int32) int32
+//go:linkname nestedFault C.acceptance_nested_fault
+func nestedFault()
+
+func expectFault(call func()) {
+    recovered := false
+    func() {
+        defer func() {
+            value := recover()
+            err, ok := value.(error)
+            if !ok || err.Error() != "runtime error: invalid memory address or nil pointer dereference" {
+                panic("incorrect foreign fault payload")
+            }
+            recovered = true
+        }()
+        call()
+    }()
+    if !recovered { panic("foreign fault did not recover") }
+}
+func callback(mode int32) int32 {
+    time.Sleep(time.Millisecond)
+    if mode == 2 { expectFault(nestedFault) }
+    if mode == 3 { panic("callback-escape") }
+    return mode + 10
+}
+func callbackEscape() {
+    recovered := false
+    func() {
+        defer func() {
+            if recover() != "callback-escape" { panic("incorrect callback escape") }
+            recovered = true
+        }()
+        reenter(callback, 3)
+    }()
+    if !recovered { panic("callback escape did not recover") }
+}
+func main() {
+    for i := 0; i < 3; i++ {
+        expectFault(func() { reenter(callback, 1) })
+        if reenter(callback, 2) != 12 { panic("nested callback result") }
+        callbackEscape()
+        if reenter(callback, 0) != 10 { panic("normal callback result") }
+    }
+    os.Stdout.WriteString("REENTRY_FAULT_OK\n")
+}
+`
+	const csource = `#include <stdint.h>
+static int32_t *volatile fault_pointer;
+void acceptance_nested_fault(void) { *fault_pointer = 42; }
+int32_t acceptance_reentry(int32_t (*callback)(int32_t), int32_t mode) {
+    int32_t value = callback(mode);
+    if (mode == 1) acceptance_nested_fault();
+    return value;
+}
+`
+	writeCallerAcceptanceModule(t, dir, map[string]string{
+		"main.go":        source,
+		"go.mod":         "module reentry-fault\n\ngo 1.21\n",
+		"wrap/reentry.c": csource,
+	})
+	out, err := runLLGoInModule(t, dir, "run", ".")
+	if err != nil || !strings.Contains(out, "REENTRY_FAULT_OK") {
+		t.Fatalf("foreign reentry fault probe failed: %v\n%s", err, out)
 	}
 }
 

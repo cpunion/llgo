@@ -130,7 +130,7 @@ func validateCoroManagedDispatchCallKind(
 			callPlan.Unresolved,
 		)
 	}
-	sig, err := coroConcreteManagedCallableSignature(common.Signature())
+	sig, err := coroDynamicCallableSignature(plan.CallableSignature(owner, common.Signature()))
 	if err != nil {
 		return fail("v2 descriptor callable signature: %v", err)
 	}
@@ -169,7 +169,7 @@ func validateCoroManagedDispatchCallKind(
 		if !found || targetPlan.ID != targetID {
 			return fail("target %q has no canonical function plan", targetID)
 		}
-		targetSignature, err := coroConcreteManagedCallableSignature(target.Signature)
+		targetSignature, err := coroDynamicCallableSignature(plan.CallableSignature(target, target.Signature))
 		if err != nil || !types.Identical(sig, targetSignature) {
 			return fail("call signature %s does not match target %q signature %s", sig, targetID, target.Signature)
 		}

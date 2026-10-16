@@ -466,7 +466,7 @@ func arrayAt(p unsafe.Pointer, i int, eltSize uintptr, whySafe string) unsafe.Po
 	return add(p, uintptr(i)*eltSize, "i < len")
 }
 
-//go:linkname ifaceE2I github.com/xgo-dev/llgo/runtime/internal/runtime.IfaceE2I
+//go:linkname ifaceE2I github.com/xgo-dev/llgo/runtime/internal/runtime.ReflectIfaceE2I
 func ifaceE2I(t *abi.Type, src any, dst unsafe.Pointer)
 
 // typedmemmove copies a value of type t to dst from src.

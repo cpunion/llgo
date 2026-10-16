@@ -105,6 +105,23 @@ func TestPlan9AsmEnabledByDefaultForNamedWebAssemblyBytealg(t *testing.T) {
 	}
 }
 
+func TestPlan9AsmEnabledByDefaultForBaremetalBytealg(t *testing.T) {
+	for _, target := range []string{"cortex-m-qemu", "riscv-qemu"} {
+		conf := &Config{Target: target, Goos: "linux", Goarch: "arm", resolvedTargetBuildTags: []string{"baremetal"}}
+		if !plan9asmEnabledByDefault(conf, "internal/bytealg") {
+			t.Fatalf("%s left selected bytealg assembly without a translated body", target)
+		}
+		if !shouldSkipPlan9AsmSFilesForTarget(conf, "internal/runtime/syscall/linux") {
+			t.Fatalf("%s retained Linux kernel trap assembly", target)
+		}
+		for _, unrelated := range []string{"syscall", "internal/chacha8rand"} {
+			if plan9asmEnabledByDefault(conf, unrelated) {
+				t.Fatalf("%s enabled unrelated %s assembly", target, unrelated)
+			}
+		}
+	}
+}
+
 func TestPkgSFilesUsesLoadedOtherFiles(t *testing.T) {
 	pkgDir := t.TempDir()
 	sfile := filepath.Join(pkgDir, "asm_amd64.s")

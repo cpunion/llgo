@@ -35,6 +35,7 @@ import (
 
 	"github.com/xgo-dev/llgo/cl/ssawrap"
 	"github.com/xgo-dev/llgo/internal/coro"
+	"github.com/xgo-dev/llgo/internal/genmethod"
 	"github.com/xgo-dev/llgo/internal/typepatch"
 	llssa "github.com/xgo-dev/llgo/ssa"
 	llabi "github.com/xgo-dev/llgo/ssa/abi"
@@ -112,6 +113,10 @@ type EmissionUniverseOptions struct {
 	// construction instead of being left to the legacy LLVM symbol resolver.
 	CompleteRuntimeABI     bool
 	CoroTargetCapabilities coro.TargetCapabilities
+	// CoroProgramPredicates freezes whole-program feature constants before
+	// ProgramIR determines reachable instructions and effects. A zero mask is
+	// reserved for the conservative discovery pass and isolated fixtures.
+	CoroProgramPredicates coro.ProgramPredicateRequirements
 	// LogicalLocality freezes the compiler-inserted package-block and lazy
 	// initializer edges used when locality follows a stackless logical G.
 	// It is an explicit construction input because Program.LogicalLocality is
@@ -329,6 +334,7 @@ type EmissionUniverse struct {
 	callableIdentities      map[*ssa.Function]CoroCallableIdentityCertificate
 	callableContracts       map[*ssa.Function]CoroCallableContractCertificate
 	callableDefaults        map[*ssa.Function]none
+	pythonObjectTypes       []types.Type
 	localExportBindings     map[*ssa.Function]coroLocalExportBinding
 	exportIngressBindings   map[*ssa.Function]coroExportIngressCertificate
 	noPreempt               map[*ssa.Function]string
@@ -363,10 +369,9 @@ type EmissionUniverse struct {
 }
 
 type emissionEffectiveTypeKey struct {
-	owner                *preparedEmissionPackage
-	function             *ssa.Function
-	typ                  types.Type
-	preservePatchedNamed bool
+	owner    *preparedEmissionPackage
+	function *ssa.Function
+	typ      types.Type
 }
 
 // emissionCanonicalIndex is the single cross-owner canonicalization boundary
@@ -529,12 +534,12 @@ const (
 	// specific dual recipe can therefore also execute in a synchronous outcome
 	// twin while timer, poll, host, and generic worker waits cannot.
 	CoroIntrinsicCallInlineNativeBlock
-	// CoroIntrinsicCallInlineForeignSuspend is the same current-frame erasure
-	// shape, but the structured suspension waits for a bounded foreign-worker
-	// transaction rather than a scheduler-local event. Keeping it distinct
-	// makes WaitForeign an exact owner-local effect instead of disguising the
-	// operation as a generic park.
-	CoroIntrinsicCallInlineForeignSuspend
+	// CoroIntrinsicCallInlineForeignTransaction erases the declaration call and
+	// emits one typed foreign transaction in the current structured body. The
+	// frozen route may suspend on a bounded worker or synchronously detach the
+	// current M for a reentry-capable same-M episode. Keeping it distinct makes
+	// WaitForeign an exact owner-local effect in both cases.
+	CoroIntrinsicCallInlineForeignTransaction
 	// CoroIntrinsicCallInlineYield is also a current-frame suspension, but the
 	// task remains runnable. It seeds YieldOnly rather than MayPark and is used
 	// for explicit scheduler handoff/backoff, not event waiting.
@@ -554,7 +559,7 @@ const (
 func (s CoroIntrinsicCallSemantics) ElidesManagedCall() bool {
 	return s == CoroIntrinsicCallInlineNoSuspend || s == CoroIntrinsicCallInlineWithLoweredCalls ||
 		s == CoroIntrinsicCallInlineSuspend || s == CoroIntrinsicCallInlineNativeBlock ||
-		s == CoroIntrinsicCallInlineForeignSuspend ||
+		s == CoroIntrinsicCallInlineForeignTransaction ||
 		s == CoroIntrinsicCallInlineYield ||
 		s == CoroIntrinsicCallInlineOutcome
 }
@@ -567,7 +572,7 @@ func (s CoroIntrinsicCallSemantics) ElidesManagedCall() bool {
 // in the same analyzer seed.
 func (s CoroIntrinsicCallSemantics) SuspendsCurrentFrame() bool {
 	return s == CoroIntrinsicCallInlineSuspend || s == CoroIntrinsicCallInlineNativeBlock ||
-		s == CoroIntrinsicCallInlineForeignSuspend ||
+		s == CoroIntrinsicCallInlineForeignTransaction ||
 		s == CoroIntrinsicCallInlineYield ||
 		s == CoroIntrinsicCallInlineOutcome
 
@@ -590,7 +595,7 @@ func (s CoroIntrinsicCallSemantics) CurrentFrameEffect() coro.Effect {
 	switch s {
 	case CoroIntrinsicCallInlineSuspend, CoroIntrinsicCallInlineNativeBlock:
 		return coro.MayPark
-	case CoroIntrinsicCallInlineForeignSuspend:
+	case CoroIntrinsicCallInlineForeignTransaction:
 		return coro.WaitForeign
 	case CoroIntrinsicCallInlineYield:
 		return coro.YieldOnly
@@ -639,12 +644,12 @@ const (
 	// CoroCallElidedFrontendUnevaluated records a source call in an SSA
 	// fallback region that the selected frontend lowering does not emit.
 	CoroCallElidedFrontendUnevaluated
-	// CoroCallElidedCgoWorker replaces one exact call to a generated,
-	// synchronous _Cfunc_* adapter with a typed bounded-worker transaction.
-	// The adapter retains its single raw/plain implementation; the managed
-	// caller owns the suspension and never invokes that implementation on an
-	// executor thread.
-	CoroCallElidedCgoWorker
+	// CoroCallElidedGeneratedCgo replaces one exact call to a generated,
+	// synchronous _Cfunc_* adapter with a typed foreign transaction. Its frozen
+	// execution class selects a bounded worker only under a callback-free
+	// certificate; otherwise it preserves Go cgo semantics with an outcome-aware
+	// same-M episode. The adapter retains one raw/plain implementation.
+	CoroCallElidedGeneratedCgo
 	// CoroCallElidedPython replaces one exact compiler-recognized Python call
 	// or Python value-construction intrinsic with an owner-preserving same-M
 	// episode. The source declaration has no managed Go body.
@@ -678,12 +683,12 @@ type CoroCallSitePlan struct {
 	RawPlainSynchronousIntrinsic bool
 	Elision                      CoroCallElisionKind
 	ElisionCertificate           string
-	// CgoWorkerTarget is the exact generated Go adapter whose native-stack
-	// entry is published to the bounded worker by CoroCallElidedCgoWorker.
+	// GeneratedCgoTarget is the exact generated Go adapter whose native-stack
+	// entry is consumed by CoroCallElidedGeneratedCgo's frozen foreign route.
 	// It is nil for every other elision. Whole-program analysis consumes this
 	// frozen edge directly; it must not recover the target from a symbol name
 	// or from the source call after ProgramIR construction.
-	CgoWorkerTarget *ssa.Function
+	GeneratedCgoTarget *ssa.Function
 	// PythonTarget is the exact frontend InPython declaration selected by a
 	// Python operation. It is nil for compiler-owned pyList/pyTuple/pyStr
 	// intrinsics and every non-Python call.
@@ -735,6 +740,7 @@ func (shape coroHostOperationCallShape) valid() bool {
 
 type coroFrozenCallSitePlan struct {
 	plan               CoroCallSitePlan
+	interfaceMethodKey string
 	failure            string
 	opcode             int
 	intrinsicPlacement coroRuntimeHelperPlacement
@@ -743,7 +749,7 @@ type coroFrozenCallSitePlan struct {
 	workerCertified    bool
 	workerOwners       map[*ssa.Function]none
 	workerIncoming     []coroWorkerSyscallIncomingEdge
-	cgoWorker          CoroCgoWorkerCallCertificate
+	generatedCgo       CoroGeneratedCgoCallCertificate
 	patchRedirect      coroPatchInitRedirect
 	patchAttempted     bool
 }
@@ -795,6 +801,9 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 // whole-program construction contracts. Production active coroutine builds
 // set CompleteRuntimeABI; unit/report universes deliberately leave it false.
 func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inputs []EmissionPackage, options EmissionUniverseOptions) (*EmissionUniverse, error) {
+	if !options.CoroProgramPredicates.Valid() {
+		return nil, fmt.Errorf("prepare emission universe: invalid program predicate bindings")
+	}
 	goroot, err := normalizeEmissionGOROOT(options.GOROOT)
 	if err != nil {
 		return nil, fmt.Errorf("prepare emission universe: %w", err)
@@ -895,6 +904,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		effectiveTypes:          make(map[emissionEffectiveTypeKey]types.Type),
 	}
 	u.libraryEffects.index.universe = u
+	u.coroProgramIR.programPredicates = options.CoroProgramPredicates
 	for i, input := range inputs {
 		if input.SSA == nil || input.SSA.Prog == nil || input.SSA.Pkg == nil {
 			return nil, fmt.Errorf("prepare emission universe: package %d is incomplete", i)
@@ -1116,6 +1126,61 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	}
 	if err := u.freezeCoroCallableIdentityCertificates(); err != nil {
 		return nil, err
+	}
+	for _, function := range u.functions {
+		background, classified, err := u.FunctionBackground(function)
+		if err != nil {
+			return nil, fmt.Errorf("prepare emission universe: classify frozen callable %q: %w", function.Name(), err)
+		}
+		opcode, intrinsic := 0, false
+		if !classified {
+			opcode, intrinsic, err = u.coroIntrinsicOpcode(function)
+			if err != nil {
+				return nil, fmt.Errorf("prepare emission universe: classify frozen intrinsic %q: %w", function.Name(), err)
+			}
+		}
+		u.coroProgramIR.callableClassifications[function] = coroCallableClassification{
+			background: background, classified: classified, opcode: opcode, intrinsic: intrinsic,
+		}
+	}
+	for alias := range u.aliases {
+		if canonical, frozen := u.Resolve(alias); frozen {
+			if classification, present := u.coroProgramIR.callableClassifications[canonical]; present {
+				u.coroProgramIR.callableClassifications[alias] = classification
+			}
+		}
+	}
+	u.pythonObjectTypes = u.coroProgramIR.coroPythonObjectTypes(u.functions)
+	// Resolve managed method publication while canonical declarations and their
+	// native adapters are still builder-owned. Descriptor planning and emission
+	// consume these exact frozen targets, never reconstructing adapter identity.
+	for _, function := range u.functions {
+		target := function
+		if function.Signature != nil && function.Signature.Recv() != nil {
+			adapter, adapted, err := u.CoroManagedFunctionValueTarget(function)
+			if err != nil {
+				return nil, err
+			}
+			if adapted {
+				target = adapter
+			}
+		}
+		u.coroProgramIR.managedMethodTargets[function] = target
+		references, err := u.CoroPlanningMetadata().ManagedValueReferences(function)
+		if err != nil {
+			return nil, err
+		}
+		u.coroProgramIR.managedValueReferences[function] = references
+	}
+	for alias := range u.aliases {
+		if canonical, frozen := u.Resolve(alias); frozen {
+			if target := u.coroProgramIR.managedMethodTargets[canonical]; target != nil {
+				if target == canonical {
+					target = alias // ordinary aliases retain their source receiver view
+				}
+				u.coroProgramIR.managedMethodTargets[alias] = target
+			}
+		}
 	}
 	if err := u.freezeCoroCallableContractCertificates(); err != nil {
 		return nil, err
@@ -2004,7 +2069,7 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 	controlOperation CoroControlOperation,
 	workerCertificate CoroWorkerSyscallCertificate,
 	workerCertified bool,
-	cgoErrnoCertificate CoroCgoWorkerCallCertificate,
+	cgoErrnoCertificate CoroGeneratedCgoCallCertificate,
 	cgoErrnoCertified bool,
 ) (semantics CoroIntrinsicCallSemantics, exact bool, err error) {
 	if call == nil || call.Common() == nil {
@@ -2109,9 +2174,40 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
+		if shape.unusedResult && direct.Referrers() != nil {
+			for _, ref := range *direct.Referrers() {
+				if _, debug := ref.(*ssa.DebugRef); !debug {
+					return CoroIntrinsicCallUnsupported, true, fmt.Errorf("%s result must be unused; it is not a processor identity", shape.name)
+				}
+			}
+		}
 		return semantics, true, nil
 	}
 	switch opcode {
+	case llgoCoroBorrowResult:
+		recipe, err := planCoroDeliveryBorrow(u, ctx, direct)
+		if err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		if err := u.coroProgramIR.freezeDeliveryProducer(recipe); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		// Hidden fallback initialization and cleanup are ordinary managed calls.
+		// Freeze them into the same graph as source calls before effect/demand
+		// analysis; a metadata reference alone must not erase their effects.
+		if err := u.recordCoroLoweredCall(recipe.producer, coroDeliveryInitializeCall, recipe.initializer); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		if err := u.recordCoroLoweredCall(recipe.producer, coroDeliveryDropCall, recipe.drop); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
+	case llgoSkip:
+		// The intentionally polymorphic llgo.skip contract has no narrower
+		// signature to validate. The exact-direct-call check above is the full
+		// call-site proof; lowering consumes the call and synthesizes zero
+		// results without materializing the declaration.
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	case llgoCstr:
 		args := direct.Common().Args
 		if len(args) != 1 {
@@ -2390,13 +2486,14 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 	case llgoCgoCgocall:
 		if cgoErrnoCertified {
 			if cgoErrnoCertificate.ID == "" || cgoErrnoCertificate.TargetIdentity == "" ||
-				cgoErrnoCertificate.ABISignature == "" {
+				cgoErrnoCertificate.ABISignature == "" ||
+				!validCoroGeneratedCgoExecution(cgoErrnoCertificate.mode, cgoErrnoCertificate.reentry) {
 				return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
-					"generated C2 call %q has an incomplete bounded-worker certificate",
+					"generated C2 call %q has an incomplete foreign-transaction certificate",
 					direct.String(),
 				)
 			}
-			return CoroIntrinsicCallInlineForeignSuspend, true, nil
+			return CoroIntrinsicCallInlineForeignTransaction, true, nil
 		}
 		if err := u.verifyCoroRawCgocallShape(ctx, direct); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
@@ -2927,12 +3024,12 @@ func (u *EmissionUniverse) CoroRawFunctionAddressCallArgument(call ssa.CallInstr
 	return argument == 0, nil
 }
 
-// CoroStaticCodeAddressCallArgument reports an exact FuncPCABI0 or
-// FuncPCABIInternal operand whose selected entry PC is observed but cannot be
-// invoked through the result. This keeps the transient MakeInterface out of
+// CoroStaticFunctionReferenceCallArgument reports exact compiler-metadata
+// operands and FuncPCABI0/FuncPCABIInternal code observations, neither of which
+// publishes a callable Go function value. This keeps transient boxes out of
 // the descriptor ABI without manufacturing a synchronous entry demand for the
 // observed function.
-func (u *EmissionUniverse) CoroStaticCodeAddressCallArgument(call ssa.CallInstruction, argument int) (bool, error) {
+func (u *EmissionUniverse) CoroStaticFunctionReferenceCallArgument(call ssa.CallInstruction, argument int) (bool, error) {
 	if call == nil || call.Common() == nil || argument < 0 || argument >= len(call.Common().Args) {
 		return false, nil
 	}
@@ -2942,6 +3039,11 @@ func (u *EmissionUniverse) CoroStaticCodeAddressCallArgument(call ssa.CallInstru
 	}
 	if frozen.failure != "" {
 		return false, fmt.Errorf("%s", frozen.failure)
+	}
+	if frozen.plan.Intrinsic && frozen.opcode == llgoCoroBorrowResult {
+		// The declaration's two exact function operands were already bound by
+		// ProgramIR. They carry helper identity, not a runtime code address.
+		return argument < 2, nil
 	}
 	if !frozen.plan.Intrinsic || frozen.opcode != llgoFuncPCABI0 {
 		return false, nil
@@ -3131,6 +3233,12 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		return CoroIntrinsicCallInlineNoSuspend
 	}
 	switch opcode {
+	case llgoSkip:
+		// skip is a compiler-owned erasure intrinsic. Its declaration may use
+		// any type-correct parameter and result list: arguments are evaluated
+		// by Go before the call, the call itself disappears, and every result
+		// is the corresponding zero value. It therefore owns no scheduler edge.
+		return CoroIntrinsicCallInlineNoSuspend
 	case llgoCstr:
 		// cstr accepts only a compile-time string literal and lowers directly
 		// to an LLVM constant C string pointer.
@@ -3182,10 +3290,15 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// closureEnv projects the compiler-owned environment parameter of the
 		// current entry. It emits neither a call nor scheduler state.
 		return CoroIntrinsicCallInlineNoSuspend
+	case llgoCoroExecutionDomainEnabled, llgoCoroGCObservationEnabled:
+		// A compile-time capability query has no callable or scheduler edge.
+		return CoroIntrinsicCallInlineNoSuspend
 	case llgoCoroCurrentTask:
 		// Typed-FFI adapters receive the active physical task directly. The
 		// intrinsic emits no call and is valid only in their managed owner.
 		return CoroIntrinsicCallInlineNoSuspend
+	case llgoCoroBorrowResult:
+		return CoroIntrinsicCallInlineWithLoweredCalls
 	case llgoAllocaCStr, llgoAllocaCStrs:
 		// The C-string allocation intrinsics lower their size arithmetic and
 		// storage directly, then call runtime.AllocU/CStrCopy in a physical
@@ -3252,7 +3365,7 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		return CoroIntrinsicCallInlineSuspend
 	case llgoCoroControlledTimerWait:
 		return CoroIntrinsicCallInlineSuspend
-	case llgoCoroCriticalEnter:
+	case llgoCoroCriticalEnter, llgoCoroCriticalPin:
 		return CoroIntrinsicCallInlineNoSuspend
 	case llgoCoroCriticalExit:
 		return CoroIntrinsicCallInlineYield
@@ -3430,7 +3543,7 @@ func (u *EmissionUniverse) coroCriticalCallSite(call *ssa.Call) (coroCriticalCal
 	}
 	var role coroCriticalCallRole
 	switch frozen.opcode {
-	case llgoCoroCriticalEnter:
+	case llgoCoroCriticalEnter, llgoCoroCriticalPin:
 		role = coroCriticalCallEnter
 	case llgoCoroCriticalExit:
 		role = coroCriticalCallExit
@@ -3453,10 +3566,11 @@ type coroIntrinsicTypeShape struct {
 }
 
 type coroExactIntrinsicShape struct {
-	name       string
-	signature  string
-	parameters []coroIntrinsicTypeShape
-	result     *coroIntrinsicTypeShape
+	name         string
+	signature    string
+	parameters   []coroIntrinsicTypeShape
+	result       *coroIntrinsicTypeShape
+	unusedResult bool
 }
 
 // coroExactIntrinsicShapeForOpcode is the single data-driven boundary for
@@ -3465,6 +3579,13 @@ type coroExactIntrinsicShape struct {
 // capabilities, or other semantic facts retain their dedicated verifier.
 func coroExactIntrinsicShapeForOpcode(opcode int) (coroExactIntrinsicShape, bool) {
 	switch opcode {
+	case llgoCoroCriticalPin:
+		return coroExactIntrinsicShape{
+			name:         "llgo.coroCriticalPin",
+			signature:    "func() int",
+			result:       &coroIntrinsicTypeShape{basic: types.Int},
+			unusedResult: true,
+		}, true
 	case llgoBoolToUint8:
 		return coroExactIntrinsicShape{
 			name:       "llgo.boolToUint8",
@@ -3529,6 +3650,16 @@ func coroExactIntrinsicShapeForOpcode(opcode int) (coroExactIntrinsicShape, bool
 			name:      "llgo.coroCurrentTask",
 			signature: "func() unsafe.Pointer",
 			result:    &coroIntrinsicTypeShape{basic: types.UnsafePointer},
+		}, true
+	case llgoCoroExecutionDomainEnabled, llgoCoroGCObservationEnabled:
+		name := "llgo.coroExecutionDomainEnabled"
+		if opcode == llgoCoroGCObservationEnabled {
+			name = "llgo.coroGCObservationEnabled"
+		}
+		return coroExactIntrinsicShape{
+			name:      name,
+			signature: "func() bool",
+			result:    &coroIntrinsicTypeShape{basic: types.Bool},
 		}, true
 	case llgoCoroPropagatePanic:
 		return coroExactIntrinsicShape{
@@ -4219,7 +4350,11 @@ func (u *EmissionUniverse) selectPackage(prepared *preparedEmissionPackage, pkg 
 func (u *EmissionUniverse) selectTypeMethods(prepared *preparedEmissionPackage, typ types.Type, state pkgState, fromPatch, require bool) error {
 	mset := u.goProg.MethodSets.MethodSet(typ)
 	for i := 0; i < mset.Len(); i++ {
-		fn := u.goProg.MethodValue(mset.At(i))
+		selection := mset.At(i)
+		if !emissionABIIncludesMethod(selection) {
+			continue
+		}
+		fn := u.goProg.MethodValue(selection)
 		if fn == nil {
 			continue
 		}
@@ -4303,6 +4438,9 @@ func (u *EmissionUniverse) selectABITypeMethods(prepared *preparedEmissionPackag
 	}
 	for index := 0; index < mset.Len(); index++ {
 		selection := mset.At(index)
+		if !emissionABIIncludesMethod(selection) {
+			continue
+		}
 		if err := selectMethod(selection); err != nil {
 			return nil, err
 		}
@@ -4328,6 +4466,15 @@ func (u *EmissionUniverse) selectABITypeMethods(prepared *preparedEmissionPackag
 		}
 	}
 	return stableUniqueFunctions(methods), nil
+}
+
+// emissionABIIncludesMethod mirrors ssa.Builder.abiInterfaceMethods. Generic
+// concrete methods require explicit type arguments and therefore have no
+// receiver-only entry that an uncommon ABI method table, interface dispatch,
+// or reflection can publish. Their concrete instances remain ordinary call
+// graph demands and are selected independently.
+func emissionABIIncludesMethod(selection *types.Selection) bool {
+	return selection != nil && (!genmethod.SupportsGenericMethods || !genmethod.IsGenericMethod(selection.Type()))
 }
 
 func (u *EmissionUniverse) functionProvenance(prepared *preparedEmissionPackage, fn *ssa.Function) (pkgState, bool) {
@@ -4398,6 +4545,11 @@ func (u *EmissionUniverse) selectFunction(prepared *preparedEmissionPackage, fn 
 		if winner := prepared.winners[key]; winner != nil {
 			if winner != fn {
 				winnerFromPatch := prepared.fromPatch[winner]
+				linknameDeclaration, linknameDefinition, exactLinknamePair, linknameErr :=
+					u.sameOwnerBodylessGoLinknamePair(prepared, key, winner, fn)
+				if linknameErr != nil {
+					return linknameErr
+				}
 				switch {
 				case fromPatch && !winnerFromPatch:
 					// Patch provenance wins even when a cross-package or runtime-type
@@ -4409,6 +4561,37 @@ func (u *EmissionUniverse) selectFunction(prepared *preparedEmissionPackage, fn 
 				case !fromPatch && winnerFromPatch:
 					canonical = winner
 					u.aliases[fn] = winner
+				case exactLinknamePair && winner == linknameDeclaration && fn == linknameDefinition:
+					// Keep both source views selected and required until
+					// aliasBodylessGoLinknameDeclarations freezes the complete
+					// pair and transfers every owner record atomically. The
+					// bodyful side must nevertheless own the package's one
+					// managed symbol now so later discoveries see a definition,
+					// not a declaration, as the emission winner.
+					prepared.winners[key] = fn
+					prepared.fromPatch[fn] = fromPatch
+					u.finalKeys[emissionFunctionOwnerKey{function: fn, owner: prepared}] = key
+					canonical = fn
+				case exactLinknamePair && winner == linknameDefinition && fn == linknameDeclaration:
+					// The bodyful winner was discovered first. Retain the
+					// declaration as a pending required source view; the exact
+					// linkname pass below will install the canonical alias before
+					// any body is materialized.
+					prepared.fromPatch[fn] = fromPatch
+					u.finalKeys[emissionFunctionOwnerKey{function: fn, owner: prepared}] = key
+					canonical = fn
+				case managedKeyFunctionType(key) != goFunc &&
+					emissionExternalMethodFacadePreferred(fn, winner):
+					// A receiver method and a receiver-free declaration may expose
+					// the same native symbol and C ABI. Keep the method as the logical
+					// winner: ABI method tables, interface dispatch, and reflection
+					// require its receiver identity, while an ordinary declaration can
+					// still call the same physical C symbol through that receiver-first
+					// facade. Discovery order must not decide this semantic identity.
+					if err := u.replaceManagedWinner(prepared, key, winner, fn); err != nil {
+						return err
+					}
+					canonical = fn
 				case managedKeyFunctionType(key) != goFunc:
 					// C, Python, and llgo-intrinsic functions are declarations of
 					// the resolved external operation. cl never emits their Go SSA
@@ -4491,6 +4674,57 @@ func (u *EmissionUniverse) selectFunction(prepared *preparedEmissionPackage, fn 
 	}
 	u.addRequired(canonical, prepared)
 	return nil
+}
+
+// sameOwnerBodylessGoLinknamePair recognizes the narrow collision that can
+// occur before the dedicated bodyless-linkname pass: one package contains both
+// a called bodyless Go declaration and the bodyful Go definition selected for
+// the same final //go:linkname symbol. The normal managed key already proves
+// the exact physical symbol and strict callable ABI; replay the dedicated
+// linkname ABI key as well so an unrelated same-symbol body still fails closed.
+func (u *EmissionUniverse) sameOwnerBodylessGoLinknamePair(
+	prepared *preparedEmissionPackage,
+	key string,
+	left, right *ssa.Function,
+) (declaration, definition *ssa.Function, exact bool, err error) {
+	if u == nil || prepared == nil || left == nil || right == nil || left == right ||
+		managedKeyFunctionType(key) != goFunc || functionNeedsLinkOnce(left) ||
+		functionNeedsLinkOnce(right) {
+		return nil, nil, false, nil
+	}
+	switch {
+	case len(left.Blocks) == 0 && len(right.Blocks) != 0:
+		declaration, definition = left, right
+	case len(right.Blocks) == 0 && len(left.Blocks) != 0:
+		declaration, definition = right, left
+	default:
+		return nil, nil, false, nil
+	}
+	if !bodylessManagedGoDeclaration(declaration) {
+		return nil, nil, false, nil
+	}
+	index := emissionCanonicalIndex{universe: u}
+	declarationKey, err := index.managedGoLinknamePairKeyWithPointerFacade(prepared, declaration, key, false)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	definitionKeys, err := index.managedGoLinknameDefinitionPairKeys(prepared, definition, key)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	for _, definitionKey := range definitionKeys {
+		if declarationKey == definitionKey {
+			return declaration, definition, true, nil
+		}
+	}
+	return nil, nil, false, nil
+}
+
+func emissionExternalMethodFacadePreferred(candidate, current *ssa.Function) bool {
+	if candidate == nil || current == nil || candidate.Signature == nil || current.Signature == nil {
+		return false
+	}
+	return candidate.Signature.Recv() != nil && current.Signature.Recv() == nil
 }
 
 // samePatchedGenericInstanceOrigin reports only the relationship established
@@ -4780,9 +5014,9 @@ func (u *EmissionUniverse) samePromotedWrapperLinkIdentity(owner *preparedEmissi
 }
 
 func (u *EmissionUniverse) structuralWrapperABIKey(owner *preparedEmissionPackage, fn *ssa.Function) string {
-	fields := []string{"wrapper-abi-v1", u.emissionTypeKeys.strict(u.effectiveType(owner, fn, fn.Signature, false))}
+	fields := []string{"wrapper-abi-v1", u.emissionTypeKeys.strict(u.effectiveType(owner, fn, fn.Signature))}
 	for _, free := range fn.FreeVars {
-		fields = append(fields, u.emissionTypeKeys.strict(u.effectiveType(owner, fn, free.Type(), false)))
+		fields = append(fields, u.emissionTypeKeys.strict(u.effectiveType(owner, fn, free.Type())))
 	}
 	return framedEmissionKey(fields...)
 }
@@ -5165,7 +5399,15 @@ type emissionGoLinknameDeclaration struct {
 type emissionGoLinknamePair struct {
 	definition       *ssa.Function
 	key              string
+	definitionKey    string
 	declarationOwner *preparedEmissionPackage
+}
+
+func (pair emissionGoLinknamePair) targetKey() string {
+	if pair.definitionKey != "" {
+		return pair.definitionKey
+	}
+	return pair.key
 }
 
 type emissionGoLinknameGroup struct {
@@ -5217,7 +5459,8 @@ func (u *EmissionUniverse) exactManagedGoLinknameDefinition(fn *ssa.Function) (b
 		if resolvedDefinition == nil || resolvedDeclaration == nil {
 			return false, fmt.Errorf("managed go:linkname definition has cyclic declaration aliases")
 		}
-		if resolvedDefinition != canonical || !u.managedGoLinknameDefinitionHasKey(resolvedDefinition, pair.key) {
+		if resolvedDefinition != canonical ||
+			!u.managedGoLinknameDefinitionHasKey(resolvedDefinition, pair.targetKey()) {
 			continue
 		}
 		switch {
@@ -5361,12 +5604,6 @@ func (u *EmissionUniverse) managedGoLinknameDefinitionHasKey(definition *ssa.Fun
 	return false
 }
 
-func (u *EmissionUniverse) managedGoLinknamePairKey(owner *preparedEmissionPackage, function *ssa.Function, finalKey string) (string, error) {
-	return (emissionCanonicalIndex{
-		universe: u,
-	}).managedGoLinknamePairKeyWithPointerFacade(owner, function, finalKey, false)
-}
-
 // managedGoLinknameDefinitionPairKeys includes one additional key that erases
 // direct typed-pointer parameter/result pointees. Bodyless declarations use
 // that key only when they explicitly expose a direct unsafe.Pointer. This
@@ -5430,7 +5667,7 @@ func (index emissionCanonicalIndex) managedGoLinknamePairKeyWithPointerFacade(
 		fields := make([]string, 0, len(typeArgs)+2)
 		fields = append(fields, "go-linkname-callable-instance-v1", signature)
 		for _, argument := range typeArgs {
-			fields = append(fields, u.emissionTypeKeys.goLinknameABI(u.effectiveType(owner, function, argument, false)))
+			fields = append(fields, u.emissionTypeKeys.goLinknameABI(u.effectiveType(owner, function, argument)))
 		}
 		signature = framedEmissionKey(fields...)
 	}
@@ -5519,6 +5756,7 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 	// side first, including bodyful functions whose source name is unrelated to
 	// the final go:linkname symbol.
 	groups := make(map[string]*emissionGoLinknameGroup)
+	definitionKeysBySymbol := make(map[string]map[*ssa.Function]string)
 	for _, prepared := range packages {
 		keys := make([]string, 0, len(prepared.winners))
 		for key := range prepared.winners {
@@ -5526,7 +5764,7 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			ftype, _, _, valid := splitManagedSymbolKey(key)
+			ftype, symbol, _, valid := splitManagedSymbolKey(key)
 			if !valid || ftype != goFunc {
 				continue
 			}
@@ -5557,6 +5795,18 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 			if err != nil {
 				return err
 			}
+			byFunction := definitionKeysBySymbol[symbol]
+			if byFunction == nil {
+				byFunction = make(map[*ssa.Function]string)
+				definitionKeysBySymbol[symbol] = byFunction
+			}
+			if previous, exists := byFunction[function]; exists && previous != pairKeys[0] {
+				return fmt.Errorf(
+					"prepare emission universe: managed Go definition %q has conflicting pair keys for symbol %q",
+					function.Name(), symbol,
+				)
+			}
+			byFunction[function] = pairKeys[0]
 			for _, pairKey := range pairKeys {
 				group := groups[pairKey]
 				if group == nil {
@@ -5611,7 +5861,7 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 			if !managed || managedKeyFunctionType(key) != goFunc {
 				continue
 			}
-			pairKey, err := u.managedGoLinknamePairKey(prepared, function, key)
+			pairKey, err := (emissionCanonicalIndex{universe: u}).managedGoLinknamePairKeyWithPointerFacade(prepared, function, key, false)
 			if err != nil {
 				return err
 			}
@@ -5635,17 +5885,12 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 	}
 	sort.Strings(keys)
 	type aliasOperation struct {
-		key         string
-		declaration emissionGoLinknameDeclaration
-		definition  *ssa.Function
+		key           string
+		definitionKey string
+		declaration   emissionGoLinknameDeclaration
+		definition    *ssa.Function
 	}
-	operations := make([]aliasOperation, 0)
-	for _, key := range keys {
-		group := groups[key]
-		definitions := make([]*ssa.Function, 0, len(group.definitions))
-		for function := range group.definitions {
-			definitions = append(definitions, function)
-		}
+	selectDefinitions := func(key string, definitions []*ssa.Function) ([]*ssa.Function, error) {
 		sort.SliceStable(definitions, func(i, j int) bool {
 			return u.copiedTestVariantDefinitionLess(definitions[i], definitions[j])
 		})
@@ -5655,8 +5900,7 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 			// but a bodyless go:linkname declaration still names the one physical
 			// Go symbol shared by those copies. Select the earliest input variant
 			// only when package path, source identity and complete frozen SSA body
-			// all agree. A distinct same-path test body remains ambiguous and is
-			// rejected below rather than being guessed equivalent.
+			// all agree. A distinct same-path test body remains ambiguous.
 			equivalentCopies := true
 			for index := 1; index < len(definitions); index++ {
 				if !u.sameCopiedTestVariantDefinition(definitions[0], definitions[index]) {
@@ -5668,15 +5912,10 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 				definitions = definitions[:1]
 			}
 		}
-		if len(definitions) > 1 && mutuallyExclusiveSyntheticTestMainDefinitions(key, definitions, u.ownerOf) {
-			// One `llgo test ./...` build owns several independently linked test
-			// executables in the same SSA/emission universe. The build-injected
-			// ForTest marker proves that each main.main is a Go-generated test
-			// entry and therefore a mutually exclusive linker definition. All are
-			// explicit AsyncDemand roots, while runtime.main_main needs one exact
-			// representative only to freeze their common managed-call ABI. Keep
-			// every definition in the universe; select the deterministic first one
-			// solely for that bodyless declaration contract.
+		if len(definitions) > 1 &&
+			mutuallyExclusiveSyntheticTestMainDefinitions(key, definitions, u.ownerOf) {
+			// Each build-owned test main is linked into a distinct output. Keep the
+			// deterministic representative used by the exact pairing path.
 			definitions = definitions[:1]
 		}
 		if len(definitions) > 1 {
@@ -5685,25 +5924,84 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 			for index, function := range definitions {
 				diagnostics[index] = emissionFunctionDiagnostic(function)
 			}
-			return fmt.Errorf(
-				"prepare emission universe: bodyless go:linkname symbol %q has multiple emitted Go definitions with the same exact structural signature: %s",
+			return nil, fmt.Errorf(
+				"prepare emission universe: bodyless go:linkname symbol %q has multiple emitted Go definitions compatible with the frozen managed facade: %s",
 				symbol, strings.Join(diagnostics, ", "),
 			)
 		}
-		if len(definitions) == 0 {
-			// An assembly implementation or a definition with a different Go
-			// signature remains an opaque declaration. Exact-key matching must
-			// not infer compatibility from the physical symbol alone.
-			continue
-		}
+		return definitions, nil
+	}
+	operations := make([]aliasOperation, 0)
+	for _, key := range keys {
+		group := groups[key]
 		sort.SliceStable(group.declarations, func(i, j int) bool {
 			if group.declarations[i].owner.order != group.declarations[j].owner.order {
 				return group.declarations[i].owner.order < group.declarations[j].owner.order
 			}
-			return emissionFunctionSortKey(group.declarations[i].function) < emissionFunctionSortKey(group.declarations[j].function)
+			return emissionFunctionSortKey(group.declarations[i].function) <
+				emissionFunctionSortKey(group.declarations[j].function)
 		})
+		definitions := make([]*ssa.Function, 0, len(group.definitions))
+		for function := range group.definitions {
+			definitions = append(definitions, function)
+		}
+		var err error
+		definitions, err = selectDefinitions(key, definitions)
+		if err != nil {
+			return err
+		}
+		if len(definitions) == 1 {
+			for _, declaration := range group.declarations {
+				operations = append(operations, aliasOperation{
+					key: key, definitionKey: key,
+					declaration: declaration, definition: definitions[0],
+				})
+			}
+			continue
+		}
+
+		// Exact structural pairing deliberately remains the first choice. Only
+		// an otherwise-unmatched declaration may use the narrower asymmetric
+		// facade, and only when one definition of the same physical Go symbol
+		// consumes a strict compatible prefix of its parameters.
+		_, symbol, _, valid := splitManagedSymbolKey(key)
+		if !valid {
+			continue
+		}
 		for _, declaration := range group.declarations {
-			operations = append(operations, aliasOperation{key: key, declaration: declaration, definition: definitions[0]})
+			definitionKeys := make(map[*ssa.Function]string)
+			compatibleDefinitions := make([]*ssa.Function, 0)
+			for definition, definitionKey := range definitionKeysBySymbol[symbol] {
+				facade, compatible, err := managedGoLinknameFacadeShape(
+					declaration.function, definition, u.coroPhysicalSourceSignature,
+					func(typ types.Type) string { return coroPhysicalTransportTypeKey(u, typ) },
+				)
+				if err != nil {
+					return fmt.Errorf(
+						"prepare emission universe: trailing-argument go:linkname %q -> %q: %w",
+						declaration.function.Name(), definition.Name(), err,
+					)
+				}
+				if !compatible || facade.source.Params().Len() <= facade.target.Params().Len() {
+					continue
+				}
+				definitionKeys[definition] = definitionKey
+				compatibleDefinitions = append(compatibleDefinitions, definition)
+			}
+			compatibleDefinitions, err = selectDefinitions(key, compatibleDefinitions)
+			if err != nil {
+				return err
+			}
+			if len(compatibleDefinitions) == 0 {
+				// An assembly implementation or an incompatible Go definition remains
+				// an opaque declaration; never guess a call ABI from the symbol alone.
+				continue
+			}
+			definition := compatibleDefinitions[0]
+			operations = append(operations, aliasOperation{
+				key: key, definitionKey: definitionKeys[definition],
+				declaration: declaration, definition: definition,
+			})
 		}
 	}
 
@@ -5716,10 +6014,13 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 		pair := emissionGoLinknamePair{
 			definition:       operation.definition,
 			key:              operation.key,
+			definitionKey:    operation.definitionKey,
 			declarationOwner: operation.declaration.owner,
 		}
 		if previous, exists := u.goLinknameDefinitions[operation.declaration.function]; exists &&
-			(previous.definition != pair.definition || previous.key != pair.key || previous.declarationOwner != pair.declarationOwner) {
+			(previous.definition != pair.definition || previous.key != pair.key ||
+				previous.targetKey() != pair.targetKey() ||
+				previous.declarationOwner != pair.declarationOwner) {
 			return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q has conflicting exact definitions", operation.declaration.function.Name())
 		}
 		u.goLinknameDefinitions[operation.declaration.function] = pair
@@ -5839,7 +6140,7 @@ func (u *EmissionUniverse) activateBodylessGoLinknameAlias(declaration *ssa.Func
 	if len(definition.Blocks) == 0 || functionNeedsLinkOnce(definition) {
 		return fmt.Errorf("prepare emission universe: exact go:linkname target %q is not a non-linkonce emitted definition", definition.Name())
 	}
-	if !u.managedGoLinknameDefinitionHasKey(definition, pair.key) {
+	if !u.managedGoLinknameDefinitionHasKey(definition, pair.targetKey()) {
 		return fmt.Errorf("prepare emission universe: exact go:linkname definition %q changed its frozen managed key", definition.Name())
 	}
 	if _, materialized := u.materialized[declaration]; materialized {
@@ -5864,7 +6165,7 @@ func (u *EmissionUniverse) activateBodylessGoLinknameAlias(declaration *ssa.Func
 		if !stateOK || !kindOK || kind != goFunc || !keyOK || key == "" {
 			return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q has incomplete frozen owner metadata for %q", declaration.Name(), owner.identity)
 		}
-		ownerPairKey, err := u.managedGoLinknamePairKey(owner, declaration, key)
+		ownerPairKey, err := (emissionCanonicalIndex{universe: u}).managedGoLinknamePairKeyWithPointerFacade(owner, declaration, key, false)
 		if err != nil || ownerPairKey != pair.key {
 			return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q changed its frozen linkname ABI key for owner %q", declaration.Name(), owner.identity)
 		}
@@ -5989,6 +6290,40 @@ func (u *EmissionUniverse) aliasFunction(prepared *preparedEmissionPackage, fn *
 	}
 	if _, selected := prepared.selected[fn]; selected {
 		return nil
+	}
+	// A patch may replace a named type by an alias to an implementation in
+	// another package. Its methods then have different physical symbols, so
+	// matching only the old symbol cannot find the replacement. Follow the
+	// configured receiver substitution, retaining the exact method-set entry
+	// and callable type; never infer a replacement from a method name alone.
+	if fn.Signature != nil && fn.Signature.Recv() != nil {
+		receiver := fn.Signature.Recv().Type()
+		replacement := u.effectiveGoLinknameType(prepared, fn, receiver)
+		if !types.Identical(receiver, replacement) {
+			var methodPackage *types.Package
+			if object := fn.Object(); object != nil {
+				methodPackage = object.Pkg()
+			}
+			method := u.goProg.MethodSets.MethodSet(replacement).Lookup(methodPackage, fn.Name())
+			if method != nil {
+				target := u.goProg.MethodValue(method)
+				if target != nil && target != fn && types.Identical(
+					u.effectiveGoLinknameType(prepared, fn, fn.Signature),
+					u.effectiveGoLinknameType(prepared, target, target.Signature),
+				) {
+					targetOwner := u.ownerOf(target)
+					if targetOwner == nil {
+						targetOwner = prepared
+					}
+					state, fromPatch := u.functionProvenance(targetOwner, target)
+					if err := u.selectFunction(targetOwner, target, state, fromPatch); err != nil {
+						return err
+					}
+					u.aliases[fn] = u.canonicalAlias(target)
+					return nil
+				}
+			}
+		}
 	}
 	if fn.Name() == "init" && fn.Signature.Recv() == nil {
 		_, skipInit := prepared.skips["init"]
@@ -6222,8 +6557,8 @@ func (u *EmissionUniverse) wrapperCallIdentity(prepared *preparedEmissionPackage
 			"invoke-method-v1",
 			pkgPath,
 			method.Name(),
-			u.emissionTypeKeys.strict(u.effectiveType(prepared, fn, method.Type(), false)),
-			u.emissionTypeKeys.strict(u.effectiveType(prepared, fn, common.Value.Type(), false)),
+			u.emissionTypeKeys.strict(u.effectiveType(prepared, fn, method.Type())),
+			u.emissionTypeKeys.strict(u.effectiveType(prepared, fn, common.Value.Type())),
 		), false, nil
 	}
 	return "", false, nil
@@ -6358,7 +6693,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 	// though codegen does not emit those instructions. ProgramIR must therefore
 	// own their local facts as well; falling back to an analysis-time raw scan
 	// would reopen a second semantic authority.
-	constantReachable := coroPhysicalConstantReachableBlocks(fn)
+	constantReachable := u.coroProgramIR.freezeCoroPredicateCFG(ctx, fn)
 	for _, block := range fn.Blocks {
 		for _, instruction := range block.Instrs {
 			evaluated := constantReachable[block]
@@ -6419,7 +6754,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		}
 		if opcode, exact, opcodeErr := u.coroIntrinsicOpcode(canonicalTarget); opcodeErr != nil {
 			return opcodeErr
-		} else if exact && (opcode == llgoCoroCriticalEnter || opcode == llgoCoroCriticalExit ||
+		} else if exact && (opcode == llgoCoroCriticalEnter || opcode == llgoCoroCriticalPin || opcode == llgoCoroCriticalExit ||
 			opcode == llgoCoroOSThreadLock || opcode == llgoCoroOSThreadUnlock) {
 			return fmt.Errorf(
 				"prepare emission universe: coroutine scheduler marker %q cannot be materialized as a function value",
@@ -6467,7 +6802,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 			if err != nil {
 				return err
 			}
-			effectiveSignature := u.effectiveType(owner, spawn.Parent(), signature, false)
+			effectiveSignature := u.effectiveType(owner, spawn.Parent(), signature)
 			structuralKey, err := builtinSpawnWrapperStructuralKey(
 				u.emissionTypeKeys.strict, key, owner, u.finalIdentity(spawn.Parent()), effectiveSignature,
 			)
@@ -6491,7 +6826,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		return nil
 	}
 	if isCgo {
-		functionShape, shapeErr := prepareCoroEmissionFunctionShape(fn)
+		functionShape, shapeErr := prepareCoroEmissionFunctionShape(fn, u.coroProgramIR)
 		if shapeErr != nil {
 			return fmt.Errorf("prepare emission universe: cgo function %q SitePlan shape: %w", fn.Name(), shapeErr)
 		}
@@ -6528,7 +6863,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		}
 		return u.materializeABITypeDemandsOfFunction(fn, owner, emissionState)
 	}
-	functionShape, err := prepareCoroEmissionFunctionShape(fn)
+	functionShape, err := prepareCoroEmissionFunctionShape(fn, u.coroProgramIR)
 	if err != nil {
 		return fmt.Errorf("prepare emission universe: function %q SitePlan shape: %w", fn.Name(), err)
 	}
@@ -6602,7 +6937,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 				}
 				directFunction := false
 				if change, converted := instr.(*ssa.ChangeType); converted && change.X == target {
-					effective := u.effectiveType(owner, fn, change.Type(), false)
+					effective := u.effectiveType(owner, fn, change.Type())
 					directFunction = llssa.IsNativeFuncBackground(u.prog.TypeBackground(effective))
 				}
 				if err := materializeTarget(target, directFunction); err != nil {
@@ -7205,14 +7540,12 @@ func (u *EmissionUniverse) effectiveType(
 	owner *preparedEmissionPackage,
 	fn *ssa.Function,
 	typ types.Type,
-	preservePatchedNamed bool,
 ) types.Type {
 	if owner == nil || u == nil || typ == nil {
 		return typ
 	}
 	key := emissionEffectiveTypeKey{
 		owner: owner, function: fn, typ: typ,
-		preservePatchedNamed: preservePatchedNamed,
 	}
 	if u.effectiveTypeCacheReady {
 		u.effectiveTypeMu.Lock()
@@ -7225,13 +7558,6 @@ func (u *EmissionUniverse) effectiveType(
 	ctx := u.effectiveTypeContext(owner, fn)
 	if ctx == nil {
 		return typ
-	}
-	if preservePatchedNamed {
-		// Linkname pairing compares both sides after one shared physical
-		// projection. Preserve an alternate package's named replacement until
-		// that projection so recursive edges continue to point at the exact
-		// same node.
-		ctx.preservePatchedNamed = true
 	}
 	effective := ctx.patchType(typ)
 	if u.effectiveTypeCacheReady {
@@ -7247,7 +7573,7 @@ func (u *EmissionUniverse) effectiveType(
 }
 
 func (u *EmissionUniverse) effectiveGoLinknameType(owner *preparedEmissionPackage, fn *ssa.Function, typ types.Type) types.Type {
-	return u.effectiveType(owner, fn, typ, true)
+	return u.effectiveType(owner, fn, typ)
 }
 
 func (u *EmissionUniverse) effectiveTypeContext(owner *preparedEmissionPackage, fn *ssa.Function) *context {
@@ -8233,7 +8559,7 @@ func (u *EmissionUniverse) freezeFunctionIdentities() error {
 			info,
 			owner,
 			u.finalIdentity(info.spawn.Parent()),
-			u.effectiveType(owner, info.spawn.Parent(), signature, false),
+			u.effectiveType(owner, info.spawn.Parent(), signature),
 		)
 		if err != nil {
 			return err
@@ -8966,7 +9292,7 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 				info,
 				owner,
 				u.finalIdentity(info.spawn.Parent()),
-				u.effectiveType(owner, info.spawn.Parent(), signature, false),
+				u.effectiveType(owner, info.spawn.Parent(), signature),
 			); err == nil {
 				return key
 			}

@@ -1,4 +1,4 @@
-//go:build (darwin || linux || windows) && go1.23
+//go:build (darwin || linux || windows) && go1.23 && !go1.27
 
 package runtime
 

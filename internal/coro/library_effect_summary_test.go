@@ -132,7 +132,8 @@ func testLibraryEffectSummary(t *testing.T, pkg string, reverse bool) LibraryEff
 			PrimarySymbol:  pkg + ".Beta$coro",
 			RawPlainSymbol: pkg + ".Beta",
 			ProgramCapabilities: NewProgramCapabilities(true, true) |
-				NativeDefaultFaultBoundaryProgramCapability(),
+				NativeDefaultFaultBoundaryProgramCapability() | ExecutionDomainProgramCapability(),
+			ProgramPredicates: ProgramPredicateRequirements{Mask: ExecutionDomainProgramCapability(), Values: ExecutionDomainProgramCapability()},
 		},
 	}
 	alpha := functions[0]
@@ -308,6 +309,46 @@ func TestLibraryEffectSummaryPublishesVersionedExportIngress(t *testing.T) {
 				t.Fatalf("invalid export ingress was accepted: %+v", invalid)
 			}
 		})
+	}
+}
+
+func TestLibraryForeignCallableFaultDemandRoundTrip(t *testing.T) {
+	summary := testLibraryEffectSummary(t, "example/faultleaf", false)
+	summary.ForeignCallables[0].Contract.NativeDefaultFaultBoundary = true
+	record, err := summary.MarshalRecord()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseLibraryEffectSummaryRecords(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := NewLibraryEffectIndex(parsed, summary.Metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := summary.ForeignCallables[0]
+	fact, found := index.LookupForeignFunction(want.Function)
+	if !found || fact != want {
+		t.Fatalf("archive lost exact foreign fault demand: %+v, found=%t", fact, found)
+	}
+	policy, err := fact.ImportedPolicy()
+	if err != nil || !policy.CallableContractCertificate.NativeDefaultFaultBoundary {
+		t.Fatalf("consumer policy lost fault demand: %+v, %v", policy, err)
+	}
+	summary.ForeignCallables[0].Contract.NativeDefaultFaultBoundary = false
+	without, err := summary.MarshalRecord()
+	if err != nil || bytes.Equal(record, without) {
+		t.Fatalf("fault demand absent from archive content identity: %v", err)
+	}
+	// Older records cannot silently turn a missing implementation fact into
+	// proof that a direct executor call needs no native landing boundary.
+	for _, version := range []byte{13, 14, 15} {
+		oldRecord := bytes.Clone(record)
+		oldRecord[len(libraryEffectSummaryRecordMagic)-1] = version
+		if _, err := ParseLibraryEffectSummaryRecords(oldRecord); err == nil {
+			t.Fatalf("accepted archive v%d without current fault/predicate metadata", version)
+		}
 	}
 }
 
@@ -508,6 +549,48 @@ func TestLibraryEffectSummaryFailsClosed(t *testing.T) {
 	invalid.Functions[0].ProgramCapabilities = ProgramCapabilities(1 << 7)
 	if _, err := invalid.MarshalStable(); err == nil || !strings.Contains(err.Error(), "program capabilities") {
 		t.Fatalf("invalid program-capability error = %v", err)
+	}
+	for _, requirements := range []ProgramPredicateRequirements{
+		{Mask: ExecutionDomainProgramCapability(), Values: NewProgramCapabilities(true, false)},
+		{Mask: NewProgramCapabilities(true, false)},
+		{Values: ExecutionDomainProgramCapability()},
+	} {
+		invalid.Functions[0] = summary.Functions[0]
+		invalid.Functions[0].ProgramPredicates = requirements
+		if _, err := invalid.MarshalStable(); err == nil || !strings.Contains(err.Error(), "program predicate") {
+			t.Fatalf("invalid program-predicate requirement %+v: %v", requirements, err)
+		}
+	}
+}
+
+func TestLibraryEffectSummaryPreservesFalseProgramPredicate(t *testing.T) {
+	for _, bit := range []ProgramCapabilities{ExecutionDomainProgramCapability(), GCObservationProgramCapability(), ProgramPredicateMask()} {
+		testLibraryEffectSummaryPreservesFalseProgramPredicate(t, bit)
+	}
+}
+
+func testLibraryEffectSummaryPreservesFalseProgramPredicate(t *testing.T, bit ProgramCapabilities) {
+	summary := testLibraryEffectSummary(t, "example/predicates", false)
+	want := ProgramPredicateRequirements{Mask: bit}
+	summary.Functions[0].ProgramPredicates = want
+	data, err := summary.MarshalStable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseLibraryEffectSummary(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Functions[0].ProgramPredicates; got != want || !got.Compatible(0) || got.Compatible(bit) {
+		t.Fatalf("false specialization lost across archive: %+v", got)
+	}
+	unconstrained := testLibraryEffectSummary(t, "example/predicates", false)
+	other, err := unconstrained.MarshalStable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(data, other) {
+		t.Fatal("false specialization and unconstrained entry have identical metadata")
 	}
 }
 

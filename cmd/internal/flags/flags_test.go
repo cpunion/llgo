@@ -17,7 +17,7 @@ import (
 func TestApplyGoBuildFlags(t *testing.T) {
 	cmd := new(base.Command)
 	captured := CaptureGoBuildFlags(cmd)
-	if err := cmd.Flag.Parse([]string{"-ldflags=-s -w", "-gcflags=all=-N", "."}); err != nil {
+	if err := cmd.Flag.Parse([]string{"-ldflags=-s -w", "-gcflags=all=-N", "-modfile=test.mod", "."}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -25,7 +25,7 @@ func TestApplyGoBuildFlags(t *testing.T) {
 	if err := ApplyGoBuildFlags(conf, captured.Args); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-tags=existing", "-ldflags=-s -w", "-gcflags=all=-N"}
+	want := []string{"-tags=existing", "-ldflags=-s -w", "-gcflags=all=-N", "-modfile=test.mod"}
 	if !reflect.DeepEqual(conf.GoBuildFlags, want) {
 		t.Fatalf("GoBuildFlags = %v, want %v", conf.GoBuildFlags, want)
 	}
@@ -287,8 +287,8 @@ func TestDeadcodeDropBuildFlag(t *testing.T) {
 	fs := flag.NewFlagSet("deadcodedrop-default", flag.ContinueOnError)
 	fs.SetOutput(new(bytes.Buffer))
 	AddBuildFlags(fs)
-	if got := fs.Lookup("deadcodedrop") != nil; got != buildenv.Dev {
-		t.Fatalf("deadcodedrop flag registered = %v, want %v", got, buildenv.Dev)
+	if fs.Lookup("deadcodedrop") == nil {
+		t.Fatal("production deadcodedrop override flag was not registered")
 	}
 	if err := fs.Parse(nil); err != nil {
 		t.Fatalf("Parse(nil) unexpected error: %v", err)
@@ -297,20 +297,14 @@ func TestDeadcodeDropBuildFlag(t *testing.T) {
 	if err := UpdateConfig(conf); err != nil {
 		t.Fatalf("UpdateConfig error: %v", err)
 	}
-	if conf.DeadcodeDrop {
-		t.Fatal("DeadcodeDrop enabled by default")
+	if conf.DeadcodeDrop || conf.DeadcodeDropSet {
+		t.Fatal("unspecified deadcodedrop must preserve the build configuration default")
 	}
 
 	fs = flag.NewFlagSet("deadcodedrop-enabled", flag.ContinueOnError)
 	fs.SetOutput(new(bytes.Buffer))
 	AddBuildFlags(fs)
 	err := fs.Parse([]string{"-deadcodedrop"})
-	if !buildenv.Dev {
-		if err == nil {
-			t.Fatal("Parse(-deadcodedrop) succeeded in a non-development build")
-		}
-		return
-	}
 	if err != nil {
 		t.Fatalf("Parse(-deadcodedrop) unexpected error: %v", err)
 	}
@@ -318,8 +312,22 @@ func TestDeadcodeDropBuildFlag(t *testing.T) {
 	if err := UpdateConfig(conf); err != nil {
 		t.Fatalf("UpdateConfig error: %v", err)
 	}
-	if !conf.DeadcodeDrop {
+	if !conf.DeadcodeDrop || !conf.DeadcodeDropSet {
 		t.Fatal("DeadcodeDrop not enabled by -deadcodedrop")
+	}
+
+	fs = flag.NewFlagSet("deadcodedrop-disabled", flag.ContinueOnError)
+	fs.SetOutput(new(bytes.Buffer))
+	AddBuildFlags(fs)
+	if err := fs.Parse([]string{"-lto=full", "-deadcodedrop=false"}); err != nil {
+		t.Fatal(err)
+	}
+	conf = &build.Config{}
+	if err := UpdateConfig(conf); err != nil {
+		t.Fatal(err)
+	}
+	if conf.DeadcodeDrop || !conf.DeadcodeDropSet {
+		t.Fatal("explicit false was lost to the full-LTO default")
 	}
 }
 

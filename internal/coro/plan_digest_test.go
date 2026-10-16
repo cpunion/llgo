@@ -150,6 +150,59 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 	}
 }
 
+func TestCoroPlanDigestIncludesProgramPredicateConstants(t *testing.T) {
+	plan, _ := buildPlanDigestTestPlan(t, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
+	metadata := validPlanDigestMetadata()
+	seen := make(map[string]bool)
+	for _, binding := range []ProgramPredicateRequirements{
+		{}, {Mask: ExecutionDomainProgramCapability()},
+		{Mask: ExecutionDomainProgramCapability(), Values: ExecutionDomainProgramCapability()},
+		{Mask: GCObservationProgramCapability()},
+		{Mask: GCObservationProgramCapability(), Values: GCObservationProgramCapability()},
+		{Mask: ProgramPredicateMask()},
+		{Mask: ProgramPredicateMask(), Values: ExecutionDomainProgramCapability()},
+		{Mask: ProgramPredicateMask(), Values: GCObservationProgramCapability()},
+		{Mask: ProgramPredicateMask(), Values: ProgramPredicateMask()},
+	} {
+		metadata.ProgramPredicates = binding
+		digest, err := plan.CoroPlanDigest(metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen[digest] {
+			t.Fatal("unknown, false and true predicates shared a cache identity")
+		}
+		seen[digest] = true
+	}
+	metadata.ProgramPredicates = ProgramPredicateRequirements{Values: ExecutionDomainProgramCapability()}
+	if _, err := plan.CoroPlanDigest(metadata); err == nil {
+		t.Fatal("digest accepted a value without its predicate mask")
+	}
+}
+
+func TestCoroPlanDigestCoversUnevaluatedBuiltinAndSpawn(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "unevaluated_digest.go", `package coroid
+func target() {}
+func root(fn func()) { println(1); go target(); fn() }
+`)
+	root := pkg.Func("root")
+	config := planDigestSSAConfig()
+	config.ClassifyUnevaluatedCall = func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+		return call.Parent() == root, nil
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := plan.canonicalPlanDigest(validPlanDigestMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.ElidedCalls) != 3 {
+		t.Fatalf("digest covered %d unevaluated calls, want all 3 shapes", len(document.ElidedCalls))
+	}
+}
+
 func TestCoroPlanDigestCanonicalizesSyntheticDependencyInitOrder(t *testing.T) {
 	prog, pkg := buildPlanDigestDependencyInitSSA(t)
 	root := packageFunction(t, pkg, "init")
@@ -313,8 +366,8 @@ import (
 }
 
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v39" {
-		t.Fatalf("plan digest schema = %q, want descriptor-outcome schema v39", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v42" {
+		t.Fatalf("plan digest schema = %q, want least-fixed-point program-predicate schema v42", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {

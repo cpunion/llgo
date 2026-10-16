@@ -378,6 +378,13 @@ func TestCoroGenericParkStateRetentionRequiresExactLifetimeProof(t *testing.T) {
 				"prepare(unsafe.Pointer(&state), unsafe.Pointer(addr))\n\tprepare(unsafe.Pointer(&state), unsafe.Pointer(addr))\n\tpark", 1),
 		},
 		{
+			name: "prepare split across control-flow diamond",
+			abi:  CoroFrameRetentionParkABIV2,
+			source: strings.Replace(coroFrameRetentionFixture,
+				"\tprepare(unsafe.Pointer(&state), unsafe.Pointer(addr))\n",
+				"\tif *addr != 0 { prepare(unsafe.Pointer(&state), unsafe.Pointer(addr)) } else { prepare(unsafe.Pointer(&state), unsafe.Pointer(addr)) }\n", 1),
+		},
+		{
 			name: "missing prepare owner",
 			abi:  CoroFrameRetentionParkABIV2,
 			source: strings.Replace(coroFrameRetentionFixture,

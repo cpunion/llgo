@@ -181,6 +181,7 @@ func coroTargetPostTaskControlV1(id coro.OperationID, kind coro.TaskCancelKind, 
 //
 //export __llgo_coro_host_next_action_v1
 func __llgo_coro_host_next_action_v1(out *coro.HostActionV1) uint32 {
+	coroObserveGCV1()
 	if out == nil || !coroHostTargetV1State.NextAction(out) {
 		if out != nil {
 			*out = coro.HostActionV1{}

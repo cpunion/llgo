@@ -25,6 +25,8 @@ const (
 	coroHostFileCloseV1  = uintptr(1<<16 | 4)
 	coroHostFileSeekV1   = uintptr(1<<16 | 5)
 	coroHostFileUnlinkV1 = uintptr(1<<16 | 6)
+	coroHostFilePreadV1  = uintptr(1<<16 | 7)
+	coroHostFilePwriteV1 = uintptr(1<<16 | 8)
 
 	coroHostNetworkSocketV1      = uintptr(2<<16 | 1)
 	coroHostNetworkBindV1        = uintptr(2<<16 | 2)
@@ -99,6 +101,9 @@ func coroHostOperationMessage(
 //go:linkname coroHostOperationSeek llgo.coroHostOperation
 func coroHostOperationSeek(opcode, fd, offsetLo, offsetHi, whence uintptr) (r1, r2, errno uintptr)
 
+//go:linkname coroHostOperationPositioned llgo.coroHostOperation
+func coroHostOperationPositioned(opcode, fd uintptr, buffer unsafe.Pointer, size, offsetLo, offsetHi uintptr) (r1, r2, errno uintptr)
+
 // coroHostSockaddrV1 is the target-neutral borrowed address record passed to
 // class-2 host operations. It deliberately does not expose a Linux, WASI, JS,
 // or libc sockaddr layout. Version/family/port/zone are little-endian u32
@@ -133,106 +138,6 @@ func hostOperationError(r1, errno uintptr) error {
 		return Errno(errno)
 	}
 	return nil
-}
-
-func unsupportedWebAssemblySyscall() (r1, r2 uintptr, err Errno) {
-	return ^uintptr(0), 0, ENOSYS
-}
-
-func rawSyscallNoError(trap, a1, a2, a3 uintptr) (r1, r2 uintptr) {
-	return ^uintptr(0), 0
-}
-
-func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
-	return unsupportedWebAssemblySyscall()
-}
-
-func Syscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno) {
-	return unsupportedWebAssemblySyscall()
-}
-
-func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
-	return unsupportedWebAssemblySyscall()
-}
-
-func RawSyscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno) {
-	return unsupportedWebAssemblySyscall()
-}
-
-// Named freestanding WebAssembly files are complete host operations rather
-// than Linux traps. The ordinary synchronous Go signatures remain unchanged;
-// llgo.coroHostOperation is the single compiler-owned stack cut, and its
-// pointer-shaped operands keep string/slice storage live until exact host
-// completion.
-func Open(path string, mode int, perm uint32) (fd int, err error) {
-	pointer := unsafe.StringData(path)
-	r1, _, errno := coroHostOperation4(
-		coroHostFileOpenV1,
-		unsafe.Pointer(pointer),
-		uintptr(len(path)),
-		uintptr(mode),
-		uintptr(perm),
-	)
-	if operationErr := hostOperationError(r1, errno); operationErr != nil {
-		return -1, operationErr
-	}
-	return int(r1), nil
-}
-
-func Read(fd int, p []byte) (n int, err error) {
-	r1, _, errno := coroHostOperation3(
-		coroHostFileReadV1,
-		uintptr(fd),
-		unsafe.Pointer(unsafe.SliceData(p)),
-		uintptr(len(p)),
-	)
-	if operationErr := hostOperationError(r1, errno); operationErr != nil {
-		return 0, operationErr
-	}
-	return int(r1), nil
-}
-
-func Write(fd int, p []byte) (n int, err error) {
-	r1, _, errno := coroHostOperation3(
-		coroHostFileWriteV1,
-		uintptr(fd),
-		unsafe.Pointer(unsafe.SliceData(p)),
-		uintptr(len(p)),
-	)
-	if operationErr := hostOperationError(r1, errno); operationErr != nil {
-		return 0, operationErr
-	}
-	return int(r1), nil
-}
-
-func Close(fd int) error {
-	r1, _, errno := coroHostOperation1(coroHostFileCloseV1, uintptr(fd))
-	return hostOperationError(r1, errno)
-}
-
-func Seek(fd int, offset int64, whence int) (newoffset int64, err error) {
-	word := uint64(offset)
-	r1, r2, errno := coroHostOperationSeek(
-		coroHostFileSeekV1,
-		uintptr(fd),
-		uintptr(uint32(word)),
-		uintptr(uint32(word>>32)),
-		uintptr(whence),
-	)
-	if operationErr := hostOperationError(r1, errno); operationErr != nil {
-		return 0, operationErr
-	}
-	return int64(uint64(uint32(r1)) | uint64(uint32(r2))<<32), nil
-}
-
-func Unlink(path string) error {
-	pointer := unsafe.StringData(path)
-	r1, _, errno := coroHostOperation2(
-		coroHostFileUnlinkV1,
-		unsafe.Pointer(pointer),
-		uintptr(len(path)),
-	)
-	return hostOperationError(r1, errno)
 }
 
 func hostSocketFamily(domain int) (uintptr, error) {

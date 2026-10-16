@@ -24,6 +24,22 @@
 #include <unistd.h>
 #include <wasi/api.h>
 
+// wasi-libc's public path helpers accept NUL-terminated strings and silently
+// compute strlen. Go already provides exact byte lengths, so import the raw
+// Preview 1 functions rather than copying or reinterpreting those paths.
+#define LLGO_WASI_IMPORT(name) __attribute__((import_module("wasi_snapshot_preview1"), import_name(#name)))
+extern uint16_t llgo_wasi_path_open_v1(uint32_t, uint32_t, const char *, uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, __wasi_fd_t *) LLGO_WASI_IMPORT(path_open);
+extern uint16_t llgo_wasi_path_filestat_get_v1(uint32_t, uint32_t, const char *, uint32_t, __wasi_filestat_t *) LLGO_WASI_IMPORT(path_filestat_get);
+extern uint16_t llgo_wasi_path_filestat_set_times_v1(uint32_t, uint32_t, const char *, uint32_t, uint64_t, uint64_t, uint32_t) LLGO_WASI_IMPORT(path_filestat_set_times);
+extern uint16_t llgo_wasi_path_create_directory_v1(uint32_t, const char *, uint32_t) LLGO_WASI_IMPORT(path_create_directory);
+extern uint16_t llgo_wasi_path_unlink_file_v1(uint32_t, const char *, uint32_t) LLGO_WASI_IMPORT(path_unlink_file);
+extern uint16_t llgo_wasi_path_remove_directory_v1(uint32_t, const char *, uint32_t) LLGO_WASI_IMPORT(path_remove_directory);
+extern uint16_t llgo_wasi_path_rename_v1(uint32_t, const char *, uint32_t, uint32_t, const char *, uint32_t) LLGO_WASI_IMPORT(path_rename);
+extern uint16_t llgo_wasi_path_link_v1(uint32_t, uint32_t, const char *, uint32_t, uint32_t, const char *, uint32_t) LLGO_WASI_IMPORT(path_link);
+extern uint16_t llgo_wasi_path_symlink_v1(const char *, uint32_t, uint32_t, const char *, uint32_t) LLGO_WASI_IMPORT(path_symlink);
+extern uint16_t llgo_wasi_path_readlink_v1(uint32_t, const char *, uint32_t, char *, uint32_t, __wasi_size_t *) LLGO_WASI_IMPORT(path_readlink);
+#undef LLGO_WASI_IMPORT
+
 enum {
     llgo_host_action_none_v1 = 0,
     llgo_host_action_schedule_v1 = 1,
@@ -54,16 +70,34 @@ enum {
     llgo_host_capability_reactor_poll_v1 = 1u << 10,
     llgo_host_capability_operation_v1 = 1u << 11,
 
-    llgo_host_file_open_v1 = (1u << 16) | 1u,
+    // internal/poll's deadline-aware operations retain the generic buffer ABI.
     llgo_host_file_read_v1 = (1u << 16) | 2u,
     llgo_host_file_write_v1 = (1u << 16) | 3u,
-    llgo_host_file_close_v1 = (1u << 16) | 4u,
-    llgo_host_file_seek_v1 = (1u << 16) | 5u,
-    llgo_host_file_unlink_v1 = (1u << 16) | 6u,
+    llgo_host_wasi_fd_read_v1 = (3u << 16) | 1u,
+    llgo_host_wasi_fd_write_v1 = (3u << 16) | 2u,
+    llgo_host_wasi_fd_pread_v1 = (3u << 16) | 3u,
+    llgo_host_wasi_fd_pwrite_v1 = (3u << 16) | 4u,
+    llgo_host_wasi_fd_close_v1 = (3u << 16) | 5u,
+    llgo_host_wasi_fd_seek_v1 = (3u << 16) | 6u,
+    llgo_host_wasi_fd_readdir_v1 = (3u << 16) | 7u,
+    llgo_host_wasi_fd_filestat_get_v1 = (3u << 16) | 8u,
+    llgo_host_wasi_fd_filestat_set_size_v1 = (3u << 16) | 9u,
+    llgo_host_wasi_fd_sync_v1 = (3u << 16) | 10u,
+    llgo_host_wasi_fd_fdstat_set_rights_v1 = (3u << 16) | 11u,
+    llgo_host_wasi_path_open_v1 = (3u << 16) | 12u,
+    llgo_host_wasi_path_filestat_get_v1 = (3u << 16) | 13u,
+    llgo_host_wasi_path_filestat_set_times_v1 = (3u << 16) | 14u,
+    llgo_host_wasi_path_create_directory_v1 = (3u << 16) | 15u,
+    llgo_host_wasi_path_unlink_file_v1 = (3u << 16) | 16u,
+    llgo_host_wasi_path_remove_directory_v1 = (3u << 16) | 17u,
+    llgo_host_wasi_path_rename_v1 = (3u << 16) | 18u,
+    llgo_host_wasi_path_link_v1 = (3u << 16) | 19u,
+    llgo_host_wasi_path_symlink_v1 = (3u << 16) | 20u,
+    llgo_host_wasi_path_readlink_v1 = (3u << 16) | 21u,
 
-    llgo_host_operation_max_args_v1 = 9,
     llgo_host_operation_capacity_v1 = 64,
-    llgo_wasi_path_capacity_v1 = 4096,
+    llgo_host_operation_max_args_v1 = 9,
+
     llgo_run_budget_v2 = 1024,
 };
 
@@ -140,7 +174,6 @@ static struct llgo_retained_action_v1 llgo_wasi_schedule_v1;
 static struct llgo_retained_action_v1 llgo_wasi_alarm_v1;
 static struct llgo_pending_operation_v1
     llgo_wasi_operations_v1[llgo_host_operation_capacity_v1];
-static char llgo_wasi_path_v1[llgo_wasi_path_capacity_v1 + 1];
 static __wasi_subscription_t
     llgo_wasi_subscriptions_v1[llgo_host_operation_capacity_v1 + 1];
 static __wasi_event_t
@@ -321,185 +354,110 @@ static bool llgo_fail_operation_v1(
         operation, UINT32_MAX, 0, (uint32_t)error);
 }
 
-static bool llgo_copy_path_v1(
-    const struct llgo_host_operation_v1 *operation,
-    uint32_t pointer_index,
-    uint32_t length_index)
+static bool llgo_retire_descriptor_operations_v1(uint64_t descriptor)
 {
-    uint64_t raw_pointer =
-        llgo_operation_arg_v1(operation, pointer_index);
-    uint64_t length = llgo_operation_arg_v1(operation, length_index);
-    if (raw_pointer > UINTPTR_MAX ||
-        length > llgo_wasi_path_capacity_v1 ||
-        (length != 0 && raw_pointer == 0)) {
-        return false;
+    for (uint32_t index = 0; index < llgo_host_operation_capacity_v1; index++) {
+        struct llgo_pending_operation_v1 *pending = &llgo_wasi_operations_v1[index];
+        if (pending->active && llgo_operation_arg_v1(&pending->value, 0) == descriptor) {
+            struct llgo_host_operation_v1 completed = pending->value;
+            memset(pending, 0, sizeof(*pending));
+            if (!llgo_fail_operation_v1(&completed, EBADF)) {
+                return false;
+            }
+        }
     }
-    uintptr_t pointer = (uintptr_t)raw_pointer;
-    if (length != 0) {
-        memcpy(llgo_wasi_path_v1, (const void *)pointer, (size_t)length);
-    }
-    llgo_wasi_path_v1[length] = '\0';
     return true;
 }
 
-enum {
-    llgo_go_o_wronly_v1 = 1,
-    llgo_go_o_rdwr_v1 = 2,
-    llgo_go_o_create_v1 = 0100,
-    llgo_go_o_excl_v1 = 0200,
-    llgo_go_o_nofollow_v1 = 0400,
-    llgo_go_o_trunc_v1 = 01000,
-    llgo_go_o_append_v1 = 02000,
-    llgo_go_o_sync_v1 = 010000,
-    llgo_go_o_directory_v1 = 020000,
-};
-
-static bool llgo_translate_open_flags_v1(uint32_t go_flags, int *flags)
-{
-    const uint32_t known =
-        3u |
-        llgo_go_o_create_v1 |
-        llgo_go_o_excl_v1 |
-        llgo_go_o_nofollow_v1 |
-        llgo_go_o_trunc_v1 |
-        llgo_go_o_append_v1 |
-        llgo_go_o_sync_v1 |
-        llgo_go_o_directory_v1;
-    if (flags == NULL || (go_flags & ~known) != 0) {
-        return false;
-    }
-    switch (go_flags & 3u) {
-    case 0:
-        *flags = O_RDONLY;
-        break;
-    case llgo_go_o_wronly_v1:
-        *flags = O_WRONLY;
-        break;
-    case llgo_go_o_rdwr_v1:
-        *flags = O_RDWR;
-        break;
-    default:
-        return false;
-    }
-    if ((go_flags & llgo_go_o_create_v1) != 0) {
-        *flags |= O_CREAT;
-    }
-    if ((go_flags & llgo_go_o_excl_v1) != 0) {
-        *flags |= O_EXCL;
-    }
-    if ((go_flags & llgo_go_o_nofollow_v1) != 0) {
-        *flags |= O_NOFOLLOW;
-    }
-    if ((go_flags & llgo_go_o_trunc_v1) != 0) {
-        *flags |= O_TRUNC;
-    }
-    if ((go_flags & llgo_go_o_append_v1) != 0) {
-        *flags |= O_APPEND;
-    }
-    if ((go_flags & llgo_go_o_sync_v1) != 0) {
-        *flags |= O_SYNC;
-    }
-    if ((go_flags & llgo_go_o_directory_v1) != 0) {
-        *flags |= O_DIRECTORY;
-    }
-    // The synchronous Go wrapper owns blocking semantics. The reactor keeps
-    // the underlying descriptor nonblocking and retries EAGAIN after
-    // poll_oneoff, so no individual read/write import can retain the command.
-    *flags |= O_NONBLOCK;
-    return true;
-}
-
+// Class 3 preserves WASI's fd-relative ABI. Go owns preopen resolution and
+// cwd; there is no second libc path resolver or fixed path-copy buffer.
 static bool llgo_service_immediate_operation_v1(
     const struct llgo_host_operation_v1 *operation)
 {
-    uint64_t r1 = 0;
-    uint64_t r2 = 0;
+#define ARG(index) ((uint32_t)llgo_operation_arg_v1(operation, (index)))
+#define PTR(type, index) ((type *)(uintptr_t)ARG(index))
+#define WORD64(index) llgo_join_words_v1(ARG(index), ARG((index) + 1))
+    __wasi_errno_t error;
     switch (operation->opcode) {
-    case llgo_host_file_open_v1: {
-        if (operation->arg_count != 4) {
+    case llgo_host_wasi_fd_close_v1:
+        if (!llgo_retire_descriptor_operations_v1(ARG(0))) {
+            return false;
+        }
+        error = __wasi_fd_close(ARG(0));
+        break;
+    case llgo_host_wasi_fd_seek_v1:
+        if (ARG(3) > __WASI_WHENCE_END) {
             return llgo_fail_operation_v1(operation, EINVAL);
         }
-        if (!llgo_copy_path_v1(operation, 0, 1)) {
-            return llgo_fail_operation_v1(operation, ENAMETOOLONG);
-        }
-        uint64_t go_flags = llgo_operation_arg_v1(operation, 2);
-        uint64_t permissions = llgo_operation_arg_v1(operation, 3);
-        if (go_flags > UINT32_MAX || permissions > UINT32_MAX) {
+        error = __wasi_fd_seek(ARG(0), (int64_t)WORD64(1), ARG(3), PTR(__wasi_filesize_t, 4));
+        break;
+    case llgo_host_wasi_fd_readdir_v1:
+        error = __wasi_fd_readdir(ARG(0), PTR(uint8_t, 1), ARG(2), WORD64(3), PTR(__wasi_size_t, 5));
+        break;
+    case llgo_host_wasi_fd_filestat_get_v1:
+        error = __wasi_fd_filestat_get(ARG(0), PTR(__wasi_filestat_t, 1));
+        break;
+    case llgo_host_wasi_fd_filestat_set_size_v1:
+        error = __wasi_fd_filestat_set_size(ARG(0), WORD64(1));
+        break;
+    case llgo_host_wasi_fd_sync_v1:
+        error = __wasi_fd_sync(ARG(0));
+        break;
+    case llgo_host_wasi_fd_fdstat_set_rights_v1:
+        error = __wasi_fd_fdstat_set_rights(ARG(0), WORD64(1), WORD64(3));
+        break;
+    case llgo_host_wasi_path_open_v1: {
+        if (ARG(4) > UINT16_MAX || ARG(6) > UINT16_MAX) {
             return llgo_fail_operation_v1(operation, EINVAL);
         }
-        int flags = 0;
-        if (!llgo_translate_open_flags_v1(
-                (uint32_t)go_flags, &flags)) {
-            return llgo_fail_operation_v1(operation, EINVAL);
+        uint64_t memory_bytes = (uint64_t)__builtin_wasm_memory_size(0) << 16;
+        if (ARG(5) == 0 || (uint64_t)ARG(5) + 16 > memory_bytes) {
+            return llgo_fail_operation_v1(operation, EFAULT);
         }
-        errno = 0;
-        int descriptor = open(
-            llgo_wasi_path_v1,
-            flags,
-            (mode_t)permissions);
-        if (descriptor < 0) {
-            return llgo_fail_operation_v1(operation, errno);
-        }
-        r1 = (uint32_t)descriptor;
+        uint64_t capabilities[2];
+        memcpy(capabilities, PTR(const void, 5), sizeof(capabilities));
+        error = llgo_wasi_path_open_v1(ARG(0), ARG(1), PTR(const char, 2), ARG(3),
+                                 ARG(4), capabilities[0], capabilities[1],
+                                 ARG(6), PTR(__wasi_fd_t, 7));
         break;
     }
-    case llgo_host_file_close_v1:
-        if (operation->arg_count != 1) {
-            return llgo_fail_operation_v1(operation, EINVAL);
-        }
-        if (llgo_operation_arg_v1(operation, 0) > INT_MAX) {
-            return llgo_fail_operation_v1(operation, EBADF);
-        }
-        errno = 0;
-        if (close((int)llgo_operation_arg_v1(operation, 0)) != 0) {
-            return llgo_fail_operation_v1(operation, errno);
-        }
+    case llgo_host_wasi_path_filestat_get_v1:
+        error = llgo_wasi_path_filestat_get_v1(ARG(0), ARG(1), PTR(const char, 2), ARG(3), PTR(__wasi_filestat_t, 4));
         break;
-    case llgo_host_file_seek_v1: {
-        if (operation->arg_count != 4) {
+    case llgo_host_wasi_path_filestat_set_times_v1:
+        if (ARG(8) > UINT16_MAX) {
             return llgo_fail_operation_v1(operation, EINVAL);
         }
-        if (llgo_operation_arg_v1(operation, 0) > INT_MAX ||
-            llgo_operation_arg_v1(operation, 1) > UINT32_MAX ||
-            llgo_operation_arg_v1(operation, 2) > UINT32_MAX ||
-            llgo_operation_arg_v1(operation, 3) > INT_MAX) {
-            return llgo_fail_operation_v1(operation, EINVAL);
-        }
-        uint64_t offset =
-            (uint64_t)(uint32_t)llgo_operation_arg_v1(operation, 1) |
-            ((uint64_t)(uint32_t)llgo_operation_arg_v1(operation, 2) << 32);
-        errno = 0;
-        off_t result = lseek(
-            (int)llgo_operation_arg_v1(operation, 0),
-            (off_t)(int64_t)offset,
-            (int)llgo_operation_arg_v1(operation, 3));
-        if (result == (off_t)-1) {
-            return llgo_fail_operation_v1(operation, errno);
-        }
-        uint64_t word = (uint64_t)(int64_t)result;
-        r1 = (uint32_t)word;
-        r2 = (uint32_t)(word >> 32);
+        error = llgo_wasi_path_filestat_set_times_v1(ARG(0), ARG(1), PTR(const char, 2), ARG(3), WORD64(4), WORD64(6), ARG(8));
         break;
-    }
-    case llgo_host_file_unlink_v1:
-        if (operation->arg_count != 2) {
-            return llgo_fail_operation_v1(operation, EINVAL);
-        }
-        if (!llgo_copy_path_v1(operation, 0, 1)) {
-            return llgo_fail_operation_v1(operation, ENAMETOOLONG);
-        }
-        errno = 0;
-        if (unlink(llgo_wasi_path_v1) != 0) {
-            return llgo_fail_operation_v1(operation, errno);
-        }
+    case llgo_host_wasi_path_create_directory_v1:
+        error = llgo_wasi_path_create_directory_v1(ARG(0), PTR(const char, 1), ARG(2));
+        break;
+    case llgo_host_wasi_path_unlink_file_v1:
+        error = llgo_wasi_path_unlink_file_v1(ARG(0), PTR(const char, 1), ARG(2));
+        break;
+    case llgo_host_wasi_path_remove_directory_v1:
+        error = llgo_wasi_path_remove_directory_v1(ARG(0), PTR(const char, 1), ARG(2));
+        break;
+    case llgo_host_wasi_path_rename_v1:
+        error = llgo_wasi_path_rename_v1(ARG(0), PTR(const char, 1), ARG(2), ARG(3), PTR(const char, 4), ARG(5));
+        break;
+    case llgo_host_wasi_path_link_v1:
+        error = llgo_wasi_path_link_v1(ARG(0), ARG(1), PTR(const char, 2), ARG(3), ARG(4), PTR(const char, 5), ARG(6));
+        break;
+    case llgo_host_wasi_path_symlink_v1:
+        error = llgo_wasi_path_symlink_v1(PTR(const char, 0), ARG(1), ARG(2), PTR(const char, 3), ARG(4));
+        break;
+    case llgo_host_wasi_path_readlink_v1:
+        error = llgo_wasi_path_readlink_v1(ARG(0), PTR(const char, 1), ARG(2), PTR(char, 3), ARG(4), PTR(__wasi_size_t, 5));
         break;
     default:
-        // Preview 1 has no standard socket creation/connect surface. Every
-        // unsupported HostOp is completed explicitly instead of being dropped
-        // or accidentally executed on the managed scheduler stack.
         return llgo_fail_operation_v1(operation, ENOSYS);
     }
-    return llgo_complete_operation_v1(operation, r1, r2, 0);
+    return llgo_complete_operation_v1(operation, 0, 0, error);
+#undef WORD64
+#undef PTR
+#undef ARG
 }
 
 static struct llgo_pending_operation_v1 *llgo_find_operation_v1(
@@ -530,6 +488,19 @@ static struct llgo_pending_operation_v1 *llgo_free_operation_v1(void)
         }
     }
     return NULL;
+}
+
+static bool llgo_file_operation_read_v1(uint32_t opcode)
+{
+    return opcode == llgo_host_file_read_v1 ||
+           opcode == llgo_host_wasi_fd_read_v1 ||
+           opcode == llgo_host_wasi_fd_pread_v1;
+}
+
+static bool llgo_file_buffer_operation_v1(uint32_t opcode)
+{
+    return opcode == llgo_host_file_read_v1 ||
+           opcode == llgo_host_file_write_v1;
 }
 
 static bool llgo_take_operation_v1(
@@ -566,25 +537,24 @@ static bool llgo_take_operation_v1(
             operation->source_generation) != NULL) {
         return false;
     }
-    if (operation->opcode != llgo_host_file_read_v1 &&
-        operation->opcode != llgo_host_file_write_v1) {
-        return llgo_service_immediate_operation_v1(operation);
+    // Exact class/arity is checked before any borrowed pointer is interpreted.
+    static const uint8_t argument_counts[] = { 4, 4, 6, 6, 1, 5, 6, 2, 3, 1, 5, 8, 5, 9, 3, 3, 3, 6, 7, 5, 6 };
+    uint32_t verb = operation->opcode - (3u << 16) - 1u;
+    bool buffer_operation = llgo_file_buffer_operation_v1(operation->opcode);
+    if (!buffer_operation && verb >= sizeof(argument_counts)) {
+        return llgo_fail_operation_v1(operation, ENOSYS);
     }
-    if (operation->arg_count != 3) {
+    uint32_t arg_count = buffer_operation ? 3 : argument_counts[verb];
+    if (operation->arg_count != arg_count) {
         return llgo_fail_operation_v1(operation, EINVAL);
     }
-    uint64_t descriptor = llgo_operation_arg_v1(operation, 0);
-    uint64_t pointer = llgo_operation_arg_v1(operation, 1);
-    uint64_t length = llgo_operation_arg_v1(operation, 2);
-    if (descriptor > INT_MAX) {
-        return llgo_fail_operation_v1(operation, EBADF);
+    for (uint32_t index = 0; index < operation->arg_count; index++) {
+        if (llgo_operation_arg_v1(operation, index) > UINT32_MAX) {
+            return llgo_fail_operation_v1(operation, EINVAL);
+        }
     }
-    if (pointer > UINTPTR_MAX || length > SIZE_MAX ||
-        (length != 0 && pointer == 0)) {
-        return llgo_fail_operation_v1(operation, EFAULT);
-    }
-    if (length == 0) {
-        return llgo_complete_operation_v1(operation, 0, 0, 0);
+    if (!buffer_operation && verb >= 4) {
+        return llgo_service_immediate_operation_v1(operation);
     }
     struct llgo_pending_operation_v1 *pending = llgo_free_operation_v1();
     if (pending == NULL) {
@@ -617,28 +587,54 @@ static bool llgo_service_ready_operation_v1(
     struct llgo_pending_operation_v1 *pending)
 {
     const struct llgo_host_operation_v1 *operation = &pending->value;
-    int descriptor = (int)llgo_operation_arg_v1(operation, 0);
-    void *buffer = (void *)(uintptr_t)llgo_operation_arg_v1(operation, 1);
-    size_t length = (size_t)llgo_operation_arg_v1(operation, 2);
-    errno = 0;
-    ssize_t result;
-    if (operation->opcode == llgo_host_file_read_v1) {
-        result = read(descriptor, buffer, length);
-    } else if (operation->opcode == llgo_host_file_write_v1) {
-        result = write(descriptor, buffer, length);
+    __wasi_fd_t descriptor = (uint32_t)llgo_operation_arg_v1(operation, 0);
+    uintptr_t vectors = (uintptr_t)llgo_operation_arg_v1(operation, 1);
+    __wasi_size_t count = (uint32_t)llgo_operation_arg_v1(operation, 2);
+    bool buffer_operation = llgo_file_buffer_operation_v1(operation->opcode);
+    __wasi_iovec_t vector;
+    __wasi_size_t transferred = 0;
+    if (buffer_operation) {
+        // The host call is synchronous; this adapter has no retained native
+        // frame. The managed source keeps the original buffer rooted until
+        // exact completion/cancellation, just as for raw WASI iovecs.
+        vector.buf = (void *)vectors;
+        vector.buf_len = count;
+        vectors = (uintptr_t)&vector;
+        count = 1;
+    }
+    __wasi_errno_t error;
+    if (operation->opcode == llgo_host_wasi_fd_read_v1 ||
+        operation->opcode == llgo_host_file_read_v1) {
+        __wasi_size_t *result = buffer_operation ? &transferred :
+            (__wasi_size_t *)(uintptr_t)llgo_operation_arg_v1(operation, 3);
+        error = __wasi_fd_read(descriptor, (const __wasi_iovec_t *)vectors, count, result);
+    } else if (operation->opcode == llgo_host_wasi_fd_write_v1 ||
+               operation->opcode == llgo_host_file_write_v1) {
+        __wasi_size_t *result = buffer_operation ? &transferred :
+            (__wasi_size_t *)(uintptr_t)llgo_operation_arg_v1(operation, 3);
+        error = __wasi_fd_write(descriptor, (const __wasi_ciovec_t *)vectors, count, result);
+    } else if (operation->opcode == llgo_host_wasi_fd_pread_v1 ||
+               operation->opcode == llgo_host_wasi_fd_pwrite_v1) {
+        uint64_t offset = llgo_operation_arg_v1(operation, 3) |
+                         (llgo_operation_arg_v1(operation, 4) << 32);
+        __wasi_size_t *result = (__wasi_size_t *)(uintptr_t)llgo_operation_arg_v1(operation, 5);
+        // Preview 1 imports are synchronous even for regular-file metadata
+        // and I/O. Polling cannot promise nonblocking disk/host execution.
+        if (llgo_file_operation_read_v1(operation->opcode)) {
+            error = __wasi_fd_pread(descriptor, (const __wasi_iovec_t *)vectors, count, offset, result);
+        } else {
+            error = __wasi_fd_pwrite(descriptor, (const __wasi_ciovec_t *)vectors, count, offset, result);
+        }
     } else {
         return false;
     }
-    if (result < 0 && (errno == EAGAIN || errno == EINTR)) {
+    if (error == __WASI_ERRNO_AGAIN || error == __WASI_ERRNO_INTR) {
         return true;
     }
     struct llgo_host_operation_v1 completed = pending->value;
     memset(pending, 0, sizeof(*pending));
-    if (result < 0) {
-        return llgo_fail_operation_v1(&completed, errno);
-    }
-    return llgo_complete_operation_v1(
-        &completed, (uint64_t)(size_t)result, 0, 0);
+    return llgo_complete_operation_v1(&completed,
+        buffer_operation ? (error ? UINT32_MAX : transferred) : 0, 0, error);
 }
 
 static bool llgo_validate_run_result_v1(
@@ -721,12 +717,19 @@ static __wasi_errno_t llgo_make_nonblocking_v1(int descriptor)
     if ((state.fs_flags & __WASI_FDFLAGS_NONBLOCK) != 0) {
         return __WASI_ERRNO_SUCCESS;
     }
+    if ((state.fs_rights_base & __WASI_RIGHTS_FD_FDSTAT_SET_FLAGS) == 0) {
+        // Inherited host streams can expose only FD_READ/FD_WRITE, with no
+        // mutable fd flags. Do not attempt a forbidden metadata operation:
+        // poll_oneoff still decides whether this host can service the stream.
+        // As with regular files, Preview 1 cannot guarantee a nonblocking
+        // synchronous host import after readiness has been reported.
+        return __WASI_ERRNO_SUCCESS;
+    }
     error = __wasi_fd_fdstat_set_flags(
         descriptor,
         state.fs_flags | __WASI_FDFLAGS_NONBLOCK);
-    // Some regular-file hosts report NOTSUP even though poll_oneoff always
-    // reports the descriptor ready. The subsequent operation is still guarded
-    // by that readiness event.
+    // Some regular-file hosts report NOTSUP. Readiness and positional imports
+    // still inherit Preview 1's synchronous-host I/O limitation.
     return error == __WASI_ERRNO_NOTSUP
                ? __WASI_ERRNO_SUCCESS
                : error;
@@ -758,13 +761,27 @@ static bool llgo_build_poll_set_v1(uint32_t *count)
             }
             continue;
         }
+        if (pending->value.opcode == llgo_host_wasi_fd_pread_v1 ||
+            pending->value.opcode == llgo_host_wasi_fd_pwrite_v1) {
+            // A pipe/socket must report ESPIPE even when it has no readable
+            // data. Try the nonblocking positional operation before waiting;
+            // only EAGAIN/EINTR keep the same cancelable pending obligation.
+            if (!llgo_service_ready_operation_v1(pending)) {
+                return false;
+            }
+            if (!pending->active) {
+                continue;
+            }
+        }
         __wasi_subscription_t *subscription =
             &llgo_wasi_subscriptions_v1[*count];
         subscription->userdata = (uint64_t)index + 1;
-        if (pending->value.opcode == llgo_host_file_read_v1) {
+        if (llgo_file_operation_read_v1(pending->value.opcode)) {
             subscription->u.tag = __WASI_EVENTTYPE_FD_READ;
             subscription->u.u.fd_read.file_descriptor = descriptor;
-        } else if (pending->value.opcode == llgo_host_file_write_v1) {
+        } else if (pending->value.opcode == llgo_host_file_write_v1 ||
+                   pending->value.opcode == llgo_host_wasi_fd_write_v1 ||
+                   pending->value.opcode == llgo_host_wasi_fd_pwrite_v1) {
             subscription->u.tag = __WASI_EVENTTYPE_FD_WRITE;
             subscription->u.u.fd_write.file_descriptor = descriptor;
         } else {
@@ -812,7 +829,7 @@ static bool llgo_service_poll_events_v1(uint32_t count)
             return false;
         }
         uint8_t expected =
-            pending->value.opcode == llgo_host_file_read_v1
+            llgo_file_operation_read_v1(pending->value.opcode)
                 ? __WASI_EVENTTYPE_FD_READ
                 : __WASI_EVENTTYPE_FD_WRITE;
         if (event->type != expected) {
@@ -845,6 +862,24 @@ static bool llgo_service_unpollable_files_v1(void)
             continue;
         }
         found = true;
+        __wasi_fdstat_t state;
+        __wasi_errno_t error = __wasi_fd_fdstat_get(
+            (uint32_t)llgo_operation_arg_v1(&pending->value, 0), &state);
+        if (error == __WASI_ERRNO_SUCCESS &&
+            state.fs_filetype != __WASI_FILETYPE_REGULAR_FILE &&
+            (state.fs_flags & __WASI_FDFLAGS_NONBLOCK) == 0) {
+            // A stream without mutable NONBLOCK flags must have readiness
+            // support. NOTSUP is not permission to perform a blocking read.
+            error = __WASI_ERRNO_NOTSUP;
+        }
+        if (error != __WASI_ERRNO_SUCCESS) {
+            struct llgo_host_operation_v1 failed = pending->value;
+            memset(pending, 0, sizeof(*pending));
+            if (!llgo_fail_operation_v1(&failed, error)) {
+                return false;
+            }
+            continue;
+        }
         if (!llgo_service_ready_operation_v1(pending)) {
             return false;
         }
@@ -899,6 +934,16 @@ uint32_t __llgo_coro_wasi_command_reactor_v1(void)
         uint32_t subscription_count = 0;
         if (!llgo_build_poll_set_v1(&subscription_count)) {
             return 0;
+        }
+        // Descriptor errors or an immediate positional completion may have
+        // posted runnable work while building the set. Consume its exact
+        // schedule/cancel actions before sleeping on any remaining deadline.
+        if (!llgo_drain_actions_v1()) {
+            return 0;
+        }
+        if (llgo_wasi_schedule_v1.active ||
+            (llgo_wasi_alarm_v1.active && llgo_wasi_alarm_v1.ready)) {
+            continue;
         }
         if (subscription_count == 0) {
             return 0;

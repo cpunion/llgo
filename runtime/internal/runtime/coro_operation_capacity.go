@@ -22,7 +22,9 @@ import "github.com/xgo-dev/llgo/runtime/internal/coro"
 // source retains its allocation-free inline page; hosted runtimes attach one
 // stable page only when the current owner has exhausted all existing slots.
 const (
-	coroRuntimeTimerCapacityV1  = 64 * coro.TimerRegistrationPageCapacity
+	// Sleep has no fallible API with which to report a profile-local quota.
+	// Use the complete representable catalog, still growing one page on demand.
+	coroRuntimeTimerCapacityV1  = coro.TimerRegistrationMaximumCapacity
 	coroRuntimePollCapacityV1   = 16 * coro.PollOperationPageCapacity
 	coroRuntimeManualCapacityV1 = 32 * coro.ManualOperationPageCapacity
 	coroRuntimeWorkerCapacityV1 = 16 * coro.WorkerOperationPageCapacity

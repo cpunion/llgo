@@ -427,6 +427,9 @@ func (source *ManualOperationSource) Post(id OperationID) ManualOperationPostRes
 			}
 			// A payload-bearing source writes its scalar payload here, before the
 			// release store of Posted. ManualOperationSource has no payload.
+			if ExecutionDomainEnabled() {
+				PublishExecutionDomainManual(id)
+			}
 			preemptStore(&slot.mailbox, uint32(manualOperationMailboxPosted))
 			preemptStore(&source.pending, 1)
 			producerAdmissionRelease(&slot.inflight)

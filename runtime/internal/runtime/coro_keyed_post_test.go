@@ -18,7 +18,18 @@
 
 package runtime
 
-import "github.com/xgo-dev/llgo/runtime/internal/coro"
+import (
+	"unsafe"
+
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+)
+
+var keyedTestDomainContext unsafe.Pointer
+
+func CurrentExecutionDomainContext() unsafe.Pointer { return keyedTestDomainContext }
+
+// This named source-island fixture does not install a synctest controller.
+func coroPublishDomainParkV1(task *coro.G, state *CoroKeyedParkV2) bool { return false }
 
 func coroTargetPostKeyedOperationV2(id coro.OperationID) bool {
 	posted := coroProgramManualSourceV2State.Post(id)

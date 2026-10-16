@@ -1,4 +1,4 @@
-//go:build wasip1 || wasip2 || wasm_unknown
+//go:build wasip1 || wasip2 || wasm_unknown || baremetal
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -22,9 +22,9 @@ import "unsafe"
 
 // Go's bootstrap print/println operations are implementation diagnostics.
 // Freestanding core modules deliberately have no implicit stderr import, and
-// WASI Preview 1 cannot perform a potentially blocking diagnostic write from
-// the executor stack. A component or custom embedding can provide output at a
-// higher boundary.
+// WASI Preview 1 and baremetal cannot perform a potentially blocking diagnostic
+// write from the executor stack. A component or board embedding must provide
+// actual console I/O at its event boundary; these builtins are not an I/O API.
 func PrintBatchV1([]PrintArgV1, uint8) {}
 func PrintBool(bool)                   {}
 func PrintByte(byte)                   {}

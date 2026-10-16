@@ -253,8 +253,8 @@ func Host() uintptr { return funcPCABI0(libc_execve_trampoline) }
 	}
 	host := ssaPkg.Func("Host")
 	plan := analyzeCoroRawPlainValidationPlan(t, universe, ssaPkg, host, coro.SSAConfig{
-		ClassifyStaticCodeAddressCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
-			return universe.CoroStaticCodeAddressCallArgument(call, argument)
+		ClassifyStaticFunctionReferenceCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return universe.CoroStaticFunctionReferenceCallArgument(call, argument)
 		},
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			if fn == host {
@@ -292,7 +292,7 @@ func Host() uintptr { return funcPCABI0(libc_execve_trampoline) }
 			t.Fatalf("raw funcPCABI0 box referrers = %v", refs)
 		}
 		direct, ok := (*refs)[0].(*ssa.Call)
-		if !ok || !plan.StaticCodeAddressArgument(direct, 0) {
+		if !ok || !plan.StaticFunctionReferenceArgument(direct, 0) {
 			t.Fatalf("raw funcPCABI0 call has no frozen static code-address argument: call=%T %v", (*refs)[0], (*refs)[0])
 		}
 	}

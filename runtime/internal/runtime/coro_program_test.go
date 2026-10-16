@@ -185,10 +185,12 @@ type coroProgramTestDriverV1 struct {
 	released                    bool
 	requestScheduleOnDestroy    bool
 	panicOnResume               bool
+	spawnOnPanic                bool
 	panicTypeWord               unsafe.Pointer
 	panicDataWord               unsafe.Pointer
 	spawnOnMainReturn           bool
 	spawnBeforeMainReturn       bool
+	pendingMainReturn           *coroProgramPendingMainReturnV1
 	commandBootstrapDirectChild bool
 	bootstrapChildFrame         *coroProgramTestFrameV1
 	bootstrapChildCompleteReady bool
@@ -210,6 +212,91 @@ type coroProgramTestDriverV1 struct {
 	taskControlToken            coroTaskControlTokenV1
 	taskControlInvalidPost      uint32
 	taskControlPost             uint32
+}
+
+// Both pending shapes are prepared through the public park/producer protocol.
+// The source-island wrappers model compiler resume gates, not user callbacks.
+type coroProgramPendingMainReturnV1 struct {
+	direct      bool
+	park        coro.DirectChannelParkStorageV1
+	wait        coro.WaitSetRecord
+	claim       coro.SelectClaim
+	ticket      coro.ParkTicket
+	id          coro.OperationID
+	cancelGates int
+}
+
+func (pending *coroProgramPendingMainReturnV1) resumeChild(driver *coroProgramTestDriverV1) {
+	t, frame := driver.t, driver.childFrame
+	t.Helper()
+	source := &coroProgramChannelSourceV1State
+	if driver.childResumeCalls == 1 {
+		_, _, _, task, ok := coro.TakeRunDecision(frame.g, coro.ParkTicket{})
+		if !ok || task != coro.TaskCancelNone {
+			t.Fatal("take pending-child initial resume gate")
+		}
+		frame.header.SuspendReason = uint16(coro.SuspendPark)
+		frame.header.Lifecycle = uint16(coro.FrameSuspended)
+		if pending.direct {
+			owner, route := coro.PrepareCurrentDirectChannelPark(frame.g, frame.handle, frame.header, &pending.park)
+			if owner != &coroProgramExecutorDriverV1State || !route.Valid() {
+				t.Fatal("prepare pending direct channel park")
+			}
+		} else {
+			var ok bool
+			pending.ticket, pending.id, ok = coro.PrepareSingleChannelPark(
+				frame.g, frame.handle, frame.header, source, &pending.wait, &pending.claim, 1, 0,
+			)
+			if !ok {
+				t.Fatal("prepare pending owner-local channel park")
+			}
+		}
+		return
+	}
+	if driver.childResumeCalls != 2 || coroProgramLifecycleV1State != coroProgramMainReturnRequestedV1 {
+		t.Fatal("pending child entered user continuation after main return")
+	}
+	var outcome coro.ParkOutcome
+	var task coro.TaskCancelKind
+	var ok bool
+	if pending.direct {
+		var small uint8
+		outcome, task, small, ok = coro.TakeDirectChannelResume(frame.g, &pending.park)
+		if small != coro.ResumeSmallInvalid {
+			t.Fatal("shutdown gate exposed completed channel result")
+		}
+	} else {
+		var lease coro.OperationResultLease
+		outcome, _, lease, task, ok = coro.TakeRunDecision(frame.g, pending.ticket)
+		if !ok || !coro.FinishSingleChannelPark(frame.g, source, pending.id, &pending.claim, lease, true) {
+			t.Fatal("discard pending owner-local result during shutdown")
+		}
+	}
+	if !ok || outcome != coro.ParkOutcomeCanceled || task != coro.TaskCancelShutdown {
+		t.Fatalf("pending child cancellation gate = (%d, %d, %t)", outcome, task, ok)
+	}
+	pending.cancelGates++
+	frame.header.SuspendReason = uint16(coro.SuspendFrameComplete)
+	frame.header.Lifecycle = uint16(coro.FrameFinalSuspended)
+	if !coro.PrepareComplete(frame.g, frame.handle, frame.header) {
+		t.Fatal("prepare canceled pending-child final suspend")
+	}
+	driver.childCompleteReady = true
+}
+
+func (pending *coroProgramPendingMainReturnV1) publishLocal(driver *coroProgramTestDriverV1) {
+	if pending.direct {
+		return // The host producer publishes after the physical main result.
+	}
+	var transaction coro.ChannelExternalCommit
+	source := &coroProgramChannelSourceV1State
+	if coro.BeginChannelExternalCommit(&transaction, source, pending.id, &pending.claim) != coro.ChannelExternalCommitBeginPrepared ||
+		!transaction.BeginEffect() || !transaction.CommitAtRoute(pending.id.Route()) {
+		driver.t.Fatal("commit pending owner-local channel effect")
+	}
+	if published, ok := coro.TryPublishOwnerLocalChannelCompletion(driver.frame.g, source, pending.id); !published || !ok {
+		driver.t.Fatalf("publish pending owner-local completion = (%t, %t)", published, ok)
+	}
 }
 
 var activeCoroProgramDriver *coroProgramTestDriverV1
@@ -367,6 +454,10 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 	}
 	if driver != nil && driver.childFrame != nil && handle == driver.childFrame.handle {
 		driver.childResumeCalls++
+		if driver.pendingMainReturn != nil {
+			driver.pendingMainReturn.resumeChild(driver)
+			return
+		}
 		if driver.childResumeCalls != 1 {
 			driver.t.Fatalf("child coroutine resume calls = %d, want 1", driver.childResumeCalls)
 		}
@@ -477,6 +568,16 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		}
 		return
 	}
+	if driver.spawnOnMainReturn || driver.spawnBeforeMainReturn && driver.resumeCalls == 1 || driver.spawnOnPanic {
+		driver.child = new(coro.G)
+		if !coro.BeginSpawn(frame.g, driver.child, unsafe.Pointer(driver.child), coro.TaskStorageSize()) {
+			driver.t.Fatal("begin named-adapter command child")
+		}
+		driver.childFrame = newCoroProgramTestFrameV1(driver.t, driver.child)
+		if !coro.CommitSpawn(frame.g, driver.child, driver.childFrame.handle) {
+			driver.t.Fatal("commit named-adapter command child")
+		}
+	}
 	if driver.panicOnResume {
 		frame.header.SuspendReason = uint16(coro.SuspendPanic)
 		frame.header.Lifecycle = uint16(coro.FrameFinalSuspended)
@@ -490,16 +591,6 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		driver.completeReady = true
 		return
 	}
-	if driver.spawnOnMainReturn || driver.spawnBeforeMainReturn && driver.resumeCalls == 1 {
-		driver.child = new(coro.G)
-		if !coro.BeginSpawn(frame.g, driver.child, unsafe.Pointer(driver.child), coro.TaskStorageSize()) {
-			driver.t.Fatal("begin named-adapter command child")
-		}
-		driver.childFrame = newCoroProgramTestFrameV1(driver.t, driver.child)
-		if !coro.CommitSpawn(frame.g, driver.child, driver.childFrame.handle) {
-			driver.t.Fatal("commit named-adapter command child")
-		}
-	}
 	if driver.spawnBeforeMainReturn && driver.resumeCalls == 1 {
 		frame.header.SuspendReason = uint16(coro.SuspendYield)
 		frame.header.Lifecycle = uint16(coro.FrameSuspended)
@@ -512,6 +603,9 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		if driver.child == nil || driver.childFrame == nil ||
 			driver.spawnBeforeMainReturn && driver.childResumeCalls != 1 {
 			driver.t.Fatal("main return did not observe the completed child physical resume")
+		}
+		if driver.pendingMainReturn != nil {
+			driver.pendingMainReturn.publishLocal(driver)
 		}
 		if !coroProgramMainReturnV1(unsafe.Pointer(frame.g)) {
 			driver.t.Fatal("publish named-adapter normal main return")
@@ -562,7 +656,8 @@ func (driver *coroProgramTestDriverV1) destroy(handle unsafe.Pointer) {
 		return
 	}
 	if driver.childFrame != nil && handle == driver.childFrame.handle {
-		if !coroProgramTestTargetV1State.joined {
+		if !coroProgramTestTargetV1State.joined &&
+			(driver.pendingMainReturn == nil || driver.pendingMainReturn.cancelGates != 1) {
 			driver.t.Fatal("ready child cancellation ran before target strong join")
 		}
 		driver.cancelDestroyCalls++
@@ -1699,6 +1794,37 @@ func requireCoroProgramRuntimeAbort(t *testing.T, want string, call func()) {
 	t.Fatal("coroutine runtime ABI violation returned after abort")
 }
 
+func TestCoroProgramMainPanicWithReadyPeerUsesTaskReporter(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV2()
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), unsafe.Pointer(&manifest.factoryMarker))
+	if !ok {
+		t.Fatal("begin main-panic program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	driver := &coroProgramTestDriverV1{
+		t: t, frame: frame, panicOnResume: true, spawnOnPanic: true,
+		panicTypeWord: unsafe.Pointer(new(byte)), panicDataWord: unsafe.Pointer(new(byte)),
+	}
+	activeCoroProgramDriver = driver
+	requireCoroProgramRuntimeAbort(t, "unhandled coroutine task panic", func() {
+		coroProgramRunV1(gPointer, frame.handle)
+	})
+	if !coro.DeadG(&coroProgramGV1State) || driver.destroyCalls != 1 || !driver.released ||
+		driver.child == nil || coro.DeadG(driver.child) || driver.cancelDestroyCalls != 0 ||
+		!coroProgramExecutorBoundV1State || coroProgramTestTargetV1State.closeCalls != 0 {
+		t.Fatalf("main panic must commit only the failed G, not close the peer executor: dead=%t destroy=%d released=%t child=%p childResume=%d bound=%t close=%d",
+			coro.DeadG(&coroProgramGV1State), driver.destroyCalls, driver.released,
+			driver.child, driver.childResumeCalls, coroProgramExecutorBoundV1State, coroProgramTestTargetV1State.closeCalls)
+	}
+	if record, published := coro.LoadPanicRecord(&coroProgramGV1State); !published ||
+		record.TypeWord != driver.panicTypeWord || record.DataWord != driver.panicDataWord {
+		t.Fatalf("main panic record lost before terminal reporting: %+v published=%t", record, published)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
 func TestCoroProgramExplicitPanicHookAndTerminalDispatcher(t *testing.T) {
 	resetCoroProgramTestStateV1(t)
 	manifest := newCoroProgramTestManifestV2()
@@ -1869,6 +1995,154 @@ func TestCoroProgramCompatibilityPreservesStableReturnBoundary(t *testing.T) {
 	if got := coroFinishRunSliceCompatibility(nil, nil, nil, want); got != want {
 		t.Fatalf("stable physical-owner return boundary = %+v, want %+v", got, want)
 	}
+}
+
+func TestCoroProgramMainDoneDrainsPendingCompletionBeforeClose(t *testing.T) {
+	for mode := 0; mode < 3; mode++ {
+		direct := mode != 0
+		name := "owner-local"
+		if direct {
+			name = "direct-inbox"
+		}
+		if mode == 2 {
+			name = "idle-uncompleted-wait"
+		}
+		t.Run(name, func(t *testing.T) {
+			resetCoroProgramTestStateV1(t)
+			manifest := newCoroProgramTestManifestV2()
+			if _, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), unsafe.Pointer(&manifest.factoryMarker)); !ok {
+				t.Fatal("begin pending-completion program")
+			}
+			frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+			pending := &coroProgramPendingMainReturnV1{direct: direct}
+			driver := &coroProgramTestDriverV1{
+				t: t, frame: frame, spawnBeforeMainReturn: true, pendingMainReturn: pending,
+			}
+			activeCoroProgramDriver = driver
+			p, main, executor := &coroProgramPV1State, &coroProgramGV1State, &coroProgramExecutorDriverV1State
+			if !coroProgramDriveAdmissionV1State.Acquire() || !coroAdoptRoot(main, frame.handle) ||
+				!coroEnqueue(p, main) || !coroTargetExecutorStartV1(coroProgramExecutorHandleV1State) {
+				t.Fatal("start pending-completion program")
+			}
+			coroProgramLifecycleV1State = coroProgramRunningV1
+			result := coroRunSlice(p, main, executor, 64)
+			if result.stop != coroRunMainDoneV1 || result.g != main || result.action != (coro.Action{}) ||
+				driver.resumeCalls != 2 || driver.childResumeCalls != 1 || driver.destroyCalls != 1 {
+				t.Fatalf("pending physical main result = %+v; resume=%d childResume=%d destroy=%d",
+					result, driver.resumeCalls, driver.childResumeCalls, driver.destroyCalls)
+			}
+			if mode == 2 {
+				// After an earlier completion was drained, an unrelated parked
+				// child may still have no event. A stable idle result must reach
+				// FinishMain's shutdown cancellation, never ordinary host sleep.
+				idle := coroRunSlice(p, main, executor, 64)
+				if idle.stop != coroRunIdleV1 || !coro.HasWaiting(p) {
+					t.Fatalf("outstanding wait boundary = %+v", idle)
+				}
+				done := coroFinishRunSliceCompatibility(p, main, executor, idle)
+				if done.stop != coroRunMainDoneV1 || done.g != main ||
+					coroProgramHandleRunResultV1(done) != coroProgramDriveAgainV1 ||
+					coroProgramTestTargetV1State.waitCalls != 0 {
+					t.Fatalf("outstanding wait did not enter shutdown drain: %+v", done)
+				}
+			} else if direct {
+				// Publish from a separate producer after the root was destroyed but
+				// before the outer compatibility boundary. This ordering reproduces
+				// the race deterministically, without timing sleeps or private fields.
+				if got := coroFinishRunSliceCompatibility(p, main, executor, result); got != result {
+					t.Fatalf("stable main result changed before publication: %+v", got)
+				}
+				published := make(chan bool, 1)
+				go func() {
+					completion := &pending.park.Completion
+					if coro.BeginDirectChannelCompletion(completion) != coro.DirectChannelCompletionBeginAcquired {
+						published <- false
+						return
+					}
+					owner, route, ok := coro.FinishDirectChannelCompletion(completion, 1, 0)
+					published <- ok && owner == executor && route.Valid() &&
+						coro.PublishExecutorDirectChannelCompletion(owner, completion)
+				}()
+				if !<-published {
+					t.Fatal("publish concurrent direct completion")
+				}
+			}
+			for _, invalid := range []*coro.ExecutorDriver{nil, new(coro.ExecutorDriver)} {
+				if got := coroFinishRunSliceCompatibility(p, main, invalid, result); got != (coroRunResultV1{}) {
+					t.Fatalf("invalid main-completion driver accepted: %+v", got)
+				}
+			}
+			coroProgramLifecycleV1State = coroProgramMainGoexitV1
+			if got := coroFinishRunSliceCompatibility(p, main, executor, result); got != (coroRunResultV1{}) {
+				t.Fatalf("non-return lifecycle admitted pending main completion: %+v", got)
+			}
+			coroProgramLifecycleV1State = coroProgramMainReturnRequestedV1
+			malformed := result
+			malformed.g = driver.child
+			if got := coroFinishRunSliceCompatibility(p, main, executor, malformed); got != (coroRunResultV1{}) {
+				t.Fatalf("wrong main identity admitted pending completion: %+v", got)
+			}
+			malformed = result
+			malformed.action.Kind = coro.ActionCheckResume
+			if got := coroFinishRunSliceCompatibility(p, main, executor, malformed); got != (coroRunResultV1{}) {
+				t.Fatalf("live action admitted pending main completion: %+v", got)
+			}
+			want := result
+			want.stop, want.g = coroRunAgainV1, nil
+			if got := coroFinishRunSliceCompatibility(p, main, executor, result); got != want {
+				t.Fatalf("pending main completion = %+v, want %+v", got, want)
+			}
+			if status := coroProgramFinishDriveAdmissionV1(coroProgramDriveStepV1()); status != coroProgramDriveCompleteV1 ||
+				coroProgramLifecycleV1State != coroProgramCompleteV1 || pending.cancelGates != 1 ||
+				driver.childResumeCalls != 2 || driver.cancelDestroyCalls != 1 || driver.taskReleaseCalls != 1 ||
+				!coroProgramTestTargetV1State.joined || !coro.TerminalG(p, main) || !coro.TerminalG(p, driver.child) {
+				t.Fatalf("pending-completion shutdown = status:%d lifecycle:%d cancelGates:%d resume:%d destroy:%d release:%d",
+					status, coroProgramLifecycleV1State, pending.cancelGates, driver.childResumeCalls,
+					driver.cancelDestroyCalls, driver.taskReleaseCalls)
+			}
+			runtime.KeepAlive(frame.memory)
+			runtime.KeepAlive(driver.childFrame.memory)
+			runtime.KeepAlive(manifest)
+		})
+	}
+}
+
+func TestCoroProgramMainDoneRejectsIssuedAction(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV2()
+	if _, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), unsafe.Pointer(&manifest.factoryMarker)); !ok {
+		t.Fatal("begin issued-action program")
+	}
+	main, p, executor := &coroProgramGV1State, &coroProgramPV1State, &coroProgramExecutorDriverV1State
+	frame := newCoroProgramTestFrameV1(t, main)
+	if !coroAdoptRoot(main, frame.handle) || !coroEnqueue(p, main) {
+		t.Fatal("enqueue issued-action main")
+	}
+	run, ok := coro.BeginExecutorRunSlice(executor)
+	if !ok {
+		t.Fatal("begin issued-action slice")
+	}
+	for reduction := 0; reduction < 32; reduction++ {
+		step, ok := run.Next()
+		if !ok {
+			t.Fatal("select issued action")
+		}
+		if step.Kind != coro.ExecutorRunStepAction {
+			continue
+		}
+		if step.Action.Kind != coro.ActionCheckResume || step.G != main {
+			t.Fatalf("unexpected issued action: %+v", step)
+		}
+		coroProgramLifecycleV1State = coroProgramMainReturnRequestedV1
+		result := coroRunResultV1{stop: coroRunMainDoneV1, g: main}
+		if got := coroFinishRunSliceCompatibility(p, main, executor, result); got != (coroRunResultV1{}) {
+			t.Fatalf("issued physical action accepted as main completion: %+v", got)
+		}
+		runtime.KeepAlive(frame.memory)
+		runtime.KeepAlive(manifest)
+		return
+	}
+	t.Fatal("did not reach issued action")
 }
 
 func TestCoroProgramExplicitPanicHookRejectsInvalidPhysicalG(t *testing.T) {

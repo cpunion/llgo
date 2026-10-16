@@ -27,18 +27,30 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-const coroImportedProgramCapabilitiesDigestDomain = "llgo.coro.imported-program-capabilities.v1"
+const coroImportedProgramCapabilitiesDigestDomain = "llgo.coro.imported-program-capabilities.v2"
 
-// coroImportedProgramCapabilitiesDigest binds the only imported producer fact
-// which changes optional runtime-service emission without changing the
-// function's structural ABI or suspend effect. Zero-capability facts need no
-// entry: adding or removing one cannot alter generated code.
+func advanceCoroProgramPredicates(current coro.ProgramPredicateRequirements, discovered coro.ProgramCapabilities) (coro.ProgramPredicateRequirements, bool, error) {
+	if !current.Valid() || current.Mask != coro.ProgramPredicateMask() ||
+		!discovered.Valid() || discovered&^current.Mask != 0 {
+		return current, false, fmt.Errorf("coroutine program predicate discovery requires the complete frozen optional-service mask")
+	}
+	if current.Values&^discovered != 0 {
+		return current, false, fmt.Errorf("coroutine program predicate demand is non-monotone: enabled %#x, discovered %#x", current.Values, discovered)
+	}
+	next := coro.ProgramPredicateRequirements{Mask: current.Mask, Values: discovered}
+	return next, next != current, nil
+}
+
+// coroImportedProgramCapabilitiesDigest binds imported runtime-service demand
+// and the exact predicates consumed by producer specialization. A consumed
+// false predicate still needs an entry even when service demand is zero.
 func coroImportedProgramCapabilitiesDigest(
 	effects map[*ssa.Function]coro.LibraryEffectFunction,
 ) (string, error) {
 	type record struct {
 		id           coro.FunctionID
 		capabilities coro.ProgramCapabilities
+		predicates   coro.ProgramPredicateRequirements
 	}
 	records := make([]record, 0, len(effects))
 	seen := make(map[coro.FunctionID]struct{}, len(effects))
@@ -49,14 +61,17 @@ func coroImportedProgramCapabilitiesDigest(
 		if !fact.ProgramCapabilities.Valid() {
 			return "", fmt.Errorf("imported function %q has invalid program capabilities %#x", fact.ID, fact.ProgramCapabilities)
 		}
+		if !fact.ProgramPredicates.Valid() {
+			return "", fmt.Errorf("imported function %q has invalid program predicates %+v", fact.ID, fact.ProgramPredicates)
+		}
 		if _, duplicate := seen[fact.ID]; duplicate {
 			return "", fmt.Errorf("duplicate imported program capability for %q", fact.ID)
 		}
 		seen[fact.ID] = struct{}{}
-		if fact.ProgramCapabilities == 0 {
+		if fact.ProgramCapabilities == 0 && fact.ProgramPredicates.Mask == 0 {
 			continue
 		}
-		records = append(records, record{id: fact.ID, capabilities: fact.ProgramCapabilities})
+		records = append(records, record{id: fact.ID, capabilities: fact.ProgramCapabilities, predicates: fact.ProgramPredicates})
 	}
 	if len(records) == 0 {
 		return "", nil
@@ -69,7 +84,7 @@ func coroImportedProgramCapabilitiesDigest(
 		binary.BigEndian.PutUint64(size[:], uint64(len(item.id)))
 		_, _ = hash.Write(size[:])
 		_, _ = hash.Write([]byte(item.id))
-		_, _ = hash.Write([]byte{byte(item.capabilities)})
+		_, _ = hash.Write([]byte{byte(item.capabilities), byte(item.predicates.Mask), byte(item.predicates.Values)})
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }

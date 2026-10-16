@@ -274,7 +274,7 @@ func (p *context) compileCoroExactInterfaceOutcome(
 	}
 	result := p.compileCoroStaticOutcomeTargetCallAliasResult(
 		b, target, arguments, instructionPlan.directOutcomeNativeResult,
-		instructionPlan.recoverAlias,
+		instructionPlan.recoverAlias, nil,
 	)
 	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
 	markCoroReflectTypeMethodByNameCalls(b, reflectCheck, result.physicalCalls)

@@ -46,6 +46,14 @@ type g struct {
 	defer_       *Defer
 	panic_       unsafe.Pointer
 	recoverPanic unsafe.Pointer
+	m            *m
+	paniconfault bool
+	goid         uint64
+}
+
+type m struct {
+	curg                *g
+	signalFaultBoundary *Defer
 }
 
 var coroPanicBoundaryTestG g

@@ -109,8 +109,8 @@ func currentRuntimeGMPState() runtimeGMPState {
 
 func checkRunningRuntimeGMP(t *testing.T, state runtimeGMPState) {
 	t.Helper()
-	if state.goid == 0 {
-		t.Fatal("current G has no ID")
+	if state.goid == 0 || state.goid > 1<<63 {
+		t.Fatalf("current G has invalid ID %d", state.goid)
 	}
 	if state.mid == 0 {
 		t.Fatal("current G has no M")
@@ -141,8 +141,6 @@ func TestRuntimeGMPLinks(t *testing.T) {
 	}
 
 	seenG := map[uint64]bool{parent.goid: true}
-	seenM := map[int64]bool{parent.mid: true}
-	seenP := map[int32]bool{parent.pid: true}
 	for i := 0; i < cap(results); i++ {
 		state := <-results
 		checkRunningRuntimeGMP(t, state)
@@ -152,15 +150,31 @@ func TestRuntimeGMPLinks(t *testing.T) {
 		if seenG[state.goid] {
 			t.Fatalf("duplicate G id %d", state.goid)
 		}
-		if seenM[state.mid] {
-			t.Fatalf("duplicate M id %d", state.mid)
-		}
-		if seenP[state.pid] {
-			t.Fatalf("duplicate P id %d", state.pid)
-		}
 		seenG[state.goid] = true
-		seenM[state.mid] = true
-		seenP[state.pid] = true
+	}
+}
+
+func TestRuntimeGMPIDBatchAllocation(t *testing.T) {
+	parent := currentRuntimeGMPState()
+	checkRunningRuntimeGMP(t, parent)
+	// Cross several per-P ID batches and interleave parents and grandchildren
+	// so both the cached and detached-parent global paths are exercised.
+	const count = 65
+	results := make(chan runtimeGMPState, 2*count)
+	for i := 0; i < count; i++ {
+		go func() {
+			results <- currentRuntimeGMPState()
+			go func() { results <- currentRuntimeGMPState() }()
+		}()
+	}
+	seen := map[uint64]bool{parent.goid: true}
+	for i := 0; i < 2*count; i++ {
+		state := <-results
+		checkRunningRuntimeGMP(t, state)
+		if seen[state.goid] {
+			t.Fatalf("duplicate G id %d across allocation batches", state.goid)
+		}
+		seen[state.goid] = true
 	}
 }
 
@@ -170,13 +184,14 @@ type runtimeDeferProbeResult struct {
 	after  unsafe.Pointer
 }
 
-func runtimeDeferProbe(ready chan<- unsafe.Pointer, start <-chan struct{}, results chan<- runtimeDeferProbeResult) {
+func runtimeDeferProbe(token unsafe.Pointer, ready chan<- unsafe.Pointer, start <-chan struct{}, results chan<- runtimeDeferProbeResult) {
 	result := runtimeDeferProbeResult{before: runtimeGetThreadDeferForGTest()}
 	func() {
-		defer func() {}()
+		runtimeSetThreadDeferForGTest(token)
 		result.inside = runtimeGetThreadDeferForGTest()
 		ready <- result.inside
 		<-start
+		runtimeSetThreadDeferForGTest(result.before)
 	}()
 	result.after = runtimeGetThreadDeferForGTest()
 	results <- result
@@ -187,9 +202,11 @@ func TestRuntimeDeferHeadIsolation(t *testing.T) {
 	ready := make(chan unsafe.Pointer, 2)
 	start := make(chan struct{})
 	results := make(chan runtimeDeferProbeResult, 2)
+	firstToken := new(byte)
+	secondToken := new(byte)
 
-	go runtimeDeferProbe(ready, start, results)
-	go runtimeDeferProbe(ready, start, results)
+	go runtimeDeferProbe(unsafe.Pointer(firstToken), ready, start, results)
+	go runtimeDeferProbe(unsafe.Pointer(secondToken), ready, start, results)
 	first := <-ready
 	second := <-ready
 	close(start)

@@ -51,7 +51,7 @@ func TestCoroPanicBoundaryContract(t *testing.T) {
 	cmd := exec.Command(
 		"go", "test",
 		"-tags=coro_panic_boundary_adapter_test",
-		"coro_panic_boundary.go", "coro_panic_boundary_test_adapter.go",
+		"coro_panic_boundary.go", "coro_panic_boundary_test_adapter.go", "g.go",
 		"coro_panic_boundary_test.go",
 		"-run", "^TestCoroPanicBoundary",
 		"-count=1",

@@ -372,19 +372,28 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 		if frozenErr != nil {
 			return coro.LoweringFact{}, false, frozenErr
 		}
-		if found && frozenCall.plan.Elision == CoroCallElidedCgoWorker {
+		if coroCallNeedsNativeFaultBoundary(plan, call) {
+			class = coro.OpLowered
+			recipe = coro.RecipeID("cl.ssa.native-default-fault-boundary.v0")
+			contract = coro.ContractID("llgo.coro.native-default-fault-boundary.v0")
+			materialized = true
+		}
+		if found && frozenCall.plan.Elision == CoroCallElidedGeneratedCgo {
 			if frozenCall.failure != "" {
-				return coro.LoweringFact{}, false, fmt.Errorf("invalid frozen cgo worker call: %s", frozenCall.failure)
+				return coro.LoweringFact{}, false, fmt.Errorf("invalid frozen generated-cgo call: %s", frozenCall.failure)
 			}
-			if !plan.ElidesCall(call) || frozenCall.cgoWorker.ID == "" ||
-				frozenCall.plan.ElisionCertificate != frozenCall.cgoWorker.ID {
-				return coro.LoweringFact{}, false, fmt.Errorf("cgo worker call lost its exact frozen elision certificate")
+			if !plan.ElidesCall(call) || frozenCall.generatedCgo.ID == "" ||
+				frozenCall.plan.ElisionCertificate != frozenCall.generatedCgo.ID {
+				return coro.LoweringFact{}, false, fmt.Errorf("generated-cgo call lost its exact frozen elision certificate")
 			}
 			materialized = true
 			class = coro.OpLowered
-			recipe = generatedCgoWorkerCallRecipeID(frozenCall.cgoWorker)
+			recipe = generatedCgoCallRecipeID(frozenCall.generatedCgo)
 			effect = coro.WaitForeign
-			contract = coro.ContractID("llgo.coro.cgo-worker-call.v1")
+			contract = generatedCgoCallContractID(frozenCall.generatedCgo)
+			if recipe == "" || contract == "" {
+				return coro.LoweringFact{}, false, fmt.Errorf("cgo call has an invalid frozen execution recipe")
+			}
 		}
 		if found && frozenCall.plan.Elision == CoroCallElidedPython {
 			if frozenCall.failure != "" {
@@ -426,7 +435,7 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 						Targets: []coro.FunctionID{targetID}, Open: false, MayBeNil: false,
 					}}
 				} else if intrinsic && semantics.ElidesManagedCall() {
-					if found && (frozenCall.plan.Elision == CoroCallElidedCgoWorker ||
+					if found && (frozenCall.plan.Elision == CoroCallElidedGeneratedCgo ||
 						frozenCall.plan.Elision == CoroCallElidedPython) {
 						return coro.LoweringFact{}, false, fmt.Errorf("foreign operation is also classified as an intrinsic")
 					}
@@ -519,8 +528,8 @@ func coroIntrinsicLoweringRecipe(semantics CoroIntrinsicCallSemantics) (coro.Rec
 		return coro.RecipeID("cl.intrinsic.inline-suspend.v0"), coro.MayPark
 	case CoroIntrinsicCallInlineNativeBlock:
 		return coro.RecipeID("cl.intrinsic.inline-native-block.v1"), coro.MayPark
-	case CoroIntrinsicCallInlineForeignSuspend:
-		return coro.RecipeID("cl.intrinsic.inline-foreign-suspend.v1"), coro.WaitForeign
+	case CoroIntrinsicCallInlineForeignTransaction:
+		return coro.RecipeID("cl.intrinsic.inline-foreign-transaction.v2"), coro.WaitForeign
 	case CoroIntrinsicCallInlineYield:
 		return coro.RecipeID("cl.intrinsic.inline-yield.v0"), coro.YieldOnly
 	case CoroIntrinsicCallInlineOutcome:

@@ -35,6 +35,54 @@ type ssaDominatingNonNilProof struct {
 	Successor  *ssa.BasicBlock
 }
 
+// ssaConditionalEdgeDominates proves the selected condition outcome, not just
+// the destination block. A merge may dominate use while also being reached by
+// the opposite outcome or a path which never evaluated the comparison. Most
+// checked branches have one predecessor and need only the existing dominator
+// tree. For a shared successor, query the same SSA CFG with exactly this edge
+// omitted; no alternate path may reach use. Nothing is cached or reclassified.
+func ssaConditionalEdgeDominates(from, successor, use *ssa.BasicBlock) bool {
+	if from == nil || successor == nil || use == nil || from.Parent() == nil ||
+		from.Parent() != successor.Parent() || from.Parent() != use.Parent() ||
+		len(from.Instrs) == 0 || len(from.Succs) != 2 || from.Succs[0] == from.Succs[1] ||
+		(from.Succs[0] != successor && from.Succs[1] != successor) ||
+		!from.Dominates(use) || !successor.Dominates(use) {
+		return false
+	}
+	if _, conditional := from.Instrs[len(from.Instrs)-1].(*ssa.If); !conditional {
+		return false
+	}
+	if len(successor.Preds) == 1 && successor.Preds[0] == from {
+		return true
+	}
+	fn := from.Parent()
+	if len(fn.Blocks) == 0 || fn.Blocks[0] == nil {
+		return false
+	}
+	queue := []*ssa.BasicBlock{fn.Blocks[0]}
+	if fn.Recover != nil {
+		queue = append(queue, fn.Recover)
+	}
+	visited := make(map[*ssa.BasicBlock]bool)
+	for len(queue) != 0 {
+		block := queue[0]
+		queue = queue[1:]
+		if block == nil || visited[block] {
+			continue
+		}
+		if block == use {
+			return false
+		}
+		visited[block] = true
+		for _, next := range block.Succs {
+			if block != from || next != successor {
+				queue = append(queue, next)
+			}
+		}
+	}
+	return true
+}
+
 func proveSSADominatingNonNil(pointer ssa.Value, use ssa.Instruction) (ssaDominatingNonNilProof, bool) {
 	var zero ssaDominatingNonNilProof
 	if pointer == nil || use == nil || use.Parent() == nil || use.Block() == nil {
@@ -68,7 +116,7 @@ func proveSSADominatingNonNil(pointer ssa.Value, use ssa.Instruction) (ssaDomina
 		if comparison.Op == token.EQL {
 			successor = block.Succs[1]
 		}
-		if successor == nil || !successor.Dominates(use.Block()) {
+		if !ssaConditionalEdgeDominates(block, successor, use.Block()) {
 			continue
 		}
 		return ssaDominatingNonNilProof{
@@ -86,6 +134,42 @@ func ssaValueProvenNonNilAt(pointer ssa.Value, use ssa.Instruction) bool {
 	return ok
 }
 
+// A source &p.field must check p before producing its address. Once that exact
+// instruction has completed, both its result and the same immutable SSA base
+// are non-nil. Plain
+// FieldAddr nodes are not sufficient evidence: they may only be intermediate
+// GEPs whose check belongs to a later load. Strict dominance excludes the
+// candidate itself, later instructions, and checks on a bypassable branch.
+func ssaDominatingFieldAddressNonNil(pointer ssa.Value, use ssa.Instruction, fields map[token.Pos]none, unevaluated map[ssa.Instruction]none) bool {
+	if pointer == nil || use == nil || use.Parent() == nil || use.Block() == nil || len(fields) == 0 {
+		return false
+	}
+	base := ssaCanonicalPointerValue(pointer)
+	if base == nil {
+		return false
+	}
+	for _, block := range use.Parent().Blocks {
+		if block == nil || !block.Dominates(use.Block()) {
+			continue
+		}
+		for _, instruction := range block.Instrs {
+			field, ok := instruction.(*ssa.FieldAddr)
+			if !ok || field == use || field.Parent() != use.Parent() ||
+				(field != base && ssaCanonicalPointerValue(field.X) != base) ||
+				!coroSSAInstructionDominates(field, use) {
+				continue
+			}
+			if _, skipped := unevaluated[field]; skipped {
+				continue
+			}
+			if _, checked := fields[field.Pos()]; checked {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ssaAddressValueProvenNonNilAt proves that a pointer-producing SSA address
 // constructor cannot yield nil on the path reaching use. A completed
 // IndexAddr needs no duplicate static bounds proof: if its dynamic bounds
@@ -93,19 +177,31 @@ func ssaValueProvenNonNilAt(pointer ssa.Value, use ssa.Instruction) bool {
 // result is therefore non-nil whenever its pointer-to-array base is
 // independently known non-nil. This is the single FieldAddr predicate shared
 // by helper inventory, ABI preflight, and final emission.
-func ssaAddressValueProvenNonNilAt(address ssa.Value, use ssa.Instruction) bool {
-	return ssaAddressValueProvenNonNilAtRecursive(address, use, make(map[ssa.Value]bool))
+func ssaAddressValueProvenNonNilAt(address ssa.Value, use ssa.Instruction, fields map[token.Pos]none, unevaluated map[ssa.Instruction]none) bool {
+	return ssaAddressValueProvenNonNilAtRecursive(address, use, fields, unevaluated, make(map[ssa.Value]bool))
+}
+
+func (ctx *context) addressValueProvenNonNilAt(address ssa.Value, use ssa.Instruction) bool {
+	var fields map[token.Pos]none
+	var unevaluated map[ssa.Instruction]none
+	if ctx != nil {
+		fields = ctx.addrOfFieldAddrs
+		unevaluated = ctx.unevaluatedSSA
+	}
+	return ssaAddressValueProvenNonNilAt(address, use, fields, unevaluated)
 }
 
 func ssaAddressValueProvenNonNilAtRecursive(
 	address ssa.Value,
 	use ssa.Instruction,
+	fields map[token.Pos]none,
+	unevaluated map[ssa.Instruction]none,
 	visiting map[ssa.Value]bool,
 ) bool {
 	if address == nil || use == nil || use.Parent() == nil || use.Block() == nil {
 		return false
 	}
-	if ssaValueProvenNonNilAt(address, use) {
+	if ssaValueProvenNonNilAt(address, use) || ssaDominatingFieldAddressNonNil(address, use, fields, unevaluated) {
 		return true
 	}
 	address = ssaCanonicalPointerValue(address)
@@ -127,7 +223,7 @@ func ssaAddressValueProvenNonNilAtRecursive(
 		return value.Parent() == use.Parent() && ssaSourceClosureFreeVarCell(value)
 	case *ssa.FieldAddr:
 		return value.Parent() == use.Parent() &&
-			ssaAddressValueProvenNonNilAtRecursive(value.X, value, visiting)
+			ssaAddressValueProvenNonNilAtRecursive(value.X, value, fields, unevaluated, visiting)
 	case *ssa.IndexAddr:
 		if value.Parent() != use.Parent() || value.X == nil {
 			return false
@@ -137,7 +233,7 @@ func ssaAddressValueProvenNonNilAtRecursive(
 			return false
 		}
 		_, ok = types.Unalias(pointer.Elem()).Underlying().(*types.Array)
-		return ok && ssaAddressValueProvenNonNilAtRecursive(value.X, value, visiting)
+		return ok && ssaAddressValueProvenNonNilAtRecursive(value.X, value, fields, unevaluated, visiting)
 	default:
 		return false
 	}
@@ -182,7 +278,7 @@ func ssaFunctionValueProvenNonNilAt(function ssa.Value, use ssa.Instruction) boo
 		if comparison.Op == token.EQL {
 			successor = block.Succs[1]
 		}
-		if successor != nil && successor.Dominates(use.Block()) {
+		if ssaConditionalEdgeDominates(block, successor, use.Block()) {
 			return true
 		}
 	}
@@ -313,7 +409,7 @@ func ssaDominatingIntegerComparisonAt(
 			continue
 		}
 		successor := proofSuccessor(comparison, value, block)
-		if successor != nil && successor.Dominates(use.Block()) {
+		if ssaConditionalEdgeDominates(block, successor, use.Block()) {
 			return true
 		}
 	}
@@ -431,7 +527,7 @@ func ssaIntegerValueProvenPositiveByLoopBoundAt(value ssa.Value, use ssa.Instruc
 			continue
 		}
 		trueSuccessor := block.Succs[0]
-		if trueSuccessor == nil || !trueSuccessor.Dominates(use.Block()) {
+		if !ssaConditionalEdgeDominates(block, trueSuccessor, use.Block()) {
 			continue
 		}
 		if _, nonNegative := coroFrameRetentionNonNegativeRangeIndex(index, block, trueSuccessor, use, 0); nonNegative {

@@ -1,7 +1,10 @@
 // LITTEST
+// Scope: common
 package main
 
-import "unsafe"
+import (
+	"unsafe"
+)
 
 type N[T any] struct {
 	n1 T
@@ -14,13 +17,33 @@ type M[T any] struct {
 	m2 N[T]
 }
 
+type packedLayout struct {
+	a byte
+	b uint8
+	c uint16
+	d byte
+	e [8]int8
+}
+
+// CHECK-LABEL: define i64 @main.layoutSize(){{.*}} {
+// CHECK: ret i64 14
+func layoutSize() uintptr {
+	return unsafe.Sizeof(packedLayout{})
+}
+
 func main() {
+	if got := layoutSize(); got != 14 {
+		panic("packed layout size mismatch")
+	}
 	m1 := M[bool]{}
 	m1.check(1, 8, 1)
 	m2 := M[int64]{}
 	m2.check(8, 16, 8)
 }
 
+// Each instantiation folds Alignof/Offsetof to its concrete layout. The error
+// paths can print and therefore use coroutine entries, but the comparison
+// constants must remain the concrete layout values.
 func (m *M[T]) check(align, offset1, offset2 uintptr) {
 	if v := unsafe.Alignof(m.m2); v != align {
 		println("have", v, "want", align)
@@ -36,29 +59,19 @@ func (m *M[T]) check(align, offset1, offset2 uintptr) {
 	}
 }
 
-// The generic unsafe layout builtins are type-only operations, but the
-// diagnostic paths use one managed batch per source println. Keep this check
-// focused on the stable semantic boundary: Offsetof/Alignof remain uintptr,
-// each batch is awaited, and both instantiated layouts remain distinct.
+// CHECK-LABEL: define ptr @"main.main$coro"(
+// CHECK: call i64 @main.layoutSize()
+// CHECK: call ptr @"main.(*M[bool]).check$coro"({{.*}}i64 1, i64 8, i64 1)
+// CHECK: call ptr @"main.(*M[int64]).check$coro"({{.*}}i64 8, i64 16, i64 8)
 
-// CHECK-LABEL: define ptr @"main.main$coro"(ptr %0, ptr %1){{.*}} {
-// CHECK: call ptr @"main.(*M[bool]).check$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"main.(*M[int64]).check$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
+// CHECK-LABEL: define linkonce ptr @"main.(*M[bool]).check$coro"(
+// CHECK: icmp ne i64 1, %{{[0-9]+}}
+// CHECK: icmp ne i64 8, %{{[0-9]+}}
+// CHECK: icmp ne i64 1, %{{[0-9]+}}
+// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
 
-// CHECK-LABEL: define linkonce ptr @"main.(*M[bool]).check$coro"(ptr %0, ptr %1, ptr %2, i64 %3, i64 %4, i64 %5){{.*}} {
+// CHECK-LABEL: define linkonce ptr @"main.(*M[int64]).check$coro"(
+// CHECK: icmp ne i64 8, %{{[0-9]+}}
+// CHECK: icmp ne i64 16, %{{[0-9]+}}
+// CHECK: icmp ne i64 8, %{{[0-9]+}}
 // CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-
-// CHECK-LABEL: define linkonce ptr @"main.(*M[int64]).check$coro"(ptr %0, ptr %1, ptr %2, i64 %3, i64 %4, i64 %5){{.*}} {
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4
-// CHECK: call ptr @"{{.*}}/runtime/internal/runtime.PrintBatchV1$coro"
-// CHECK: call i1 @__llgo_coro_await_prepare_inline_v4

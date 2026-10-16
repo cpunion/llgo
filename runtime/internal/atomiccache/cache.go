@@ -74,15 +74,16 @@ func (table *PairTable) Intern(first, second, value unsafe.Pointer) unsafe.Point
 const weakBucketCount = 64
 
 // WeakHandle is the stable object returned to weak-pointer callers. Key is a
-// deliberately non-GC-visible address. Live is the sole field written by a raw
-// collector callback; next is managed by WeakTable in ordinary managed code.
+// complemented address, hidden from conservative collectors. Live is a full
+// pointer-width disappearing-link cell owned by the collector; next is managed
+// by WeakTable in ordinary managed code. The handle remains three words.
 type WeakHandle struct {
 	Key  uintptr
-	Live uint32
+	Live uintptr
 	next unsafe.Pointer // *WeakHandle
 }
 
-// WeakTable interns live handles by address. Raw callbacks only tombstone a
+// WeakTable interns live handles by address. Collectors only tombstone a
 // WeakHandle; managed callers opportunistically unlink tombstones.
 type WeakTable struct {
 	buckets [weakBucketCount]unsafe.Pointer // *WeakHandle
@@ -117,7 +118,7 @@ restart:
 		}
 		handle := (*WeakHandle)(raw)
 		next := loadPointer(&handle.next)
-		if loadUint32(&handle.Live) == 0 {
+		if loadUintptr(&handle.Live) == 0 {
 			if !compareAndSwapPointer(link, raw, next) {
 				goto restart
 			}
@@ -136,7 +137,7 @@ func (table *WeakTable) InternWeak(candidate *WeakHandle) (winner *WeakHandle, p
 		head := loadPointer(bucket)
 		for raw := head; raw != nil; {
 			handle := (*WeakHandle)(raw)
-			if handle.Key == candidate.Key && loadUint32(&handle.Live) != 0 {
+			if handle.Key == candidate.Key && loadUintptr(&handle.Live) != 0 {
 				return handle, false
 			}
 			raw = loadPointer(&handle.next)

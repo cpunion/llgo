@@ -334,7 +334,7 @@ func TestEmissionABIDemandWalksPtrToThisAndMethods(t *testing.T) {
 	named.AddMethod(types.NewFunc(token.NoPos, pkg, "PointerMethod", signature))
 
 	var visited typeutil.Map
-	if err := walkEmissionABITypeDemandEx(named, nil, nil, prog.ABITypeImplicitDescriptorTypes, func(typ types.Type) error {
+	if err := walkEmissionABITypeDemandEx(named, nil, nil, nil, prog.ABITypeImplicitDescriptorTypes, func(typ types.Type) error {
 		visited.Set(typ, true)
 		return nil
 	}); err != nil {
@@ -357,7 +357,7 @@ func TestEmissionABIDemandNamedUnderlyingIsNotDescriptorRoot(t *testing.T) {
 	named := types.NewNamed(types.NewTypeName(token.NoPos, nil, "N", nil), underlying, nil)
 
 	var visited typeutil.Map
-	if err := walkEmissionABITypeDemandEx(named, nil, nil, prog.ABITypeImplicitDescriptorTypes, func(typ types.Type) error {
+	if err := walkEmissionABITypeDemandEx(named, nil, nil, nil, prog.ABITypeImplicitDescriptorTypes, func(typ types.Type) error {
 		visited.Set(typ, true)
 		return nil
 	}); err != nil {
@@ -1110,13 +1110,18 @@ func Root() any { return Host{} }
 	if types.Identical(sourceParam, physicalParam) {
 		t.Fatalf("method parameter was not converted to its physical closure shape: %v", physicalParam)
 	}
-	selection := emissionABIDemandMethodSelection(t, testProg.ssa, physicalParam, "M")
+	selection := emissionABIDemandMethodSelection(t, testProg.ssa, sourceParam, "M")
 	wantWrapper := testProg.ssa.MethodValue(selection)
 	if wantWrapper == nil {
-		t.Fatalf("physical promoted wrapper for %v.M is nil", physicalParam)
+		t.Fatalf("source promoted wrapper for %v.M is nil", sourceParam)
 	}
 	if resolved, ok := universe.Resolve(wantWrapper); !ok || resolved != wantWrapper {
-		t.Fatalf("physical method-parameter wrapper = %v, %v; want exact %v", resolved, ok, wantWrapper)
+		t.Fatalf("source method-parameter wrapper = %v, %v; want exact %v", resolved, ok, wantWrapper)
+	}
+	physicalSelection := emissionABIDemandMethodSelection(t, testProg.ssa, physicalParam, "M")
+	physicalWrapper := testProg.ssa.MethodValue(physicalSelection)
+	if _, ok := universe.Resolve(physicalWrapper); ok {
+		t.Fatal("physical receiver manufactured an additional GoSSA method owner")
 	}
 }
 
@@ -1379,6 +1384,88 @@ func _Cfunc_demo(values map[struct{ Base }]int, key struct{ Base }) {
 	}
 }
 
+func TestEmissionABIDemandMaterializesManagedForeignMethodAdapter(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/foreignmethodvalue", `package foreignmethodvalue
+type Format int8
+//llgo:link (*Format).Printf C.printf
+func (*Format) Printf(__llgo_va_list ...any) int32 { return 0 }
+//go:linkname Printf C.printf
+func Printf(format *int8, __llgo_va_list ...any) int32
+type Container struct { *Format }
+type Printer interface { Printf(__llgo_va_list ...any) int32 }
+func Root() bool {
+	Printf(nil)
+	var value any = new(Container)
+	_, ok := value.(Printer)
+	return ok
+}
+`)
+	testProg.ssa.Build()
+	prog := ssatest.NewProgram(t, nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	named, ok := pkg.types.Scope().Lookup("Format").Type().(*types.Named)
+	if !ok {
+		t.Fatal("Format is not a named type")
+	}
+	selection := emissionABIDemandMethodSelection(t, testProg.ssa, types.NewPointer(named), "Printf")
+	method := testProg.ssa.MethodValue(selection)
+	if method == nil || method.Signature == nil || method.Signature.Recv() == nil || !method.Signature.Variadic() {
+		t.Fatalf("foreign method = %v; want one variadic receiver method", method)
+	}
+	topLevel := pkg.ssa.Func("Printf")
+	if resolvedTopLevel, required := universe.Resolve(topLevel); !required || resolvedTopLevel != method {
+		t.Fatalf(
+			"receiver-free C facade resolves to %v, required=%t; want canonical method %v",
+			resolvedTopLevel, required, method,
+		)
+	}
+	if resolvedMethod, required := universe.Resolve(method); !required || resolvedMethod != method {
+		t.Fatalf("canonical C method resolves to %v, required=%t; want itself", resolvedMethod, required)
+	}
+	adapter, adapted, err := universe.CoroManagedFunctionValueTarget(method)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !adapted || adapter == nil || adapter == method {
+		t.Fatalf("managed foreign method adapter = %v, %t; want one distinct adapter", adapter, adapted)
+	}
+	if adapter.Signature == nil || adapter.Signature.Recv() == nil || !adapter.Signature.Variadic() ||
+		!types.Identical(adapter.Signature, method.Signature) {
+		t.Fatalf("managed foreign method adapter signature = %v; want %v", adapter.Signature, method.Signature)
+	}
+	if err := universe.validateManagedForeignFunctionValueWrapper(adapter); err != nil {
+		t.Fatalf("validate managed foreign method adapter: %v", err)
+	}
+	references, err := universe.CoroPlanningMetadata().ManagedValueReferences(pkg.ssa.Func("Root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, reference := range references {
+		found = found || reference == method
+	}
+	if !found {
+		t.Fatalf("Root managed ABI references = %v; want source method %v", references, method)
+	}
+	// Method descriptor consumers resolve the exact adapter from ProgramIR,
+	// without rediscovering mutable frontend adapter metadata after freezing.
+	universe.managedForeignWraps = nil
+	for _, source := range []*ssa.Function{method, topLevel} {
+		frozenTarget, err := universe.coroProgramIR.resolveCoroManagedABIMethodTarget(source)
+		if err != nil || frozenTarget != adapter {
+			t.Fatalf("frozen managed method target %v = %v, %v; want %v", source, frozenTarget, err, adapter)
+		}
+	}
+}
+
 func TestEmissionUniverseOrdinaryIgnoredDirectFunctionArgumentNeedsNoWrapper(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	pkg := testProg.addPackage(t, "example.com/emission/ignoredfunctionarg", `package ignoredfunctionarg
@@ -1413,9 +1500,9 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 	add(emissionIntrinsicNoValues,
 		"cstr", "pystr", "skip", "_cgoCheckPointer", "sigjmpbuf",
 		"deferData", "unreachable", "stackSave", "coroYield",
-		"coroCriticalEnter", "coroCriticalExit", "coroGoexit",
+		"coroCriticalEnter", "coroCriticalPin", "coroCriticalExit", "coroGoexit",
 		"coroOSThreadLock", "coroOSThreadUnlock", "controlTrap", "controlFork",
-		"closureEnv", "coroCurrentTask")
+		"closureEnv", "coroCurrentTask", "coroExecutionDomainEnabled", "coroGCObservationEnabled")
 	add(emissionIntrinsicRawAllValues, "syscall")
 	add(emissionIntrinsicCompileValues,
 		"boolToUint8", "atomicLoad", "atomicStore", "atomicCmpXchg",
@@ -1436,6 +1523,7 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 	add(emissionIntrinsicFuncAddr, "funcAddr")
 	add(emissionIntrinsicFuncPCABI0, "funcPCABI0", "funcPCABIInternal")
 	add(emissionIntrinsicAsm, "asm")
+	add(emissionIntrinsicStaticFunctions, "coroBorrowResult")
 	add(emissionIntrinsicRawAllValues, "syscall32", "syscallPtr")
 
 	for name, instruction := range llgoInstrs {

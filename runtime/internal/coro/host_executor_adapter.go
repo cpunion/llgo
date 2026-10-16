@@ -713,6 +713,21 @@ func (clock *HostWallClock) Snapshot() (sec int64, nsec int32, ok bool) {
 	return 0, 0, false
 }
 
+// SnapshotOrMonotonic gives targets without an RTC a progressing civil clock
+// rooted at the Unix epoch. A constant epoch would lose elapsed time when Go's
+// time.Now sees monotonic zero (its sentinel for "no monotonic clock"). This
+// fallback does not change the scheduler's clock or exported alarm coordinates.
+func (clock *HostWallClock) SnapshotOrMonotonic(monotonic *HostMonotonicClock) (sec int64, nsec int32, ok bool) {
+	if sec, nsec, ok = clock.Snapshot(); ok {
+		return
+	}
+	now, ok := monotonic.Snapshot()
+	if !ok {
+		return 0, 0, false
+	}
+	return now / 1e9, int32(now % 1e9), true
+}
+
 func (clock *HostWallClock) Publish(secLo, secHi, nsec uint32) bool {
 	if clock == nil || nsec >= 1e9 {
 		return false

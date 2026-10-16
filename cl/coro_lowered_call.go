@@ -165,7 +165,16 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		nativeResult := !p.prog.LocalGoTypeExceedsNativeStack(
 			newOutcomePlainPhysicalABI(sourceSig).resultSlotType,
 		)
-		return p.compileCoroStaticOutcomeTargetCall(b, target, args, nativeResult), true
+		var cleanup *coroStaticCleanupState
+		if site := p.coroEmissionSite(); site != nil && site.placement == coroRuntimeHelperAtCleanup {
+			cleanup = p.coroCleanup()
+			if cleanup == nil {
+				panic("lowered outcome cleanup has no active drainer")
+			}
+		}
+		return p.compileCoroStaticOutcomeTargetCallAliasResult(
+			b, target, args, nativeResult, false, cleanup,
+		).value, true
 	}
 
 	switch targetPlan.Emission {

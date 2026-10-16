@@ -763,8 +763,7 @@ func emitRuntimeMainBody(b llssa.Builder, pkg llssa.Package, fns entryFunctions)
 			failBlock,
 		)
 		b.SetBlock(failBlock)
-		abort := declareNoArgFunc(pkg, "abort")
-		b.Call(abort.Expr)
+		b.ControlTrap()
 		b.Unreachable()
 		b = b.SetBlock(preparedBlock)
 	}
@@ -879,7 +878,7 @@ func declareCoroWASICommandHookV1(pkg llssa.Package, name string) llssa.Function
 // adapter and return from the entry immediately; the embedding later consumes
 // NextAction and invokes the host continuation wrapper. No continuation call or
 // scheduler recursion exists in this entry. Panic, Invalid, Repost, Ignored,
-// and malformed result tuples abort at the compiler/runtime trust boundary.
+// and malformed result tuples trap at the compiler/runtime trust boundary.
 func emitCoroHostInitialSliceV2(
 	b llssa.Builder,
 	pkg llssa.Package,
@@ -1025,8 +1024,8 @@ func emitCoroHostInitialSliceV2(
 	}
 
 	b.SetBlock(failBlock)
-	abort := declareNoArgFunc(pkg, "abort")
-	b.Call(abort.Expr)
+	// Host-pull includes freestanding targets without a libc abort/process ABI.
+	b.ControlTrap()
 	b.Unreachable()
 
 	return b.SetBlock(completeBlock)

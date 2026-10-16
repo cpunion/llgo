@@ -97,35 +97,41 @@ const serviceOperation = (record) => {
       complete(slot, generation, BigInt(fd));
       return;
     }
-    case 0x00010002: { // read(fd, pointer, len)
+    case 0x00010002: // read(fd, pointer, len)
+    case 0x00010007: { // pread(fd, pointer, len, offset-lo, offset-hi)
       const descriptor = descriptors.get(arg(0));
       if (!descriptor) {
         complete(slot, generation, 0xffff_ffffn, 0n, 9n);
         return;
       }
       const file = files.get(descriptor.path) ?? new Uint8Array();
-      const count = Math.min(arg(2), Math.max(0, file.length - descriptor.offset));
+      const positioned = opcode === 0x00010007;
+      const position = positioned ? Number(join(arg(3), arg(4))) : descriptor.offset;
+      const count = Math.min(arg(2), Math.max(0, file.length - position));
       new Uint8Array(api.memory.buffer, arg(1), count).set(
-        file.subarray(descriptor.offset, descriptor.offset + count),
+        file.subarray(position, position + count),
       );
-      descriptor.offset += count;
+      if (!positioned) descriptor.offset += count;
       complete(slot, generation, BigInt(count));
       return;
     }
-    case 0x00010003: { // write(fd, pointer, len)
+    case 0x00010003: // write(fd, pointer, len)
+    case 0x00010008: { // pwrite(fd, pointer, len, offset-lo, offset-hi)
       const descriptor = descriptors.get(arg(0));
       if (!descriptor) {
         complete(slot, generation, 0xffff_ffffn, 0n, 9n);
         return;
       }
+      const positioned = opcode === 0x00010008;
+      const position = positioned ? Number(join(arg(3), arg(4))) : descriptor.offset;
       const input = new Uint8Array(api.memory.buffer, arg(1), arg(2));
       const previous = files.get(descriptor.path) ?? new Uint8Array();
-      const required = descriptor.offset + input.length;
+      const required = position + input.length;
       const output = new Uint8Array(Math.max(previous.length, required));
       output.set(previous);
-      output.set(input, descriptor.offset);
+      output.set(input, position);
       files.set(descriptor.path, output);
-      descriptor.offset += input.length;
+      if (!positioned) descriptor.offset += input.length;
       complete(slot, generation, BigInt(input.length));
       return;
     }
@@ -233,7 +239,9 @@ try {
   }
   const completeFileLifecycle =
     (operations === 6 && opcodes.size === 6 && files.size === 0) ||
-    (operations === 5 && opcodes.size === 5 && files.size === 1);
+    (operations === 5 && opcodes.size === 5 && files.size === 1) ||
+    (process.argv[3] === "positional" && operations === 12 &&
+      opcodes.size === 7 && files.size === 0);
   if (!completeFileLifecycle || descriptors.size !== 0) {
     throw new Error(
       `incomplete file lifecycle: operations=${operations}, opcodes=${opcodes.size}, files=${files.size}, fds=${descriptors.size}`,

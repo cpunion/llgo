@@ -1,4 +1,4 @@
-//go:build wasip1 || wasip2 || wasm_unknown
+//go:build wasip1 || wasip2 || wasm_unknown || baremetal
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -18,7 +18,11 @@
 
 package runtime
 
-import _ "unsafe"
+import (
+	_ "unsafe"
+
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+)
 
 //go:linkname coroFreestandingAbort llgo.controlTrap
 func coroFreestandingAbort()
@@ -26,10 +30,17 @@ func coroFreestandingAbort()
 // Freestanding core modules have no process stderr or exit ABI, while WASI
 // Preview 1 cannot perform a potentially blocking diagnostic write from the
 // executor stack. A scheduler invariant failure is therefore an immediate
-// WebAssembly trap; richer diagnostics belong to an embedding-owned host
+// target trap; richer diagnostics belong to an embedding-owned host
 // adapter or a future terminal WASI control operation.
 func coroRuntimeAbort(string) {
 	coroFreestandingAbort()
 	for {
 	}
+}
+
+// Unhandled child panics are terminal on freestanding targets too. They must
+// not import the native stdio/symbolization reporter into an executor resume;
+// host-owned structured panic presentation remains a separate capability.
+func coroReportTaskPanicV1(*coro.G) {
+	coroRuntimeAbort("unhandled coroutine task panic")
 }

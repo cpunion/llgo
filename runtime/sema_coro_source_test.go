@@ -39,14 +39,14 @@ func TestRuntimeSemaphoreSelectsEventDrivenCoroImplementation(t *testing.T) {
 	requireRuntimeAnnotationFreeCDeclarations(
 		t,
 		runtimeSemaphoreCoroSource,
-		"llgoCoroSemaphorePrepareOrAbortV2",
+		"llgoCoroSemaphorePrepareOrAbortV3",
 		"llgoCoroSemaphoreReleaseOrAbortV2",
 	)
 	for _, marker := range []string{
-		"C.__llgo_coro_sema_prepare_or_abort_v2",
+		"C.__llgo_coro_sema_prepare_or_abort_v3",
 		"C.__llgo_coro_sema_release_or_abort_v2",
 		"//go:linkname llgoCoroSemaphoreSuspendV2 llgo.coroPark",
-		"llgoCoroSemaphorePrepareOrAbortV2(",
+		"llgoCoroSemaphorePrepareOrAbortV3(unsafe.Pointer(&state), unsafe.Pointer(addr), durable)",
 		"unsafe.Pointer(addr)",
 		"llgoCoroSemaphoreSuspendV2(&state, 0)",
 		"latomic.CompareAndSwapUint32(addr, value, value-1)",
@@ -66,6 +66,8 @@ func TestRuntimeSemaphoreSelectsEventDrivenCoroImplementation(t *testing.T) {
 		".Cond",
 		"coroSchedulerYield",
 		"runtime.Gosched",
+		"llgoCoroSemaphorePrepareOrAbortV2",
+		"llgoCoroSemaphorePrepareDurableOrAbortV1",
 	} {
 		if strings.Contains(coroSource, forbidden) {
 			t.Errorf("%s retains blocking or busy-yield semaphore path %q", runtimeSemaphoreCoroSource, forbidden)
@@ -117,12 +119,19 @@ func assertRuntimeSemaphoreExactRetentionSpan(t *testing.T, path, source string)
 		t.Fatal(err)
 	}
 	var function *ast.FuncDecl
+	var ordinary *ast.FuncDecl
 	for _, declaration := range file.Decls {
 		candidate, ok := declaration.(*ast.FuncDecl)
-		if ok && candidate.Name.Name == "semaAcquire" {
+		if ok && candidate.Name.Name == "semaAcquireWaitGroup" {
 			function = candidate
-			break
 		}
+		if ok && candidate.Name.Name == "semaAcquire" {
+			ordinary = candidate
+		}
+	}
+	if ordinary == nil || ordinary.Body == nil ||
+		!strings.Contains(coroTimerOwnerNodeText(t, ordinary.Body), "semaAcquireWaitGroup(addr, false)") {
+		t.Fatalf("%s ordinary semaphore must select non-durable shared loop", path)
 	}
 	if function == nil || function.Body == nil || len(function.Body.List) != 1 {
 		t.Fatalf("%s semaAcquire is not one retry loop", path)
@@ -131,8 +140,22 @@ func assertRuntimeSemaphoreExactRetentionSpan(t *testing.T, path, source string)
 	if !ok || loop.Body == nil {
 		t.Fatalf("%s semaAcquire does not retry token CAS after wake", path)
 	}
-	prepare, park := -1, -1
+	prepare, park, prepares, parks := -1, -1, 0, 0
 	for index, statement := range loop.Body.List {
+		// A prepare hidden in either branch of a diamond is not an exact
+		// same-block lifetime proof, even when the whole if precedes park.
+		if expression, ok := statement.(*ast.ExprStmt); ok {
+			if call, ok := expression.X.(*ast.CallExpr); ok {
+				if identifier, ok := call.Fun.(*ast.Ident); ok {
+					switch identifier.Name {
+					case "llgoCoroSemaphorePrepareOrAbortV3":
+						prepare = index
+					case "llgoCoroSemaphoreSuspendV2":
+						park = index
+					}
+				}
+			}
+		}
 		ast.Inspect(statement, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
@@ -143,20 +166,20 @@ func assertRuntimeSemaphoreExactRetentionSpan(t *testing.T, path, source string)
 				return true
 			}
 			switch identifier.Name {
-			case "llgoCoroSemaphorePrepareOrAbortV2":
-				prepare = index
+			case "llgoCoroSemaphorePrepareOrAbortV3":
+				prepares++
 			case "llgoCoroSemaphoreSuspendV2":
-				park = index
+				parks++
 			}
 			return true
 		})
 	}
-	if prepare < 0 || park != prepare+1 {
-		t.Fatalf("semaphore prepare/park are not an exact adjacent span: %d/%d", prepare, park)
+	if prepare < 0 || park != prepare+1 || prepares != 1 || parks != 1 {
+		t.Fatalf("semaphore prepare/park are not one direct adjacent span: positions %d/%d, counts %d/%d", prepare, park, prepares, parks)
 	}
 }
 
-func TestCoroSemaphoreOwnerV2FailStopABIAndKeyedSource(t *testing.T) {
+func TestCoroSemaphoreOwnerFailStopABIAndKeyedSource(t *testing.T) {
 	const ownerPath = "internal/runtime/coro_sema_owner_llgo.go"
 	source := readRuntimePollFile(t, ownerPath)
 	file, err := parser.ParseFile(token.NewFileSet(), ownerPath, source, parser.ParseComments)
@@ -176,10 +199,10 @@ func TestCoroSemaphoreOwnerV2FailStopABIAndKeyedSource(t *testing.T) {
 		exportLine string
 	}{
 		{
-			name:       "__llgo_coro_sema_prepare_or_abort_v2",
-			params:     []string{"unsafe.Pointer", "unsafe.Pointer"},
+			name:       "__llgo_coro_sema_prepare_or_abort_v3",
+			params:     []string{"unsafe.Pointer", "unsafe.Pointer", "bool"},
 			delegates:  "coroPrepareKeyedStateV2",
-			exportLine: "//export __llgo_coro_sema_prepare_or_abort_v2",
+			exportLine: "//export __llgo_coro_sema_prepare_or_abort_v3",
 		},
 		{
 			name:       "__llgo_coro_sema_release_or_abort_v2",
@@ -240,6 +263,8 @@ func TestCoroSemaphoreOwnerV2FailStopABIAndKeyedSource(t *testing.T) {
 	}
 	for _, obsolete := range []string{
 		"__llgo_coro_sema_prepare_or_abort_v1",
+		"__llgo_coro_sema_prepare_or_abort_v2",
+		"__llgo_coro_sema_prepare_durable_or_abort_v1",
 		"__llgo_coro_sema_retire_completed_or_abort_v1",
 		"__llgo_coro_sema_release_or_abort_v1",
 		"PrepareExecutorSemaphoreWait",

@@ -157,7 +157,7 @@ func TestMfinalManagedRegistryUsesSchedulerAwareGate(t *testing.T) {
 	lock := mfinalSourceFunc(t, file, "Lock")
 	unlock := mfinalSourceFunc(t, file, "Unlock")
 	set := mfinalSourceFunc(t, file, "SetFinalizer")
-	drain := mfinalSourceFunc(t, file, "runFinalizers")
+	drain := mfinalSourceFunc(t, file, "drainFinalizers")
 	callback := mfinalSourceFunc(t, file, "setFinalizerCallback")
 
 	loops := 0
@@ -176,10 +176,18 @@ func TestMfinalManagedRegistryUsesSchedulerAwareGate(t *testing.T) {
 		mfinalCallCount(unlock.Body, "throw") != 1 {
 		t.Fatal("finalizer registry gate release is not one checked CAS")
 	}
-	for name, fn := range map[string]*ast.FuncDecl{"SetFinalizer": set, "runFinalizers": drain} {
-		if mfinalCallCount(fn.Body, "finalizerState.registry.Lock") != 1 ||
-			mfinalCallCount(fn.Body, "finalizerState.registry.Unlock") != 1 {
-			t.Fatalf("%s does not own exactly one finalizer registry transaction", name)
+	for _, transaction := range []struct {
+		fn    *ast.FuncDecl
+		count int
+	}{
+		{set, 1},
+		// Draining removes the finalizer registration and, independently,
+		// claims a registered cleanup before invoking user code unlocked.
+		{drain, 2},
+	} {
+		if mfinalCallCount(transaction.fn.Body, "finalizerState.registry.Lock") != transaction.count ||
+			mfinalCallCount(transaction.fn.Body, "finalizerState.registry.Unlock") != transaction.count {
+			t.Fatalf("%s does not own exactly %d finalizer registry transactions", transaction.fn.Name, transaction.count)
 		}
 	}
 	if mfinalCallCount(callback.Body, "finalizerState.registry.Lock") != 0 ||
@@ -198,12 +206,31 @@ func TestMfinalManagedRegistryUsesSchedulerAwareGate(t *testing.T) {
 	}
 }
 
+func TestMfinalBubbleDrainTransfersOwnershipWithoutChangingCaller(t *testing.T) {
+	file := parseMfinalQueueSource(t)
+	entry := mfinalSourceFunc(t, file, "runFinalizers")
+	drain := mfinalSourceFunc(t, file, "drainFinalizers")
+	if mfinalCallCount(entry.Body, "coro.ExecutionDomainEnabled") != 1 ||
+		mfinalCallCount(entry.Body, "llruntime.GoOutsideExecutionDomain") != 1 ||
+		mfinalCallCount(entry.Body, "drainFinalizers") != 1 {
+		t.Fatal("drain entry must specialize away optional bubble dispatch and retain the ordinary inline drain")
+	}
+	if mfinalCallCount(entry.Body, "releaseFinalizerDrain") != 0 ||
+		mfinalCallCount(drain.Body, "releaseFinalizerDrain") != 1 {
+		t.Fatal("finalizer drain ownership was released by the publishing caller instead of the drain")
+	}
+	if mfinalCallCount(entry.Body, "llruntime.LeaveExecutionDomain") != 0 {
+		t.Fatal("collector entry must not detach the requesting goroutine from its bubble")
+	}
+}
+
 func TestMfinalRawProducerIsBoundedAtomicMPSC(t *testing.T) {
 	file := parseMfinalQueueSource(t)
 	enqueue := mfinalSourceFunc(t, file, "enqueueFinalizerEntry")
 	callback := mfinalSourceFunc(t, file, "setFinalizerCallback")
 	dequeue := mfinalSourceFunc(t, file, "dequeueFinalizerEntry")
 	drain := mfinalSourceFunc(t, file, "runFinalizers")
+	ownedDrain := mfinalSourceFunc(t, file, "drainFinalizers")
 	releaseDrain := mfinalSourceFunc(t, file, "releaseFinalizerDrain")
 
 	atomicCalls := map[string]int{}
@@ -309,8 +336,9 @@ func TestMfinalRawProducerIsBoundedAtomicMPSC(t *testing.T) {
 		t.Fatalf("single-consumer dequeue atomics = Exchange:%d Load:%d; want no direct exchange and at least three acquire loads", exchanges, loads)
 	}
 
-	var claims, deferredReleases int
-	ast.Inspect(drain.Body, func(node ast.Node) bool {
+	var claims, cleanupClaims, deferredReleases int
+	bodies := &ast.BlockStmt{List: []ast.Stmt{drain.Body, ownedDrain.Body}}
+	ast.Inspect(bodies, func(node ast.Node) bool {
 		switch value := node.(type) {
 		case *ast.CallExpr:
 			selector, ok := value.Fun.(*ast.SelectorExpr)
@@ -319,7 +347,21 @@ func TestMfinalRawProducerIsBoundedAtomicMPSC(t *testing.T) {
 			}
 			pkg, packageOK := selector.X.(*ast.Ident)
 			if packageOK && pkg.Name == "atomic" && selector.Sel.Name == "CompareAndExchange" {
-				claims++
+				if len(value.Args) != 3 {
+					t.Fatal("drain CAS has an unexpected signature")
+				}
+				address, ok := value.Args[0].(*ast.UnaryExpr)
+				if !ok || address.Op != token.AND {
+					t.Fatal("drain CAS does not address an owned state field")
+				}
+				switch target := mfinalSelectorPath(address.X); target {
+				case "finalizerState.draining":
+					claims++
+				case "entry.state":
+					cleanupClaims++
+				default:
+					t.Fatalf("drain has an unaudited CAS on %s", target)
+				}
 			}
 		case *ast.DeferStmt:
 			callee, ok := value.Call.Fun.(*ast.Ident)
@@ -329,8 +371,8 @@ func TestMfinalRawProducerIsBoundedAtomicMPSC(t *testing.T) {
 		}
 		return true
 	})
-	if claims != 1 || deferredReleases != 1 {
-		t.Fatalf("managed drain ownership = claims:%d deferred releases:%d, want one each", claims, deferredReleases)
+	if claims != 1 || cleanupClaims != 1 || deferredReleases != 1 {
+		t.Fatalf("managed drain ownership = claims:%d cleanup claims:%d deferred releases:%d, want one each", claims, cleanupClaims, deferredReleases)
 	}
 
 	releaseStores := 0

@@ -33,6 +33,6 @@ func compareAndSwapPointer(address *unsafe.Pointer, old, new unsafe.Pointer) boo
 	return swapped
 }
 
-func loadUint32(address *uint32) uint32 {
+func loadUintptr(address *uintptr) uintptr {
 	return catomic.Load(address)
 }

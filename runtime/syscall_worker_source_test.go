@@ -349,9 +349,16 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 		{"libc_fchmod_trampoline", "fchmod"},
 		{"libc_fchown_trampoline", "fchown"},
 		{"libc_ftruncate_trampoline", "ftruncate"},
+		{"libc_futimes_trampoline", "futimes"},
+		{"libc_getegid_trampoline", "getegid"},
+		{"libc_geteuid_trampoline", "geteuid"},
 		{"libc_getcwd_trampoline", "getcwd"},
+		{"libc_getgid_trampoline", "getgid"},
+		{"libc_getgroups_trampoline", "getgroups"},
 		{"libc_getpid_trampoline", "getpid"},
+		{"libc_getppid_trampoline", "getppid"},
 		{"libc_getrusage_trampoline", "getrusage"},
+		{"libc_getuid_trampoline", "getuid"},
 		{"libc_getpeername_trampoline", "getpeername"},
 		{"libc_getsockname_trampoline", "getsockname"},
 		{"libc_kill_trampoline", "kill"},
@@ -372,6 +379,7 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 		{"libc_truncate_trampoline", "truncate"},
 		{"libc_unlink_trampoline", "unlink"},
 		{"libc_unlinkat_trampoline", "unlinkat"},
+		{"libc_utimes_trampoline", "utimes"},
 		{"libc_write_trampoline", "write"},
 		{"libc_sendfile_trampoline", "sendfile"},
 		{"libc_socketpair_trampoline", "socketpair"},
@@ -511,6 +519,27 @@ func TestDarwinInternalSyscallAtWorkerTargetsAreExact(t *testing.T) {
 	}
 	if strings.Contains(string(source), "//llgo:coro") {
 		t.Errorf("%s retains derivable address-carrier directives", path)
+	}
+}
+
+func TestDarwinInternalSyscallUserWorkerTargetsAreExact(t *testing.T) {
+	path := "internal/lib/internal/syscall/unix/user_darwin_coro.go"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	targets := []string{"getpwnam_r", "getpwuid_r", "getgrnam_r", "getgrgid_r", "getgrouplist", "sysconf"}
+	for _, target := range targets {
+		if !strings.Contains(source, "//go:linkname libc_"+target+"_trampoline C."+target+"\nfunc libc_"+target+"_trampoline()") {
+			t.Errorf("%s lacks exact worker target %s", path, target)
+		}
+	}
+	if strings.Count(source, "//go:linkname ") != len(targets) || strings.Contains(source, "//llgo:coro") {
+		t.Error("account query catalog must only map the reviewed C symbols; Go effects are inferred")
+	}
+	if !strings.Contains(source, "//go:build darwin && go1.26") {
+		t.Error("account query catalog lacks its Darwin constraint")
 	}
 }
 

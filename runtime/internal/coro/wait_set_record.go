@@ -495,6 +495,11 @@ func promoteReadyWaitSet(sources *ExecutorSourceSet, p *P, record *WaitSetRecord
 // reduction. Generic and multi-source callers retain promoteReadyWaitSet.
 func promoteReadyWaitSetUnchecked(p *P, record *WaitSetRecord) {
 	g := record.g
+	if ExecutionDomainEnabled() {
+		// The live active-wait certificate also proves the optional membership
+		// cannot have crossed its terminal retirement boundary.
+		resumeExecutionDomainTask(g)
+	}
 	frame := g.active
 	previous, next := record.activePrev, record.activeNext
 	if previous == nil {

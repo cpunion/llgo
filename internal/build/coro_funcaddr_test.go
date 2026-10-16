@@ -287,13 +287,13 @@ func analyzeCoroFuncAddrTest(t *testing.T, ssaPkg *ssa.Package, files []*ast.Fil
 		return nil, nil, nil, fmt.Errorf("root has no funcAddr call")
 	}
 	input := CoroPlanInput{
-		Program:                        ssaPkg.Prog,
-		EmissionUniverse:               ssaEmission,
-		resolveFunction:                emission.Resolve,
-		functionBackground:             emission.FunctionBackground,
-		callSitePlan:                   emission.CoroCallSitePlan,
-		rawFunctionAddressCallArgument: emission.CoroRawFunctionAddressCallArgument,
-		staticCodeAddressCallArgument:  emission.CoroStaticCodeAddressCallArgument,
+		Program:                             ssaPkg.Prog,
+		EmissionUniverse:                    ssaEmission,
+		resolveFunction:                     emission.Resolve,
+		functionBackground:                  emission.FunctionBackground,
+		callSitePlan:                        emission.CoroCallSitePlan,
+		rawFunctionAddressCallArgument:      emission.CoroRawFunctionAddressCallArgument,
+		staticFunctionReferenceCallArgument: emission.CoroStaticFunctionReferenceCallArgument,
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1

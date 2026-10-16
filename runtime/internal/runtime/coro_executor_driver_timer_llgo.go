@@ -44,7 +44,6 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 		coro.PollOperationConfiguredCapacity(&coroProgramPollSourceV1State) != coro.PollOperationPageCapacity ||
 		coro.ManualOperationConfiguredCapacity(&coroProgramManualSourceV2State) != coro.ManualOperationPageCapacity ||
 		coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coro.ChannelOperationPageCapacity ||
-		coroNativeTimerCapacityV1 != coroNativeTimerPageCountV1*coro.TimerRegistrationPageCapacity ||
 		coroNativePollCapacityV1 != coroNativeSourcePageCountV1*coro.PollOperationPageCapacity ||
 		coroNativeWorkerCapacityV1 != coroRuntimeWorkerCapacityV1 ||
 		coroNativeWorkerQueueSizeV1 != coroNativeWorkerCapacityV1 {
@@ -90,6 +89,9 @@ func coroProgramNextRunStepV1(
 }
 
 func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool, deadline int64, hasDeadline, ok bool) {
+	if coroObserveGCV1() {
+		return false, 0, false, true
+	}
 	if ready, fastOK := coroNativeTryFastWorkerCompletionV1(driver); !fastOK {
 		return false, 0, false, false
 	} else if ready {

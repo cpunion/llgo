@@ -1133,13 +1133,13 @@ func (v Value) Pointer() uintptr {
 		if v.flag&flagMethod != 0 {
 			// As the doc comment says, the returned pointer is an
 			// underlying code pointer but not necessarily enough to
-			// identify a single function uniquely. All method expressions
-			// created via reflect have the same underlying code pointer,
-			// so their Pointers are equal. The function used here must
-			// match the one used in makeMethodValue.
-			//			return methodValueCallCodePtr()
-			_, _, fn := methodReceiver("unsafePointer", v, int(v.flag)>>flagMethodShift)
-			return uintptr(functionCodePointer(fn))
+			// identify a single function uniquely. Resolve the ordinary
+			// receiver-first method expression so the stackless profile
+			// reads Method.Tfn_'s managed descriptor. Method.Ifn_ is an
+			// interface-call entry and may deliberately remain a raw code
+			// pointer, so it must never be decoded as a descriptor here.
+			_, method := methodExpressionValue("Pointer", v, int(v.flag)>>flagMethodShift)
+			return method.Pointer()
 		}
 		p := v.pointer()
 		// Non-nil func value points at its physical two-word carrier. In the
@@ -1757,12 +1757,11 @@ func (v Value) UnsafePointer() unsafe.Pointer {
 		if v.flag&flagMethod != 0 {
 			// As the doc comment says, the returned pointer is an
 			// underlying code pointer but not necessarily enough to
-			// identify a single function uniquely. All method expressions
-			// created via reflect have the same underlying code pointer,
-			// so their Pointers are equal. The function used here must
-			// match the one used in makeMethodValue.
-			_, _, fn := methodReceiver("unsafePointer", v, int(v.flag)>>flagMethodShift)
-			return functionCodePointer(fn)
+			// identify a single function uniquely. Method.Tfn_ is the
+			// receiver-first Go func value capability; Method.Ifn_ may be
+			// a legacy raw interface entry and is not a descriptor.
+			_, method := methodExpressionValue("UnsafePointer", v, int(v.flag)>>flagMethodShift)
+			return method.UnsafePointer()
 		}
 		p := v.pointer()
 		// Non-nil func value points at its physical two-word carrier. In the
@@ -2431,9 +2430,12 @@ func appendFFIPadding(fields []*ffi.Type, off, size uintptr) ([]*ffi.Type, uintp
 }
 
 func toFFISig(tin, tout []*abi.Type) (*ffi.Signature, error) {
-	args := make([]*ffi.Type, len(tin))
-	for i, in := range tin {
-		args[i] = toFFIType(in)
+	args := make([]*ffi.Type, 0, len(tin))
+	for _, in := range tin {
+		if size, _ := llgoABITypeLayout(in); size == 0 {
+			continue
+		}
+		args = append(args, toFFIType(in))
 	}
 	return ffi.NewSignature(toFFIRetType(tout), args...)
 }
@@ -2644,10 +2646,20 @@ func (v Value) call(op string, in []Value) (out []Value) {
 
 	ffiArgs := make([]*ffi.Type, 0, len(tin)+4)
 	for i := 0; i < ioff; i++ {
+		if size, _ := llgoABITypeLayout(tin[i]); size == 0 {
+			continue
+		}
 		ffiArgs = append(ffiArgs, toFFIType(tin[i]))
 	}
 	for i, arg := range in {
 		typ := tin[ioff+i]
+		// LLVM retains zero-sized source parameters in the IR function type,
+		// but they consume no native ABI argument slot. libffi cannot describe
+		// a genuinely empty struct and would otherwise substitute a byte,
+		// shifting every following argument register.
+		if size, _ := llgoABITypeLayout(typ); size == 0 {
+			continue
+		}
 		if ffiCallSliceAsTriple && typ.Kind() == abi.Slice {
 			h := (*unsafeheaderSlice)(arg.ptr)
 			ffiArgs = append(ffiArgs, ffi.TypePointer, ffi.TypeInt, ffi.TypeInt)

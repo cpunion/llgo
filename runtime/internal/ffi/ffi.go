@@ -250,6 +250,9 @@ func CallLLGo(
 	resultSize, resultAlign uintptr,
 	args ...unsafe.Pointer,
 ) {
+	if !ffi.DynamicCallsSupported {
+		panic("libffi is unsupported on this freestanding target")
+	}
 	if descriptor == nil {
 		panic("reflect.Value.Call: call of nil function")
 	}

@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/xgo-dev/llgo/ssa"
-	"github.com/xgo-dev/llgo/ssa/ssatest"
 )
 
 func TestBoundsCheckModesIR(t *testing.T) {
@@ -45,7 +44,7 @@ func TestBoundsCheckModesIR(t *testing.T) {
 
 func boundsCheckModeIR(t *testing.T, disable bool) string {
 	t.Helper()
-	prog := ssatest.NewProgram(t, nil)
+	prog := newRuntimeTestProgram(t, nil)
 	t.Cleanup(prog.Dispose)
 	prog.DisableBoundsChecks(disable)
 

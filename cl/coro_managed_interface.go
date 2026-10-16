@@ -43,6 +43,11 @@ func (p *context) emitCoroMethodValueDescriptor(
 	if plan == nil {
 		return llssa.Nil, fmt.Errorf("coroutine method value descriptor requires an exact receiver target and compilation plan")
 	}
+	var err error
+	target, err = p.immutableEmissionUniverse().coroProgramIR.resolveCoroManagedABIMethodTarget(target)
+	if err != nil {
+		return llssa.Nil, fmt.Errorf("coroutine method value descriptor: resolve managed target: %w", err)
+	}
 	entry := p.mustFunctionSymbol(target)
 	if entry.function.Signature == nil || entry.function.Signature.Recv() == nil ||
 		len(entry.function.FreeVars) != 0 || entry.plan.Demand == coro.NoDemand {
@@ -197,6 +202,25 @@ func (p *coroManagedInterfaceDispatchPlan) acceptsTarget(fn *ssa.Function, plan 
 	return ok && target == fn
 }
 
+// resolveCoroManagedABIMethodTarget preserves the source receiver only long
+// enough to select the compiler-owned managed adapter introduced for a native
+// method facade. ABI metadata records the source method because no source SSA
+// value exists at that publication site; all capability and codegen checks
+// must consume the same adapter that AnalyzeSSA selected for that managed
+// value. Static/raw C calls deliberately do not use this resolver.
+func (ir *coroProgramIR) resolveCoroManagedABIMethodTarget(
+	source *ssa.Function,
+) (*ssa.Function, error) {
+	if ir == nil || source == nil {
+		return nil, fmt.Errorf("managed ABI method target requires an exact ProgramIR and source")
+	}
+	target := ir.managedMethodTargets[source]
+	if target == nil {
+		return nil, fmt.Errorf("managed ABI method target %q is absent from ProgramIR", source.Name())
+	}
+	return target, nil
+}
+
 func coroManagedInterfaceMethodKey(
 	method *types.Func,
 	signature *types.Signature,
@@ -215,29 +239,24 @@ func coroManagedInterfaceMethodKey(
 	return method.Id() + "\x00" + structuralEmissionABITypeKey(callable)
 }
 
-func coroManagedInterfaceInvokeMethodKey(
-	universe *EmissionUniverse, owner *ssa.Function, call ssa.CallInstruction,
+func (ir *coroProgramIR) coroManagedInterfaceInvokeMethodKey(
+	owner *ssa.Function, call ssa.CallInstruction,
 ) (string, error) {
-	if owner == nil || call == nil || call.Common() == nil {
+	if owner == nil || call == nil || call.Parent() != owner || call.Common() == nil {
 		return "", fmt.Errorf("managed interface descriptor requires an exact owner and call")
 	}
 	common := call.Common()
 	if common.StaticCallee() != nil || !common.IsInvoke() || common.Method == nil {
 		return "", fmt.Errorf("managed interface descriptor requires an interface invoke")
 	}
-	signature, err := coroInterfaceDispatchEffectiveCallableSignature(universe, owner, common.Signature())
+	frozen, present, err := ir.callSitePlan(call)
 	if err != nil {
 		return "", err
 	}
-	var typeKeys *emissionTypeKeyCache
-	if universe != nil {
-		typeKeys = &universe.emissionTypeKeys
-	}
-	key := coroManagedInterfaceMethodKey(common.Method, signature, typeKeys.strictABI)
-	if key == "" {
+	if !present || frozen.interfaceMethodKey == "" {
 		return "", fmt.Errorf("managed interface descriptor has no exact method/signature key")
 	}
-	return key, nil
+	return frozen.interfaceMethodKey, nil
 }
 
 func analyzeCoroManagedInterfaceDispatchPlan(
@@ -252,8 +271,8 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	if plan == nil {
 		return nil, fmt.Errorf("managed interface descriptor requires a compilation plan")
 	}
-	if universe == nil {
-		return nil, fmt.Errorf("managed interface descriptor requires a prepared emission universe")
+	if universe == nil || universe.coroProgramIR == nil {
+		return nil, fmt.Errorf("managed interface descriptor requires a prepared ProgramIR")
 	}
 
 	// Method.Tfn_ is always a first-class Go function value. ABI type lowering
@@ -266,13 +285,21 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 		if owner.Function == nil || owner.Plan.Emission == coro.EmitNone {
 			continue
 		}
-		references, err := universe.CoroPlanningMetadata().ManagedValueReferences(owner.Function)
-		if err != nil {
-			return nil, err
+		references, present := universe.coroProgramIR.managedValueReferences[owner.Function]
+		if !present {
+			return nil, fmt.Errorf("managed method publication owner %q is absent from ProgramIR", owner.Function.Name())
 		}
 		for _, target := range references {
 			if target.Signature == nil || target.Signature.Recv() == nil {
 				continue
+			}
+			source := target
+			target, err := universe.coroProgramIR.resolveCoroManagedABIMethodTarget(source)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"resolve managed method value target %q from %q: %w",
+					source.Name(), owner.Function.Name(), err,
+				)
 			}
 			targetPlan, found := plan.FunctionPlan(target)
 			if !found || targetPlan.ID == "" || targetPlan.Demand == coro.NoDemand ||
@@ -312,7 +339,7 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 				if !found || call.Common() == nil || !call.Common().IsInvoke() || callPlan.Rep != coro.Dispatch {
 					continue
 				}
-				key, err := coroManagedInterfaceInvokeMethodKey(universe, owner.Function, call)
+				key, err := universe.coroProgramIR.coroManagedInterfaceInvokeMethodKey(owner.Function, call)
 				if err != nil {
 					return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction, err.Error())
 				}
@@ -342,7 +369,7 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 					continue
 				}
 				common := call.Common()
-				key, err := coroManagedInterfaceInvokeMethodKey(universe, owner.Function, call)
+				key, err := universe.coroProgramIR.coroManagedInterfaceInvokeMethodKey(owner.Function, call)
 				if err != nil {
 					return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction, err.Error())
 				}
@@ -455,7 +482,7 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 				if !ok || plan.ElidesCall(call) || call.Common() == nil || !call.Common().IsInvoke() {
 					continue
 				}
-				key, err := coroManagedInterfaceInvokeMethodKey(universe, owner.Function, call)
+				key, err := universe.coroProgramIR.coroManagedInterfaceInvokeMethodKey(owner.Function, call)
 				if err != nil {
 					return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction, err.Error())
 				}
@@ -533,7 +560,7 @@ func validateCoroManagedInterfaceDispatchCall(
 	fail := func(format string, args ...any) error {
 		return coroPlainDispatchInstructionError(owner, call, "managed interface descriptor: "+fmt.Sprintf(format, args...))
 	}
-	if plan == nil || owner == nil || call == nil || call.Parent() != owner || call.Common() == nil {
+	if plan == nil || universe == nil || universe.coroProgramIR == nil || owner == nil || call == nil || call.Parent() != owner || call.Common() == nil {
 		return fail("requires one exact call carrier in the compilation plan")
 	}
 	kind := coro.CallDirect
@@ -573,7 +600,7 @@ func validateCoroManagedInterfaceDispatchCall(
 	if err := validateCoroManagedDispatchSignatureShape(signature); err != nil {
 		return fail("signature: %v", err)
 	}
-	if _, err := coroManagedInterfaceInvokeMethodKey(universe, owner, call); err != nil {
+	if _, err := universe.coroProgramIR.coroManagedInterfaceInvokeMethodKey(owner, call); err != nil {
 		return fail("signature: %v", err)
 	}
 	return nil
@@ -634,9 +661,6 @@ func (p *context) compileCoroManagedInterfaceAwait(
 		p.hasOutcomePlainPhysicalBody() && !instructionPlan.structuredOutcomeOnly {
 		panic("managed interface await escaped its frozen physical control recipe")
 	}
-	method, args := p.compileCoroManagedInterfaceOperands(
-		b, call, instructionPlan.rawInterfaceReceiver,
-	)
 	plan := p.compilation.immutablePlan()
 	if plan == nil {
 		panic("managed interface await has no immutable compilation plan")
@@ -645,6 +669,9 @@ func (p *context) compileCoroManagedInterfaceAwait(
 	if !found || callPlan.Rep != coro.Dispatch {
 		panic("managed interface await lost its frozen Dispatch CallPlan")
 	}
+	method, args := p.compileCoroManagedInterfaceOperands(
+		b, call, instructionPlan.rawInterfaceReceiver,
+	)
 	if instructionPlan.recoverAlias {
 		p.observeCoroPhysicalRecoverAlias(call)
 	}
@@ -785,6 +812,11 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 ) (llssa.Expr, error) {
 	if p == nil || p.compilation == nil || p.immutablePlan() == nil || target == nil {
 		return llssa.Nil, fmt.Errorf("managed interface descriptor requires an exact target and compilation plan")
+	}
+	var err error
+	target, err = p.immutableEmissionUniverse().coroProgramIR.resolveCoroManagedABIMethodTarget(target)
+	if err != nil {
+		return llssa.Nil, fmt.Errorf("managed interface descriptor: resolve managed target: %w", err)
 	}
 	entry := p.mustFunctionSymbol(target)
 	logicalSignature := coroInterfaceDispatchCanonicalSignature(coroInterfaceDispatchCallableSignature(interfaceEntrySignature))

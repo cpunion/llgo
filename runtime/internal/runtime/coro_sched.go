@@ -65,6 +65,7 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 	result := coroRunResultV1{}
 	held := false
 	for result.used < budget {
+		coroObserveGCV1()
 		if !held {
 			var wait, permitOK bool
 			held, wait, permitOK = coroPrepareManagedExecutionV1(driver)
@@ -180,9 +181,23 @@ func coroFinishRunSliceCompatibility(
 		result.action = coro.Action{}
 		return result
 	case coroRunMainDoneV1:
-		if !coro.EnterExecutorRunCompatibility(driver) {
+		if coro.EnterExecutorRunCompatibility(driver) {
+			return result
+		}
+		// Completing the command root does not complete an owner-local source
+		// cursor or a concurrently published channel completion. Keep the
+		// stable close path above; otherwise only a normal-main return may
+		// re-enter the bounded runner with its sticky child-cancellation gate.
+		// That runner retains the source transaction instead of discarding it.
+		if coroProgramLifecycleV1State != coroProgramMainReturnRequestedV1 ||
+			main == nil || result.g != main || result.action != (coro.Action{}) {
 			return coroRunResultV1{}
 		}
+		if _, valid := coro.BeginExecutorRunSlice(driver); !valid {
+			return coroRunResultV1{}
+		}
+		result.stop = coroRunAgainV1
+		result.g = nil
 		return result
 	case coroRunIdleV1:
 		entered, compatibilityOK := coro.EnterExecutorRunStandbyCompatibility(driver)
@@ -201,7 +216,10 @@ func coroFinishRunSliceCompatibility(
 			result.stop = coroRunAgainV1
 			return result
 		}
-		if coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 && !coro.HasWaiting(p) {
+		if coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 {
+			// Remaining parked children need the command shutdown drain to
+			// publish cancellation. Waiting for their ordinary events here would
+			// put a returned command to sleep instead of initiating that drain.
 			result.stop = coroRunMainDoneV1
 			result.g = main
 			return result

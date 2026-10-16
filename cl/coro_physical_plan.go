@@ -195,8 +195,10 @@ const (
 	coroPhysicalOperationWorkerForeign
 	coroPhysicalOperationSameMForeign
 	coroPhysicalOperationSameMPython
-	coroPhysicalOperationWorkerCgo
-	coroPhysicalOperationWorkerCgoErrno
+	coroPhysicalOperationGeneratedCgoWorker
+	coroPhysicalOperationGeneratedCgoSameM
+	coroPhysicalOperationGeneratedCgoErrnoWorker
+	coroPhysicalOperationGeneratedCgoErrnoSameM
 	coroPhysicalOperationHostCall
 	coroPhysicalOperationControl
 	// NativeSyscall executes the compiler-certified word call synchronously on
@@ -227,10 +229,14 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "same-m-foreign"
 	case coroPhysicalOperationSameMPython:
 		return "same-m-python"
-	case coroPhysicalOperationWorkerCgo:
-		return "worker-cgo"
-	case coroPhysicalOperationWorkerCgoErrno:
-		return "worker-cgo-errno"
+	case coroPhysicalOperationGeneratedCgoWorker:
+		return "generated-cgo-worker"
+	case coroPhysicalOperationGeneratedCgoSameM:
+		return "generated-cgo-same-m"
+	case coroPhysicalOperationGeneratedCgoErrnoWorker:
+		return "generated-cgo-errno-worker"
+	case coroPhysicalOperationGeneratedCgoErrnoSameM:
+		return "generated-cgo-errno-same-m"
 	case coroPhysicalOperationHostCall:
 		return "host-operation"
 	case coroPhysicalOperationControl:
@@ -239,6 +245,27 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "native-syscall"
 	default:
 		return fmt.Sprintf("physical-operation-recipe(%d)", uint8(recipe))
+	}
+}
+
+func coroGeneratedCgoOperationMatches(
+	recipe coroPhysicalOperationRecipe,
+	mode coroForeignCallMode,
+	errno bool,
+) bool {
+	switch mode {
+	case coroForeignCallModeWorker:
+		if errno {
+			return recipe == coroPhysicalOperationGeneratedCgoErrnoWorker
+		}
+		return recipe == coroPhysicalOperationGeneratedCgoWorker
+	case coroForeignCallModeSameM:
+		if errno {
+			return recipe == coroPhysicalOperationGeneratedCgoErrnoSameM
+		}
+		return recipe == coroPhysicalOperationGeneratedCgoSameM
+	default:
+		return false
 	}
 }
 
@@ -333,26 +360,31 @@ type coroPhysicalInstructionPlan struct {
 	// occurrence whose complete target family publishes the coroutine ABI. The
 	// emitter still performs the ordinary child transaction, but loads only the
 	// structured entry and emits no impossible plain/outcome successors.
-	structuredCoroutineOnly bool
-	operation               coroPhysicalOperationRecipe
-	operationFailure        string
-	operationWorker         *coroWorkerForeignCallShape
-	operationPythonTarget   *ssa.Function
-	operationPythonOpcode   int
-	operationCgo            *coroWorkerCgoCallShape
-	operationCgoErrno       *coroWorkerCgoErrnoCallShape
-	operationHost           coroHostOperationCallShape
-	operationControl        CoroControlOperation
-	outcome                 coroPhysicalOutcomeRecipe
-	outcomeFailure          string
-	returnCleanup           bool
-	elideValue              bool
-	reuseValueAddress       bool
-	valueOperand            ssa.Value
-	container               coroPhysicalContainerKind
-	bound                   int64
-	nilGuard                bool
-	boundsGuard             bool
+	structuredCoroutineOnly    bool
+	operation                  coroPhysicalOperationRecipe
+	operationFailure           string
+	operationWorker            *coroWorkerForeignCallShape
+	operationPythonTarget      *ssa.Function
+	operationPythonOpcode      int
+	operationGeneratedCgo      *coroGeneratedCgoCallShape
+	operationGeneratedCgoErrno *coroGeneratedCgoErrnoCallShape
+	operationHost              coroHostOperationCallShape
+	operationControl           CoroControlOperation
+	outcome                    coroPhysicalOutcomeRecipe
+	outcomeFailure             string
+	returnCleanup              bool
+	elideValue                 bool
+	reuseValueAddress          bool
+	// Allocation motion is confined to one frozen safepoint interval. The
+	// original instruction retains its poll/cost observation; the exact Store
+	// materializes the still-unpublished heap object through its original site.
+	deferHeapAllocation       bool
+	materializeHeapAllocation *ssa.Alloc
+	valueOperand              ssa.Value
+	container                 coroPhysicalContainerKind
+	bound                     int64
+	nilGuard                  bool
+	boundsGuard               bool
 	// nativeFaultBoundary records one reachable physical memory operation
 	// whose exact low absolute address is deliberately left to the native
 	// fault signal path. It is metadata only: the closed-program capability
@@ -615,14 +647,26 @@ func (plan *coroPhysicalFunctionPlan) validateCaptureSnapshots() error {
 // coroPhysicalTailForwardArgument is one frozen source-to-target parameter
 // recipe for a coroutine ramp that can be represented by another ramp. Exactly
 // one arm is selected: sourceParameter indexes the forwarding function's
-// physical source parameters and may carry one proven representation-identical
-// retag, while constant retains one immutable SSA literal and its exact target
-// parameter type.
+// physical source parameters and may carry one pure value-field projection
+// followed by one proven representation-identical retag, while constant
+// retains one immutable SSA literal and its exact target parameter type.
 type coroPhysicalTailForwardArgument struct {
 	sourceParameter   int
 	constant          *ssa.Const
 	targetType        types.Type
+	fieldPath         []int
 	retagTransportKey string
+}
+
+func coroPhysicalTailForwardProjectedType(source types.Type, fields []int) (types.Type, bool) {
+	for _, field := range fields {
+		structure, ok := types.Unalias(source).Underlying().(*types.Struct)
+		if !ok || field < 0 || field >= structure.NumFields() {
+			return nil, false
+		}
+		source = structure.Field(field).Type()
+	}
+	return source, source != nil
 }
 
 // coroPhysicalTailForwardPlan proves that a source function contributes no
@@ -659,7 +703,8 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 	if !targetPlanned || targetPlan.ID != plan.targetID ||
 		targetPlan.Emission != coro.EmitCoroutine ||
 		targetPlan.ManagedEntry != coro.ManagedEntryCoroutine ||
-		targetPlan.Primary != coro.PrimaryCoroutine || targetPlan.FuncRep != coro.DirectCoro {
+		targetPlan.Primary != coro.PrimaryCoroutine ||
+		(targetPlan.FuncRep != coro.DirectCoro && targetPlan.FuncRep != coro.Dispatch) {
 		return fmt.Errorf("tail-forward target is not the frozen direct coroutine primary %q", plan.targetID)
 	}
 	sourceSig := coroPhysicalNormalizeSourceSignature(function.Signature)
@@ -681,7 +726,12 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 			if argument.sourceParameter >= sourceSig.Params().Len() {
 				return fmt.Errorf("tail-forward argument %d has an incompatible source parameter", index)
 			}
-			sourceType := sourceSig.Params().At(argument.sourceParameter).Type()
+			sourceType, projected := coroPhysicalTailForwardProjectedType(
+				sourceSig.Params().At(argument.sourceParameter).Type(), argument.fieldPath,
+			)
+			if !projected {
+				return fmt.Errorf("tail-forward argument %d has an invalid value-field projection", index)
+			}
 			identical := types.Identical(sourceType, argument.targetType)
 			if identical && argument.retagTransportKey != "" {
 				return fmt.Errorf("tail-forward argument %d has a redundant source parameter retag", index)
@@ -694,6 +744,9 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 		if argument.retagTransportKey != "" {
 			return fmt.Errorf("tail-forward argument %d retags a constant", index)
 		}
+		if len(argument.fieldPath) != 0 {
+			return fmt.Errorf("tail-forward argument %d projects a constant", index)
+		}
 		if argument.constant.Type() == nil ||
 			(!types.AssignableTo(argument.constant.Type(), argument.targetType) &&
 				!types.Identical(types.Default(argument.constant.Type()), argument.targetType)) {
@@ -701,6 +754,140 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 		}
 	}
 	return nil
+}
+
+// coroPhysicalTailForwardValueProjection collapses the one compiler-created
+// receiver spill used by x/tools/ssa's promoted value-method wrappers. The
+// result is deliberately a value-only field path: an address rooted in a
+// source pointer can fault, while an address of the eliminated spill cannot be
+// handed to a child coroutine because that storage would outlive this ramp.
+// Keeping those two cases outside the language makes the recipe safe both in
+// the public frame-free ramp and when a static caller flattens it completely.
+func coroPhysicalTailForwardValueProjection(
+	physical *coroPhysicalFunctionPlan,
+	function *ssa.Function,
+	value ssa.Value,
+) (parameter *ssa.Parameter, fields []int, consumed map[ssa.Instruction]none, ok bool) {
+	if physical == nil || physical.function != function || function == nil || len(function.Blocks) != 1 ||
+		len(function.Locals) != 1 || function.Locals[0] == nil {
+		return nil, nil, nil, false
+	}
+	spill := function.Locals[0]
+	if spill.Heap {
+		return nil, nil, nil, false
+	}
+	var store *ssa.Store
+	for _, instruction := range function.Blocks[0].Instrs {
+		candidate, isStore := instruction.(*ssa.Store)
+		if !isStore || candidate.Addr != spill {
+			continue
+		}
+		if store != nil {
+			return nil, nil, nil, false
+		}
+		store = candidate
+	}
+	if store == nil {
+		return nil, nil, nil, false
+	}
+	root, rootIsParameter := store.Val.(*ssa.Parameter)
+	if !rootIsParameter || root == nil || root.Parent() != function {
+		return nil, nil, nil, false
+	}
+
+	consumed = make(map[ssa.Instruction]none)
+	var valueProjection func(ssa.Value) (*ssa.Parameter, []int, bool)
+	var addressProjection func(ssa.Value) (*ssa.Parameter, []int, bool)
+	appendField := func(sourceType types.Type, path []int, field int) ([]int, bool) {
+		candidate := append(append([]int(nil), path...), field)
+		if _, exact := coroPhysicalTailForwardProjectedType(sourceType, candidate); !exact {
+			return nil, false
+		}
+		return candidate, true
+	}
+	addressProjection = func(address ssa.Value) (*ssa.Parameter, []int, bool) {
+		switch address := address.(type) {
+		case *ssa.Alloc:
+			if address != spill {
+				return nil, nil, false
+			}
+			consumed[spill] = none{}
+			consumed[store] = none{}
+			return root, nil, true
+		case *ssa.FieldAddr:
+			base, path, exact := addressProjection(address.X)
+			if !exact {
+				return nil, nil, false
+			}
+			path, exact = appendField(base.Type(), path, address.Field)
+			if !exact {
+				return nil, nil, false
+			}
+			consumed[address] = none{}
+			return base, path, true
+		default:
+			// In particular, never turn &pointer.Field into a ramp-time
+			// projection: it owns a Go nil edge that needs a coroutine outcome.
+			return nil, nil, false
+		}
+	}
+	valueProjection = func(candidate ssa.Value) (*ssa.Parameter, []int, bool) {
+		switch candidate := candidate.(type) {
+		case *ssa.Parameter:
+			if candidate.Parent() != function {
+				return nil, nil, false
+			}
+			return candidate, nil, true
+		case *ssa.UnOp:
+			if candidate.Op != token.MUL {
+				return nil, nil, false
+			}
+			base, path, exact := addressProjection(candidate.X)
+			if !exact {
+				return nil, nil, false
+			}
+			consumed[candidate] = none{}
+			return base, path, true
+		case *ssa.Field:
+			base, path, exact := valueProjection(candidate.X)
+			if !exact {
+				return nil, nil, false
+			}
+			path, exact = appendField(base.Type(), path, candidate.Field)
+			if !exact {
+				return nil, nil, false
+			}
+			consumed[candidate] = none{}
+			return base, path, true
+		default:
+			return nil, nil, false
+		}
+	}
+	parameter, fields, ok = valueProjection(value)
+	if !ok {
+		return nil, nil, nil, false
+	}
+	for instruction := range consumed {
+		instructionPlan, frozen := physical.instructions[instruction]
+		if !frozen || !instructionPlan.semantic.evaluated || instructionPlan.mayFault() ||
+			instructionPlan.control != coroPhysicalControlNone ||
+			instructionPlan.operation != coroPhysicalOperationNone ||
+			instructionPlan.outcome != coroPhysicalOutcomeNone || instructionPlan.elideValue {
+			return nil, nil, nil, false
+		}
+		switch instruction.(type) {
+		case *ssa.Alloc:
+			if instructionPlan.recipe != coroPhysicalInstructionOrdinary &&
+				instructionPlan.recipe != coroPhysicalInstructionFrameAllocation {
+				return nil, nil, nil, false
+			}
+		default:
+			if instructionPlan.recipe != coroPhysicalInstructionOrdinary {
+				return nil, nil, nil, false
+			}
+		}
+	}
+	return parameter, fields, consumed, true
 }
 
 // planCoroPhysicalExactInterfaceMakeElision derives interface-box removal from
@@ -882,6 +1069,12 @@ func prepareCoroPhysicalFunctionPlan(
 			}
 		}
 	}
+	if logical.Emission == coro.EmitCoroutine && !logical.AtomicCostProof.ProvesOutcomePlain() {
+		plan.freezeUnpublishedPointerAllocations()
+	}
+	if err := plan.validateAllocationPlacements(); err != nil {
+		return nil, fmt.Errorf("heap allocation placement: %w", err)
+	}
 	if logical.AtomicCostProof.ProvesOutcomePlain() {
 		if audit.universe == nil || audit.universe.coroProgramIR == nil {
 			return nil, fmt.Errorf("atomic-cost physical proof requires one frozen ProgramIR")
@@ -927,6 +1120,131 @@ func prepareCoroPhysicalFunctionPlan(
 		return nil, fmt.Errorf("immutable capture snapshots: %w", err)
 	}
 	return plan, nil
+}
+
+// freezeUnpublishedPointerAllocations avoids spilling an unobserved capture
+// cell's address across an await before its first initialization. It is a
+// scheduling projection of existing instruction plans, not another liveness
+// analysis: paths reaching initialization retain the allocation count, heap
+// identity and original helper. Cancellation before initialization may omit
+// this still-unpublished allocation.
+//
+// The preemption plan counts source instructions without resetting at calls.
+// Moving one instruction within the SAME frozen poll interval preserves that
+// interval's total cost. Crossing even the destination's poll is forbidden.
+// A frozen needsPreempt=false body has no instruction polls; its acyclic
+// block's total cost likewise remains unchanged. A missing plan when polls
+// ARE required is never accepted. Critical and outcome-plain functions retain
+// their original ordering/proofs.
+func (plan *coroPhysicalFunctionPlan) freezeUnpublishedPointerAllocations() {
+	if plan.function == nil || plan.function.Recover != nil || plan.critical != nil ||
+		plan.needsPreempt != (plan.preempt != nil) || plan.staticOutcome ||
+		plan.atomicCostProof != coro.AtomicCostUnproven || plan.atomicCertificate != "" {
+		return
+	}
+	cyclic := cyclicBlocks(plan.function.Blocks)
+	var operands instructionOperandScratch
+	for _, block := range plan.function.Blocks {
+		if !plan.reachableBlocks[block] || cyclic[block] {
+			continue
+		}
+		for index, instruction := range block.Instrs {
+			allocation, ok := instruction.(*ssa.Alloc)
+			if !ok || !allocation.Heap {
+				continue
+			}
+			site, frozen := plan.instructions[allocation]
+			if !frozen || !site.semantic.evaluated || site.recipe != coroPhysicalInstructionOrdinary || site.elideValue {
+				continue
+			}
+			pointer, ok := types.Unalias(allocation.Type()).Underlying().(*types.Pointer)
+			if !ok {
+				continue
+			}
+			if _, pointerCell := types.Unalias(pointer.Elem()).Underlying().(*types.Pointer); !pointerCell {
+				continue
+			}
+			awaited := false
+			for _, next := range block.Instrs[index+1:] {
+				if _, debug := next.(*ssa.DebugRef); debug {
+					continue
+				}
+				other, frozen := plan.instructions[next]
+				if !frozen || !other.semantic.evaluated || other.elideValue ||
+					plan.preempt.pollsBefore(next) || other.mayFault() ||
+					other.operation != coroPhysicalOperationNone || other.outcome != coroPhysicalOutcomeNone {
+					break
+				}
+				if operands.uses(next, allocation) {
+					store, initializes := next.(*ssa.Store)
+					if awaited && initializes && store.Addr == allocation && store.Val != allocation &&
+						other.materializeHeapAllocation == nil {
+						site.deferHeapAllocation = true
+						other.materializeHeapAllocation = allocation
+						plan.instructions[allocation] = site
+						plan.instructions[store] = other
+					}
+					break
+				}
+				switch next := next.(type) {
+				case *ssa.Call:
+					// Only a closed source-Go await may be crossed. Opaque,
+					// foreign, dynamic and critical marker calls are barriers.
+					target := next.Common().StaticCallee()
+					if other.control != coroPhysicalControlDirectAwait || target == nil ||
+						target != other.controlTarget || other.controlTargetID == "" || len(target.Blocks) == 0 {
+						goto nextAllocation
+					}
+					awaited = true
+				case *ssa.Alloc, *ssa.Extract, *ssa.ChangeType:
+					if other.control != coroPhysicalControlNone {
+						goto nextAllocation
+					}
+				case *ssa.Store:
+					// A preceding tuple field may initialize a different fresh
+					// cell. Its source Store stays in place and cannot fault.
+					if _, fresh := next.Addr.(*ssa.Alloc); !fresh || other.control != coroPhysicalControlNone {
+						goto nextAllocation
+					}
+				default:
+					goto nextAllocation
+				}
+			}
+		nextAllocation:
+		}
+	}
+}
+
+func (plan *coroPhysicalFunctionPlan) validateAllocationPlacements() error {
+	paired := make(map[*ssa.Alloc]*ssa.Store)
+	for instruction, site := range plan.instructions {
+		allocation := site.materializeHeapAllocation
+		if allocation == nil {
+			continue
+		}
+		store, ok := instruction.(*ssa.Store)
+		original, frozen := plan.instructions[allocation]
+		if !ok || site.deferHeapAllocation || store.Addr != allocation || store.Val == allocation ||
+			!frozen || !original.deferHeapAllocation || !allocation.Heap ||
+			allocation.Parent() != plan.function || store.Parent() != plan.function ||
+			allocation.Block() != store.Block() || !instructionPrecedes(allocation, store) {
+			return fmt.Errorf("materialization is not paired with its exact source allocation")
+		}
+		if paired[allocation] != nil {
+			return fmt.Errorf("source allocation has multiple materialization sites")
+		}
+		paired[allocation] = store
+	}
+	for instruction, site := range plan.instructions {
+		if !site.deferHeapAllocation {
+			continue
+		}
+		allocation, ok := instruction.(*ssa.Alloc)
+		if !ok || paired[allocation] == nil {
+			return fmt.Errorf("deferred source allocation has no exact materialization site")
+		}
+	}
+	return nil
 }
 
 // planCoroPhysicalTailForward recognizes the deliberately small forwarding
@@ -1006,11 +1324,32 @@ scanAdapters:
 		adapterParameters[instructions[callIndex].(ssa.Value)] = parameter
 		callIndex++
 	}
-	if callIndex >= len(instructions) {
-		return nil, nil
+	var call *ssa.Call
+	if callIndex < len(instructions) {
+		call, _ = instructions[callIndex].(*ssa.Call)
 	}
-	call, ok := instructions[callIndex].(*ssa.Call)
-	if !ok || call.Common() == nil || call.Common().IsInvoke() ||
+	methodValueProjection := false
+	if call == nil {
+		if validateCoroExactMethodWrapper(function) != nil {
+			return nil, nil
+		}
+		for index, instruction := range instructions {
+			candidate, isCall := instruction.(*ssa.Call)
+			if !isCall || candidate.Common() == nil || candidate.Common().StaticCallee() == nil {
+				continue
+			}
+			if call != nil {
+				return nil, nil
+			}
+			call, callIndex = candidate, index
+		}
+		if call == nil {
+			return nil, nil
+		}
+		methodValueProjection = true
+		adapterParameters = nil
+	}
+	if call == nil || call.Common() == nil || call.Common().IsInvoke() ||
 		call.Common().Method != nil || call.Common().StaticCallee() == nil {
 		return nil, nil
 	}
@@ -1067,7 +1406,8 @@ scanAdapters:
 		!targetPlanned || targetPlan.ID != callPhysical.controlTargetID ||
 		callPlan.Targets[0] != targetPlan.ID || targetPlan.Emission != coro.EmitCoroutine ||
 		targetPlan.ManagedEntry != coro.ManagedEntryCoroutine ||
-		targetPlan.Primary != coro.PrimaryCoroutine || targetPlan.FuncRep != coro.DirectCoro {
+		targetPlan.Primary != coro.PrimaryCoroutine ||
+		(targetPlan.FuncRep != coro.DirectCoro && targetPlan.FuncRep != coro.Dispatch) {
 		return nil, nil
 	}
 
@@ -1084,18 +1424,36 @@ scanAdapters:
 	}
 	arguments := make([]coroPhysicalTailForwardArgument, len(call.Common().Args))
 	usedAdapters := make(map[ssa.Value]none, len(adapterParameters))
+	usedProjectionInstructions := make(map[ssa.Instruction]none)
 	for index, value := range call.Common().Args {
 		targetType := targetSig.Params().At(index).Type()
 		parameter, directParameter := value.(*ssa.Parameter)
-		if !directParameter {
+		var fieldPath []int
+		if methodValueProjection {
+			var consumed map[ssa.Instruction]none
+			var projected bool
+			parameter, fieldPath, consumed, projected = coroPhysicalTailForwardValueProjection(
+				physical, function, value,
+			)
+			if projected {
+				for instruction := range consumed {
+					usedProjectionInstructions[instruction] = none{}
+				}
+				directParameter = len(fieldPath) == 0 && value == parameter
+			}
+		} else if !directParameter {
 			parameter = adapterParameters[value]
 		}
 		if parameter != nil {
 			sourceIndex, owned := parameterIndex[parameter]
-			retag := !types.Identical(parameter.Type(), targetType)
+			projectedType, projected := coroPhysicalTailForwardProjectedType(parameter.Type(), fieldPath)
+			if !projected {
+				return nil, nil
+			}
+			retag := !types.Identical(projectedType, targetType)
 			retagTransportKey := ""
 			if retag {
-				sourceKey := coroPhysicalTransportTypeKey(universe, parameter.Type())
+				sourceKey := coroPhysicalTransportTypeKey(universe, projectedType)
 				targetKey := coroPhysicalTransportTypeKey(universe, targetType)
 				if sourceKey != targetKey {
 					return nil, nil
@@ -1103,16 +1461,17 @@ scanAdapters:
 				retagTransportKey = sourceKey
 			}
 			if !owned || value.Type() == nil || !types.Identical(value.Type(), targetType) ||
-				(directParameter && retag) || (!directParameter && !retag) ||
+				(!methodValueProjection && ((directParameter && retag) || (!directParameter && !retag))) ||
 				(retag && retagTransportKey == "") {
 				return nil, nil
 			}
-			if !directParameter {
+			if !methodValueProjection && !directParameter {
 				usedAdapters[value] = none{}
 			}
 			arguments[index] = coroPhysicalTailForwardArgument{
 				sourceParameter:   sourceIndex,
 				targetType:        targetType,
+				fieldPath:         append([]int(nil), fieldPath...),
 				retagTransportKey: retagTransportKey,
 			}
 			continue
@@ -1129,7 +1488,13 @@ scanAdapters:
 			targetType:      targetType,
 		}
 	}
-	if len(usedAdapters) != len(adapterParameters) {
+	if methodValueProjection {
+		for index := 0; index < callIndex; index++ {
+			if _, consumed := usedProjectionInstructions[instructions[index]]; !consumed {
+				return nil, nil
+			}
+		}
+	} else if len(usedAdapters) != len(adapterParameters) {
 		return nil, nil
 	}
 
@@ -1312,8 +1677,8 @@ func (ir *coroProgramIR) programCapabilitySeeds() (map[*ssa.Function]coro.Progra
 			switch plan.operation {
 			case coroPhysicalOperationWorkerSyscall,
 				coroPhysicalOperationWorkerForeign,
-				coroPhysicalOperationWorkerCgo,
-				coroPhysicalOperationWorkerCgoErrno:
+				coroPhysicalOperationGeneratedCgoWorker,
+				coroPhysicalOperationGeneratedCgoErrnoWorker:
 				seeds[key.function] |= coro.NewProgramCapabilities(true, false)
 			}
 			if plan.nativeFaultBoundary {
@@ -1326,7 +1691,7 @@ func (ir *coroProgramIR) programCapabilitySeeds() (map[*ssa.Function]coro.Progra
 			}
 			if !function.cleanup.external {
 				for _, member := range coroExplicitCleanupFamily(function.function)[1:] {
-					cleanupReachable[member] = coroPhysicalConstantReachableBlocks(member)
+					cleanupReachable[member] = ir.reachableBlocks[member]
 				}
 			}
 			for index, site := range function.cleanup.sites {
@@ -1338,11 +1703,17 @@ func (ir *coroProgramIR) programCapabilitySeeds() (map[*ssa.Function]coro.Progra
 					)
 				}
 				switch site.kind {
-				case coroStaticCleanupCgoWorker:
-					if site.cgoWorker == nil {
-						return nil, fmt.Errorf("coroutine program capabilities found a cgo worker cleanup without its typed shape")
+				case coroStaticCleanupGeneratedCgo:
+					if site.generatedCgo == nil {
+						return nil, fmt.Errorf("coroutine program capabilities found a generated-cgo cleanup without its typed shape")
 					}
-					seeds[key.function] |= coro.NewProgramCapabilities(true, false)
+					switch site.generatedCgo.mode {
+					case coroForeignCallModeWorker:
+						seeds[key.function] |= coro.NewProgramCapabilities(true, false)
+					case coroForeignCallModeSameM:
+					default:
+						return nil, fmt.Errorf("coroutine program capabilities found a cgo cleanup with an unknown execution class")
+					}
 				case coroStaticCleanupForeignWorker:
 					if site.foreignWorker == nil || site.foreignWorker.mode != coroForeignCallModeWorker {
 						return nil, fmt.Errorf("coroutine program capabilities found a foreign worker cleanup without its bounded-worker shape")
@@ -1562,7 +1933,7 @@ func planCoroPhysicalInstruction(
 		result.container, result.bound = container, bound
 		result.boundsDisabled = boundsDisabled
 		result.nilGuard = container == coroPhysicalContainerArrayPointer &&
-			emissionArrayPointerNeedsNilCheck(instruction.X, instruction)
+			emissionArrayPointerNeedsNilCheck(audit.ctx, instruction.X, instruction)
 		safe, err := coroPhysicalSafeFixedArrayIndex(audit, whole, instruction, instruction.X, instruction.Index)
 		if err != nil {
 			return result, err
@@ -1583,7 +1954,7 @@ func planCoroPhysicalInstruction(
 		result.container, result.bound = container, bound
 		result.boundsDisabled = boundsDisabled
 		result.nilGuard = container == coroPhysicalContainerArrayPointer &&
-			emissionArrayPointerNeedsNilCheck(instruction.X, instruction)
+			emissionArrayPointerNeedsNilCheck(audit.ctx, instruction.X, instruction)
 		safe, err := coroPhysicalSafeFixedArrayIndex(audit, whole, instruction, instruction.X, instruction.Index)
 		if err != nil {
 			return result, err
@@ -1620,7 +1991,7 @@ func planCoroPhysicalInstruction(
 		result.container, result.bound = container, bound
 		result.boundsDisabled = boundsDisabled
 		result.nilGuard = container == coroPhysicalContainerArrayPointer &&
-			emissionArrayPointerNeedsNilCheck(instruction.X, instruction)
+			emissionArrayPointerNeedsNilCheck(audit.ctx, instruction.X, instruction)
 		result.boundsGuard = !boundsDisabled
 		if result.nilGuard && !explicitPanic {
 			return result, fmt.Errorf("unchecked Slice requires a nil guard but the physical ABI has no explicit panic outcome")
@@ -2089,10 +2460,6 @@ func planCoroPhysicalOperationInstruction(
 					result.operationFailure = "Python operation requires the native same-M foreign-episode capability"
 					return
 				}
-				if !isCoroProgramManagedEntry(audit.fn) {
-					result.operationFailure = "Python operation has no compiler-owned program-root owner realm"
-					return
-				}
 				if target := frozen.plan.PythonTarget; target != nil {
 					resolved, required := audit.universe.Resolve(instruction.Common().StaticCallee())
 					if !required || resolved != target {
@@ -2115,43 +2482,67 @@ func planCoroPhysicalOperationInstruction(
 				result.operation = coroPhysicalOperationSameMPython
 				return
 			}
-			if found && frozen.plan.Elision == CoroCallElidedCgoWorker {
-				if !capabilities.worker {
-					result.operationFailure = "generated cgo call requires the bounded worker capability"
-					return
-				}
-				shape, recognized, err := validateCoroWorkerCgoCall(whole, audit.universe, instruction)
+			if found && frozen.plan.Elision == CoroCallElidedGeneratedCgo {
+				shape, recognized, err := validateCoroGeneratedCgoCall(whole, audit.universe, instruction)
 				if !recognized {
-					result.operationFailure = "generated cgo worker elision has no exact typed call shape"
+					result.operationFailure = "generated-cgo elision has no exact typed call shape"
 					return
 				}
 				if err != nil {
-					result.operationFailure = "invalid generated cgo worker call: " + err.Error()
+					result.operationFailure = "invalid generated-cgo call: " + err.Error()
 					return
 				}
-				result.operation = coroPhysicalOperationWorkerCgo
-				result.operationCgo = &shape
+				switch shape.mode {
+				case coroForeignCallModeWorker:
+					if !capabilities.worker {
+						result.operationFailure = "generated cgo call requires the bounded worker capability"
+						return
+					}
+					result.operation = coroPhysicalOperationGeneratedCgoWorker
+				case coroForeignCallModeSameM:
+					if !capabilities.sameMForeign {
+						result.operationFailure = "generated cgo call requires the native same-M foreign-episode capability"
+						return
+					}
+					result.operation = coroPhysicalOperationGeneratedCgoSameM
+				default:
+					result.operationFailure = "generated cgo call selected an unknown execution class"
+					return
+				}
+				result.operationGeneratedCgo = &shape
 				return
 			}
 			if found && frozen.plan.Intrinsic && frozen.opcode == llgoCgoCgocall &&
-				frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineForeignSuspend {
-				if !capabilities.worker {
-					result.operationFailure = "generated C2 call requires the bounded worker capability"
-					return
-				}
-				shape, recognized, err := validateCoroWorkerCgoErrnoCall(
+				frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineForeignTransaction {
+				shape, recognized, err := validateCoroGeneratedCgoErrnoCall(
 					whole, audit.ctx, instruction,
 				)
 				if !recognized {
-					result.operationFailure = "generated C2 worker intrinsic has no exact typed errno shape"
+					result.operationFailure = "generated C2 intrinsic has no exact typed errno shape"
 					return
 				}
 				if err != nil {
-					result.operationFailure = "invalid generated C2 worker call: " + err.Error()
+					result.operationFailure = "invalid generated C2 foreign call: " + err.Error()
 					return
 				}
-				result.operation = coroPhysicalOperationWorkerCgoErrno
-				result.operationCgoErrno = &shape
+				switch shape.mode {
+				case coroForeignCallModeWorker:
+					if !capabilities.worker {
+						result.operationFailure = "generated C2 call requires the bounded worker capability"
+						return
+					}
+					result.operation = coroPhysicalOperationGeneratedCgoErrnoWorker
+				case coroForeignCallModeSameM:
+					if !capabilities.sameMForeign {
+						result.operationFailure = "generated C2 call requires the native same-M foreign-episode capability"
+						return
+					}
+					result.operation = coroPhysicalOperationGeneratedCgoErrnoSameM
+				default:
+					result.operationFailure = "generated C2 call selected an unknown execution class"
+					return
+				}
+				result.operationGeneratedCgoErrno = &shape
 				return
 			}
 			if found && frozen.plan.Intrinsic && isLLGoSyscallIntrinsic(frozen.opcode) &&
@@ -2176,6 +2567,33 @@ func planCoroPhysicalOperationInstruction(
 		pointerSize := 0
 		if audit.universe != nil && audit.universe.prog != nil {
 			pointerSize = audit.universe.prog.PointerSize()
+		}
+		interfaceShape, interfaceRecognized, interfaceErr :=
+			validateCoroWorkerForeignInterfaceCall(audit, instruction, pointerSize)
+		if interfaceRecognized {
+			if interfaceErr != nil {
+				result.operationFailure = "invalid managed foreign interface call: " + interfaceErr.Error()
+				return
+			}
+			if !capabilities.worker {
+				result.operationFailure = "blocking foreign interface call requires the bounded worker capability"
+				return
+			}
+			if !capabilities.explicitPanic {
+				result.operationFailure = "foreign interface receiver requires the explicit-status panic ABI"
+				return
+			}
+			// Control planning runs before physical-operation planning and sees the
+			// source-level Dispatch edge. This exact specialization replaces that
+			// descriptor await with one compiler-owned typed worker transaction, so
+			// discard every field derived from the superseded control recipe. No
+			// other interface call reaches this branch: the validator has already
+			// proved a closed singleton target and its complete promoted wrapper.
+			clearCoroPhysicalControlForOperation(result)
+			result.rawInterfaceReceiver = true
+			result.operation = coroPhysicalOperationWorkerForeign
+			result.operationWorker = &interfaceShape
+			return
 		}
 		shape, recognized, err := validateCoroWorkerForeignCallWithAuthority(
 			audit.foreignCallAuthority(),
@@ -2211,6 +2629,25 @@ func planCoroPhysicalOperationInstruction(
 		}
 		result.operationWorker = &shape
 	}
+}
+
+func clearCoroPhysicalControlForOperation(result *coroPhysicalInstructionPlan) {
+	if result == nil {
+		panic("physical operation cannot clear a nil control plan")
+	}
+	result.control = coroPhysicalControlNone
+	result.controlTarget = nil
+	result.controlTargetID = ""
+	result.controlReceiver = nil
+	result.controlClosure = nil
+	result.controlInterface = nil
+	result.controlSignature = nil
+	result.controlFailure = ""
+	result.controlFailureHard = false
+	result.directOutcomeNativeResult = false
+	result.structuredOutcomeOnly = false
+	result.structuredCoroutineOnly = false
+	result.rawInterfaceReceiver = false
 }
 
 // planCoroPhysicalControlInstruction is the sole post-analysis selector for

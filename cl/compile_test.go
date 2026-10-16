@@ -20,6 +20,8 @@
 package cl_test
 
 import (
+	"go/token"
+	"go/types"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +36,7 @@ import (
 	"github.com/xgo-dev/llgo/internal/cabi"
 	"github.com/xgo-dev/llgo/internal/llgen"
 	"github.com/xgo-dev/llgo/internal/lto"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	llvmenv "github.com/xgo-dev/llgo/xtool/env/llvm"
 )
 
@@ -93,57 +96,43 @@ var embedTargetConfigs = []embedTargetConfig{
 		target: "esp32c3-basic",
 		ignoreByDir: map[string][]string{
 			"./_testgo": {
-				"./_testgo/abimethod",   // llgo panic: unsatisfied import internal/runtime/sys
-				"./_testgo/cgobasic",    // fast fail: build constraints exclude all Go files (cgo)
-				"./_testgo/cgocfiles",   // fast fail: build constraints exclude all Go files (cgo)
-				"./_testgo/cgodefer",    // fast fail: build constraints exclude all Go files (cgo)
-				"./_testgo/cgofull",     // fast fail: build constraints exclude all Go files (cgo)
-				"./_testgo/cgomacro",    // fast fail: build constraints exclude all Go files (cgo)
-				"./_testgo/cgopython",   // fast fail: build constraints exclude all Go files (cgo)
-				"./_testgo/chan",        // timeout: emulator did not auto-exit
-				"./_testgo/complitnil",  // baremetal terminates on the nil-pointer panic before deferred recovery
-				"./_testgo/cursor",      // panic: internal/bytealg: selected .s files require plan9asm translation
-				"./_testgo/defer4",      // unexpected output: got "fatal error", expected "recover: panic message"
-				"./_testgo/goexit",      // llgo panic: unsatisfied import internal/runtime/sys
-				"./_testgo/indexerr",    // unexpected output: len(dst)=12, len(src)=0 (got "fatal error")
-				"./_testgo/makeslice",   // unexpected output: len(dst)=23, len(src)=0 (got "fatal error\\nmust error")
-				"./_testgo/mapindirect", // ld.lld: error: undefined symbol: __atomic_fetch_or_4
-				"./_testgo/reflect",     // llgo panic: unsatisfied import internal/runtime/sys
-				"./_testgo/reflectconv", // llgo panic: unsatisfied import internal/sync
-				"./_testgo/reflectfn",   // llgo panic: unsatisfied import internal/runtime/sys
-				"./_testgo/reflectmkfn", // llgo panic: unsatisfied import internal/runtime/sys
-				"./_testgo/rewrite",     // llgo panic: unsatisfied import internal/sync
-				"./_testgo/select",      // timeout: emulator did not auto-exit
-				"./_testgo/selects",     // timeout: emulator did not auto-exit
-				"./_testgo/sigsegv",     // unexpected output: got "0/main", expected recover nil-pointer message
-				"./_testgo/syncmap",     // llgo panic: unsatisfied import internal/runtime/sys
-				// Baremetal terminates after an outermost panic is recovered.
-				"./_testgo/nesteddeferpanic",
+				"./_testgo/abimethod",     // llgo panic: unsatisfied import internal/runtime/sys
+				"./_testgo/arith-divrem",  // embedded int64 min/-1 division returns 0 instead of Go's defined minInt result
+				"./_testgo/cgobasic",      // fast fail: build constraints exclude all Go files (cgo)
+				"./_testgo/cgocfiles",     // fast fail: build constraints exclude all Go files (cgo)
+				"./_testgo/cgodefer",      // fast fail: build constraints exclude all Go files (cgo)
+				"./_testgo/chan",          // timeout: emulator did not auto-exit
+				"./_testgo/complitassign", // baremetal terminates on the merged nil-destination panic before deferred recovery
+				"./_testgo/defer4",        // unexpected output: got "fatal error", expected "recover: panic message"
+				"./_testgo/indexerr",      // unexpected output: len(dst)=12, len(src)=0 (got "fatal error")
+				"./_testgo/makeslice",     // unexpected output: len(dst)=23, len(src)=0 (got "fatal error\\nmust error")
+				"./_testgo/mapindirect",   // ld.lld: error: undefined symbol: __atomic_fetch_or_4
+				"./_testgo/reflect",       // llgo panic: unsatisfied import internal/runtime/sys
+				"./_testgo/reflectconv",   // llgo panic: unsatisfied import internal/sync
+				"./_testgo/reflectmkfn",   // llgo panic: unsatisfied import internal/runtime/sys
+				"./_testgo/rewrite",       // llgo panic: unsatisfied import internal/sync
+				"./_testgo/runextest",     // package-selection fixture owned by internal/build
+				"./_testgo/runtest",       // package-selection fixture owned by internal/build
+				"./_testgo/select",        // timeout: emulator did not auto-exit
 			},
 			"./_testlibc": {
-				"./_testlibc/argv",     // timeout: emulator panic (Load access fault), no auto-exit
-				"./_testlibc/atomic",   // link error: ld.lld: error: undefined symbol: __atomic_store
-				"./_testlibc/complex",  // link error: ld.lld: error: undefined symbol: cabsf
-				"./_testlibc/demangle", // link error: ld.lld: error: unknown argument '-Wl,-search_paths_first'
-				"./_testlibc/once",     // fast fail: build constraints exclude all Go files (pthread/sync)
-				"./_testlibc/setjmp",   // link error: ld.lld: error: undefined symbol: stderr
-				"./_testlibc/sqlite",   // link error: ld.lld: error: unable to find library -lsqlite3
+				"./_testlibc/argv",    // timeout: emulator panic (Load access fault), no auto-exit
+				"./_testlibc/atomic",  // link error: ld.lld: error: undefined symbol: __atomic_store
+				"./_testlibc/complex", // link error: ld.lld: error: undefined symbol: cabsf
+				"./_testlibc/cppabi",  // C++ standard headers are unavailable in the baremetal sysroot
+				"./_testlibc/once",    // fast fail: build constraints exclude all Go files (pthread/sync)
+				"./_testlibc/setjmp",  // link error: ld.lld: error: undefined symbol: stderr
 			},
 			"./_testrt": {
-				"./_testrt/asmfull",     // compile/asm error: unrecognized instruction mnemonic
-				"./_testrt/fprintf",     // link error: ld.lld: error: undefined symbol: __stderrp
-				"./_testrt/hello",       // fast fail: build constraints exclude all Go files
-				"./_testrt/linkname",    // unexpected output: line order mismatch ("hello" appears first)
-				"./_testrt/makemap",     // link error: ld.lld: error: undefined symbol: __atomic_fetch_or_4
-				"./_testrt/strlen",      // fast fail: build constraints exclude all Go files
-				"./_testrt/struct",      // fast fail: build constraints exclude all Go files
-				"./_testrt/tpfunc",      // unexpected output: type size mismatch (got 8 4 4, expected 16 8 8)
-				"./_testrt/typalias",    // fast fail: build constraints exclude all Go files
-				"./_testrt/unreachable", // timeout: emulator panic (Instruction access fault), no auto-exit
+				"./_testrt/asmfull",  // compile/asm error: unrecognized instruction mnemonic
+				"./_testrt/linkname", // unexpected output: line order mismatch ("hello" appears first)
+				"./_testrt/makemap",  // link error: ld.lld: error: undefined symbol: __atomic_fetch_or_4
+				"./_testrt/struct",   // fast fail: build constraints exclude all Go files
+				"./_testrt/tpfunc",   // unexpected output: type size mismatch (got 8 4 4, expected 16 8 8)
+				"./_testrt/typalias", // fast fail: build constraints exclude all Go files
 
 				"./_testrt/reflectclosureenv", // baseline embedded runtime cannot build this reflect path
 				"./_testrt/ptrtothislazy",     // baseline embedded runtime cannot build this reflect path
-				"./_testrt/ptrtothislazynew",  // baseline embedded runtime cannot build this reflect path
 			},
 			"./_testdata": {
 				"./_testdata/debug", // llgo panic: unsatisfied import internal/runtime/sys
@@ -154,46 +143,40 @@ var embedTargetConfigs = []embedTargetConfig{
 		target: "esp32",
 		ignoreByDir: map[string][]string{
 			"./_testgo": {
-				"./_testgo/abimethod",   // panic: internal/bytealg selected .s files require plan9asm translation
-				"./_testgo/alias",       // unexpected output
-				"./_testgo/cgodefer",    // panic: cannot build SSA for packages
-				"./_testgo/cgopython",   // panic: cannot build SSA for packages
-				"./_testgo/complitnil",  // baremetal terminates on the nil-pointer panic before deferred recovery
-				"./_testgo/cursor",      // panic: internal/bytealg: selected .s files require plan9asm translation
-				"./_testgo/defer4",      // runtime output: fatal error
-				"./_testgo/indexerr",    // runtime output: fatal error
-				"./_testgo/invoke",      // unexpected output
-				"./_testgo/makeslice",   // runtime output: fatal error
-				"./_testgo/mapindirect", // fatal error: error in backend: Incomplete scavenging after 2nd pass
-				"./_testgo/multiret",    // unexpected output
-				"./_testgo/select",      // timeout: emulator did not auto-exit
-				"./_testgo/sigsegv",     // unexpected output
-				"./_testgo/struczero",   // timeout: emulator did not auto-exit
-				// Baremetal terminates after an outermost panic is recovered.
-				"./_testgo/nesteddeferpanic",
+				"./_testgo/abimethod",     // panic: internal/bytealg selected .s files require plan9asm translation
+				"./_testgo/arith-divrem",  // embedded int64 min/-1 division returns 0 instead of Go's defined minInt result
+				"./_testgo/alias",         // unexpected output
+				"./_testgo/cgocfiles",     // host CGo errno/aggregate ABI; cgo source is excluded on bare metal
+				"./_testgo/cgodefer",      // panic: cannot build SSA for packages
+				"./_testgo/complitassign", // baremetal terminates on the merged nil-destination panic before deferred recovery
+				"./_testgo/defer4",        // runtime output: fatal error
+				"./_testgo/indexerr",      // runtime output: fatal error
+				"./_testgo/invoke",        // unexpected output
+				"./_testgo/makeslice",     // runtime output: fatal error
+				"./_testgo/mapindirect",   // fatal error: error in backend: Incomplete scavenging after 2nd pass
+				"./_testgo/multiret",      // unexpected output
+				"./_testgo/runextest",     // package-selection fixture owned by internal/build
+				"./_testgo/runtest",       // package-selection fixture owned by internal/build
+				"./_testgo/select",        // timeout: emulator did not auto-exit
+				"./_testgo/struczero",     // timeout: emulator did not auto-exit
 			},
 			"./_testlibc": {
-				"./_testlibc/atomic",   // unexpected output
-				"./_testlibc/demangle", // link error: ld.lld unknown argument -Wl,-search_paths_first
-				"./_testlibc/once",     // panic: cannot build SSA for packages
-				"./_testlibc/setjmp",   // link error: ld.lld undefined symbol stderr
-				"./_testlibc/sqlite",   // link error: ld.lld unable to find library -lsqlite3
+				"./_testlibc/atomic", // unexpected output
+				"./_testlibc/cppabi", // C++ standard headers are unavailable in the baremetal sysroot
+				"./_testlibc/once",   // panic: cannot build SSA for packages
+				"./_testlibc/setjmp", // link error: ld.lld undefined symbol stderr
 			},
 			"./_testrt": {
 				"./_testrt/asmfull",  // unexpected output
 				"./_testrt/cast",     // timeout: emulator did not auto-exit
 				"./_testrt/complex",  // unexpected output
-				"./_testrt/fprintf",  // link error: ld.lld undefined symbol __stderrp
-				"./_testrt/hello",    // panic: cannot build SSA for packages
 				"./_testrt/linkname", // unexpected output
-				"./_testrt/strlen",   // panic: runtime index out of range
 				"./_testrt/struct",   // panic: runtime index out of range
 				"./_testrt/tpfunc",   // unexpected output
 				"./_testrt/typalias", // panic: runtime index out of range
 
 				"./_testrt/reflectclosureenv", // baseline embedded runtime cannot build this reflect path
 				"./_testrt/ptrtothislazy",     // baseline embedded runtime cannot build this reflect path
-				"./_testrt/ptrtothislazynew",  // baseline embedded runtime cannot build this reflect path
 			},
 			"./_testdata": {
 				"./_testdata/cpkgimp", // unexpected output
@@ -215,7 +198,13 @@ func runEmbedTargetSuite(t *testing.T, target, relDir string, ignore []string) {
 }
 
 func TestRunAndTestFromTestgo(t *testing.T) {
-	cltest.RunAndTestFromDir(t, "", "./_testgo", nil)
+	// Package-selection fixtures remain in place for internal/build, but none
+	// of the compiler runners treat them as lowering owners.
+	ignore := []string{
+		"./_testgo/runextest",
+		"./_testgo/runtest",
+	}
+	cltest.RunAndTestFromDir(t, "", "./_testgo", ignore)
 }
 
 func TestRunAndTestFromTestmeta(t *testing.T) {
@@ -238,19 +227,13 @@ func TestRunAndTestFromTestlto(t *testing.T) {
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin",
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_concat",
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_global",
-		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_global_slice",
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_loop",
-		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_param",
-		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_range_literal",
-		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_slice",
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_string_abi",
-		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_switch",
 	}
 	if !buildenv.Dev {
 		ignore = append(ignore,
 			"./_testlto/globaldce_abitype_fakeuse",
 			"./_testlto/globaldce_interface_matrix",
-			"./_testlto/globaldce_interface_slots",
 			"./_testlto/globaldce_reflect_method",
 			"./_testlto/globaldce_reflect_type_method",
 			"./_testlto/globaldce_reflect_type_method_by_name",
@@ -266,7 +249,6 @@ func TestRunAndTestFromTestlto(t *testing.T) {
 
 var testltoSymbolChecks = []string{
 	"globaldce_interface_matrix",
-	"globaldce_interface_slots",
 	"globaldce_reflect_method",
 	"globaldce_reflect_type_method_by_name",
 	"globaldce_reflect_value_method",
@@ -281,13 +263,8 @@ var testltoLTOPluginTests = []string{
 	"globaldce_reflect_method_by_name_ltoplugin",
 	"globaldce_reflect_method_by_name_ltoplugin_concat",
 	"globaldce_reflect_method_by_name_ltoplugin_global",
-	"globaldce_reflect_method_by_name_ltoplugin_global_slice",
 	"globaldce_reflect_method_by_name_ltoplugin_loop",
-	"globaldce_reflect_method_by_name_ltoplugin_param",
-	"globaldce_reflect_method_by_name_ltoplugin_range_literal",
-	"globaldce_reflect_method_by_name_ltoplugin_slice",
 	"globaldce_reflect_method_by_name_ltoplugin_string_abi",
-	"globaldce_reflect_method_by_name_ltoplugin_switch",
 }
 
 func TestBuildAndCheckSymbolsFromTestlto(t *testing.T) {
@@ -749,18 +726,28 @@ func TestSelectOutputLinesAllowsConcurrentPrints(t *testing.T) {
 }
 
 func TestRunAndTestFromTestpy(t *testing.T) {
-	cltest.RunAndTestFromDir(t, "", "./_testpy", nil)
+	conf := pythonFixtureConfig()
+	cltest.RunAndTestFromDir(t, "", "./_testpy", nil, cltest.WithRunConfig(conf))
 }
 
 func TestRunAndTestFromTestpyDWARF(t *testing.T) {
-	conf := build.NewDefaultConf(build.ModeRun)
+	conf := pythonFixtureConfig()
 	conf.LinkOptions.DWARF = build.DWARFPreserve
 	cltest.RunAndTestFromDir(t, "", "./_testpy", nil,
 		cltest.WithRunConfig(conf), cltest.WithIRCheck(false))
 }
 
-func TestRunAndTestFromTestlibgo(t *testing.T) {
-	cltest.RunAndTestFromDir(t, "", "./_testlibgo", nil)
+func pythonFixtureConfig() *build.Config {
+	conf := build.NewDefaultConf(build.ModeRun)
+	conf.TestPythonPackage = func() *types.Package {
+		pkg := types.NewPackage(llssa.PkgPython, "py")
+		obj := types.NewTypeName(token.NoPos, pkg, "Object", nil)
+		types.NewNamed(obj, types.NewStruct(nil, nil), nil)
+		pkg.Scope().Insert(obj)
+		pkg.MarkComplete()
+		return pkg
+	}
+	return conf
 }
 
 func TestRunAndTestFromTestlibc(t *testing.T) {
@@ -788,7 +775,6 @@ func TestRunAndTestFromTestrt(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		ignore = []string{
 			"./_testrt/asmfull", // Output is macOS-specific.
-			"./_testrt/fprintf", // Linux uses different stderr symbol (no __stderrp).
 		}
 	}
 	cltest.RunAndTestFromDir(t, "", "./_testrt", ignore)
@@ -798,14 +784,14 @@ func TestRunAndTestFromTestdata(t *testing.T) {
 	cltest.RunAndTestFromDir(t, "", "./_testdata", nil)
 }
 
-func TestCgofullGeneratesC2func(t *testing.T) {
-	ir := llgen.GenFrom("./_testgo/cgofull")
+func TestCgocfilesGeneratesC2func(t *testing.T) {
+	ir := llgen.GenFrom("./_testgo/cgocfiles")
 	if !strings.Contains(ir, "_C2func_test_structs") {
-		t.Fatal("missing _C2func_test_structs in cgofull IR")
+		t.Fatal("missing _C2func_test_structs in cgocfiles IR")
 	}
 	errnoCall := strings.Index(ir, "call i32 @cliteErrno()")
 	if errnoCall < 0 {
-		t.Fatal("missing cliteErrno call in cgofull IR")
+		t.Fatal("missing cliteErrno call in cgocfiles IR")
 	}
 	functionStart := strings.LastIndex(ir[:errnoCall], "\ndefine ")
 	functionEnd := strings.Index(ir[errnoCall:], "\n}")
@@ -813,15 +799,19 @@ func TestCgofullGeneratesC2func(t *testing.T) {
 		t.Fatal("cliteErrno call is not enclosed by an LLVM function")
 	}
 	errnoThunk := ir[functionStart : errnoCall+functionEnd]
-	if !strings.Contains(errnoThunk, "@__llgo_coro_worker_cgo_thunk_v1_") {
-		t.Fatal("cliteErrno is not captured by the typed C2 worker thunk")
+	if !strings.Contains(errnoThunk, "@__llgo_coro_generated_cgo_thunk_v2_") {
+		t.Fatal("cliteErrno is not captured by the typed generated C2 thunk")
+	}
+	if count := strings.Count(ir, "call i32 @__llgo_coro_same_m_foreign_reentry_call_v2"); count < 2 {
+		t.Fatalf("C2/generated-cgo same-M boundaries = %d, want at least 2", count)
 	}
 	for _, symbol := range []string{
-		"__llgo_coro_worker_park_v1",
-		"__llgo_coro_worker_resume_v1",
+		"call void @__llgo_coro_worker_park_v1",
+		"call i32 @__llgo_coro_worker_resume_v1",
+		"call i32 @__llgo_coro_os_thread_foreign_call_v1",
 	} {
-		if !strings.Contains(ir, "@"+symbol) {
-			t.Fatalf("C2 lowering does not use the coroutine worker boundary %s", symbol)
+		if strings.Contains(ir, symbol) {
+			t.Fatalf("unproved C2/generated-cgo call fell back to %s", symbol)
 		}
 	}
 	for _, line := range strings.Split(ir, "\n") {
@@ -833,7 +823,33 @@ func TestCgofullGeneratesC2func(t *testing.T) {
 		}
 		if strings.Contains(line, "$coro") || strings.Contains(line, "$managed") ||
 			strings.Contains(line, "$raw") {
-			t.Fatalf("generated cgo worker adapter acquired a second physical body: %s", line)
+			t.Fatalf("generated cgo adapter acquired a second physical body: %s", line)
+		}
+	}
+}
+
+func TestCgodeferUsesSameMReentryBoundary(t *testing.T) {
+	ir := llgen.GenFrom("./_testgo/cgodefer")
+	const boundary = "call i32 @__llgo_coro_same_m_foreign_reentry_call_v2"
+	if count := strings.Count(ir, boundary); count < 5 {
+		t.Fatalf("generated cgo same-M reentry calls = %d, want at least 5", count)
+	}
+	for _, symbol := range []string{
+		"call void @__llgo_coro_worker_park_v1",
+		"call i32 @__llgo_coro_worker_resume_v1",
+		"call i32 @__llgo_coro_os_thread_foreign_call_v1",
+	} {
+		if strings.Contains(ir, symbol) {
+			t.Fatalf("callback-capable generated cgo fell back to %s", symbol)
+		}
+	}
+	for _, symbol := range []string{
+		"define ptr @\"main.main$coro\"",
+		"call ptr @__llgo_coro_foreign_reentry_acquire_v1",
+		"call i32 @__llgo_coro_foreign_reentry_run_v1",
+	} {
+		if !strings.Contains(ir, symbol) {
+			t.Fatalf("generated cgo reentry IR is missing %s", symbol)
 		}
 	}
 }

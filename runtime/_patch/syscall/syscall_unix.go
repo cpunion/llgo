@@ -1,4 +1,4 @@
-//go:build (darwin || linux) && !tinygo.wasm
+//go:build (darwin || linux) && !tinygo.wasm && !baremetal
 
 package syscall
 

@@ -1,7 +1,6 @@
 package ssa
 
 import (
-	"go/importer"
 	"go/types"
 	"runtime"
 	"strings"
@@ -16,13 +15,7 @@ func TestAssertNilDerefZeroExprNoPanic(t *testing.T) {
 func TestAssertNilDerefCallsRuntimeOnlyOnNilEdge(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("memory-guard", "test/memory-guard")
 	param := types.NewVar(0, nil, "p", types.NewPointer(types.Typ[types.Int]))
 	sig := types.NewSignatureType(nil, nil, nil, types.NewTuple(param), nil, false)
@@ -41,13 +34,7 @@ func TestAssertNilDerefCallsRuntimeOnlyOnNilEdge(t *testing.T) {
 func TestLoadKnownNonNilZeroSizedSkipsNilDerefGuard(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("memory", "test/memory")
 	empty := types.NewStruct(nil, nil)
 	params := types.NewTuple(types.NewVar(0, nil, "p", types.NewPointer(empty)))
@@ -80,13 +67,7 @@ func TestLoadKnownNonNilZeroSizedSkipsNilDerefGuard(t *testing.T) {
 func TestFieldAddrKnownNonNilSkipsStaticNilDerefGuard(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("memory", "test/memory")
 	structure := types.NewStruct([]*types.Var{
 		types.NewField(0, nil, "Value", types.Typ[types.Int], false),
@@ -121,13 +102,7 @@ func TestFieldAddrKnownNonNilSkipsStaticNilDerefGuard(t *testing.T) {
 func TestStoreKnownNonNilSkipsStaticNilDerefGuard(t *testing.T) {
 	prog := NewProgram(nil)
 	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
-	prog.SetRuntime(func() *types.Package {
-		pkg, err := importer.For("source", nil).Import(PkgRuntime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return pkg
-	})
+	prog.SetRuntime(RuntimeTypesForTest(t))
 	pkg := prog.NewPackage("memory", "test/memory")
 	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
 

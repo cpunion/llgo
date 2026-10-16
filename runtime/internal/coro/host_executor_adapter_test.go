@@ -217,6 +217,51 @@ func TestHostMonotonicClockEnsureInitializedPreservesPublishedTime(t *testing.T)
 	}
 }
 
+func TestHostPublishedClockDrivesSharedTimerWithoutEarlyResume(t *testing.T) {
+	var clock HostMonotonicClock
+	if !clock.Publish(11, 0) {
+		t.Fatal("initial host sample rejected")
+	}
+	fixture := newTimerParkOwnerFixture(t, "host-clock-deadline", 50)
+	var adapter HostExecutorAdapter
+	if !adapter.Start(fixture.executor, true) || !adapter.BeginWait(fixture.executor, 7, 50, true) {
+		t.Fatal("host did not retain the parked timer obligation")
+	}
+	var action HostActionV1
+	if !adapter.NextAction(&action) || action.Kind != uint32(HostActionAlarmV1) || action.DeadlineLo != 50 || action.DeadlineHi != 0 {
+		t.Fatalf("host alarm is outside the shared monotonic domain: %+v", action)
+	}
+	// The host now owns the action; no managed activation is retained. An
+	// unrelated IRQ may advance the clock without completing this timer.
+	if !clock.Publish(49, 0) || clock.Publish(48, 0) {
+		t.Fatal("host clock accepted regression or rejected forward progress")
+	}
+	now, _ := clock.Snapshot()
+	if due, promoted, ok := PollExecutorAt(fixture.driver, now); !ok || due != 0 || promoted != 0 || fixture.task.g.state != GWaiting {
+		t.Fatalf("timer resumed before host deadline: due=%d promoted=%d ok=%t", due, promoted, ok)
+	}
+	if !clock.Publish(50, 0) {
+		t.Fatal("deadline sample rejected")
+	}
+	claim, lease := adapter.ClaimCallback(fixture.executor, 7, HostCallbackAlarmV1)
+	if claim != HostCallbackClaimed || !lease || adapter.CompleteWait(fixture.executor, 7) != HostAdapterCompletionComplete {
+		t.Fatal("later alarm turn did not claim the exact parked continuation")
+	}
+	now, _ = clock.Snapshot()
+	if due, promoted, ok := PollExecutorAt(fixture.driver, now); !ok || due != 1 || promoted != 1 {
+		t.Fatalf("deadline failed to resume shared timer: due=%d promoted=%d ok=%t", due, promoted, ok)
+	}
+	outcome, _, result, cancel := fixture.beginResumeAt(t, now)
+	if outcome != ParkOutcomeCompleted || cancel != TaskCancelNone {
+		t.Fatalf("timer result=%d cancel=%d", outcome, cancel)
+	}
+	fixture.finishPark(t, result, false)
+	if !adapter.FinishCallback(fixture.executor, 7, HostCallbackAlarmV1, lease, false) {
+		t.Fatal("later host callback failed to release its ingress lease")
+	}
+	fixture.yieldCloseAndFinish(t)
+}
+
 func TestHostWallClockPreservesSignedSecondsAndAllowsCorrection(t *testing.T) {
 	var clock HostWallClock
 	if _, _, ok := clock.Snapshot(); ok || clock.Publish(0, 0, 1e9) {
@@ -236,5 +281,41 @@ func TestHostWallClockPreservesSignedSecondsAndAllowsCorrection(t *testing.T) {
 	}
 	if sec, nsec, ok := clock.Snapshot(); !ok || sec != 3 || nsec != 31 {
 		t.Fatalf("corrected wall-clock snapshot = (%d, %d, %t)", sec, nsec, ok)
+	}
+}
+
+func TestHostWallClockFallsBackToProgressingMonotonicEpoch(t *testing.T) {
+	var wall HostWallClock
+	var mono HostMonotonicClock
+	if _, _, ok := wall.SnapshotOrMonotonic(&mono); ok {
+		t.Fatal("unpublished clocks supplied a false time sample")
+	}
+	if !mono.EnsureInitialized() {
+		t.Fatal("zero monotonic epoch failed to initialize")
+	}
+	for _, now := range []uint64{0, 20, 999999999, 1000000000, 1000000001, 1<<63 - 1} {
+		if !mono.Publish(uint32(now), uint32(now>>32)) {
+			t.Fatalf("monotonic sample %d rejected", now)
+		}
+		sec, nsec, ok := wall.SnapshotOrMonotonic(&mono)
+		if !ok || sec != int64(now/1e9) || nsec != int32(now%1e9) || nsec < 0 || nsec >= 1e9 {
+			t.Fatalf("fallback at %d = (%d, %d, %t)", now, sec, nsec, ok)
+		}
+	}
+	if mono.Publish(0, 1<<31) {
+		t.Fatal("negative monotonic sample accepted")
+	}
+	// A real RTC is authoritative, even before the Unix epoch or without a
+	// monotonic sample. Nanoseconds retain Go's normalized nonnegative form.
+	for _, sec := range []int64{-2, 0, 17} {
+		if !wall.Publish(uint32(sec), uint32(uint64(sec)>>32), 29) {
+			t.Fatal("RTC sample rejected")
+		}
+		for _, clock := range []*HostMonotonicClock{nil, &mono} {
+			gotSec, gotNSec, ok := wall.SnapshotOrMonotonic(clock)
+			if !ok || gotSec != sec || gotNSec != 29 {
+				t.Fatalf("RTC priority at %d = (%d, %d, %t)", sec, gotSec, gotNSec, ok)
+			}
+		}
 	}
 }

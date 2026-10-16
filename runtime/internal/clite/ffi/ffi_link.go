@@ -1,4 +1,4 @@
-//go:build !wasm && !tinygo.wasm
+//go:build !wasm && !tinygo.wasm && !baremetal
 
 package ffi
 
@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	LLGoPackage = "link: $(pkg-config --libs libffi); -lffi"
-	LLGoFiles   = "$(pkg-config --cflags libffi): _wrap/libffi.c"
+	// DynamicCallsSupported is a target property, not a per-function contract.
+	DynamicCallsSupported = true
+	LLGoPackage           = "link: $(pkg-config --libs libffi); -lffi"
+	LLGoFiles             = "$(pkg-config --cflags libffi): _wrap/libffi.c"
 )
 
 /*

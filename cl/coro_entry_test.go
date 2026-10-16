@@ -85,6 +85,7 @@ func newCoroEntryTestContext(t *testing.T, pkg *ssa.Package, compilation *Compil
 // expected to stop in whole-plan preflight before package/codegen validation.
 func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
 	u := &EmissionUniverse{
+		coroProgramIR: newCoroProgramIR(),
 		required:      make(map[*ssa.Function]none),
 		aliases:       make(map[*ssa.Function]*ssa.Function),
 		functionKinds: make(map[emissionFunctionOwnerKey]int),
@@ -99,6 +100,8 @@ func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
 	owners := make(map[*ssa.Package]*preparedEmissionPackage)
 	for _, planned := range plan.Functions() {
 		fn := planned.Function
+		u.coroProgramIR.managedValueReferences[fn] = nil
+		u.coroProgramIR.managedMethodTargets[fn] = fn
 		u.functions = append(u.functions, fn)
 		u.required[fn] = none{}
 		owner := owners[fn.Pkg]
@@ -517,6 +520,19 @@ func Export() func(uint32) uint32 { return Imported }
 				fact.PrimarySymbol += ".wrong"
 			},
 			want: "primary symbol",
+		},
+		{
+			name: "unbound resource delivery",
+			edit: func(fact *coro.LibraryEffectFunction) {
+				fact.Delivery = coro.DeliveryRecipeRecord{
+					Version:  coro.DeliveryRecipeVersionV1,
+					Producer: fact.ID, ProducerABI: fact.ABIHash,
+					Initializer: "llgo.function.v0:test.delivery.init", InitializerABI: strings.Repeat("a", 64),
+					Drop: "llgo.function.v0:test.delivery.drop", DropABI: strings.Repeat("b", 64),
+					ResultSize: 8, ResultAlign: 8,
+				}
+			},
+			want: "bound physical resource-delivery recipe",
 		},
 	} {
 		t.Run("reject "+test.name+" mismatch", func(t *testing.T) {

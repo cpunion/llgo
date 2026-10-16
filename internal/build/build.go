@@ -29,7 +29,6 @@ import (
 	"maps"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -65,6 +64,7 @@ import (
 	"github.com/xgo-dev/llgo/internal/packages"
 	"github.com/xgo-dev/llgo/internal/pclnmap"
 	"github.com/xgo-dev/llgo/internal/pclnpost"
+	"github.com/xgo-dev/llgo/internal/quoted"
 	"github.com/xgo-dev/llgo/internal/typepatch"
 	"github.com/xgo-dev/llgo/ssa/abi"
 	xenv "github.com/xgo-dev/llgo/xtool/env"
@@ -143,37 +143,38 @@ type CoroPlanInput struct {
 	Program          *ssa.Program
 	EmissionUniverse *coro.SSAEmissionUniverse
 
-	resolveFunction                func(*ssa.Function) (*ssa.Function, bool)
-	managedFunctionValueTarget     func(*ssa.Function) (*ssa.Function, bool, error)
-	augmentFunctionIDs             func(coro.FunctionIDConfig) coro.FunctionIDConfig
-	localBodyFacts                 func(*ssa.Function) (coro.SSAFunctionBodyFacts, error)
-	functionBackground             func(*ssa.Function) (llssa.Background, bool, error)
-	rawCFunctionType               func(types.Type) (bool, error)
-	foreignNoBlock                 func(*ssa.Function) (cl.CoroForeignNoBlockCertificate, bool, error)
-	foreignSync                    func(*ssa.Function) (cl.CoroForeignSyncCertificate, bool, error)
-	foreignWorker                  func(*ssa.Function) (cl.CoroForeignWorkerCertificate, bool, error)
-	callableIdentity               func(*ssa.Function) (cl.CoroCallableIdentityCertificate, bool, error)
-	callableContract               func(*ssa.Function) (cl.CoroCallableContractCertificate, bool, error)
-	noPreempt                      func(*ssa.Function) (string, bool, error)
-	noUnwind                       func(*ssa.Function) (string, bool, error)
-	trustedInlineCall              func(*ssa.Function, ssa.CallInstruction) (coro.SSATrustedInlineCallCertificate, bool, error)
-	assemblyNoSuspend              func(*ssa.Function) (string, bool, error)
-	dynamicImplements              func(types.Type, *types.Interface) (bool, error)
-	callSitePlan                   func(ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error)
-	rawFunctionAddressCallArgument func(ssa.CallInstruction, int) (bool, error)
-	staticCodeAddressCallArgument  func(ssa.CallInstruction, int) (bool, error)
-	erasedFunctionInterface        func(*ssa.MakeInterface) (bool, error)
-	demandReferences               func(*ssa.Function) ([]*ssa.Function, error)
-	syncDemandReferences           func(*ssa.Function) ([]*ssa.Function, error)
-	plainLoweredCalls              func(*ssa.Function) ([]coro.SSALoweredCall, error)
-	managedValueReferences         func(*ssa.Function) ([]*ssa.Function, error)
-	loweredCalls                   func(*ssa.Function) ([]coro.SSALoweredCall, error)
-	requiredRoots                  coro.Roots
-	requiredPlain                  map[*ssa.Function]struct{}
-	requiredHostPlain              map[*ssa.Function]struct{}
-	requiredDirectPlain            []requiredCoroDirectPlainCallArgument
-	requiredClosedDynamic          map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
-	requiredGlobalFunctionSlots    map[ssa.CallInstruction]coroGlobalFunctionSlotProof
+	resolveFunction                     func(*ssa.Function) (*ssa.Function, bool)
+	managedFunctionValueTarget          func(*ssa.Function) (*ssa.Function, bool, error)
+	augmentFunctionIDs                  func(coro.FunctionIDConfig) coro.FunctionIDConfig
+	localBodyFacts                      func(*ssa.Function) (coro.SSAFunctionBodyFacts, error)
+	functionBackground                  func(*ssa.Function) (llssa.Background, bool, error)
+	rawCFunctionType                    func(types.Type) (bool, error)
+	foreignNoBlock                      func(*ssa.Function) (cl.CoroForeignNoBlockCertificate, bool, error)
+	foreignSync                         func(*ssa.Function) (cl.CoroForeignSyncCertificate, bool, error)
+	foreignWorker                       func(*ssa.Function) (cl.CoroForeignWorkerCertificate, bool, error)
+	callableIdentity                    func(*ssa.Function) (cl.CoroCallableIdentityCertificate, bool, error)
+	callableContract                    func(*ssa.Function) (cl.CoroCallableContractCertificate, bool, error)
+	noPreempt                           func(*ssa.Function) (string, bool, error)
+	noUnwind                            func(*ssa.Function) (string, bool, error)
+	trustedInlineCall                   func(*ssa.Function, ssa.CallInstruction) (coro.SSATrustedInlineCallCertificate, bool, error)
+	assemblyNoSuspend                   func(*ssa.Function) (string, bool, error)
+	dynamicImplements                   func(types.Type, *types.Interface) (bool, error)
+	dynamicSignature                    func(*ssa.Function, *types.Signature) (*types.Signature, error)
+	callSitePlan                        func(ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error)
+	rawFunctionAddressCallArgument      func(ssa.CallInstruction, int) (bool, error)
+	staticFunctionReferenceCallArgument func(ssa.CallInstruction, int) (bool, error)
+	erasedFunctionInterface             func(*ssa.MakeInterface) (bool, error)
+	demandReferences                    func(*ssa.Function) ([]*ssa.Function, error)
+	syncDemandReferences                func(*ssa.Function) ([]*ssa.Function, error)
+	plainLoweredCalls                   func(*ssa.Function) ([]coro.SSALoweredCall, error)
+	managedValueReferences              func(*ssa.Function) ([]*ssa.Function, error)
+	loweredCalls                        func(*ssa.Function) ([]coro.SSALoweredCall, error)
+	requiredRoots                       coro.Roots
+	requiredPlain                       map[*ssa.Function]struct{}
+	requiredHostPlain                   map[*ssa.Function]struct{}
+	requiredDirectPlain                 []requiredCoroDirectPlainCallArgument
+	requiredClosedDynamic               map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
+	requiredGlobalFunctionSlots         map[ssa.CallInstruction]coroGlobalFunctionSlotProof
 	// importedLibraryEffects contains only exact bodyless managed-Go
 	// declarations whose producer metadata, FunctionID, structural ABI, target
 	// ABI, and physical symbol were preflighted by the build driver. Go callers
@@ -466,6 +467,10 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 		return nil, fmt.Errorf("build coroutine plan: builder cannot override the frozen frontend dynamic implementation relation")
 	}
 	config.DynamicImplements = in.dynamicImplements
+	if config.DynamicSignature != nil {
+		return nil, fmt.Errorf("build coroutine plan: builder cannot override the frozen frontend dynamic signature relation")
+	}
+	config.DynamicSignature = in.dynamicSignature
 	if config.ClassifyTrustedInlineCall != nil {
 		return nil, fmt.Errorf("build coroutine plan: builder cannot manufacture trusted-inline invocation capabilities; the frozen frontend owns exact call-site proofs")
 	}
@@ -990,7 +995,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					if frozen && callSite.ControlOperation != cl.CoroControlNone {
 						policy.Exec = policy.Exec.Join(callSite.ControlOperation.ExecFlags())
 					}
-					if frozen && (callSite.Elision == cl.CoroCallElidedCgoWorker ||
+					if frozen && (callSite.Elision == cl.CoroCallElidedGeneratedCgo ||
 						callSite.Elision == cl.CoroCallElidedPython) {
 						policy.Effect = policy.Effect.Join(coro.WaitForeign)
 					} else if _, ordinary := call.(*ssa.Call); ordinary &&
@@ -1051,6 +1056,15 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					spawn, ok := instruction.(*ssa.Go)
 					if !ok {
 						continue
+					}
+					if in.callSitePlan != nil {
+						site, frozen, err := in.callSitePlan(spawn)
+						if err != nil || !frozen {
+							return nil, fmt.Errorf("read frozen spawn reachability in %q: %v", fn.Name(), err)
+						}
+						if site.Elision == cl.CoroCallElidedFrontendUnevaluated {
+							continue
+						}
 					}
 					spawnSeeded[fn] = struct{}{}
 					// Preserve the direct-static path for top-level functions and
@@ -1175,6 +1189,21 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			return policy, nil
 		}
 	}
+	if config.ClassifyUnevaluatedCall != nil {
+		return nil, fmt.Errorf("build coroutine plan: builder cannot override frozen ProgramIR reachability")
+	}
+	if in.callSitePlan != nil {
+		config.ClassifyUnevaluatedCall = func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			frontend, frozen, err := in.callSitePlan(call)
+			if err != nil {
+				return false, err
+			}
+			if !frozen {
+				return false, fmt.Errorf("call %q is absent from frozen ProgramIR", call.String())
+			}
+			return frontend.Elision == cl.CoroCallElidedFrontendUnevaluated, nil
+		}
+	}
 	classifyElided := config.ClassifyElidedCall
 	config.ClassifyElidedCall = func(caller *ssa.Function, call ssa.CallInstruction) (bool, error) {
 		requested := false
@@ -1196,25 +1225,9 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			return false, fmt.Errorf("call %q in %q is absent from the frozen ProgramIR", call.String(), caller.Name())
 		}
 		if frontend.Elision == cl.CoroCallElidedFrontendUnevaluated {
-			// Preserve the ProgramIR decision when the omitted instruction also
-			// satisfies AnalyzeSSA's narrow static-call gate. Generated cgo adapters
-			// place _Cgo_use/_Cgo_keepalive behind runtime.cgoAlwaysFalse; their
-			// blocks are absent from physical lowering and must not reappear as raw
-			// closure edges. Dynamic calls, invokes, builtins, spawns, and alternate
-			// defer stacks remain conservative until the analyzer has a complete
-			// frontend-unevaluated instruction projection for those shapes.
-			common := call.Common()
-			if common == nil || common.StaticCallee() == nil || common.IsInvoke() {
-				return false, nil
-			}
-			switch exact := call.(type) {
-			case *ssa.Call:
-				return exact != nil, nil
-			case *ssa.Defer:
-				return exact != nil && exact.DeferStack == nil, nil
-			default:
-				return false, nil
-			}
+			// The stronger complete-occurrence proof above owns dead CFG sites;
+			// intrinsic declaration elision retains its narrower safety gate.
+			return false, nil
 		}
 		if requested && !frontend.ElidesCall() {
 			return false, fmt.Errorf("builder cannot elide ordinary call in %q; only calls omitted by the build frontend may be elided", caller.Name())
@@ -1327,13 +1340,13 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			return compilerRequired, nil
 		}
 	}
-	if in.staticCodeAddressCallArgument != nil || config.ClassifyStaticCodeAddressCallArgument != nil {
-		classifyCodeAddress := config.ClassifyStaticCodeAddressCallArgument
-		config.ClassifyStaticCodeAddressCallArgument = func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+	if in.staticFunctionReferenceCallArgument != nil || config.ClassifyStaticFunctionReferenceCallArgument != nil {
+		classifyCodeAddress := config.ClassifyStaticFunctionReferenceCallArgument
+		config.ClassifyStaticFunctionReferenceCallArgument = func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
 			compilerRequired := false
 			var err error
-			if in.staticCodeAddressCallArgument != nil {
-				compilerRequired, err = in.staticCodeAddressCallArgument(call, argument)
+			if in.staticFunctionReferenceCallArgument != nil {
+				compilerRequired, err = in.staticFunctionReferenceCallArgument(call, argument)
 				if err != nil {
 					return false, fmt.Errorf("classify frozen static code-address argument %d in %q: %w", argument, caller.Name(), err)
 				}
@@ -2070,7 +2083,7 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 	}
 
 	// A managed generated-cgo call publishes the exact synchronous adapter
-	// entry to a bounded worker thunk. The source call itself is deliberately
+	// entry to a typed foreign thunk. The source call itself is deliberately
 	// elided from the ordinary managed call graph, so carry its ProgramIR-owned
 	// physical target into the independent raw domain explicitly. This is the
 	// same provenance shape as a raw function-address publication, but remains
@@ -2088,25 +2101,25 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 					}
 					site, frozen, err := in.callSitePlan(call)
 					if err != nil {
-						return nil, fmt.Errorf("classify live cgo worker crossing in %q: %w", owner.Function.Name(), err)
+						return nil, fmt.Errorf("classify live generated-cgo crossing in %q: %w", owner.Function.Name(), err)
 					}
-					if !frozen || site.Elision != cl.CoroCallElidedCgoWorker {
+					if !frozen || site.Elision != cl.CoroCallElidedGeneratedCgo {
 						continue
 					}
-					target := site.CgoWorkerTarget
+					target := site.GeneratedCgoTarget
 					if target == nil || site.ElisionCertificate == "" {
-						return nil, fmt.Errorf("live cgo worker crossing in %q has no exact target and certificate", owner.Function.Name())
+						return nil, fmt.Errorf("live generated-cgo crossing in %q has no exact target and certificate", owner.Function.Name())
 					}
 					canonical, exact := in.ResolveFunction(target)
 					if !exact || canonical == nil || canonical != target {
-						return nil, fmt.Errorf("live cgo worker crossing in %q targets non-canonical function %q", owner.Function.Name(), target.Name())
+						return nil, fmt.Errorf("live generated-cgo crossing in %q targets non-canonical function %q", owner.Function.Name(), target.Name())
 					}
 					if target.Signature == nil || target.Signature.Recv() != nil ||
 						target.Parent() != nil || len(target.FreeVars) != 0 {
-						return nil, fmt.Errorf("live cgo worker target %q has no exact receiver-less, non-capturing top-level shape", target.Name())
+						return nil, fmt.Errorf("live generated-cgo target %q has no exact receiver-less, non-capturing top-level shape", target.Name())
 					}
 					if err := enqueueGoBody(target, true, false, coroRawABIPlainProvenance{
-						site: "generated cgo worker entry",
+						site: "generated-cgo foreign entry",
 					}); err != nil {
 						return nil, err
 					}
@@ -2966,11 +2979,12 @@ func (in CoroPlanInput) closedStaticSpawnTarget(owner *ssa.Function, spawn *ssa.
 	// and receives every value through ordinary parameters, so it uses the same
 	// DirectCoro spawn ABI as a package-level function. Capturing literals are
 	// represented through MakeClosure and remain in the descriptor path.
-	if len(target.FreeVars) != 0 || !redirected && target.Synthetic != "" ||
-		target.Origin() != nil || len(target.TypeArgs()) != 0 {
+	genericInstance := coro.MaterializedGenericInstance(target)
+	if len(target.FreeVars) != 0 || !redirected && target.Synthetic != "" && !genericInstance ||
+		(target.Origin() != nil || len(target.TypeArgs()) != 0) && !genericInstance {
 		return nil, fmt.Errorf("target %q is not an exact non-capturing context-free function", target.Name())
 	}
-	if params := target.TypeParams(); params != nil && params.Len() != 0 {
+	if params := target.TypeParams(); params != nil && params.Len() != 0 && !genericInstance {
 		return nil, fmt.Errorf("target %q is a generic declaration", target.Name())
 	}
 	sig := target.Signature
@@ -3034,7 +3048,7 @@ func requiredCoroManagedSpawnTargets(plan *coro.SSAPlan) (map[*ssa.Function]stru
 		for _, block := range owner.Function.Blocks {
 			for _, instruction := range block.Instrs {
 				spawn, ok := instruction.(*ssa.Go)
-				if !ok {
+				if !ok || plan.ElidesCall(spawn) {
 					continue
 				}
 				callPlan, found := plan.CallPlan(spawn)
@@ -3078,7 +3092,7 @@ func validateCoroSpawnPlan(plan *coro.SSAPlan) error {
 		for _, block := range owner.Function.Blocks {
 			for _, instruction := range block.Instrs {
 				spawn, ok := instruction.(*ssa.Go)
-				if !ok {
+				if !ok || plan.ElidesCall(spawn) {
 					continue
 				}
 				callPlan, found := plan.CallPlan(spawn)
@@ -3221,7 +3235,7 @@ func validateCoroClosedStaticSpawnRunGate(conf *Config, plan *coro.SSAPlan, fram
 		for _, block := range owner.Function.Blocks {
 			for _, instruction := range block.Instrs {
 				spawn, ok := instruction.(*ssa.Go)
-				if !ok {
+				if !ok || plan.ElidesCall(spawn) {
 					continue
 				}
 				callPlan, found := plan.CallPlan(spawn)
@@ -3439,7 +3453,7 @@ type Config struct {
 	LTOPlugin          lto.PassPlugin
 	BinPath            string
 	AppExt             string  // ".exe" on Windows, empty on Unix
-	OutFile            string  // only valid for ModeBuild when len(pkgs) == 1
+	OutFile            string  // output file, or directory for ModeBuild package executables
 	OutFmts            OutFmts // Output format specifications (only for Target != "")
 	CompileOnly        bool    // compile test binary but do not run it (only valid for ModeTest)
 	Emulator           bool    // run in emulator mode
@@ -3451,10 +3465,11 @@ type Config struct {
 	AbiMode            AbiMode
 	GenExpect          bool // only valid for ModeCmpTest
 	Verbose            bool
-	PrintPackages      bool // print package paths as they are compiled, like go build -v
+	PrintPackages      bool // print package paths after successful compilation
 	PrintCommands      bool
 	GenLL              bool // generate pkg .ll files
-	DeadcodeDrop       bool // enable Go dead code drop (development builds only)
+	DeadcodeDrop       bool // explicitly enable semantic method-slot DCE
+	DeadcodeDropSet    bool // distinguish an explicit false from the full-LTO executable default
 	CollectPackageMeta bool // collect package metadata without enabling dead code drop
 	CheckLLFiles       bool // check .ll files valid
 	CheckLinkArgs      bool // check linkargs valid
@@ -3516,6 +3531,10 @@ type Config struct {
 	CoroPlanBuilder  CoroPlanBuilder
 	CoroPlanObserver CoroPlanObserver
 	Overlay          map[string][]byte
+	// TestPythonPackage supplies the synthetic Python ABI root used by compiler
+	// fixtures that intentionally avoid importing github.com/goplus/lib/py.
+	// Production callers leave this nil; the provider is evaluated once per Do.
+	TestPythonPackage func() *types.Package
 
 	// compilerBuildTags is a compiler-owned channel for isolated runtime-island
 	// builds that deliberately do not enable the complete program-bootstrap
@@ -3752,7 +3771,21 @@ func (c *Config) goGlobalDCEEnabled() bool {
 }
 
 func (c *Config) deadcodeDropEnabled() bool {
-	return buildenv.Dev && c.DeadcodeDrop && !c.goGlobalDCEEnabled()
+	if c == nil || c.Mode == ModeGen || c.PackageCompileOnly ||
+		c.BuildMode != "" && c.BuildMode != BuildModeExe || c.ImportCfg != "" ||
+		c.goGlobalDCEEnabled() {
+		return false
+	}
+	// Imported coroutine effect records are not complete method/interface
+	// summaries. Keep importcfg and library producers conservative. The final
+	// link additionally requires every linked package's semantic summary.
+	if c.DeadcodeDropSet || c.DeadcodeDrop {
+		return c.DeadcodeDrop
+	}
+	// Full LTO already retains the package modules needed by the existing
+	// override emitter. Non-LTO builds keep the memory-bounded staged backend;
+	// an explicit opt-in retains the former direct-backend behavior.
+	return c.ltoMode() == lto.Full
 }
 
 func (c *Config) packageMetaEnabled() bool {
@@ -3782,7 +3815,15 @@ func Do(args []string, conf *Config) ([]Package, error) {
 }
 
 // Build executes one build invocation.
-func Build(inv Invocation) ([]Package, error) {
+func Build(inv Invocation) (result []Package, resultErr error) {
+	var fallback *multiBuildFallback
+	defer func() {
+		if resultErr == nil || fallback == nil || inv.disableMultiFallback {
+			return
+		}
+		result, resultErr = fallback.run()
+	}()
+
 	dir := inv.Dir
 	if dir == "" {
 		var err error
@@ -3820,10 +3861,18 @@ func Build(inv Invocation) ([]Package, error) {
 	}()
 	// Handle crosscompile configuration first to set correct GOOS/GOARCH
 	forceEspClang := conf.ForceEspClang || conf.Target != ""
-	export, err := crosscompile.UseWithGOARM(conf.Goos, conf.Goarch, conf.GOARM, conf.Target, wasiThreadsForBuild(conf), forceEspClang, conf.OptLevel, conf.ltoMode(), conf.goGlobalDCEEnabled())
+	nativeInput := crosscompile.NativeToolchainInput{}
+	if usesNativeWindowsToolchain(runtime.GOOS, runtime.GOARCH, conf) {
+		nativeInput, err = parseNativeToolchainInput(commands, conf.LinkOptions)
+		if err != nil {
+			return nil, err
+		}
+	}
+	export, err := crosscompile.UseWithGOARMAndToolchain(conf.Goos, conf.Goarch, conf.GOARM, conf.Target, wasiThreadsForBuild(conf), forceEspClang, conf.OptLevel, conf.ltoMode(), conf.goGlobalDCEEnabled(), nativeInput)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup crosscompile: %w", err)
 	}
+	applyModeGenTargetCompileFlag(conf.Mode, &export)
 	// Update GOOS/GOARCH from export if target was used
 	if conf.Target != "" && export.GOOS != "" {
 		conf.Goos = export.GOOS
@@ -3960,13 +4009,20 @@ func Build(inv Invocation) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := loadSyntaxErr(); err != nil {
-		return nil, err
-	}
 	if conf.AllowNoBody {
 		allowMissingFunctionBodies(initial)
 	}
 	mode := conf.Mode
+	var multiOutputDir string
+	if mode == ModeBuild && conf.OutFile != "" {
+		multiOutputDir, err = prepareBuildOutput(dir, conf.OutFile, len(initial) > 1, initial)
+		if err != nil {
+			return nil, err
+		}
+		if multiOutputDir != "" {
+			conf.OutFile = multiOutputDir
+		}
+	}
 	if mode == ModeTest {
 		initial, err = filterTestPackages(initial, conf.OutFile)
 		if err != nil {
@@ -3978,9 +4034,10 @@ func Build(inv Invocation) ([]Package, error) {
 	} else if len(initial) > 1 {
 		switch mode {
 		case ModeBuild:
-			if conf.OutFile != "" {
-				return nil, fmt.Errorf("cannot build multiple packages with -o")
+			if conf.BuildMode != BuildModeExe {
+				return nil, fmt.Errorf("-buildmode=%s requires exactly one main package", conf.BuildMode)
 			}
+			fallback = newMultiBuildFallback(conf, initial, dir, multiOutputDir)
 		case ModeInstall:
 			if conf.Target != "" {
 				return nil, fmt.Errorf("cannot install multiple packages to embedded target")
@@ -3988,6 +4045,9 @@ func Build(inv Invocation) ([]Package, error) {
 		case ModeRun:
 			return nil, fmt.Errorf("cannot run multiple packages")
 		}
+	}
+	if err := loadSyntaxErr(); err != nil {
+		return nil, err
 	}
 
 	altPkgPaths := altPkgs(initial, conf, llssa.PkgRuntime)
@@ -4018,6 +4078,8 @@ func Build(inv Invocation) ([]Package, error) {
 	var pythonTypes *types.Package
 	if pythonPkg != nil {
 		pythonTypes = pythonPkg.Types
+	} else if conf.TestPythonPackage != nil {
+		pythonTypes = conf.TestPythonPackage()
 	}
 	prog.SetRuntime(func() *types.Package {
 		return runtimeTypes
@@ -4076,13 +4138,16 @@ func Build(inv Invocation) ([]Package, error) {
 	defer ctx.closePackageMetas()
 	defer ctx.closePackageArchiveBuffers()
 	defer ctx.cleanupStagedBitcodeFiles()
+	defer ctx.nativeObjectWorkspace().cleanup()
 	// Isolated backends use independent LLVM contexts. Keep Programs needed by
 	// whole-program consumers alive through deadcode analysis and strong ABI type
 	// override emission, then release them on every normal, error, or panic path.
 	defer ctx.disposeBackendPrograms()
 
 	// default runtime globals must be registered before packages are built
-	addGlobalString(conf, "runtime.defaultGOROOT="+runtime.GOROOT(), nil)
+	// The generated program must report the GOROOT whose standard library is
+	// being compiled, which may differ from the toolchain used to build llgo.
+	addGlobalString(conf, "runtime.defaultGOROOT="+sourcePatchGOROOT, nil)
 	addGlobalString(conf, "runtime.buildVersion="+runtime.Version(), nil)
 	pkgs, pkgEntries, err := registerSSAPkgs(ctx, initial, verbose)
 	if err != nil {
@@ -4142,6 +4207,9 @@ func Build(inv Invocation) ([]Package, error) {
 			return nil, err
 		}
 	}
+	// Every native object is now owned by a package archive. Release private
+	// compiler outputs before linking or executing user code.
+	ctx.nativeObjectWorkspace().cleanup()
 
 	if mode == ModeGen {
 		for _, pkg := range allPkgs {
@@ -4160,84 +4228,31 @@ func Build(inv Invocation) ([]Package, error) {
 		return nil, fmt.Errorf("initial package not found")
 	}
 
+	linkMultiple := mode == ModeBuild && len(initial) > 1
 	var executions []linkedOutputExecution
+	var linkErrs []error
 	for _, pkg := range initial {
-		if needLink(pkg, mode) {
-			name := path.Base(pkg.PkgPath)
-
-			// Create output format details
-			outFmts, err := buildOutFmts(name, conf, len(ctx.initial) > 1, &ctx.crossCompile)
-			if err != nil {
-				return nil, err
+		if !needLink(pkg, mode) || inv.compileOnly {
+			continue
+		}
+		execution, err := prepareInitialPackage(ctx, pkg, allPkgs, conf, verbose, linkMultiple && conf.OutFile == "")
+		if err != nil {
+			if inv.disableMultiFallback {
+				linkErrs = append(linkErrs, err)
+			} else {
+				linkErrs = append(linkErrs, fmt.Errorf("%s: %w", pkg.PkgPath, err))
 			}
-			resolveOutputs(ctx.commands.dir, outFmts)
-
-			// Link main package using the output path from buildOutFmts
-			linkSpan := buildTrace.startCoordinator("link "+pkg.PkgPath, map[string]any{
-				"package": pkg.PkgPath,
-				"output":  outFmts.Out,
-			})
-			err = linkMainPkg(ctx, pkg, allPkgs, outFmts.Out, verbose)
-			linkSpan.done()
-			if err != nil {
-				return nil, err
-			}
-			if err := finalizeRuntimePCLN(ctx, outFmts, verbose); err != nil {
-				return nil, err
-			}
-			if err := finalizeDarwinSizeExecutable(ctx, outFmts.Out, verbose); err != nil {
-				return nil, err
-			}
-			if conf.Mode == ModeBuild && conf.SizeReport {
-				if err := reportBinarySize(outFmts.Out, conf.SizeFormat, conf.SizeLevel, allPkgs); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: size report failed: %v\n", err)
-				}
-			}
-
-			// Generate C headers for c-archive and c-shared modes before linking
-			if ctx.buildConf.BuildMode == BuildModeCArchive || ctx.buildConf.BuildMode == BuildModeCShared {
-				libname := strings.TrimSuffix(filepath.Base(outFmts.Out), conf.AppExt)
-				headerPath := filepath.Join(filepath.Dir(outFmts.Out), libname) + ".h"
-				pkgs := cHeaderPackages(allPkgs)
-				headerErr := header.GenHeaderFile(prog, pkgs, libname, headerPath, verbose)
-				if headerErr != nil {
-					return nil, headerErr
-				}
-				continue
-			}
-
-			envMap := outFmts.ToEnvMap()
-
-			// Only convert formats when Target is specified
-			if conf.Target != "" {
-				// Process format conversions for embedded targets
-				err = firmware.ConvertFormats(ctx.crossCompile.BinaryFormat, ctx.crossCompile.FormatDetail, envMap)
-				if err != nil {
-					return nil, err
-				}
-			}
-
-			switch mode {
-			case ModeBuild:
-				// Do nothing
-
-			case ModeInstall:
-				// Native already installed in linkMainPkg
-				if conf.Target != "" {
-					executions = append(executions, linkedOutputExecution{envMap: envMap})
-				}
-
-			case ModeRun, ModeTest, ModeCmpTest:
-				executions = append(executions, linkedOutputExecution{
-					app:     outFmts.Out,
-					envMap:  envMap,
-					pkgDir:  pkg.Dir,
-					pkgName: pkg.PkgPath,
-				})
-			}
+			continue
+		}
+		if execution != nil {
+			executions = append(executions, *execution)
 		}
 	}
-	if len(executions) != 0 {
+	// The shared graph completed, so a link failure must not trigger the
+	// expensive per-root compile fallback. Other main packages were already
+	// attempted above and their link errors are returned together.
+	fallback = nil
+	if len(linkErrs) == 0 && len(executions) != 0 {
 		// Linking is the final compiler consumer. Do not retain LLVM modules,
 		// package graphs, overlays, or whole-program coroutine receipts while a
 		// generated test/application runs: that process may invoke llgo again.
@@ -4251,7 +4266,8 @@ func Build(inv Invocation) ([]Package, error) {
 		releaseNativeHeap()
 		for _, execution := range executions {
 			if err := executeLinkedOutput(ctx, execution, conf, mode, verbose); err != nil {
-				return nil, err
+				linkErrs = append(linkErrs, err)
+				break
 			}
 		}
 	}
@@ -4261,7 +4277,124 @@ func Build(inv Invocation) ([]Package, error) {
 		mockable.Exit(1)
 	}
 
-	return allPkgs, nil
+	return allPkgs, errors.Join(linkErrs...)
+}
+
+func linkInitialPackage(ctx *context, pkg *packages.Package, allPkgs []*aPackage, conf *Config, verbose, discardOutput bool) error {
+	execution, err := prepareInitialPackage(ctx, pkg, allPkgs, conf, verbose, discardOutput)
+	if err != nil || execution == nil {
+		return err
+	}
+	return executeLinkedOutput(ctx, *execution, conf, conf.Mode, verbose)
+}
+
+// prepareInitialPackage finishes every compiler-owned output step but does not
+// run, flash, or monitor the result. Keeping execution behind this phase
+// boundary lets the coordinator release the complete frontend/backend graph
+// before a generated program can recursively invoke LLGo.
+func prepareInitialPackage(ctx *context, pkg *packages.Package, allPkgs []*aPackage, conf *Config, verbose, discardOutput bool) (*linkedOutputExecution, error) {
+	name := defaultExecutableName(pkg.PkgPath)
+	outFmts, err := buildOutFmts(name, conf, len(ctx.initial) > 1, &ctx.crossCompile)
+	if err != nil {
+		return nil, err
+	}
+	if discardOutput {
+		defer removeOutFmts(outFmts)
+	}
+	resolveOutputs(ctx.commands.dir, outFmts)
+	linkSpan := ctx.buildTrace.startCoordinator("link "+pkg.PkgPath, map[string]any{
+		"package": pkg.PkgPath,
+		"output":  outFmts.Out,
+	})
+	err = linkMainPkg(ctx, pkg, allPkgs, outFmts.Out, verbose)
+	linkSpan.done()
+	if err != nil {
+		return nil, err
+	}
+	if err := finalizeRuntimePCLN(ctx, outFmts, verbose); err != nil {
+		return nil, err
+	}
+	if err := finalizeDarwinSizeExecutable(ctx, outFmts.Out, verbose); err != nil {
+		return nil, err
+	}
+	if conf.Mode == ModeBuild && conf.SizeReport {
+		if err := reportBinarySize(outFmts.Out, conf.SizeFormat, conf.SizeLevel, allPkgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: size report failed: %v\n", err)
+		}
+	}
+	if ctx.buildConf.BuildMode == BuildModeCArchive || ctx.buildConf.BuildMode == BuildModeCShared {
+		libname := strings.TrimSuffix(filepath.Base(outFmts.Out), conf.AppExt)
+		headerPath := filepath.Join(filepath.Dir(outFmts.Out), libname) + ".h"
+		return nil, header.GenHeaderFile(ctx.prog, cHeaderPackages(allPkgs), libname, headerPath, verbose)
+	}
+
+	envMap := outFmts.ToEnvMap()
+	if conf.Target != "" {
+		if err := firmware.ConvertFormats(ctx.crossCompile.BinaryFormat, ctx.crossCompile.FormatDetail, envMap); err != nil {
+			return nil, err
+		}
+	}
+	switch conf.Mode {
+	case ModeInstall:
+		if conf.Target != "" {
+			return &linkedOutputExecution{envMap: envMap}, nil
+		}
+	case ModeRun, ModeTest, ModeCmpTest:
+		return &linkedOutputExecution{
+			app:     outFmts.Out,
+			envMap:  envMap,
+			pkgDir:  pkg.Dir,
+			pkgName: pkg.PkgPath,
+		}, nil
+	}
+	return nil, nil
+}
+
+func removeOutFmts(outFmts *OutFmtDetails) {
+	for _, output := range []string{
+		outFmts.Out, outFmts.PCLN, outFmts.Bin, outFmts.Hex,
+		outFmts.Img, outFmts.Uf2, outFmts.Zip,
+	} {
+		if output != "" {
+			_ = os.Remove(output)
+		}
+	}
+}
+
+func usesNativeWindowsToolchain(hostGOOS, hostGOARCH string, conf *Config) bool {
+	return conf.Target == "" && hostGOOS == "windows" &&
+		conf.Goos == hostGOOS && conf.Goarch == hostGOARCH
+}
+
+func parseNativeToolchainInput(commands commandEnv, options LinkOptions) (crosscompile.NativeToolchainInput, error) {
+	input := crosscompile.NativeToolchainInput{Dir: commands.dir, Environ: slices.Clone(commands.environ)}
+	for _, setting := range []struct {
+		name       string
+		value      string
+		out        *[]string
+		allowEmpty bool
+	}{
+		{name: "CC", value: commands.lookup("CC"), out: &input.CC},
+		{name: "CXX", value: commands.lookup("CXX"), out: &input.CXX},
+		{name: "-extld", value: options.ExternalLinker, out: &input.ExternalLinker, allowEmpty: true},
+		{name: "-extldflags", value: options.ExternalLinkerFlags, out: &input.ExternalFlags, allowEmpty: true},
+	} {
+		if setting.value == "" {
+			continue
+		}
+		args, err := quoted.Split(setting.value)
+		if err != nil {
+			return crosscompile.NativeToolchainInput{}, fmt.Errorf("could not parse %s value %q: %w", setting.name, setting.value, err)
+		}
+		if len(args) == 0 {
+			if setting.allowEmpty {
+				continue
+			}
+			return crosscompile.NativeToolchainInput{}, fmt.Errorf("%s requires a non-empty command or argument list", setting.name)
+		}
+		*setting.out = args
+	}
+	return input, nil
 }
 
 // linkedOutputExecution is deliberately backend-free. Link and target-format
@@ -4302,13 +4435,16 @@ func executeLinkedOutput(ctx *context, execution linkedOutputExecution, conf *Co
 }
 
 func llgoTargetTypeSizes(sizes types.Sizes, _, arch, llvmTarget string) types.Sizes {
-	if arch == "wasm" || strings.HasPrefix(llvmTarget, "wasm32-") {
-		// LLGo's wasm targets use 32-bit words and pointers, while LLVM's wasm
-		// data layout gives i64/f64 an 8-byte ABI alignment. Named TinyGo-style
-		// targets retain GOARCH=arm for source selection, so the resolved LLVM
-		// triple—not only GOARCH—must select this layout. Keep the frontend
-		// layout identical so unsafe constants and LLVM GEP/alloc sizes cannot
-		// disagree.
+	physicalArch, _, _ := strings.Cut(llvmTarget, "-")
+	if arch == "wasm" || llvmTarget == "" && arch == "arm" ||
+		physicalArch == "wasm32" || physicalArch == "riscv32" ||
+		strings.HasPrefix(physicalArch, "thumb") || strings.HasPrefix(physicalArch, "armv") || physicalArch == "arm" {
+		// These LLVM targets use 32-bit words/pointers and 8-byte i64/f64
+		// alignment. gc/arm instead aligns uint64 to 4 bytes. Named targets
+		// may also use GOARCH=arm merely for source selection, so consume the
+		// resolved physical triple where available. Unsafe constants must
+		// agree with LLVM GEP/allocation layout: a disagreement underallocates
+		// runtime sidecars and corrupts adjacent allocator metadata.
 		return &types.StdSizes{WordSize: 4, MaxAlign: 8}
 	}
 	return sizes
@@ -4616,13 +4752,14 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		input.noUnwind = ctx.coroEmission.CoroNoUnwindCertificate
 		input.trustedInlineCall = ctx.coroEmission.CoroTrustedInlineCallCertificate
 		input.dynamicImplements = ctx.coroEmission.CoroDynamicImplements
+		input.dynamicSignature = ctx.coroEmission.CoroPlanningMetadata().CallableSignature
 		input.assemblyNoSuspend = func(fn *ssa.Function) (string, bool, error) {
 			certificate, ok, err := ctx.coroEmission.CoroAssemblyNoSuspendCertificate(fn)
 			return certificate.ID, ok, err
 		}
 		input.callSitePlan = ctx.coroEmission.CoroCallSitePlan
 		input.rawFunctionAddressCallArgument = ctx.coroEmission.CoroRawFunctionAddressCallArgument
-		input.staticCodeAddressCallArgument = ctx.coroEmission.CoroStaticCodeAddressCallArgument
+		input.staticFunctionReferenceCallArgument = ctx.coroEmission.CoroStaticFunctionReferenceCallArgument
 		input.erasedFunctionInterface = ctx.coroEmission.CoroErasedFunctionInterface
 		input.demandReferences = ctx.coroEmission.CoroDemandReferences
 		input.syncDemandReferences = ctx.coroEmission.CoroSyncDemandReferences
@@ -4654,6 +4791,24 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		return fmt.Errorf("validate coroutine plan: builder must return a plan created by CoroPlanInput.Analyze")
 	}
 	analyzedPlansMu.Unlock()
+	if ctx.coroEmission != nil && ctx.coroEmission.CompleteRuntimeABI() {
+		values, err := cl.DiscoverCoroProgramPredicates(plan, importedLibraryEffects)
+		if err != nil {
+			return fmt.Errorf("discover coroutine program predicates: %w", err)
+		}
+		next, changed, err := advanceCoroProgramPredicates(ctx.coroProgramPredicates, values)
+		if err != nil {
+			return err
+		}
+		if changed {
+			// Reuse the same ProgramIR/SSAPlan pipeline. Each retry enables at
+			// least one new bit, so convergence takes at most bits+1 analyses.
+			// No intermediate plan reaches ABI preflight, archive validation,
+			// metadata publication, or physical emission.
+			ctx.coroProgramPredicates = next
+			return buildCoroPlan(ctx, packages...)
+		}
+	}
 	if ctx.coroEmission != nil {
 		if err := ctx.coroEmission.ValidateCoroPlan(plan); err != nil {
 			return fmt.Errorf("validate coroutine plan coverage: %w", err)
@@ -4725,6 +4880,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		ctx.coroProgramCapabilities = programCapabilities
 		ctx.clCompilation.FinalCoroProgramCapabilities = programCapabilities
 		ctx.clCompilation.FinalCoroProgramCapabilitiesFrozen = true
+		if err := ctx.clCompilation.ValidateCoroLibraryProgramPredicates(); err != nil {
+			return fmt.Errorf("validate coroutine library program predicates: %w", err)
+		}
 	}
 	if ctx.prog != nil {
 		ctx.prog.SetLogicalLocality(true)
@@ -5167,9 +5325,9 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 // requiredCoroGenerationEntryRoots preserves ModeGen's historical contract:
 // the requested package is an IR-generation unit, not a runnable closed
 // program. Every bodyful source-level function in that package is therefore an
-// independently callable managed Go entry. Compiler-generated cgo worker
-// adapters are the deliberate exception: ProgramIR publishes them only through
-// an exact worker certificate and raw/native-stack closure. An emission entry
+// independently callable managed Go entry. Compiler-generated cgo adapters
+// are the deliberate exception: ProgramIR publishes them only through an exact
+// foreign certificate and raw/native-stack closure. An emission entry
 // contributes AsyncDemand so effect propagation selects the correct physical
 // managed entry, but is not a scheduler root: it owns no root factory and does
 // not prevent a non-suspending body from using the compact outcome/plain
@@ -5273,7 +5431,7 @@ func requiredCoroRawABIEntryRoots(
 				}
 				if frozen && site.Elision == cl.CoroCallElidedIntrinsic &&
 					site.Intrinsic &&
-					site.IntrinsicSemantics == cl.CoroIntrinsicCallInlineForeignSuspend {
+					site.IntrinsicSemantics == cl.CoroIntrinsicCallInlineForeignTransaction {
 					managedCgoErrno++
 				}
 			}
@@ -5784,7 +5942,7 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 			coroTimerRequestControlledSymbolV2,
 			coroKeyedParkSymbolV2,
 			coroKeyedResumeSymbolV2,
-			coroSemaphorePrepareOrAbortSymbolV2,
+			coroSemaphorePrepareOrAbortSymbolV3,
 			coroSemaphoreReleaseOrAbortSymbolV2,
 			coroNotifyPrepareOrAbortSymbolV2,
 			coroNotifyOneOrAbortSymbolV2,
@@ -6110,17 +6268,18 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 			sig := fn.Signature
 			pointerPointer := types.NewPointer(types.Typ[types.UnsafePointer])
 			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
-				sig.Params().Len() != 5 || sig.Results().Len() != 1 ||
+				sig.Params().Len() != 6 || sig.Results().Len() != 1 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Uintptr]) ||
 				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.Uintptr]) ||
-				!types.Identical(sig.Params().At(3).Type(), pointerPointer) ||
+				!types.Identical(sig.Params().At(3).Type(), types.Typ[types.Uintptr]) ||
 				!types.Identical(sig.Params().At(4).Type(), pointerPointer) ||
+				!types.Identical(sig.Params().At(5).Type(), pointerPointer) ||
 				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
 				typeParamLen(sig.TypeParams()) != 0 ||
 				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 				return nil, nil, nil, nil, fmt.Errorf(
-					"coroutine same-M foreign-reentry ABI %q must have exact func(unsafe.Pointer, uintptr, uintptr, *unsafe.Pointer, *unsafe.Pointer) uint32 signature",
+					"coroutine same-M foreign-reentry ABI %q must have exact func(unsafe.Pointer, uintptr, uintptr, uintptr, *unsafe.Pointer, *unsafe.Pointer) uint32 signature",
 					name,
 				)
 			}
@@ -6338,13 +6497,14 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 				return nil, nil, nil, nil, fmt.Errorf("coroutine keyed resume V2 ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer) uint32 signature", name)
 			}
 		}
-		if name == coroSemaphorePrepareOrAbortSymbolV2 {
+		if name == coroSemaphorePrepareOrAbortSymbolV3 {
 			sig := fn.Signature
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 0 ||
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 3 || sig.Results().Len() != 0 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.Bool]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine semaphore prepare V2 ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer) signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine semaphore prepare V3 ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, bool) signature", name)
 			}
 		}
 		if name == coroSemaphoreReleaseOrAbortSymbolV2 {
@@ -7055,6 +7215,7 @@ func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) 
 		return coro.PlanDigestMetadata{}, fmt.Errorf("digest imported coroutine program capabilities: %w", err)
 	}
 	return coro.PlanDigestMetadata{
+		ProgramPredicates:   ctx.coroProgramPredicates,
 		CoroABI:             activeCoroABIVersion(ctx.buildConf),
 		SchedulerABI:        activeCoroSchedulerABIVersion(ctx.buildConf),
 		PanicABI:            activeCoroPanicABIVersion(ctx.buildConf),
@@ -7136,12 +7297,20 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		})
 		hasRuntimeABI = hasRuntimeABI || aPkg.PkgPath == llssa.PkgRuntime
 	}
+	if hasRuntimeABI && ctx.coroProgramPredicates.Mask == 0 {
+		// Optional services start disabled. A real registration/entry or an
+		// imported producer's capability can enable them on a later iteration;
+		// an observer/query must not pull itself or an absent Go alias in merely
+		// because its unselected branch was conservatively analyzed first.
+		ctx.coroProgramPredicates = coro.ProgramPredicateRequirements{Mask: coro.ProgramPredicateMask()}
+	}
 	emission, err := cl.PrepareEmissionUniverseWithOptions(ctx.prog, ctx.patches, inputs, cl.EmissionUniverseOptions{
 		// Archive-producing entry resolution with the real runtime input must
 		// freeze every hidden compiler/runtime ABI edge. Isolated plan tests may
 		// deliberately prepare an incomplete package universe.
 		CompleteRuntimeABI:     hasRuntimeABI,
 		CoroTargetCapabilities: ctx.buildConf.coroTargetCapabilities(),
+		CoroProgramPredicates:  ctx.coroProgramPredicates,
 		LogicalLocality:        true,
 		CoroForeignExecutorLeafProofs: ctx.coroRawGlobalSymbols.
 			frozenForeignExecutorLeafProofs(),
@@ -7247,12 +7416,68 @@ func applyBuildModeCompileFlags(mode BuildMode, toolchain crosscompile.NativeToo
 	}
 }
 
+// applyModeGenTargetCompileFlag keeps C/C++ declaration probes in the same ABI
+// as the LLVM module captured by ModeGen. Ordinary non-native GOOS/GOARCH
+// selection historically needed only a Go IR target and therefore leaves the
+// external compiler flags empty. Coroutine whole-program analysis also visits
+// dependency C wrappers before returning the requested module; compiling those
+// wrappers with the host ABI can either fail (for example, Windows __declspec
+// on Darwin) or silently describe the wrong calling convention.
+//
+// CFLAGS are merged after the compiler command prefix and CCFLAGS, so one final
+// authoritative flag also overrides an earlier host default without rewriting
+// user-supplied command prefixes. Avoid appending it when the effective target
+// is already exact.
+func applyModeGenTargetCompileFlag(mode Mode, export *crosscompile.Export) {
+	if mode != ModeGen || export == nil || export.LLVMTarget == "" {
+		return
+	}
+	effective := ""
+	for _, flags := range [][]string{export.CCArgs, export.CCFLAGS, export.CFLAGS} {
+		if target, ok := lastClangTargetFlag(flags); ok {
+			effective = target
+		}
+	}
+	if effective == export.LLVMTarget {
+		return
+	}
+	export.CFLAGS = append(export.CFLAGS, "--target="+export.LLVMTarget)
+}
+
+func lastClangTargetFlag(flags []string) (target string, ok bool) {
+	for i := 0; i < len(flags); i++ {
+		switch flag := flags[i]; {
+		case flag == "-target" || flag == "--target":
+			if i+1 < len(flags) {
+				target, ok = flags[i+1], true
+				i++
+			}
+		case strings.HasPrefix(flag, "-target="):
+			target, ok = strings.TrimPrefix(flag, "-target="), true
+		case strings.HasPrefix(flag, "--target="):
+			target, ok = strings.TrimPrefix(flag, "--target="), true
+		}
+	}
+	return
+}
+
 func cSharedLinkArgs(toolchain crosscompile.NativeToolchain) []string {
 	args := []string{"-shared"}
 	if toolchain.ObjectFormat != crosscompile.ObjectFormatCOFF {
 		args = append(args, "-fPIC")
 	}
 	return args
+}
+
+func cSharedImportLibraryArgs(toolchain crosscompile.NativeToolchain, output string) []string {
+	if toolchain.ObjectFormat != crosscompile.ObjectFormatCOFF || toolchain.ABI != crosscompile.PlatformABIGNU {
+		return nil
+	}
+	// lld-link creates a sibling .lib automatically for MSVC links. MinGW's
+	// GNU-flavor lld needs an explicit output path for the equivalent COFF
+	// import library.
+	imports := strings.TrimSuffix(output, filepath.Ext(output)) + ".lib"
+	return []string{"-Xlinker", "--out-implib", "-Xlinker", imports}
 }
 
 // DefaultBuildTags returns the build tags LLGo always enables for a target.
@@ -7396,9 +7621,10 @@ type context struct {
 
 	// coroPlan is the compilation-scoped authority for the sole stackless
 	// execution architecture.
-	coroPlan        *coro.SSAPlan
-	coroEmission    *cl.EmissionUniverse
-	coroSSAEmission *coro.SSAEmissionUniverse
+	coroPlan              *coro.SSAPlan
+	coroEmission          *cl.EmissionUniverse
+	coroSSAEmission       *coro.SSAEmissionUniverse
+	coroProgramPredicates coro.ProgramPredicateRequirements
 	// coroRawGlobalSymbols freezes package-owned non-Go linker inputs before
 	// whole-program analysis. Each global function-cell certificate consumes
 	// only the profile for its exact stable emission-package identity.
@@ -7448,6 +7674,11 @@ type context struct {
 	stagedPointerSize     int
 	stagedSiteFormat      siteObjectFormat
 	stagedEntrySiteInfo   siteSectionInfo
+
+	// Isolated package backends share the invocation's native output owner.
+	// Its private directory survives until all package archives are published.
+	nativeObjects      nativeObjectWorkspace
+	nativeObjectsOwner *nativeObjectWorkspace
 
 	// stripDarwinLTOLocals is set by the final executable link plan. LTO has
 	// already internalized ordinary Go symbols, but pclnpost still needs them
@@ -7581,6 +7812,7 @@ func releaseBuildStateBeforeExecution(c *context, pkgs []*aPackage) {
 	c.coroPlan = nil
 	c.coroEmission = nil
 	c.coroSSAEmission = nil
+	c.coroProgramPredicates = coro.ProgramPredicateRequirements{}
 	c.coroRawGlobalSymbols = nil
 	c.coroGlobalFunctionSlots = nil
 	c.coroPlanDigest = ""
@@ -7660,21 +7892,22 @@ func preloadPatchedPackageSyntax(prog llssa.Program, patches cl.Patches, dedup p
 }
 
 func (c *context) compiler() *clang.Cmd {
-	config := clang.NewConfig(
-		c.crossCompile.CC,
-		c.crossCompile.CCFLAGS,
-		c.crossCompile.CFLAGS,
-		c.crossCompile.LDFLAGS,
-		c.crossCompile.Linker,
-	)
-	cmd := clang.NewCompiler(config)
+	cmd := clang.NewCompiler(c.clangConfig())
 	cmd.Dir = c.commands.dir
 	cmd.Env = slices.Clone(c.commands.environ)
 	cmd.Verbose = c.shouldPrintCommands(false)
 	return cmd
 }
 
-func (c *context) linker() *clang.Cmd {
+func (c *context) cxxCompiler() *clang.Cmd {
+	cmd := clang.NewCXXCompiler(c.clangConfig())
+	cmd.Dir = c.commands.dir
+	cmd.Env = slices.Clone(c.commands.environ)
+	cmd.Verbose = c.shouldPrintCommands(false)
+	return cmd
+}
+
+func (c *context) clangConfig() clang.Config {
 	config := clang.NewConfig(
 		c.crossCompile.CC,
 		c.crossCompile.CCFLAGS,
@@ -7682,7 +7915,22 @@ func (c *context) linker() *clang.Cmd {
 		c.crossCompile.LDFLAGS,
 		c.crossCompile.Linker,
 	)
+	config.CCArgs = slices.Clone(c.crossCompile.CCArgs)
+	config.CXX = c.crossCompile.CXX
+	config.CXXArgs = slices.Clone(c.crossCompile.CXXArgs)
+	config.LinkerArgs = slices.Clone(c.crossCompile.LinkerArgs)
+	return config
+}
+
+func (c *context) linker() *clang.Cmd {
+	config := c.clangConfig()
 	cmd := clang.NewLinker(config)
+	if config.Linker == "" && config.CXX != "" {
+		// Native LLGo historically linked through clang++. Preserve that C++
+		// runtime behavior while allowing CC and CXX to be selected and probed
+		// independently. An explicit -extld keeps Go's precedence.
+		cmd = clang.NewCXXCompiler(config)
+	}
 	cmd.Dir = c.commands.dir
 	cmd.Env = slices.Clone(c.commands.environ)
 	cmd.Verbose = c.shouldPrintCommands(false)
@@ -7851,6 +8099,7 @@ func finalizePackageBuild(ctx *context, task *packageBuildTask, verbose bool) er
 	if shouldStageNativeExecutableBackend(ctx) {
 		releaseBuiltPackageSource(aPkg)
 	}
+	printCompletedPackage(ctx.buildConf, aPkg)
 	return nil
 }
 
@@ -8057,40 +8306,7 @@ func rewritePrebuiltFuncTab(ctx *context, out string, verbose bool) {
 }
 
 func linkedPackagesForMain(ctx *context, pkg *packages.Package, pkgs []*aPackage) []Package {
-	allPkgs := []*packages.Package{pkg}
-	for _, v := range pkgs {
-		if v.PkgPath != pkg.PkgPath && v.Name == "main" {
-			continue
-		}
-		allPkgs = append(allPkgs, v.Package)
-	}
-	visitRoots := allPkgs
-	if ctx.mode == ModeTest {
-		visitRoots = []*packages.Package{pkg}
-		for _, p := range allPkgs {
-			if isRuntimePkg(p.PkgPath) {
-				visitRoots = append(visitRoots, p)
-			}
-		}
-	}
-	linkedPkgs := make(map[string]bool) // Track linked packages by ID to avoid duplicates
-	var linkedOrder []Package
-	packages.Visit(visitRoots, nil, func(p *packages.Package) {
-		// Skip if already linked this package (by ID)
-		if linkedPkgs[p.ID] {
-			return
-		}
-		aPkg := ctx.pkgs[p]
-		if aPkg == nil {
-			// Fallback: lookup by pkg.ID for packages that may be different instances
-			aPkg = ctx.pkgByID[p.ID]
-		}
-		if p.ExportFile != "" && aPkg != nil { // skip packages that only contain declarations
-			linkedPkgs[p.ID] = true
-			linkedOrder = append(linkedOrder, aPkg)
-		}
-	})
-	return linkedOrder
+	return linkedPackageClosure(ctx, pkg, pkgs)
 }
 
 type mainEntryRequirements struct {
@@ -8343,25 +8559,32 @@ func fullRpathArgs(toolchain crosscompile.NativeToolchain, linkArgs []string) (r
 	return rpathArgs
 }
 
-func linkedPackageMetas(pkgs []Package) ([]*meta.PackageMeta, error) {
+func linkedPackageMetas(pkgs []Package) ([]*meta.PackageMeta, bool, error) {
 	metas := make([]*meta.PackageMeta, 0, len(pkgs))
 	for _, pkg := range pkgs {
-		if pkg == nil || pkg.Meta == nil {
-			pkgPath := "<nil>"
-			if pkg != nil && pkg.Package != nil {
-				pkgPath = pkg.PkgPath
-			}
-			return nil, fmt.Errorf("deadcode drop: linked package %q has no semantic metadata", pkgPath)
+		if pkg == nil {
+			return nil, false, fmt.Errorf("deadcode drop: nil linked package")
+		}
+		if pkg.Meta == nil {
+			return nil, false, nil
 		}
 		metas = append(metas, pkg.Meta)
 	}
-	return metas, nil
+	return metas, true, nil
 }
 
 func applyDeadcodeDropOverrides(ctx *context, pkgs []Package, entryPkg Package, needRuntime bool, verbose bool) error {
-	metas, err := linkedPackageMetas(pkgs)
+	metas, complete, err := linkedPackageMetas(pkgs)
 	if err != nil {
 		return err
+	}
+	if !complete {
+		// Missing facts cannot prove a method dead. Leave the original tables
+		// intact; malformed/conflicting summaries still fail below.
+		if verbose {
+			fmt.Fprintln(os.Stderr, "[dce] retain all method slots: incomplete linked package metadata")
+		}
+		return nil
 	}
 	summary, err := meta.NewGlobalSummary(metas)
 	if err != nil {
@@ -8592,6 +8815,7 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	switch ctx.buildConf.BuildMode {
 	case BuildModeCShared:
 		buildArgs = append(buildArgs, cSharedLinkArgs(ctx.crossCompile.Toolchain)...)
+		buildArgs = append(buildArgs, cSharedImportLibraryArgs(ctx.crossCompile.Toolchain, linkOutput)...)
 	case BuildModeExe:
 		if needsLinuxNoPIE(ctx, linkArgs) {
 			buildArgs = append(buildArgs, "-no-pie")
@@ -8946,10 +9170,8 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string, error) {
 	pkg := aPkg.Package
 	pkgPath := pkg.PkgPath
-	if debugBuild || verbose {
+	if debugBuild || verbose && !ctx.buildConf.PrintPackages {
 		fmt.Fprintln(os.Stderr, pkgPath)
-	} else {
-		printCompiledPackage(ctx.buildConf, aPkg)
 	}
 	if llruntime.SkipToBuild(pkgPath) {
 		pkg.ExportFile = ""
@@ -9301,7 +9523,7 @@ func dropUnusedWindowsTestMain(ctx *context, pkg *aPackage, mod gllvm.Module) {
 	fn.EraseFromParentAsFunction()
 }
 
-func printCompiledPackage(conf *Config, pkg *aPackage) {
+func printCompletedPackage(conf *Config, pkg *aPackage) {
 	if conf.PrintPackages && !pkg.CacheHit {
 		fmt.Fprintln(os.Stderr, pkg.PkgPath)
 	}
@@ -9310,7 +9532,7 @@ func printCompiledPackage(conf *Config, pkg *aPackage) {
 // shouldStageNativeExecutableBackend selects the memory-bounded native
 // executable pipeline. LTO already emits bitcode rather than machine objects,
 // while cross/wasm builds already use an external backend, so neither needs
-// this native instruction-selection isolation. Development-only method DCE
+// this native instruction-selection isolation. Explicit non-LTO method DCE
 // needs every source module live while it constructs strong type overrides;
 // keep that opt-in mode on the direct upstream-compatible path.
 func shouldStageNativeExecutableBackend(ctx *context) bool {
@@ -9512,6 +9734,7 @@ func releaseCoroPlanningScratchBeforeEmission(ctx *context) {
 	ctx.progSSA = nil
 	ctx.dedup = nil
 	ctx.coroSSAEmission = nil
+	ctx.coroProgramPredicates = coro.ProgramPredicateRequirements{}
 	ctx.coroRawGlobalSymbols = nil
 	ctx.coroGlobalFunctionSlots = nil
 }
@@ -10505,22 +10728,32 @@ func clFile(ctx *context, args []string, cFile, expFile, pkgPath string, procFil
 			fmt.Fprintf(os.Stderr, "# compiling %s for pkg: %s\n", llFile, pkgPath)
 			fmt.Fprintln(os.Stderr, "clang", llArgs)
 		}
-		cmd := ctx.compiler()
+		cmd := ctx.compilerForSource(cFile)
 		err := cmd.Compile(llArgs...)
 		check(err)
 	}
 
 	// Always compile to .o for linking
-	objFile := baseName + ".o"
+	objFile, err := ctx.nativeObjectWorkspace().create(cFile)
+	check(err)
 	objArgs := append(args, "-o", objFile, "-c", cFile)
 	if printCmds {
 		fmt.Fprintf(os.Stderr, "# compiling %s for pkg: %s\n", objFile, pkgPath)
 		fmt.Fprintln(os.Stderr, "clang", objArgs)
 	}
-	cmd := ctx.compiler()
-	err := cmd.Compile(objArgs...)
+	cmd := ctx.compilerForSource(cFile)
+	err = cmd.Compile(objArgs...)
 	check(err)
 	procFile(objFile)
+}
+
+func (c *context) compilerForSource(path string) *clang.Cmd {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".cc", ".cpp", ".cxx":
+		return c.cxxCompiler()
+	default:
+		return c.compiler()
+	}
 }
 
 func pkgExists(initial []*packages.Package, pkg *packages.Package) bool {

@@ -208,8 +208,8 @@ type coroFunctionPreamblePlan struct {
 	emitsGoBody bool
 	// managedGenerationEntry distinguishes an independently callable managed
 	// Go definition from one compiler-generated raw/native-stack adapter. Both
-	// have frontend-emitted Go bodies, but a generated cgo worker adapter enters
-	// the plan only through its exact ProgramIR worker certificate and raw
+	// have frontend-emitted Go bodies, but a generated cgo adapter enters the
+	// plan only through its exact ProgramIR foreign certificate and raw
 	// closure; giving it an additional ModeGen async root would manufacture an
 	// unsupported managed primary.
 	managedGenerationEntry bool
@@ -310,12 +310,12 @@ func (plan coroFunctionPreamblePlan) loweringRecipe() (coro.RecipeID, error) {
 	return coro.RecipeID(strings.TrimSuffix(string(recipe), ".v0") + ".recover-frame.v0"), nil
 }
 
-func prepareCoroEmissionFunctionShape(fn *ssa.Function) (coroEmissionFunctionShape, error) {
+func prepareCoroEmissionFunctionShape(fn *ssa.Function, programs ...*coroProgramIR) (coroEmissionFunctionShape, error) {
 	shape := coroEmissionFunctionShape{
-		dynamicCleanup:           coroFunctionRequiresDynamicCleanup(fn),
+		dynamicCleanup:           coroFunctionRequiresDynamicCleanup(fn, programs...),
 		terminalResultAllocation: make(map[*ssa.Alloc]none),
 	}
-	allocations, err := coroStaticTerminalReconstructionAllocations(fn)
+	allocations, err := coroStaticTerminalReconstructionAllocations(fn, programs...)
 	if err != nil {
 		return coroEmissionFunctionShape{}, err
 	}
@@ -367,7 +367,7 @@ func (builder coroProgramIRBuilder) materializeFunctionPreamble(
 	plan := coroFunctionPreamblePlan{
 		emitsGoBody: ftype == goFunc,
 		managedGenerationEntry: ftype == goFunc &&
-			!isGeneratedCgoWorkerAdapterName(ownerFn.Name()),
+			!isGeneratedCgoAdapterName(ownerFn.Name()),
 	}
 	if ftype == goFunc && ctx.functionUsesRecover(ownerFn) {
 		plan.recoverFrameBinding = true
@@ -954,6 +954,13 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		}
 	}
 
+	// Ordinary calls, go statements, and defer statements all evaluate the
+	// interface receiver at the source site. Freeze that normalization edge
+	// once, before their distinct scheduling/cleanup recipes are selected.
+	if call, ok := instr.(ssa.CallInstruction); ok && call.Common().IsInvoke() {
+		add("IfacePtrData")
+	}
+
 	switch v := instr.(type) {
 	case *ssa.BinOp:
 		u.binOpRuntimeHelpers(ctx, v, add)
@@ -993,7 +1000,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 				emissionAssertNilDerefBaseRuntimeHelpers(v.X, add)
 				add("AssertNilDeref")
 			}
-			if unused && !elidedZeroSizedFreeVar && !ssaAddressValueProvenNonNilAt(v.X, v) {
+			if unused && !elidedZeroSizedFreeVar && !ctx.addressValueProvenNonNilAt(v.X, v) {
 				// compileInstrOrValue elides the unused load but must still
 				// evaluate its complete pointer chain and preserve the outer Go
 				// dereference. assertNilDerefBase may emit AssertNilDerefPtr for
@@ -1020,15 +1027,12 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		if shape.dynamicCleanup {
 			add("AllocU", "FreeDeferNode")
 		}
-		if v.Call.IsInvoke() {
-			add("IfacePtrData")
-		}
 		if builtin, ok := v.Call.Value.(*ssa.Builtin); !ok ||
 			builtin.Name() != "panic" && builtin.Name() != "recover" {
 			u.builtinRuntimeHelpers(ctx, &v.Call, add)
 		}
 	case *ssa.FieldAddr:
-		if ctx.isAddressOfFieldAddr(v) && !ssaAddressValueProvenNonNilAt(v.X, v) {
+		if ctx.isAddressOfFieldAddr(v) && !ctx.addressValueProvenNonNilAt(v.X, v) {
 			add("AssertNilDeref")
 		}
 	case *ssa.Index:
@@ -1053,10 +1057,10 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		needsNil := false
 		if _, pointer := types.Unalias(ctx.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer {
 			if boundsDisabled {
-				needsNil = emissionArrayPointerNeedsNilCheck(v.X, v)
+				needsNil = emissionArrayPointerNeedsNilCheck(ctx, v.X, v)
 			} else {
 				needsNil = !emissionKnownNonNilArrayBase(v.X) &&
-					!(safeBounds && ssaAddressValueProvenNonNilAt(v.X, v))
+					!(safeBounds && ctx.addressValueProvenNonNilAt(v.X, v))
 			}
 		}
 		if needsNil {
@@ -1072,7 +1076,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		}
 		if emissionBoundsChecksDisabled(ctx) {
 			if _, pointer := types.Unalias(ctx.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
-				emissionArrayPointerNeedsNilCheck(v.X, v) {
+				emissionArrayPointerNeedsNilCheck(ctx, v.X, v) {
 				add("AssertNilDeref")
 			}
 			break
@@ -1200,11 +1204,6 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		if emissionCallNeedsManagedCoroResultSlot(ctx, v) {
 			add(coroManagedFrameSlotAllocZCall)
 		}
-		if v.Call.IsInvoke() {
-			// Builder.Imethod extracts the receiver through this runtime helper
-			// before issuing the physical closure call.
-			add("IfacePtrData")
-		}
 		// Exact intrinsic opcodes are frozen by the LLSSA link table. Pure
 		// frontend/report universes intentionally have no such table and do not
 		// materialize physical runtime-helper edges.
@@ -1219,7 +1218,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 				add("AllocU", "CStrCopy")
 			case intrinsic && opcode == llgoCgoCgocall &&
 				v.Parent() != nil && isCgoC2func(v.Parent().Name()):
-				// The exact generated C2 worker transaction resumes in the Go
+				// The exact generated C2 foreign transaction resumes in the Go
 				// wrapper and constructs its (result, error) pair there. The nil
 				// error slot owns AllocU. The non-nil syscall.Errno conversion has
 				// one statically known concrete type, so Builder.MakeInterface now
@@ -1690,9 +1689,9 @@ func emissionKnownNonNilArrayBase(value ssa.Value) bool {
 // semantics. Recursive SSA address proof lets generated field/index addresses
 // consume a dominating proof on their base without rediscovering pointer facts
 // from the lowered LLVM value.
-func emissionArrayPointerNeedsNilCheck(value ssa.Value, use ssa.Instruction) bool {
+func emissionArrayPointerNeedsNilCheck(ctx *context, value ssa.Value, use ssa.Instruction) bool {
 	return !emissionKnownNonNilArrayBase(value) &&
-		!ssaAddressValueProvenNonNilAt(value, use)
+		!ctx.addressValueProvenNonNilAt(value, use)
 }
 
 func isEmissionVargsAlloc(ctx *context, alloc *ssa.Alloc) bool {

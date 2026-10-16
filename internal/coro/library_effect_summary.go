@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	LibraryEffectSummaryVersion = "v13"
+	LibraryEffectSummaryVersion = "v17"
 
 	// LibraryEffectExportIngressABIV1 identifies the compiler-generated exact
 	// C-to-managed adapter published by LibraryEffectExportIngress. It is
@@ -61,7 +61,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 13,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 17,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -116,6 +116,10 @@ type LibraryEffectFunction struct {
 	// what executing the function can require. A consumer propagates them through
 	// its own call graph instead of rescanning unavailable library bodies.
 	ProgramCapabilities ProgramCapabilities `json:"program_capabilities"`
+	// ProgramPredicates records consumed true AND false compilation predicates.
+	// Its mask is propagated through the final call plan, not inferred from a
+	// service-demand bit, symbol name or already-specialized physical body.
+	ProgramPredicates ProgramPredicateRequirements `json:"program_predicates"`
 	// OutcomePlainSymbol is the exact synchronous static-call entry certified by
 	// AtomicCostProof or StaticOutcome. It equals PrimarySymbol when outcome-plain
 	// is primary and names a separate twin when ManagedEntry remains coroutine.
@@ -126,6 +130,12 @@ type LibraryEffectFunction struct {
 	// therefore uses the compiler's private managed suffix. Summary validation
 	// requires a matching versioned LibraryEffectExportIngress record.
 	ExportIngress bool `json:"export_ingress,omitempty"`
+	// Delivery is the optional producer-owned result-delivery contract. Its
+	// helpers use the same function inventory as every other imported callable;
+	// no address registry or separate resource metadata section is needed.
+	// omitzero preserves the compact ordinary-function record. Value semantics
+	// keep canonical summaries and the immutable import index free of aliases.
+	Delivery DeliveryRecipeRecord `json:"delivery,omitzero"`
 }
 
 func (function LibraryEffectFunction) HasStaticOutcome() bool {
@@ -352,6 +362,14 @@ func (function LibraryEffectFunction) validate() error {
 	if err := validateSHA256Hex("library function ABI hash", function.ABIHash); err != nil {
 		return err
 	}
+	if !function.Delivery.IsZero() {
+		if err := function.Delivery.Validate(); err != nil {
+			return fmt.Errorf("coro: library function %q delivery: %w", function.ID, err)
+		}
+		if function.Delivery.Producer != function.ID || function.Delivery.ProducerABI != function.ABIHash {
+			return fmt.Errorf("coro: library function %q delivery does not bind its producer identity and ABI", function.ID)
+		}
+	}
 	if err := function.Effect.Validate(); err != nil {
 		return err
 	}
@@ -372,6 +390,9 @@ func (function LibraryEffectFunction) validate() error {
 	}
 	if !function.ProgramCapabilities.Valid() {
 		return fmt.Errorf("coro: library function %q has invalid program capabilities %#x", function.ID, function.ProgramCapabilities)
+	}
+	if !function.ProgramPredicates.Valid() {
+		return fmt.Errorf("coro: library function %q has invalid program predicate requirements %+v", function.ID, function.ProgramPredicates)
 	}
 	if function.Primary == PrimaryExternal {
 		return fmt.Errorf("coro: library function %q has no producer-owned primary", function.ID)
@@ -864,6 +885,7 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 		exportSymbols:     make(map[string]LibraryEffectExportBinding),
 		ingressSymbols:    make(map[string]LibraryEffectExportIngress),
 	}
+	var deliveries []LibraryEffectFunction
 	for summaryIndex, summary := range summaries {
 		canonical, err := summary.canonical()
 		if err != nil {
@@ -877,6 +899,9 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 				return nil, fmt.Errorf("coro: duplicate imported library effect function %q", function.ID)
 			}
 			index.functions[function.ID] = function
+			if !function.Delivery.IsZero() {
+				deliveries = append(deliveries, function)
+			}
 		}
 		for _, callable := range canonical.ForeignCallables {
 			if _, duplicate := index.foreignFunctions[callable.Function]; duplicate {
@@ -904,6 +929,34 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 			index.ingressSymbols[ingress.Symbol] = ingress
 		}
 	}
+	// Resolve after collecting every package: an initializer or drop may live
+	// in a different input archive. Missing or incompatible helpers fail here,
+	// before a consumer can freeze lowering or publish a descriptor.
+	for _, function := range deliveries {
+		record := function.Delivery
+		for _, helper := range []struct {
+			role string
+			id   FunctionID
+			abi  string
+		}{
+			{"initializer", record.Initializer, record.InitializerABI},
+			{"drop", record.Drop, record.DropABI},
+		} {
+			fact, found := index.functions[helper.id]
+			if !found || fact.ABIHash != helper.abi {
+				return nil, fmt.Errorf("coro: library delivery %q has no exact %s %q ABI", function.ID, helper.role, helper.id)
+			}
+			if !fact.Delivery.IsZero() {
+				return nil, fmt.Errorf("coro: library delivery %q %s must not itself publish resource results", function.ID, helper.role)
+			}
+		}
+		if consumer.PointerBits < 64 {
+			maximum := uint64(1)<<consumer.PointerBits - 1
+			if record.ResultSize > maximum || record.ResultAlign > maximum {
+				return nil, fmt.Errorf("coro: library delivery %q result layout exceeds the target pointer width", function.ID)
+			}
+		}
+	}
 	return index, nil
 }
 
@@ -913,6 +966,14 @@ func (index *LibraryEffectIndex) Lookup(id FunctionID) (LibraryEffectFunction, b
 	}
 	function, ok := index.functions[id]
 	return function, ok
+}
+
+// LookupDelivery returns a value copy only after the producer and both helper
+// records have passed the shared compatibility/index checks. Physical callers
+// must still bind their normalized source/helper signatures before emission.
+func (index *LibraryEffectIndex) LookupDelivery(id FunctionID) (DeliveryRecipeRecord, bool) {
+	function, found := index.Lookup(id)
+	return function.Delivery, found && !function.Delivery.IsZero()
 }
 
 // LookupForeignFunction returns one exact imported C declaration by its stable
