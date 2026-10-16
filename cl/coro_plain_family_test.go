@@ -114,3 +114,51 @@ func Root(second, nilValue bool) {
 		}
 	}
 }
+
+func TestCoroOpaqueCallableFamilyKeepsUniversalEntry(t *testing.T) {
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			prog, pkg, plan, source := compileCoroOutcomePlainSourceWithResolution(t, target.arch, `package foo
+func Candidate() *byte { return nil }
+var published = Candidate
+var dynamic func() *byte
+func Apply(callback func() *byte) *byte { return callback() }
+func Root() *byte { return Apply(dynamic) }
+`, "Root", -1, coro.DynamicCHAClosed, func(config *coro.SSAConfig) {
+				config.ClassifyUnknownCall = func(_ *ssa.Function, call ssa.CallInstruction) (coro.UnknownTarget, error) {
+					if call.Common().StaticCallee() == nil && !call.Common().IsInvoke() {
+						return coro.UnknownManagedDispatch, nil
+					}
+					return coro.UnknownManaged, nil
+				}
+			})
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+			apply := source.Func("Apply")
+			call := onlyCoroManagedDispatchValidationCall(t, apply)
+			fact, found := plan.CallPlan(call)
+			if !found || !fact.Open || coroManagedDispatchPublishedEntry(plan, fact) != coro.ManagedEntryNone {
+				t.Fatalf("opaque descriptor selected a source-only entry: %+v present=%t", fact, found)
+			}
+			owner, _ := plan.FunctionPlan(apply)
+			if owner.Emission != coro.EmitCoroutine || owner.StaticOutcome {
+				t.Fatalf("opaque Apply acquired a synchronous-only body: %+v", owner)
+			}
+			body := requireCoroPhysicalFunction(t, module, "foo.Apply")
+			if !strings.Contains(body.String(), "coro.dispatch.version.invalid") {
+				t.Fatalf("universal descriptor validation disappeared:\n%s", body.String())
+			}
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+			runCoroABITestPipeline(t, prog, module)
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

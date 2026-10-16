@@ -1206,6 +1206,7 @@ func compileCoroOutcomePlainSourceWithResolution(
 	source, rootName string,
 	maxPlainInstructions int,
 	dynamicResolution coro.DynamicResolution,
+	configure ...func(*coro.SSAConfig),
 ) (llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Package) {
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
@@ -1253,6 +1254,9 @@ func compileCoroOutcomePlainSourceWithResolution(
 		config.ClassifyDemandReferences = universe.CoroDemandReferences
 		config.ClassifySyncDemandReferences = universe.CoroSyncDemandReferences
 		config.ClassifyManagedValueReferences = universe.CoroPlanningMetadata().ManagedValueReferences
+	}
+	for _, option := range configure {
+		option(&config)
 	}
 	plan, err := coro.AnalyzeSSA(
 		ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, config,

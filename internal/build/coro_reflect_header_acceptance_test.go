@@ -33,6 +33,7 @@ func TestCoroReflectHeaderGCAcceptance(t *testing.T) {
 		{"goroot", filepath.Join(runtime.GOROOT(), "test", "unsafe_string_data.go"), ""},
 		{"reflect-pointer-goroot", filepath.Join(runtime.GOROOT(), "test", "fixedbugs", "issue15329.go"), ""},
 		{"reflect-unsafeaddr-goroot", filepath.Join(runtime.GOROOT(), "test", "fixedbugs", "issue35073a.go"), ""},
+		{"reflect-result-gc-goroot", filepath.Join(runtime.GOROOT(), "test", "fixedbugs", "issue27695b.go"), ""},
 		{"global-slice-header-goroot", filepath.Join(runtime.GOROOT(), "test", "fixedbugs", "issue35027.go"), ""},
 		{"gc-await", "./internal/build/_testgo/coro_reflect_header_gc", "reflect header exact owner survives GC and await"},
 		{"consumed-pointer-result", "./internal/build/_testgo/coro_consumed_pointer_gc", "consumed pointer result is collectible with a live caller"},

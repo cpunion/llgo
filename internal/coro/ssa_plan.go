@@ -63,6 +63,8 @@ const (
 	// DynamicCHAClosed removes the unknown edge only when CHA reports a nonempty
 	// candidate set and every candidate remains in the effective program. The
 	// caller is responsible for establishing the closed-world assumption.
+	// Opaque callable producers (reflection assertions, unsafe loads, unavailable
+	// bodies) retain an open domain despite matching source declarations.
 	DynamicCHAClosed
 )
 
@@ -1769,6 +1771,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := flow.validateDirectPlainCallArguments(); err != nil {
 		return nil, fmt.Errorf("coro: validate trusted direct-plain call arguments: %w", err)
 	}
+	if err := flow.retainOpaqueCallableDomains(bodyFunctions, config.DynamicSignature); err != nil {
+		return nil, fmt.Errorf("coro: retain opaque function-value domains: %w", err)
+	}
 	if err := flow.validateRawFunctionAddressCallArguments(rawFunctionAddressCallArguments); err != nil {
 		return nil, fmt.Errorf("coro: validate trusted raw function-address call arguments: %w", err)
 	}
@@ -2263,15 +2268,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 						return nil, err
 					}
 				}
-				closedWorldResolved := config.DynamicResolution == DynamicCHAClosed && len(rawCandidates) != 0
-				if closedWorldResolved {
-					for candidate := range rawCandidates {
-						if !includedSet[candidate] {
-							closedWorldResolved = false
-							break
-						}
-					}
-				}
+				closedWorldResolved := flow.dynamicCallClosed(call)
 				if !closedWorldResolved {
 					if err := addSSAUnknownCall(graph, ids[caller], kind, target); err != nil {
 						return nil, err

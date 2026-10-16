@@ -653,6 +653,7 @@ type ssaFuncFlow struct {
 	ids                 map[*ssa.Function]FunctionID
 	dynamicCandidates   map[ssa.CallInstruction]map[*ssa.Function]struct{}
 	dynamicResolution   DynamicResolution
+	opaqueDynamicCalls  map[ssa.CallInstruction]bool
 	canonicalizer       *ssaFunctionCanonicalizer
 	managedResolver     SSAManagedFunctionValueResolver
 	directPlainArgs     map[ssaCallArgumentUse]struct{}
@@ -1852,6 +1853,9 @@ func ssaSpawnNeedsDispatch(call ssa.CallInstruction) bool {
 }
 
 func (f *ssaFuncFlow) dynamicCallClosed(call ssa.CallInstruction) bool {
+	if f.opaqueDynamicCalls[call] {
+		return false
+	}
 	candidates := f.dynamicCandidates[call]
 	if len(candidates) == 0 {
 		return false

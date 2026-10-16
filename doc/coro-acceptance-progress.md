@@ -201,6 +201,28 @@ deferred result slots reuse the producer's already materialized allocator edge.
 The native/wasm32 gate now verifies both ordinary and deferred large consumers.
 The actual six-mode rerun and unchanged architecture gate remain required.
 
+Immutable v81 closes that static-route gate: the permanent native test passes
+all six modes, **60/60 executions**, including deferred and range-yield ownership
+and canceling the second static acquisition site (43.39s test / 1257.8MiB peak,
+matching source-after). Compiler SHA-256 is
+`e64865c15297d0f0810421b7646086bc63ebd7e0a67780fb1dee785342e6ecc6`;
+manifest is `87fa254f9904020726470eaf1d39e27699d7b6a6c108554f5fa41ffd677539de`.
+The final selected compiler/architecture gates pass 10.845s / 0.845s with
+unchanged budgets (1241.4MiB peak). [PR #267](https://github.com/cpunion/llgo/pull/267)
+targets `llvm-coro` at exact head `7fe24b518`; CI run `38888860337` is pending.
+
+The reflection failure is isolated on `coro/opaque-function-family-20261016`.
+A native debugger stops at an indirect call through a nil plain entry in
+`main.f$outcome`: source-only CHA had closed the signature around a normal
+literal, while the actual MakeFunc descriptor publishes only coroutine entry.
+Four minimal plan regressions fail on the old implementation (assertion,
+comma-ok assertion, external function result and unsafe load). The correction
+retains opaque callable domains in the existing SSA flow; exact scalar-flow
+and explicit closed-call proofs remain valid. Host core race passes 23.471s;
+the compiler selection passes 38.732s, unchanged architecture 0.807s, and
+native/wasm32 open-vs-closed-family CoroSplit gate 3.369s. Actual unchanged
+GOROOT execution is still required before calling the reflection bug fixed.
+
 GOROOT shard 1 also reports `fixedbugs/issue27695b.go` in the reflection/GC
 path. A strict unchanged-case v79 rerun still fails with `invalid zero-ticket
 coroutine run decision` (228.29s case; 2086.2MiB peak, source-after matched).
