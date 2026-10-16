@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	coroDeliveryGuardABI       = "llgo.coro.borrowed-result-guards.v1"
+	coroDeliveryGuardABI       = "llgo.coro.borrowed-result-guards.v2"
 	coroDeliveryInitializeCall = "coro.delivery.initialize"
 	coroDeliveryDropCall       = "coro.delivery.drop"
 )
@@ -36,6 +36,8 @@ type coroSourceDeliveryRecipe struct {
 	consumerInitialize string
 	consumerDrop       string
 	archive            *coroArchiveDeliveryRecipe
+	loan               coro.SSABorrowedValueProof
+	helperLoans        [2]coro.SSABorrowedParameterProof
 }
 
 type coroDeliverySourceUniverse interface {
@@ -215,6 +217,31 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 	}
 	if err := builder.freezeArchiveDeliveryProducers(ir); err != nil {
 		return err
+	}
+	// Call-site contracts are complete here. Reuse their exact logical-call
+	// lifetime, rather than reparsing C declarations or trusting inert stubs.
+	borrow := coroBorrowedAllocationProofConfig(u)
+	borrow.BorrowedCallArgument = func(call *ssa.Call, _ int) bool {
+		frozen, present := ir.callPlans[call]
+		return present && frozen.failure == "" && frozen.plan.ArgumentsBorrowedUntilCompletion
+	}
+	for producer, recipe := range ir.deliveryProducers {
+		if recipe.archive != nil {
+			continue // The checked producer ABI binds the library's proof.
+		}
+		loan, proven := coro.ProveSSABorrowedValueWithConfig(recipe.borrow, borrow)
+		if !proven {
+			return fmt.Errorf("llgo.coroBorrowResult: borrowed output address may escape producer %q", producer.String())
+		}
+		recipe.loan = loan
+		for ordinal, helper := range []*ssa.Function{recipe.initializer, recipe.drop} {
+			proof, proven := coro.ProveSSABorrowedParameterWithConfig(helper, 0, borrow)
+			if !proven {
+				return fmt.Errorf("llgo.coroBorrowResult: delivery helper retains borrowed output: %q", helper.String())
+			}
+			recipe.helperLoans[ordinal] = proof
+		}
+		ir.deliveryProducers[producer] = recipe
 	}
 	if len(ir.deliveryProducers) == 0 {
 		return nil

@@ -53,6 +53,15 @@ type SSABorrowedParameterProof struct {
 	ParametersProven uint32
 }
 
+// SSABorrowedValueProof applies the same closed address-graph proof to an
+// existing pointer value, such as a caller-owned result sink. It grants no
+// allocation reclassification or permission to expose a hidden ABI argument.
+type SSABorrowedValueProof struct {
+	Value            ssa.Value
+	FunctionsVisited uint32
+	ParametersProven uint32
+}
+
 // SSABorrowedAllocationConfig defines which static callee body is authoritative
 // for the final program. Frontends which replace a source SSA body with an
 // intrinsic, foreign symbol, or other physical implementation must reject that
@@ -142,6 +151,35 @@ func ProveSSABorrowedParameterWithConfig(
 		config:     config,
 	}
 	if !analyzer.proveParameter(function, index) {
+		return proof, false
+	}
+	proof.FunctionsVisited = uint32(len(analyzer.functions))
+	for _, state := range analyzer.parameters {
+		if state == ssaBorrowProofAccepted {
+			proof.ParametersProven++
+		}
+	}
+	return proof, true
+}
+
+// ProveSSABorrowedValueWithConfig proves that one existing pointer's complete
+// address graph ends with its owning logical invocation. It reuses the same
+// transitive callee and foreign-call certificates as allocation/parameter
+// borrowing; unknown calls, captures and detached execution fail closed.
+func ProveSSABorrowedValueWithConfig(value ssa.Value, config SSABorrowedAllocationConfig) (SSABorrowedValueProof, bool) {
+	proof := SSABorrowedValueProof{Value: value}
+	if value == nil || value.Parent() == nil || value.Type() == nil {
+		return proof, false
+	}
+	if _, pointer := types.Unalias(value.Type()).Underlying().(*types.Pointer); !pointer {
+		return proof, false
+	}
+	analyzer := &ssaBorrowedAllocationAnalyzer{
+		parameters: make(map[ssaBorrowParameterKey]ssaBorrowProofState),
+		functions:  make(map[*ssa.Function]struct{}),
+		config:     config,
+	}
+	if !analyzer.proveAddressValue(value.Parent(), value) {
 		return proof, false
 	}
 	proof.FunctionsVisited = uint32(len(analyzer.functions))

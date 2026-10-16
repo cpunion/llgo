@@ -248,6 +248,99 @@ func Acquire(path string) (int, error) {
 func Root() { Acquire("fixture") }
 `
 
+func TestCoroDeliveryRejectsBorrowedOutputEscape(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			for _, test := range []struct{ name, declarations, use string }{
+				{"global", "var leaked *Result", "leaked = out"},
+				{"interior", "var leaked *int", "leaked = &out.R0"},
+				{"unsafe", "var leaked unsafe.Pointer", "leaked = unsafe.Pointer(out)"},
+				{"interface", "var leaked any", "leaked = out"},
+				{"closure", "var leaked func()", "field := &out.R0; leaked = func() { *field = 1 }"},
+				{"transitive", "var leaked *Result; func escape(p *Result) { leaked = p }", "escape(out)"},
+				{"goroutine", "func mutate(p *Result) { p.R0 = 1 }", "go mutate(out)"},
+				{"dynamic", "var observer func(*Result)", "observer(out)"},
+				{"staged", "var leaked *Result", "pair := struct { P *Result }{out}; leaked = pair.P"},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					source := strings.Replace(coroDeliverySourceFixture, "return out.R0, out.R1", test.use+"; return out.R0, out.R1", 1) + "\n" + test.declarations
+					pkg, _, files := buildGoSSAPkg(t, source)
+					prog := newLLSSAProgForTarget(t, target.arch)
+					defer prog.Dispose()
+					_, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
+					if err == nil || !strings.Contains(err.Error(), "borrowed output address may escape") {
+						for _, block := range pkg.Func("Acquire").Blocks {
+							for _, instruction := range block.Instrs {
+								t.Logf("%T: %s", instruction, instruction)
+							}
+						}
+						t.Fatalf("unproven output loan was accepted: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCoroDeliveryRejectsHelperOutputEscape(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, helper := range []string{"initFD", "dropFD"} {
+		t.Run(helper, func(t *testing.T) {
+			source := coroDeliverySourceFixture
+			if helper == "initFD" {
+				source = strings.Replace(source, "out.R0 = -1; out.R1 = nil", "leaked = out; out.R0 = -1; out.R1 = nil", 1)
+			} else {
+				source = strings.Replace(source, "_ string) { out.R0 = -1 }", "_ string) { leaked = out; out.R0 = -1 }", 1)
+			}
+			source += "\nvar leaked *Result"
+			pkg, _, files := buildGoSSAPkg(t, source)
+			prog := newLLSSAProgForTarget(t, nil)
+			defer prog.Dispose()
+			_, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
+			if err == nil || !strings.Contains(err.Error(), "delivery helper retains borrowed output") {
+				t.Fatalf("escaping %s was accepted: %v", helper, err)
+			}
+		})
+	}
+}
+
+func TestCoroDeliveryOutputLifetimeUsesFrozenCallSiteContracts(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name, declaration string
+		accepted          bool
+	}{
+		{"managed", "func observe(p *Result) { p.R0 = 7 }", true},
+		{"foreign-default", "//go:linkname observe C.delivery_loan_observer\nfunc observe(*Result)", true},
+		{"foreign-retained", "//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=retained\n//go:linkname observe C.delivery_loan_observer\nfunc observe(*Result)", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := strings.Replace(coroDeliverySourceFixture, "return out.R0, out.R1", "observe(out); return out.R0, out.R1", 1) + "\n" + test.declaration
+			pkg, _, files := buildGoSSAPkg(t, source)
+			prog := newLLSSAProgForTarget(t, nil)
+			defer prog.Dispose()
+			u, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
+			if !test.accepted {
+				if err == nil || !strings.Contains(err.Error(), "borrowed output address may escape") {
+					t.Fatalf("untrusted C lifetime was accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			recipe, present, err := u.coroProgramIR.sourceDelivery(pkg.Func("Acquire"))
+			if err != nil || !present || recipe.loan.Value != recipe.borrow || recipe.loan.FunctionsVisited == 0 {
+				t.Fatalf("closed logical call lost its output loan: %+v: %v", recipe, err)
+			}
+		})
+	}
+}
+
 func TestCoroDeliverySourceFreezesExactTypedHelperIdentities(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, target := range []struct {
@@ -380,6 +473,26 @@ func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target, p
 			if !found || !fact.Effect.Contains(coro.AwaitStructured) || !fact.Exec.Contains(coro.NeedsRuntimeContext) {
 				t.Fatalf("hidden %s did not automatically color %s: %+v present=%t", asyncHelper, function, fact, found)
 			}
+		}
+	}
+	if recipe.loan.Value != recipe.borrow || recipe.loan.FunctionsVisited == 0 ||
+		recipe.helperLoans[0].Function != recipe.initializer || recipe.helperLoans[1].Function != recipe.drop {
+		t.Fatal("source recipe lost its exact output/helper lifetime proofs")
+	}
+	for _, missing := range []string{"producer", "initializer", "drop"} {
+		corrupt := *universe.coroProgramIR
+		broken := recipe
+		switch missing {
+		case "producer":
+			broken.loan = coro.SSABorrowedValueProof{}
+		case "initializer":
+			broken.helperLoans[0] = coro.SSABorrowedParameterProof{}
+		case "drop":
+			broken.helperLoans[1] = coro.SSABorrowedParameterProof{}
+		}
+		corrupt.deliveryProducers = map[*ssa.Function]coroSourceDeliveryRecipe{producer: broken}
+		if _, err := prepareCoroDeliveryFunctionPlan(producer, plan, &corrupt, universe); err == nil || !strings.Contains(err.Error(), "lifetime proof") {
+			t.Fatalf("physical preflight accepted missing %s proof: %v", missing, err)
 		}
 	}
 	for _, function := range []*ssa.Function{recipe.initializer, recipe.drop} {

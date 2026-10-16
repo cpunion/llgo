@@ -796,6 +796,23 @@ The corrected gate requests cancellation while the program is running and checks
 the exact canceled resource identity. Descriptor publication, external defer
 owners, output-loan lifetime and reflection resource handoff remain unfinished.
 
+The following isolated branch closes the source output-loan proof boundary,
+not descriptor publication. It reuses the existing interprocedural borrowed
+allocation/parameter analyzer for the borrowed result value and both helper
+output parameters, after consuming the already frozen call-site lifetime
+contracts. The physical preflight checks all three exact identities; guard ABI
+v2 participates in the existing source/library hash. There is no new runtime
+storage, allocation, check or directive. Corrected native/wasm32 escape fixtures
+fail18/18 against immutable v101 (0.594s/1262.9MiB), then pass after the proof;
+the initial closure fixture instead violated the earlier exact return-projection
+gate and is not evidence of a new lifetime bug. Escaping initializer/drop
+parameters separately reproduce the missing check. A real indexed archive
+still passes three cancellation/cleanup executions (25.357s/722.7MiB), and the
+shared value/parameter/allocation proof race group passes1.418s/346.8MiB.
+The invalid bodyful-C/declaration fixture is rejected by the existing contract
+shape gate, not treated as a causal lifetime failure. Whole-compiler/final
+immutable acceptance of this follow-up remains pending.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
@@ -1667,13 +1684,13 @@ bound is still explicit.
 ## Remaining work, in order
 
 1. Finish current executable acceptance on immutable compiler/source pairs.
-   Complete v67/v70 `test/go` cohorts pass 268/268 each; v70 native Go demos
-   pass 73/73. A fresh v83 `test/go` is executing after the opaque-callable fix;
-   v82's compiled-only attempt stopped on a missing `lsof` in the caller PATH.
-   The single-snapshot v70 180-package stdlib evaluation has 46 completed
-   package passes and no failure so far; it remains active. The older fixed
-   v65-source/v64-compiler eight-shard GOROOT evaluation has completed shards
-   0/1 and is running shard 2. Preserve every older failure/resource stop;
+   Latest integrated v100 `test/go` passes271/271; immutable v101 is running
+   the complete fresh-build cohort for PR277. The earlier v70 native Go demos
+   pass73/73. The single-snapshot v70 180-package stdlib evaluation has124
+   completed package passes and no failure so far; it remains active. The older
+   fixed v65-source/v64-compiler eight-shard GOROOT evaluation has completed
+   shards0–5 and is running shard6 (117/135 done at this observation).
+   Preserve every older failure/resource stop;
    focused passes on later snapshots do not rewrite those journals or establish
    a final-snapshot whole-suite pass. Keep unchanged inputs, private scratch
    reclamation and child joins. Do not update instruction goldens or xfails
