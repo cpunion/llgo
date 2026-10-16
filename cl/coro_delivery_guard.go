@@ -76,6 +76,9 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 					if !planned || !fact.ResultDelivery {
 						continue
 					}
+					if dynamic.largeResult && dynamic.allocate == "" {
+						return nil, fmt.Errorf("large dynamic delivery requires its frozen conditional result allocator")
+					}
 					if len(fact.Targets) == 1 {
 						target, _ := whole.Function(fact.Targets[0])
 						recipe = ir.deliveryProducers[target]
@@ -161,7 +164,7 @@ func (s *coroStaticCleanupState) bindDelivery(p *context, plan *coroDeliveryFunc
 		if site.dynamic != nil {
 			guard.dropDescriptor = p.coroFrameAlloc(p.prog.VoidPtr())
 		}
-		if _, deferred := site.call.(*ssa.Defer); deferred && s.dynamic {
+		if _, deferred := site.call.(*ssa.Defer); deferred && (s.dynamic || site.dynamic != nil && site.dynamic.largeResult) {
 			// A heterogeneous drainer emits its prefix before its site bodies.
 			// Keep the active site's result address in the existing owner frame;
 			// never depend on code-generation order or a later LLVM definition.
@@ -208,7 +211,9 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 		if err != nil {
 			panic(err)
 		}
-		guard.result = p.coroResultSlot(p.prog.Type(guard.plan.resultType(), llssa.InGo))
+		if guard.plan.dynamic.allocate == "" {
+			guard.result = p.coroResultSlot(p.prog.Type(guard.plan.resultType(), llssa.InGo))
+		}
 		p.armCoroDynamicDeliveryCall(b, guard, env, args,
 			p.emitCoroDeliveryHelperValue(b, guard.plan.recipe.initializer, initializer),
 			p.emitCoroDeliveryHelperValue(b, guard.plan.recipe.drop, drop), p.coroDeliveryHelperInvocation())

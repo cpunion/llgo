@@ -513,6 +513,41 @@ regressions pass14.822s/1305.2MiB, the unchanged architecture gate passes
 defer, panic/recover) passes0.312s. Its actual LLGo linked execution is pending;
 this follow-up remains unintegrated. Resource-bearing large dynamic defer
 still needs its exact conditional allocator and does not silently fall back.
+
+PR272 completes all18 coroutine CI jobs successfully and, after a fresh empty
+paginated review/comment inventory and empty GraphQL threads, merges at
+15:08:12 UTC as `8a45e5537`. Exact head is `a2f727c5b`; external receipt is
+`root/ci-38917619760-complete.json`. No main branch changes. The long full
+`test/go`, stdlib180 and GOROOT evaluations remain independent ongoing cohorts.
+
+Immutable v91 verifies the discarded-result follow-up on source `8ee494728`:
+compiler `49e43dff36709cf4ef143973d554b17b6b305c11df595fc2ee467811cb71c8cf`,
+manifest `b6fa6a16a5af0b9aa5c959e25a935f4ed0058072b5e53568bcd1201b9335077b`.
+The same ordinary Go program covers yielding 131073-byte results, static and
+dynamic LIFO defer and panic/recover. Go and LLGo match in all12 executions
+(P=1/2, three repeats per implementation); snapshot/program source-after match,
+peak1207.8MiB. Program SHA-256 is
+`4439a03d91848bef619d46a13724cc69006c60a8719ca4d0c5af2515774250c8`.
+This exact artifact precedes the next allocator increment, not a current-head
+dynamic resource-publication proof.
+
+The subsequent local allocator cohort now binds the real static allocator to
+the same source condition, ledger and cleanup placement. Large deferred custody
+storage is allocated only inside the positive HasDelivery branch; base-only
+descriptors retain nil output. The owner frame stores a typed address rather
+than the large result. Missing frozen runtime dependencies are rejected for
+active consumers instead of materialized during emission. Native/wasm32 gates
+prove that allocation is unreachable after removing the positive branch,
+the ledger contains both exact conditional allocators, and split frames remain
+below128KiB (2.599s/1242.9MiB before the ledger addition). The final race-selected
+delivery/cleanup/defer cohort, including the ledger addition, passes
+124.511s/1200.5MiB; unchanged architecture passes0.970s/738.2MiB. The first
+fixture attempt correctly rejects a missing AllocU declaration for its newly
+added loop-defer case; the fixture now supplies the same normal node allocator
+and releaser, without changing production/runtime semantics. This branch is
+still unintegrated; a final immutable linked regression is pending. The latest
+long-run observation is v90 test/go94 completed top-level tests with no failure,
+v70 stdlib81/180 all passing, and v65 GOROOT shard4 still running.
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;

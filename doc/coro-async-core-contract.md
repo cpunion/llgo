@@ -260,12 +260,20 @@ cleanup、result-drop 三种 placement 的 helper 是否保留；仅从清单中
 result allocator 是准确的静态 target；两者消费同一个 occurrence 条件并进入原调用图。
 条件不能同时携带 raw/no-unwind/unwind-only/terminal-elision shortcut；exact target
 照常验证 canonical inventory、需求和 effect 传播，并把 target 与条件共同绑定到
-digest。这个核心/前端元信息扩展不代表大型动态 defer 的物理 allocator 已接通。
+digest。核心/前端元信息通过后，物理 allocator 仍需单独的 capability/placement gate。
 源码 defer 明确丢弃返回值时，非资源 static/descriptor child 使用已有 nil-output ABI，
 不分配或加载只为丢弃而存在的结果 aggregate。discard 是编译期 invocation 语义，
 与直接 recover 权限正交；内部 helper 不因丢弃 void result 而获得 recover 权限。
 有资源 guard 的 defer 仍传入受保护结果槽，completion 消费后才 claim；不能把
 nil-output 优化用来绕过资源保管或条件 allocator。
+大型动态 defer 的 custody storage 仅在 `HasDelivery` 正分支内分配，借用现有
+已冻结 runtime allocator target，并以 source occurrence 独立身份进入同一条件调用图。
+该分支外的 base-only descriptor 仍使用 nil output；不能提前把大 aggregate 分配到
+ramp 或 coro frame。现有 owner frame 只保留 typed result-address word，normal claim
+和 drop 都按原 active tag 清除它。runtime dependency 不在冻结清单时，只有最终 active
+consumer 在 physical preflight 明确拒绝；closed nonresource 条件仍正常消除，不从 emitter
+补目标或放宽闭包。native/wasm32 的 gate 必须验证：移除 capability 正分支后 allocation
+不可达、分配次数与 exact ledger 对应、pre/post-CoroSplit 有效且 frame 不包含大 aggregate。
 物理 consumer 复用原结果槽、每 frame 一个 active tag、原 cleanup drainer 与 child
 transaction；仅额外保存 drop descriptor、producer env 和准确参数。helper env 固定
 为 nil，不保存冗余 word。初始化完成才 arm，completion 消费和 result load 后才
@@ -277,7 +285,7 @@ helper 共用唯一 frozen-record validator/observer，架构预算不得提高�
 该 consumer 路径已有 native/wasm32、完整 SitePlan、pre/post-CoroSplit 验证，覆盖
 普通动态 call、局部 defer 和循环 defer。它还不是动态资源 acquisition 的端到端
 证明：source producer descriptor publication、bodyless helper、external defer owner、
-大型动态 defer 的条件 allocator、reflect 第二次交付与 loan lifetime proof 尚须闭环。
+imported allocator/helper 绑定、reflect 第二次交付与 loan lifetime proof 尚须闭环。
 publication 拒绝门和 unguarded dispatch/FFI 拒绝门保留，public seed 不启用。
 
 启用 seed 前，必须同时具备：producer borrowed-address/fallback、static normal/cancel

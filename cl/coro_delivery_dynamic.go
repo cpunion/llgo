@@ -27,6 +27,8 @@ type coroDynamicDeliveryRecipe struct {
 	drop        *types.Signature
 	initialize  string
 	release     string
+	allocate    string
+	largeResult bool
 }
 
 func (builder coroProgramIRBuilder) freezeDynamicDeliveryConsumer(ir *coroProgramIR, call ssa.CallInstruction) (*coroDynamicDeliveryRecipe, error) {
@@ -80,11 +82,28 @@ func (builder coroProgramIRBuilder) freezeDynamicDeliveryConsumer(ir *coroProgra
 		initialize: coroDeliveryInitializeCall + identity, release: coroDeliveryDropCall + identity,
 	}
 	for _, name := range []string{recipe.initialize, recipe.release} {
-		if err := builder.freezeDeliveryHelperCall(call.Parent(), name, call); err != nil {
+		if err := builder.freezeDeliveryHelperCall(call.Parent(), name, call, nil); err != nil {
 			return nil, err
 		}
 	}
-	if err := builder.freezeDeliveryHelperPlacements(ir, call, recipe.initialize, recipe.release); err != nil {
+	var extra []coroPlannedRuntimeHelper
+	if _, deferred := call.(*ssa.Defer); deferred && u.prog.LocalGoTypeExceedsNativeStack(result) {
+		recipe.largeResult = true
+		// Consume only a runtime dependency already present in the frozen
+		// inventory. An active consumer without this binding fails physical
+		// preflight; a closed nonresource condition must still fold away.
+		if runtime := u.byPath[llssa.PkgRuntime]; runtime != nil && !u.pathDup[llssa.PkgRuntime] {
+			target := u.canonicalAlias(runtime.ssa.Func(coroRuntimeHelperTargetName(coroManagedFrameSlotAllocZCall)))
+			if _, included := u.required[target]; target != nil && included {
+				recipe.allocate = coroManagedFrameSlotAllocZCall + identity
+				if err := builder.freezeDeliveryHelperCall(call.Parent(), recipe.allocate, call, target); err != nil {
+					return nil, err
+				}
+				extra = append(extra, coroPlannedRuntimeHelper{name: recipe.allocate, placement: coroRuntimeHelperAtCleanup})
+			}
+		}
+	}
+	if err := builder.freezeDeliveryHelperPlacements(ir, call, recipe.initialize, recipe.release, extra...); err != nil {
 		return nil, err
 	}
 	return recipe, nil
@@ -104,7 +123,7 @@ func (ir *coroProgramIR) deliveryHelperActive(plan *coro.SSAPlan, instruction ss
 		return false, err
 	}
 	if !present || frozen.dynamicDelivery == nil ||
-		name != frozen.dynamicDelivery.initialize && name != frozen.dynamicDelivery.release {
+		name != frozen.dynamicDelivery.initialize && name != frozen.dynamicDelivery.release && name != frozen.dynamicDelivery.allocate {
 		return true, nil
 	}
 	if plan == nil {
@@ -120,11 +139,11 @@ func (ir *coroProgramIR) deliveryHelperActive(plan *coro.SSAPlan, instruction ss
 	return result.ResultDelivery, nil
 }
 
-// freezeDeliveryHelperCall retains an ordinary managed invocation with no
-// fabricated SSA target. The existing value-flow pass resolves its exact
+// freezeDeliveryHelperCall retains an ordinary exact or descriptor invocation
+// with no fabricated SSA target. The existing value-flow pass resolves its exact
 // source condition before computing effects; physical emission must consume
 // that active lowered record, never the mutable builder map.
-func (builder coroProgramIRBuilder) freezeDeliveryHelperCall(owner *ssa.Function, name string, source ssa.CallInstruction) error {
+func (builder coroProgramIRBuilder) freezeDeliveryHelperCall(owner *ssa.Function, name string, source ssa.CallInstruction, target *ssa.Function) error {
 	u := builder.canonical.universe
 	if u == nil || owner == nil || u.canonicalAlias(owner) != owner ||
 		source == nil || source.Parent() != owner || source.Block() == nil || source.Common() == nil ||
@@ -148,7 +167,12 @@ func (builder coroProgramIRBuilder) freezeDeliveryHelperCall(owner *ssa.Function
 	default:
 		return fmt.Errorf("conditional delivery helper cannot own a spawned invocation")
 	}
-	return builder.recordLoweredCallTarget(owner, name, coroLoweredCallTarget{whenResultDeliveryOf: source})
+	if target != nil {
+		if _, present := u.required[target]; !present || u.canonicalAlias(target) != target {
+			return fmt.Errorf("conditional exact delivery helper requires its real canonical target in the frozen inventory")
+		}
+	}
+	return builder.recordLoweredCallTarget(owner, name, coroLoweredCallTarget{target: target, whenResultDeliveryOf: source})
 }
 
 func (p *context) emitCoroDeliveryHelperValue(b llssa.Builder, target *ssa.Function, signature *types.Signature) llssa.Expr {
@@ -204,6 +228,12 @@ func (p *context) armCoroDynamicDeliveryCall(
 ) {
 	if len(args) != len(guard.args) || guard.plan.dynamic == nil || guard.dropDescriptor.IsNil() {
 		panic("dynamic delivery lost its exact typed captures")
+	}
+	if helper := guard.plan.dynamic.allocate; helper != "" {
+		// Deferred results are discarded. Allocate large custody storage
+		// only on the positive delivery-capability lane, never in the ramp
+		// or for a base-only descriptor returning an ordinary large value.
+		guard.result = b.AllocZAs(p.prog.Type(guard.plan.resultType(), llssa.InGo), helper)
 	}
 	if env.IsNil() {
 		env = p.prog.Nil(p.prog.VoidPtr())

@@ -279,10 +279,10 @@ func Spawn(f func() int) { go f() }
 	}
 	call := callFor("Owner")
 	for _, name := range []string{"delivery.initialize", "delivery.drop"} {
-		if err := builder.freezeDeliveryHelperCall(owner, name, call); err != nil {
+		if err := builder.freezeDeliveryHelperCall(owner, name, call, nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := builder.freezeDeliveryHelperCall(owner, name, call); err != nil {
+		if err := builder.freezeDeliveryHelperCall(owner, name, call, nil); err != nil {
 			t.Fatalf("idempotent conditional helper: %v", err)
 		}
 	}
@@ -327,7 +327,7 @@ func Spawn(f func() int) { go f() }
 		if name == "Other" {
 			candidateOwner = owner
 		}
-		if err := builder.freezeDeliveryHelperCall(candidateOwner, "invalid."+name, callFor(name)); err == nil {
+		if err := builder.freezeDeliveryHelperCall(candidateOwner, "invalid."+name, callFor(name), nil); err == nil {
 			t.Fatalf("%s accepted as an exact result-owning occurrence", name)
 		}
 	}

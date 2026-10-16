@@ -237,11 +237,12 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	}
 	resultSlot := p.prog.Nil(p.prog.VoidPtr())
 	retainResult := !options.cleanup.discardResult || options.delivery != nil
+	deferredAllocation := options.delivery != nil && options.delivery.plan.dynamic.allocate != ""
 	results := abi.signature.Results()
 	if options.cleanup.discardResult {
 		results = types.NewTuple()
 	}
-	if retainResult && (abi.signature.Results().Len() != 0 || options.entry != coro.ManagedEntryOutcomePlain) {
+	if retainResult && !deferredAllocation && (abi.signature.Results().Len() != 0 || options.entry != coro.ManagedEntryOutcomePlain) {
 		resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
 		if p.hasCoroPhysicalBody() {
 			resultSlot = p.coroResultSlot(resultType)
@@ -329,6 +330,9 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	if guard := options.delivery; guard != nil {
 		guard.result = resultSlot
 		p.beginCoroDynamicDeliveryCall(b, guard, fn, args, selection, options.cleanup)
+		if deferredAllocation {
+			resultSlot = b.LoadKnownNonNil(guard.resultAddress)
+		}
 	}
 	hasOutcome, hasCoro, codeEntry := selection.HasOutcome(), selection.HasCoro(), selection.CodeEntry()
 	b.If(hasCoro, coroutineBlock, nonCoroutineBlock)

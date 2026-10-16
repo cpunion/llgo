@@ -27,6 +27,8 @@ func TestCoroDeliveryLargeFallbackAllocatesOnlyOnNilOutput(t *testing.T) {
 			runtimePkg := source.addPackage(t, llssa.PkgRuntime, `package runtime
 import "unsafe"
 func AllocZ(size uintptr) unsafe.Pointer { return nil }
+func AllocU(size uintptr) unsafe.Pointer { return nil }
+func FreeDeferNode(pointer unsafe.Pointer) {}
 func AssertNilDeref(value bool) {}
 `)
 			foo := source.addPackage(t, "foo", `package foo
@@ -39,6 +41,8 @@ func borrow(func(*Result), func(*Result, unsafe.Pointer)) *Result
 func Acquire() [131073]byte { out := borrow(initialize, drop); return out.R0 }
 func Root() byte { return Acquire()[0] }
 func Deferred() { defer Acquire() }
+func DynamicDeferred(f func() [131073]byte) { defer f() }
+func DynamicLoopDeferred(f func() [131073]byte) { for i := 0; i < 2; i++ { defer f() } }
 `)
 			source.ssa.Build()
 			prog := newLLSSAProgForTarget(t, target.arch)
@@ -59,10 +63,15 @@ func Deferred() { defer Acquire() }
 			plan, err := coro.AnalyzeSSA(foo.ssa.Prog, coro.Roots{
 				{Function: foo.ssa.Func("Root"), Demand: coro.AsyncDemand},
 				{Function: foo.ssa.Func("Deferred"), Demand: coro.AsyncDemand},
+				{Function: foo.ssa.Func("DynamicDeferred"), Demand: coro.AsyncDemand},
+				{Function: foo.ssa.Func("DynamicLoopDeferred"), Demand: coro.AsyncDemand},
 			}, coro.SSAConfig{
 				EmissionUniverse: sources, FunctionIDs: ids, MaxPlainInstructions: -1,
 				OutcomeMode: coro.OutcomeExplicitStatus, ClassifyLocalBody: u.CoroLocalBodyFacts,
 				ClassifyLoweredCalls: u.CoroLoweredCalls,
+				ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (coro.UnknownTarget, error) {
+					return coro.UnknownManagedDispatch, nil
+				},
 				ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 					if fn == foo.ssa.Func("Acquire") {
 						return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
@@ -79,6 +88,26 @@ func Deferred() { defer Acquire() }
 			})
 			if err != nil {
 				t.Fatal(err)
+			}
+			report, err := u.BuildCoroLoweringFactsReport(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			conditionalAllocators := 0
+			for _, function := range report.Facts.Functions {
+				for _, site := range function.Sites {
+					for _, helper := range site.Helpers {
+						if strings.HasPrefix(helper.LogicalName, coroManagedFrameSlotAllocZCall+":dynamic:") {
+							conditionalAllocators++
+							if helper.ManagedDispatch || helper.Target == "" {
+								t.Fatalf("conditional allocator lost its exact real target: %+v", helper)
+							}
+						}
+					}
+				}
+			}
+			if conditionalAllocators != 2 {
+				t.Fatalf("pointer-free exact conditional allocators=%d, want 2", conditionalAllocators)
 			}
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: u}
 			enableCoroChildAwaitCompilation(compilation)
@@ -128,6 +157,28 @@ func Deferred() { defer Acquire() }
 					t.Fatalf("%s result allocations=%d, want one planned shared result slot:\n%s", name, count, consumer.String())
 				}
 			}
+			for _, name := range []string{"foo.DynamicDeferred", "foo.DynamicLoopDeferred"} {
+				consumer := requireCoroPhysicalFunction(t, module, name)
+				withoutDelivery := coroDeliveryTestReachableWithoutCapability(t, consumer)
+				allocations := 0
+				for _, block := range consumer.BasicBlocks() {
+					for call := block.FirstInstruction(); !call.IsNil(); call = llvm.NextInstruction(call) {
+						if call.InstructionOpcode() != llvm.Call || call.CalledValue().Name() != llssa.PkgRuntime+".AllocZ" {
+							continue
+						}
+						allocations++
+						if block == consumer.FirstBasicBlock() {
+							t.Fatalf("%s eagerly allocated a discarded large result in its ramp:\n%s", name, consumer)
+						}
+						if withoutDelivery[block] {
+							t.Fatalf("%s allocation is reachable without the positive delivery capability:\n%s", name, consumer)
+						}
+					}
+				}
+				if allocations != 1 || !strings.Contains(consumer.String(), "coro.dispatch.delivery") {
+					t.Fatalf("%s lacks one capability-gated custody allocation: allocations=%d\n%s", name, allocations, consumer)
+				}
+			}
 			runCoroABITestPipeline(t, prog, module)
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatal(err)
@@ -135,8 +186,52 @@ func Deferred() { defer Acquire() }
 			if size := coroFrameAllocationSize(t, module.NamedFunction("foo.Acquire$coro"), prog.PointerSize()*8); size >= 128*1024 {
 				t.Fatalf("fallback aggregate inflated the coroutine frame to %d bytes", size)
 			}
+			for _, name := range []string{"foo.DynamicDeferred$coro", "foo.DynamicLoopDeferred$coro"} {
+				if size := coroFrameAllocationSize(t, module.NamedFunction(name), prog.PointerSize()*8); size >= 128*1024 {
+					t.Fatalf("%s retained a large discarded result in its frame: %d bytes", name, size)
+				}
+			}
 		})
 	}
+}
+
+func coroDeliveryTestReachableWithoutCapability(t *testing.T, function llvm.Value) map[llvm.BasicBlock]bool {
+	t.Helper()
+	var positive llvm.BasicBlock
+	for _, block := range function.BasicBlocks() {
+		branch := block.LastInstruction()
+		if branch.InstructionOpcode() != llvm.Br || branch.SuccessorsCount() != 2 {
+			continue
+		}
+		condition := branch.Operand(0)
+		if condition.InstructionOpcode() != llvm.ICmp || condition.IntPredicate() != llvm.IntNE || !condition.Operand(1).IsNull() {
+			continue
+		}
+		mask := condition.Operand(0)
+		if mask.InstructionOpcode() == llvm.And && !mask.Operand(1).IsAConstantInt().IsNil() &&
+			mask.Operand(1).ZExtValue() == uint64(llssa.CoroDispatchFlagHasDelivery) {
+			positive = branch.Successor(0)
+			break
+		}
+	}
+	if positive.IsNil() {
+		t.Fatal("consumer has no positive delivery-capability branch")
+	}
+	reachable := make(map[llvm.BasicBlock]bool)
+	pending := []llvm.BasicBlock{function.FirstBasicBlock()}
+	for len(pending) != 0 {
+		block := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if reachable[block] || block == positive {
+			continue
+		}
+		reachable[block] = true
+		branch := block.LastInstruction()
+		for index := 0; index < branch.SuccessorsCount(); index++ {
+			pending = append(pending, branch.Successor(index))
+		}
+	}
+	return reachable
 }
 
 const coroDeliverySourceFixture = `package foo
