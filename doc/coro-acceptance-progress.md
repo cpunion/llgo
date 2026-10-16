@@ -916,6 +916,40 @@ The separate minimal captured-archive experiment lacks its frontend AllocZ
 binding and is preserved on a local experiment branch, not promoted or counted
 as evidence of a production capture failure.
 
+The integrated PR279 snapshot v104 now completes its fresh unfiltered test/go
+cohort **271/271**, zero failures/skips, at20:14:00 UTC. Source-after20:14:04
+matches, all children join and private scratch is reclaimed. Its binary is
+`c30611e23dcdcb1a33050fe2ff3ee928f70b750781726d2efe2fb4154cfba17d`
+(25931536bytes); separate build/run peaks are8389.5/6649.2MiB. PR280 remains
+an independently validated follow-up: immutable v105 passes broad191.089s,
+three actual archives/nine executions103.625s, full analysis race51.024s and
+unchanged architecture/build1.311s. Its60 real-fd and6 opaque controls plus all
+three reflection/GC routes pass with matching source-after and peak2890.1MiB.
+PR280 CI run38959102970 is still in progress; it is not merged on partial CI.
+
+The captured branch also fixes the independent entry's descriptor check: a
+nil-output spawn may accept HasDelivery because its child fallback owns custody,
+without a parent result guard. All other descriptor schema/hash/layout/capability
+checks remain. The focused IR fixture supplies the production spawn policy's
+preemptible owner/target seeds to its direct SSA API and checks the frozen
+parent delivery plan, not a substring also used by descriptor validation.
+Native/wasm32 pre/post-split passes2.113s/1285.2MiB. Immutable v108 then passes
+all100 real-fd executions,6 opaque controls and3 reflection/GC routes
+(70.028s+153.787s, matching source-after, peak2779.1MiB). Its retained actual
+acceptance image has SHA-256
+`42017fee96ed2136b76f6ff7e0b3bef82614ef408cba4a0b5e5e8e8b669848fd`;
+the captured discarded entry additionally passes100 repetitions and the
+normal-then-canceled captured callable1000 repetitions.
+
+This is not evidence that every observed worker failure is resolved. v107 also
+records one worker-completion abort during mode9; an independently rebuilt v107
+image subsequently passes2100 repetitions, without establishing a cause. A
+separate local diagnostic branch preserves non-success completion reason codes
+and the C worker's fail-stop, while production remains unchanged. That open
+investigation is not erased by v108's passing cohort. A fresh v107 full test/go,
+v108 four-package runtime cohort, v103 demos and older stdlib/GOROOT evaluations
+remain separately running; none is relabeled as a final-head whole-suite pass.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
@@ -1625,7 +1659,7 @@ delivery/performance acceptance.
 | `test/llgoext` | 23 passed | Fixed v54 compiler/source, including defer-head isolation and 130-G ID allocation |
 | `test/std/runtime` | 5 passed | Fixed v35 compiler/source, uncached compile and execution |
 | C fault recovery, foreign reentry, traceback | 4 passed | v7 compiler; probes compile, link and execute with LLGo |
-| Full `test/go` | Complete v67 and v70: 268/268 passed each, zero failures/skips | v67 completed at 08:00:52 UTC, v70 at 08:41:59 UTC. Both match source-after, join children and reclaim scratch; v70 run peak is 6503.3MiB. The earlier v64 266-pass / 2-failure cohort is retained; both original caller-PC failures are covered by the later complete runs. These are post-PC-fix cohorts, not acceptance of every subsequent compiler/runtime change. |
+| Full `test/go` | Integrated PR279 v104: 271/271, zero failures/skips | Completed20:14:00 UTC, source-after20:14:04 matches, children joined and private scratch reclaimed. Build/run peaks8389.5/6649.2MiB are separate maxima. Earlier cohorts and failures remain preserved. This is not acceptance of the later private-factory/captured follow-ups. |
 | Top-level `_demo/go` | Fixed v70: all 73/73 passed, zero failures | Completed 2026-10-16 09:13:31 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Every v70 package was freshly built and run; no earlier-version successes were adopted. The previous v46 complete pass remains separate evidence. |
 | `test/std/os`, `test/std/net` | 85 passed; 129 passed / 5 skipped, respectively | Full packages compiled and executed with fixed source snapshot and v35, cache disabled |
 | `test/std/reflect` | v25: 68 passed | Separate real LLGo compile and generated-binary execution; build peak 5768 MiB |
@@ -1787,8 +1821,9 @@ bound is still explicit.
 ## Remaining work, in order
 
 1. Finish current executable acceptance on immutable compiler/source pairs.
-   Integrated PR277's v101 `test/go` passes271/271; immutable v104 is running
-   the complete fresh-build cohort for PR279. The earlier v70 native Go demos
+   Integrated PR279's v104 `test/go` passes271/271; immutable v107 is running
+   the next complete fresh-build cohort. The v108 top-level runtime/cgo/
+   syncpool/llgoext cohort is also running. The earlier v70 native Go demos
    pass73/73, and v103's73-demo cohort is running. The single-snapshot v70
    180-package stdlib evaluation has at least128
    completed package passes and no failure so far; it remains active. The older
