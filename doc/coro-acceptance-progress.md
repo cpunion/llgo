@@ -1204,13 +1204,37 @@ Nested exact/disjoint writes are supported; a partial subfield overwrite does
 not authorize substituting the old container. This adds no runtime compensation,
 Go-SSA analysis, second backend path or late emitter inference. The new tuple
 gate fails before this correction and full ABI tests pass afterwards0.317s.
-An immutable actual replay is still required before integrating this change.
+Immutable v118 (`2c63c4d07`) completes that replay. Its source manifest is
+`38ad2a75d701e6a4da2259ff55409ea7f19f6dc18991c4d96f2f310955a9bb68`,
+compiler SHA-256
+`08db68b95320c570545ac2436efea05b8a8bea18cfefcc4977d16e20497047ec`.
+Broad compiler gates pass214.414s/1271.4MiB, all18 archive executions
+252.541s/1972.5MiB, and ABI/build gates0.953s/768.0MiB, unchanged budgets.
+The large recovery program and six O0/O3-full recovery executions pass.
+All160 FD executions, six opaque nonresource controls and three reflection/GC
+routes pass79.533s+169.041s, source-after matching, peak2849.0MiB. No diagnostic
+printing, hard-coded paths or optional checks are present in this compiler.
+
+Independent persisted images additionally pass all16 resource modes three
+times each at Os and O3-full: **96/96 executions**, source-after matching,
+peak1529.1MiB. O0 passes three runs of each newly added large-result mode:
+**12/12**, source-after matching, peak1025.9MiB. The source Go and C files
+are byte-identical between v117/v118. For this exact fixture at O0, executable
+size falls from14918064 to2943776bytes (about80.3%); Os/O3-full images are
+1474592/1500560bytes. This is a same-source code-size result, not a runtime
+throughput or quiet-host compiler-time comparison. A subsequent test-only
+commit runs the projection/overwrite/alignment gate on native64 and wasm32
+layouts (full ABI suite0.380s/127.2MiB); production code is unchanged from v118.
 
 The old v70 standard-library evaluation has171 package passes and one retained
 failure so far: testing/quick's custom Generator case. A complete focused v117
 rerun reproduces it, with matching source-after and reclaimed scratch. This is
-not added to xfails. v117 whole-test/go, four runtime packages and all native Go
-demos are running as separate fresh cohorts with the corrected launcher PATH.
+not added to xfails. The minimal executable narrows it to the Generator invoke
+after a successful reflect.TypeAssert: the method has not entered before a
+nil-access panic, while the Go control completes. v117 whole-test/go and all
+native Go demos continue as separate fresh cohorts. Its four runtime packages
+complete with68 passes and the original helper-process skip, zero failures,
+matching source-after22:49:51 UTC, joined children and reclaimed scratch.
 
 Immutable v108 completes the four runtime packages with **68 passes and one
 helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
