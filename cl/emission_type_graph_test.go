@@ -75,6 +75,42 @@ func TestCoroStructuralTypeKeysCanonicalizePredeclaredAliases(t *testing.T) {
 	}
 }
 
+func TestCoroStructuralABIKeysRespectMemberVisibility(t *testing.T) {
+	left := types.NewPackage("example.com/left", "left")
+	right := types.NewPackage("example.com/right", "right")
+	structure := func(pkg *types.Package, name, tag string) types.Type {
+		return types.NewStruct([]*types.Var{types.NewField(token.NoPos, pkg, name, types.Typ[types.Int], false)}, []string{tag})
+	}
+	methodSet := func(pkg *types.Package, name string) types.Type {
+		signature := types.NewSignatureType(nil, nil, nil, types.NewTuple(), types.NewTuple(), false)
+		return types.NewInterfaceType([]*types.Func{types.NewFunc(token.NoPos, pkg, name, signature)}, nil).Complete()
+	}
+	for _, test := range []struct {
+		name        string
+		left, right types.Type
+		identical   bool
+	}{
+		{"exported field", structure(left, "R0", ""), structure(right, "R0", ""), true},
+		{"generated exported field", structure(left, "R0", ""), structure(nil, "R0", ""), true},
+		{"unexported field", structure(left, "r0", ""), structure(right, "r0", ""), false},
+		{"field tag", structure(left, "R0", "json:\"a\""), structure(left, "R0", "json:\"b\""), false},
+		{"exported method", methodSet(left, "Read"), methodSet(right, "Read"), true},
+		{"generated exported method", methodSet(left, "Read"), methodSet(nil, "Read"), true},
+		{"unexported method", methodSet(left, "read"), methodSet(right, "read"), false},
+		{"named types", types.NewNamed(types.NewTypeName(token.NoPos, left, "T", nil), structure(left, "R0", ""), nil),
+			types.NewNamed(types.NewTypeName(token.NoPos, right, "T", nil), structure(right, "R0", ""), nil), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if identical := types.Identical(test.left, test.right); identical != test.identical {
+				t.Fatalf("Go identity=%t, want %t", identical, test.identical)
+			}
+			if equal := structuralEmissionABITypeKey(test.left) == structuralEmissionABITypeKey(test.right); equal != test.identical {
+				t.Fatalf("strict ABI equality=%t, want Go identity=%t", equal, test.identical)
+			}
+		})
+	}
+}
+
 func TestStructuralGoLinknameABITypeKeyCompactsSharedTypeDAG(t *testing.T) {
 	left := testSharedGoLinknameType("example.com/left", 20, types.Typ[types.Uintptr])
 	right := testSharedGoLinknameType("example.com/right", 20, types.Typ[types.Uintptr])

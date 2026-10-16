@@ -4,6 +4,7 @@ package cl
 
 import (
 	"fmt"
+	"go/types"
 	"strings"
 	"testing"
 
@@ -39,6 +40,11 @@ func TestCoroDeliverySourceFreezesExactTypedHelperIdentities(t *testing.T) {
 	if err != nil || !found || recipe.producer != producer || recipe.initializer != pkg.Func("initFD") ||
 		recipe.drop != pkg.Func("dropFD") || recipe.borrow == nil || recipe.result.NumFields() != 2 {
 		t.Fatalf("source recipe=%+v present=%t error=%v", recipe, found, err)
+	}
+	initializerResult := recipe.initializer.Signature.Params().At(0).Type().(*types.Pointer).Elem()
+	if !types.Identical(recipe.result, initializerResult) ||
+		universe.emissionTypeKeys.strictABI(recipe.result) != universe.emissionTypeKeys.strictABI(initializerResult) {
+		t.Fatal("Go-identical canonical and source-expressible result tuples have different strict ABI keys")
 	}
 	site, frozen, err := universe.CoroCallSitePlan(recipe.borrow)
 	if err != nil || !frozen || !site.Intrinsic || !site.ElidesCall() ||

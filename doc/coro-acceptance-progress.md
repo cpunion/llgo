@@ -7,6 +7,30 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-16 (Asia/Shanghai)
 
+The v58 expvar retry now compiles and executes all four tests successfully.
+It retains source `d5d6c5627`, source-manifest SHA-256
+`4e19f44822bab94594cd031dccfa17ff0d8d9932a909d98ea6f692d1ccf11fe3`
+and compiler SHA-256
+`7e23b89ae2f218b4aaf3a2406fe76c3cb3427132b6713f005e20fb1dc8459ddc`.
+The build uses a 24GiB hard cap and 8GiB Go soft limit, peaks at 15521.4MiB,
+and produces binary SHA-256
+`0a42885d908653bcaae5715f88590fdab7243b6b664124ace2254dd3079d95c5`.
+The cohort finishes with its source unchanged and private scratch reclaimed.
+The earlier 16GiB failure remains a separate resource-limited attempt.
+
+A follow-up structural-key correction removes source-package qualification
+from exported struct fields and interface methods only, matching Go identity.
+Private members, named types and field tags remain distinct. It also makes
+compiler-generated delivery result tuples agree with their source-expressible
+anonymous aliases; it does not enable physical resource guards. Native64 and
+wasm32 interface IR passes verification before/after CoroSplit, visibility and
+delivery-key gates pass, and the broad compiler selection passes (290.167s).
+Restoring only the old key builder fails the new positive cases while retaining
+the private/tag/named negative distinctions. The new executable `test/go`
+regression covers interface calls, bound method values and reflection with an
+actual channel suspension and a by-value aggregate. Its Go control passes all
+three subtests; LLGo execution is still pending a fresh compiler snapshot.
+
 PR [cpunion/llgo#261](https://github.com/cpunion/llgo/pull/261) is now merged as
 `d292d73d5`, after head `33887a5bd` passed all 18 coroutine CI jobs in run
 `38849290434`; review, inline and issue-comment inventories were empty. It
