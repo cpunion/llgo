@@ -1691,6 +1691,12 @@ func (p *context) checkVArgs(v *ssa.Alloc, t *types.Pointer) bool {
 }
 
 func (p *context) skipSyntheticMakeSliceAlloc(v *ssa.Alloc) bool {
+	// syntheticMakeSliceCap requires this source identity too. Reject ordinary
+	// allocations before copying their (potentially very large) use lists in
+	// each frame-retention trace.
+	if v == nil || v.Comment != "makeslice" {
+		return false
+	}
 	refs, ok := nonDebugReferrers(v)
 	if !ok || len(refs) != 1 {
 		return false
