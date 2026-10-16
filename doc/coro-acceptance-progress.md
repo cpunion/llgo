@@ -120,7 +120,10 @@ only ordinary or deferred/frozen stops and preserves the receipt across park
 reuse. A 24-combination test covers issued/compatibility preparation and local,
 routed and pre-suspend completion; 14 invalid/interrupting inputs stay
 zero-mutation rejections. Full core race/shuffle and selected Node/wasm core
-tests pass (4.756s / 0.166s, combined peak 369.8MiB). Public resource API seeds
+tests pass (4.756s / 0.166s, combined peak 369.8MiB). Restoring only the old
+compact-channel file through a Go overlay passes all six ordinary controls
+but fails all 18 cleanup combinations, isolating the runtime transition fix
+from unrelated compiler changes. Public resource API seeds
 remain disabled; these gates do not establish public resource delivery.
 
 The v58 expvar retry now compiles and executes all four tests successfully.
