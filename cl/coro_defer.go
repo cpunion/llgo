@@ -2274,13 +2274,18 @@ func (s *coroStaticCleanupState) emitCompletionDispatch(p *context, b llssa.Buil
 	b.SetBlock(baseDispatch)
 	dispatch := b.Switch(b.Load(s.continuation), invalid)
 	dispatch.Case(b.Prog.IntVal(uint64(coroStaticCleanupContinueComplete), b.Prog.Uint32()), s.complete)
-	if p.goFn == nil || p.goFn.Recover == nil {
-		panic("coroutine cleanup recover continuation has no canonical SSA recover block")
+	if p.goFn == nil {
+		panic("coroutine cleanup continuation has no source owner")
 	}
-	dispatch.Case(
-		b.Prog.IntVal(uint64(coroStaticCleanupContinueRecover), b.Prog.Uint32()),
-		p.sourceBlock(p.goFn.Recover.Index),
-	)
+	if p.goFn.Recover != nil {
+		dispatch.Case(
+			b.Prog.IntVal(uint64(coroStaticCleanupContinueRecover), b.Prog.Uint32()),
+			p.sourceBlock(p.goFn.Recover.Index),
+		)
+	}
+	// An implicit resource guard can be the only cleanup in a source function
+	// with no Go defer/Recover block. It must not invent a source recovery
+	// continuation: an impossible cleared-panic recovery base traps below.
 	for _, continuation := range s.run {
 		dispatch.Case(b.Prog.IntVal(uint64(continuation.id), b.Prog.Uint32()), continuation.block)
 	}

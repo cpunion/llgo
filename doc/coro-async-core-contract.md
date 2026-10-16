@@ -249,6 +249,14 @@ microtask 链饿死实际 I/O callback。公开 `syscall.Open` 仍保留原调�
 守卫，不能因为调用了 Open 就被认定为资源生产函数。未知 C 的 int/pointer 返回仍不
 猜测所有权。`Dup2(oldfd, oldfd)` 不产生新资源，不能套用 Dup 的 acquire 契约。
 
+编译器内部守卫不等同于用户的 Go `defer`。它必须复用同一 drainer 的 join、panic
+overlay 和 cancellation shielding，但不能让 drop 获得恢复调用者原 panic 的直接
+`recover` 权限。drop 自己产生的 panic 仍可由它自己的 Go defer 恢复；用户原有 defer
+的直接 recover 语义保持不变。没有源码 defer 的调用者没有 SSA `Recover` block，
+共享 completion dispatcher 必须支持这种 owner，不能伪造恢复后正常返回的源码路径。
+`TestCoroCleanupCompletionWithoutSourceRecover` 已验证该 dispatcher 的唯一 complete
+case 与 invalid-continuation trap；parent-recover 权限隔离仍是物理接线前的强制 gate。
+
 static 与 descriptor 调用消费同一个冻结事实、同一个结果槽和 cleanup 路径：
 
 1. 按 Go 顺序求值 callee/参数，再初始化结果槽并注册临时 cleanup；资源动作此时尚未开始。
@@ -322,6 +330,12 @@ release 分派。对可以静态证明无取消/跨 await 的边界允许消去�
 实施顺序为永久 core oracle → 单一 typed recipe/validator → static/dynamic 共用消费及
 descriptor/archive 闭环 → 有限 native public adapter → reflection/os wrapper → Node/WASI。
 第一批不得在物理消费者闭环前启用 public API seed，不保留没有消费者的并行 custody 框架。
+还须单独覆盖 `go acquisition(...)` 等丢弃结果的入口：当前 spawn 传 nil result sink，
+没有普通调用者的接管守卫。fallback typed slot 的释放责任必须保持到真正的 terminal
+Return 交付点；不能仅在源码 return 前设置 `done=true`，因为后续的 compiler poll
+仍可能选择取消。调用结果临时守卫在源 defer 之前执行；入口自持结果守卫则在源 defer
+之后处理失败出口，并且只在最后的正常结果发布路径撤销。两者仍使用原 drainer 和
+completion 协议，不增加 G 字段或另一套资源生命周期状态机。该入口接线尚未实现。
 以下强制门不变：
 
 1. 正常消费、submit 前取消、Post 前后取消、物化后取消、迁移后取消均逐阶段验证。

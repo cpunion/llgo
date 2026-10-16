@@ -196,9 +196,19 @@ does not change source/compiler inputs, but disk admission still prevents a
 fresh full-suite run. These are infrastructure stops, not new suite passes.
 
 After disk recovery the same v46 cohorts resumed with the repaired PATH. Full
-test/go compiles successfully (7633.7 MiB sampled process-tree peak) and is now
-executing; the demo and fresh 180-package stdlib cohorts are also running. They
-remain incomplete. CI head `bb860510d` passes the earlier target/clock/TCP
+test/go compiles successfully (7633.7 MiB sampled process-tree peak). At
+00:13 UTC all three cohorts stopped again at the unchanged 10GiB disk floor:
+32/73 demos and 6/180 stdlib packages passed; test/go recorded 233 top-level
+passes and no semantic failure before interruption. None is a complete v46
+suite pass. Demo/stdlib runners joined their children, reclaimed private scratch
+and verified their source fingerprints. The full-test outer interruption left
+a nested join marker: the marked PIDs and all snapshot/compiler processes were
+subsequently absent, absolute-path lsof found no scratch handles, and the source
+and retained test-binary hashes still matched. Scratch and the lock were moved
+to `scratch-interrupted-disk-0013` / `interrupted-disk-0013.lock`, not deleted or
+misrepresented as an automatic join receipt. Resuming that package must rerun
+the whole test binary; its 233 partial passes are not reusable package acceptance.
+CI head `bb860510d` passes the earlier target/clock/TCP
 corrections. Two later workflow gates exposed further host-test wiring:
 WASI reactor discovery used the obsolete `.llgo/clibs_build` location instead
 of the current XDG crosscompile cache, and a host-SSA test lacked its matching
@@ -206,6 +216,15 @@ of the current XDG crosscompile cache, and a host-SSA test lacked its matching
 (0.648s / 91.6 MiB); the llgo-tag package test passes (0.424s / 265.3 MiB), as
 do analyzer/build vet and production-tagged runtime vet. No runtime fallback or
 semantic test assertion is removed by these corrections.
+
+Resource-cleanup review also removes the completion dispatcher's assumption
+that every compiler-owned cleanup has a source SSA Recover block. The LLVM
+regression and existing static-cleanup/parent-drain gates pass (1.976s /
+1245.4 MiB). This enables a no-source-defer drainer but does not yet insert a
+resource guard. Two required integration gates are explicit in the core
+contract: internal drops cannot recover a parent's panic, and discarded-result
+entry ownership must remain protected until actual terminal Return rather than
+an early source-level commit followed by a compiler preemption poll.
 
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
