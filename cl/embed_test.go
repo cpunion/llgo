@@ -17,7 +17,6 @@ import (
 
 	"github.com/goplus/gogen/packages"
 	"github.com/xgo-dev/llgo/internal/goembed"
-	llssa "github.com/xgo-dev/llgo/ssa"
 	gossa "golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
@@ -431,11 +430,6 @@ func TestEmbedTypeChecks(t *testing.T) {
 	}
 }
 
-func TestApplyEmbedInits_NoPending(t *testing.T) {
-	p := &context{}
-	p.applyEmbedInits(nil)
-}
-
 func TestParseEmbedDirective(t *testing.T) {
 	tests := []struct {
 		line     string
@@ -741,22 +735,6 @@ func TestTryEmbedGlobalInit_EarlyAndDefaultBranches(t *testing.T) {
 	mustPanicContains(t, "go:embed cannot apply to var of type int", func() {
 		_ = p.tryEmbedGlobalInit(nil, global, nil, "foo.Num")
 	})
-}
-
-func TestApplyEmbedInits_SortAndMissingGlobal(t *testing.T) {
-	prog := llssa.NewProgram(nil)
-	pkg := prog.NewPackage("foo", "foo")
-	p := &context{
-		pkg: pkg,
-		embedInits: []embedInit{
-			{globalName: "z", kind: embedInitFS},
-			{globalName: "a", kind: 999},
-		},
-	}
-	p.applyEmbedInits(nil)
-	if p.embedInits != nil {
-		t.Fatalf("applyEmbedInits should clear pending inits")
-	}
 }
 
 func buildTestSSAGlobal(t *testing.T, name, src string) *gossa.Global {

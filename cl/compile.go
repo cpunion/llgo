@@ -236,7 +236,6 @@ type context struct {
 	cgoSymbols  []string
 	rewrites    map[string]string
 	embedMap    goembed.VarMap
-	embedInits  []embedInit
 
 	trackCallerFrames bool
 	staticGlobalInits map[*ssa.Global]llssa.Expr
@@ -1362,9 +1361,6 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 
 	if doModInit {
 		p.initializeLocalGuardsWithCoroPlan(b)
-		if p.state != pkgInPatch {
-			p.applyEmbedInits(b)
-		}
 		if pyModInit = p.pyMod != ""; pyModInit {
 			last = len(instrs) - 1
 			instrs = instrs[:last]

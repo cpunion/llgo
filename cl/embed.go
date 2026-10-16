@@ -3,22 +3,11 @@ package cl
 import (
 	"fmt"
 	"go/types"
-	"sort"
 
 	"github.com/xgo-dev/llgo/internal/goembed"
 	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
-
-const (
-	embedInitFS = iota + 1
-)
-
-type embedInit struct {
-	globalName string
-	kind       int
-	fsEntries  []goembed.FileData
-}
 
 func isStringType(t types.Type) bool {
 	b, ok := t.Underlying().(*types.Basic)
@@ -70,35 +59,10 @@ func (p *context) tryEmbedGlobalInit(pkg llssa.Package, gbl *ssa.Global, g llssa
 		g.Init(pkg.ConstBytes(info.Files[0].Data))
 		return true
 	case isEmbedFSType(elem):
-		p.embedInits = append(p.embedInits, embedInit{
-			globalName: globalName,
-			kind:       embedInitFS,
-			fsEntries:  goembed.BuildFSEntries(info.Files),
-		})
-		return false
+		g.Init(p.embedFSConstant(pkg, elem, globalName, goembed.BuildFSEntries(info.Files)))
+		return true
 	default:
 		panic(fmt.Sprintf("go:embed cannot apply to var of type %s", elem.String()))
-	}
-}
-
-func (p *context) applyEmbedInits(b llssa.Builder) {
-	if len(p.embedInits) == 0 {
-		return
-	}
-	sort.Slice(p.embedInits, func(i, j int) bool {
-		return p.embedInits[i].globalName < p.embedInits[j].globalName
-	})
-	inits := p.embedInits
-	p.embedInits = nil
-	for _, it := range inits {
-		g := p.pkg.VarOf(it.globalName)
-		if g == nil {
-			continue
-		}
-		switch it.kind {
-		case embedInitFS:
-			p.applyEmbedFSInit(b, g, it.fsEntries)
-		}
 	}
 }
 
@@ -108,26 +72,32 @@ const (
 	embedFileFieldBytes = 1
 )
 
-func (p *context) applyEmbedFSInit(b llssa.Builder, g llssa.Global, entries []goembed.FileData) {
-	ptr := g.Expr.Type.RawType().(*types.Pointer)
-	fsTyp := types.Unalias(ptr.Elem())
+// embedFSConstant uses the existing exact Go layout, but its file records and
+// slice header are static data. No hidden package-init allocation, coroutine
+// effect or target-specific startup path is needed.
+func (p *context) embedFSConstant(pkg llssa.Package, fsTyp types.Type, name string, entries []goembed.FileData) llssa.Expr {
 	fsStruct := fsTyp.Underlying().(*types.Struct)
 	filesPtr := types.Unalias(fsStruct.Field(embedFSFieldFiles).Type()).(*types.Pointer)
 	filesSlice := types.Unalias(filesPtr.Elem()).(*types.Slice)
 	fileTyp := filesSlice.Elem()
 	llFileTyp := p.type_(fileTyp, llssa.InGo)
 	llFilesSliceTyp := p.prog.Slice(llFileTyp)
-
-	n := p.prog.IntVal(uint64(len(entries)), p.prog.Int())
-	files := b.MakeSlice(llFilesSliceTyp, n, n)
+	fileStruct := fileTyp.Underlying().(*types.Struct)
+	values := make([]llssa.Expr, len(entries))
 	for i, entry := range entries {
-		idx := p.prog.IntVal(uint64(i), p.prog.Int())
-		elemPtr := b.IndexAddr(files, idx)
-		b.Store(b.FieldAddr(elemPtr, embedFileFieldName), b.Str(entry.Name))
-		b.Store(b.FieldAddr(elemPtr, embedFileFieldBytes), b.Str(string(entry.Data)))
+		fields := make([]llssa.Expr, fileStruct.NumFields())
+		for index := range fields {
+			fields[index] = p.prog.Zero(p.type_(fileStruct.Field(index).Type(), llssa.InGo))
+		}
+		fields[embedFileFieldName] = pkg.ConstString(entry.Name)
+		fields[embedFileFieldBytes] = pkg.ConstString(string(entry.Data))
+		values[i] = p.prog.ConstStruct(llFileTyp, fields)
 	}
-
-	filesPtrVal := b.Alloc(llFilesSliceTyp, true)
-	b.Store(filesPtrVal, files)
-	b.Store(b.FieldAddr(g.Expr, embedFSFieldFiles), filesPtrVal)
+	files := pkg.ConstReadOnlySlice(name+"$embed.files", llFilesSliceTyp, values)
+	fields := make([]llssa.Expr, fsStruct.NumFields())
+	for index := range fields {
+		fields[index] = p.prog.Zero(p.type_(fsStruct.Field(index).Type(), llssa.InGo))
+	}
+	fields[embedFSFieldFiles] = pkg.ConstAddress(files)
+	return p.prog.ConstStruct(p.type_(fsTyp, llssa.InGo), fields)
 }
