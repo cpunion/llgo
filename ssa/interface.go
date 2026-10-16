@@ -295,7 +295,7 @@ func (b Builder) makeInterface(tinter Type, x Expr, constantBacking bool) (ret E
 	tabi := b.abiType(typ.raw.Type)
 	if !directIfaceType(typ.raw.Type) {
 		if constantBacking {
-			vptr := b.Pkg.constantAddress(x)
+			vptr := b.Pkg.ConstAddress(x)
 			return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
 		}
 		vptr := b.AllocU(typ)
@@ -306,7 +306,7 @@ func (b Builder) makeInterface(tinter Type, x Expr, constantBacking bool) (ret E
 	switch kind {
 	case abi.Indirect:
 		if constantBacking {
-			vptr := b.Pkg.constantAddress(x)
+			vptr := b.Pkg.ConstAddress(x)
 			return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
 		}
 		vptr := b.AllocU(typ)
