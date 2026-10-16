@@ -62,27 +62,43 @@ func (l largeAggregateLowerer) transformModule(m llvm.Module) {
 	for _, fn := range funcs {
 		l.transformFunc(m, fn)
 	}
-	l.transformStoredLoads(m)
+	l.transformLargeMemory(m)
 }
 
-// transformStoredLoads prevents a large aggregate load from reaching
-// SelectionDAG as one enormous SSA value. Lower an adjacent load/store pair
-// directly to memmove. When the value is stored later or more than once,
-// preserve Go assignment semantics by taking one snapshot at the original
-// load and copying that snapshot to every destination at the original sites.
-func (l largeAggregateLowerer) transformStoredLoads(m llvm.Module) {
-	var loads []llvm.Value
+// transformLargeMemory keeps large zero stores, discarded loads and copies
+// out of target aggregate scalarization. Lower an adjacent load/store pair to
+// memmove; delayed/multiple stores retain one snapshot at the original load.
+// Volatile accesses remain untouched: ordinary memcpy/memset must not replace
+// observable source memory operations.
+func (l largeAggregateLowerer) transformLargeMemory(m llvm.Module) {
+	var loads, zeroStores []llvm.Value
 	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
 		for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
 			for instr := bb.FirstInstruction(); !instr.IsNil(); instr = llvm.NextInstruction(instr) {
+				if store := instr.IsAStoreInst(); !store.IsNil() && !store.IsVolatile() &&
+					!store.Operand(0).IsAConstantAggregateZero().IsNil() && l.isLargeAggregate(store.Operand(0).Type()) {
+					zeroStores = append(zeroStores, store)
+				}
 				load := instr.IsALoadInst()
 				if !load.IsNil() && !load.IsVolatile() && l.isLargeAggregate(load.Type()) {
-					if _, ok := storedLoadUsers(load); ok {
+					if _, ok := storedLoadUsers(load); ok || load.FirstUse().IsNil() {
 						loads = append(loads, load)
 					}
 				}
 			}
 		}
+	}
+	ctx := m.Context()
+	b := ctx.NewBuilder()
+	defer b.Dispose()
+	for _, store := range zeroStores {
+		b.SetInsertPointBefore(store)
+		size := llvm.ConstInt(ctx.IntType(l.td.PointerSize()*8), l.td.TypeAllocSize(store.Operand(0).Type()), false)
+		zero := b.CreateIntrinsic(ctx.VoidType(), llvm.LookupIntrinsicID("llvm.memset"), []llvm.Value{
+			store.Operand(1), llvm.ConstInt(ctx.Int8Type(), 0, false), size, llvm.ConstInt(ctx.Int1Type(), 0, false),
+		}, "")
+		zero.InstructionSetDebugLoc(store.InstructionDebugLoc())
+		store.EraseFromParentAsInstruction()
 	}
 	for _, load := range loads {
 		l.transformStoredLoad(m, load)
@@ -102,6 +118,10 @@ func storedLoadUsers(load llvm.Value) ([]llvm.Value, bool) {
 }
 
 func (l largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Value) {
+	if load.FirstUse().IsNil() {
+		load.EraseFromParentAsInstruction()
+		return
+	}
 	stores, ok := storedLoadUsers(load)
 	if !ok {
 		return

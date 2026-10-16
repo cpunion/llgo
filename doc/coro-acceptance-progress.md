@@ -1028,6 +1028,43 @@ No runtime fields, allocation category, scheduler or second drainer are added.
 This closes external range defer custody, not the remaining large archive,
 receiver/reflect resource-adapter or public Open seed gates.
 
+The range-owner follow-up is [PR #282](https://github.com/cpunion/llgo/pull/282),
+exact head `d151abc71`, stacked on #281 and still targeting `llvm-coro` only.
+Run `38968146897` is queued; all review/comment/thread inventories are empty.
+A fresh unfiltered v113 `test/go` cohort is running with separate 12GiB
+build/run caps and joined nested compiler probes. Neither result is a final
+integration/whole-suite passing receipt yet.
+
+The next isolated large-archive gate uses a131080-byte result, with checks on
+the first/last payload bytes, normal transfer, ignored defer output, canceled
+value99, exactly one drop and both asynchronous drop steps. Static, direct
+function-value and private-factory paths now pass9/9 actual executions in the
+working branch (69.556s/1677.1MiB); immutable final-source replay is pending.
+Initial missing AllocZ/frontend-certificate bindings were fixture setup errors,
+not accepted negative compiler results. The fixture now models the linked
+zero allocator, supplies the complete runtime-helper ABI and consumes the same
+frozen foreign contracts. It also runs production's mandatory large-aggregate
+lowering before CoroSplit instead of feeding raw frontend aggregates to codegen.
+
+The stronger gate then exposed two code-generation gaps. Managed physical
+bodies still inherited legacy longjmp `recoverSlots` for large ordinary locals;
+they use explicit status/CFG instead, so the old volatile barriers are removed
+only there, preserving the native longjmp path. A new native/wasm32 IR gate
+fails before that correction and passes after it. The existing mandatory ABI
+lowerer additionally missed large nonvolatile zero stores and unused aggregate
+loads. These now become memset/no load, without new allocation, while volatile
+operations, threshold-sized aggregates, mixed-use values and delayed-copy
+snapshot semantics remain unchanged. The new ABI zero-store test fails before
+the correction; the complete ABI suite passes after it. Saved LLVM22 AArch64
+SelectionDAG failures remain retained, not erased by passing reruns.
+
+A new full-runtime program covers large named results modified by ordinary and
+recovering asynchronous defers, plus an unnamed return whose local is changed
+after result evaluation. Its Go control passes; LLGo immutable execution,
+broader gates and CI are still pending. A possible redundant copy when a
+borrowed producer returns its already-aliased result remains a separate
+code-generation optimization to review, not an optimization claimed here.
+
 Immutable v108 completes the four runtime packages with **68 passes and one
 helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
 llgoext23. Source-after20:47:34 matches, children join and private scratch is

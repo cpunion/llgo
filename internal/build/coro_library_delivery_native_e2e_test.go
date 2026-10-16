@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/xgo-dev/llgo/cl"
+	llabi "github.com/xgo-dev/llgo/internal/abi"
 	"github.com/xgo-dev/llgo/internal/coro"
 	"github.com/xgo-dev/llgo/internal/goembed"
 	llssa "github.com/xgo-dev/llgo/ssa"
@@ -30,15 +31,24 @@ import (
 // The consumer's imported type package has only exported declarations: neither
 // private helper gets an invented SSA function or a substitute runtime body.
 func TestCoroArchiveDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
-	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveStaticDelivery)
+	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveStaticDelivery, false)
 }
 
 func TestCoroArchiveDynamicDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
-	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveDirectValueDelivery)
+	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveDirectValueDelivery, false)
 }
 
 func TestCoroArchivePrivateCallableDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
-	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveFactoryValueDelivery)
+	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveFactoryValueDelivery, false)
+}
+
+func TestCoroArchiveLargeDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		mode coroArchiveDeliveryMode
+	}{{"static", coroArchiveStaticDelivery}, {"dynamic", coroArchiveDirectValueDelivery}, {"private-factory", coroArchiveFactoryValueDelivery}} {
+		t.Run(mode.name, func(t *testing.T) { testCoroArchiveDeliveryNativeRuntime(t, mode.mode, true) })
+	}
 }
 
 type coroArchiveDeliveryMode uint8
@@ -49,7 +59,7 @@ const (
 	coroArchiveFactoryValueDelivery
 )
 
-func testCoroArchiveDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode) {
+func testCoroArchiveDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode, large bool) {
 	t.Helper()
 	dynamic, factory := mode != coroArchiveStaticDelivery, mode == coroArchiveFactoryValueDelivery
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
@@ -115,6 +125,25 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 			t.Fatal(err)
 		}
 		inputs := []cl.EmissionPackage{{SSA: source, Files: files, Identity: source.Pkg.Path()}}
+		if large {
+			// Model the same zero-initialized allocator that the linked runtime
+			// island actually provides. A large-result gate must supply its
+			// frozen frontend dependency, not invent a producer/helper body or
+			// let code generation discover the allocator after analysis.
+			runtimeSSA, runtimeFiles, _, _ := createCoroBootstrapV2SSAPackage(t, source.Prog, source.Prog.Fset, llssa.PkgRuntime, `package runtime
+import "unsafe"
+//go:linkname zero C.__llgo_archive_delivery_allocz
+//llgo:coro sync
+func zero(uintptr) unsafe.Pointer
+func AllocZ(size uintptr) unsafe.Pointer { return zero(size) }
+//go:linkname abort C.abort
+//llgo:coro noblock
+func abort()
+func AssertNilDeref(value bool) { if value { abort() } }
+`, coroPlanTestImporter{"unsafe": types.Unsafe})
+			runtimeSSA.Build()
+			inputs = append(inputs, cl.EmissionPackage{SSA: runtimeSSA, Files: runtimeFiles, Identity: llssa.PkgRuntime})
+		}
 		if !producer {
 			library := source.Prog.ImportedPackage(libraryPath)
 			if library == nil || library.Func("initialize") != nil || library.Func("drop") != nil {
@@ -129,6 +158,7 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 			cl.ParsePkgSyntax(prog, source.Prog.Fset, input.SSA.Pkg, input.Files)
 		}
 		u, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, inputs, cl.EmissionUniverseOptions{
+			CompleteRuntimeABI: large,
 			CoroLibraryEffects: index, CoroTargetCapabilities: metadata.TargetCapabilities,
 			CoroProgramPredicates: coro.ProgramPredicateRequirements{Mask: coro.ProgramPredicateMask()},
 		})
@@ -167,7 +197,9 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 		}
 		input := CoroPlanInput{Program: source.Prog, EmissionUniverse: universe,
 			resolveFunction: u.Resolve, localBodyFacts: u.CoroLocalBodyFacts, functionBackground: u.FunctionBackground,
-			callSitePlan: u.CoroCallSitePlan, loweredCalls: u.CoroLoweredCalls,
+			foreignNoBlock: u.CoroForeignNoBlockCertificate, foreignSync: u.CoroForeignSyncCertificate,
+			callableContract: u.CoroCallableContractCertificate,
+			callSitePlan:     u.CoroCallSitePlan, loweredCalls: u.CoroLoweredCalls,
 			staticFunctionReferenceCallArgument: u.CoroStaticFunctionReferenceCallArgument,
 			importedLibraryEffects:              imported, importedFunctions: imports,
 		}
@@ -221,6 +253,10 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 				t.Fatal(err)
 			}
 		}
+		// Match buildPkg's mandatory target-independent large aggregate
+		// lowering before CoroSplit. Feeding a 128KiB scalarized aggregate
+		// directly to SelectionDAG is not the production backend contract.
+		llabi.LowerLargeAggregates(prog.TargetData(), module)
 		records, err := cl.CoroLibraryEffectSummaryRecords(pkg)
 		if err != nil || len(records) == 0 {
 			t.Fatalf("actual producer records: %v (%d bytes)", err, len(records))
@@ -257,9 +293,24 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 	}
 	producerSource := librarySource
 	declarationSource := "package library\nfunc Acquire(uint32) uint32\nfunc Stats() uint32\nfunc DropInfo() uint32\n"
+	const payload = "type Payload = struct { Value uint32; Padding [131073]byte }\n"
+	if large {
+		producerSource = strings.Replace(producerSource, "type Result = struct { R0 uint32 }", payload+"type Result = struct { R0 Payload }", 1)
+		producerSource = strings.ReplaceAll(producerSource, "out.R0", "out.R0.Value")
+		producerSource = strings.Replace(producerSource, "func Acquire(value uint32) uint32", "func Acquire(value uint32) Payload", 1)
+		producerSource = strings.Replace(producerSource, "out.R0.Value = value", "out.R0.Value = value; out.R0.Padding[0] = 37; out.R0.Padding[131072] = 53", 1)
+		producerSource = strings.Replace(producerSource, "lastDrop = out.R0.Value;", "lastDrop = out.R0.Value; if out.R0.Padding[0] != 37 || out.R0.Padding[131072] != 53 { lastDrop = 9999 };", 1)
+		producerSource = strings.Replace(producerSource, "return out.R0.Value", "return out.R0", 1)
+		declarationSource = strings.Replace(declarationSource, "package library\n", "package library\n"+payload, 1)
+		declarationSource = strings.Replace(declarationSource, "func Acquire(uint32) uint32", "func Acquire(uint32) Payload", 1)
+	}
 	if factory {
-		producerSource = strings.Replace(producerSource, "func Acquire(", "func acquire(", 1) + "\nfunc Callable() func(uint32) uint32 { return acquire }\n"
-		declarationSource = "package library\nfunc Callable() func(uint32) uint32\nfunc Stats() uint32\nfunc DropInfo() uint32\n"
+		result := "uint32"
+		if large {
+			result = "Payload"
+		}
+		producerSource = strings.Replace(producerSource, "func Acquire(", "func acquire(", 1) + "\nfunc Callable() func(uint32) " + result + " { return acquire }\n"
+		declarationSource = strings.Replace(declarationSource, "func Acquire(uint32) "+result, "func Callable() func(uint32) "+result, 1)
 	}
 	producer, files := buildCoroPlanTestPackage(t, libraryPath, producerSource, nil)
 	build(newProgram(), producer, files, true)
@@ -279,6 +330,11 @@ func main() {
  for lib.Stats() != 212 || lib.DropInfo() != 1099 { yield() }
 }
 `
+	if large {
+		consumerSource = strings.Replace(consumerSource, "Normal = lib.Acquire(7)", `normal := lib.Acquire(7)
+ Normal = normal.Value
+ if normal.Padding[0] != 37 || normal.Padding[131072] != 53 { Normal = 1000 }`, 1)
+	}
 	if dynamic {
 		consumerSource = strings.ReplaceAll(consumerSource, "lib.Acquire(", "acquire(")
 		consumerSource = strings.Replace(consumerSource, "func child() {", "func child(acquire func(uint32) uint32) {", 1)
@@ -286,6 +342,9 @@ func main() {
 		consumerSource = strings.Replace(consumerSource, "go child()", "go child(acquire)", 1)
 		if factory {
 			consumerSource = strings.Replace(consumerSource, "acquire := lib.Acquire", "acquire := lib.Callable()", 1)
+		}
+		if large {
+			consumerSource = strings.ReplaceAll(consumerSource, "func(uint32) uint32", "func(uint32) lib.Payload")
 		}
 	}
 	consumer, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, consumerSource, coroPlanTestImporter{libraryPath: declarations.Pkg, "unsafe": types.Unsafe})
@@ -377,6 +436,8 @@ func main() {
 	reportSource, reportObject := filepath.Join(temp, "report.c"), filepath.Join(temp, "report.o")
 	if err := os.WriteFile(reportSource, []byte(`#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+void *__llgo_archive_delivery_allocz(uintptr_t size) { return calloc(1, size); }
 void __llgo_archive_delivery_report(uint32_t stats, uint32_t drop) { fprintf(stderr, "archive delivery stats=%u (want312) drop=%u (want1099)\n", stats, drop); }
 `), 0o600); err != nil {
 		t.Fatal(err)

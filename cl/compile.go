@@ -912,7 +912,10 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			oldCoroPrintScratch, oldCoroPrintScratchCap := p.coroPrintScratch, p.coroPrintScratchCap
 			p.coroPrintScratch = llssa.Nil
 			p.coroPrintScratchCap = -1
-			if f.Recover != nil {
+			// Native longjmp recovery needs volatile source locals. Managed
+			// physical bodies recover through explicit CFG/status edges instead;
+			// their frozen frame/result lifetimes need no legacy slot barriers.
+			if f.Recover != nil && !managedPhysicalABI {
 				p.recoverSlots = make(map[*ssa.Alloc]none)
 			} else {
 				p.recoverSlots = nil

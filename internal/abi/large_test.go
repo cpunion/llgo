@@ -286,6 +286,24 @@ entry:
   store %Small %value, ptr %dst, align 1
   ret void
 }
+
+define void @large_zero(ptr %dst) {
+entry:
+  store %Large zeroinitializer, ptr %dst, align 1
+  ret void
+}
+
+define void @volatile_large_zero(ptr %dst) {
+entry:
+  store volatile %Large zeroinitializer, ptr %dst, align 1
+  ret void
+}
+
+define void @dead_large_load(ptr %src) {
+entry:
+  %unused = load %Large, ptr %src, align 1
+  ret void
+}
 `
 
 	ctx := llvm.NewContext()
@@ -335,6 +353,17 @@ entry:
 	small := mod.NamedFunction("small_copy").String()
 	if !strings.Contains(small, "load [65536 x i8]") || !strings.Contains(small, "store [65536 x i8]") {
 		t.Fatalf("aggregate at the threshold was unexpectedly rewritten:\n%s", small)
+	}
+	zero := mod.NamedFunction("large_zero").String()
+	if !strings.Contains(zero, "call void @llvm.memset") || strings.Contains(zero, "store [65537 x i8]") {
+		t.Fatalf("large zero store reached target aggregate scalarization:\n%s", zero)
+	}
+	volatile := mod.NamedFunction("volatile_large_zero").String()
+	if !strings.Contains(volatile, "store volatile [65537 x i8]") || strings.Contains(volatile, "llvm.memset") {
+		t.Fatalf("observable volatile store was rewritten as ordinary memory:\n%s", volatile)
+	}
+	if dead := mod.NamedFunction("dead_large_load").String(); strings.Contains(dead, "load [65537 x i8]") {
+		t.Fatalf("discarded large value reached target aggregate scalarization:\n%s", dead)
 	}
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("stored-load module is invalid: %v\n%s", err, mod.String())
