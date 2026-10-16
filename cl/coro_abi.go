@@ -353,11 +353,18 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	sourceSig = coroPhysicalNormalizeSourceSignature(sourceSig)
 	hasEnv := false
 	if entry.function != nil {
-		hidden := sourceSig.Params().Len() - len(entry.function.Params)
+		declared := coroPhysicalNormalizeSourceSignature(entry.function.Signature).Params().Len()
+		if len(entry.function.Blocks) != 0 && declared != len(entry.function.Params) {
+			panic("coroutine physical ABI: owned body parameters disagree with its source signature")
+		}
+		// A bodyless declaration has no SSA parameter values. Closure context
+		// is the difference between two complete typed signatures, not between
+		// a signature and the optional parameter-value projection of a body.
+		hidden := sourceSig.Params().Len() - declared
 		if hidden < 0 || hidden > 1 {
 			panic(fmt.Sprintf(
-				"coroutine physical ABI: function %q source parameters=%d disagree with SSA parameters=%d",
-				entry.function.String(), sourceSig.Params().Len(), len(entry.function.Params),
+				"coroutine physical ABI: function %q entry parameters=%d disagree with source parameters=%d",
+				entry.function.String(), sourceSig.Params().Len(), declared,
 			))
 		}
 		hasEnv = hidden == 1
@@ -408,16 +415,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	faultPayloadArgsHook := coroFaultPayloadHookV2
 	completePrepareHook := coroCompletePrepareHookV2
 	resultSlotType := coro.ResultSlotType(sourceSig.Results())
-	physicalParams := make([]*types.Var, 0, sourceSig.Params().Len()+2)
-	physicalParams = append(physicalParams,
-		types.NewParam(token.NoPos, nil, "__llgo_g", types.Typ[types.UnsafePointer]),
-		types.NewParam(token.NoPos, nil, "__llgo_out", types.Typ[types.UnsafePointer]),
-	)
-	for i := 0; i < sourceSig.Params().Len(); i++ {
-		physicalParams = append(physicalParams, sourceSig.Params().At(i))
-	}
-	physicalResults := types.NewTuple(types.NewParam(token.NoPos, nil, "__llgo_handle", types.Typ[types.UnsafePointer]))
-	physicalSig := types.NewSignatureType(nil, nil, nil, types.NewTuple(physicalParams...), physicalResults, false)
+	physicalSig := coroPhysicalEntrySignature(sourceSig)
 
 	qualified := func(pkg *types.Package) string {
 		if pkg == nil {
@@ -565,6 +563,21 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		resultSlotType:                resultSlotType,
 		resultCount:                   sourceSig.Results().Len(),
 	}
+}
+
+// coroPhysicalEntrySignature is the sole (g,out,args)->handle type constructor
+// for local ramps and exact archive declarations. Descriptor context adaptation
+// remains in the existing typed thunk, not in a fabricated source function.
+func coroPhysicalEntrySignature(source *types.Signature) *types.Signature {
+	parameters := []*types.Var{
+		types.NewParam(token.NoPos, nil, "__llgo_g", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "__llgo_out", types.Typ[types.UnsafePointer]),
+	}
+	for index := 0; index < source.Params().Len(); index++ {
+		parameters = append(parameters, source.Params().At(index))
+	}
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "__llgo_handle", types.Typ[types.UnsafePointer]))
+	return types.NewSignatureType(nil, nil, nil, types.NewTuple(parameters...), results, false)
 }
 
 func coroHeaderType(prog llssa.Program) llssa.Type {

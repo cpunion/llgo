@@ -181,6 +181,7 @@ type CoroPlanInput struct {
 	// inherit these facts through the ordinary SSA fixed point; no source
 	// annotation is propagated.
 	importedLibraryEffects map[*ssa.Function]coro.LibraryEffectFunction
+	importedFunctions      []coro.LibraryEffectFunction
 	// libraryForeign contains exact producer-owned C
 	// declaration identities and optional target-neutral contracts. The build
 	// driver has already matched FunctionID, physical symbol, typed ABI, target
@@ -412,6 +413,10 @@ func isCoroManagedDescriptorSpawn(call ssa.CallInstruction) bool {
 // structural identity resolver is composed with builder identity policy.
 // Builders use this helper instead of calling AnalyzeSSA directly.
 func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.SSAPlan, error) {
+	if len(config.ImportedFunctions) != 0 && !slices.Equal(config.ImportedFunctions, in.importedFunctions) {
+		return nil, fmt.Errorf("build coroutine plan: builder cannot supply archive helper facts outside the frozen typed import inventory")
+	}
+	config.ImportedFunctions = slices.Clone(in.importedFunctions)
 	if len(in.requiredClosedDynamic) != 0 {
 		closed := make(map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate, len(in.requiredClosedDynamic))
 		for call, certificate := range in.requiredClosedDynamic {
@@ -3279,35 +3284,19 @@ func sameExactCoroLoweredCalls(left, right []coro.SSALoweredCall) bool {
 	if len(left) != len(right) {
 		return false
 	}
-	type exactLoweredCall struct {
-		target               *ssa.Function
-		noUnwind             bool
-		unwindOnly           bool
-		explicitStatusElided bool
-		rawPlain             bool
-	}
-	byName := make(map[string]exactLoweredCall, len(left))
+	byName := make(map[string]coro.SSALoweredCall, len(left))
 	for _, call := range left {
-		if call.LogicalName == "" || call.Target == nil {
+		if call.LogicalName == "" {
 			return false
 		}
 		if _, duplicate := byName[call.LogicalName]; duplicate {
 			return false
 		}
-		byName[call.LogicalName] = exactLoweredCall{
-			target:               call.Target,
-			noUnwind:             call.NoUnwind,
-			unwindOnly:           call.UnwindOnly,
-			explicitStatusElided: call.ExplicitStatusElided,
-			rawPlain:             call.RawPlain,
-		}
+		byName[call.LogicalName] = call
 	}
 	for _, call := range right {
 		frozen, ok := byName[call.LogicalName]
-		if call.LogicalName == "" || call.Target == nil || !ok || frozen.target != call.Target ||
-			frozen.noUnwind != call.NoUnwind ||
-			frozen.unwindOnly != call.UnwindOnly || frozen.explicitStatusElided != call.ExplicitStatusElided ||
-			frozen.rawPlain != call.RawPlain {
+		if call.LogicalName == "" || !ok || frozen != call {
 			return false
 		}
 		delete(byName, call.LogicalName)
@@ -4546,8 +4535,17 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if builder == nil {
 		builder = defaultCoroPlanBuilder
 	}
+	var libraryIndex *coro.LibraryEffectIndex
+	var importedLibraryMetadata coro.LibraryEffectMetadata
+	if ctx.buildConf.ImportCfg != "" && (len(packages) != 0 || ctx.coroEmission != nil) {
+		var err error
+		libraryIndex, importedLibraryMetadata, err = loadCoroLibraryEffectIndex(ctx)
+		if err != nil {
+			return fmt.Errorf("load coroutine library effects: %w", err)
+		}
+	}
 	if len(packages) != 0 {
-		if err := prepareCoroEmissionUniverse(ctx, packages); err != nil {
+		if err := prepareCoroEmissionUniverse(ctx, packages, libraryIndex); err != nil {
 			return fmt.Errorf("prepare coroutine emission universe: %w", err)
 		}
 	}
@@ -4556,19 +4554,14 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	}
 	var importedLibraryEffects map[*ssa.Function]coro.LibraryEffectFunction
 	var libraryForeign map[*ssa.Function]coro.LibraryEffectForeignCallable
-	var importedLibraryMetadata coro.LibraryEffectMetadata
 	if ctx.coroEmission != nil && ctx.buildConf.ImportCfg != "" {
-		index, metadata, err := loadCoroLibraryEffectIndex(ctx)
-		if err != nil {
-			return fmt.Errorf("load coroutine library effects: %w", err)
-		}
-		importedLibraryMetadata = metadata
-		importedLibraryEffects, err = prepareCoroImportedLibraryEffects(ctx, index, metadata)
+		var err error
+		importedLibraryEffects, err = prepareCoroImportedLibraryEffects(ctx, libraryIndex, importedLibraryMetadata)
 		if err != nil {
 			return fmt.Errorf("prepare coroutine library effects: %w", err)
 		}
 		libraryForeign, err =
-			prepareCoroImportedLibraryForeignCallables(ctx, index, metadata)
+			prepareCoroImportedLibraryForeignCallables(ctx, libraryIndex, importedLibraryMetadata)
 		if err != nil {
 			return fmt.Errorf("prepare coroutine library foreign callables: %w", err)
 		}
@@ -4702,6 +4695,10 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		input.demandReferences = ctx.coroEmission.CoroDemandReferences
 		input.syncDemandReferences = ctx.coroEmission.CoroSyncDemandReferences
 		planningMetadata := ctx.coroEmission.CoroPlanningMetadata()
+		input.importedFunctions, err = planningMetadata.ImportedFunctions()
+		if err != nil {
+			return fmt.Errorf("read frozen archive helpers: %w", err)
+		}
 		input.plainLoweredCalls = planningMetadata.PlainLoweredCalls
 		input.managedValueReferences = planningMetadata.ManagedValueReferences
 		input.loweredCalls = ctx.coroEmission.CoroLoweredCalls
@@ -7190,7 +7187,7 @@ func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) 
 	}, nil
 }
 
-func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
+func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage, library *coro.LibraryEffectIndex) error {
 	if ctx != nil && ctx.coroRawGlobalSymbols == nil {
 		inventory, err := freezeCoroRawGlobalSymbolInventory(ctx, packages)
 		if err != nil {
@@ -7262,6 +7259,7 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		ctx.coroProgramPredicates = coro.ProgramPredicateRequirements{Mask: coro.ProgramPredicateMask()}
 	}
 	emission, err := cl.PrepareEmissionUniverseWithOptions(ctx.prog, ctx.patches, inputs, cl.EmissionUniverseOptions{
+		CoroLibraryEffects: library,
 		// Archive-producing entry resolution with the real runtime input must
 		// freeze every hidden compiler/runtime ABI edge. Isolated plan tests may
 		// deliberately prepare an incomplete package universe.

@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v42"
+const PlanDigestSchema = "llgo.coro.plan-digest.v43"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -142,6 +142,7 @@ type planDigestDocument struct {
 	Metadata          PlanDigestMetadata           `json:"metadata"`
 	Roots             []planDigestRoot             `json:"roots"`
 	Functions         []planDigestFunction         `json:"functions"`
+	ImportedFunctions []SSAImportedFunctionPlan    `json:"imported_functions,omitempty"`
 	Calls             []planDigestCall             `json:"calls"`
 	LoweredCalls      []planDigestLoweredCall      `json:"lowered_calls"`
 	ElidedCalls       []planDigestElidedCall       `json:"elided_calls,omitempty"`
@@ -329,6 +330,10 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 	if err != nil {
 		return planDigestDocument{}, err
 	}
+	importedFunctions, err := p.canonicalDigestImportedFunctions()
+	if err != nil {
+		return planDigestDocument{}, err
+	}
 	definitions, err := p.digestValueDefinitions()
 	if err != nil {
 		return planDigestDocument{}, err
@@ -345,6 +350,7 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		Metadata:          metadata,
 		Roots:             roots,
 		Functions:         functions,
+		ImportedFunctions: importedFunctions,
 		Calls:             make([]planDigestCall, 0, len(p.callPlans)),
 		LoweredCalls:      loweredCalls,
 		ElidedCalls:       make([]planDigestElidedCall, 0, len(p.elidedCalls)),
@@ -708,8 +714,17 @@ func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error)
 			}
 			targetID, ok := p.byFunction[call.Target]
 			if call.ManagedDispatch {
-				if call.Target != nil || call.NoUnwind || call.RawPlain || call.UnwindOnly || call.ExplicitStatusElided {
+				if call.Target != nil || call.ImportedTarget != "" || call.NoUnwind || call.RawPlain || call.UnwindOnly || call.ExplicitStatusElided {
 					return nil, fmt.Errorf("coro: malformed managed-dispatch lowered call %q in %q", call.LogicalName, ownerID)
+				}
+			} else if call.ImportedTarget != "" {
+				if call.Target != nil || call.RawPlain {
+					return nil, fmt.Errorf("coro: malformed imported lowered call %q in %q", call.LogicalName, ownerID)
+				}
+				targetID = call.ImportedTarget
+				index := sort.Search(len(p.importedFunctions), func(index int) bool { return p.importedFunctions[index].Fact.ID >= targetID })
+				if index == len(p.importedFunctions) || p.importedFunctions[index].Fact.ID != targetID {
+					return nil, fmt.Errorf("coro: imported lowered call %q in %q lost its archive helper", call.LogicalName, ownerID)
 				}
 			} else if !ok {
 				return nil, fmt.Errorf("coro: lowered call %q in %q targets a function outside the plan", call.LogicalName, ownerID)
@@ -924,7 +939,7 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 		}
 	}
 	baseFunctions := p.plan.Functions()
-	if len(p.functions) != len(baseFunctions) || len(p.functions) != len(p.byFunction) || len(p.functions) != len(p.byID) {
+	if len(p.functions)+len(p.importedFunctions) != len(baseFunctions) || len(p.functions) != len(p.byFunction) || len(p.functions) != len(p.byID) {
 		return nil, fmt.Errorf("coro: SSA function-plan coverage mismatch")
 	}
 	ret := make([]planDigestFunction, 0, len(p.functions))
@@ -944,7 +959,7 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 			return nil, fmt.Errorf("coro: SSA function plans are not in strict FunctionID order")
 		}
 		previous = plan.ID
-		if baseFunctions[index] != plan {
+		if base, found := p.plan.Lookup(plan.ID); !found || base != plan {
 			return nil, fmt.Errorf("coro: SSA function plan %q differs from the base plan", plan.ID)
 		}
 		if got, ok := p.byFunction[function.Function]; !ok || got != plan.ID {

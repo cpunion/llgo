@@ -744,6 +744,58 @@ verified no-preempt/proof-consumption branch instead of deleting or resetting
 the experiment. Bodyless helper binding, resource publication and the other
 remaining semantic gates are unchanged and still unfinished.
 
+PR [#276](https://github.com/cpunion/llgo/pull/276) merges as `861541425`
+at17:59:46 UTC after all18 jobs in CI38938054648 pass at exact head
+`6a2d0c271`, with fresh empty paginated review/comment/thread inventories.
+Immutable final-head v100 full test/go passes **271/271**, zero failures/skips,
+completed17:56:25 UTC, matching source-after17:56:26, joined children and
+reclaimed scratch. Its binary is
+`1cabd4adcf1cb6ac1f4720464afadeb2a16619eb23034afcd6e58006affcd17c`
+(25931536bytes); separate build/run peaks are8448.6/6567.0MiB. The same compiler
+passes the60FD+6opaque linked resource runs and all three original reflection
+routes, source-after matching, combined peak2740.3MiB. This is the latest
+integrated full test/go evidence, not a full stdlib/GOROOT/platform pass.
+
+The next local branch implements archive-only typed helpers as leaves in the
+same Graph and plan digest v43; Functions remains source-only. Missing helpers,
+source-identity conflicts, mixed invocation domains, invalid metadata and
+builder overrides fail closed. Transitive capabilities and true/false predicate
+requirements use the existing owner fixed point. Native/wasm32 physical guards
+and typed helper declarations pass verification before/after CoroSplit, with
+no fabricated SSA bodies. A real compiler-produced indexed archive is consumed
+through importcfg; private helper declarations are absent from consumer SSA.
+The native executable passes three repeated explicit-cancellation runs, including
+normal result ownership, ignored defer results, one drop of resource99 and both
+asynchronous drop steps. A strengthened run waits for cleanup before main exits
+and also passes three times (29.260s/746.2MiB). Analysis/runtime-core race pass
+23.345s/1663.8MiB and5.441s/127.0MiB. This local feature is not yet integrated
+or accepted by a final immutable whole-suite run. The broad compiler regression
+passes119.470s/1333.4MiB after restoring the original unrelated preflight
+diagnostics. Both genuinely private helpers and existing bodyless helper
+declarations pass native/wasm32 pre/post-split physical verification
+(5.672s/1296.6MiB); the latter uses the same exact imported-primary capability
+matrix and ordinary static helper path. No architecture budget, semantic
+assertion or instruction golden is relaxed.
+
+Immutable v101's exact-source archive gate passes29.509s/740.5MiB,
+full compiler regression131.451s/1205.5MiB,
+analysis race20.749s/1505.6MiB and unchanged architecture/build gates
+0.668s/347.3MiB. Its fresh complete test/go run remains active. The native linked
+CI lane now names the real archive execution test explicitly; the earlier
+18-job workflow did not include that new E2E fixture in its enumerated list.
+
+The first real archive probe exposes an export-data declaration with no SSA
+parameter values: defer operand validation now consumes its complete typed
+signature, and physical ABI context detection no longer mistakes absent body
+parameters for a closure environment. A three-argument real imported declaration
+regression passes. The native test island also adds the actual production
+cleanup-shield bridge, rather than a stub. Earlier exploratory archive runs
+r3–r7 incorrectly assumed main return would explicitly cancel a live compute
+goroutine; their failure logs are retained, not classified as compiler negatives.
+The corrected gate requests cancellation while the program is running and checks
+the exact canceled resource identity. Descriptor publication, external defer
+owners, output-loan lifetime and reflection resource handoff remain unfinished.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;

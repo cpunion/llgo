@@ -62,6 +62,27 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 	return validateCoroManagedDescriptorPrimary(fn, plan, universes...)
 }
 
+// Exact imported primaries share this capability matrix whether their source
+// declaration is present or only a typed private-helper binding is available.
+// Public value publication separately requires Dispatch; private helpers may
+// retain their already selected direct representation.
+func coroExternalManagedDescriptorEntry(plan coro.FunctionPlan) (plain, structured bool) {
+	if plan.External != coro.ExternalKnown || plan.Emission != coro.EmitExternal ||
+		plan.Primary != coro.PrimaryExternal || plan.Effect.IsOpaque() || plan.Exec.IsOpaque() {
+		return false, false
+	}
+	switch plan.ManagedEntry {
+	case coro.ManagedEntryCoroutine:
+		structured = (plan.FuncRep == coro.Dispatch || plan.FuncRep == coro.DirectCoro) && plan.Effect.MaySuspend()
+	case coro.ManagedEntryOutcomePlain:
+		structured = (plan.FuncRep == coro.Dispatch || plan.FuncRep == coro.DirectCoro) && plan.Effect == coro.OutcomeStructured && plan.HasStaticOutcome()
+	case coro.ManagedEntryPlain:
+		plain = (plan.FuncRep == coro.Dispatch || plan.FuncRep == coro.DirectPlain) && plan.Effect == coro.NoSuspend &&
+			plan.Exec&(coro.BlockForeign|coro.NeedsPreempt|coro.ThreadAffine|coro.MayUnwind) == 0
+	}
+	return
+}
+
 // A private typed helper can describe its already demanded static primary
 // without changing source value flow to Dispatch. Public function values still
 // pass the separate representation/publication check above.
@@ -79,28 +100,8 @@ func validateCoroManagedDescriptorPrimary(fn *ssa.Function, plan coro.FunctionPl
 	}
 	externalPlain := false
 	externalStructured := false
-	if fn != nil && len(fn.Blocks) == 0 && plan.External == coro.ExternalKnown &&
-		plan.Emission == coro.EmitExternal && plan.Primary == coro.PrimaryExternal &&
-		!plan.Exec.IsOpaque() {
-		switch plan.ManagedEntry {
-		case coro.ManagedEntryCoroutine:
-			externalStructured = plan.FuncRep == coro.Dispatch && plan.Effect.MaySuspend()
-		case coro.ManagedEntryOutcomePlain:
-			externalStructured = plan.FuncRep == coro.Dispatch && plan.Effect == coro.OutcomeStructured &&
-				plan.HasStaticOutcome()
-		case coro.ManagedEntryPlain:
-			if plan.Effect != coro.NoSuspend ||
-				plan.Exec&(coro.BlockForeign|coro.NeedsPreempt|coro.ThreadAffine|coro.MayUnwind) != 0 ||
-				plan.FuncRep != coro.Dispatch {
-				break
-			}
-			// A compatibility-checked imported Go-library fact is the producer's
-			// exact no-suspend/no-unwind contract. FuncRep ABI v2 lets each consumer
-			// synthesize the content-addressed descriptor/thunk from that fact and
-			// the published primary. Re-querying C-boundary certificates here would
-			// duplicate weaker evidence and could not strengthen this Go ABI proof.
-			externalPlain = true
-		}
+	if fn != nil && len(fn.Blocks) == 0 {
+		externalPlain, externalStructured = coroExternalManagedDescriptorEntry(plan)
 	}
 	if fn == nil || !externalPlain && !externalStructured &&
 		(plan.External != coro.Defined || len(fn.Blocks) == 0) {
@@ -1298,12 +1299,22 @@ func (p *context) emitCoroManagedPrimaryValue(
 			rawPlainTarget = b.ChangeType(p.prog.Type(carrierSig, llssa.InC), rawPhysical.Expr)
 		}
 	}
-	targetHash := sha256.Sum256([]byte(entry.plan.ID))
+	return p.emitCoroManagedPrimaryDescriptor(b, entry.plan, abi, physical.Expr, plainTarget, rawPlainTarget, closureCtx, captured, env)
+}
+
+// Both source and archive-only helpers use this one descriptor/thunk factory.
+// Callers have already bound the exact typed primary; no source/body discovery
+// or independent callable classification occurs here.
+func (p *context) emitCoroManagedPrimaryDescriptor(
+	b llssa.Builder, plan coro.FunctionPlan, abi coroPlainDispatchABI,
+	physical, plainTarget, rawPlainTarget llssa.Expr, closureCtx types.Type, captured bool, env llssa.Expr,
+) llssa.Expr {
+	targetHash := sha256.Sum256([]byte(plan.ID))
 	targetKey := hex.EncodeToString(targetHash[:8]) + "." + hex.EncodeToString(abi.hash[:])
 	result := p.prog.Type(abi.resultSlotType, llssa.InC)
-	physicalEmission := entry.plan.Emission
+	physicalEmission := plan.Emission
 	if physicalEmission == coro.EmitExternal {
-		switch entry.plan.ManagedEntry {
+		switch plan.ManagedEntry {
 		case coro.ManagedEntryPlain:
 			physicalEmission = coro.EmitPlain
 		case coro.ManagedEntryOutcomePlain:
@@ -1313,7 +1324,7 @@ func (p *context) emitCoroManagedPrimaryValue(
 		default:
 			panic(fmt.Errorf(
 				"coroutine dynamic dispatch ABI: external target %q has no managed physical entry",
-				entry.plan.ID,
+				plan.ID,
 			))
 		}
 	}
@@ -1331,9 +1342,9 @@ func (p *context) emitCoroManagedPrimaryValue(
 		case coro.EmitCoroutine:
 			flags |= llssa.CoroDispatchFlagHasCoro
 			coroEntry = p.newCoroDynamicDispatchEntryThunk(
-				coroCoroDispatchThunkPrefix+targetKey, physical.Expr, abi, physicalEmission, closureCtx,
+				coroCoroDispatchThunkPrefix+targetKey, physical, abi, physicalEmission, closureCtx,
 			)
-			if rawPhysical != nil {
+			if !rawPlainTarget.IsNil() {
 				flags |= llssa.CoroDispatchFlagHasPlain
 				plainEntry = p.newCoroDynamicDispatchEntryThunk(
 					coroPlainDispatchThunkPrefix+targetKey, rawPlainTarget, abi, coro.EmitRawPlain, closureCtx,
@@ -1342,10 +1353,10 @@ func (p *context) emitCoroManagedPrimaryValue(
 		case coro.EmitOutcomePlain:
 			flags |= llssa.CoroDispatchFlagHasOutcome
 			outcomeEntry = p.newCoroDynamicDispatchEntryThunk(
-				coroOutcomeDispatchThunkPrefix+targetKey, physical.Expr, abi, physicalEmission, closureCtx,
+				coroOutcomeDispatchThunkPrefix+targetKey, physical, abi, physicalEmission, closureCtx,
 			)
 		default:
-			panic(fmt.Errorf("coroutine dynamic dispatch ABI: target %q has unsupported emission %s", entry.plan.ID, entry.plan.Emission))
+			panic(fmt.Errorf("coroutine dynamic dispatch ABI: target %q has unsupported emission %s", plan.ID, plan.Emission))
 		}
 		if !captured {
 			flags |= llssa.CoroDispatchFlagNoCapture
@@ -1358,7 +1369,7 @@ func (p *context) emitCoroManagedPrimaryValue(
 			PlainEntry:   plainEntry,
 			OutcomeEntry: outcomeEntry,
 			CoroEntry:    coroEntry,
-			CodeEntry:    physical.Expr,
+			CodeEntry:    physical,
 			Result:       result,
 		})
 		if p.coroPlainDescriptors == nil {

@@ -871,6 +871,7 @@ func (function LibraryEffectFunction) ImportedPolicy() (SSAFunctionPolicy, error
 // LibraryEffectIndex is an immutable lookup table constructed only after
 // metadata compatibility has been checked.
 type LibraryEffectIndex struct {
+	metadata          LibraryEffectMetadata
 	functions         map[FunctionID]LibraryEffectFunction
 	foreignFunctions  map[FunctionID]LibraryEffectForeignCallable
 	foreignIdentities map[string]LibraryEffectForeignCallable
@@ -879,7 +880,11 @@ type LibraryEffectIndex struct {
 }
 
 func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEffectMetadata) (*LibraryEffectIndex, error) {
+	if err := consumer.validate(); err != nil {
+		return nil, err
+	}
 	index := &LibraryEffectIndex{
+		metadata:          consumer,
 		functions:         make(map[FunctionID]LibraryEffectFunction),
 		foreignFunctions:  make(map[FunctionID]LibraryEffectForeignCallable),
 		foreignIdentities: make(map[string]LibraryEffectForeignCallable),
@@ -959,6 +964,15 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 		}
 	}
 	return index, nil
+}
+
+// Metadata returns the exact consumer profile against which this immutable
+// index was checked. The frontend binds helper ABIs under that same profile.
+func (index *LibraryEffectIndex) Metadata() LibraryEffectMetadata {
+	if index == nil {
+		return LibraryEffectMetadata{}
+	}
+	return index.metadata
 }
 
 func (index *LibraryEffectIndex) Lookup(id FunctionID) (LibraryEffectFunction, bool) {

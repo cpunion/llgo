@@ -15,14 +15,15 @@ func (c *Compilation) ValidateCoroLibraryProgramPredicates() error {
 	if c == nil {
 		return fmt.Errorf("library predicate validation requires a compilation")
 	}
-	if len(c.CoroLibraryEffects) == 0 {
+	plan := c.immutablePlan()
+	if len(c.CoroLibraryEffects) == 0 && (plan == nil || len(plan.ImportedFunctions()) == 0) {
 		return nil
 	}
 	values, err := c.CoroProgramPredicateValues()
 	if err != nil {
 		return err
 	}
-	return validateCoroLibraryProgramPredicates(c.immutablePlan(), c.CoroLibraryEffects, values)
+	return validateCoroLibraryProgramPredicates(plan, c.CoroLibraryEffects, values)
 }
 
 func validateCoroLibraryProgramPredicates(plan *coro.SSAPlan, effects map[*ssa.Function]coro.LibraryEffectFunction, values coro.ProgramCapabilities) error {
@@ -36,6 +37,13 @@ func validateCoroLibraryProgramPredicates(plan *coro.SSAPlan, effects map[*ssa.F
 		}
 		if !fact.ProgramPredicates.Compatible(values) {
 			return fmt.Errorf("library function %q requires program predicates mask=%#x values=%#x, consumer has %#x; recompile the library for this program",
+				fact.ID, fact.ProgramPredicates.Mask, fact.ProgramPredicates.Values, values)
+		}
+	}
+	for _, entry := range plan.ImportedFunctions() {
+		fact := entry.Fact
+		if entry.Plan.Emission != coro.EmitNone && !fact.ProgramPredicates.Compatible(values) {
+			return fmt.Errorf("library helper %q requires program predicates mask=%#x values=%#x, consumer has %#x; recompile the library for this program",
 				fact.ID, fact.ProgramPredicates.Mask, fact.ProgramPredicates.Values, values)
 		}
 	}

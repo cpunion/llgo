@@ -91,6 +91,20 @@ Effect 通过普通 direct/defer/dynamic managed call graph求最小固定点。
 
 Import 时 summary 参与与源码函数相同的固定点；link 时验证版本和 ABI hash。Whole-program cache digest不能替代 producer archive summary。
 
+私有 helper 没有 consumer SSA 声明时，仍以 producer summary 的精确 FunctionID
+加入同一个 Graph，不能补造 `ssa.Function` 或把已知调用降级成 unknown dispatch。
+`SSAPlan.Functions()` 只投影真实源码；`ImportedFunctions()` 投影这些 archive leaf。
+精确 lowered edge 统一传播 effect/demand，producer 已闭包的 service/predicate fact
+在该 edge 上进入现有固定点。Plan digest v43 同时绑定 imported fact（含符号、完整
+ABI hash、true/false predicate mask）及最终 FunctionPlan，未使用的 helper 不成为 root。
+静态 bodyless producer 的 helper 签名由完整返回 tuple 推导，复用 producer/consumer
+同一个 ABI hash 构造器，并绑定实际 target layout。物理调用复用现有 descriptor/thunk、
+child await 与 cleanup drainer；不增加 runtime 字段或第二套调度/取消协议。当前测试
+覆盖 native/wasm32 CoroSplit 前后，以及真实 native archive 的运行期显式取消。
+source producer 动态发布、FFI 第二次资源交付和 output-loan lifetime 仍是独立 gate，
+不能仅凭类型元数据或符号存在而放开。普通 main 退出不等价于可等待的显式任务取消，
+正常丢弃返回值（包括 defer）也不自动 drop。
+
 ### 3.3 Lowering matrix
 
 | Caller | Callee/值 | Lowering |

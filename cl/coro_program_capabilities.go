@@ -101,6 +101,10 @@ func deriveCoroFunctionProgramCapabilities(
 	}
 	capabilities := make(map[*ssa.Function]coro.ProgramCapabilities, len(functions))
 	reverse := make(map[*ssa.Function]map[*ssa.Function]struct{}, len(functions))
+	archive := make(map[coro.FunctionID]coro.SSAImportedFunctionPlan)
+	for _, function := range plan.ImportedFunctions() {
+		archive[function.Fact.ID] = function
+	}
 
 	addEdge := func(caller, callee *ssa.Function) error {
 		if caller == nil || callee == nil {
@@ -227,7 +231,7 @@ func deriveCoroFunctionProgramCapabilities(
 		}
 		for _, call := range plan.LoweredCalls(caller) {
 			if call.ManagedDispatch {
-				if call.Target != nil {
+				if call.Target != nil || call.ImportedTarget != "" {
 					return nil, fmt.Errorf("managed-dispatch lowered call %q in %q invents an exact target", call.LogicalName, caller.Name())
 				}
 				if source := call.WhenResultDeliveryOf; source != nil {
@@ -242,6 +246,20 @@ func deriveCoroFunctionProgramCapabilities(
 				// above. Published Dispatch entries remain potential program roots.
 				// Do not invent SSA functions or seed every optional service merely
 				// to represent this typed invocation domain.
+				continue
+			}
+			if call.ImportedTarget != "" {
+				entry, present := archive[call.ImportedTarget]
+				if call.Target != nil || !present {
+					return nil, fmt.Errorf("lowered call %q in %q lost its exact archive helper", call.LogicalName, caller.Name())
+				}
+				if entry.Plan.Emission != coro.EmitNone {
+					// Archive facts are already transitive. Seed this exact owner
+					// and let the existing source-edge fixed point propagate them;
+					// no unavailable body or second call graph is reconstructed.
+					capabilities[caller] |= entry.Fact.ProgramCapabilities
+					masks[caller] |= entry.Fact.ProgramPredicates.Mask
+				}
 				continue
 			}
 			if call.Target == nil {

@@ -366,8 +366,8 @@ import (
 }
 
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v42" {
-		t.Fatalf("plan digest schema = %q, want least-fixed-point program-predicate schema v42", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v43" {
+		t.Fatalf("plan digest schema = %q, want exact imported-callable inventory schema v43", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {

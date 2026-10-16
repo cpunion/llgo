@@ -1338,19 +1338,23 @@ func validateCoroStaticCleanupOperands(common *ssa.CallCommon, target *ssa.Funct
 		return fmt.Errorf("static cleanup operands require one receiver-free function")
 	}
 	signature := coroPhysicalNormalizeSourceSignature(target.Signature)
-	if signature.Params().Len() != len(target.Params) || len(common.Args) != len(target.Params) {
+	// Imported declarations have a complete signature but no body parameter
+	// values. The type ABI is authoritative; owned bodies additionally prove
+	// that their SSA parameter projection agrees with it.
+	hasSSAParameters := len(target.Blocks) != 0 || len(target.Params) != 0
+	if len(common.Args) != signature.Params().Len() || hasSSAParameters && signature.Params().Len() != len(target.Params) {
 		return fmt.Errorf(
 			"static cleanup argument shape mismatch: signature=%d SSA-params=%d call-args=%d",
 			signature.Params().Len(), len(target.Params), len(common.Args),
 		)
 	}
-	for index, parameter := range target.Params {
-		if parameter == nil || common.Args[index] == nil ||
-			!types.Identical(parameter.Type(), signature.Params().At(index).Type()) ||
-			!types.Identical(common.Args[index].Type(), parameter.Type()) {
+	for index := 0; index < signature.Params().Len(); index++ {
+		parameter := signature.Params().At(index).Type()
+		if common.Args[index] == nil || !types.Identical(common.Args[index].Type(), parameter) ||
+			hasSSAParameters && (target.Params[index] == nil || !types.Identical(target.Params[index].Type(), parameter)) {
 			return fmt.Errorf("static cleanup operand %d does not match the target parameter ABI", index)
 		}
-		if err := validateCoroPhysicalValueType(parameter.Type(), make(map[types.Type]bool)); err != nil {
+		if err := validateCoroPhysicalValueType(parameter, make(map[types.Type]bool)); err != nil {
 			return fmt.Errorf("static cleanup operand %d has unsupported type: %w", index, err)
 		}
 	}
