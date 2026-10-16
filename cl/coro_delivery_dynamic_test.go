@@ -24,6 +24,8 @@ func Certified(f func(string) (int, error)) { f("certified") }
 func Plain(string) (int, error) { return 1, nil }
 func Other(string) (int, error) { return 2, nil }
 func Closed(flag bool) { f := Plain; if flag { f = Other }; f("closed") }
+func Neutral(string) (int, error) { return 3, nil }
+func Resource(flag bool) { f := Acquire; if flag { f = Neutral }; f("resource"); defer f("resource-defer") }
 func NilOnly() { var f func(string) (int, error); f("nil") }
 func Variadic(f func(...int) int, xs []int) { f(xs...) }
 `)
@@ -43,7 +45,7 @@ func Variadic(f func(...int) int, xs []int) { f(xs...) }
 		calls  int
 	}{
 		{"Dynamic", true, 3}, {"Certified", true, 1}, {"Closed", false, 1},
-		{"NilOnly", false, 1}, {"Variadic", true, 1},
+		{"NilOnly", false, 1}, {"Variadic", true, 1}, {"Resource", true, 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fn := pkg.Func(test.name)
@@ -66,6 +68,32 @@ func Variadic(f func(...int) int, xs []int) { f(xs...) }
 			}
 			if fact, present := plan.FunctionPlan(fn); !present || fact.LocalExec.Contains(coro.NeedsCleanupFrame) != test.active {
 				t.Fatalf("conditional cleanup: %+v present=%t", fact, present)
+			}
+			// This production phase runs before physical publication. A typed
+			// descriptor helper has no fabricated SSA target; predicate discovery
+			// must consume its source CallPlan rather than reject the nil target.
+			if _, err := DiscoverCoroProgramPredicates(plan, nil); err != nil {
+				t.Fatalf("production predicate discovery rejected the frozen helper domain: %v", err)
+			}
+			// Seed only the existing exact initializer/drop entries. A known
+			// resource family must inherit both dependencies through its source
+			// producer; an open or proven nonresource family must not turn on
+			// services merely because its helper domain uses managed dispatch.
+			initializeBit, dropBit := coro.ExecutionDomainProgramCapability(), coro.GCObservationProgramCapability()
+			local := map[*ssa.Function]coro.ProgramCapabilities{pkg.Func("initFD"): initializeBit, pkg.Func("dropFD"): dropBit}
+			masks := map[*ssa.Function]coro.ProgramCapabilities{pkg.Func("initFD"): initializeBit, pkg.Func("dropFD"): dropBit}
+			capabilities, err := deriveCoroFunctionProgramCapabilities(plan, local, nil, masks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCapability := coro.ProgramCapabilities(0)
+			if test.name == "Resource" {
+				wantCapability = initializeBit | dropBit
+			}
+			if capabilities[fn] != wantCapability || masks[fn] != wantCapability ||
+				projectCoroProgramCapabilities(plan, capabilities)&coro.ProgramPredicateMask() != wantCapability {
+				t.Fatalf("helper dependency closure: capability=%#x mask=%#x projected=%#x, want=%#x",
+					capabilities[fn], masks[fn], projectCoroProgramCapabilities(plan, capabilities), wantCapability)
 			}
 			seen := make(map[string]bool)
 			calls := 0

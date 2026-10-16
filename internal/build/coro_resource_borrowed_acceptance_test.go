@@ -109,6 +109,27 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 			}
 		})
 	}
+	t.Run("opaque-nonresource-callable", func(t *testing.T) {
+		image := filepath.Join(t.TempDir(), "opaque-callable")
+		build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-o", image, "./_testgo/coro_dynamic_delivery_predicate/main.go")
+		build.Dir = filepath.Join(root, "runtime")
+		build.Env = append(os.Environ(), "LLGO_ROOT="+root, "LLGO_BUILD_CACHE=off")
+		if output, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("opaque callable predicate build: %v\n%s", err, output)
+		}
+		for _, owners := range []string{"1", "2"} {
+			for attempt := 0; attempt < 3; attempt++ {
+				runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
+				run := exec.CommandContext(runCtx, image)
+				run.Env = append(os.Environ(), "GOMAXPROCS="+owners)
+				output, err := run.CombinedOutput()
+				runCancel()
+				if err != nil || strings.TrimSpace(string(output)) != "opaque callable predicate closure ok" {
+					t.Fatalf("opaque callable P=%s run %d: %v\n%s", owners, attempt, err, output)
+				}
+			}
+		}
+	})
 }
 
 // The Node gate consumes the real private borrowed-output primitive. Public

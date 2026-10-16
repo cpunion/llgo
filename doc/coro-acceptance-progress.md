@@ -5,7 +5,7 @@ notes in the design documents. Update a row only with a test of the relevant
 compiler and generated program. Host-Go unit tests do not establish LLGo
 source compatibility, and one platform's result does not establish another's.
 
-## Current checkpoint: 2026-10-16 (Asia/Shanghai)
+## Current checkpoint: 2026-10-17 (Asia/Shanghai)
 
 PRs [#262](https://github.com/cpunion/llgo/pull/262) and
 [#263](https://github.com/cpunion/llgo/pull/263) are merged into `llvm-coro`
@@ -603,6 +603,63 @@ conversion now lets the original high-word assertions compile on32-bit;
 neither the 64-bit value nor any assertion is reduced. Final portable compile,
 positive panic/traceback regressions and repeat original-case gates remain
 pending for the follow-up head.
+
+Final immutable v94 `dd9295cfa` completes the caller follow-up's local gates:
+compiler SHA-256
+`8e6fdd66020abae7495f0a790884dab43c9be44e5189698a4f8a6da1d7e7f039`,
+manifest `773e3808bb2097dc1aea33037a91cef0effad6feb59bcbdc597588e245d21235`.
+Complete runtime/coro race passes5.875s/371.2MiB; linux/386 and js/wasm test
+binary compilation pass382.9MiB/347.0MiB, retaining the exact compile-time
+Frame capacity assertion. Broad compiler passes199.861s/1277.5MiB. All three
+unchanged original GOROOT cases `issue75764`, `issue5856`, `issue29504` pass
+with matching source-after, combined peak3002.8MiB. Draft
+[PR274](https://github.com/cpunion/llgo/pull/274) targets only `llvm-coro`;
+CI38927305156 and final review are pending. Independent older GOROOT shard4
+finishes135/135 with no failures/skips (peak7888.2MiB), and shard5 starts.
+
+Production-phase review finds a separate integration omission: capability
+discovery still assumes every lowered helper has an SSA target and rejects
+typed managed-dispatch delivery helpers. Adding DiscoverCoroProgramPredicates
+to the existing production recipe test reproduces the exact failure for
+Dynamic, Certified and Variadic (0.623s/1262.7MiB), retained as the negative
+cohort. The fix respects the existing invocation domain and source CallPlan;
+it neither invents SSA targets nor enables all optional services. A known
+resource family propagates initializer/drop service bits and predicate masks
+through the original producer closure; open and closed nonresource families
+do not acquire them merely from the helper domain. The selected full predicate,
+capability and production-recipe race suite passes1.986s/1205.0MiB.
+
+The first expanded fixture reused Plain across resource and nonresource phi
+families; the current conservative representation union then retained the
+nonresource guard, violating the original Closed pruning assertion. That failed
+cohort is preserved. The new resource fixture uses a distinct Neutral leaf so
+the existing Closed/nil-only assertions stay unchanged; no assertion or xfail
+is relaxed. Separating representation equivalence from per-call exact target
+precision remains an identified optimization, not a claimed completed fix.
+
+Immutable v95 `6008bd7b6` verifies the capability follow-up: compiler
+`5311c0c3d7eb31d360b2d9160c90c9ee5c1bd087a60458d922c8518be327cdfd`,
+manifest `ee85f2bbf95bd6f17171f0798dd751d12b08c6060d0fa86aa4504b0e061fcbde`.
+Build passes/706.8MiB; selected predicate/capability/production recipe race
+passes1.915s/1210.9MiB; architecture0.833s/728.6MiB; broad compiler
+144.480s/1243.0MiB. All60 linked resource modes and the three original
+reflection/GC, cgo and channel routes pass with matching source-after
+(reflection routes171.028s, combined peak2727.1MiB).
+
+The new isolated fixture retains one exact static borrowed-result producer
+and invokes an ordinary yielding callable after any/channel erasure, including
+loop-defer result discard. Its SHA-256 is
+`1214eb1badf8831fdd08e5dce5da8019766def517f231efea84af261a4ff38db`.
+Exact v94 rejects it in production predicate discovery with
+`lowered call "coro.delivery.drop:dynamic:0:5" in "exercise" has no target`
+(683.8MiB). Exact v95 compiles it and passes all6 P=1/2 linked executions;
+binary `1cd9d4ea3e68c4f0a16272670a1de0917ec33ea3f1ed06310da5773e96874ab4`,
+peak1149.8MiB. Both cohorts match snapshot/fixture source-after. The fixture
+and its subtest now join the existing opt-in ResourceDeliverySlot acceptance
+gate, without another workflow or runtime protocol. Earlier exploratory typed
+channel/fallback-body variants also pass on v94 and are retained as controls,
+not falsely counted as causal negatives. The final private-intrinsic fixture
+is LLGo-only and is not presented as an unchanged Go-control program.
 
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper

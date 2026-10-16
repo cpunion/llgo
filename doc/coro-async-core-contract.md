@@ -262,6 +262,13 @@ no-unwind 或 terminal-elision shortcut。它不引入 synthetic SSA 函数或�
 source facade identity 与 canonical physical primary 的区别，不能丢失 go:linkname
 函数值的 source signature。
 
+program capability/predicate 闭包同样按这个调用域消费记录：exact helper 必须有
+冻结目标；managed-dispatch helper 不得为了满足该要求而伪造目标。动态 delivery
+helper 绑定的 source CallPlan 必须仍为 active，其已知 producer 的 initializer/drop
+依赖沿原有 producer 调用闭包传播，open Dispatch entry 仍是潜在 program root。
+未知 helper 不能仅因未知就启用全部可选服务；已闭合的无资源族不能获得这些依赖。
+这是对同一个最终 CallPlan 的投影，不是新的 capability 调用图或第二套染色。
+
 动态 consumer 现已从真实源码 occurrence 自动冻结 typed recipe 与 helper placement，
 无需手工登记。最终 `CallPlan.ResultDelivery` 同时决定 pointer-free ledger 和 source、
 cleanup、result-drop 三种 placement 的 helper 是否保留；仅从清单中找不到 helper

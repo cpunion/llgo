@@ -226,6 +226,24 @@ func deriveCoroFunctionProgramCapabilities(
 			}
 		}
 		for _, call := range plan.LoweredCalls(caller) {
+			if call.ManagedDispatch {
+				if call.Target != nil {
+					return nil, fmt.Errorf("managed-dispatch lowered call %q in %q invents an exact target", call.LogicalName, caller.Name())
+				}
+				if source := call.WhenResultDeliveryOf; source != nil {
+					invocation, present := plan.CallPlan(source)
+					if source.Parent() != caller || !present || !invocation.ResultDelivery {
+						return nil, fmt.Errorf("managed-dispatch lowered call %q in %q lost its active source delivery plan", call.LogicalName, caller.Name())
+					}
+				}
+				// An open descriptor invocation has no exact callee edge, just
+				// like an open source CallPlan. Delivery helpers belong to that
+				// source producer's existing transitive closure, already projected
+				// above. Published Dispatch entries remain potential program roots.
+				// Do not invent SSA functions or seed every optional service merely
+				// to represent this typed invocation domain.
+				continue
+			}
 			if call.Target == nil {
 				return nil, fmt.Errorf("lowered call %q in %q has no target", call.LogicalName, caller.Name())
 			}
