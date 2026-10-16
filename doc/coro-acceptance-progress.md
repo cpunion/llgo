@@ -604,6 +604,39 @@ neither the 64-bit value nor any assertion is reduced. Final portable compile,
 positive panic/traceback regressions and repeat original-case gates remain
 pending for the follow-up head.
 
+Final immutable v94 `dd9295cfa` completes the caller follow-up's local gates:
+compiler SHA-256
+`8e6fdd66020abae7495f0a790884dab43c9be44e5189698a4f8a6da1d7e7f039`,
+manifest `773e3808bb2097dc1aea33037a91cef0effad6feb59bcbdc597588e245d21235`.
+Complete runtime/coro race passes5.875s/371.2MiB; linux/386 and js/wasm test
+binary compilation pass382.9MiB/347.0MiB, retaining the exact compile-time
+Frame capacity assertion. Broad compiler passes199.861s/1277.5MiB. All three
+unchanged original GOROOT cases `issue75764`, `issue5856`, `issue29504` pass
+with matching source-after, combined peak3002.8MiB. Draft
+[PR274](https://github.com/cpunion/llgo/pull/274) targets only `llvm-coro`;
+CI38927305156 and final review are pending. Independent older GOROOT shard4
+finishes135/135 with no failures/skips (peak7888.2MiB), and shard5 starts.
+
+Production-phase review finds a separate integration omission: capability
+discovery still assumes every lowered helper has an SSA target and rejects
+typed managed-dispatch delivery helpers. Adding DiscoverCoroProgramPredicates
+to the existing production recipe test reproduces the exact failure for
+Dynamic, Certified and Variadic (0.623s/1262.7MiB), retained as the negative
+cohort. The fix respects the existing invocation domain and source CallPlan;
+it neither invents SSA targets nor enables all optional services. A known
+resource family propagates initializer/drop service bits and predicate masks
+through the original producer closure; open and closed nonresource families
+do not acquire them merely from the helper domain. The selected full predicate,
+capability and production-recipe race suite passes1.986s/1205.0MiB.
+
+The first expanded fixture reused Plain across resource and nonresource phi
+families; the current conservative representation union then retained the
+nonresource guard, violating the original Closed pruning assertion. That failed
+cohort is preserved. The new resource fixture uses a distinct Neutral leaf so
+the existing Closed/nil-only assertions stay unchanged; no assertion or xfail
+is relaxed. Separating representation equivalence from per-call exact target
+precision remains an identified optimization, not a claimed completed fix.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
