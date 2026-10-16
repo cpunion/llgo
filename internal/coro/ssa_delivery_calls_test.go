@@ -222,6 +222,11 @@ func Owner(f func() int) {
 		if len(calls) != 2 || calls[0].Parent() == calls[1].Parent() {
 			t.Fatalf("fixture needs sibling/nested source sites, got %v", calls)
 		}
+		firstOrdinal, firstErr := SemanticInstructionOrdinal(calls[0])
+		secondOrdinal, secondErr := SemanticInstructionOrdinal(calls[1])
+		if firstErr != nil || secondErr != nil || calls[0].Block().Index != calls[1].Block().Index || firstOrdinal != secondOrdinal {
+			t.Fatalf("fixture must isolate equal block/instruction ordinals across source functions: %d/%d, %v/%v", firstOrdinal, secondOrdinal, firstErr, secondErr)
+		}
 		plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
 			FunctionIDs: planDigestSSAConfig().FunctionIDs, MaxPlainInstructions: -1,
 			OutcomeMode:         OutcomeExplicitStatus,
