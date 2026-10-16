@@ -307,10 +307,29 @@ Hidden initializer/drop calls are now frozen as ordinary lowered managed calls
 in that same graph, even without explicit source calls. Independent initializer-
 only and drop-only suspension/executor seeds both color producer and caller
 automatically without requiring Dispatch (1.405s / 1239.7 MiB). The architecture
-and affected build gates still pass (0.776s / 324.5 MiB). The broad build-driver rerun
-hit its 4GiB process-tree bound (4098.8 MiB); the diagnostic is retained and the
-whole selection restarts with an 8GiB bound. It is not a semantic failure or a
-completed build-driver pass.
+and affected build gates still pass (0.776s / 324.5 MiB). The broad build-driver
+selection first hit its 4GiB process-tree bound (4098.8 MiB). Restarting that
+whole selection at 8GiB passes (790.155s / 7888.6 MiB), including the enabled
+native scheduler/cleanup E2E and production code-generation probes; opt-in
+platform/resource acceptance tests remain explicitly skipped. The first run's
+resource diagnostic is retained, not relabeled as a semantic failure.
+
+The shared lowered-helper resolver also had a cleanup-specific optimization
+gap: selecting a synchronous outcome entry lost the active drainer and reset
+its panic/nil-fault continuation as if executing ordinary source code. The
+outcome transaction now carries that existing owner into its existing cleanup-
+aware completion dispatcher. No new runtime/frame fields or cancellation
+protocol are added. Native/wasm32 LLVM verification and exact continuation-
+storage checks pass before and after CoroSplit (0.592s / 1230.4 MiB). Restoring
+only the old resolver with a Go overlay fails both targets at the intended
+panic/nil-fault base reset; this is the final negative control. Earlier attempts
+with a symbol mismatch or source-line/continuation-value collision are retained
+as fixture-check failures, not extra runtime regressions. All selected compiler
+`TestCoro*` / `TestEmission*` tests pass (150.552s / 388.1 MiB), followed by the
+architecture gate (0.798s). Vet passes with the existing CI policy: full vet for
+core/build and `-unsafeptr=false` for cl's intentional unsafe-pointer fixtures.
+An initial unrestricted cl vet reports the unchanged builtin fixture at line
+569; no source assertion or CI policy is changed to suppress a new warning.
 
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against

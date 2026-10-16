@@ -274,6 +274,9 @@ overlay 和 cancellation shielding，但不能让 drop 获得恢复调用者原 
 case 与 invalid-continuation trap。统一 await 已把 owner 与 parent-recover 权限分开；
 deferred builtin 的真实生成 helper 在 native/wasm32 的 CoroSplit 前后均不获得此权限，
 恢复旧行为的负对照失败。新增 resource drop 的物理接线必须复用此路径。
+隐藏 helper 若选择同步 outcome 入口，同样必须把已有 drainer 传给共用 completion
+分派；panic/nil fault 替换 overlay 而不重置原有正常/取消清理 continuation。
+对应 native/wasm32 前后 CoroSplit 门禁和仅恢复旧接线的负对照均已验证。
 
 static 与 descriptor 调用消费同一个冻结事实、同一个结果槽和 cleanup 路径：
 
