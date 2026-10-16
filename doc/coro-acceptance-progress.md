@@ -270,6 +270,12 @@ currently stopped, not running. Sufficient stable free disk is still needed
 to finish these gates. Completed v47 focused tests have no remaining compiler
 processes and do not replace the incomplete full cohorts.
 
+At 00:48 UTC the shared filesystem recovered over 190GiB free. All three v46
+cohorts resumed with identical fingerprinted inputs and unchanged limits.
+Full test/go rebuilds and reruns the entire package, rather than adopting the
+233 interrupted test results; demos/stdlib reuse only completed package passes.
+The preserved full-test scratch/lock and its manual inspection receipt remain.
+
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
 both the source SHA-256 manifest and recursive content comparison before
