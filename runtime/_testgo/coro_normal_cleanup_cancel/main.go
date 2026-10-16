@@ -48,8 +48,10 @@ func owner() {
 	defer deferredClose(fd)
 }
 
+func releaseCleanup() { release() }
+
 func sentinel(ready chan<- struct{}) {
-	defer release()
+	defer releaseCleanup()
 	ready <- struct{}{}
 	for {
 		runtime.Gosched()
