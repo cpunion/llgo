@@ -140,6 +140,14 @@ completion 开启作用域，普通 managed child 继承，legacy empty completi
 payload。recover-taken 仍保留作用域直到 deferred child 返回；恢复 parent 时自然
 使用其原有继承位，嵌套恢复不需要额外 push/pop。终态、销毁与资源清理协议不变。
 
+该 owner-only 元数据观察本身不能为了扫描祖先而成为一个新的可抢占 observer
+frame。仅底层 `deferredPanicTraceScope` 使用现有 `llgo:nopreempt` 证书；它不分配、
+不访问 I/O，只调用叶级元数据谓词。普通 Go 调用者仍自动染色，不逐层标注。
+证书只压制本函数的 loop/budget seed，不压制 callee 的真实 suspend/unwind，也
+不免除其他物理校验。同步 outcome 的循环体同样必须消费冻结的 exact-body 证书；
+缺失、空证书或另一函数的证书均不能授权。普通未标注循环继续使用抢占 poll，不能
+从 `NeedsPreempt` 恰好为零倒推出该授权。
+
 当前工作树已完成可独立闭环的task-stop和动态cleanup子集：`CompletionRecord`实际发布并逐层消费`Return/Panic/Abort/Shutdown`，另用`ReturnRecovered`提交direct deferred invocation的recover；frame-local terminal status使普通defer返回不会把`Abort/Shutdown`覆盖成`Return`，defer中的panic作为overlay优先，只有精确的`ReturnRecovered`会清除原panic。zero-ticket gate以及Channel/Worker/Timer/Poll/child-await恢复路径都会保留精确cancel kind；取消命中await后仍先消费child completion，并按五种状态重新进入同一个drainer。函数一旦存在循环注册，全部defer site统一进入frame-rooted异构LIFO，typed record在调用前pop/copy/free；无环site（包括可闭合的descriptor defer）仍保留一次注册的typed slot fast path。当前证据覆盖compiler可枚举的owner-local defer与direct recover；range-over-func的跨frame`DeferStack`、`Goexit`、root boundary outcome及完整GOROOT panic/defer矩阵仍未完成。
 
 ### 3.6 资源型结果：物理完成不等于调用者接管
