@@ -121,14 +121,25 @@ func TestFuncForPCCacheProductionCollisionAndRace(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "go", "test", "-race", "-count=1", "cache.go", "policy.go", "cache_test.go")
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(), "GOWORK=off")
-			if output, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("production cache %s: %v\n%s", policy, err, output)
+			runStage := func(stage string, timeout time.Duration, command string, args ...string) {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				started := time.Now()
+				cmd := exec.CommandContext(ctx, command, args...)
+				cmd.Dir = dir
+				cmd.Env = append(os.Environ(), "GOWORK=off")
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("production cache %s %s after %s (context=%v): %v\n%s", policy, stage, time.Since(started), ctx.Err(), err, output)
+				}
+				t.Logf("production cache %s %s: %s", policy, stage, time.Since(started))
 			}
+			// A cold race-toolchain build is not evidence that the cache lookup
+			// hangs. Separate it from execution and give the actual concurrent
+			// production algorithm a tighter bound than the former shared minute.
+			image := filepath.Join(dir, "cache.test.exe")
+			runStage("race build", 3*time.Minute, "go", "test", "-c", "-race", "-o", image, "cache.go", "policy.go", "cache_test.go")
+			runStage("race execution", 30*time.Second, image, "-test.v", "-test.count=1", "-test.timeout=20s")
 		})
 	}
 }
