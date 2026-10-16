@@ -18,6 +18,7 @@ package cl
 
 import (
 	"fmt"
+	"go/types"
 	"strconv"
 	"strings"
 
@@ -111,6 +112,13 @@ func (view CoroLibraryEffectView) FunctionABIHash(
 	if err != nil {
 		return "", err
 	}
+	return view.signatureABIHash(signature, metadata), nil
+}
+
+// signatureABIHash is shared by source declarations and private archive helpers.
+// The latter derive the complete no-capture signature from the producer's typed
+// delivery contract, rather than trying to reverse a code address or FunctionID.
+func (view CoroLibraryEffectView) signatureABIHash(signature *types.Signature, metadata coro.LibraryEffectMetadata) string {
 	return emissionDigest(framedEmissionKey(
 		coroLibraryFunctionABIDigestDomain,
 		metadata.CoroABI,
@@ -122,8 +130,8 @@ func (view CoroLibraryEffectView) FunctionABIHash(
 		metadata.Endianness,
 		metadata.DataLayout,
 		coroDeliveryGuardABI,
-		u.emissionTypeKeys.strictABI(signature),
-	)), nil
+		view.index.universe.emissionTypeKeys.strictABI(signature),
+	))
 }
 
 // ExportABIHash binds one source export's effective raw C signature without
@@ -170,6 +178,26 @@ func (view CoroLibraryEffectView) ValidateFunction(
 	metadata coro.LibraryEffectMetadata,
 	fact coro.LibraryEffectFunction,
 ) error {
+	if err := view.validateFunctionEntry(function, metadata, fact); err != nil {
+		return err
+	}
+	// A source producer must publish its contract, not silently downgrade to an
+	// ordinary result transfer. A bodyless import still cannot consume it until
+	// its exact helpers and parent guard have been bound in ProgramIR.
+	recipe, bound, err := view.SourceDeliveryRecord(function, metadata)
+	if err != nil {
+		return err
+	}
+	if bound && fact.Delivery != recipe {
+		return fmt.Errorf("coroutine library function %q has a missing or mismatched source delivery recipe", fact.ID)
+	}
+	if !bound && !fact.Delivery.IsZero() {
+		return fmt.Errorf("coroutine library function %q requires a bound physical resource-delivery recipe", fact.ID)
+	}
+	return nil
+}
+
+func (view CoroLibraryEffectView) validateFunctionEntry(function *ssa.Function, metadata coro.LibraryEffectMetadata, fact coro.LibraryEffectFunction) error {
 	if _, err := fact.ImportedPolicy(); err != nil {
 		return err
 	}
@@ -221,19 +249,6 @@ func (view CoroLibraryEffectView) ValidateFunction(
 			"coroutine library raw-plain symbol for %q is %q, producer published %q",
 			fact.ID, base, fact.RawPlainSymbol,
 		)
-	}
-	// A source producer must publish its contract, not silently downgrade to an
-	// ordinary result transfer. A bodyless import still cannot consume it until
-	// its exact helpers and parent guard have been bound in ProgramIR.
-	recipe, bound, err := view.SourceDeliveryRecord(function, metadata)
-	if err != nil {
-		return err
-	}
-	if bound && fact.Delivery != recipe {
-		return fmt.Errorf("coroutine library function %q has a missing or mismatched source delivery recipe", fact.ID)
-	}
-	if !bound && !fact.Delivery.IsZero() {
-		return fmt.Errorf("coroutine library function %q requires a bound physical resource-delivery recipe", fact.ID)
 	}
 	return nil
 }
