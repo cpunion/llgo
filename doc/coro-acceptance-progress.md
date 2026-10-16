@@ -55,6 +55,30 @@ linked-program run is still required before this follow-up is integrated.
 Immutable v70 separately starts new complete `test/go`, 73-demo and
 180-package stdlib cohorts; the v65 eight-shard GOROOT rerun remains ongoing.
 
+The cgo follow-up is now [PR #265](https://github.com/cpunion/llgo/pull/265),
+head `bea4a1ff7`, targeting `llvm-coro` only. Immutable v71 completes the
+stronger linked cgo fixture **10/10 times**, including both reflection forms,
+spawned deletion and P=1/2, plus the Go control. Compiler SHA-256 is
+`358f257ae71ca8169492050bc44d824c2ce03518cfa70dc2de011f716e92e038`;
+source manifest is `c55615ceac327f9454430dbad4bfb5f3f6908b67226cdc24203ad7693fcc3601`;
+binary is `164e49ea966d91d62eaa97cf86c10d0d06951b4f988707d4fbb547000d8496be`.
+Source-after matches; combined build/run peak is 2706.1MiB. The broad gate
+passes cl 155.553s, cltest 8.183s and the actual architecture gate 0.495s,
+with unchanged budgets. CI run `38871898480` is still in progress, so this
+is not yet a merged/current-head CI completion claim.
+
+An isolated resource-delivery branch retains a separate late-cancel failure:
+normal async cleanup starts before shutdown, its channel is released by the
+shutdown sentinel, but its explicit final close is skipped (v74 exit 86;
+source-after matches; the probe itself reclaims its fd). The core-only
+cleanup-scope prototype reuses the existing cancellation phase word and adds
+no G/frame/park/completion fields; full native race and selected Node/wasm
+core tests pass. It preserves operation cancellation, exact owner receipt,
+strong-join/completion ordering, the frozen stop cause, no direct recover
+authority and zero-allocation balanced scopes. It is **not wired into compiler
+invocations**, the linked negative remains failing, and public resource API
+seeds remain disabled. This prototype is not part of PR #265.
+
 The v58 expvar retry now compiles and executes all four tests successfully.
 It retains source `d5d6c5627`, source-manifest SHA-256
 `4e19f44822bab94594cd031dccfa17ff0d8d9932a909d98ea6f692d1ccf11fe3`

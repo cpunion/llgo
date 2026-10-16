@@ -208,6 +208,25 @@ release 进入现有 task-cleanup 屏蔽期后，不因新一轮取消再入或�
 close callback，只有 callback physical join 后才能撤销 custody。此处要复用已有
 cleanup cancellation shielding，不能另建任务调度/取消状态机。
 
+2026-10-16 的独立反例又区分了 **已有 task cancellation 的 cleanup** 与 **正常返回
+已经开始的 async cleanup，此时才收到新 stop**。后者尚无完整屏蔽：冻结 v74 的
+`coro_normal_cleanup_cancel` 已进入 normal defer 并等待 channel；shutdown sentinel
+确实释放了 channel，但 final close 计数仍为 0，程序以 86 失败退出并自行回收 fd。
+不能用已有 cancellation-cleanup 测试替代此门禁，也不能把单纯 Go main 退出时的
+source-independent direct destroy 当作同一个反例。
+
+隔离开发分支已有 core scope 原型：复用既有一字节 task-cancel phase，增加
+Shielded/ShieldedRequested 两态，不扩展 G、Frame、ParkState、CompletionRecord 或
+operation。它只延后 task stop；原 operation/context cancellation 与 scheduler
+preemption 仍有效。exact outer owner 的 receipt 只在 child strong join 且 completion
+已消费后结束；嵌套调用不取得新的 outer receipt。结束时返回并 claim 延后的 stop，
+编译器必须保留其 Abort/Shutdown cleanup base 与原 panic overlay，不能返回用户正常
+continuation，也不能赋予 drop 直接 recover 权限。它不是用户可用的取消 mask。
+native 全 core race 与 Node/wasm core 测试通过，balanced scope 为零分配；两次 wasm
+测试因继承 GOMAXPROCS=2 在 gc runtime 初始化即失败，改为 wasm 支持的 1 后通过。
+**编译器 scope begin/end、各 await/outcome 路径及实际反例的正向闭环尚未接线**，因此
+当前不能宣称 normal cleanup 的 late-cancel 或 public resource delivery 已修复。
+
 真实 fd 的 `TestResourceDeliveryBoundary` 是这个差异的永久 core oracle：child physical
 destroy 后再取消，normal/cancel lane 消费完全相同的 nil-payload Return；parent guard
 存在时关闭一次，故意移除 guard 的负对照会泄漏，然后由测试显式清理。它不是 public
