@@ -133,6 +133,18 @@ func rangeOwner() {
 	}
 }
 
+func rangeDeferredOwner() {
+	for range sequence {
+		defer acquire(1)
+	}
+}
+
+func rangeDynamicDeferredOwner(acquire func(uint32) int32) {
+	for range sequence {
+		defer acquire(1)
+	}
+}
+
 func secondSiteOwner() {
 	fd := acquire(0)
 	checkAlive(fd)
@@ -144,7 +156,8 @@ func secondSiteOwner() {
 func main() {
 	runtime.GOMAXPROCS(1)
 	install()
-	capturedFixture = fixtureMode() >= 6
+	mode := fixtureMode()
+	capturedFixture = mode >= 6 && mode <= 9 || mode == 11
 	fd := acquire(0)
 	runtime.Gosched()
 	runtime.GC()
@@ -187,6 +200,10 @@ func main() {
 		checkAlive(fd)
 		closeFD(fd)
 		go capturedOwner(acquire)
+	case 10:
+		go rangeDeferredOwner()
+	case 11:
+		go rangeDynamicDeferredOwner(capturedAcquire())
 	default:
 		baseline := runtime.NumGoroutine()
 		go acquire(0)

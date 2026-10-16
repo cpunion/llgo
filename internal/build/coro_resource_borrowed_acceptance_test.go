@@ -99,6 +99,8 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 		"typed resource delivery normal, discarded and canceled passed", // Captured dynamic looped defer.
 		"typed resource delivery normal, discarded and canceled passed", // Captured discarded entry.
 		"typed resource delivery normal, discarded and canceled passed", // Normal captured result, then cancellation.
+		"typed resource delivery normal, discarded and canceled passed", // External range-owner static resource defer.
+		"typed resource delivery normal, discarded and canceled passed", // External range-owner captured resource defer.
 	} {
 		t.Run(strconv.Itoa(mode), func(t *testing.T) {
 			for attempt := 0; attempt < 10; attempt++ {
