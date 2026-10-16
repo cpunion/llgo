@@ -99,7 +99,7 @@ func PrepareInlineAwaitCompiler(
 			if depthOK {
 				parent.completion.child = childHandle
 				parent.completion.status = completionArmed
-				child.parent = parent
+				linkAwaitChild(parent, child)
 				if depth >= maxInlineAwaitDepth {
 					g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
 					return InlineAwaitDeclined
@@ -140,7 +140,7 @@ func PrepareInlineAwaitCompiler(
 				parent.completion.typeWord = recoverType
 				parent.completion.dataWord = recoverData
 			}
-			child.parent = parent
+			linkAwaitChild(parent, child)
 			if p.inlineAwaitDepth >= maxInlineAwaitDepth {
 				g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
 				return InlineAwaitDeclined
@@ -621,7 +621,7 @@ func CommitInlineAwaitReturnPhysicalDestroyCompiler(
 				child.owner == g && child.parent == parent && child.header != nil &&
 				child.state == FrameDestroyPending &&
 				child.header.Lifecycle == uint16(FrameDestroyPending) &&
-				child.borrowedStorage && child.allocationSize == 0 && child.parkWait == nil &&
+				child.borrowedStorage() && child.allocationSize == 0 && child.parkWait == nil &&
 				child.header.AllocationBase == unsafe.Pointer(child) &&
 				!child.retainPanicTrace && g.frames == child && child.next == parent:
 				g.frames = parent
