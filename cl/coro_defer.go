@@ -272,6 +272,10 @@ func prepareCoroStaticCleanupPlan(
 	drainedReturns := make(map[*ssa.Return]none)
 	allSites := make([]*coroStaticCleanupSitePlan, 0)
 	var dynamicTrigger *ssa.Defer
+	implicitDelivery := false
+	if ir != nil {
+		_, implicitDelivery = ir.deliveryProducers[fn]
+	}
 	for _, siteFunction := range scanFunctions {
 		siteCaller, planned := whole.FunctionPlan(siteFunction)
 		if !planned {
@@ -284,6 +288,17 @@ func prepareCoroStaticCleanupPlan(
 				continue
 			}
 			for instructionIndex, raw := range block.Instrs {
+				if ir != nil && len(ir.deliveryProducers) != 0 {
+					if call, ok := raw.(ssa.CallInstruction); ok {
+						if _, spawned := call.(*ssa.Go); !spawned {
+							frozen, _, err := ir.callSitePlan(call)
+							if err != nil {
+								return nil, err
+							}
+							implicitDelivery = implicitDelivery || frozen.deliveryProducer != nil
+						}
+					}
+				}
 				switch instruction := raw.(type) {
 				case *ssa.Defer:
 					if siteFunction != fn && instruction.DeferStack == nil {
@@ -477,6 +492,9 @@ func prepareCoroStaticCleanupPlan(
 
 	if len(byInstruction) == 0 {
 		if caller.Exec.Contains(coro.NeedsCleanupFrame) {
+			if implicitDelivery {
+				return nil, fmt.Errorf("llgo.coroBorrowResult requires a bound physical resource-delivery guard")
+			}
 			return nil, fmt.Errorf("needs-cleanup-frame body has no supported static defer site")
 		}
 		return nil, nil

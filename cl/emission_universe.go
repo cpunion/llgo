@@ -740,6 +740,7 @@ func (shape coroHostOperationCallShape) valid() bool {
 
 type coroFrozenCallSitePlan struct {
 	plan               CoroCallSitePlan
+	deliveryProducer   *ssa.Function
 	interfaceMethodKey string
 	failure            string
 	opcode             int

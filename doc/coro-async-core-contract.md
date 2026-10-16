@@ -258,6 +258,17 @@ helper 来触发染色；两者独立的 suspend/exec 需求均通过原固定�
 当前实现只完成源码事实与自动染色的前端验证，物理 guard 未绑定时后端明确拒绝，
 不会因为出现这个声明就把尚未保护的 hidden output 指针交给适配器。
 
+源码冻结现已在所有 producer 收集完成后，将 exact static call/go/defer 绑定到同一个
+producer fact，并同步既有 owner SitePlan；不复制 helper ABI 或新增资源调用图。
+producer 的 discarded-entry fallback，以及实际执行 initializer/drop 的普通调用者和
+defer owner，均在原 local body facts 中获得 `NeedsCleanupFrame`，排除无 cleanup 的
+outcome-plain 优化。父 Go caller 不执行 spawned child 的 initializer/drop，因此不增加
+该父函数的 helper edge 或 cleanup 标志；间接普通 wrapper 和常量死分支也不继承资源
+所有权。父调用者的隐藏 helper edges 进入同一个 lowered-call 固定点，不靠注释触发染色。
+对应前端与单一架构 authority gate 已通过，未提高任何架构债务预算。此处仍只是物理
+接线的先决条件：缺少实际守卫时，preflight 继续以准确的 unbound-guard 错误拒绝，
+不将隐式 cleanup 伪装成一个不存在的 source defer，不算公开交付验收完成。
+
 私有 producer 的返回证明采用有限结构：borrow 必须先于源码 call/go/defer，所有
 正常 return 按顺序直接读取同一个 borrowed tuple 的各字段；开始读取后只允许其余
 字段投影和 return。不能先缓存 fd，再调用可能 await/改槽的 helper，最后发布旧值；
