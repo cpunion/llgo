@@ -88,6 +88,7 @@ func SourcePatchReplacesAsmForGOARCH(path, goarch string) bool {
 
 var sourcePatchPkgs = map[string]struct{}{
 	"crypto/internal/constanttime":   {},
+	"hash/maphash":                   {},
 	"internal/bytealg":               {},
 	"internal/chacha8rand":           {},
 	"internal/poll":                  {},
