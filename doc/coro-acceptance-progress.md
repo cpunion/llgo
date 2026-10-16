@@ -17,6 +17,11 @@ jobs before the new commit superseded it. Those passes do not establish the
 current head's CI status. No reviews, inline review comments or issue comments
 were present at the latest inspection. Later CI/review observations must name
 the checked head.
+Latest integrated CI observation: head `7170ce7a7` in run `38826618373` has
+16/18 successful jobs and two running, with no failure. This includes the
+repaired WASI cache-discovery and host-SSA build-tag lanes. The separate
+resource-delivery branch is at `73095ebc0`; its newer cleanup changes are tested
+below and are not silently included in that CI head.
 The destination is `cpunion/llgo:llvm-coro`. The acceptance environment is
 Darwin/arm64, Go 1.27 and LLVM 22. No new upstream-main synchronization is
 required for this work.
@@ -243,6 +248,25 @@ fails both native/wasm32 cases at the actual handoff's leaked panic authority
 (0.477s / 1228.6 MiB); production sources are not reverted. Earlier attempts
 to add a source panic hit missing runtime-type helpers in the small test
 fixture and are retained as setup failures, not the negative control.
+
+Fixed v47 source is commit `73095ebc0`; compiler SHA-256 is
+`06f2532dfa11ae2b16003b5368e8704fd120d079167da891ffd4e8d47af59092`.
+The source manifest SHA-256 is
+`517b7f580a9c21f7698ae404835efe8a193274f34b15beca45a9c9c4ea5a6346`,
+and matches after executable acceptance. The real `TestBuiltinPrintOutputMatchesGo`
+passes (31.352s / 868.1 MiB including host test and child compilers). The native
+borrowed-FD fixture passes ten executions and its Node counterpart passes three
+(48.299s / 1247.7 MiB including both builds). Each task uses a bounded private
+Go cache reclaimed on completion. This validates the changed cleanup path,
+not the unimplemented public acquisition-return guard.
+
+Initializer review retains ordinary automatic coloring. A proposed plain-only
+initializer gate was tested locally but not retained: a typed pointer store may
+carry a nil-fault effect, and denying that effect would require unnecessary
+annotations. Zero result storage before initialization, finish initialization
+before arming the resource guard, and do not start acquisition until afterward.
+Existing plain/outcome/coro completion owns initialization failure/cancellation;
+no additional partial-initialization resource state is needed.
 
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against

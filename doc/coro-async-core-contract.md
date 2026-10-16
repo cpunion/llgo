@@ -249,13 +249,22 @@ microtask 链饿死实际 I/O callback。公开 `syscall.Open` 仍保留原调�
 守卫，不能因为调用了 Open 就被认定为资源生产函数。未知 C 的 int/pointer 返回仍不
 猜测所有权。`Dup2(oldfd, oldfd)` 不产生新资源，不能套用 Dup 的 acquire 契约。
 
+初始化空槽也消费已有 callable effect/exec 事实，不能为了要求 initializer 是 plain
+而新增 no-panic/no-suspend 标注：普通 typed pointer store 就可能保守包含 nil fault。
+先把含指针的结果存储清零，再按已有 plain/outcome/coro 路径调用 initializer；只有
+它正常完成后才注册资源临时 guard，之后才可开始 acquisition。初始化阶段尚未获得
+资源，panic/cancel 走原调用者 cleanup，不对部分初始化槽调用 drop，也不新增一套
+“部分初始化”的状态协议。initializer 的边界语义只允许建立空态，不能做资源 acquisition。
+
 编译器内部守卫不等同于用户的 Go `defer`。它必须复用同一 drainer 的 join、panic
 overlay 和 cancellation shielding，但不能让 drop 获得恢复调用者原 panic 的直接
 `recover` 权限。drop 自己产生的 panic 仍可由它自己的 Go defer 恢复；用户原有 defer
 的直接 recover 语义保持不变。没有源码 defer 的调用者没有 SSA `Recover` block，
 共享 completion dispatcher 必须支持这种 owner，不能伪造恢复后正常返回的源码路径。
 `TestCoroCleanupCompletionWithoutSourceRecover` 已验证该 dispatcher 的唯一 complete
-case 与 invalid-continuation trap；parent-recover 权限隔离仍是物理接线前的强制 gate。
+case 与 invalid-continuation trap。统一 await 已把 owner 与 parent-recover 权限分开；
+deferred builtin 的真实生成 helper 在 native/wasm32 的 CoroSplit 前后均不获得此权限，
+恢复旧行为的负对照失败。新增 resource drop 的物理接线必须复用此路径。
 
 static 与 descriptor 调用消费同一个冻结事实、同一个结果槽和 cleanup 路径：
 
