@@ -27,8 +27,10 @@ import (
 
 // materializeManagedForeignFunctionValueAdapter creates the single Go-callable
 // body used when an exact C declaration or C-linked method crosses a managed
-// function-value boundary. An exact managed linkname facade also uses this
-// forwarder when aliasing would erase its source receiver or callable type.
+// function-value boundary. A declaration-only Go replacement also uses this
+// forwarder when aliasing its omitted source body would erase the receiver or
+// callable type. Ordinary bodyless runtime-hook facades keep their existing
+// canonical publication; this does not create carriers in non-emitted owners.
 // Direct calls and raw code-address uses continue to name target. The wrapper's
 // ordinary SSA call lets the existing callable
 // contract, worker, same-M, and effect propagation machinery choose its
@@ -72,7 +74,8 @@ func (u *EmissionUniverse) materializeManagedForeignFunctionValueAdapter(
 		)
 	}
 	carrier := target
-	managedFacade := kind == goFunc && source != target && source.Signature != nil &&
+	managedFacade := kind == goFunc && source != target && len(source.Blocks) != 0 &&
+		bodylessManagedGoDeclaration(source) && source.Signature != nil &&
 		!types.Identical(source.Signature, target.Signature)
 	if managedFacade {
 		pair, paired := u.goLinknameDefinitions[source]

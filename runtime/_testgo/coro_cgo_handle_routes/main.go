@@ -15,6 +15,24 @@ func construct(constructor func(any) cgo.Handle, value any) cgo.Handle {
 	return constructor(value)
 }
 
+func handleDeleted(handle cgo.Handle) (deleted bool) {
+	defer func() { deleted = recover() != nil }()
+	_ = handle.Value()
+	return false
+}
+
+func checkSpawnedDelete() {
+	handle := construct(cgo.NewHandle, &payload{value: -1})
+	go handle.Delete()
+	for attempt := 0; attempt < 10000; attempt++ {
+		if handleDeleted(handle) {
+			return
+		}
+		runtime.Gosched()
+	}
+	panic("spawned cgo handle delete did not complete")
+}
+
 func exercise(value *payload) {
 	handle := construct(cgo.NewHandle, value)
 	defer handle.Delete()
@@ -57,6 +75,7 @@ func main() {
 			})
 		}
 		group.Wait()
+		checkSpawnedDelete()
 	}
 	const marker = "cgo handle managed routes passed\n"
 	if count, err := os.Stdout.WriteString(marker); err != nil || count != len(marker) {

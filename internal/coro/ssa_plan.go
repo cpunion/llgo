@@ -4386,17 +4386,25 @@ func classifySSAStaticCallTargets(
 					return nil, fmt.Errorf("coro: redirected call target %q in %q is not one bodyful context-free Go function", target.Name(), caller.Name())
 				}
 				signature := target.Signature
-				if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+				if signature == nil || signature.Variadic() ||
 					typeParamListLen(signature.TypeParams()) != 0 ||
 					typeParamListLen(signature.RecvTypeParams()) != 0 ||
 					!types.Identical(common.Signature(), signature) {
 					return nil, fmt.Errorf("coro: redirected call target %q in %q does not preserve the exact source signature", target.Name(), caller.Name())
 				}
-				if len(common.Args) != signature.Params().Len() {
-					return nil, fmt.Errorf("coro: redirected call target %q in %q has %d arguments, want %d", target.Name(), caller.Name(), len(common.Args), signature.Params().Len())
+				parameterBase := 0
+				if signature.Recv() != nil {
+					parameterBase = 1
+				}
+				if len(common.Args) != signature.Params().Len()+parameterBase {
+					return nil, fmt.Errorf("coro: redirected call target %q in %q has %d arguments, want %d", target.Name(), caller.Name(), len(common.Args), signature.Params().Len()+parameterBase)
 				}
 				for index, argument := range common.Args {
-					if argument == nil || !types.Identical(argument.Type(), signature.Params().At(index).Type()) {
+					parameter := signature.Recv()
+					if index >= parameterBase {
+						parameter = signature.Params().At(index - parameterBase)
+					}
+					if argument == nil || !types.Identical(argument.Type(), parameter.Type()) {
 						return nil, fmt.Errorf("coro: redirected call target %q in %q has an incompatible argument %d", target.Name(), caller.Name(), index)
 					}
 				}

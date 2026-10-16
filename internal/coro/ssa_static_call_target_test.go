@@ -19,11 +19,75 @@
 package coro
 
 import (
+	"go/types"
 	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/ssa"
 )
+
+func TestAnalyzeSSAStaticCallTargetPreservesExactReceiver(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "static_method_target.go", `package coroid
+type Receiver int
+type Other int
+var channel chan int
+func (r Receiver) declaration(value int) int { return value }
+func (r Receiver) implementation(value int) int { return <-channel }
+func (r Other) mismatch(value int) int { return value }
+func caller(r Receiver) int { return r.declaration(1) }
+func deferred(r Receiver) { defer r.declaration(2) }
+func spawned(r Receiver) { go r.declaration(3) }
+`)
+	method := func(receiver, name string) *ssa.Function {
+		named := pkg.Pkg.Scope().Lookup(receiver).Type().(*types.Named)
+		for index := 0; index < named.NumMethods(); index++ {
+			if object := named.Method(index); object.Name() == name {
+				return prog.FuncValue(object)
+			}
+		}
+		t.Fatalf("missing %s.%s", receiver, name)
+		return nil
+	}
+	declaration := method("Receiver", "declaration")
+	implementation := method("Receiver", "implementation")
+	mismatch := method("Other", "mismatch")
+	owners := []*ssa.Function{pkg.Func("caller"), pkg.Func("deferred"), pkg.Func("spawned")}
+	roots := Roots{}
+	for _, owner := range owners {
+		roots = append(roots, Root{Function: owner, Demand: AsyncDemand})
+	}
+	for _, target := range []*ssa.Function{implementation, mismatch} {
+		plan, err := AnalyzeSSA(prog, roots, SSAConfig{
+			MaxPlainInstructions: -1,
+			ClassifyStaticCallTarget: func(_ *ssa.Function, call ssa.CallInstruction) (*ssa.Function, bool, error) {
+				if call.Common().StaticCallee() == declaration {
+					return target, true, nil
+				}
+				return nil, false, nil
+			},
+			ClassifyFunction: func(*ssa.Function) (SSAFunctionPolicy, error) {
+				return SSAFunctionPolicy{Effect: YieldOnly}, nil
+			},
+		})
+		if target == mismatch {
+			if err == nil || !strings.Contains(err.Error(), "incompatible argument 0") {
+				t.Fatalf("different named receiver was accepted: %v", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, found := plan.FunctionID(target)
+		for _, owner := range owners {
+			call := onlyStaticTargetTestInvocation(t, owner, declaration)
+			fact, present := plan.CallPlan(call)
+			if !found || !present || len(fact.Targets) != 1 || fact.Targets[0] != id {
+				t.Fatalf("%s lost the exact receiver-preserving target: %+v", owner.Name(), fact)
+			}
+		}
+	}
+}
 
 func TestAnalyzeSSAStaticCallTargetUsesOrdinaryGoFixedPoint(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "static_target.go", `package coroid

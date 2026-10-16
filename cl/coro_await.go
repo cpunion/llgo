@@ -281,7 +281,8 @@ func validateCoroStaticMethodCallOperands(call ssa.CallInstruction, target *ssa.
 	normalized := coroPhysicalNormalizeSourceSignature(target.Signature)
 	var targetContext *context
 	if universe != nil {
-		if canonical := universe.canonicalAlias(raw); canonical == nil || canonical != target {
+		if canonical := universe.canonicalAlias(raw); canonical == nil ||
+			canonical != target && universe.coroProgramIR.managedMethodTargets[raw] != target {
 			return fmt.Errorf("static coroutine method target is not the frozen canonical alias of its source operand")
 		}
 		effectiveRaw, err := universe.coroPhysicalSourceSignature(raw)

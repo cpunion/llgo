@@ -6934,6 +6934,14 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 						continue
 					}
 					directFunction := root.directFunction
+					if _, deferred := call.(*ssa.Defer); deferred && root.value == call.Common().Value {
+						if _, paired := u.goLinknameDefinitions[target]; paired {
+							// Capture through the same typed carrier as a function
+							// value when the implementation has another source ABI.
+							// Ordinary static calls still use their direct facade.
+							directFunction = false
+						}
+					}
 					if spawn, ok := call.(*ssa.Go); ok && spawn.Common() != nil && root.value == spawn.Common().Value {
 						// A direct intrinsic has no callable body. The legacy
 						// Builder.Do path generated a carrier around its buildCall

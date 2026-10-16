@@ -95,9 +95,10 @@ func Root() any {
     var view interface { Value() any } = handle
     if bound() != expression(handle) || view.Value() != handle.Value() { panic("facade") }
     value := handle.Value()
-    handle.Delete()
+    defer handle.Delete()
     return value
 }
+func Spawn(handle declhandles.Handle) { go handle.Delete() }
 `)
 	fixture.ssa.Build()
 	prog := llssa.NewProgram(nil)
@@ -144,6 +145,21 @@ func Root() any {
 		}
 		if source.Signature.Recv() != nil && u.coroProgramIR.managedMethodTargets[source] != adapter {
 			t.Errorf("%s metadata lost its receiver-preserving facade", test.source)
+		}
+	}
+	for _, owner := range []*ssa.Function{caller.ssa.Func("Root"), caller.ssa.Func("Spawn")} {
+		for _, block := range owner.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common().StaticCallee() != sources["Delete"] {
+					continue
+				}
+				site, frozen, err := u.CoroCallSitePlan(call)
+				if err != nil || !frozen || site.ManagedStaticTarget != u.managedForeignWraps[sources["Delete"]] ||
+					site.ManagedStaticTargetCertificate == "" {
+					t.Errorf("%s did not freeze the shared typed go/defer carrier: %+v error=%v", owner.Name(), site, err)
+				}
+			}
 		}
 	}
 }
