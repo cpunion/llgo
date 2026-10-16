@@ -14,8 +14,17 @@ import (
 )
 
 func TestCoroClosedPlainCallUsesPrimaryDespiteDescriptorPublication(t *testing.T) {
+	testCoroClosedPlainDescriptor(t, true)
+}
+
+func TestCoroClosedPlainDescriptorAvoidsInventedAwait(t *testing.T) {
+	testCoroClosedPlainDescriptor(t, false)
+}
+
+func testCoroClosedPlainDescriptor(t *testing.T, parking bool) {
+	t.Helper()
 	llssa.Initialize(llssa.InitAll)
-	const source = `package foo
+	source := `package foo
 type Callback func(uint32) uint32
 var gate chan uint32
 func Target(value uint32) uint32 { return value + 1 }
@@ -30,6 +39,9 @@ func Root(value uint32, external Callback) uint32 {
 	return callback(value) + PlainCaller(value, true) + Dynamic(external, value)
 }
 `
+	if !parking {
+		source = strings.Replace(source, "Park(); ", "", 1)
+	}
 	for _, target := range []struct {
 		name string
 		arch *llssa.Target
@@ -90,6 +102,21 @@ func Root(value uint32, external Callback) uint32 {
 			}
 			module := compiled.Module()
 			defer module.Dispose()
+			if !parking {
+				dynamicPlan, _ := plan.FunctionPlan(pkg.Func("Dynamic"))
+				if dynamicPlan.Emission != coro.EmitOutcomePlain || !dynamicPlan.StaticOutcome {
+					t.Fatalf("closed plain descriptor owner retained a coroutine frame: %+v", dynamicPlan)
+				}
+				body := module.NamedFunction("foo.Dynamic" + coroOutcomePlainPrimarySuffix)
+				if body.IsNil() {
+					t.Fatal("missing synchronous dynamic owner")
+				}
+				for _, forbidden := range []string{"llvm.coro.", coroFrameAllocHookV1, coroAwaitPrepareInlineHookV4, "coro.dispatch.version.invalid"} {
+					if strings.Contains(body.String(), forbidden) {
+						t.Fatalf("closed plain call retained %q:\n%s", forbidden, body.String())
+					}
+				}
+			}
 			check := func(fn llvm.Value) {
 				t.Helper()
 				if fn.IsNil() {

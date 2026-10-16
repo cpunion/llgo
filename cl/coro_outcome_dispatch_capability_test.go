@@ -132,13 +132,17 @@ func Apply(callback func(int) int) int { return callback(1) }
 		{"neither-proof", false, false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			entry := coro.ManagedEntryNone
+			if test.published {
+				entry = coro.ManagedEntryOutcomePlain
+			}
 			physical := &coroPhysicalFunctionPlan{
 				function: fn,
 				instructions: map[ssa.Instruction]coroPhysicalInstructionPlan{
 					call: {
-						semantic:              coroSemanticInstructionPlan{evaluated: true, recipe: "cl.ssa.call.v1"},
-						control:               coroPhysicalControlDispatchAwait,
-						structuredOutcomeOnly: test.published, directOutcomeNativeResult: test.native,
+						semantic:      coroSemanticInstructionPlan{evaluated: true, recipe: "cl.ssa.call.v1"},
+						control:       coroPhysicalControlDispatchAwait,
+						dispatchEntry: entry, directOutcomeNativeResult: test.native,
 					},
 				},
 			}

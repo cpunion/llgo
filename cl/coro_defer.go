@@ -48,24 +48,24 @@ const (
 )
 
 type coroStaticCleanupSitePlan struct {
-	instruction             *ssa.Defer
-	target                  *ssa.Function
-	targetPlan              coro.FunctionPlan
-	kind                    coroStaticCleanupTargetKind
-	closure                 *ssa.MakeClosure
-	closureEnvironment      *types.Var
-	descriptor              ssa.Value
-	interfaceReceiver       ssa.Value
-	interfaceMethod         *types.Func
-	signature               *types.Signature
-	callPlan                coro.SSACallPlan
-	structuredCoroutineOnly bool
-	intrinsic               int
-	builtin                 string
-	generatedCgo            *coroGeneratedCgoCallShape
-	foreignWorker           *coroWorkerForeignCallShape
-	arguments               []ssa.Value
-	tag                     uint32
+	instruction        *ssa.Defer
+	target             *ssa.Function
+	targetPlan         coro.FunctionPlan
+	kind               coroStaticCleanupTargetKind
+	closure            *ssa.MakeClosure
+	closureEnvironment *types.Var
+	descriptor         ssa.Value
+	interfaceReceiver  ssa.Value
+	interfaceMethod    *types.Func
+	signature          *types.Signature
+	callPlan           coro.SSACallPlan
+	dispatchEntry      coro.ManagedEntryKind
+	intrinsic          int
+	builtin            string
+	generatedCgo       *coroGeneratedCgoCallShape
+	foreignWorker      *coroWorkerForeignCallShape
+	arguments          []ssa.Value
+	tag                uint32
 }
 
 type coroStaticCleanupPlan struct {
@@ -429,8 +429,7 @@ func prepareCoroStaticCleanupPlan(
 							return nil, fmt.Errorf("defer in block %d: managed descriptor cleanup lost its CallPlan", block.Index)
 						}
 						site.callPlan = callPlan
-						site.structuredCoroutineOnly =
-							coroManagedDispatchPublishedCoroutineOnly(whole, callPlan)
+						site.dispatchEntry = coroManagedDispatchPublishedEntry(whole, callPlan)
 						if instruction.Common().IsInvoke() {
 							if callPlan.Open {
 								if err := validateCoroManagedInterfaceDispatchCall(
@@ -2153,10 +2152,10 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
 			b, b.Load(site.descriptor), args, site.plan.signature,
 			coroManagedDispatchAwaitOptions{
-				cleanup:                 coroSourceDeferInvocation(s),
-				recoverAliasChild:       site.plan.interfaceReceiver != nil,
-				trustedDescriptor:       site.plan.structuredCoroutineOnly,
-				structuredCoroutineOnly: site.plan.structuredCoroutineOnly,
+				cleanup:           coroSourceDeferInvocation(s),
+				recoverAliasChild: site.plan.interfaceReceiver != nil,
+				trustedDescriptor: site.plan.dispatchEntry != coro.ManagedEntryNone,
+				entry:             site.plan.dispatchEntry,
 			},
 		)
 		return true

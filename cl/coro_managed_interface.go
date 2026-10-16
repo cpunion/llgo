@@ -658,7 +658,7 @@ func (p *context) compileCoroManagedInterfaceAwait(
 ) llssa.Expr {
 	if !p.hasStructuredOutcomePhysicalBody() || call == nil || call.Common() == nil ||
 		instructionPlan.control != coroPhysicalControlManagedInterfaceAwait || instructionPlan.controlSignature == nil ||
-		p.hasOutcomePlainPhysicalBody() && !instructionPlan.structuredOutcomeOnly {
+		p.hasOutcomePlainPhysicalBody() && !coroManagedEntryIsSynchronous(instructionPlan.dispatchEntry) {
 		panic("managed interface await escaped its frozen physical control recipe")
 	}
 	plan := p.compilation.immutablePlan()
@@ -675,25 +675,20 @@ func (p *context) compileCoroManagedInterfaceAwait(
 	if instructionPlan.recoverAlias {
 		p.observeCoroPhysicalRecoverAlias(call)
 	}
-	var result coroAwaitedValue
-	if instructionPlan.structuredOutcomeOnly {
-		result = p.compileCoroManagedDispatchOutcomeOnlyValueResult(
-			b, method, args, instructionPlan.controlSignature,
-			instructionPlan.recoverAlias, true,
-			instructionPlan.directOutcomeNativeResult,
-		)
-	} else {
-		keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-		result = p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
-			b, method, args, instructionPlan.controlSignature, coroManagedDispatchAwaitOptions{
-				keepaliveSlots:          keepaliveSlots,
-				transparentRecoverAlias: instructionPlan.recoverAlias,
-				trustedDescriptor:       !callPlan.Open,
-				descriptorNonNil:        true,
-				structuredCoroutineOnly: instructionPlan.structuredCoroutineOnly,
-			},
-		)
+	var keepaliveSlots []llssa.Expr
+	if !coroManagedEntryIsSynchronous(instructionPlan.dispatchEntry) {
+		keepaliveSlots = p.compileCoroCallKeepaliveSlots(b, call)
 	}
+	result := p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
+		b, method, args, instructionPlan.controlSignature, coroManagedDispatchAwaitOptions{
+			keepaliveSlots:          keepaliveSlots,
+			transparentRecoverAlias: instructionPlan.recoverAlias,
+			trustedDescriptor:       !callPlan.Open,
+			descriptorNonNil:        true,
+			entry:                   instructionPlan.dispatchEntry,
+			nativeResult:            instructionPlan.directOutcomeNativeResult,
+		},
+	)
 	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
 	markCoroReflectTypeMethodByNameCalls(b, reflectCheck, result.physicalCalls)
 	b.EmitReflectTypeMethodCheckedLoad(result.value, reflectCheck)

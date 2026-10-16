@@ -2533,7 +2533,7 @@ func validateCoroPhysicalABIForOwner(
 						}
 						continue
 					case coroPhysicalControlManagedInterfaceAwait:
-						if !instructionPlan.structuredOutcomeOnly {
+						if !coroManagedEntryIsSynchronous(instructionPlan.dispatchEntry) {
 							awaits++
 						}
 						continue
@@ -2564,7 +2564,7 @@ func validateCoroPhysicalABIForOwner(
 				case coroPhysicalControlRawPlainCall:
 					continue
 				case coroPhysicalControlDispatchAwait:
-					if !instructionPlan.structuredOutcomeOnly {
+					if !coroManagedEntryIsSynchronous(instructionPlan.dispatchEntry) {
 						awaits++
 					}
 					continue

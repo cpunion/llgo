@@ -284,13 +284,16 @@ func validateStaticOutcomeFrozenPlan(plan *coroPhysicalFunctionPlan, logical cor
 			}
 			if physical.control == coroPhysicalControlManagedInterfaceAwait ||
 				physical.control == coroPhysicalControlDispatchAwait {
-				exactOutcome = physical.structuredOutcomeOnly
+				if physical.dispatchEntry == coro.ManagedEntryPlain {
+					continue
+				}
+				exactOutcome = physical.dispatchEntry == coro.ManagedEntryOutcomePlain
 			}
 			if !exactOutcome || !physical.directOutcomeNativeResult {
 				return fmt.Errorf(
 					"static-outcome call %q lacks an exact synchronous target (control=%s target=%q structured=%t native-result=%t failure=%q)",
 					call.String(), physical.control, physical.controlTargetID,
-					physical.structuredOutcomeOnly, physical.directOutcomeNativeResult,
+					physical.dispatchEntry == coro.ManagedEntryOutcomePlain, physical.directOutcomeNativeResult,
 					physical.controlFailure,
 				)
 			}

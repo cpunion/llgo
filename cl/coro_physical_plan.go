@@ -351,16 +351,11 @@ type coroPhysicalInstructionPlan struct {
 	// DAG caller has no suspension-capable allocator fallback and must require
 	// this frozen target-layout fact.
 	directOutcomeNativeResult bool
-	// structuredOutcomeOnly proves that every target reachable at this exact
-	// descriptor/interface occurrence publishes a synchronous outcome entry.
-	// It authorizes the physical emitter to call that capability directly,
-	// without manufacturing an unreachable plain/coroutine probe branch.
-	structuredOutcomeOnly bool
-	// structuredCoroutineOnly is the symmetric proof for a closed descriptor
-	// occurrence whose complete target family publishes the coroutine ABI. The
-	// emitter still performs the ordinary child transaction, but loads only the
-	// structured entry and emits no impossible plain/outcome successors.
-	structuredCoroutineOnly    bool
+	// dispatchEntry selects the single ABI proven for this occurrence; None
+	// retains universal dispatch for open/mixed families. For descriptors this
+	// is their published primary, not a target's optional static outcome twin.
+	// Closed interface lowering may independently select such an exact twin.
+	dispatchEntry              coro.ManagedEntryKind
 	operation                  coroPhysicalOperationRecipe
 	operationFailure           string
 	operationWorker            *coroWorkerForeignCallShape
@@ -2645,8 +2640,7 @@ func clearCoroPhysicalControlForOperation(result *coroPhysicalInstructionPlan) {
 	result.controlFailure = ""
 	result.controlFailureHard = false
 	result.directOutcomeNativeResult = false
-	result.structuredOutcomeOnly = false
-	result.structuredCoroutineOnly = false
+	result.dispatchEntry = coro.ManagedEntryNone
 	result.rawInterfaceReceiver = false
 }
 
@@ -2764,10 +2758,8 @@ func planCoroPhysicalControlInstruction(
 				}
 				result.control = coroPhysicalControlManagedInterfaceAwait
 				result.controlSignature = signature
-				published := coroManagedDispatchPublishedStructuredEntry(whole, callPlan)
-				result.structuredOutcomeOnly = published == coro.ManagedEntryOutcomePlain
-				result.structuredCoroutineOnly = published == coro.ManagedEntryCoroutine
-				if result.structuredOutcomeOnly && audit.ctx != nil && audit.ctx.prog != nil {
+				result.dispatchEntry = coroManagedDispatchPublishedEntry(whole, callPlan)
+				if result.dispatchEntry == coro.ManagedEntryOutcomePlain && audit.ctx != nil && audit.ctx.prog != nil {
 					result.directOutcomeNativeResult = !audit.ctx.prog.LocalGoTypeExceedsNativeStack(
 						newOutcomePlainPhysicalABI(signature).resultSlotType,
 					)
@@ -2797,9 +2789,10 @@ func planCoroPhysicalControlInstruction(
 			}
 			result.control = coroPhysicalControlClosedInterfaceAwait
 			result.controlInterface = dispatch
-			_, result.structuredOutcomeOnly =
-				coroInterfaceDispatchStaticOutcomeCandidate(dispatch)
-			if result.structuredOutcomeOnly && audit.ctx != nil && audit.ctx.prog != nil {
+			if _, exact := coroInterfaceDispatchStaticOutcomeCandidate(dispatch); exact {
+				result.dispatchEntry = coro.ManagedEntryOutcomePlain
+			}
+			if result.dispatchEntry == coro.ManagedEntryOutcomePlain && audit.ctx != nil && audit.ctx.prog != nil {
 				result.directOutcomeNativeResult = !audit.ctx.prog.LocalGoTypeExceedsNativeStack(
 					newOutcomePlainPhysicalABI(dispatch.sourceCallSignature).resultSlotType,
 				)
@@ -2844,10 +2837,8 @@ func planCoroPhysicalControlInstruction(
 				return
 			}
 			result.control = coroPhysicalControlDispatchAwait
-			published := coroManagedDispatchPublishedStructuredEntry(whole, callPlan)
-			result.structuredOutcomeOnly = published == coro.ManagedEntryOutcomePlain
-			result.structuredCoroutineOnly = published == coro.ManagedEntryCoroutine
-			if result.structuredOutcomeOnly && audit.ctx != nil && audit.ctx.prog != nil {
+			result.dispatchEntry = coroManagedDispatchPublishedEntry(whole, callPlan)
+			if result.dispatchEntry == coro.ManagedEntryOutcomePlain && audit.ctx != nil && audit.ctx.prog != nil {
 				result.directOutcomeNativeResult = !audit.ctx.prog.LocalGoTypeExceedsNativeStack(
 					newOutcomePlainPhysicalABI(common.Signature()).resultSlotType,
 				)
