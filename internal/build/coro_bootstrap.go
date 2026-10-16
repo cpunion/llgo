@@ -49,6 +49,8 @@ const (
 	coroRecoverTakeSymbolV1                                     = "__llgo_coro_recover_take_v1"
 	coroRecoverAliasBeginSymbolV1                               = "__llgo_coro_recover_alias_begin_v1"
 	coroRecoverAliasEndSymbolV1                                 = "__llgo_coro_recover_alias_end_v1"
+	coroCleanupShieldBeginSymbolV1                              = "__llgo_coro_cleanup_shield_begin_v1"
+	coroCleanupShieldEndSymbolV1                                = "__llgo_coro_cleanup_shield_end_v1"
 	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
 	coroNativeWorkerCompleteSymbolV1                            = "__llgo_coro_native_worker_complete_v1"
 	coroNativeFleetOwnerSymbolV2                                = "__llgo_coro_native_fleet_owner_v2"

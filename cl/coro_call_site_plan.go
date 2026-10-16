@@ -606,6 +606,9 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 	if err := ir.finalizeRangeYieldCleanupOwners(u.functions, u.sortedUseOwners); err != nil {
 		return fmt.Errorf("finalize range-yield cleanup owners: %w", err)
 	}
+	if err := (coroProgramIRBuilder{canonical: emissionCanonicalIndex{universe: u}}).freezeDeliveryConsumers(ir); err != nil {
+		return fmt.Errorf("freeze resource delivery consumers: %w", err)
+	}
 	ir.callsFrozen = true
 	// These maps are mutable builder scratch. All production call-site
 	// certificate payloads now live in ProgramIR; retaining a second readable
@@ -642,7 +645,7 @@ func cloneCoroWorkerIncomingEdges(source []coroWorkerSyscallIncomingEdge) []coro
 }
 
 func sameCoroFrozenCallSitePlan(first, second coroFrozenCallSitePlan) bool {
-	if first.plan != second.plan || first.failure != second.failure || first.opcode != second.opcode ||
+	if first.plan != second.plan || first.deliveryProducer != second.deliveryProducer || first.failure != second.failure || first.opcode != second.opcode ||
 		first.interfaceMethodKey != second.interfaceMethodKey ||
 		first.intrinsicPlacement != second.intrinsicPlacement ||
 		first.hostOperation != second.hostOperation ||

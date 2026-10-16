@@ -265,7 +265,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	if body == nil {
 		panic("managed dispatch await requires an active physical coroutine body")
 	}
-	awaitChild := func(child llssa.Expr) {
+	awaitChild := func(child llssa.Expr, endShield func(llssa.Builder)) {
 		var afterConsume func(llssa.Builder)
 		if options.cleanup.recoverParent {
 			token := descriptorWord
@@ -278,6 +278,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 		} else if options.transparentRecoverAlias {
 			afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
 		}
+		afterConsume = chainCoroReconciliation(afterConsume, endShield)
 		p.awaitCoroChildCompletionWithRecovery(
 			b, child, options.cleanup,
 			options.keepaliveSlots, afterConsume,
@@ -288,13 +289,14 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 			panic("coroutine-only descriptor await requires a trusted publication proof")
 		}
 		selection := b.PrepareCoroDispatchStructuredOnly(fn, dispatchOptions, false)
+		endShield := p.beginCoroCleanupShield(b, options.cleanup)
 		child := b.CallPreparedCoroDispatchCoroOnly(
 			selection,
 			body.task,
 			b.Convert(p.prog.VoidPtr(), resultSlot),
 			args,
 		)
-		awaitChild(child)
+		awaitChild(child, endShield)
 		return coroAwaitedValue{
 			value:   p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results()),
 			address: p.coroAwaitResultAddress(b, resultSlot, abi.signature.Results()),
@@ -317,13 +319,14 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	b.If(hasOutcome, outcomeBlock, plainBlock)
 
 	b.SetBlockEx(coroutineBlock, llssa.AtEnd, false)
+	endShield := p.beginCoroCleanupShield(b, options.cleanup)
 	child := b.CallPreparedCoroDispatchCoro(
 		selection,
 		body.task,
 		b.Convert(p.prog.VoidPtr(), resultSlot),
 		args,
 	)
-	awaitChild(child)
+	awaitChild(child, endShield)
 	b.Jump(join)
 
 	b.SetBlockEx(outcomeBlock, llssa.AtEnd, false)

@@ -42,11 +42,24 @@ const (
 	taskCancelIdle taskCancelPhase = iota
 	taskCancelRequested
 	taskCancelCleanup
+	// A compiler-owned cleanup scope defers a new task stop without
+	// suppressing scheduler preemption or operation/context cancellation.
+	taskCancelShielded
+	taskCancelShieldedRequested
 )
 
 func validTaskCancelState(kind TaskCancelKind, phase taskCancelPhase) bool {
-	return kind == TaskCancelNone && phase == taskCancelIdle ||
-		validTaskCancelKind(kind) && (phase == taskCancelRequested || phase == taskCancelCleanup)
+	return kind == TaskCancelNone && (phase == taskCancelIdle || phase == taskCancelShielded) ||
+		validTaskCancelKind(kind) && (phase == taskCancelRequested || phase == taskCancelCleanup || phase == taskCancelShieldedRequested)
+}
+
+// taskCancelParkMayComplete distinguishes a pending, interrupting task stop
+// from a frozen cleanup cause or an explicitly deferred stop. The latter two
+// remain sticky across parks, but do not suppress a cleanup operation's result.
+// Invalid kind/phase pairs never authorize the compact completion path.
+func taskCancelParkMayComplete(state *ParkState) bool {
+	return state != nil && validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) &&
+		state.taskCancelPhase != taskCancelRequested
 }
 
 func taskCancelParkKind(kind TaskCancelKind) ParkCancelKind {
@@ -381,6 +394,14 @@ func requestTaskCancellationOwned(p *P, g *G, kind TaskCancelKind, proof taskCan
 	strongest := kind
 	if g.park.taskCancelKind > strongest {
 		strongest = g.park.taskCancelKind
+	}
+	if g.park.taskCancelPhase == taskCancelShielded || g.park.taskCancelPhase == taskCancelShieldedRequested {
+		// Preserve the sticky request, but do not cancel this cleanup's park
+		// or suppress its winner. The outer receipt restores Requested only
+		// after the child has physically joined and its outcome is consumed.
+		g.park.taskCancelKind = strongest
+		g.park.taskCancelPhase = taskCancelShieldedRequested
+		return true
 	}
 	if wait == nil {
 		if !applyTaskCancellationToParkOwned(g, strongest, proof) {

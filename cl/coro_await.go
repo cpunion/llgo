@@ -37,6 +37,9 @@ const (
 
 	coroAwaitRecoverNone   uint64 = 0
 	coroAwaitRecoverDirect uint64 = 1
+
+	coroCleanupShieldBeginHookV1 = "__llgo_coro_cleanup_shield_begin_v1"
+	coroCleanupShieldEndHookV1   = "__llgo_coro_cleanup_shield_end_v1"
 )
 
 // resolveCoroStaticAwait proves the exact subset implemented by the physical
@@ -702,6 +705,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		b.Convert(p.prog.VoidPtr(), resultSlot),
 	)
 	callArgs = append(callArgs, physicalArgs...)
+	endShield := p.beginCoroCleanupShield(b, invocation)
 	child := b.Call(childFn.Expr, callArgs...)
 	if child.Type == nil || !types.Identical(child.RawType(), types.Typ[types.UnsafePointer]) {
 		var childType types.Type
@@ -727,6 +731,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	} else if transparentRecoverAlias {
 		afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
 	}
+	afterConsume = chainCoroReconciliation(afterConsume, endShield)
 	value := p.awaitCoroChildWithRecoveryAndConsume(
 		b, child, resultSlot, sourceSig.Results(), invocation, keepaliveSlots, afterConsume,
 	)
@@ -736,6 +741,56 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		physicalCalls: []coroPhysicalCall{{
 			call: child, argCount: len(callArgs), resultArg: 1,
 		}},
+	}
+}
+
+func chainCoroReconciliation(first, second func(llssa.Builder)) func(llssa.Builder) {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(b llssa.Builder) { first(b); second(b) }
+}
+
+// beginCoroCleanupShield protects only an already-selected cleanup invocation.
+// Ordinary calls emit no scope or storage. The receipt lives in its owner's
+// existing LLVM frame and is reconciled on both child-completion lanes.
+func (p *context) beginCoroCleanupShield(b llssa.Builder, invocation coroCleanupInvocation) func(llssa.Builder) {
+	invocation.validate()
+	cleanup := invocation.state
+	// Go main return may terminate other goroutines without completing their
+	// user defers. Only compiler-owned finite cleanup is masked; source-defer
+	// recover authority is a separate capability and never enables this scope.
+	if cleanup == nil || invocation.recoverParent {
+		return nil
+	}
+	task, handle := p.coroTask(), p.activeCoroHandle()
+	if task.IsNil() || handle.IsNil() || p.coroCleanup() != cleanup || b == nil || b.Func != p.fn {
+		panic("cleanup shield requires its exact active physical drainer")
+	}
+	pointer := types.Typ[types.UnsafePointer]
+	parameters := func(count int) *types.Tuple {
+		values := make([]*types.Var, count)
+		for index := range values {
+			values[index] = types.NewParam(token.NoPos, nil, "", pointer)
+		}
+		return types.NewTuple(values...)
+	}
+	beginSignature := types.NewSignatureType(nil, nil, nil, parameters(2),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "", pointer)), false)
+	endSignature := types.NewSignatureType(nil, nil, nil, parameters(3),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "", types.Typ[types.Uint32])), false)
+	begin := p.pkg.NewFunc(coroCleanupShieldBeginHookV1, beginSignature, llssa.InC)
+	end := p.pkg.NewFunc(coroCleanupShieldEndHookV1, endSignature, llssa.InC)
+	receipt := b.Call(begin.Expr, task, handle)
+	return func(done llssa.Builder) {
+		if done == nil || done.Func != p.fn {
+			panic("cleanup shield reconciliation escaped its owner")
+		}
+		kind := done.Call(end.Expr, task, handle, receipt)
+		p.reconcileCoroCleanupTaskStop(done, cleanup, kind)
 	}
 }
 

@@ -208,6 +208,37 @@ release 进入现有 task-cleanup 屏蔽期后，不因新一轮取消再入或�
 close callback，只有 callback physical join 后才能撤销 custody。此处要复用已有
 cleanup cancellation shielding，不能另建任务调度/取消状态机。
 
+2026-10-16 review 明确区分 **已领取 task cancellation 的 cleanup** 与 **正常返回时
+开始的内部资源 drop**。Go main 返回不保证其他 goroutine 的普通 defer 执行完毕；
+冻结 v74 的 normal-defer 诊断虽以 86 失败、fd 已自行回收，但不能据此要求屏蔽
+所有源码 Go defer。广义屏蔽的 v75 实验也保留其 channel-close 失败记录，不作为
+正向验收。新的 `coro_claimed_cleanup_channel` 专门验证 LLGo 已有 structured shutdown：
+两个任务先领取 stop，再在 cleanup 内通过 channel rendezvous 并显式 close fd。
+它是内部生命周期回归，不把 Go 未承诺的 main-exit 行为变成通用语言保证。
+
+隔离开发分支已有 core scope 原型：复用既有一字节 task-cancel phase，增加
+Shielded/ShieldedRequested 两态，不扩展 G、Frame、ParkState、CompletionRecord 或
+operation。它只延后 task stop；原 operation/context cancellation 与 scheduler
+preemption 仍有效。exact outer owner 的 receipt 只在 child strong join 且 completion
+已消费后结束；嵌套调用不取得新的 outer receipt。结束时返回并 claim 延后的 stop，
+编译器必须保留其 Abort/Shutdown cleanup base 与原 panic overlay，不能返回用户正常
+continuation，也不能赋予 drop 直接 recover 权限。它不是用户可用的取消 mask。
+编译器 static/dynamic async helper 的 begin/end 已接入同一 await transaction，且仅
+用于内部 cleanup invocation；source Go defer 不新增 scope。End 发生在 child joined、
+completion 已消费之后；延后的 stop 只修改 cleanup base，保留 panic overlay。同步
+outcome/plain helper 没有挂起窗口，不增加异步 scope。native/wasm32 CoroSplit 前后
+IR 验证内部 helper 有 scope、源码 Go defer 和普通调用无 scope；架构预算未提高。
+
+compact channel 的旧 fast path 只接受 None/Idle，不能用于已领取或屏蔽中的 cleanup。
+现在 prepare、commit 和 local/routed completion 共享有效 cancellation 状态检查，
+只让不会中断当前 operation 的状态完成；真正 Requested 仍走原取消处理，非法组合
+拒绝且不修改 spill。兼容 prepare 重建 ParkState 时保留 task receipt，不重置其原因。
+24 种准备/完成组合、14 个非法或 interrupting 输入、全 core race/shuffle 和 Node/wasm
+测试通过。冻结 v76 的真实 linked regression 和 10 次重复运行通过，旧 v75 compiler/
+runtime 跑相同 v76 leaf fixture 则 abort；两侧 source-after 均匹配。这个回归验证已
+领取取消原因的 channel cleanup，不能代替 public delivery 的端到端验收。此原型不
+表示公开资源返回、标准库 adoption 或全部平台已经闭环。
+
 真实 fd 的 `TestResourceDeliveryBoundary` 是这个差异的永久 core oracle：child physical
 destroy 后再取消，normal/cancel lane 消费完全相同的 nil-payload Return；parent guard
 存在时关闭一次，故意移除 guard 的负对照会泄漏，然后由测试显式清理。它不是 public
@@ -257,6 +288,17 @@ fallback initializer/drop 的隐藏调用也纳入已有 lowered-call 图，不�
 helper 来触发染色；两者独立的 suspend/exec 需求均通过原固定点自动传播。
 当前实现只完成源码事实与自动染色的前端验证，物理 guard 未绑定时后端明确拒绝，
 不会因为出现这个声明就把尚未保护的 hidden output 指针交给适配器。
+
+源码冻结现已在所有 producer 收集完成后，将 exact static call/go/defer 绑定到同一个
+producer fact，并同步既有 owner SitePlan；不复制 helper ABI 或新增资源调用图。
+producer 的 discarded-entry fallback，以及实际执行 initializer/drop 的普通调用者和
+defer owner，均在原 local body facts 中获得 `NeedsCleanupFrame`，排除无 cleanup 的
+outcome-plain 优化。父 Go caller 不执行 spawned child 的 initializer/drop，因此不增加
+该父函数的 helper edge 或 cleanup 标志；间接普通 wrapper 和常量死分支也不继承资源
+所有权。父调用者的隐藏 helper edges 进入同一个 lowered-call 固定点，不靠注释触发染色。
+对应前端与单一架构 authority gate 已通过，未提高任何架构债务预算。此处仍只是物理
+接线的先决条件：缺少实际守卫时，preflight 继续以准确的 unbound-guard 错误拒绝，
+不将隐式 cleanup 伪装成一个不存在的 source defer，不算公开交付验收完成。
 
 私有 producer 的返回证明采用有限结构：borrow 必须先于源码 call/go/defer，所有
 正常 return 按顺序直接读取同一个 borrowed tuple 的各字段；开始读取后只允许其余

@@ -198,3 +198,94 @@ func (ir *coroProgramIR) sourceDelivery(producer *ssa.Function) (coroSourceDeliv
 	recipe, present := ir.deliveryProducers[producer]
 	return recipe, present, nil
 }
+
+// freezeDeliveryConsumers binds exact static consumers only after every
+// producer source fact exists. Source/package traversal order cannot decide
+// whether a call owns temporary cleanup. Dynamic descriptor publication is a
+// separate physical consumer of the same producer fact, not inferred here.
+func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) error {
+	u := builder.canonical.universe
+	if ir == nil || u == nil || u.coroProgramIR != ir || ir.callsFrozen {
+		return fmt.Errorf("delivery consumers require the active ProgramIR builder")
+	}
+	if len(ir.deliveryProducers) == 0 {
+		return nil
+	}
+	requireCleanup := func(function *ssa.Function) error {
+		facts, present := ir.localBodyFacts[function]
+		if !present {
+			return fmt.Errorf("delivery cleanup owner %q has no frozen local body", function.Name())
+		}
+		// This is local ownership, not a propagating resource effect. Even a
+		// non-suspending initializer/drop needs the existing cleanup drainer
+		// for panic, cancellation and discarded-entry fallback.
+		facts.Exec = facts.Exec.Join(coro.NeedsCleanupFrame)
+		facts.OutcomePlainLeaf = false
+		facts.OutcomePlainDAG = false
+		facts.StaticOutcomeLocal = false
+		ir.localBodyFacts[function] = facts
+		return nil
+	}
+	for _, function := range u.functions {
+		if function == nil {
+			continue
+		}
+		if _, producer := ir.deliveryProducers[function]; producer {
+			if err := requireCleanup(function); err != nil {
+				return err
+			}
+		}
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common() == nil || call.Common().IsInvoke() {
+					continue
+				}
+				frozen, present := ir.callPlans[call]
+				if !present || frozen.failure != "" || frozen.plan.ElidesCall() || frozen.plan.RawPlain {
+					continue
+				}
+				target := u.canonicalAlias(call.Common().StaticCallee())
+				if frozen.plan.ManagedStaticTarget != nil {
+					target = frozen.plan.ManagedStaticTarget
+				}
+				recipe, producer := ir.deliveryProducers[target]
+				if !producer {
+					continue
+				}
+				frozen.deliveryProducer = recipe.producer
+				ir.callPlans[call] = frozen
+				for _, owner := range u.sortedUseOwners(function) {
+					key := emissionFunctionOwnerKey{function: function, owner: owner}
+					site, present := ir.sitePlans[key][instruction]
+					if !present || !site.hasCallPlan {
+						return fmt.Errorf("delivery call %q lacks its frozen owner SitePlan", call.String())
+					}
+					site.callPlan = frozen
+					ir.sitePlans[key][instruction] = site
+				}
+				if _, spawned := call.(*ssa.Go); spawned {
+					// A go statement does not execute the child's initializer/drop
+					// on its parent. Its independently owned entry uses fallback.
+					continue
+				}
+				if err := requireCleanup(function); err != nil {
+					return err
+				}
+				identity := emissionDigest(u.finalIdentity(target))
+				for _, helper := range []struct {
+					name   string
+					target *ssa.Function
+				}{
+					{coroDeliveryInitializeCall, recipe.initializer},
+					{coroDeliveryDropCall, recipe.drop},
+				} {
+					if err := u.recordCoroLoweredCall(function, helper.name+":"+identity, helper.target); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
+}

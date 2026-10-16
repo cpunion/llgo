@@ -200,6 +200,82 @@ func TestCoroDeliverySourceRejectsUnboundOrInexactShapes(t *testing.T) {
 	}
 }
 
+func TestCoroDeliveryConsumerFactsAreLocalAndFrozen(t *testing.T) {
+	source := coroDeliverySourceFixture + `
+func Twice() { Acquire("first"); Acquire("second") }
+func SpawnOnly() { go Acquire("spawn") }
+func Deferred() { defer Acquire("defer") }
+func OrdinaryWrapper() { Root() }
+func Dead() { if false { Acquire("dead") } }
+func Unrelated() {}
+`
+	pkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	u, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		cleanup bool
+		helpers int
+	}{
+		{"Acquire", true, 2}, // Discarded-entry fallback is independently owned.
+		{"Root", true, 2},
+		{"Twice", true, 2}, // Helper identity, not one edge per source occurrence.
+		{"Deferred", true, 2},
+		{"SpawnOnly", false, 0},
+		{"OrdinaryWrapper", false, 0}, // Local cleanup ownership never propagates.
+		{"Dead", false, 0},
+		{"Unrelated", false, 0},
+	} {
+		fn := pkg.Func(test.name)
+		facts, err := u.CoroLocalBodyFacts(fn)
+		if err != nil || facts.Exec.Contains(coro.NeedsCleanupFrame) != test.cleanup {
+			t.Errorf("%s cleanup=%t, want %t; error=%v", test.name, facts.Exec.Contains(coro.NeedsCleanupFrame), test.cleanup, err)
+		}
+		if test.cleanup && (facts.OutcomePlainLeaf || facts.OutcomePlainDAG || facts.StaticOutcomeLocal) {
+			t.Errorf("%s implicit cleanup retained a frame-free body candidate: %+v", test.name, facts)
+		}
+		edges, err := u.CoroLoweredCalls(fn)
+		if err != nil || len(edges) != test.helpers {
+			t.Errorf("%s hidden helper edges=%+v, want %d; error=%v", test.name, edges, test.helpers, err)
+		}
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common().StaticCallee() != pkg.Func("Acquire") {
+					continue
+				}
+				frozen, present, err := u.coroProgramIR.callSitePlan(call)
+				if test.name == "Dead" {
+					if err != nil || !present || !frozen.plan.ElidesCall() || frozen.deliveryProducer != nil {
+						t.Fatalf("dead acquisition acquired a delivery obligation: %+v error=%v", frozen, err)
+					}
+					continue
+				}
+				if err != nil || !present || frozen.deliveryProducer != pkg.Func("Acquire") {
+					t.Fatalf("%s exact consumer producer=%v present=%t error=%v", test.name, frozen.deliveryProducer, present, err)
+				}
+				recipe, found, err := u.coroProgramIR.sourceDelivery(frozen.deliveryProducer)
+				if err != nil || !found || recipe.initializer != pkg.Func("initFD") || recipe.drop != pkg.Func("dropFD") {
+					t.Fatalf("%s consumer lost its shared producer recipe: %+v found=%t error=%v", test.name, recipe, found, err)
+				}
+				for _, owner := range u.sortedUseOwners(fn) {
+					key := emissionFunctionOwnerKey{function: fn, owner: owner}
+					if site := u.coroProgramIR.sitePlans[key][instruction]; !sameCoroFrozenCallSitePlan(site.callPlan, frozen) {
+						t.Fatal("consumer and owner SitePlan disagree about one delivery recipe")
+					}
+				}
+			}
+		}
+	}
+	if err := (coroProgramIRBuilder{canonical: emissionCanonicalIndex{universe: u}}).freezeDeliveryConsumers(u.coroProgramIR); err == nil {
+		t.Fatal("delivery consumers remained mutable after source freeze")
+	}
+}
+
 func TestCoroDeliverySourceAcceptsFreshProjectionsAfterOrdinaryWork(t *testing.T) {
 	for _, body := range []string{
 		"dropFD(out, nil, path); return out.R0, out.R1",
