@@ -89,7 +89,11 @@ func (u *EmissionUniverse) freezeCoroNoUnwindCertificates() error {
 	u.noUnwind = certificates
 	for function := range certificates {
 		for logicalName, lowered := range u.loweredCalls[function] {
-			if lowered.rawPlain {
+			if lowered.rawPlain || lowered.whenResultDeliveryOf != nil {
+				// A source body certificate does not certify the dynamically
+				// selected initializer/drop. The ordinary managed-call solver
+				// must retain that conditional dependency, even for a closed
+				// non-resource family whose condition later folds to false.
 				continue
 			}
 			lowered.noUnwind = true

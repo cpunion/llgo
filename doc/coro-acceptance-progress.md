@@ -432,7 +432,37 @@ passes a strict current v89 replay (103.70s case, source-after matches,
 3084.9MiB peak). The older failed cohort is retained; versions are not stitched
 into a fictitious same-snapshot full pass. The eight-shard script continues
 into shard 4. The live v70 stdlib cohort has 71/180 completed packages, all
-passing at this checkpoint; neither long cohort is yet complete.
+passing at that checkpoint; neither long cohort is yet complete.
+
+The next development cohort wires conditional delivery consumers into the
+production frontend, rather than registering test-only helpers. Exact typed
+recipes bind their non-debug source ordinal and source/cleanup/result-drop
+placements before the existing effect fixed point. Final value-flow decisions
+prune both the pointer-free lowering ledger and all emission placements; a
+closed nonresource/nil-only family keeps no helper or cleanup ownership.
+The caller's `nounwind` certificate cannot certify a dynamically selected
+initializer/drop. Both exact and descriptor helpers now share the existing
+frozen-record validator and SitePlan observation boundary.
+
+Physical consumers reuse the result slot, one frame active tag and existing
+drainer/child-await engine. They read the optional tail only on `HasDelivery`,
+arm only after initialization, claim after completion/result consumption and
+clear before dropping. Compiler helpers never inherit direct-defer recover
+permission. Native/wasm32 pre/post-CoroSplit tests pass with **CompleteRuntimeABI**
+and the full helper observer, including ordinary calls, local defer and looped
+heterogeneous defer (2.686s / 1229.7MiB). The final focused helper/ledger/cleanup
+gate passes 5.985s / 1297.9MiB and the unchanged architecture gate passes
+0.930s / 699.1MiB. The initial architecture failure (one extra observation
+authority) is retained: the correction shares the existing boundary rather
+than raising a budget. These are emitted-IR/host gates, not a claim that a
+dynamic resource producer is already publishable or verified end-to-end.
+The producer-publication, unguarded-dispatch and FFI rejection gates remain;
+bodyless library helpers, external defer owners, conditional allocation for
+large deferred dynamic results, output-loan lifetime proof, reflect's second
+handoff and standard-library adoption remain required before public seeds.
+The full compiler and immutable linked-program regressions are tracked
+separately. The ongoing older v70 stdlib cohort now has **76/180** complete,
+all passing; the older GOROOT eight-shard run remains in shard 4.
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;

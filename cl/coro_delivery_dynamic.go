@@ -17,6 +17,109 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+// This typed recipe belongs to one exact source occurrence, not to the
+// function signature's entire call family. The sole value-flow pass decides
+// whether its helpers survive; emission consumes that frozen decision.
+type coroDynamicDeliveryRecipe struct {
+	signature   *types.Signature
+	result      *types.Struct
+	initializer *types.Signature
+	drop        *types.Signature
+	initialize  string
+	release     string
+}
+
+func (builder coroProgramIRBuilder) freezeDynamicDeliveryConsumer(ir *coroProgramIR, call ssa.CallInstruction) (*coroDynamicDeliveryRecipe, error) {
+	u := builder.canonical.universe
+	if call.Common().StaticCallee() != nil || call.Common().IsInvoke() || call.Common().Signature().Results().Len() == 0 {
+		return nil, nil
+	}
+	if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
+		return nil, nil
+	}
+	switch call := call.(type) {
+	case *ssa.Call:
+	case *ssa.Defer:
+		if call.DeferStack != nil {
+			return nil, nil // External owners remain rejected by physical preflight.
+		}
+	default:
+		return nil, nil // Spawn owns an independent discarded-result entry.
+	}
+	owner := u.ownerOf(call.Parent())
+	signature, ok := u.effectiveType(owner, call.Parent(), call.Common().Signature()).(*types.Signature)
+	if !ok {
+		return nil, fmt.Errorf("dynamic delivery call has no frozen source signature")
+	}
+	// Raw C function values do not publish managed delivery capabilities.
+	if llssa.IsNativeFuncBackground(u.prog.TypeBackground(signature)) {
+		return nil, nil
+	}
+	signature, err := coroConcreteManagedCallableSignature(signature)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic delivery call %q: %w", call.String(), err)
+	}
+	signature = canonicalCoroPlainDispatchSignature(signature)
+	if signature.Variadic() {
+		// SSA already packed the variadic arguments into the final slice.
+		// Only the helper's callable shape is normalized; the public
+		// descriptor keeps its Go-visible variadic bit for reflection.
+		signature = types.NewSignatureType(nil, nil, nil, signature.Params(), signature.Results(), false)
+	}
+	result, initializer, drop, err := coro.DeliveryHelperSignatures(signature)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic delivery call %q: %w", call.String(), err)
+	}
+	ordinal, err := coro.SemanticInstructionOrdinal(call)
+	if err != nil {
+		return nil, err
+	}
+	identity := fmt.Sprintf(":dynamic:%d:%d", call.Block().Index, ordinal)
+	recipe := &coroDynamicDeliveryRecipe{
+		signature: signature, result: result, initializer: initializer, drop: drop,
+		initialize: coroDeliveryInitializeCall + identity, release: coroDeliveryDropCall + identity,
+	}
+	for _, name := range []string{recipe.initialize, recipe.release} {
+		if err := builder.freezeDeliveryHelperCall(call.Parent(), name, call); err != nil {
+			return nil, err
+		}
+	}
+	if err := builder.freezeDeliveryHelperPlacements(ir, call, recipe.initialize, recipe.release); err != nil {
+		return nil, err
+	}
+	return recipe, nil
+}
+
+// deliveryHelperActive is shared by lowering facts and all physical helper
+// placements. A pruned helper must have an exact source recipe and a final
+// negative CallPlan proof; absence from LoweredCalls alone is not permission
+// to omit an expected managed invocation.
+func (ir *coroProgramIR) deliveryHelperActive(plan *coro.SSAPlan, instruction ssa.Instruction, name string) (bool, error) {
+	call, callable := instruction.(ssa.CallInstruction)
+	if !callable {
+		return true, nil
+	}
+	frozen, present, err := ir.callSitePlan(call)
+	if err != nil {
+		return false, err
+	}
+	if !present || frozen.dynamicDelivery == nil ||
+		name != frozen.dynamicDelivery.initialize && name != frozen.dynamicDelivery.release {
+		return true, nil
+	}
+	if plan == nil {
+		return false, fmt.Errorf("conditional delivery helper requires the frozen whole-program plan")
+	}
+	if plan.ElidesCall(call) {
+		return false, nil
+	}
+	result, present := plan.CallPlan(call)
+	if !present {
+		return false, fmt.Errorf("conditional delivery helper lost its exact source CallPlan")
+	}
+	return result.ResultDelivery, nil
+}
+
 // freezeDeliveryHelperCall retains an ordinary managed invocation with no
 // fabricated SSA target. The existing value-flow pass resolves its exact
 // source condition before computing effects; physical emission must consume
@@ -61,4 +164,107 @@ func (p *context) emitCoroDeliveryHelperValue(b llssa.Builder, target *ssa.Funct
 		panic(fmt.Errorf("resource delivery helper descriptor: %w", err))
 	}
 	return p.emitCoroManagedPrimaryValue(b, entry, target, nil, signature)
+}
+
+func (p *context) coroDynamicDeliveryGuard(call ssa.CallInstruction) *coroDeliveryGuardState {
+	cleanup := p.coroCleanup()
+	if cleanup == nil || cleanup.delivery == nil {
+		return nil
+	}
+	guard := cleanup.delivery.calls[call]
+	if guard == nil || guard.plan.dynamic == nil {
+		return nil
+	}
+	return guard
+}
+
+func (p *context) beginCoroDynamicDeliveryCall(
+	b llssa.Builder, guard *coroDeliveryGuardState, fn llssa.Expr, args []llssa.Expr,
+	selection llssa.CoroDispatchSelection, invocation coroCleanupInvocation,
+) {
+	if guard == nil || guard.plan.dynamic == nil || guard.result.IsNil() {
+		panic("dynamic delivery requires the exact bound output guard")
+	}
+	present, ready := p.fn.MakeBlock(), p.fn.MakeBlock()
+	b.If(selection.HasDelivery(), present, ready)
+	b.SetBlockEx(present, llssa.AtEnd, false)
+	recipe := guard.plan.dynamic
+	initializer, drop := b.PrepareCoroDispatchDelivery(selection, recipe.initializer, recipe.drop)
+	// The nil environment of the helper is not another retained frame word.
+	// Only its descriptor, the producer environment and exact arguments survive
+	// a child suspension in the existing owner frame.
+	p.armCoroDynamicDeliveryCall(b, guard, b.Field(fn, 1), args, initializer, drop, invocation)
+	b.Jump(ready)
+	b.SetBlockContinuation(ready)
+}
+
+func (p *context) armCoroDynamicDeliveryCall(
+	b llssa.Builder, guard *coroDeliveryGuardState, env llssa.Expr, args []llssa.Expr,
+	initializer, drop llssa.Expr, invocation coroCleanupInvocation,
+) {
+	if len(args) != len(guard.args) || guard.plan.dynamic == nil || guard.dropDescriptor.IsNil() {
+		panic("dynamic delivery lost its exact typed captures")
+	}
+	if env.IsNil() {
+		env = p.prog.Nil(p.prog.VoidPtr())
+	}
+	b.StoreKnownNonNil(guard.env, b.Convert(p.prog.VoidPtr(), env))
+	b.StoreKnownNonNil(guard.dropDescriptor, b.Field(drop, 0))
+	if !guard.resultAddress.IsNil() {
+		b.StoreKnownNonNil(guard.resultAddress, guard.result)
+	}
+	for index, argument := range args {
+		b.StoreKnownNonNil(guard.args[index], argument)
+	}
+	b.StoreKnownNonNil(guard.result, p.prog.Zero(p.prog.Elem(guard.result.Type)))
+	p.compileCoroDynamicDeliveryHelper(b, guard.plan.dynamic.initialize, initializer, guard.plan.dynamic.initializer,
+		[]llssa.Expr{guard.result}, invocation)
+	// Initialization must complete before acquiring custody. A failed
+	// initializer cannot run a drop on uninitialized output.
+	b.StoreKnownNonNil(p.coroCleanup().delivery.active, p.prog.IntVal(uint64(guard.plan.tag), p.prog.Uint32()))
+}
+
+func (p *context) compileCoroDynamicDeliveryHelper(
+	b llssa.Builder, name string, fn llssa.Expr, signature *types.Signature, args []llssa.Expr,
+	invocation coroCleanupInvocation,
+) {
+	site := p.coroEmissionSite()
+	if site == nil || signature == nil || signature.Results().Len() != 0 {
+		panic("dynamic delivery helper requires an exact typed emission site")
+	}
+	call, callable := site.instruction.(ssa.CallInstruction)
+	if !callable {
+		panic("dynamic delivery helper requires its source call occurrence")
+	}
+	source, present, err := p.emissionUniverse.coroProgramIR.callSitePlan(call)
+	if err != nil || !present || source.dynamicDelivery == nil {
+		panic(fmt.Errorf("dynamic delivery helper %q lost its typed source recipe: %v", name, err))
+	}
+	recipe := source.dynamicDelivery
+	if name != recipe.initialize && name != recipe.release ||
+		name == recipe.initialize && !types.Identical(signature, recipe.initializer) ||
+		name == recipe.release && !types.Identical(signature, recipe.drop) {
+		panic(fmt.Errorf("dynamic delivery helper %q disagrees with its frozen source signature", name))
+	}
+	frozen, plainOnly := p.resolveCoroPhysicalHelperRecord(name)
+	if plainOnly || !frozen.ManagedDispatch || frozen.Target != nil || frozen.WhenResultDeliveryOf != site.instruction || frozen.NoUnwind {
+		panic(fmt.Errorf("dynamic delivery helper %q lost its frozen conditional managed edge", name))
+	}
+	activeAtSite, err := p.emissionUniverse.coroProgramIR.deliveryHelperActive(p.immutablePlan(), site.instruction, name)
+	if err != nil || !activeAtSite {
+		panic(fmt.Errorf("dynamic delivery helper %q has no active exact source proof: %v", name, err))
+	}
+	// Helpers are ordinary managed dispatch calls, but never recursively
+	// initialize the source producer's guard or grant source-defer recover.
+	invocation.recoverParent = false
+	p.compileCoroManagedDispatchAwaitValueResultWithRecovery(b, fn, args, signature, coroManagedDispatchAwaitOptions{
+		cleanup: invocation, descriptorNonNil: true,
+	})
+}
+
+func (p *context) coroDeliveryHelperInvocation() coroCleanupInvocation {
+	if site := p.coroEmissionSite(); site != nil && site.placement != coroRuntimeHelperAtSource {
+		return coroCleanupInvocation{state: p.coroCleanup()}
+	}
+	return coroCleanupInvocation{}
 }

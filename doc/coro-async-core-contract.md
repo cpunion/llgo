@@ -250,8 +250,25 @@ no-unwind 或 terminal-elision shortcut。它不引入 synthetic SSA 函数或�
 冷 helper 元信息复用普通 descriptor/typed-thunk 的同一 primary 构造器，不能
 为此将静态 initializer/drop 染成 Dispatch 或复制函数体。共享构造器仍须保留
 source facade identity 与 canonical physical primary 的区别，不能丢失 go:linkname
-函数值的 source signature。当前已验证这些独立接点；consumer frame guard、
-source placement 自动接入和动态 publication 的完整闭环尚未完成，拒绝门不撤销。
+函数值的 source signature。
+
+动态 consumer 现已从真实源码 occurrence 自动冻结 typed recipe 与 helper placement，
+无需手工登记。最终 `CallPlan.ResultDelivery` 同时决定 pointer-free ledger 和 source、
+cleanup、result-drop 三种 placement 的 helper 是否保留；仅从清单中找不到 helper
+不能作为省略依据。普通 Go body 的 `nounwind` 证书也不能借给动态选择的 helper。
+物理 consumer 复用原结果槽、每 frame 一个 active tag、原 cleanup drainer 与 child
+transaction；仅额外保存 drop descriptor、producer env 和准确参数。helper env 固定
+为 nil，不保存冗余 word。初始化完成才 arm，completion 消费和 result load 后才
+claim，drop 前先清除 tag/captures，内部 helper 没有 source-defer recover 权限。
+异构循环 defer 只为其尚未在 drainer 构建前出现的结果保留 typed address，不能依赖
+emitter 顺序。closed nonresource 不产生这些 storage 或 helper。static/descriptor
+helper 共用唯一 frozen-record validator/observer，架构预算不得提高。
+
+该 consumer 路径已有 native/wasm32、完整 SitePlan、pre/post-CoroSplit 验证，覆盖
+普通动态 call、局部 defer 和循环 defer。它还不是动态资源 acquisition 的端到端
+证明：source producer descriptor publication、bodyless helper、external defer owner、
+大型动态 defer 的条件 allocator、reflect 第二次交付与 loan lifetime proof 尚须闭环。
+publication 拒绝门和 unguarded dispatch/FFI 拒绝门保留，public seed 不启用。
 
 启用 seed 前，必须同时具备：producer borrowed-address/fallback、static normal/cancel
 交付、dynamic descriptor 可选契约与 ABI 校验、库元信息消费、defer/go discarded

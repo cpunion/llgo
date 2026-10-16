@@ -203,10 +203,10 @@ func (ir *coroProgramIR) sourceDelivery(producer *ssa.Function) (coroSourceDeliv
 	return recipe, present, nil
 }
 
-// freezeDeliveryConsumers binds exact static consumers only after every
+// freezeDeliveryConsumers binds consumers only after every
 // producer source fact exists. Source/package traversal order cannot decide
-// whether a call owns temporary cleanup. Dynamic descriptor publication is a
-// separate physical consumer of the same producer fact, not inferred here.
+// whether a call owns temporary cleanup. Dynamic helper occurrences are
+// conditional inputs to the existing whole-program value-flow analysis.
 func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) error {
 	u := builder.canonical.universe
 	if ir == nil || u == nil || u.coroProgramIR != ir || ir.callsFrozen {
@@ -265,18 +265,21 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 				}
 				recipe, producer := ir.deliveryProducers[target]
 				if !producer {
+					dynamic, err := builder.freezeDynamicDeliveryConsumer(ir, call)
+					if err != nil {
+						return err
+					}
+					if dynamic != nil {
+						frozen.dynamicDelivery = dynamic
+						if err := builder.freezeDeliveryConsumerSite(ir, call, frozen); err != nil {
+							return err
+						}
+					}
 					continue
 				}
 				frozen.deliveryProducer = recipe.producer
-				ir.callPlans[call] = frozen
-				for _, owner := range u.sortedUseOwners(function) {
-					key := emissionFunctionOwnerKey{function: function, owner: owner}
-					site, present := ir.sitePlans[key][instruction]
-					if !present || !site.hasCallPlan {
-						return fmt.Errorf("delivery call %q lacks its frozen owner SitePlan", call.String())
-					}
-					site.callPlan = frozen
-					ir.sitePlans[key][instruction] = site
+				if err := builder.freezeDeliveryConsumerSite(ir, call, frozen); err != nil {
+					return err
 				}
 				if _, spawned := call.(*ssa.Go); spawned {
 					// A go statement does not execute the child's initializer/drop
@@ -312,6 +315,21 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 				}
 			}
 		}
+	}
+	return nil
+}
+
+func (builder coroProgramIRBuilder) freezeDeliveryConsumerSite(ir *coroProgramIR, call ssa.CallInstruction, frozen coroFrozenCallSitePlan) error {
+	u := builder.canonical.universe
+	ir.callPlans[call] = frozen
+	for _, owner := range u.sortedUseOwners(call.Parent()) {
+		key := emissionFunctionOwnerKey{function: call.Parent(), owner: owner}
+		site, present := ir.sitePlans[key][call]
+		if !present || !site.hasCallPlan {
+			return fmt.Errorf("delivery call %q lacks its frozen owner SitePlan", call.String())
+		}
+		site.callPlan = frozen
+		ir.sitePlans[key][call] = site
 	}
 	return nil
 }
@@ -361,6 +379,9 @@ func (ir *coroProgramIR) deliverySiteHelpers(instruction ssa.Instruction) (initi
 		return "", "", false
 	}
 	frozen := ir.callPlans[call]
+	if recipe := frozen.dynamicDelivery; recipe != nil {
+		return recipe.initialize, recipe.release, true
+	}
 	if recipe, found := ir.deliveryProducers[frozen.deliveryProducer]; found {
 		return recipe.consumerInitialize, recipe.consumerDrop, true
 	}

@@ -9,6 +9,7 @@ package cl
 import (
 	"fmt"
 	"go/token"
+	"go/types"
 
 	"github.com/xgo-dev/llgo/internal/coro"
 	llssa "github.com/xgo-dev/llgo/ssa"
@@ -16,10 +17,25 @@ import (
 )
 
 type coroDeliveryGuardPlan struct {
-	call   ssa.CallInstruction
-	recipe coroSourceDeliveryRecipe
-	tag    uint32
-	hasEnv bool
+	call    ssa.CallInstruction
+	recipe  coroSourceDeliveryRecipe
+	dynamic *coroDynamicDeliveryRecipe
+	tag     uint32
+	hasEnv  bool
+}
+
+func (plan coroDeliveryGuardPlan) signature() *types.Signature {
+	if plan.dynamic != nil {
+		return plan.dynamic.signature
+	}
+	return plan.recipe.signature
+}
+
+func (plan coroDeliveryGuardPlan) resultType() *types.Struct {
+	if plan.dynamic != nil {
+		return plan.dynamic.result
+	}
+	return plan.recipe.result
 }
 
 type coroDeliveryFunctionPlan struct {
@@ -55,6 +71,23 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 			}
 			recipe, present := ir.deliveryProducers[frozen.deliveryProducer]
 			if !present {
+				if dynamic := frozen.dynamicDelivery; dynamic != nil {
+					fact, planned := whole.CallPlan(call)
+					if !planned || !fact.ResultDelivery {
+						continue
+					}
+					if len(fact.Targets) == 1 {
+						target, _ := whole.Function(fact.Targets[0])
+						recipe = ir.deliveryProducers[target]
+					}
+					if uint64(len(plan.calls)) == uint64(^uint32(0)) {
+						return nil, fmt.Errorf("too many resource delivery call sites")
+					}
+					plan.calls = append(plan.calls, coroDeliveryGuardPlan{
+						call: call, recipe: recipe, dynamic: dynamic, tag: uint32(len(plan.calls)) + 1, hasEnv: true,
+					})
+					continue
+				}
 				// A dynamic/closed-value occurrence must not receive an ordinary
 				// result slot until its descriptor carries the same contract.
 				if fact, planned := whole.CallPlan(call); planned {
@@ -92,10 +125,12 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 // These are emission-time bindings of existing typed frame storage. There is
 // no runtime guard object, independent cancellation decision, or per-call bool.
 type coroDeliveryGuardState struct {
-	plan   coroDeliveryGuardPlan
-	result llssa.Expr
-	args   []llssa.Expr
-	env    llssa.Expr
+	plan           coroDeliveryGuardPlan
+	result         llssa.Expr
+	args           []llssa.Expr
+	env            llssa.Expr
+	dropDescriptor llssa.Expr
+	resultAddress  llssa.Expr
 }
 
 type coroDeliveryFunctionState struct {
@@ -123,8 +158,17 @@ func (s *coroStaticCleanupState) bindDelivery(p *context, plan *coroDeliveryFunc
 		if site.hasEnv {
 			guard.env = p.coroFrameAlloc(p.prog.VoidPtr())
 		}
-		for index := 0; index < site.recipe.signature.Params().Len(); index++ {
-			guard.args = append(guard.args, p.coroFrameAlloc(p.type_(site.recipe.signature.Params().At(index).Type(), llssa.InGo)))
+		if site.dynamic != nil {
+			guard.dropDescriptor = p.coroFrameAlloc(p.prog.VoidPtr())
+		}
+		if _, deferred := site.call.(*ssa.Defer); deferred && s.dynamic {
+			// A heterogeneous drainer emits its prefix before its site bodies.
+			// Keep the active site's result address in the existing owner frame;
+			// never depend on code-generation order or a later LLVM definition.
+			guard.resultAddress = p.coroFrameAlloc(p.prog.Pointer(p.prog.Type(site.resultType(), llssa.InGo)))
+		}
+		for index := 0; index < site.signature().Params().Len(); index++ {
+			guard.args = append(guard.args, p.coroFrameAlloc(p.type_(site.signature().Params().At(index).Type(), llssa.InGo)))
 		}
 		delivery.calls[site.call] = guard
 	}
@@ -156,6 +200,20 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 	if guard == nil || guard.plan.recipe.producer != target {
 		return nil // An initializer/drop at the same source site is not the producer.
 	}
+	if guard.plan.dynamic != nil {
+		// A closed singleton may use an exact ramp without materializing the
+		// producer's public descriptor. Its conditional helper edges still
+		// invoke the same typed primary helper descriptors.
+		_, initializer, drop, err := coro.DeliveryHelperSignatures(guard.plan.signature())
+		if err != nil {
+			panic(err)
+		}
+		guard.result = p.coroResultSlot(p.prog.Type(guard.plan.resultType(), llssa.InGo))
+		p.armCoroDynamicDeliveryCall(b, guard, env, args,
+			p.emitCoroDeliveryHelperValue(b, guard.plan.recipe.initializer, initializer),
+			p.emitCoroDeliveryHelperValue(b, guard.plan.recipe.drop, drop), p.coroDeliveryHelperInvocation())
+		return guard
+	}
 	if len(args) != len(guard.args) {
 		panic("resource delivery call lost its exact typed captures")
 	}
@@ -163,6 +221,9 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 	// and its exact SitePlan are observed together. coroResultSlot still places
 	// physical storage in the dominating ramp, once per static call site.
 	guard.result = p.coroResultSlot(p.prog.Type(guard.plan.recipe.result, llssa.InGo))
+	if !guard.resultAddress.IsNil() {
+		b.StoreKnownNonNil(guard.resultAddress, guard.result)
+	}
 	if guard.plan.hasEnv {
 		if env.IsNil() {
 			panic("resource delivery call lost its frozen closure environment")
@@ -184,6 +245,12 @@ func (s *coroDeliveryFunctionState) claim(b llssa.Builder, guard *coroDeliveryGu
 }
 
 func (guard *coroDeliveryGuardState) clearCaptures(b llssa.Builder) {
+	if !guard.dropDescriptor.IsNil() {
+		b.StoreVolatile(guard.dropDescriptor, b.Prog.Nil(b.Prog.VoidPtr()))
+	}
+	if !guard.resultAddress.IsNil() {
+		b.StoreVolatile(guard.resultAddress, b.Prog.Nil(b.Prog.Elem(guard.resultAddress.Type)))
+	}
 	if !guard.env.IsNil() {
 		b.StoreVolatile(guard.env, b.Prog.Nil(b.Prog.VoidPtr()))
 	}
@@ -213,13 +280,26 @@ func (s *coroStaticCleanupState) emitDeliveryPrefix(p *context, b llssa.Builder,
 		if !guard.env.IsNil() {
 			env = b.LoadKnownNonNil(guard.env)
 		}
-		args := []llssa.Expr{guard.result, env}
+		result := guard.result
+		if !guard.resultAddress.IsNil() {
+			result = b.LoadKnownNonNil(guard.resultAddress)
+		}
+		args := []llssa.Expr{result, env}
 		for _, capture := range guard.args {
 			args = append(args, b.LoadKnownNonNil(capture))
 		}
+		var drop llssa.Expr
+		if site.dynamic != nil {
+			drop = b.Aggregate(p.prog.Closure(site.dynamic.drop),
+				b.LoadKnownNonNil(guard.dropDescriptor), p.prog.Nil(p.prog.VoidPtr()))
+		}
 		delivery.claim(b, guard)
 		finish := s.beginRelocatedSiteEmission(p, site.call, coroRuntimeHelperAtResultDrop)
-		p.compileCoroDeliveryHelper(b, site.recipe.consumerDrop, site.recipe.drop, args)
+		if site.dynamic != nil {
+			p.compileCoroDynamicDeliveryHelper(b, site.dynamic.release, drop, site.dynamic.drop, args, coroCleanupInvocation{state: s})
+		} else {
+			p.compileCoroDeliveryHelper(b, site.recipe.consumerDrop, site.recipe.drop, args)
+		}
 		finish()
 		b.Jump(next)
 	}

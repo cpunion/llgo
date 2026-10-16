@@ -57,12 +57,6 @@ func (p *context) resolveCoroLoweredHelperCall(b llssa.Builder, helper string, m
 	if b.Func != p.fn {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q escaped into another LLVM function", helper, p.goFn.Name()))
 	}
-	// Every production compiler-inserted runtime call reaches this resolver
-	// through Package.RuntimeFunc's private expression marker, including a
-	// declaration which was already materialized in the package. Keep the
-	// exact SitePlan observation at this one shared boundary so individual
-	// instrumentation and lowering helpers cannot become new authorities.
-	p.observeCoroSiteRuntimeHelper(helper)
 	var printKeepaliveSlots []llssa.Expr
 	if helper == "PrintBatchV1" {
 		// Print batching replaces several per-operand managed calls with one
@@ -75,44 +69,12 @@ func (p *context) resolveCoroLoweredHelperCall(b llssa.Builder, helper string, m
 		}
 	}
 
-	// ProgramIR freezes both occurrence domains before representation and
-	// demand reach their fixed point. Select by the body being emitted, not by
-	// the target's aggregate FunctionPlan: an ordinary/raw Go ABI body must use
-	// the independently proven legacy-stack entry even when its physical twin
-	// awaits the same logical helper as a managed coroutine.
-	plainDomain := !p.hasCoroPhysicalEmission()
-	frozenCall := coro.SSALoweredCall{}
-	target := (*ssa.Function)(nil)
-	ok := false
-	var err error
-	plainOnly := false
-	if plainDomain {
-		target, ok, err = p.emissionUniverse.ResolveCoroPlainLoweredCall(p.goFn, helper)
-		if err != nil {
-			panic(fmt.Errorf("coroutine plain lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
-		}
-		plainOnly = ok
+	frozenCall, plainOnly := p.resolveCoroPhysicalHelperRecord(helper)
+	target := frozenCall.Target
+	if frozenCall.ManagedDispatch || target == nil {
+		panic(fmt.Errorf("coroutine exact runtime call %q cannot invoke a managed descriptor", helper))
 	}
-	if !ok {
-		frozenCall, ok, err = p.emissionUniverse.ResolveCoroLoweredCallRecord(p.goFn, helper)
-		if err != nil {
-			panic(fmt.Errorf("coroutine lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
-		}
-		target = frozenCall.Target
-	}
-	rawPlainOccurrence := ok && !plainOnly && frozenCall.RawPlain
-	if !ok || target == nil {
-		panic(fmt.Errorf("coroutine lowered runtime call %q in %q is absent from the frozen emission universe", helper, p.goFn.Name()))
-	}
-	if !plainOnly {
-		plannedCall, planned := p.immutablePlan().ResolveLoweredCallRecord(p.goFn, helper)
-		if !planned || plannedCall.Target != target || plannedCall.RawPlain != rawPlainOccurrence ||
-			plannedCall.NoUnwind != frozenCall.NoUnwind ||
-			plannedCall.UnwindOnly != frozenCall.UnwindOnly ||
-			plannedCall.ExplicitStatusElided != frozenCall.ExplicitStatusElided {
-			panic(fmt.Errorf("coroutine lowered runtime call %q in %q disagrees between the frozen emission universe and SSA plan", helper, p.goFn.Name()))
-		}
-	}
+	rawPlainOccurrence := !plainOnly && frozenCall.RawPlain
 	explicitStatusLegacyPlain, err := coroExplicitStatusElidedUsesRawPlainEntry(
 		p.hasStructuredOutcomePhysicalBody(), p.rawPlainBody, frozenCall.ExplicitStatusElided,
 	)
@@ -178,6 +140,40 @@ func (p *context) resolveCoroLoweredHelperCall(b llssa.Builder, helper string, m
 		return b.Call(fn.Expr, args...), true
 	}
 	return p.emitCoroResolvedManagedHelper(b, helper, target, targetPlan, sourceSig, args, printKeepaliveSlots), true
+}
+
+// Both exact runtime helpers and typed compiler-owned descriptor helpers
+// consume this one occurrence validator/observer. No feature gets an
+// independent authority to invent or silently omit a managed helper call.
+func (p *context) resolveCoroPhysicalHelperRecord(helper string) (coro.SSALoweredCall, bool) {
+	plainOnly := false
+	frozen := coro.SSALoweredCall{}
+	ok := false
+	var err error
+	if !p.hasCoroPhysicalEmission() {
+		frozen.Target, ok, err = p.emissionUniverse.ResolveCoroPlainLoweredCall(p.goFn, helper)
+		if err != nil {
+			panic(fmt.Errorf("coroutine plain lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
+		}
+		plainOnly = ok
+	}
+	if !ok {
+		frozen, ok, err = p.emissionUniverse.ResolveCoroLoweredCallRecord(p.goFn, helper)
+		if err != nil {
+			panic(fmt.Errorf("coroutine lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
+		}
+	}
+	if !ok || frozen.Target == nil && !frozen.ManagedDispatch {
+		panic(fmt.Errorf("coroutine lowered runtime call %q in %q is absent from the frozen emission universe", helper, p.goFn.Name()))
+	}
+	if !plainOnly {
+		planned, present := p.immutablePlan().ResolveLoweredCallRecord(p.goFn, helper)
+		if !present || planned != frozen {
+			panic(fmt.Errorf("coroutine lowered runtime call %q in %q disagrees between the frozen emission universe and SSA plan", helper, p.goFn.Name()))
+		}
+	}
+	p.observeCoroSiteRuntimeHelper(helper)
+	return frozen, plainOnly
 }
 
 // emitCoroResolvedManagedHelper is the common physical entry selector after

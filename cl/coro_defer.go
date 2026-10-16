@@ -277,10 +277,7 @@ func prepareCoroStaticCleanupPlan(
 	drainedReturns := make(map[*ssa.Return]none)
 	allSites := make([]*coroStaticCleanupSitePlan, 0)
 	var dynamicTrigger *ssa.Defer
-	implicitDelivery := false
-	if ir != nil {
-		_, implicitDelivery = ir.deliveryProducers[fn]
-	}
+	implicitDelivery := delivery != nil
 	for _, siteFunction := range scanFunctions {
 		siteCaller, planned := whole.FunctionPlan(siteFunction)
 		if !planned {
@@ -293,17 +290,6 @@ func prepareCoroStaticCleanupPlan(
 				continue
 			}
 			for instructionIndex, raw := range block.Instrs {
-				if ir != nil && len(ir.deliveryProducers) != 0 {
-					if call, ok := raw.(ssa.CallInstruction); ok {
-						if _, spawned := call.(*ssa.Go); !spawned {
-							frozen, _, err := ir.callSitePlan(call)
-							if err != nil {
-								return nil, err
-							}
-							implicitDelivery = implicitDelivery || frozen.deliveryProducer != nil
-						}
-					}
-				}
 				switch instruction := raw.(type) {
 				case *ssa.Defer:
 					if siteFunction != fn && instruction.DeferStack == nil {
@@ -2200,6 +2186,10 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		if site.descriptor.IsNil() || site.plan.signature == nil {
 			panic("managed descriptor cleanup lost its typed descriptor/signature")
 		}
+		finishSite := func() {}
+		if !siteEmissionActive {
+			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction, coroRuntimeHelperAtCleanup)
+		}
 		p.compileCoroManagedDispatchAwaitValueResultWithRecovery(
 			b, b.Load(site.descriptor), args, site.plan.signature,
 			coroManagedDispatchAwaitOptions{
@@ -2207,8 +2197,10 @@ func (s *coroStaticCleanupState) emitSiteCall(
 				recoverAliasChild: site.plan.interfaceReceiver != nil,
 				trustedDescriptor: site.plan.dispatchEntry != coro.ManagedEntryNone,
 				entry:             site.plan.dispatchEntry,
+				delivery:          p.coroDynamicDeliveryGuard(site.plan.instruction),
 			},
 		)
+		finishSite()
 		return true
 	case coroStaticCleanupIntrinsic:
 		if !isCoroAtomicIntrinsic(site.plan.intrinsic) {
