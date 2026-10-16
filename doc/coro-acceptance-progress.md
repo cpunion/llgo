@@ -1090,6 +1090,32 @@ Read-only upstream inspection finds that current main (`1e93b1548`) already
 contains large zero-store lowering. No duplicate issue is filed, no upstream
 code is changed, and main is not synchronized into this branch.
 
+Immutable v115 (`a71f09512`) closes the target-promoted terminal-result gap:
+the unchanged full-runtime recovery program now passes48.115s/1290.8MiB with
+matching source-after. Explicit `-O0` and `-O3 -lto=full` images each pass three
+additional executions, also matching source-after (combined peak1503.8MiB).
+O0 image SHA-256 is
+`1b6b207792fe1286553beecf82703d6eed46c02be3750f6d6b78cb4ec2cef071`;
+O3-full image SHA-256 is
+`ae5d48d7535856664daf8b9ad38ef4f0f378a733e50ea30894a6d918f1b8ff1f`.
+The source result cells preserve named-return cleanup writes, recovered panic
+returns and unnamed-result evaluation before deferred mutation across yield/GC.
+
+The same v115 passes broad compiler gates271.191s/1234.7MiB, all six small/large
+archive functions (18 executions)321.077s/1915.9MiB, ABI/build gates1.226s/
+723.3MiB,120 fd runs and6 opaque controls71.810s, then3 reflection/GC routes
+196.575s, matching source-after and peak2757.4MiB. These elapsed times include
+concurrent acceptance load and are not a compiler-performance comparison.
+Compiler SHA-256 is
+`45f13449080d3336e9891b38fc7b3c7e2077d5386be4e49d6721acffa04c1db9`;
+source manifest is
+`65f4e6a914b27880c7bd17ee710c7db668c0a200ef224c0372b694ca1f9cf7f6`.
+The first compiler build was started before freeze completion was explicitly
+observed, so it is not used as acceptance evidence; the independent second
+build follows complete freeze and source verification. Older failed cohorts
+remain retained. Receiver/reflect resource adapters, public Open seeds and
+final whole-suite/platform/performance gates remain open.
+
 Immutable v108 completes the four runtime packages with **68 passes and one
 helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
 llgoext23. Source-after20:47:34 matches, children join and private scratch is
