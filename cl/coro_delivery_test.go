@@ -148,6 +148,16 @@ func TestCoroDeliverySourceRejectsUnboundOrInexactShapes(t *testing.T) {
 		{"non-entry", "out := borrow", "if path == \"\" { return 0, nil }; out := borrow", "source entry block"},
 		{"duplicate", "out := borrow(initFD, dropFD)", "out := borrow(initFD, dropFD); _ = borrow(initFD, dropFD)", "conflicting or repeated"},
 		{"foreign-drop", "func dropFD", "//go:linkname dropFD C.llgo_test_delivery_drop\nfunc dropFD", "managed Go helper"},
+		{"invented-fd", "return out.R0, out.R1", "return 0, out.R1", "load each exact borrowed result field"},
+		{"changed-fd", "return out.R0, out.R1", "return out.R0 + 1, out.R1", "load each exact borrowed result field"},
+		{"invented-error", "return out.R0, out.R1", "return out.R0, nil", "load each exact borrowed result field"},
+		{"stale-fd", "return out.R0, out.R1", "fd := out.R0; out.R0 = -1; return fd, out.R1", "followed only by the remaining projections"},
+		{"await-after-load", "return out.R0, out.R1", "fd := out.R0; dropFD(out, nil, path); return fd, out.R1", "followed only by the remaining projections"},
+		{"cross-block-load", "return out.R0, out.R1", "fd := out.R0; if path == \"\" { return fd, out.R1 }; return out.R0, out.R1", "load each exact borrowed result field"},
+		{"call-before-borrow", "out := borrow", "initFD(nil); out := borrow", "borrow must precede source calls"},
+		{"defer-before-borrow", "out := borrow", "defer initFD(nil); out := borrow", "borrow must precede source calls"},
+		{"go-before-borrow", "out := borrow", "go initFD(nil); out := borrow", "borrow must precede source calls"},
+		{"cleanup-after-load", "return out.R0, out.R1", "defer dropFD(out, nil, path); return out.R0, out.R1", "exact borrowed result field"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			source := strings.ReplaceAll(coroDeliverySourceFixture, test.old, test.replacement)
@@ -181,5 +191,25 @@ func TestCoroDeliverySourceRejectsUnboundOrInexactShapes(t *testing.T) {
 				t.Fatalf("diagnostic=%v, want %q", err, test.diagnostic)
 			}
 		})
+	}
+}
+
+func TestCoroDeliverySourceAcceptsFreshProjectionsAfterOrdinaryWork(t *testing.T) {
+	for _, body := range []string{
+		"dropFD(out, nil, path); return out.R0, out.R1",
+		"if path == \"\" { out.R0 = 0; return out.R0, out.R1 }; out.R0 = 1; return out.R0, out.R1",
+	} {
+		pkg, _, files := buildGoSSAPkg(t, strings.Replace(coroDeliverySourceFixture, "return out.R0, out.R1", body, 1))
+		prog := newLLSSAProg(t)
+		universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
+		if err == nil {
+			_, present, lookupErr := universe.coroProgramIR.sourceDelivery(pkg.Func("Acquire"))
+			if lookupErr != nil || !present {
+				t.Errorf("fresh borrowed-result projection was not frozen: present=%t error=%v", present, lookupErr)
+			}
+		} else {
+			t.Errorf("ordinary producer work rejected: %v", err)
+		}
+		prog.Dispose()
 	}
 }
