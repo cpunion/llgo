@@ -82,6 +82,9 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 			if frozen.failure != "" || frozen.plan.ElidesCall() || frozen.plan.RawPlain {
 				continue
 			}
+			if _, spawned := call.(*ssa.Go); spawned {
+				continue // Static and dynamic entries own their nil-output fallback.
+			}
 			recipe, present := ir.deliveryProducers[frozen.deliveryProducer]
 			if !present {
 				if dynamic := frozen.dynamicDelivery; dynamic != nil {
@@ -115,9 +118,6 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 					}
 				}
 				continue
-			}
-			if _, spawned := call.(*ssa.Go); spawned {
-				continue // The independently owned entry uses its nil-output fallback.
 			}
 			if uint64(len(plan.calls)) == uint64(^uint32(0)) {
 				return nil, fmt.Errorf("too many resource delivery call sites")

@@ -212,6 +212,7 @@ func Factory(seed int) func(string) (int, error) {
  }
 }
 func Captured() { f := Factory(7); Apply(f) }
+func SpawnCaptured() { go Factory(7)("spawn") }
 `)
 			source.ssa.Build()
 			pkg, files := foo.ssa, []*ast.File{foo.file}
@@ -235,6 +236,7 @@ func Captured() { f := Factory(7); Apply(f) }
 				{Function: pkg.Func("LoopedDynamic"), Demand: coro.AsyncDemand},
 				{Function: pkg.Func("Closed"), Demand: coro.AsyncDemand},
 				{Function: pkg.Func("Captured"), Demand: coro.AsyncDemand},
+				{Function: pkg.Func("SpawnCaptured"), Demand: coro.AsyncDemand},
 			}, coro.SSAConfig{
 				EmissionUniverse: universe, FunctionIDs: ids, MaxPlainInstructions: 64,
 				OutcomeMode: coro.OutcomeExplicitStatus, ClassifyLocalBody: u.CoroLocalBodyFacts,
@@ -275,6 +277,10 @@ func Captured() { f := Factory(7); Apply(f) }
 			closed := module.NamedFunction("foo.Closed").String()
 			if strings.Contains(closed, "coro.dispatch.delivery") {
 				t.Fatalf("closed nonresource family retained delivery machinery:\n%s", closed)
+			}
+			spawn := requireCoroPhysicalFunction(t, module, "foo.SpawnCaptured").String()
+			if strings.Contains(spawn, "coro.dispatch.delivery") {
+				t.Fatalf("spawn borrowed parent-owned result custody instead of using the entry fallback:\n%s", spawn)
 			}
 			closure := pkg.Func("Factory").AnonFuncs[0]
 			if fact, present := plan.FunctionPlan(closure); !present || fact.FuncRep != coro.Dispatch || len(closure.FreeVars) != 1 {

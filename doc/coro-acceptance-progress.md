@@ -899,6 +899,23 @@ broad compiler204.815s/528.6MiB and unchanged architecture/build gates
 feature acceptance and CI remain pending; unit capability seeds alone do not
 establish execution of a private worker/GC factory.
 
+The captured-source follow-up reuses the existing frozen closure environment,
+funcval env retention and discarded-entry fallback, without new runtime fields
+or allocations. The real fd source first fails on v105 at its captured producer's
+publication guard (740.7MiB); native/wasm32 captured-descriptor IR then verifies
+before/after CoroSplit (3.093s/1232.6MiB). Immutable v106's stronger real source
+exposes a second exact admission gap: dynamic `go f(...)` reaches the parent's
+unbound result guard instead of the independently owned entry path. The shared
+spawn exemption is now applied before static/dynamic producer lookup; a physical
+IR assertion keeps the spawning parent free of a result-delivery branch. The
+actual fd table adds modes6–9 for captured dynamic call, looped defer, discarded
+go entry and normal return followed by cancellation, with the original exact
+open/close/continuation oracle and GC while the worker is pending. v106's failing
+execution-build remains recorded; final follow-up execution and CI are pending.
+The separate minimal captured-archive experiment lacks its frontend AllocZ
+binding and is preserved on a local experiment branch, not promoted or counted
+as evidence of a production capture failure.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
