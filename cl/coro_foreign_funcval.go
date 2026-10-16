@@ -105,9 +105,6 @@ func (u *EmissionUniverse) materializeManagedForeignFunctionValueAdapter(
 	u.managedForeignWraps[carrier] = wrapper
 	u.managedForeignWrapInfo[wrapper] = carrier
 	u.syntheticKeys[wrapper] = structuralKey
-	if err := u.recordFunctionKind(wrapper, owner, goFunc); err != nil {
-		return false, err
-	}
 	u.fnOwners[wrapper] = owner
 	state, stateFrozen := u.fnStates[target]
 	if !stateFrozen {
@@ -117,7 +114,12 @@ func (u *EmissionUniverse) materializeManagedForeignFunctionValueAdapter(
 		)
 	}
 	u.fnStates[wrapper] = state
-	u.addRequiredWithState(wrapper, owner, state)
+	// Freeze kind, symbol and selected definition together, just like an
+	// ordinary Go function. Merely recording a required body leaves cross-
+	// package users with no immutable definition symbol to reference.
+	if err := u.selectFunction(owner, wrapper, state.state, state.fromPatch); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 

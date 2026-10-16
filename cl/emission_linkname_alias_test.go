@@ -140,6 +140,19 @@ func Spawn(handle declhandles.Handle) { go handle.Delete() }
 		if u.ownerOf(adapter) != u.packages[definitions.ssa] {
 			t.Errorf("%s callable facade belongs to a non-emitted declaration owner", test.source)
 		}
+		for _, use := range []*ssa.Package{declarations.ssa, definitions.ssa, caller.ssa} {
+			name, err := u.physicalName(use, adapter, funcName(use.Pkg, adapter, false))
+			if wantName := funcName(definitions.types, adapter, false); err != nil || name != wantName {
+				t.Errorf("%s callable facade symbol in %s=%q,%v, want definition %q", test.source, use.Pkg.Path(), name, err, wantName)
+			}
+		}
+		definitionKey := emissionFunctionOwnerKey{function: adapter, owner: u.ownerOf(adapter)}
+		key := u.finalKeys[definitionKey]
+		delete(u.finalKeys, definitionKey)
+		if _, err := u.physicalName(caller.ssa, adapter, "unproven.caller.symbol"); err == nil {
+			t.Errorf("%s callable facade silently fell back without its frozen definition", test.source)
+		}
+		u.finalKeys[definitionKey] = key
 		if err := u.validateManagedForeignFunctionValueWrapper(adapter); err != nil {
 			t.Errorf("%s facade lost its exact ordinary Go forwarding proof: %v", test.source, err)
 		}

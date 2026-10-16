@@ -4015,6 +4015,19 @@ func (u *EmissionUniverse) physicalName(ownerSSA *ssa.Package, fn *ssa.Function,
 	if name := u.physicalNames[emissionFunctionOwnerKey{function: fn, owner: owner}]; name != "" {
 		return name, nil
 	}
+	if _, carrier := u.managedForeignWrapInfo[fn]; carrier {
+		// A compiler-owned callable facade is defined in its implementation
+		// archive, not in each descriptor user's package. Its SSA function has
+		// no Pkg, so the legacy spelling depends on the requesting context.
+		// Consume the existing frozen definition key for every reference.
+		home := u.ownerOf(fn)
+		key := u.finalKeys[emissionFunctionOwnerKey{function: fn, owner: home}]
+		kind, name, _, valid := splitManagedSymbolKey(key)
+		if !valid || kind != goFunc || name == "" {
+			return "", fmt.Errorf("coroutine entry resolution: managed callable carrier %q has no frozen Go definition symbol", fn.Name())
+		}
+		return name, nil
+	}
 	if isEmissionGeneratedWrapper(fn) {
 		// A package may emit an ABI method table for a named type declared by
 		// another package. Its pointer-receiver adapter is a Pkg-nil SSA wrapper,
