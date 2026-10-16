@@ -338,6 +338,44 @@ library helper publication and reflection second handoff are still gated;
 public standard-library seeds stay off.
 The broad compiler selection also passes (226.290s / 1244.4MiB peak), as do
 the final model/archive checks and unchanged architecture gate (1.067s).
+This planning slice is [PR #270](https://github.com/cpunion/llgo/pull/270),
+head `c5a501c86`, targeting `llvm-coro`. Immutable v86 passes all 60 resource
+executions plus original reflection/GC, cgo routes and claimed-channel cleanup
+(2784.2MiB peak; source-after matches). Compiler SHA-256 is
+`af765a2c414a904b2fb74ead6914f506c5aa50397f4f67ee48b459c1512f8bdf`,
+manifest `0708714a92f890468a6ea7b2bde9f5132655d4c542f2243313136d24cb830099`.
+The first compiler launcher raced snapshot extraction and failed before
+producing a compiler; retained `r1` is not a compiler acceptance pass. The
+complete frozen-source `r2` build is the compiler used above. PR CI is pending.
+
+The fresh complete v85 `test/go` run now passes **268/268**, zero failures or
+skips, at 13:09:34 UTC. Source-after matches at 13:09:35; all child process
+domains are joined and private scratch reclaimed. Test-image SHA-256 is
+`26aeca95e3fa6ceb1952b830923966c07883ca80f2919d66a1658aa319683592`,
+run peak 6536.8MiB. The old v83 whole-run failure remains unchanged.
+
+Strict unchanged-case v85 `issue75764` still fails: 9.041us versus 164.291us
+for 1,000/10,000 wrappers, ratio 18.17 against the original threshold 9.
+It is a wrapper/stack-inspection performance gap, not a new xfail. A separate
+defer-caller probe establishes the `issue5856` cause: the logical panic stack
+omits gc's `runtime.gopanic` frame and consequently shifts Caller skip indices.
+The isolated fix reuses the existing exact CompletionRecord before and after
+recover, snapshots the live owner even without retained destroyed frames, and
+materializes one interned logical runtime frame only on stack observation.
+No G/Frame/CompletionRecord field or scheduler protocol is added. Runtime core
+race, production PC-registry race, Go control and unchanged architecture gates
+pass. Immutable v87 passes the unchanged original GOROOT `issue5856.go`
+(72.83s case, 2911.1MiB peak; source-after matches). Compiler SHA-256 is
+`478da962e09d39e846a0f3ea872f258c1c2caebce26909d4e11adfeb971039b8`,
+manifest `7d7d2bc242dfc49b10829b461b45e8feb9d225b7c9c4f2db1ef03db61c86264e`.
+The new linked before/after-recover, retained-frame and repeated-query tests,
+plus the existing caller-exhaustion/line-info regression selection, remain live.
+The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
+test-domain constraint; `1d139f475` supplies the same constraint as its helper
+tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
+production source is unchanged. Run `38906611100` replaces the superseded run,
+whose known failure is retained. This isolated panic fix is rebased on that
+corrected test-only head, not on main.
 
 GOROOT shard 1 also reports `fixedbugs/issue27695b.go` in the reflection/GC
 path. A strict unchanged-case v79 rerun still fails with `invalid zero-ticket

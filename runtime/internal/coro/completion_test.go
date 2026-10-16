@@ -525,7 +525,7 @@ func TestNestedChildPanicInfersOuterRecoveryReplacementScope(t *testing.T) {
 	if snapshot, recovered, valid := TakeRecover(fixture.g, fixture.child.handle); !valid || !recovered || snapshot != (RecoverSnapshot{TypeWord: typeWord, DataWord: dataWord}) {
 		t.Fatalf("take outer recovery before nested child = (%+v, %t, %t)", snapshot, recovered, valid)
 	}
-	if !RecoverTraceActive(fixture.g) {
+	if !DeferredPanicTraceActive(fixture.g) {
 		t.Fatal("outer recovering child has no active traceback scope")
 	}
 
@@ -552,7 +552,7 @@ func TestNestedChildPanicInfersOuterRecoveryReplacementScope(t *testing.T) {
 	}
 	leaf.header.SuspendReason = uint16(SuspendNone)
 	leaf.header.Lifecycle = uint16(FrameActive)
-	if !RecoverTraceActive(fixture.g) {
+	if !DeferredPanicTraceActive(fixture.g) {
 		t.Fatal("ordinary nested child lost its ancestor recovery traceback scope")
 	}
 	leaf.header.SuspendReason = uint16(SuspendPanic)

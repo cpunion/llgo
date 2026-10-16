@@ -35,7 +35,7 @@ func panicSplicePCs() []uintptr {
 	if len(pcs) == 0 {
 		return nil
 	}
-	if rtdebug.PanicActive() || rtdebug.CoroPanicRecoverActive() {
+	if rtdebug.PanicActive() || rtdebug.CoroDeferredPanicActive() {
 		return pcs
 	}
 	mark, _ := rtdebug.PanicRecoverFPs()

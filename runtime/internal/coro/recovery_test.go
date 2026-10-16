@@ -41,28 +41,38 @@ func TestRecoverDirectDeferredChildTakesPayloadOnce(t *testing.T) {
 	typeWord := unsafe.Pointer(new(byte))
 	dataWord := unsafe.Pointer(new(byte))
 	fixture := newRecoverAwaitFixture(t, typeWord, dataWord)
+	ownerDescriptor := (*FrameDescriptorV1)(fixture.parent.descriptor)
+	ownerDescriptor.Function, ownerDescriptor.File = "main.owner", "/src/main.go"
+	fixture.parent.header.Line = 17
+	var trace [1]PanicTraceFrameSnapshot
+	wantTrace := PanicTraceFrameSnapshot{Function: "main.owner", File: "/src/main.go", Line: 17}
+	if !DeferredPanicTraceActive(fixture.g) {
+		t.Fatal("defer before recover did not expose its exact panic scope")
+	}
+	if n, ok := DeferredPanicTraceFrames(fixture.g, trace[:]); !ok || n != 1 || trace[0] != wantTrace {
+		t.Fatalf("live panic trace before recover = (%d, %t, %+v), want exact owner", n, ok, trace[0])
+	}
 
 	snapshot, recovered, valid := TakeRecover(fixture.g, fixture.child.handle)
 	want := RecoverSnapshot{TypeWord: typeWord, DataWord: dataWord}
 	if !valid || !recovered || snapshot != want {
 		t.Fatalf("take direct recover = (%+v, %t, %t), want (%+v, true, true)", snapshot, recovered, valid, want)
 	}
-	if !RecoverTraceActive(fixture.g) {
+	if !DeferredPanicTraceActive(fixture.g) {
 		t.Fatal("direct recover did not expose its logical traceback scope")
 	}
-	var trace [1]PanicTraceFrameSnapshot
-	if n, ok := RecoverTraceFrames(fixture.g, trace[:]); !ok || n != 0 {
-		t.Fatalf("live recover trace = (%d, %t), want empty success", n, ok)
+	if n, ok := DeferredPanicTraceFrames(fixture.g, trace[:]); !ok || n != 1 || trace[0] != wantTrace {
+		t.Fatalf("live recover trace = (%d, %t, %+v), want exact owner", n, ok, trace[0])
 	}
 	if duplicate, recovered, valid := TakeRecover(fixture.g, fixture.child.handle); !valid || recovered || duplicate != (RecoverSnapshot{}) {
 		t.Fatalf("duplicate recover = (%+v, %t, %t)", duplicate, recovered, valid)
 	}
-	if !RecoverTraceActive(fixture.g) {
+	if !DeferredPanicTraceActive(fixture.g) {
 		t.Fatal("duplicate recover cleared the winning traceback scope")
 	}
 
 	completeRecoverChild(t, fixture)
-	if RecoverTraceActive(fixture.g) {
+	if DeferredPanicTraceActive(fixture.g) {
 		t.Fatal("completed recovering child retained its traceback scope")
 	}
 	completion, ok := ConsumeAwaitCompletion(fixture.g, fixture.parent.handle)
@@ -74,7 +84,7 @@ func TestRecoverDirectDeferredChildTakesPayloadOnce(t *testing.T) {
 	fixture.keepAlive()
 }
 
-func TestRecoverTraceFramesJoinRetainedPanicAndLiveOwner(t *testing.T) {
+func TestDeferredPanicTraceFramesJoinRetainedPanicAndLiveOwner(t *testing.T) {
 	typeWord := unsafe.Pointer(new(byte))
 	dataWord := unsafe.Pointer(new(byte))
 	fixture := newRecoverAwaitFixture(t, typeWord, dataWord)
@@ -90,6 +100,12 @@ func TestRecoverTraceFramesJoinRetainedPanicAndLiveOwner(t *testing.T) {
 	traceDescriptor.Function = "main.panicking"
 	traceDescriptor.File = "/src/main.go"
 	fixture.g.panicTraceHead.panicLine = 29
+	var before [2]PanicTraceFrameSnapshot
+	if n, ok := DeferredPanicTraceFrames(fixture.g, before[:]); !ok || n != 2 ||
+		before[0].Function != "main.panicking" || before[0].Line != 29 ||
+		before[1].Function != "main.owner" || before[1].Line != 17 {
+		t.Fatalf("retained panic before recover = (%d, %t, %+v)", n, ok, before)
+	}
 	if snapshot, recovered, valid := TakeRecover(fixture.g, fixture.child.handle); !valid || !recovered || snapshot != (RecoverSnapshot{TypeWord: typeWord, DataWord: dataWord}) {
 		t.Fatalf("take trace recovery = (%+v, %t, %t)", snapshot, recovered, valid)
 	}
@@ -99,7 +115,7 @@ func TestRecoverTraceFramesJoinRetainedPanicAndLiveOwner(t *testing.T) {
 		{Function: "main.owner", File: "/src/main.go", Line: 17},
 	}
 	got := make([]PanicTraceFrameSnapshot, len(wants))
-	if n, ok := RecoverTraceFrames(fixture.g, got); !ok || n != len(wants) {
+	if n, ok := DeferredPanicTraceFrames(fixture.g, got); !ok || n != len(wants) {
 		t.Fatalf("recover trace count = (%d, %t), want (%d, true)", n, ok, len(wants))
 	}
 	for index, want := range wants {
@@ -107,13 +123,13 @@ func TestRecoverTraceFramesJoinRetainedPanicAndLiveOwner(t *testing.T) {
 			t.Fatalf("recover trace frame %d = %+v, want %+v", index, got[index], want)
 		}
 	}
-	if n, ok := RecoverTraceFrames(fixture.g, got[:len(got)-1]); ok || n != 0 {
+	if n, ok := DeferredPanicTraceFrames(fixture.g, got[:len(got)-1]); ok || n != 0 {
 		t.Fatalf("short recover trace destination accepted = (%d, %t)", n, ok)
 	}
 
 	savedCarrier := fixture.g.panicTraceTail.parent
 	fixture.g.panicTraceTail.parent = nil
-	if n, ok := RecoverTraceFrames(fixture.g, got); ok || n != 0 {
+	if n, ok := DeferredPanicTraceFrames(fixture.g, got); ok || n != 0 {
 		t.Fatalf("detached recover trace carrier accepted = (%d, %t)", n, ok)
 	}
 	fixture.g.panicTraceTail.parent = savedCarrier
@@ -122,6 +138,30 @@ func TestRecoverTraceFramesJoinRetainedPanicAndLiveOwner(t *testing.T) {
 	runtime.KeepAlive(traceDescriptor)
 	runtime.KeepAlive(typeWord)
 	runtime.KeepAlive(dataWord)
+	fixture.keepAlive()
+}
+
+func TestDeferredPanicTraceRejectsOrdinaryAndUnboundScope(t *testing.T) {
+	fixture := newAwaitCompletionFixture(t)
+	var trace [2]PanicTraceFrameSnapshot
+	if DeferredPanicTraceActive(fixture.g) {
+		t.Fatal("ordinary deferred/call child acquired a panic scope")
+	}
+	if n, ok := DeferredPanicTraceFrames(fixture.g, trace[:]); ok || n != 0 {
+		t.Fatalf("ordinary trace = (%d, %t)", n, ok)
+	}
+	record := &fixture.parentFrame().completion
+	original := *record
+	record.status = completionRecoverArmed
+	if DeferredPanicTraceActive(fixture.g) {
+		t.Fatal("panic scope with no payload was accepted")
+	}
+	record.typeWord = unsafe.Pointer(new(byte))
+	record.child = unsafe.Pointer(new(byte))
+	if DeferredPanicTraceActive(fixture.g) {
+		t.Fatal("panic scope with another child's identity was accepted")
+	}
+	*record = original
 	fixture.keepAlive()
 }
 

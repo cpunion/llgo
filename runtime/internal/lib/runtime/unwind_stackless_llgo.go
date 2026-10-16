@@ -25,7 +25,7 @@ import rtdebug "github.com/xgo-dev/llgo/runtime/internal/runtime"
 // CompletionRecord ancestry.
 func panicSplicePCs() []uintptr {
 	pcs := rtdebug.PanicPCs()
-	if len(pcs) != 0 && (rtdebug.PanicActive() || rtdebug.CoroPanicRecoverActive()) {
+	if len(pcs) != 0 && (rtdebug.PanicActive() || rtdebug.CoroDeferredPanicActive()) {
 		return pcs
 	}
 	return nil

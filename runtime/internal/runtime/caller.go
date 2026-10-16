@@ -543,11 +543,11 @@ func matchingCoroWorkerFaultPCs(
 	return false
 }
 
-// matchingCoroRecoverTracePCs recognizes an already materialized stackless
-// recovery trace. Exact frame count and descriptor identity make repeated
+// matchingCoroDeferredPanicPCs recognizes an already materialized stackless
+// deferred panic trace. Exact frame count and descriptor identity make repeated
 // runtime.Caller/Callers queries allocation- and copy-free without adding an
 // episode field to G or panicPCStore.
-func matchingCoroRecoverTracePCs(
+func matchingCoroDeferredPanicPCs(
 	p *panicPCStore,
 	snapshots []coro.PanicTraceFrameSnapshot,
 ) bool {
@@ -560,10 +560,15 @@ func matchingCoroRecoverTracePCs(
 			visible++
 		}
 	}
-	if int(p.n) != visible {
+	if int(p.n) != visible+1 {
 		return false
 	}
-	index := 0
+	panicFrame, ok := FrameForPC(p.pcs[0])
+	panicFrame.Entry = 0 // FrameForPC supplies the synthetic PC for a zero entry.
+	if !ok || !sameSyntheticFrame(panicFrame, runtimeGopanicFrame) {
+		return false
+	}
+	index := 1
 	for _, snapshot := range snapshots {
 		if snapshot.Hidden {
 			continue
@@ -577,17 +582,17 @@ func matchingCoroRecoverTracePCs(
 	return true
 }
 
-// materializeCoroRecoverTracePCs converts compiler-retained frame descriptors
+// materializeCoroDeferredPanicPCs converts compiler-retained frame descriptors
 // into the current logical G's synthetic-PC namespace on first observation.
 // recover itself stays free of traceback work; programs which never inspect a
-// recovered panic stack pay no allocation, interning, or generated call.
-func materializeCoroRecoverTracePCs(
+// deferred panic stack pay no allocation, interning, or generated call.
+func materializeCoroDeferredPanicPCs(
 	gp *g,
 	task *coro.G,
 	p *panicPCStore,
 ) (*panicPCStore, bool) {
 	var snapshots [64]coro.PanicTraceFrameSnapshot
-	n, ok := coro.RecoverTraceFrames(task, snapshots[:])
+	n, ok := coro.DeferredPanicTraceFrames(task, snapshots[:])
 	if !ok {
 		return nil, false
 	}
@@ -595,7 +600,7 @@ func materializeCoroRecoverTracePCs(
 		return p, true
 	}
 	trace := snapshots[:n]
-	if matchingCoroWorkerFaultPCs(p, trace) || matchingCoroRecoverTracePCs(p, trace) {
+	if matchingCoroWorkerFaultPCs(p, trace) || matchingCoroDeferredPanicPCs(p, trace) {
 		p.armed = 0
 		p.recFP1 = 0
 		p.recFP2 = 0
@@ -606,12 +611,16 @@ func materializeCoroRecoverTracePCs(
 		return nil, false
 	}
 	store := callerLocationStoreForGoroutine()
-	count, ok := appendCoroTracePCs(store, p.pcs[:], trace)
+	// gc keeps gopanic between the running defer and the panic-site owner.
+	// LLVM coroutines have no such physical call, so synthesize this runtime
+	// frame in the same interned PC namespace as every other logical frame.
+	count, ok := appendCoroTracePCs(store, p.pcs[1:], trace)
 	if !ok || count == 0 {
 		commitPanicPCStore(p, 0, 0, 0, 0)
 		return nil, false
 	}
-	commitPanicPCStore(p, count, 0, 0, 0)
+	p.pcs[0] = store.captureFrame(runtimeGopanicFrame, callersPCValue).PC
+	commitPanicPCStore(p, count+1, 0, 0, 0)
 	return p, true
 }
 
@@ -743,9 +752,9 @@ func PanicPCsAreFault() bool {
 func PanicPCs() []uintptr {
 	gp := getg()
 	p := loadPanicPCStore(gp)
-	if task := currentCoroRuntimeTask(gp); task != nil && coro.RecoverTraceActive(task) {
+	if task := currentCoroRuntimeTask(gp); task != nil && coro.DeferredPanicTraceActive(task) {
 		var ok bool
-		p, ok = materializeCoroRecoverTracePCs(gp, task, p)
+		p, ok = materializeCoroDeferredPanicPCs(gp, task, p)
 		if !ok {
 			return nil
 		}
@@ -786,14 +795,14 @@ func PanicActive() bool {
 	return getg().panic_ != nil
 }
 
-// CoroPanicRecoverActive derives recovered-panic visibility from the exact
+// CoroDeferredPanicActive derives deferred-panic visibility from the exact
 // scheduler CompletionRecord owned by the current stackless G. Native
 // setjmp-based recovery continues to use its physical-frame marker; a
 // coroutine never needs to manufacture or retain a pthread stack address.
-func CoroPanicRecoverActive() bool {
+func CoroDeferredPanicActive() bool {
 	gp := getg()
 	task := currentCoroRuntimeTask(gp)
-	return task != nil && coro.RecoverTraceActive(task)
+	return task != nil && coro.DeferredPanicTraceActive(task)
 }
 
 func currentCoroRuntimeTask(gp *g) *coro.G {
@@ -821,6 +830,7 @@ func BindCallerLocation(pc uintptr, rawName string) {
 
 var (
 	runtimeCallersFrame = CallerFrame{Function: "runtime.Callers"}
+	runtimeGopanicFrame = CallerFrame{Function: "runtime.gopanic"}
 	runtimeMainFrame    = CallerFrame{Function: "runtime.main"}
 	runtimeGoexitFrame  = CallerFrame{Function: "runtime.goexit"}
 )
