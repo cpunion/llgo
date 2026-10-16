@@ -711,7 +711,7 @@ func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error)
 				if call.Target != nil || call.NoUnwind || call.RawPlain || call.UnwindOnly || call.ExplicitStatusElided {
 					return nil, fmt.Errorf("coro: malformed managed-dispatch lowered call %q in %q", call.LogicalName, ownerID)
 				}
-			} else if !ok || call.WhenResultDeliveryOf != nil {
+			} else if !ok {
 				return nil, fmt.Errorf("coro: lowered call %q in %q targets a function outside the plan", call.LogicalName, ownerID)
 			}
 			ret = append(ret, planDigestLoweredCall{
@@ -725,6 +725,9 @@ func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error)
 				ManagedDispatch:      call.ManagedDispatch,
 			})
 			if source := call.WhenResultDeliveryOf; source != nil {
+				if call.RawPlain || call.NoUnwind || call.UnwindOnly || call.ExplicitStatusElided {
+					return nil, fmt.Errorf("coro: conditional result-delivery helper %q has an unsupported occurrence shortcut", call.LogicalName)
+				}
 				if err := validateSSADeliveryCallCondition(owner, source); err != nil {
 					return nil, err
 				}

@@ -230,3 +230,88 @@ func TestAnalyzeSSAManagedLoweredCallHasNoSyntheticTarget(t *testing.T) {
 		})
 	}
 }
+
+func TestAnalyzeSSAConditionalDeliveryExactHelperSharesFlowAndDigest(t *testing.T) {
+	for _, kind := range []string{"resource", "ordinary", "open"} {
+		t.Run(kind, func(t *testing.T) {
+			prog, pkg := buildCoroTestSSA(t, "conditional_allocator.go", deliveryCallFlowSource+"\nfunc allocator() {}\n")
+			owner, allocator := packageFunction(t, pkg, "openOwner"), packageFunction(t, pkg, "allocator")
+			producer, ordinary := packageFunction(t, pkg, "resource"), packageFunction(t, pkg, "ordinary")
+			call := onlyNonBuiltinCall(t, owner)
+			config := SSAConfig{
+				FunctionIDs: planDigestSSAConfig().FunctionIDs, OutcomeMode: OutcomeExplicitStatus,
+				ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+					if fn == producer {
+						return SSAFunctionPolicy{ResultDelivery: true, Exec: NeedsCleanupFrame}, nil
+					}
+					if fn == allocator {
+						return SSAFunctionPolicy{Effect: WaitForeign}, nil
+					}
+					return SSAFunctionPolicy{}, nil
+				},
+				ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (UnknownTarget, error) { return UnknownManagedDispatch, nil },
+				ClassifyClosedDynamicCall: func(fn *ssa.Function, site ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+					if fn != owner || site != call || kind == "open" {
+						return SSAClosedDynamicCallCertificate{}, false, nil
+					}
+					target := producer
+					if kind == "ordinary" {
+						target = ordinary
+					}
+					return SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{target}}, true, nil
+				},
+				ClassifyLoweredCalls: func(fn *ssa.Function) ([]SSALoweredCall, error) {
+					if fn != owner {
+						return nil, nil
+					}
+					return []SSALoweredCall{
+						{LogicalName: "delivery.allocate", Target: allocator, WhenResultDeliveryOf: call},
+						{LogicalName: "delivery.initialize", ManagedDispatch: true, WhenResultDeliveryOf: call},
+						{LogicalName: "delivery.drop", ManagedDispatch: true, WhenResultDeliveryOf: call},
+					}, nil
+				},
+			}
+			plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := kind != "ordinary"
+			if target, found := plan.ResolveLoweredCall(owner, "delivery.allocate"); found != want || want && target != allocator {
+				t.Fatalf("conditional exact helper target=%v present=%t want=%t", target, found, want)
+			}
+			if fact := functionPlanFor(t, plan, allocator); (fact.Demand != NoDemand) != want {
+				t.Fatalf("conditional exact helper retained wrong demand: %+v", fact)
+			}
+			if body := functionPlanFor(t, plan, owner); body.Effect.Contains(WaitForeign) != want {
+				t.Fatalf("exact conditional effect did not follow ordinary managed propagation: %+v", body)
+			}
+			if _, err := plan.CoroPlanDigest(validPlanDigestMetadata()); err != nil {
+				t.Fatal(err)
+			}
+			if !want {
+				return
+			}
+			// Every forbidden shortcut is rejected again by the immutable
+			// digest, even if a caller corrupts the retained classifier result.
+			for _, shortcut := range []string{"raw", "no-unwind", "unwind-only", "terminal-elision"} {
+				original := plan.loweredCalls[owner][0]
+				mutated := original
+				switch shortcut {
+				case "raw":
+					mutated.RawPlain = true
+				case "no-unwind":
+					mutated.NoUnwind = true
+				case "unwind-only":
+					mutated.UnwindOnly = true
+				case "terminal-elision":
+					mutated.UnwindOnly, mutated.ExplicitStatusElided = true, true
+				}
+				plan.loweredCalls[owner][0] = mutated
+				if _, err := plan.CoroPlanDigest(validPlanDigestMetadata()); err == nil {
+					t.Fatalf("conditional exact helper accepted %s", shortcut)
+				}
+				plan.loweredCalls[owner][0] = original
+			}
+		})
+	}
+}

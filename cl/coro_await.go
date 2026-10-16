@@ -526,15 +526,19 @@ type coroAwaitedValue struct {
 type coroCleanupInvocation struct {
 	state         *coroStaticCleanupState
 	recoverParent bool
+	discardResult bool
 }
 
 func coroSourceDeferInvocation(state *coroStaticCleanupState) coroCleanupInvocation {
-	return coroCleanupInvocation{state: state, recoverParent: state != nil}
+	return coroCleanupInvocation{state: state, recoverParent: state != nil, discardResult: state != nil}
 }
 
 func (invocation coroCleanupInvocation) validate() {
 	if invocation.recoverParent && invocation.state == nil {
 		panic("coroutine parent recovery requires its exact cleanup owner")
+	}
+	if invocation.discardResult && invocation.state == nil {
+		panic("discarded deferred result requires its exact cleanup owner")
 	}
 }
 
@@ -702,6 +706,11 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	var resultSlot llssa.Expr
 	if guard != nil {
 		resultSlot = guard.result
+	} else if invocation.discardResult {
+		// Go discards a deferred call's results. A nonresource invocation
+		// needs neither an aggregate sink nor a managed allocation merely
+		// to throw that aggregate away after joining the child.
+		resultSlot = p.prog.Nil(p.prog.VoidPtr())
 	} else {
 		resultSlot = p.coroResultSlot(resultType)
 	}
@@ -738,15 +747,19 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
 	}
 	afterConsume = chainCoroReconciliation(afterConsume, endShield)
+	results := sourceSig.Results()
+	if invocation.discardResult {
+		results = types.NewTuple()
+	}
 	value := p.awaitCoroChildWithRecoveryAndConsume(
-		b, child, resultSlot, sourceSig.Results(), invocation, keepaliveSlots, afterConsume,
+		b, child, resultSlot, results, invocation, keepaliveSlots, afterConsume,
 	)
 	if guard != nil {
 		body.cleanup.delivery.claim(b, guard)
 	}
 	return coroAwaitedValue{
 		value:   value,
-		address: p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()),
+		address: p.coroAwaitResultAddress(b, resultSlot, results),
 		physicalCalls: []coroPhysicalCall{{
 			call: child, argCount: len(callArgs), resultArg: 1,
 		}},

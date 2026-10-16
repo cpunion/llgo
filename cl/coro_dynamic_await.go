@@ -236,7 +236,13 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 		return coroAwaitedValue{value: value, physicalCalls: []coroPhysicalCall{{call: value, argCount: len(args) + 1, resultArg: -1}}}
 	}
 	resultSlot := p.prog.Nil(p.prog.VoidPtr())
-	if abi.signature.Results().Len() != 0 || options.entry != coro.ManagedEntryOutcomePlain {
+	retainResult := !options.cleanup.discardResult || options.delivery != nil
+	deferredAllocation := options.delivery != nil && options.delivery.plan.dynamic.allocate != ""
+	results := abi.signature.Results()
+	if options.cleanup.discardResult {
+		results = types.NewTuple()
+	}
+	if retainResult && !deferredAllocation && (abi.signature.Results().Len() != 0 || options.entry != coro.ManagedEntryOutcomePlain) {
 		resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
 		if p.hasCoroPhysicalBody() {
 			resultSlot = p.coroResultSlot(resultType)
@@ -265,8 +271,8 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 		}
 		p.dispatchOutcomePlainCompletionWithRecovery(b, completion, cleanup)
 		return coroAwaitedValue{
-			value:         p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results()),
-			address:       p.coroAwaitResultAddress(b, resultSlot, abi.signature.Results()),
+			value:         p.loadCoroAwaitResult(b, resultSlot, results),
+			address:       p.coroAwaitResultAddress(b, resultSlot, results),
 			physicalCalls: []coroPhysicalCall{{call: value, argCount: len(args) + 4, resultArg: 1}},
 		}
 	}
@@ -307,8 +313,8 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 		)
 		awaitChild(child, endShield)
 		return coroAwaitedValue{
-			value:   p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results()),
-			address: p.coroAwaitResultAddress(b, resultSlot, abi.signature.Results()),
+			value:   p.loadCoroAwaitResult(b, resultSlot, results),
+			address: p.coroAwaitResultAddress(b, resultSlot, results),
 			physicalCalls: []coroPhysicalCall{{
 				call: child, argCount: len(args) + 3, resultArg: 1,
 			}},
@@ -324,6 +330,9 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	if guard := options.delivery; guard != nil {
 		guard.result = resultSlot
 		p.beginCoroDynamicDeliveryCall(b, guard, fn, args, selection, options.cleanup)
+		if deferredAllocation {
+			resultSlot = b.LoadKnownNonNil(guard.resultAddress)
+		}
 	}
 	hasOutcome, hasCoro, codeEntry := selection.HasOutcome(), selection.HasCoro(), selection.CodeEntry()
 	b.If(hasCoro, coroutineBlock, nonCoroutineBlock)
@@ -371,17 +380,19 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	} else {
 		plainResult = b.CallPreparedCoroDispatchPlain(selection, args)
 	}
-	p.storeCoroDynamicDispatchResult(b, resultSlot, plainResult, abi.signature.Results())
+	if retainResult {
+		p.storeCoroDynamicDispatchResult(b, resultSlot, plainResult, abi.signature.Results())
+	}
 	b.Jump(join)
 
 	b.SetBlockContinuation(join)
-	value := p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results())
+	value := p.loadCoroAwaitResult(b, resultSlot, results)
 	if guard := options.delivery; guard != nil {
 		body.cleanup.delivery.claim(b, guard)
 	}
 	return coroAwaitedValue{
 		value:   value,
-		address: p.coroAwaitResultAddress(b, resultSlot, abi.signature.Results()),
+		address: p.coroAwaitResultAddress(b, resultSlot, results),
 		physicalCalls: []coroPhysicalCall{
 			{call: child, argCount: len(args) + 3, resultArg: 1},
 			{call: outcomeCall, argCount: len(args) + 4, resultArg: 1},

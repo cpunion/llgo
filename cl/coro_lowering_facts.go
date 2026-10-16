@@ -305,6 +305,9 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 		if !ok {
 			return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q is absent from the frozen plan", logicalName)
 		}
+		if planned.WhenResultDeliveryOf != nil && planned.WhenResultDeliveryOf != instruction {
+			return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q lost its exact delivery condition", logicalName)
+		}
 		var targetID coro.FunctionID
 		if planned.ManagedDispatch {
 			if planned.Target != nil || planned.WhenResultDeliveryOf != instruction || planned.NoUnwind ||

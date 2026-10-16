@@ -1673,14 +1673,16 @@ func (u *EmissionUniverse) CoroLoweredCalls(owner *ssa.Function) ([]coro.SSALowe
 			return nil, fmt.Errorf("coroutine lowered-call owner %q has invalid logical name %q", owner.Name(), logicalName)
 		}
 		if source := frozen.whenResultDeliveryOf; source != nil {
-			if target != nil || frozen.noUnwind || frozen.unwindOnly || frozen.explicitStatusElided || frozen.rawPlain ||
+			if frozen.noUnwind || frozen.unwindOnly || frozen.explicitStatusElided || frozen.rawPlain ||
 				source.Parent() != owner || source.Common() == nil || source.Common().StaticCallee() != nil {
 				return nil, fmt.Errorf("coroutine lowered call %q in %q has an invalid conditional managed invocation", logicalName, owner.Name())
 			}
-			calls = append(calls, coro.SSALoweredCall{
-				LogicalName: logicalName, ManagedDispatch: true, WhenResultDeliveryOf: source,
-			})
-			continue
+			if target == nil {
+				calls = append(calls, coro.SSALoweredCall{
+					LogicalName: logicalName, ManagedDispatch: true, WhenResultDeliveryOf: source,
+				})
+				continue
+			}
 		}
 		if target == nil {
 			return nil, fmt.Errorf("coroutine lowered call %q in %q has a nil target", logicalName, owner.Name())
@@ -1698,6 +1700,7 @@ func (u *EmissionUniverse) CoroLoweredCalls(owner *ssa.Function) ([]coro.SSALowe
 			UnwindOnly:           frozen.unwindOnly,
 			ExplicitStatusElided: frozen.explicitStatusElided,
 			RawPlain:             frozen.rawPlain,
+			WhenResultDeliveryOf: frozen.whenResultDeliveryOf,
 		})
 	}
 	sort.Slice(calls, func(i, j int) bool {

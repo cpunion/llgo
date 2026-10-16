@@ -463,6 +463,91 @@ handoff and standard-library adoption remain required before public seeds.
 The full compiler and immutable linked-program regressions are tracked
 separately. The ongoing older v70 stdlib cohort now has **76/180** complete,
 all passing; the older GOROOT eight-shard run remains in shard 4.
+
+This cohort is now draft [PR #272](https://github.com/cpunion/llgo/pull/272),
+exact head `a2f727c5b`, targeting `llvm-coro` only. Immutable v90 compiler
+SHA-256 is `a5c4cd0f052dbd91b8822dcf989cac579f5fe96dceb1ba049b8939182c11acde`,
+manifest `cb646fec2c18f245bec8ad8ceca9e2f2571f163f77c8f076f3ddba810340d6a5`.
+The six existing resource modes pass **60/60** (48.093s); all original
+reflection/GC, cgo and claimed-channel routes pass (205.550s), source-after
+matches, peak2808.7MiB. These establish regression safety, not a publishable
+dynamic resource producer. Host race selection passes24.916s/1315.3MiB, full
+SSA14.220s and cltest14.207s pass/1032.6MiB, and the existing broad
+coro/emission compiler selection passes204.070s/382.8MiB. CI `38917619760`
+is still running at this checkpoint (16/18 successful, no failure observed);
+initial paginated review/comments and GraphQL threads are empty. The new
+isolated full `test/go` build completes and its runtime suite is running.
+
+An extra **unfiltered** `go test ./cl` is not a passing receipt: legacy tests
+fail to load a complete runtime profile (undefined coro GC/synctest hooks),
+then the package's default10m timeout fires inside
+`TestRunAndTestFromTestgo/cgocfiles`. The same profile failure is reproduced by
+unchanged v89 `TestRewriteGlobalStrings` (2.323s/1223.1MiB), before this
+consumer increment. The duplicate unfiltered v90 run is stopped, its processes
+are joined, and the failure record is retained. No test/golden/xfail is changed.
+This phase's broad compiler gate is the explicit coro/emission selection,
+while runtime compatibility is exercised by the separately isolated full
+`test/go` suite; instruction goldens remain outside the requested phase scope.
+
+The next isolated branch generalizes the existing delivery condition to exact
+managed helpers, so a statically known allocator and dynamically selected
+initializer/drop share the same predicate and sole effect graph. Exact target
+identity, demand, effects and conditional source all remain digest-bound;
+raw/no-unwind/unwind-only/terminal-elision combinations still fail closed.
+Core focused tests pass0.450s/365.6MiB, full core race passes24.606s/1555.5MiB,
+frontend metadata tests pass2.766s/1214.7MiB and the unchanged architecture
+gate passes0.944s/696.1MiB. This is a core/metadata checkpoint only: large dynamic
+defer physical allocation is not yet wired, and the branch is not integrated.
+
+The same isolated follow-up removes a distinct unnecessary allocation:
+nonresource source-defer calls pass a nil output to their static or descriptor
+child, since Go discards deferred results. They join the same child transaction
+but do not load/copy an unused aggregate. Resource guards still provide their
+protected result slot and claim only after completion. A compile-time invocation
+option records discard semantics independently of recover permission; no
+runtime task/frame field is added. Native/wasm32 pre/post-CoroSplit gates with
+a 131073-byte result prove that neither static nor dynamic parents introduce
+an allocator or large alloca (0.525s/1293.7MiB). Existing delivery/defer/cleanup
+regressions pass14.822s/1305.2MiB, the unchanged architecture gate passes
+0.929s/743.9MiB, and the new ordinary Go control (yielding large return, LIFO loop
+defer, panic/recover) passes0.312s. Its actual LLGo linked execution is pending;
+this follow-up remains unintegrated. Resource-bearing large dynamic defer
+still needs its exact conditional allocator and does not silently fall back.
+
+PR272 completes all18 coroutine CI jobs successfully and, after a fresh empty
+paginated review/comment inventory and empty GraphQL threads, merges at
+15:08:12 UTC as `8a45e5537`. Exact head is `a2f727c5b`; external receipt is
+`root/ci-38917619760-complete.json`. No main branch changes. The long full
+`test/go`, stdlib180 and GOROOT evaluations remain independent ongoing cohorts.
+
+Immutable v91 verifies the discarded-result follow-up on source `8ee494728`:
+compiler `49e43dff36709cf4ef143973d554b17b6b305c11df595fc2ee467811cb71c8cf`,
+manifest `b6fa6a16a5af0b9aa5c959e25a935f4ed0058072b5e53568bcd1201b9335077b`.
+The same ordinary Go program covers yielding 131073-byte results, static and
+dynamic LIFO defer and panic/recover. Go and LLGo match in all12 executions
+(P=1/2, three repeats per implementation); snapshot/program source-after match,
+peak1207.8MiB. Program SHA-256 is
+`4439a03d91848bef619d46a13724cc69006c60a8719ca4d0c5af2515774250c8`.
+This exact artifact precedes the next allocator increment, not a current-head
+dynamic resource-publication proof.
+
+The subsequent local allocator cohort now binds the real static allocator to
+the same source condition, ledger and cleanup placement. Large deferred custody
+storage is allocated only inside the positive HasDelivery branch; base-only
+descriptors retain nil output. The owner frame stores a typed address rather
+than the large result. Missing frozen runtime dependencies are rejected for
+active consumers instead of materialized during emission. Native/wasm32 gates
+prove that allocation is unreachable after removing the positive branch,
+the ledger contains both exact conditional allocators, and split frames remain
+below128KiB (2.599s/1242.9MiB before the ledger addition). The final race-selected
+delivery/cleanup/defer cohort, including the ledger addition, passes
+124.511s/1200.5MiB; unchanged architecture passes0.970s/738.2MiB. The first
+fixture attempt correctly rejects a missing AllocU declaration for its newly
+added loop-defer case; the fixture now supplies the same normal node allocator
+and releaser, without changing production/runtime semantics. This branch is
+still unintegrated; a final immutable linked regression is pending. The latest
+long-run observation is v90 test/go94 completed top-level tests with no failure,
+v70 stdlib81/180 all passing, and v65 GOROOT shard4 still running.
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
