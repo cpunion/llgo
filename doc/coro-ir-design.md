@@ -1006,6 +1006,16 @@ producer 函数值及私有工厂返回函数值；无 consumer producer/helper 
 捕获闭包/receiver resource adapter、reflection/FFI 二次 custody handoff 和外部 range defer
 owner 尚不能由本项验证推定完成。
 
+后续捕获 producer 的扩展不引入另一种 closure/resource 表示。共享 callable factory 已在生成
+delivery cold tail 之前校验 frozen closure environment；动态 guard 保留同一个 funcval env，
+nil-output fallback 读取同一 physical entry env。因而允许已绑定环境的 source closure 发布
+delivery descriptor，而 initializer/drop 继续要求精确无捕获 helper。receiver adapter、raw/plain
+publication 的限制不随之开放。`go f(...)` 无论静态还是动态，都由独立 entry 的 nil-output
+fallback 持有未交付结果，不能向 spawning parent 借用结果 guard。native/wasm32 IR 门检查
+captured descriptor、正常非资源路径消除及 spawn 不引入父级 delivery branch；真实 fd 门另验
+动态调用、循环 defer、discarded go entry、正常交付后的取消及 pending worker 期间的 GC。
+IR 通过不等于这些执行门已经通过，以验收账本和对应 immutable run 为准。
+
 ## 13. 代码迁移映射
 
 | 当前位置 | 迁移后职责 |

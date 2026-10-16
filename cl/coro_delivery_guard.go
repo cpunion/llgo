@@ -50,7 +50,7 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 	plan := new(coroDeliveryFunctionPlan)
 	if recipe, present := ir.deliveryProducers[fn]; present {
 		fact, found := whole.FunctionPlan(fn)
-		if !found || fact.FuncRep == coro.Dispatch && (len(fn.FreeVars) != 0 || fn.Signature.Recv() != nil ||
+		if !found || fact.FuncRep == coro.Dispatch && (fn.Signature.Recv() != nil ||
 			whole.HasRawPlainVariant(fn) || fact.RawPlainOnly ||
 			fact.ManagedEntry != coro.ManagedEntryCoroutine && fact.ManagedEntry != coro.ManagedEntryOutcomePlain) {
 			return nil, fmt.Errorf("llgo.coroBorrowResult requires a bound physical resource-delivery guard for descriptor publication")
@@ -81,6 +81,9 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 			frozen := ir.callPlans[call]
 			if frozen.failure != "" || frozen.plan.ElidesCall() || frozen.plan.RawPlain {
 				continue
+			}
+			if _, spawned := call.(*ssa.Go); spawned {
+				continue // Static and dynamic entries own their nil-output fallback.
 			}
 			recipe, present := ir.deliveryProducers[frozen.deliveryProducer]
 			if !present {
@@ -115,9 +118,6 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 					}
 				}
 				continue
-			}
-			if _, spawned := call.(*ssa.Go); spawned {
-				continue // The independently owned entry uses its nil-output fallback.
 			}
 			if uint64(len(plan.calls)) == uint64(^uint32(0)) {
 				return nil, fmt.Errorf("too many resource delivery call sites")

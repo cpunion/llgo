@@ -62,8 +62,14 @@ func __llgo_coro_native_worker_complete_v1(
 		return 0
 	}
 	payload, ok := coroWorkerResultPayloadV1(r1, r2, errno, fault, faultPC, faultTarget)
-	if !ok || coroProgramWorkerSourceV1State.Post(id, payload) != coro.WorkerOperationPosted ||
-		!coroTargetRequestExecutorV1(state.handle) {
+	if !ok || coroProgramWorkerSourceV1State.Post(id, payload) != coro.WorkerOperationPosted {
+		return 0
+	}
+	// As in the fleet profile, a successfully consumed source may beat this
+	// callback's wake tail to terminal close. The exact target ingress lease
+	// preserves the handle; shutdown still owes its post-join final drain.
+	request := coroNativeRequestExecutorResultV1(state.handle)
+	if !coro.ExecutorRequestAccepted(request) && request != coro.ExecutorRequestClosed {
 		return 0
 	}
 	return 1

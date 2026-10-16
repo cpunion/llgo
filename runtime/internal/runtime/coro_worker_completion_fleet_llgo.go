@@ -62,10 +62,7 @@ func __llgo_coro_native_worker_complete_v1(
 		return 0
 	}
 	result := coroNativeFleetPostWorkerV1(id, payload)
-	accepted := result.Executor == coro.ExecutorRequestPublished ||
-		result.Executor == coro.ExecutorRequestIdleWake ||
-		result.Executor == coro.ExecutorRequestCoalesced
-	if result.Route != coro.OperationRoutePosted || !accepted {
+	if !coroNativeFleetCompletionAcceptedV1(result) {
 		return 0
 	}
 	return 1

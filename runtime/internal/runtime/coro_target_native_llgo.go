@@ -112,23 +112,30 @@ func coroTargetPollExecutorWakeV1(coro.ExecutorHandle, uint32) coroTargetDispatc
 // optional pipe ring, and Leave so native shutdown cannot retire the static
 // target state in the Post -> Request -> Doorbell window.
 func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
+	return coro.ExecutorRequestAccepted(coroNativeRequestExecutorResultV1(handle))
+}
+
+// Preserve the typed close result for a producer which already published its
+// durable source. Ordinary wake callers retain their accepted-request contract.
+func coroNativeRequestExecutorResultV1(handle coro.ExecutorHandle) coro.ExecutorRequestResult {
 	state := &coroNativeTargetV1State
 	if !state.ingress.Enter() {
-		return false
+		return coro.ExecutorRequestInvalid
 	}
 	if !state.started || state.handle != handle {
 		_, _ = state.ingress.Leave()
-		return false
+		return coro.ExecutorRequestInvalid
 	}
 	result := coroProgramExecutorRegistryV1State.Request(handle)
-	accepted := result == coro.ExecutorRequestPublished || result == coro.ExecutorRequestCoalesced ||
-		result == coro.ExecutorRequestIdleWake
 	ringOK := true
 	if coro.ExecutorRequestNeedsDoorbell(result) {
 		ringOK = state.doorbell.Ring()
 	}
 	_, leaveOK := state.ingress.Leave()
-	return accepted && ringOK && leaveOK
+	if !ringOK || !leaveOK {
+		return coro.ExecutorRequestInvalid
+	}
+	return result
 }
 
 // coroTargetPostTaskControlV1 is the native foreign-producer transaction. The

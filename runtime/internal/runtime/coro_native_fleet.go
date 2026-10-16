@@ -613,6 +613,16 @@ func coroNativeFleetPostWorkerV1(id coro.OperationID, payload coro.ScalarResultP
 	return coroNativeFleetPostV1(id, payload, coro.TaskCancelNone, coro.PollOperationResultInvalid)
 }
 
+func coroNativeFleetCompletionAcceptedV1(result coro.OperationRouteIngressResult) bool {
+	// Route/target ingress leases retain the exact binding across Post->Request.
+	// The owner may consume the durable result and close its request gate first;
+	// that close owes the existing post-join final drain, not another wake. Only
+	// a successful source Post permits this Closed tail; stale/invalid/duplicate
+	// results remain failures and Closed is not generally an accepted request.
+	return result.Route == coro.OperationRoutePosted &&
+		(coro.ExecutorRequestAccepted(result.Executor) || result.Executor == coro.ExecutorRequestClosed)
+}
+
 func coroNativeFleetPostPollV1(
 	id coro.OperationID,
 	result coro.PollOperationResult,
