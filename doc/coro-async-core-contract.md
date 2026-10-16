@@ -258,6 +258,15 @@ helper 来触发染色；两者独立的 suspend/exec 需求均通过原固定�
 当前实现只完成源码事实与自动染色的前端验证，物理 guard 未绑定时后端明确拒绝，
 不会因为出现这个声明就把尚未保护的 hidden output 指针交给适配器。
 
+私有 producer 的返回证明采用有限结构：borrow 必须先于源码 call/go/defer，所有
+正常 return 按顺序直接读取同一个 borrowed tuple 的各字段；开始读取后只允许其余
+字段投影和 return。不能先缓存 fd，再调用可能 await/改槽的 helper，最后发布旧值；
+也不接受在表达式求值后执行 RunDefers、再回写缓存结果。普通 Go wrapper 没有这个
+限制，也不会自动成为资源 producer。底层 adapter 可在 borrow 后完成普通工作，再
+读取最终结果；清理保护由编译器已有 drainer 承担，不用源码 defer 充当隐含交付点。
+这只是物理消费者启用前的源码证明，不是公开 API 安全性验收。定向前端门禁通过，
+仅恢复旧源码校验后，十个旧值/错误投影/提前调用负例均不再被拒绝。
+
 初始化空槽也消费已有 callable effect/exec 事实，不能为了要求 initializer 是 plain
 而新增 no-panic/no-suspend 标注：普通 typed pointer store 就可能保守包含 nil fault。
 先把含指针的结果存储清零，再按已有 plain/outcome/coro 路径调用 initializer；只有
