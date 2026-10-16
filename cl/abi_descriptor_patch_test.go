@@ -73,6 +73,7 @@ func TestPatchedMethodDescriptorsShareSignatureIdentity(t *testing.T) {
 	for global := pkg.Module().FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
 		init := global.Initializer()
 		if init.IsNil() || init.Type().TypeKind() != llvm.ArrayTypeKind || init.Type().ArrayLength() != 1 ||
+			init.Type().ElementType().TypeKind() != llvm.StructTypeKind ||
 			init.Type().ElementType().StructName() != "github.com/xgo-dev/llgo/runtime/abi.Imethod" {
 			continue
 		}

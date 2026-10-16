@@ -7,6 +7,54 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-17 (Asia/Shanghai)
 
+### Latest executable refresh: v117/v118/v120
+
+The v117 complete `test/go` cohort passes **271/271**, with zero failures or
+skips, matching source-after, joined children and reclaimed scratch at
+23:19:30 UTC on October 16. Its compiler/test image pair is retained separately
+from the v118 large-result correction. The v117 top-level runtime/cgo/syncpool/
+llgoext cohort also passes **68 tests plus one original helper skip**, with
+matching source-after and cleanup. The v117 demo refresh remains in progress.
+
+The old immutable v70 180-package standard-library cohort has now completed:
+**179 package passes and one failure, `test/std/testing/quick`**, with matching
+source-after and reclaimed scratch at 23:23:39 UTC. A focused v117 rerun retained
+the same failure. Do not relabel that cohort as all passing.
+
+v120 fixes the actual `quick.Generator` failure at the existing method-signature
+canonicalization boundary. Source method sets and patched physical interface
+descriptors previously selected different runtime function-type keys: the named
+interface's implementation check succeeded, but structural-interface `NewItab`
+produced an empty method slot. Canonicalizing the physical signature **before**
+all existing descriptor/cache-key consumers fixes both paths without adding a
+runtime registry, annotation, helper, or allocation. The host regression uses
+different original/replacement declaration positions so nominal physical types
+cannot accidentally share a synthetic position-zero ABI key. Overlaying only
+the old `ssa/abitype.go` fails this test; the corrected compiler passes it.
+
+Frozen v120 is commit `b20fb91681d8073428ae4e3af569acd03718add6`, source manifest
+SHA-256 `682c7acf51f45968c93e22fa468ed36c6393a8d8cc81d9a79364e29057800bd5`,
+compiler SHA-256 `f3a17d18f59718a30c50d269bb3b288fa026d4f5f3a86787be3a974c71d33962`.
+Its complete unchanged `testing/quick` package now passes **3/3 tests**, including
+`TestValueAndSetupError`, with source-after matching and child/scratch cleanup
+at 23:46:57 UTC. The new permanent interface regression covers generic and
+ordinary assertions, zero/value/pointer receivers, GC, suspension and a patched
+`reflect.Value` result; it passes ten repetitions at each of P=1 and P=2, and
+its host-Go control passes. Broad compiler gates pass in 204.181s, and the
+unchanged ABI/build/architecture gates pass. The original same-source minimal
+program changes from a pre-call nil-method fault to direct and `quick.Value`
+results of 58. Its obsolete duplicate function-type descriptor disappears;
+the executable shrinks by 144 bytes, with no runtime-performance claim.
+
+The same v120 compiler/source pair passes all **18 actual small/large archive
+delivery executions** in 196.129s, **160 actual FD executions plus six opaque
+nonresource controls** in 69.137s, and all **three reflection/GC routes** in
+139.224s. Source-after matches; the resource/reflection process-tree peak is
+2780.4MiB. These affected passing reruns do not establish a fresh 180-package or
+complete GOROOT pass. Parent PR CI remains independently tracked. Preserve the
+original failures and do not add xfails or update instruction goldens to obtain
+acceptance. Earlier paragraphs below retain their historical cohort provenance.
+
 PRs [#262](https://github.com/cpunion/llgo/pull/262) and
 [#263](https://github.com/cpunion/llgo/pull/263) are merged into `llvm-coro`
 as `113f68c32` and `7cc805a0d`. Their exact heads `06502a0a8` and `3b9571606`
@@ -2122,12 +2170,14 @@ bound is still explicit.
 ## Remaining work, in order
 
 1. Finish current executable acceptance on immutable compiler/source pairs.
-   Integrated PR279's v104 `test/go` passes271/271; immutable v107 is running
-   the next complete fresh-build cohort. The v108 top-level runtime/cgo/
-   syncpool/llgoext cohort passes68+1helper skip. The v103 native Go demos
-   pass73/73. The single-snapshot v70
-   180-package stdlib evaluation has at least128
-   completed package passes and no failure so far; it remains active. The older
+   The immutable v117 complete `test/go` cohort passes271/271, zero failures or
+   skips; its runtime/cgo/syncpool/llgoext cohort passes68+1original helper skip.
+   Both have matching source-after, joined children and reclaimed scratch.
+   The v117 native Go demo refresh remains active; the earlier v103 cohort
+   passed73/73. The single-snapshot v70 180-package stdlib evaluation completes
+   with179 passes and one retained `testing/quick` failure. That original
+   package now passes3/3 tests on v120 after the canonical method-signature
+   descriptor fix above, but a new complete stdlib cohort is still required. The older
    fixed v65-source/v64-compiler eight-shard GOROOT evaluation has completed
    all8 shards with1073 passes/9 retained failures out of1082 selected cases.
    Preserve every older failure/resource stop;
