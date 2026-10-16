@@ -224,7 +224,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 			return err
 		}
 	}
-	requireCleanup := func(function *ssa.Function) error {
+	requireCleanup := func(function *ssa.Function, producer bool) error {
 		facts, present := ir.localBodyFacts[function]
 		if !present {
 			return fmt.Errorf("delivery cleanup owner %q has no frozen local body", function.Name())
@@ -233,6 +233,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 		// non-suspending initializer/drop needs the existing cleanup drainer
 		// for panic, cancellation and discarded-entry fallback.
 		facts.Exec = facts.Exec.Join(coro.NeedsCleanupFrame)
+		facts.ResultDelivery = facts.ResultDelivery || producer
 		facts.OutcomePlainLeaf = false
 		facts.OutcomePlainDAG = false
 		facts.StaticOutcomeLocal = false
@@ -244,7 +245,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 			continue
 		}
 		if _, producer := ir.deliveryProducers[function]; producer {
-			if err := requireCleanup(function); err != nil {
+			if err := requireCleanup(function, true); err != nil {
 				return err
 			}
 		}
@@ -282,7 +283,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 					// on its parent. Its independently owned entry uses fallback.
 					continue
 				}
-				if err := requireCleanup(function); err != nil {
+				if err := requireCleanup(function, false); err != nil {
 					return err
 				}
 				for _, helper := range []struct {

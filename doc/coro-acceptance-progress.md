@@ -299,8 +299,45 @@ The delivery capability is also folded into the existing allowed-flags mask:
 ordinary universal calls retain precisely the old validation mask/trap, and
 frozen closed nonresource calls gain no delivery probe. Full SSA passes 17.482s,
 unfiltered cltest 15.260s, initial selected compiler 43.199s, architecture 2.215s
-and host FFI tests 0.299s. The final broad rerun and immutable actual execution
-of this optional-tail source are still required.
+and host FFI tests 0.299s. The final broad compiler rerun passes (323.209s),
+followed by immutable v85 at source `06d6cd956`: all six real-resource modes
+pass **60/60** executions, and the original reflection/GC case, cgo route and
+claimed-channel cleanup all pass. Compiler SHA-256 is
+`13aa706f36e3f219f121a965b9716d3de7104db6659d1d5e64ba3fcfed49b1d0`;
+source manifest is `6a7c691216dd09de5e1c9134ed9cef83f70f55bb5a0e14d0843ff9e12bd75bec`.
+Source-after matches; combined peak is 2865.8MiB. These are static delivery
+and descriptor ABI gates, not public dynamic resource acceptance.
+PR [#269](https://github.com/cpunion/llgo/pull/269), exact head `06d6cd956`,
+passes all 18 coroutine CI jobs in run `38898722459`. Fresh paginated
+review/inline/issue-comment inventories and GraphQL review threads are empty;
+the exact head is merged into `llvm-coro` as `578504b0c` at 13:02:50 UTC.
+No main branch is changed.
+
+The v83 complete `test/go` run retains **266/268 passes and two failures**:
+both nested compiler probes report missing `gc/gc.h`. The identical retained
+test image and compiler pass both focused probes with and without the original
+per-invocation cache isolation; neither replay establishes the original cause
+or changes the complete result to a pass. A fresh complete v85 run is live.
+GOROOT shard 2 completes 132/135 cases: the older `issue27695c` already has a
+strict v84 pass, while `issue5856` still fails a strict unchanged-case v85
+replay (defer caller reports line 17 instead of 28). `issue75764` exercises
+wrapper tail-call performance; its older failure remains pending a current
+replay, not classified as an environment-only failure or a new xfail.
+
+The next isolated branch freezes typed hidden managed invocations without
+inventing SSA targets. A result-delivery condition uses the existing exact
+scalar/CHA/open-target flow before the sole effect fixed point. Closed
+nonresource and nil-only families retain the identical FunctionPlan, no helper
+edges and no cleanup storage demand. Potential resource calls add local
+custody/cleanup and ordinary managed helper effects; resource ownership is not
+a propagating Go effect. Producer metadata is also projected from checked
+archive delivery facts. The plan digest binds exact source occurrences and
+rejects lost producer/helper/cleanup facts. Full core tests pass (5.123s),
+including the complete race gate (24.040s). Physical dynamic helper binding,
+library helper publication and reflection second handoff are still gated;
+public standard-library seeds stay off.
+The broad compiler selection also passes (226.290s / 1244.4MiB peak), as do
+the final model/archive checks and unchanged architecture gate (1.067s).
 
 GOROOT shard 1 also reports `fixedbugs/issue27695b.go` in the reflection/GC
 path. A strict unchanged-case v79 rerun still fails with `invalid zero-ticket

@@ -60,6 +60,14 @@ func TestLibraryDeliveryRecordCrossPackageConsumption(t *testing.T) {
 	if absent, found := index.LookupDelivery(record.Drop); found || !absent.IsZero() {
 		t.Fatal("ordinary helper acquired resource delivery")
 	}
+	for _, summary := range decoded {
+		for _, function := range summary.Functions {
+			policy, err := function.ImportedPolicy()
+			if err != nil || policy.ResultDelivery != (function.ID == record.Producer) {
+				t.Fatalf("imported %s result custody=%t: %v", function.ID, policy.ResultDelivery, err)
+			}
+		}
+	}
 }
 
 func TestLibraryDeliveryRejectsMissingOrWrongHelper(t *testing.T) {

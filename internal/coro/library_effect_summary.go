@@ -860,6 +860,7 @@ func (function LibraryEffectFunction) ImportedPolicy() (SSAFunctionPolicy, error
 		AtomicCostProof:       function.AtomicCostProof,
 		AtomicCostCertificate: function.AtomicCostCertificate,
 		StaticOutcome:         function.StaticOutcome,
+		ResultDelivery:        !function.Delivery.IsZero(),
 		IgnoreBody:            true,
 		External:              ExternalKnown,
 		OverrideExternal:      true,

@@ -116,6 +116,10 @@ type Roots []Root
 type SSAFunctionPolicy struct {
 	Effect Effect
 	Exec   ExecFlags
+	// ResultDelivery is producer-owned ABI metadata, not a propagating effect.
+	// Source bodies publish it through the same frozen local-body projection;
+	// imported declarations receive it only from a checked archive contract.
+	ResultDelivery bool
 	// ManagedEntry and its optional atomic-cost proof are producer-owned
 	// physical capabilities for an ExternalKnown library declaration. Local Go
 	// bodies derive these fields after the complete fixed point instead.
@@ -366,6 +370,16 @@ type SSARawPlainCallCertificate struct {
 type SSALoweredCall struct {
 	LogicalName string
 	Target      *ssa.Function
+	// ManagedDispatch is a typed compiler-inserted descriptor invocation. It
+	// has no invented SSA target and contributes the same conservative managed
+	// call edge as an open source function value. Exact Target and dispatch are
+	// mutually exclusive; raw/no-unwind/terminal-elision shortcuts cannot apply.
+	ManagedDispatch bool
+	// WhenResultDeliveryOf binds this hidden initialization/drop invocation to
+	// one source dynamic call. Existing value flow decides whether that call
+	// can publish an undelivered resource result before the effect fixed point.
+	// A closed nonresource family removes the helper, cleanup tag and effects.
+	WhenResultDeliveryOf ssa.CallInstruction
 	// NoUnwind is an exact owner/logical-name occurrence proof that this
 	// compiler-inserted helper cannot unwind from the source operation it
 	// implements. It suppresses only MayUnwind propagation; suspend, affinity,
@@ -685,6 +699,7 @@ type SSAConfig struct {
 type SSAFunctionBodyFacts struct {
 	Effect           Effect
 	Exec             ExecFlags
+	ResultDelivery   bool
 	InstructionCount int
 	HasCycle         bool
 	// BoundedCycleCost is a conservative upper bound on the number of local,
@@ -728,6 +743,9 @@ type SSAFunctionBodyFacts struct {
 }
 
 func (facts SSAFunctionBodyFacts) validate(function *ssa.Function) error {
+	if facts.ResultDelivery && (function == nil || function.Signature == nil || function.Signature.Results().Len() == 0) {
+		return fmt.Errorf("result-delivery producer has no source results")
+	}
 	if err := facts.Effect.Validate(); err != nil {
 		return fmt.Errorf("local body effect: %w", err)
 	}
@@ -841,6 +859,7 @@ type SSAPlan struct {
 	conditionalStores       map[*ssa.Store]*ssa.Function
 	safeFixedArrayIndexes   map[ssa.Instruction]int64
 	loweredCalls            map[*ssa.Function][]SSALoweredCall
+	resultDeliveryProducers map[*ssa.Function]bool
 	managedValueReferences  map[*ssa.Function][]*ssa.Function
 	foreignNoBlock          map[*ssa.Function]string
 	foreignSync             map[*ssa.Function]string
@@ -1213,7 +1232,7 @@ func (p *SSAPlan) LoweredCalls(owner *ssa.Function) []SSALoweredCall {
 // ok is false when the exact owner has no call with that identity.
 func (p *SSAPlan) ResolveLoweredCall(owner *ssa.Function, logicalName string) (*ssa.Function, bool) {
 	call, ok := p.ResolveLoweredCallRecord(owner, logicalName)
-	if !ok {
+	if !ok || call.ManagedDispatch {
 		return nil, false
 	}
 	return call.Target, true
@@ -1849,6 +1868,56 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 	needsDispatch := flow.descriptorTargets(unknownTargets)
 	localBodyFacts := make(map[*ssa.Function]SSAFunctionBodyFacts, len(bodyFunctions))
+	resultDeliveryProducers := make(map[*ssa.Function]bool)
+	for function, policy := range trustedPolicies {
+		if policy.ResultDelivery {
+			if function.Signature == nil || function.Signature.Results().Len() == 0 {
+				return nil, fmt.Errorf("coro: result-delivery producer %q has no source results", function.Name())
+			}
+			resultDeliveryProducers[function] = true
+		}
+	}
+	for _, function := range bodyFunctions {
+		var facts SSAFunctionBodyFacts
+		if config.ClassifyLocalBody != nil {
+			var bodyErr error
+			facts, bodyErr = config.ClassifyLocalBody(function)
+			if bodyErr != nil {
+				return nil, fmt.Errorf("coro: classify local SSA body %q: %w", function.Name(), bodyErr)
+			}
+		} else {
+			facts = scanSSAFunctionBody(function)
+		}
+		if err := facts.validate(function); err != nil {
+			return nil, fmt.Errorf("coro: local SSA body %q: %w", function.Name(), err)
+		}
+		localBodyFacts[function] = facts.clone()
+		if facts.ResultDelivery {
+			resultDeliveryProducers[function] = true
+		}
+	}
+	resultDeliveryCalls := make(map[ssa.CallInstruction]bool)
+	needsResultDelivery := func(call ssa.CallInstruction) bool {
+		if needed, seen := resultDeliveryCalls[call]; seen {
+			return needed
+		}
+		needed := !elidedCalls[call] && ssaCallNeedsResultDelivery(call, flow, unknownTargets, closedDynamicCalls, resultDeliveryProducers)
+		resultDeliveryCalls[call] = needed
+		return needed
+	}
+	loweredCalls, err := freezeSSAClassifiedLoweredCalls(bodyFunctions, includedSet, canonicalizer, config, needsResultDelivery)
+	if err != nil {
+		return nil, err
+	}
+	for call, needed := range resultDeliveryCalls {
+		if !needed {
+			continue
+		}
+		facts := localBodyFacts[call.Parent()]
+		facts.Exec = facts.Exec.Join(NeedsCleanupFrame)
+		facts.OutcomePlainLeaf, facts.OutcomePlainDAG, facts.StaticOutcomeLocal = false, false, false
+		localBodyFacts[call.Parent()] = facts
+	}
 	buildPolicies := func(exactNoUnwind map[*ssa.Function]bool) (map[*ssa.Function]SSAFunctionPolicy, error) {
 		policies := make(map[*ssa.Function]SSAFunctionPolicy, len(included))
 		for _, fn := range included {
@@ -1859,23 +1928,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			}
 			trusted := trustedPolicies[fn]
 			if _, ignored := ignoredBodies[fn]; !ignored {
-				bodyFacts, classified := localBodyFacts[fn]
-				if !classified {
-					if config.ClassifyLocalBody != nil {
-						var bodyErr error
-						bodyFacts, bodyErr = config.ClassifyLocalBody(fn)
-						if bodyErr != nil {
-							return nil, fmt.Errorf("coro: classify local SSA body %q: %w", fn.Name(), bodyErr)
-						}
-					} else {
-						bodyFacts = scanSSAFunctionBody(fn)
-					}
-					if err := bodyFacts.validate(fn); err != nil {
-						return nil, fmt.Errorf("coro: local SSA body %q: %w", fn.Name(), err)
-					}
-					bodyFacts = bodyFacts.clone()
-					localBodyFacts[fn] = bodyFacts
-				}
+				bodyFacts := localBodyFacts[fn]
 				bodyEffect, bodyExec := bodyFacts.Effect, bodyFacts.Exec
 				// A synthetic package initializer can be very large solely because a
 				// generated composite/map literal expands into thousands of bounded
@@ -1910,6 +1963,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			policy.AtomicCostProof = trusted.AtomicCostProof
 			policy.AtomicCostCertificate = trusted.AtomicCostCertificate
 			policy.StaticOutcome = trusted.StaticOutcome
+			policy.ResultDelivery = resultDeliveryProducers[fn]
 			policy.NeedsDispatch = policy.NeedsDispatch || trusted.NeedsDispatch
 			policy.TrustedBoundedRecursion = trusted.TrustedBoundedRecursion
 			_, rawFunctionAddressEntry := rawFunctionAddressEntries[fn]
@@ -2277,8 +2331,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			}
 		}
 	}
-	loweredCalls, err := addSSAClassifiedLoweredCalls(graph, bodyFunctions, includedSet, ids, canonicalizer, policies, config)
-	if err != nil {
+	if err := addSSALoweredCallEdges(graph, bodyFunctions, ids, policies, loweredCalls); err != nil {
 		return nil, err
 	}
 	if err := addSSAReferenceEdges(
@@ -2312,6 +2365,14 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	valuePlans, callPlans, err := flow.finalize(base, callKinds, unknownTargets, staticCallTargets)
 	if err != nil {
 		return nil, fmt.Errorf("coro: finalize SSA value and call plans: %w", err)
+	}
+	for call, needed := range resultDeliveryCalls {
+		if plan, present := callPlans[call]; present {
+			plan.ResultDelivery = needed
+			callPlans[call] = plan
+		} else if needed {
+			return nil, fmt.Errorf("coro: resource delivery call %q lost its frozen call plan", call.String())
+		}
 	}
 	if err := validateSSASyncDispatchCallPlans(base, callPlans, ids); err != nil {
 		return nil, err
@@ -2392,6 +2453,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		conditionalStores:       make(map[*ssa.Store]*ssa.Function, len(conditionalStores)),
 		safeFixedArrayIndexes:   safeFixedArrayIndexes,
 		loweredCalls:            loweredCalls,
+		resultDeliveryProducers: resultDeliveryProducers,
 		managedValueReferences:  managedValueReferences,
 		foreignNoBlock:          make(map[*ssa.Function]string),
 		foreignSync:             make(map[*ssa.Function]string),
@@ -3183,14 +3245,12 @@ func validateSSASyncDispatchCallPlans(
 	return nil
 }
 
-func addSSAClassifiedLoweredCalls(
-	graph *Graph,
+func freezeSSAClassifiedLoweredCalls(
 	functions []*ssa.Function,
 	included map[*ssa.Function]bool,
-	ids map[*ssa.Function]FunctionID,
 	canonicalizer *ssaFunctionCanonicalizer,
-	policies map[*ssa.Function]SSAFunctionPolicy,
 	config SSAConfig,
+	needsResultDelivery func(ssa.CallInstruction) bool,
 ) (map[*ssa.Function][]SSALoweredCall, error) {
 	result := make(map[*ssa.Function][]SSALoweredCall)
 	if config.ClassifyLoweredCalls == nil {
@@ -3229,6 +3289,20 @@ func addSSAClassifiedLoweredCalls(
 			if call.ExplicitStatusElided && !call.UnwindOnly {
 				return nil, fmt.Errorf("coro: lowered call %q in %q is ExplicitStatus-elided but not unwind-only", call.LogicalName, owner.Name())
 			}
+			if call.ManagedDispatch {
+				if call.Target != nil || call.RawPlain || call.NoUnwind || call.UnwindOnly || call.ExplicitStatusElided {
+					return nil, fmt.Errorf("coro: managed-dispatch lowered call %q in %q has an exact target or unsupported shortcut", call.LogicalName, owner.Name())
+				}
+				if source := call.WhenResultDeliveryOf; source != nil {
+					if err := validateSSADeliveryCallCondition(owner, source); err != nil {
+						return nil, err
+					}
+				}
+				continue
+			}
+			if call.WhenResultDeliveryOf != nil {
+				return nil, fmt.Errorf("coro: result-delivery condition requires a managed-dispatch lowered call")
+			}
 			target := call.Target
 			if target == nil {
 				return nil, fmt.Errorf("coro: lowered call %q in %q has a nil target", call.LogicalName, owner.Name())
@@ -3247,16 +3321,36 @@ func addSSAClassifiedLoweredCalls(
 				return nil, fmt.Errorf("coro: lowered call %q target %q in %q is not the exact canonical function", call.LogicalName, target.Name(), owner.Name())
 			}
 		}
+		active := calls[:0]
+		for _, call := range calls {
+			if call.WhenResultDeliveryOf == nil || needsResultDelivery(call.WhenResultDeliveryOf) {
+				active = append(active, call)
+			}
+		}
+		calls = active
 		sort.Slice(calls, func(i, j int) bool {
 			return calls[i].LogicalName < calls[j].LogicalName
 		})
 		if len(calls) != 0 {
 			result[owner] = calls
 		}
-		for _, call := range calls {
+	}
+	return result, nil
+}
+
+func addSSALoweredCallEdges(graph *Graph, functions []*ssa.Function, ids map[*ssa.Function]FunctionID,
+	policies map[*ssa.Function]SSAFunctionPolicy, calls map[*ssa.Function][]SSALoweredCall) error {
+	for _, owner := range functions {
+		for _, call := range calls[owner] {
+			if call.ManagedDispatch {
+				if err := addSSAUnknownCall(graph, ids[owner], CallDirect, UnknownManagedDispatch); err != nil {
+					return err
+				}
+				continue
+			}
 			if call.RawPlain {
 				if err := graph.AddReference(ReferenceEdge{Owner: ids[owner], Target: ids[call.Target], RawPlain: true}); err != nil {
-					return nil, fmt.Errorf("coro: add raw-plain lowered call %q from %q to %q: %w", call.LogicalName, owner.Name(), call.Target.Name(), err)
+					return fmt.Errorf("coro: add raw-plain lowered call %q from %q to %q: %w", call.LogicalName, owner.Name(), call.Target.Name(), err)
 				}
 				continue
 			}
@@ -3267,7 +3361,7 @@ func addSSAClassifiedLoweredCalls(
 				kind = staticCallKind(CallDirect, policies[call.Target])
 				if call.NoUnwind {
 					if kind != CallDirect {
-						return nil, fmt.Errorf(
+						return fmt.Errorf(
 							"coro: no-unwind lowered call %q in %q is not one managed direct edge",
 							call.LogicalName, owner.Name(),
 						)
@@ -3276,11 +3370,11 @@ func addSSAClassifiedLoweredCalls(
 				}
 			}
 			if err := graph.AddCall(CallEdge{Caller: ids[owner], Callee: ids[call.Target], Kind: kind}); err != nil {
-				return nil, fmt.Errorf("coro: add lowered call %q from %q to %q: %w", call.LogicalName, owner.Name(), call.Target.Name(), err)
+				return fmt.Errorf("coro: add lowered call %q from %q to %q: %w", call.LogicalName, owner.Name(), call.Target.Name(), err)
 			}
 		}
 	}
-	return result, nil
+	return nil
 }
 
 func addSSAClassifiedDemandReferences(
