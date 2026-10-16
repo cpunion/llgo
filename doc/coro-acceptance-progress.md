@@ -1154,8 +1154,11 @@ source-after matching, peak2768.6MiB. Compiler SHA-256 is
 `739071727ed87e1cf869883a75e28afec9223382208441bd5ecd9e10258a290b`;
 source manifest is
 `165fadcdbea36f07ba2f65cc4d3748d65ed20157b29aa6880ea96556b41efcd1`.
-The complete v116 test/go and four runtime packages are independent live
-cohorts, not yet recorded as passing.
+The v116 whole-test/go and four-runtime-package launches are infrastructure
+interruptions: the launch PATH omitted lsof, so cleanup failed after build or
+the first package. Their parents/stages have exited, owned scratch is reclaimed
+after token/handle checks, retained images are fingerprinted, and source-after
+matches. Neither interrupted cohort is counted as a complete pass.
 
 A further isolated combination gate joins real FD custody with a131088-byte
 result containing both a large array and a Go pointer. It covers canceled
@@ -1176,6 +1179,38 @@ packed members use conservative alignment. Volatile accesses and unsupported
 nested users remain all-or-nothing exclusions. The new projection tests fail
 before the correction and the full ABI suite passes afterwards (0.469s).
 Actual combined FD/GC execution and a fresh immutable cohort remain required.
+
+Immutable v117 (`3fde9d612`) passes the broad compiler gate171.844s/1209.7MiB,
+18 archive executions191.534s/1912.8MiB, ABI/build gates0.692s/685.9MiB,
+large recovery39.629s/1250.7MiB and the six O0/O3-full recovery executions.
+The combined resource gate is nevertheless **failed**: all original modes0–11
+and opaque controls pass, while new modes12–15 exit92 under default optimization
+(330.204s including compilation). Its three separate reflection/GC routes pass
+147.501s; source-after matches, combined peak2772.8MiB. The unchanged large
+resource fixture freshly built at O0 passes all four new modes with matching
+source-after (1895.3MiB). These are distinct outcomes, not a whole v117 pass.
+
+An isolated diagnostic shows corruption before GC: firstbyte17, lastbyte17
+(expected91), pointee37. Before/after-ABI and final IR show that an assembled
+then immediately extracted source tuple hid the array load from the mandatory
+memory lowerer; only later LLVM optimization removed the redundant tuple,
+leaving a131073-byte SSA copy for target register expansion. A compiler sample
+also locates the several-minute cost in LLVM machine scheduling. The diagnostic
+branch's print calls and hard-coded IR dumps are not part of the implementation.
+
+The ABI lowerer now folds only exact insert/extract projection identities and
+removes their dead same-block tuple chains before its existing copy lowering.
+Nested exact/disjoint writes are supported; a partial subfield overwrite does
+not authorize substituting the old container. This adds no runtime compensation,
+Go-SSA analysis, second backend path or late emitter inference. The new tuple
+gate fails before this correction and full ABI tests pass afterwards0.317s.
+An immutable actual replay is still required before integrating this change.
+
+The old v70 standard-library evaluation has171 package passes and one retained
+failure so far: testing/quick's custom Generator case. A complete focused v117
+rerun reproduces it, with matching source-after and reclaimed scratch. This is
+not added to xfails. v117 whole-test/go, four runtime packages and all native Go
+demos are running as separate fresh cohorts with the corrected launcher PATH.
 
 Immutable v108 completes the four runtime packages with **68 passes and one
 helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
