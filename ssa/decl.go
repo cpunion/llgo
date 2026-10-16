@@ -404,7 +404,17 @@ func (p Package) newFunc(
 	if bg == InStdcall {
 		llvmName = p.Prog.stdcallSymbolName(name)
 	}
-	fn := llvm.AddFunction(p.mod, llvmName, t.ll)
+	fn := p.mod.NamedFunction(llvmName)
+	if !fn.IsNil() && fn.IntrinsicID() != 0 {
+		// LLVM's intrinsic builder can declare a function before the package
+		// symbol table sees it. Adopt that exact declaration: AddFunction would
+		// otherwise create an invalid renamed intrinsic such as llvm.trap.1.
+		if bg != InC || env != nil || instantiated || fn.GlobalValueType().C != t.ll.C {
+			panic("ssa: conflicting LLVM intrinsic declaration for " + name)
+		}
+	} else {
+		fn = llvm.AddFunction(p.mod, llvmName, t.ll)
+	}
 	if bg == InStdcall {
 		fn.SetFunctionCallConv(p.Prog.stdcallCallConv())
 	}
