@@ -158,6 +158,9 @@ func deferredPanicTraceScope(g *G) (owner *Frame, typeWord, dataWord unsafe.Poin
 		child.header.Lifecycle != uint16(FrameActive) {
 		return nil, nil, nil, false
 	}
+	if child.properties&frameDeferredPanicScope == 0 {
+		return nil, nil, nil, false
+	}
 	// Calls made by the panicking/recovering deferred function may be managed
 	// children (debug.Stack -> runtime.Callers is one real example). Walk the
 	// exact await ancestry until the recovery-owning CompletionRecord appears.
@@ -189,7 +192,8 @@ func deferredPanicTraceScope(g *G) (owner *Frame, typeWord, dataWord unsafe.Poin
 // descendant. The CompletionRecord owns this scope both before and after
 // recover, through the child's terminal return, so stackless traceback
 // visibility needs no native frame marker, TLS side table, or additional per-G
-// state.
+// state. The private inherited frame bit supplies only the O(1) negative proof;
+// a positive query still authenticates the complete recovery-owning ancestry.
 func DeferredPanicTraceActive(g *G) bool {
 	_, _, _, ok := deferredPanicTraceScope(g)
 	return ok

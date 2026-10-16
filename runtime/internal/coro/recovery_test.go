@@ -152,6 +152,12 @@ func TestDeferredPanicTraceRejectsOrdinaryAndUnboundScope(t *testing.T) {
 	}
 	record := &fixture.parentFrame().completion
 	original := *record
+	// A positive cache bit is never recovery authority: exercise the original
+	// payload/child validation even when the cheap negative proof is absent.
+	fixture.g.active.properties |= frameDeferredPanicScope
+	if DeferredPanicTraceActive(fixture.g) {
+		t.Fatal("inherited scope bit authorized an ordinary completion")
+	}
 	record.status = completionRecoverArmed
 	if DeferredPanicTraceActive(fixture.g) {
 		t.Fatal("panic scope with no payload was accepted")
@@ -251,6 +257,9 @@ func TestRecoverTransparentAliasTakesExactAncestorScope(t *testing.T) {
 	}
 	leafFrame.header.SuspendReason = uint16(SuspendNone)
 	leafFrame.header.Lifecycle = uint16(FrameActive)
+	if !DeferredPanicTraceActive(fixture.g) {
+		t.Fatal("ordinary inline descendant lost its inherited recovery scope")
+	}
 
 	if snapshot, recovered, valid := TakeRecover(
 		fixture.g, leafFrame.handle,
@@ -262,6 +271,9 @@ func TestRecoverTransparentAliasTakesExactAncestorScope(t *testing.T) {
 		fixture.g, leafFrame.handle,
 	); !valid || !recovered || snapshot != want {
 		t.Fatalf("transparent nested recover = (%+v, %t, %t), want (%+v, true, true)", snapshot, recovered, valid, want)
+	}
+	if !DeferredPanicTraceActive(fixture.g) {
+		t.Fatal("recover hid the deferred child's still-live traceback scope")
 	}
 	root := FrameFromStorage(fixture.parent.storage)
 	if root == nil || root.completion.status != completionRecoverTaken ||

@@ -203,9 +203,37 @@ type Frame struct {
 	// static parent frame, so llvm.coro.free deliberately skips the ordinary
 	// ReleaseFrame callback after CoroAnnotationElide. The runtime still links,
 	// validates, and destroys this metadata through the same Frame protocol.
-	borrowedStorage bool
-	parent          *Frame
-	next            *Frame
+	properties frameProperties
+	parent     *Frame
+	next       *Frame
+}
+
+// These private facts share the existing borrowed-storage byte. In particular
+// a negative deferred-panic query costs no ancestry walk and no extra storage
+// in G, HeaderV1 or Frame. CompletionRecord remains the recovery authority.
+type frameProperties uint8
+
+const (
+	frameBorrowedStorage frameProperties = 1 << iota
+	frameDeferredPanicScope
+)
+
+func (frame *Frame) borrowedStorage() bool {
+	return frame.properties&frameBorrowedStorage != 0
+}
+
+// linkAwaitChild is the publication point for both ordinary and eager awaits,
+// including foreign reentry. A suspended parent's scope cannot change while
+// its child runs. Terminal return restores that parent's own inherited fact;
+// nested recoveries therefore need neither a counter nor a separate stack.
+func linkAwaitChild(parent, child *Frame) {
+	child.parent = parent
+	child.properties &^= frameDeferredPanicScope
+	status := parent.completion.status
+	if status == completionRecoverArmed || status == completionRecoverTaken ||
+		status == completionArmed && parent.properties&frameDeferredPanicScope != 0 {
+		child.properties |= frameDeferredPanicScope
+	}
 }
 
 // BorrowedFrameStorageV2 is the compiler/runtime capacity contract for one
@@ -341,7 +369,7 @@ func validFrameAllocationIdentity(frame *Frame) bool {
 	if frame == nil || frame.header == nil {
 		return false
 	}
-	if frame.borrowedStorage {
+	if frame.borrowedStorage() {
 		return frame.allocationSize == 0 &&
 			frame.header.AllocationBase == unsafe.Pointer(frame)
 	}
@@ -535,7 +563,7 @@ func PublishFrameV2(
 	frame.header = header
 	frame.state = FrameInitialSuspended
 	frame.runtimeContext = mode
-	frame.borrowedStorage = true
+	frame.properties = frameBorrowedStorage
 	frame.next = g.frames
 	g.frames = frame
 	header.AllocationBase = metadata
@@ -641,7 +669,7 @@ func PublishFrameV3Compiler(
 	frame.header = header
 	frame.state = FrameInitialSuspended
 	frame.runtimeContext = mode
-	frame.borrowedStorage = true
+	frame.properties = frameBorrowedStorage
 	frame.next = g.frames
 	g.frames = frame
 	header.AllocationBase = metadata
@@ -669,7 +697,7 @@ func prepareAwait(
 		!completion && (recoverType != nil || recoverData != nil) {
 		return false
 	}
-	child.parent = parent
+	linkAwaitChild(parent, child)
 	g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
 	return true
 }
@@ -713,7 +741,7 @@ func PrepareAwaitCompletionCompiler(g *G, parentHandle, childHandle unsafe.Point
 			emptyCompletionRecord(&parent.completion) {
 			parent.completion.child = child.handle
 			parent.completion.status = completionArmed
-			child.parent = parent
+			linkAwaitChild(parent, child)
 			g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
 			return true
 		}
@@ -1038,7 +1066,7 @@ func CommitFrameDestroyV2(g *G, handle unsafe.Pointer) bool {
 		// schedulable frame with the same handle would make that receipt invalid.
 		return findFrame(g, handle) == nil
 	}
-	if frame.handle != handle || !frame.borrowedStorage ||
+	if frame.handle != handle || !frame.borrowedStorage() ||
 		frame.allocationSize != 0 || frame.owner != g ||
 		frame.header == nil || frame.parkWait != nil || frame.state != FrameDestroyPending ||
 		frame.header.AllocationBase != unsafe.Pointer(frame) ||
@@ -1416,7 +1444,7 @@ func retainPanicTraceFrameMetadata(
 		!emptyPanicTrace(g) && !activePanicTrace(g) {
 		return false
 	}
-	if frame.borrowedStorage {
+	if frame.borrowedStorage() {
 		if raw != nil || total != 0 || frame.allocationSize != 0 {
 			return false
 		}
@@ -1459,7 +1487,7 @@ func retainPanicTraceFrameMetadata(
 			return false
 		}
 	}
-	if !frame.borrowedStorage {
+	if !frame.borrowedStorage() {
 		// The LLVM handle is dead and the frame is no longer schedulable. Reuse
 		// its handle word for the physical allocation base so compact metadata
 		// embedded inside LLVM storage can later release the whole allocation
@@ -1499,7 +1527,7 @@ func retainPanicTraceFrame(
 }
 
 func retainDestroyedBorrowedPanicTraceFrame(g *G, frame *Frame) bool {
-	if frame == nil || !frame.borrowedStorage {
+	if frame == nil || !frame.borrowedStorage() {
 		return false
 	}
 	if frame.retainPanicTrace && frame.parent != nil &&
@@ -1614,7 +1642,7 @@ func TakeDiscardedPanicTraceFrame(g *G) (raw unsafe.Pointer, total uintptr, ok b
 			frame.header == nil {
 			return nil, 0, false
 		}
-		if frame.borrowedStorage {
+		if frame.borrowedStorage() {
 			if frame.allocationSize != 0 {
 				return nil, 0, false
 			}
@@ -1625,7 +1653,7 @@ func TakeDiscardedPanicTraceFrame(g *G) (raw unsafe.Pointer, total uintptr, ok b
 		frame.next = nil
 		frame.parent = nil
 		frame.completion = CompletionRecord{}
-		if frame.borrowedStorage {
+		if frame.borrowedStorage() {
 			Zero(unsafe.Pointer(frame), unsafe.Sizeof(Frame{}))
 			continue
 		}
@@ -1653,8 +1681,8 @@ func retainedPanicTraceFrame(
 	frame *Frame,
 ) (snapshot PanicTraceFrameSnapshot, next *Frame, ok bool) {
 	if frame == nil || frame.owner != g || frame.state != FrameTraceRetained || frame.header == nil ||
-		frame.borrowedStorage && frame.allocationSize != 0 ||
-		!frame.borrowedStorage && frame.allocationSize == 0 {
+		frame.borrowedStorage() && frame.allocationSize != 0 ||
+		!frame.borrowedStorage() && frame.allocationSize == 0 {
 		return PanicTraceFrameSnapshot{}, nil, false
 	}
 	if frame == g.panicTraceTail {

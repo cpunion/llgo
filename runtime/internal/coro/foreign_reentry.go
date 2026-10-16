@@ -183,7 +183,7 @@ func BeginForeignReentry(
 	parent.state = FrameSuspended
 	parent.header.SuspendReason = uint16(SuspendCall)
 	parent.header.Lifecycle = uint16(FrameSuspended)
-	child.parent = parent
+	linkAwaitChild(parent, child)
 	task.active = child
 	task.state = GRunnable
 	task.runP = nil

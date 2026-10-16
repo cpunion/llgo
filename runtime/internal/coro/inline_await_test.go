@@ -173,7 +173,7 @@ func TestCompilerInlineAwaitFusesBorrowedDestroyAndConsume(t *testing.T) {
 	if child == nil {
 		t.Fatal("resolve borrowed compiler child")
 	}
-	child.borrowedStorage = true
+	child.properties |= frameBorrowedStorage
 	child.allocationSize = 0
 	fixture.child.header.AllocationBase = unsafe.Pointer(child)
 	fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)

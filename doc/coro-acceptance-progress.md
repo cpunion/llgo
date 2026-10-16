@@ -548,6 +548,62 @@ and releaser, without changing production/runtime semantics. This branch is
 still unintegrated; a final immutable linked regression is pending. The latest
 long-run observation is v90 test/go94 completed top-level tests with no failure,
 v70 stdlib81/180 all passing, and v65 GOROOT shard4 still running.
+
+The subsequent exact v92 head `f430e3465` completes its immutable linked
+cohort: resource modes 60/60 (50.846s), the original reflection/GC, cgo and
+channel routes all pass (153.613s total), and the large discarded-result
+program matches Go in 12/12 executions. Source-after matches and private
+scratch is reclaimed; combined peak is 2852.8MiB. Compiler SHA-256 is
+`160db16028e25aa7a87059e73bc4c9020b6b45fff587309642a13b0d31cde9a6`,
+manifest `848bea65acdf015746314d3d706be69eea0dad34f919379cb0f5582c35b3e540`.
+The exact-head broad compiler gate passes205.310s/1246.8MiB and architecture
+passes0.828s/699.6MiB. Draft [PR273](https://github.com/cpunion/llgo/pull/273)
+targets only `llvm-coro`; its CI is still running at this checkpoint.
+
+The independent original full v90 `test/go` cohort now finishes **269/269**,
+zero failures/skips, at15:33:17 UTC with matching source-after at15:33:18,
+joined children and reclaimed cache/work scratch. Peak6824.2MiB; test binary
+SHA-256 `11290d54eb1a581230150a5bc8a65184a36094f6efe94bfb740ee8dbd5794902`.
+Receipt is `acceptance/test-go-v90-private-r1`, attempt
+`dd340943b35cba23-531b5073`. This is not a v92 suite result: the fresh v92
+full run includes the new large-defer tests and remains independently running.
+
+The remaining original `issue75764` performance failure has a concrete
+algorithmic cause candidate: `DeferredPanicTraceActive` walks every ordinary
+await ancestor even when none can own a recover scope. The current follow-up
+uses one inherited bit in the existing Frame flag byte, a shared child-link
+publication point and an O(1) negative observation. Positive observations
+retain the complete CompletionRecord identity/payload validation. No new G,
+Header, Frame capacity, recovery counter or completion protocol is introduced.
+Complete host runtime/coro race passes4.914s/390.4MiB, including nested alias
+recovery and forged-positive rejection; actual unchanged-case validation and
+cross-target layout verification are pending, not yet a performance pass.
+
+PR273 subsequently passes all18 CI jobs (`38922569789`) at exact head
+`f430e3465`. Fresh paginated reviews/inline comments/issue comments and GraphQL
+threads are empty with no next page; exact base/head is MERGEABLE/CLEAN. It
+merges at15:48:00 UTC as `4377699c0`, targeting only `cpunion/llgo:llvm-coro`.
+The new performance branch incorporates that merge without changing main.
+
+The scope-cache experiment now has an unchanged-case causal control. Exact
+v92 fails original GOROOT `fixedbugs/issue75764.go`: short8us, long161.417us,
+ratio20.177125 against allowed9 (source-after matches; peak2988.4MiB). Exact
+v93 source `b5f5cb2c3` passes the same untouched case (85.88s runner,
+peak2801.3MiB; source-after matches). Its compiler SHA-256 is
+`6bc1904698f15b3ca36e20ac22c2054bfc835eac5464dd471f6285f66c30b9c2`,
+manifest `633a4042a2fbf16e6bdaa8c05937f4cf4bba9bfcbff9e0f353d3f03d8f32cebf`.
+Both original logs are retained; this is a scaling-gate result, not a quiet
+whole-program performance comparison. Exact v93 host runtime/coro race passes
+5.726s/356.6MiB; unchanged architecture passes0.683s/665.5MiB. The first
+architecture invocation accidentally selected no tests and is explicitly not
+counted; the corrected invocation runs TestCoroArchitectureDebtIsMonotonic.
+The first 32-bit host-test compile exposes an existing overflowing constant
+in a branch guarded by pointer width. A nonconstant uint64-to-uintptr
+conversion now lets the original high-word assertions compile on32-bit;
+neither the 64-bit value nor any assertion is reduced. Final portable compile,
+positive panic/traceback regressions and repeat original-case gates remain
+pending for the follow-up head.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;

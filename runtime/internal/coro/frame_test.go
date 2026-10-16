@@ -138,7 +138,7 @@ func TestBorrowedFrameV2PublishAndDestroy(t *testing.T) {
 	frame := (*Frame)(unsafe.Pointer(metadata))
 	if g.frames != frame || frame.owner != g || frame.handle != handle ||
 		frame.header != header || frame.allocationSize != 0 ||
-		!frame.borrowedStorage || frame.state != FrameInitialSuspended ||
+		!frame.borrowedStorage() || frame.state != FrameInitialSuspended ||
 		header.AllocationBase != unsafe.Pointer(frame) {
 		t.Fatalf("borrowed publication = %+v, header base=%p", frame, header.AllocationBase)
 	}
@@ -189,7 +189,7 @@ func TestBorrowedFrameV3InitializesHeader(t *testing.T) {
 	}
 	frame := (*Frame)(unsafe.Pointer(metadata))
 	if g.frames != frame || frame.owner != g || frame.handle != handle || frame.header != header ||
-		frame.header.Descriptor != unsafe.Pointer(descriptor) || !frame.borrowedStorage ||
+		frame.header.Descriptor != unsafe.Pointer(descriptor) || !frame.borrowedStorage() ||
 		header.G != unsafe.Pointer(g) || header.Parent != nil ||
 		header.Descriptor != unsafe.Pointer(descriptor) || header.AllocationBase != unsafe.Pointer(frame) ||
 		header.ResultSlot != resultSlot || header.SuspendReason != uint16(SuspendNone) ||
@@ -253,7 +253,7 @@ func TestCompilerDynamicFrameRegisterPublishAndRelease(t *testing.T) {
 	if frame == nil || g.frames != frame || frame.owner != g || frame.handle != handle ||
 		frame.header != header || frame.header.Descriptor != unsafe.Pointer(descriptor) ||
 		frame.allocationSize != total || frame.state != FrameInitialSuspended ||
-		frame.borrowedStorage || header.AllocationBase != unsafe.Pointer(&memory[0]) ||
+		frame.borrowedStorage() || header.AllocationBase != unsafe.Pointer(&memory[0]) ||
 		frame != (*Frame)(unsafe.Pointer(metadata)) {
 		t.Fatalf("compiler frame publication = %+v, header=%+v", frame, header)
 	}

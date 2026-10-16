@@ -130,6 +130,16 @@ defer参数在statement执行时求值一次；cursor保证LIFO defer即使自�
 
 Child的frame可能在parent恢复前销毁，因此非普通终态不能只留在child header或G的一次性cancel token。structured await使用parent-owned `CompletionRecord`保存`Return/Panic/Goexit/Abort/Shutdown`及panic identity；普通用户result另存于parent-owned typed result slot，不占用Return的nil payload。CompletionRecord由单一scheduler owner发布/消费，不需要跨线程原子操作；外部producer仍只通过operation记录和既有发布协议交接。parent先读取kind，只有`Return`才读取普通result。root终态同样在destroy前复制到稳定boundary/G storage。现有cleanup-free terminal panic和直接command destroy只能保留为证明无defer/recover的受限快路径，不能作为通用Go unwind。
 
+普通 `runtime.Callers` 不得为排除 deferred-panic scope 而遍历全部 await
+祖先。每个真实 child 连接点（普通/兼容 await、bounded eager await 和 foreign
+reentry）统一通过 `linkAwaitChild` 发布一个继承的 frame 位：recover-armed
+completion 开启作用域，普通 managed child 继承，legacy empty completion
+终止继承。该位与 borrowed-storage 共用原有私有标志字节，不增加 Frame、Header
+或 G 大小，不引入计数器、TLS 或单独的恢复栈。零位只允许 O(1) 否定观察；正位
+不能授予恢复权限，仍须验证精确 child identity、CompletionRecord 状态和 panic
+payload。recover-taken 仍保留作用域直到 deferred child 返回；恢复 parent 时自然
+使用其原有继承位，嵌套恢复不需要额外 push/pop。终态、销毁与资源清理协议不变。
+
 当前工作树已完成可独立闭环的task-stop和动态cleanup子集：`CompletionRecord`实际发布并逐层消费`Return/Panic/Abort/Shutdown`，另用`ReturnRecovered`提交direct deferred invocation的recover；frame-local terminal status使普通defer返回不会把`Abort/Shutdown`覆盖成`Return`，defer中的panic作为overlay优先，只有精确的`ReturnRecovered`会清除原panic。zero-ticket gate以及Channel/Worker/Timer/Poll/child-await恢复路径都会保留精确cancel kind；取消命中await后仍先消费child completion，并按五种状态重新进入同一个drainer。函数一旦存在循环注册，全部defer site统一进入frame-rooted异构LIFO，typed record在调用前pop/copy/free；无环site（包括可闭合的descriptor defer）仍保留一次注册的typed slot fast path。当前证据覆盖compiler可枚举的owner-local defer与direct recover；range-over-func的跨frame`DeferStack`、`Goexit`、root boundary outcome及完整GOROOT panic/defer矩阵仍未完成。
 
 ### 3.6 资源型结果：物理完成不等于调用者接管
