@@ -319,7 +319,11 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 					// on its parent. Its independently owned entry uses fallback.
 					continue
 				}
-				if err := requireCleanup(function, false); err != nil {
+				cleanupOwner := coro.SSAResultDeliveryOwner(call)
+				if cleanupOwner == nil {
+					return fmt.Errorf("delivery call %q has no bound cleanup owner", call.String())
+				}
+				if err := requireCleanup(cleanupOwner, false); err != nil {
 					return err
 				}
 				for ordinal, helper := range []struct {
@@ -331,9 +335,9 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 				} {
 					var err error
 					if helper.target != nil {
-						err = u.recordCoroLoweredCall(function, helper.name, helper.target)
+						err = u.recordCoroLoweredCall(cleanupOwner, helper.name, helper.target)
 					} else {
-						err = builder.recordLoweredCallTarget(function, helper.name, coroLoweredCallTarget{importedTarget: recipe.archive.helpers[ordinal].fact.ID})
+						err = builder.recordLoweredCallTarget(cleanupOwner, helper.name, coroLoweredCallTarget{importedTarget: recipe.archive.helpers[ordinal].fact.ID})
 					}
 					if err != nil {
 						return err
@@ -354,7 +358,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 					if allocator == nil {
 						return fmt.Errorf("large delivery requires its exact frozen consumer result allocator")
 					}
-					if err := u.recordCoroLoweredCall(function, coroManagedFrameSlotAllocZCall, allocator); err != nil {
+					if err := u.recordCoroLoweredCall(cleanupOwner, coroManagedFrameSlotAllocZCall, allocator); err != nil {
 						return err
 					}
 					extra = append(extra, coroPlannedRuntimeHelper{name: coroManagedFrameSlotAllocZCall, placement: coroRuntimeHelperAtCleanup})
@@ -396,6 +400,13 @@ func (builder coroProgramIRBuilder) freezeDeliveryHelperPlacements(
 	if _, deferred := call.(*ssa.Defer); deferred {
 		placement = coroRuntimeHelperAtCleanup
 	}
+	var loweredOwner *ssa.Function
+	if owner := coro.SSAResultDeliveryOwner(call); owner != call.Parent() {
+		if owner == nil {
+			return fmt.Errorf("delivery helper placement has no bound cleanup owner")
+		}
+		loweredOwner = owner
+	}
 	for _, owner := range u.sortedUseOwners(call.Parent()) {
 		key := emissionFunctionOwnerKey{function: call.Parent(), owner: owner}
 		site, present := ir.sitePlans[key][call]
@@ -403,9 +414,12 @@ func (builder coroProgramIRBuilder) freezeDeliveryHelperPlacements(
 			return fmt.Errorf("delivery helper call %q lacks its frozen owner SitePlan", call.String())
 		}
 		site.managedRuntimeHelpers = append(site.managedRuntimeHelpers,
-			coroPlannedRuntimeHelper{name: initializer, placement: placement},
-			coroPlannedRuntimeHelper{name: drop, placement: coroRuntimeHelperAtResultDrop},
+			coroPlannedRuntimeHelper{name: initializer, placement: placement, loweredOwner: loweredOwner},
+			coroPlannedRuntimeHelper{name: drop, placement: coroRuntimeHelperAtResultDrop, loweredOwner: loweredOwner},
 		)
+		for index := range extra {
+			extra[index].loweredOwner = loweredOwner
+		}
 		site.managedRuntimeHelpers = append(site.managedRuntimeHelpers, extra...)
 		sort.Slice(site.managedRuntimeHelpers, func(i, j int) bool {
 			first, second := site.managedRuntimeHelpers[i], site.managedRuntimeHelpers[j]

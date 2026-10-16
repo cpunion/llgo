@@ -68,68 +68,76 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 			plan.fallback = &recipe
 		}
 	}
-	reachable := ir.coroReachableBlocks(fn)
-	for _, block := range fn.Blocks {
-		if !reachable[block] {
-			continue
-		}
-		for _, instruction := range block.Instrs {
-			call, callable := instruction.(ssa.CallInstruction)
-			if !callable {
+	// A range yield only registers external defers. Their result custody is
+	// part of this owner's existing heterogeneous cleanup drainer, not a guard
+	// in the short-lived registration closure.
+	for _, siteFunction := range coroExplicitCleanupFamily(fn) {
+		reachable := ir.coroReachableBlocks(siteFunction)
+		for _, block := range siteFunction.Blocks {
+			if !reachable[block] {
 				continue
 			}
-			frozen := ir.callPlans[call]
-			if frozen.failure != "" || frozen.plan.ElidesCall() || frozen.plan.RawPlain {
-				continue
-			}
-			if _, spawned := call.(*ssa.Go); spawned {
-				continue // Static and dynamic entries own their nil-output fallback.
-			}
-			recipe, present := ir.deliveryProducers[frozen.deliveryProducer]
-			if !present {
-				if dynamic := frozen.dynamicDelivery; dynamic != nil {
-					fact, planned := whole.CallPlan(call)
-					if !planned || !fact.ResultDelivery {
-						continue
-					}
-					if dynamic.largeResult && dynamic.allocate == "" {
-						return nil, fmt.Errorf("large dynamic delivery requires its frozen conditional result allocator")
-					}
-					if len(fact.Targets) == 1 {
-						target, _ := whole.Function(fact.Targets[0])
-						recipe = ir.deliveryProducers[target]
-					}
-					if uint64(len(plan.calls)) == uint64(^uint32(0)) {
-						return nil, fmt.Errorf("too many resource delivery call sites")
-					}
-					plan.calls = append(plan.calls, coroDeliveryGuardPlan{
-						call: call, recipe: recipe, dynamic: dynamic, tag: uint32(len(plan.calls)) + 1, hasEnv: true,
-					})
+			for _, instruction := range block.Instrs {
+				call, callable := instruction.(ssa.CallInstruction)
+				if !callable {
 					continue
 				}
-				// A dynamic/closed-value occurrence must not receive an ordinary
-				// result slot until its descriptor carries the same contract.
-				if fact, planned := whole.CallPlan(call); planned {
-					for _, id := range fact.Targets {
-						target, _ := whole.Function(id)
-						if _, resource := ir.deliveryProducers[target]; resource {
-							return nil, fmt.Errorf("llgo.coroBorrowResult requires a bound physical resource-delivery guard for dynamic call %q", call.String())
+				if coro.SSAResultDeliveryOwner(call) != fn {
+					continue
+				}
+				frozen := ir.callPlans[call]
+				if frozen.failure != "" || frozen.plan.ElidesCall() || frozen.plan.RawPlain {
+					continue
+				}
+				if _, spawned := call.(*ssa.Go); spawned {
+					continue // Static and dynamic entries own their nil-output fallback.
+				}
+				recipe, present := ir.deliveryProducers[frozen.deliveryProducer]
+				if !present {
+					if dynamic := frozen.dynamicDelivery; dynamic != nil {
+						fact, planned := whole.CallPlan(call)
+						if !planned || !fact.ResultDelivery {
+							continue
+						}
+						if dynamic.largeResult && dynamic.allocate == "" {
+							return nil, fmt.Errorf("large dynamic delivery requires its frozen conditional result allocator")
+						}
+						if len(fact.Targets) == 1 {
+							target, _ := whole.Function(fact.Targets[0])
+							recipe = ir.deliveryProducers[target]
+						}
+						if uint64(len(plan.calls)) == uint64(^uint32(0)) {
+							return nil, fmt.Errorf("too many resource delivery call sites")
+						}
+						plan.calls = append(plan.calls, coroDeliveryGuardPlan{
+							call: call, recipe: recipe, dynamic: dynamic, tag: uint32(len(plan.calls)) + 1, hasEnv: true,
+						})
+						continue
+					}
+					// A dynamic/closed-value occurrence must not receive an ordinary
+					// result slot until its descriptor carries the same contract.
+					if fact, planned := whole.CallPlan(call); planned {
+						for _, id := range fact.Targets {
+							target, _ := whole.Function(id)
+							if _, resource := ir.deliveryProducers[target]; resource {
+								return nil, fmt.Errorf("llgo.coroBorrowResult requires a bound physical resource-delivery guard for dynamic call %q", call.String())
+							}
 						}
 					}
+					continue
 				}
-				continue
+				if uint64(len(plan.calls)) == uint64(^uint32(0)) {
+					return nil, fmt.Errorf("too many resource delivery call sites")
+				}
+				entry, err := source.coroPhysicalEntrySourceSignature(recipe.producer)
+				if err != nil || entry == nil || entry.Params().Len() < recipe.signature.Params().Len() || entry.Params().Len() > recipe.signature.Params().Len()+1 {
+					return nil, fmt.Errorf("delivery producer lacks its exact environment layout")
+				}
+				plan.calls = append(plan.calls, coroDeliveryGuardPlan{
+					call: call, recipe: recipe, tag: uint32(len(plan.calls)) + 1,
+					hasEnv: entry.Params().Len() != recipe.signature.Params().Len(),
+				})
 			}
-			if uint64(len(plan.calls)) == uint64(^uint32(0)) {
-				return nil, fmt.Errorf("too many resource delivery call sites")
-			}
-			entry, err := source.coroPhysicalEntrySourceSignature(recipe.producer)
-			if err != nil || entry == nil || entry.Params().Len() < recipe.signature.Params().Len() || entry.Params().Len() > recipe.signature.Params().Len()+1 {
-				return nil, fmt.Errorf("delivery producer lacks its exact environment layout")
-			}
-			plan.calls = append(plan.calls, coroDeliveryGuardPlan{
-				call: call, recipe: recipe, tag: uint32(len(plan.calls)) + 1,
-				hasEnv: entry.Params().Len() != recipe.signature.Params().Len(),
-			})
 		}
 	}
 	if plan.fallback == nil && len(plan.calls) == 0 {

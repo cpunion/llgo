@@ -983,6 +983,26 @@ the full10-mode matrix passes **10,000/10,000** executions with exit0, unchanged
 binary hash and matching source-after. Diagnostic codes/printf are not present.
 Merging the predecessor history changes no source file relative to v110.
 
+The follow-up is now [PR #281](https://github.com/cpunion/llgo/pull/281), exact
+head `23737663b`, targeting `llvm-coro` only. Run `38965431697` is queued;
+review, inline/issue-comment and review-thread inventories are empty on the
+latest check, but no CI completion or merge is claimed.
+
+Immutable v107 completes another fresh, unfiltered **271/271 `test/go`** run,
+zero failures/skips, including nested compiler probes. Source-after matches at
+20:59:14 UTC; children join and private scratch is reclaimed. Its binary is
+`ffd3add2903d69ec1d05507dd711f3de44c5063db4e5b2a5e504d84769095ddf`
+(25931536bytes); separate build/run peaks are8460.7/6646.3MiB. This predates the
+worker-close correction and is not relabeled as final-head full acceptance.
+
+The next isolated range-owner resource-defer fixture adds static and captured
+dynamic cases10/11. With unchanged v110 compiler and frozen v112 fixture source
+the real build fails physical guard preflight at the external dynamic defer;
+that mixed-version negative is retained. The follow-up projects custody and
+helper edges onto the existing outer drainer, with source/execution ownership
+bound in digest v45. Native/wasm physical tests and actual linked fd execution
+must both pass before this gap is marked closed.
+
 Immutable v108 completes the four runtime packages with **68 passes and one
 helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
 llgoext23. Source-after20:47:34 matches, children join and private scratch is

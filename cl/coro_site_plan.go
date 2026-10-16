@@ -199,6 +199,11 @@ func (p *context) beginCoroSiteEmissionMode(
 		}
 		if observeHelpers {
 			if p.hasCoroPhysicalEmission() {
+				for _, helper := range plan.managedRuntimeHelpers {
+					if helper.placement == placement && helper.loweredOwner != nil && helper.loweredOwner != p.goFn {
+						panic(fmt.Errorf("coroutine relocated helper %q emitted outside its frozen cleanup owner", helper.name))
+					}
+				}
 				helpers = plan.managedRuntimeHelpersAt(placement)
 			} else if placement == coroRuntimeHelperAtSource {
 				helpers = append([]string(nil), plan.plainRuntimeHelpers...)

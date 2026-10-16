@@ -646,6 +646,9 @@ func (placement coroRuntimeHelperPlacement) cleanup() bool {
 type coroPlannedRuntimeHelper struct {
 	name      string
 	placement coroRuntimeHelperPlacement
+	// A relocated resource helper is frozen on the external defer drainer's
+	// lowered-call owner; nil keeps the source instruction's existing binding.
+	loweredOwner *ssa.Function
 }
 
 type CoroCallElisionKind uint8
@@ -1690,7 +1693,7 @@ func (u *EmissionUniverse) CoroLoweredCalls(owner *ssa.Function) ([]coro.SSALowe
 		}
 		if source := frozen.whenResultDeliveryOf; source != nil {
 			if frozen.noUnwind || frozen.unwindOnly || frozen.explicitStatusElided || frozen.rawPlain ||
-				source.Parent() != owner || source.Common() == nil || source.Common().StaticCallee() != nil {
+				coro.SSAResultDeliveryOwner(source) != owner || source.Common() == nil || source.Common().StaticCallee() != nil {
 				return nil, fmt.Errorf("coroutine lowered call %q in %q has an invalid conditional managed invocation", logicalName, owner.Name())
 			}
 			if target == nil {

@@ -256,7 +256,7 @@ func deriveCoroFunctionProgramCapabilities(
 				}
 				if source := call.WhenResultDeliveryOf; source != nil {
 					invocation, present := plan.CallPlan(source)
-					if source.Parent() != caller || !present || !invocation.ResultDelivery {
+					if coro.SSAResultDeliveryOwner(source) != caller || !present || !invocation.ResultDelivery {
 						return nil, fmt.Errorf("managed-dispatch lowered call %q in %q lost its active source delivery plan", call.LogicalName, caller.Name())
 					}
 				}
