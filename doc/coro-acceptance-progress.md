@@ -365,9 +365,25 @@ function type at the existing low-level bridge. It reuses typed foreign-worker
 record lowering, rather than extending word-call.v1 or pretending a float is a
 uintptr. The parsed production-source LLVM gate verifies park/resume and the
 actual double C operand; selected typed/raw-worker regressions pass
-(2.533s / 1251.2 MiB). Actual x509 package compilation/execution and the broader
-source-patch selection remain pending; this is an isolated experiment, not
-claimed stdlib acceptance or resource-cancellation delivery completion.
+(2.533s / 1251.2 MiB). A separate immutable v49 source (`881ab7c0e`, manifest
+`9fc3ac4ffe1c234cc207136b385f15db6e85e247f70a63c9676dce596a4a640b`)
+uses the unchanged v48 compiler. Its real x509 compile passes the FP/opaque
+boundary and next correctly rejects CFDataToSlice's erased uintptr-to-pointer
+conversion. That needs an accurate typed CF pointer adapter, not a permissive
+integer provenance rule. The x509 package is still not accepted.
+The broad source-patch/Darwin selection finishes with one assertion failure:
+the two correct WASM patch files arrived in a different order. The test now
+compares exact membership and also checks raw traps remain ENOSYS; no production
+WASM behavior or instruction golden changes. The complete source-patch selection
+and architecture gate pass on the corrected test (2.196s / 692.5 MiB).
+
+The second full-GOROOT attempt is also retained as an infrastructure stop:
+three scratch scans raced with removal of an owned temporary archive directory.
+The separate v3 local runner permits only that precise child-ENOENT race to
+retry within five seconds, still requires a complete valid scan, and rejects
+other errors immediately. The RSS guard, memory/time caps and frozen v2 runner
+are unchanged. A third whole-selection attempt restarts at the beginning; no
+interrupted GOROOT cases are adopted as completed batch acceptance.
 
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
