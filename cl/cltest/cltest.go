@@ -862,6 +862,48 @@ func filterRunOutput(in []byte) []byte {
 	return out.Bytes()
 }
 
+var compileIRRuntime struct {
+	once sync.Once
+	pkg  *types.Package
+	err  error
+}
+
+// CompileIR needs the production runtime's type declarations, not a host-Go
+// import of LLGo-only sources. Cache only immutable go/types data; the loader's
+// LLVM program is disposed before any test program consumes those declarations.
+func compileIRRuntimeTypes() (*types.Package, error) {
+	compileIRRuntime.once.Do(func() {
+		dir, err := os.MkdirTemp("", "llgo-cltest-runtime-types-")
+		if err != nil {
+			compileIRRuntime.err = err
+			return
+		}
+		defer os.RemoveAll(dir)
+		source := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(source, []byte("package main\nfunc main() {}\n"), 0600); err != nil {
+			compileIRRuntime.err = err
+			return
+		}
+		conf := build.NewDefaultConf(build.ModeGen)
+		conf.ForceRebuild = true
+		conf.ModuleHook = func(pkg build.Package) {
+			if pkg.Package != nil && pkg.PkgPath == llssa.PkgRuntime {
+				compileIRRuntime.pkg = pkg.Types
+			}
+		}
+		packages, err := build.Do([]string{source}, conf)
+		if len(packages) != 0 && packages[0].LPkg != nil {
+			packages[0].LPkg.Prog.Dispose()
+		}
+		if err != nil {
+			compileIRRuntime.err = err
+		} else if compileIRRuntime.pkg == nil {
+			compileIRRuntime.err = errors.New("production loader returned no runtime type package")
+		}
+	})
+	return compileIRRuntime.pkg, compileIRRuntime.err
+}
+
 func CompileIREx(t *testing.T, src any, fname string, dbg bool, configure func(llssa.Program)) string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -884,6 +926,13 @@ func CompileIREx(t *testing.T, src any, fname string, dbg bool, configure func(l
 	}
 	foo.WriteTo(os.Stderr)
 	prog := ssatest.NewProgramEx(t, nil, imp)
+	prog.SetRuntime(func() *types.Package {
+		runtimeTypes, err := compileIRRuntimeTypes()
+		if err != nil {
+			t.Fatal("load production runtime types:", err)
+		}
+		return runtimeTypes
+	})
 	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
 	if configure != nil {
 		configure(prog)
