@@ -579,6 +579,31 @@ Complete host runtime/coro race passes4.914s/390.4MiB, including nested alias
 recovery and forged-positive rejection; actual unchanged-case validation and
 cross-target layout verification are pending, not yet a performance pass.
 
+PR273 subsequently passes all18 CI jobs (`38922569789`) at exact head
+`f430e3465`. Fresh paginated reviews/inline comments/issue comments and GraphQL
+threads are empty with no next page; exact base/head is MERGEABLE/CLEAN. It
+merges at15:48:00 UTC as `4377699c0`, targeting only `cpunion/llgo:llvm-coro`.
+The new performance branch incorporates that merge without changing main.
+
+The scope-cache experiment now has an unchanged-case causal control. Exact
+v92 fails original GOROOT `fixedbugs/issue75764.go`: short8us, long161.417us,
+ratio20.177125 against allowed9 (source-after matches; peak2988.4MiB). Exact
+v93 source `b5f5cb2c3` passes the same untouched case (85.88s runner,
+peak2801.3MiB; source-after matches). Its compiler SHA-256 is
+`6bc1904698f15b3ca36e20ac22c2054bfc835eac5464dd471f6285f66c30b9c2`,
+manifest `633a4042a2fbf16e6bdaa8c05937f4cf4bba9bfcbff9e0f353d3f03d8f32cebf`.
+Both original logs are retained; this is a scaling-gate result, not a quiet
+whole-program performance comparison. Exact v93 host runtime/coro race passes
+5.726s/356.6MiB; unchanged architecture passes0.683s/665.5MiB. The first
+architecture invocation accidentally selected no tests and is explicitly not
+counted; the corrected invocation runs TestCoroArchitectureDebtIsMonotonic.
+The first 32-bit host-test compile exposes an existing overflowing constant
+in a branch guarded by pointer width. A nonconstant uint64-to-uintptr
+conversion now lets the original high-word assertions compile on32-bit;
+neither the 64-bit value nor any assertion is reduced. Final portable compile,
+positive panic/traceback regressions and repeat original-case gates remain
+pending for the follow-up head.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
