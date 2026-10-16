@@ -41,6 +41,9 @@ func coroManagedDispatchPublishedEntry(
 		callPlan.SyncDispatch || callPlan.RawPlain || len(callPlan.Targets) == 0 {
 		return coro.ManagedEntryNone
 	}
+	if callPlan.ResultDelivery {
+		return coro.ManagedEntryNone // Structured-only dispatch has no custody probe.
+	}
 	published := coro.ManagedEntryNone
 	for _, targetID := range callPlan.Targets {
 		target, found := plan.Function(targetID)
@@ -131,6 +134,7 @@ func (p *context) compileCoroManagedDispatchAwait(
 			trustedDescriptor:       instructionPlan.dispatchEntry != coro.ManagedEntryNone,
 			entry:                   instructionPlan.dispatchEntry,
 			nativeResult:            instructionPlan.directOutcomeNativeResult,
+			delivery:                p.coroDynamicDeliveryGuard(call),
 		},
 	)
 	p.recordCoroValueAddress(call, result.address)
@@ -146,6 +150,7 @@ type coroManagedDispatchAwaitOptions struct {
 	descriptorNonNil        bool
 	entry                   coro.ManagedEntryKind
 	nativeResult            bool
+	delivery                *coroDeliveryGuardState
 }
 
 // compileCoroManagedDispatchAwaitValue is the one capability probe and child
@@ -180,6 +185,9 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	if options.entry != coro.ManagedEntryNone && !options.trustedDescriptor {
 		panic("single-entry dispatch requires a frozen trusted publication proof")
 	}
+	if options.delivery != nil && options.entry != coro.ManagedEntryNone {
+		panic("resource delivery requires the capability-aware child transaction")
+	}
 	abi, err := newCoroPlainDispatchABI(p, signature)
 	if err != nil {
 		panic(fmt.Errorf("coroutine managed dispatch await: %w", err))
@@ -190,6 +198,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 		ABIHash:           abi.hash,
 		Result:            resultLayout,
 		TrustedDescriptor: options.trustedDescriptor,
+		DeliveryGuard:     options.delivery != nil,
 	}
 	// Descriptor validation would otherwise introduce a hidden
 	// runtime.AssertNilDeref call after the whole-program helper closure was
@@ -312,6 +321,10 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	plainBlock := p.fn.MakeBlock()
 	join := p.fn.MakeBlock()
 	selection := b.PrepareCoroDispatchCall(fn, dispatchOptions)
+	if guard := options.delivery; guard != nil {
+		guard.result = resultSlot
+		p.beginCoroDynamicDeliveryCall(b, guard, fn, args, selection, options.cleanup)
+	}
 	hasOutcome, hasCoro, codeEntry := selection.HasOutcome(), selection.HasCoro(), selection.CodeEntry()
 	b.If(hasCoro, coroutineBlock, nonCoroutineBlock)
 
@@ -362,8 +375,12 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	b.Jump(join)
 
 	b.SetBlockContinuation(join)
+	value := p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results())
+	if guard := options.delivery; guard != nil {
+		body.cleanup.delivery.claim(b, guard)
+	}
 	return coroAwaitedValue{
-		value:   p.loadCoroAwaitResult(b, resultSlot, abi.signature.Results()),
+		value:   value,
 		address: p.coroAwaitResultAddress(b, resultSlot, abi.signature.Results()),
 		physicalCalls: []coroPhysicalCall{
 			{call: child, argCount: len(args) + 3, resultArg: 1},

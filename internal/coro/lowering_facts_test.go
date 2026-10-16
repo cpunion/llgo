@@ -228,6 +228,39 @@ func TestLoweringFactsCanonicalJSONAndDigest(t *testing.T) {
 	}
 }
 
+func TestLoweringFactsManagedDescriptorHasNoSyntheticTarget(t *testing.T) {
+	facts := cloneLoweringFacts(validLoweringFacts(t))
+	exact, err := facts.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := &facts.Functions[1].Sites[0].Helpers[0]
+	helper.Target, helper.ManagedDispatch = "", true
+	dynamic, err := facts.Digest()
+	if err != nil || dynamic == exact {
+		t.Fatalf("typed managed invocation did not bind its transport: %s %v", dynamic, err)
+	}
+	for _, shortcut := range []string{"exact-target", "no-unwind", "unwind-only", "elided"} {
+		t.Run(shortcut, func(t *testing.T) {
+			mutated := cloneLoweringFacts(facts)
+			helper := &mutated.Functions[1].Sites[0].Helpers[0]
+			switch shortcut {
+			case "exact-target":
+				helper.Target = "test.helper"
+			case "no-unwind":
+				helper.NoUnwind = true
+			case "unwind-only":
+				helper.UnwindOnly = true
+			case "elided":
+				helper.ExplicitStatusElided = true
+			}
+			if _, err := mutated.Digest(); err == nil || !strings.Contains(err.Error(), "conflicting descriptor") {
+				t.Fatalf("unsafe descriptor helper shortcut accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoweringFactsVerifierRejectsMalformedFacts(t *testing.T) {
 	tests := []struct {
 		name string

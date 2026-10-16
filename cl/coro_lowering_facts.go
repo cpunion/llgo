@@ -294,13 +294,31 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 		if coroCompilerElidesImplicitFaultRuntimeHelper(instruction, logicalName) {
 			continue
 		}
+		active, err := u.coroProgramIR.deliveryHelperActive(plan, instruction, logicalName)
+		if err != nil {
+			return coro.LoweringFact{}, false, err
+		}
+		if !active {
+			continue
+		}
 		planned, ok := loweredCalls[logicalName]
-		if !ok || planned.Target == nil {
+		if !ok {
 			return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q is absent from the frozen plan", logicalName)
 		}
-		targetID, ok := plan.FunctionID(planned.Target)
-		if !ok {
-			return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q target %q has no frozen FunctionID", logicalName, planned.Target.Name())
+		var targetID coro.FunctionID
+		if planned.ManagedDispatch {
+			if planned.Target != nil || planned.WhenResultDeliveryOf != instruction || planned.NoUnwind ||
+				planned.RawPlain || planned.UnwindOnly || planned.ExplicitStatusElided {
+				return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q lost its exact conditional managed-dispatch identity", logicalName)
+			}
+		} else {
+			if planned.Target == nil {
+				return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q has no frozen target", logicalName)
+			}
+			targetID, ok = plan.FunctionID(planned.Target)
+			if !ok {
+				return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q target %q has no frozen FunctionID", logicalName, planned.Target.Name())
+			}
 		}
 		helpers = append(helpers, coro.ManagedEdge{
 			Order:                len(helpers),
@@ -308,6 +326,7 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 			Ordinal:              len(helpers),
 			LogicalName:          logicalName,
 			Target:               targetID,
+			ManagedDispatch:      planned.ManagedDispatch,
 			NoUnwind:             planned.NoUnwind,
 			UnwindOnly:           planned.UnwindOnly,
 			ExplicitStatusElided: planned.ExplicitStatusElided,

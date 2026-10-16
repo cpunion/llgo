@@ -338,6 +338,35 @@ library helper publication and reflection second handoff are still gated;
 public standard-library seeds stay off.
 The broad compiler selection also passes (226.290s / 1244.4MiB peak), as do
 the final model/archive checks and unchanged architecture gate (1.067s).
+
+Subsequent isolated physical work retains conditional managed occurrences in
+the frontend's existing lowered-call inventory, with one ProgramIR-builder
+storage/merge authority for exact and conditional records. Pointer-free
+lowering facts can represent the same typed managed transport without a fake
+FunctionID; missing exact targets and mixed descriptor/no-unwind/elision
+shortcuts still reject. Full core race passes (99.681s / 1669.5MiB peak).
+The first frontend architecture probe detects two extra direct plan authorities;
+construction is then narrowed to the existing ProgramIR builder and the gate
+passes unchanged (0.872s). No budget is raised. Typed private helper metadata
+also reuses the ordinary descriptor/primary-thunk factory without changing
+helper FuncRep or cloning its source body. Native and wasm32 tests verify
+before/after CoroSplit, and reject mismatched helper signatures; public source
+publication still rejects while dynamic frame custody is unbound. These are
+private intermediate commits, not a completed dynamic resource-delivery path.
+The broad compiler selection passes (154.627s / 1285.2MiB peak); the selected
+private-factory/compiler gates and unchanged architecture gate also pass
+(7.280s / 0.813s). The factory keeps original source-facade identity separate
+from its canonical primary, preserving go:linkname function-value signatures.
+Immutable v89 executes the existing static resource modes **60/60** plus
+original reflection/GC, cgo routes and claimed-channel cleanup successfully
+(61.617s / 204.835s, source-after matches; peak 2757.9MiB). Full SSA and cltest
+also pass (20.558s / 19.370s). Compiler SHA-256 is
+`5ba48275be2c8cba27e139afb27cc66563ffe5b4bbff7bd9158025dcef6695ae`,
+manifest `29e101a979065e19e4ab5fdc6dbf8bfe2f4557af95bd3fe895df58bc164a1dc3`.
+The private work rebases onto the merged integration branch with the identical
+Git tree `d7b13e8d53b10d9ac6d611dbe6b73d4e2c8166c6`; this later ledger update
+changes only documentation. These execution gates establish refactor safety,
+not the still-unbound dynamic resource path.
 This planning slice is [PR #270](https://github.com/cpunion/llgo/pull/270),
 head `c5a501c86`, targeting `llvm-coro`. Immutable v86 passes all 60 resource
 executions plus original reflection/GC, cgo routes and claimed-channel cleanup
@@ -347,6 +376,19 @@ manifest `0708714a92f890468a6ea7b2bde9f5132655d4c542f2243313136d24cb830099`.
 The first compiler launcher raced snapshot extraction and failed before
 producing a compiler; retained `r1` is not a compiler acceptance pass. The
 complete frozen-source `r2` build is the compiler used above. PR CI is pending.
+CI head `1d139f475` later passes 16 jobs but fails the Cortex-M lane's host
+production-PC-cache fixture at its shared 60s deadline, before the linked
+Cortex-M program step. That log cannot separate race compilation and actual
+cache execution. New head `6fb992a92` separates a bounded 3m build from a
+stricter 20s test / 30s process execution limit, without changing production
+declarations, policy sizes or collision/race assertions. Warm verification
+passes 4.371s; an explicitly empty nested GOCACHE also passes (cold build
+15.037s, executions 1.388s/1.321s, matching source-after, 256.9MiB peak).
+This does not establish the failed GitHub worker's original stage/cause.
+Run `38909611903` verifies the corrected head; the old failure is retained.
+That run completes **18/18 successful jobs** at 14:05:55 UTC. After fresh
+paginated review/comment and GraphQL thread checks remain empty, exact head
+`6fb992a92` merges as `402beabea` at 14:08:35 UTC.
 
 The fresh complete v85 `test/go` run now passes **268/268**, zero failures or
 skips, at 13:09:34 UTC. Source-after matches at 13:09:35; all child process
@@ -369,7 +411,58 @@ pass. Immutable v87 passes the unchanged original GOROOT `issue5856.go`
 `478da962e09d39e846a0f3ea872f258c1c2caebce26909d4e11adfeb971039b8`,
 manifest `7d7d2bc242dfc49b10829b461b45e8feb9d225b7c9c4f2db1ef03db61c86264e`.
 The new linked before/after-recover, retained-frame and repeated-query tests,
-plus the existing caller-exhaustion/line-info regression selection, remain live.
+plus the existing caller-exhaustion/line-info regression selection, all pass
+(line-info 64.67s, source-after matches; children joined, scratch reclaimed).
+Exact PR271 head `5da4a2315` additionally has immutable v88 execution:
+original `issue5856` passes 65.55s, resource modes pass 60/60, and original
+reflection/GC, cgo routes and claimed-channel cleanup all pass (127.810s,
+source-after matches, 2787.2MiB peak). Compiler SHA-256 is
+`4d77e3ca026743be80a895c496f0bc3212e4213620f51392b0a60563782ba16d`,
+manifest `930567042003860c465914653bec1dd550d05dd6ac253e4d6432b4120c4f0b77`.
+PR [#271](https://github.com/cpunion/llgo/pull/271) passes all 18 CI jobs in
+run `38906867661`; fresh paginated reviews/comments and review threads are
+empty. After PR270 merges, another fresh complete review/comment/thread check
+is empty and the exact head merges as `4232087aa` at 14:10:44 UTC. Both PRs
+target `llvm-coro` only; no main branch is changed. These 18-job coroutine CI
+results are not a final all-workflow/full-corpus claim.
+
+The older GOROOT shard 3 completes **134/135**, with only `issue29504.go`
+missing the original marker line in its panic traceback. The unchanged case
+passes a strict current v89 replay (103.70s case, source-after matches,
+3084.9MiB peak). The older failed cohort is retained; versions are not stitched
+into a fictitious same-snapshot full pass. The eight-shard script continues
+into shard 4. The live v70 stdlib cohort has 71/180 completed packages, all
+passing at that checkpoint; neither long cohort is yet complete.
+
+The next development cohort wires conditional delivery consumers into the
+production frontend, rather than registering test-only helpers. Exact typed
+recipes bind their non-debug source ordinal and source/cleanup/result-drop
+placements before the existing effect fixed point. Final value-flow decisions
+prune both the pointer-free lowering ledger and all emission placements; a
+closed nonresource/nil-only family keeps no helper or cleanup ownership.
+The caller's `nounwind` certificate cannot certify a dynamically selected
+initializer/drop. Both exact and descriptor helpers now share the existing
+frozen-record validator and SitePlan observation boundary.
+
+Physical consumers reuse the result slot, one frame active tag and existing
+drainer/child-await engine. They read the optional tail only on `HasDelivery`,
+arm only after initialization, claim after completion/result consumption and
+clear before dropping. Compiler helpers never inherit direct-defer recover
+permission. Native/wasm32 pre/post-CoroSplit tests pass with **CompleteRuntimeABI**
+and the full helper observer, including ordinary calls, local defer and looped
+heterogeneous defer (2.686s / 1229.7MiB). The final focused helper/ledger/cleanup
+gate passes 5.985s / 1297.9MiB and the unchanged architecture gate passes
+0.930s / 699.1MiB. The initial architecture failure (one extra observation
+authority) is retained: the correction shares the existing boundary rather
+than raising a budget. These are emitted-IR/host gates, not a claim that a
+dynamic resource producer is already publishable or verified end-to-end.
+The producer-publication, unguarded-dispatch and FFI rejection gates remain;
+bodyless library helpers, external defer owners, conditional allocation for
+large deferred dynamic results, output-loan lifetime proof, reflect's second
+handoff and standard-library adoption remain required before public seeds.
+The full compiler and immutable linked-program regressions are tracked
+separately. The ongoing older v70 stdlib cohort now has **76/180** complete,
+all passing; the older GOROOT eight-shard run remains in shard 4.
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;

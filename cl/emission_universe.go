@@ -463,6 +463,7 @@ type CoroForeignWorkerCertificate struct {
 
 type coroLoweredCallTarget struct {
 	target               *ssa.Function
+	whenResultDeliveryOf ssa.CallInstruction
 	noUnwind             bool
 	unwindOnly           bool
 	explicitStatusElided bool
@@ -749,6 +750,7 @@ func (shape coroHostOperationCallShape) valid() bool {
 type coroFrozenCallSitePlan struct {
 	plan               CoroCallSitePlan
 	deliveryProducer   *ssa.Function
+	dynamicDelivery    *coroDynamicDeliveryRecipe
 	interfaceMethodKey string
 	failure            string
 	opcode             int
@@ -1670,6 +1672,16 @@ func (u *EmissionUniverse) CoroLoweredCalls(owner *ssa.Function) ([]coro.SSALowe
 		if logicalName == "" || !utf8.ValidString(logicalName) || strings.IndexByte(logicalName, 0) >= 0 {
 			return nil, fmt.Errorf("coroutine lowered-call owner %q has invalid logical name %q", owner.Name(), logicalName)
 		}
+		if source := frozen.whenResultDeliveryOf; source != nil {
+			if target != nil || frozen.noUnwind || frozen.unwindOnly || frozen.explicitStatusElided || frozen.rawPlain ||
+				source.Parent() != owner || source.Common() == nil || source.Common().StaticCallee() != nil {
+				return nil, fmt.Errorf("coroutine lowered call %q in %q has an invalid conditional managed invocation", logicalName, owner.Name())
+			}
+			calls = append(calls, coro.SSALoweredCall{
+				LogicalName: logicalName, ManagedDispatch: true, WhenResultDeliveryOf: source,
+			})
+			continue
+		}
 		if target == nil {
 			return nil, fmt.Errorf("coroutine lowered call %q in %q has a nil target", logicalName, owner.Name())
 		}
@@ -1717,7 +1729,7 @@ func (u *EmissionUniverse) ResolveCoroLoweredCallRecord(owner *ssa.Function, log
 // ResolveCoroLoweredCallRecord so RawPlain cannot be lost.
 func (u *EmissionUniverse) ResolveCoroLoweredCall(owner *ssa.Function, logicalName string) (*ssa.Function, bool, error) {
 	call, ok, err := u.ResolveCoroLoweredCallRecord(owner, logicalName)
-	return call.Target, ok, err
+	return call.Target, ok && !call.ManagedDispatch, err
 }
 
 // ResolveCoroPlainLoweredCall returns one helper occurrence emitted by an
@@ -1835,6 +1847,17 @@ func (u *EmissionUniverse) recordCoroLoweredCallSite(owner *ssa.Function, logica
 	if _, frozen := u.required[target]; !frozen {
 		return fmt.Errorf("prepare emission universe: lowered call %q in %q targets helper %q outside the emission universe", logicalName, owner.Name(), target.Name())
 	}
+	builder := coroProgramIRBuilder{canonical: emissionCanonicalIndex{universe: u}}
+	return builder.recordLoweredCallTarget(owner, logicalName, coroLoweredCallTarget{
+		target: target, unwindOnly: unwindOnly, explicitStatusElided: explicitStatusElided, rawPlain: rawPlain,
+	})
+}
+
+// The exact and typed dynamic builders share one storage/merge authority.
+// Callers validate their invocation domain before this immutable record is
+// retained; dynamic occurrences may be repeated only with the same condition.
+func (builder coroProgramIRBuilder) recordLoweredCallTarget(owner *ssa.Function, logicalName string, record coroLoweredCallTarget) error {
+	u := builder.canonical.universe
 	if u.loweredCalls == nil {
 		u.loweredCalls = make(map[*ssa.Function]map[string]coroLoweredCallTarget)
 	}
@@ -1844,23 +1867,24 @@ func (u *EmissionUniverse) recordCoroLoweredCallSite(owner *ssa.Function, logica
 		u.loweredCalls[owner] = byName
 	}
 	if previous, ok := byName[logicalName]; ok {
-		if previous.target != target {
-			return fmt.Errorf("prepare emission universe: lowered call %q in %q resolves to both %q and %q", logicalName, owner.Name(), previous.target.Name(), target.Name())
+		if previous.whenResultDeliveryOf != nil || record.whenResultDeliveryOf != nil {
+			if previous != record {
+				return fmt.Errorf("prepare emission universe: lowered call %q in %q mixes exact or conflicting conditional managed invocations", logicalName, owner.Name())
+			}
+			return nil
 		}
-		if previous.rawPlain != rawPlain {
+		if previous.target != record.target {
+			return fmt.Errorf("prepare emission universe: lowered call %q in %q resolves to both %q and %q", logicalName, owner.Name(), previous.target.Name(), record.target.Name())
+		}
+		if previous.rawPlain != record.rawPlain {
 			return fmt.Errorf("prepare emission universe: lowered call %q in %q mixes managed and raw/plain occurrences", logicalName, owner.Name())
 		}
-		previous.unwindOnly = previous.unwindOnly && unwindOnly
-		previous.explicitStatusElided = previous.explicitStatusElided && explicitStatusElided
+		previous.unwindOnly = previous.unwindOnly && record.unwindOnly
+		previous.explicitStatusElided = previous.explicitStatusElided && record.explicitStatusElided
 		byName[logicalName] = previous
 		return nil
 	}
-	byName[logicalName] = coroLoweredCallTarget{
-		target:               target,
-		unwindOnly:           unwindOnly,
-		explicitStatusElided: explicitStatusElided,
-		rawPlain:             rawPlain,
-	}
+	byName[logicalName] = record
 	return nil
 }
 

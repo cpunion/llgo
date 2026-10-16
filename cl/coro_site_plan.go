@@ -220,6 +220,13 @@ func (p *context) beginCoroSiteEmissionMode(
 	}
 	filtered := helpers[:0]
 	for _, helper := range helpers {
+		active, err := p.emissionUniverse.coroProgramIR.deliveryHelperActive(p.immutablePlan(), instruction, helper)
+		if err != nil {
+			panic(fmt.Errorf("coroutine emission site %q helper %q: %w", instruction.String(), helper, err))
+		}
+		if !active {
+			continue
+		}
 		if hasPhysical && physical.elidesRuntimeHelper(helper) {
 			continue
 		}

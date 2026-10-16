@@ -348,17 +348,21 @@ func (footprint BackendFootprint) validate() error {
 	return nil
 }
 
-// ManagedEdge is one ordered, exact compiler-inserted managed helper edge.
+// ManagedEdge is one ordered compiler-inserted managed helper occurrence.
 // Role+Ordinal preserves distinct subsites; repeated targets are not folded.
 type ManagedEdge struct {
-	Order                int        `json:"order"`
-	Role                 SiteRole   `json:"role"`
-	Ordinal              int        `json:"ordinal"`
-	LogicalName          string     `json:"logical_name"`
-	Target               FunctionID `json:"target"`
-	NoUnwind             bool       `json:"no_unwind"`
-	UnwindOnly           bool       `json:"unwind_only"`
-	ExplicitStatusElided bool       `json:"explicit_status_elided"`
+	Order       int        `json:"order"`
+	Role        SiteRole   `json:"role"`
+	Ordinal     int        `json:"ordinal"`
+	LogicalName string     `json:"logical_name"`
+	Target      FunctionID `json:"target"`
+	// ManagedDispatch uses the existing typed descriptor ABI instead of one
+	// exact target. The containing source site and the plan digest bind its
+	// active condition; no synthetic FunctionID enters the wire format.
+	ManagedDispatch      bool `json:"managed_dispatch,omitempty"`
+	NoUnwind             bool `json:"no_unwind"`
+	UnwindOnly           bool `json:"unwind_only"`
+	ExplicitStatusElided bool `json:"explicit_status_elided"`
 }
 
 // ImplicitPanicFact records one ordered implicit nil/bounds/divide/assertion
@@ -552,7 +556,11 @@ func verifyManagedEdges(edges []ManagedEdge) error {
 		if err := validateStableIdentityText("managed helper logical name", edge.LogicalName); err != nil {
 			return err
 		}
-		if err := edge.Target.validate(); err != nil {
+		if edge.ManagedDispatch {
+			if edge.Target != "" || edge.NoUnwind || edge.UnwindOnly || edge.ExplicitStatusElided {
+				return fmt.Errorf("coro: managed helper %q has conflicting descriptor/exact target semantics", edge.LogicalName)
+			}
+		} else if err := edge.Target.validate(); err != nil {
 			return fmt.Errorf("coro: managed helper %q: %w", edge.LogicalName, err)
 		}
 		if edge.ExplicitStatusElided && !edge.UnwindOnly {

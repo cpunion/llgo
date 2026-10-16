@@ -645,7 +645,7 @@ func cloneCoroWorkerIncomingEdges(source []coroWorkerSyscallIncomingEdge) []coro
 }
 
 func sameCoroFrozenCallSitePlan(first, second coroFrozenCallSitePlan) bool {
-	if first.plan != second.plan || first.deliveryProducer != second.deliveryProducer || first.failure != second.failure || first.opcode != second.opcode ||
+	if first.plan != second.plan || first.deliveryProducer != second.deliveryProducer || first.dynamicDelivery != second.dynamicDelivery || first.failure != second.failure || first.opcode != second.opcode ||
 		first.interfaceMethodKey != second.interfaceMethodKey ||
 		first.intrinsicPlacement != second.intrinsicPlacement ||
 		first.hostOperation != second.hostOperation ||
