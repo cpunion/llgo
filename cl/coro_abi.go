@@ -2262,7 +2262,20 @@ func validateCoroPhysicalABIForOwner(
 	// retain a dead loop that neither local effect analysis nor codegen executes.
 	_, boundedCycle := whole.BoundedCycleCost(fn)
 	if hasCyclicBlock && !plan.Exec.Contains(coro.NeedsPreempt) && !rawVariant && !boundedCycle {
-		return fail("cyclic CFG requires needs-preempt execution classification")
+		// An explicit exact-body no-preempt contract is the other accepted
+		// local-cycle proof. Consume the same frozen capability as AnalyzeSSA;
+		// a synchronous outcome entry must not reconstruct it from late source
+		// comments or infer it merely from the absence of NeedsPreempt.
+		if universe == nil {
+			return fail("cyclic CFG requires needs-preempt execution classification")
+		}
+		certificate, certified, err := universe.CoroNoPreemptCertificate(fn)
+		if err != nil {
+			return fail("cyclic CFG no-preempt certificate: %v", err)
+		}
+		if !certified || certificate == "" {
+			return fail("cyclic CFG requires needs-preempt execution classification")
+		}
 	}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {

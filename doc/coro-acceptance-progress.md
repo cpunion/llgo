@@ -661,6 +661,52 @@ channel/fallback-body variants also pass on v94 and are retained as controls,
 not falsely counted as causal negatives. The final private-intrinsic fixture
 is LLGo-only and is not presented as an unchanged Go-control program.
 
+PR274 completes all18 CI jobs at exact head `dd9295cfa` and merges at16:26:41
+UTC as `e7b649074`, after fresh empty paginated review/comment inventories and
+empty GraphQL threads. Receipt `root/ci-38927305156-complete.json`; only
+`cpunion/llgo:llvm-coro` changes. The capability follow-up is draft
+[PR275](https://github.com/cpunion/llgo/pull/275), head `17b394366`, run
+38932391824, with empty initial paginated reviews/comments/threads. Incorporating
+PR274 changes history only: tree remains `119790bdf05c413932794889ce615433765b7b89`.
+
+Final v96 `0b08fdb94` also passes its broad compiler gate166.169s/1303.7MiB
+and architecture0.713s/737.2MiB. The extended linked resource gate passes all60
+FD executions plus6 erased-callable executions (66.068s), and the original
+reflection/GC/cgo/channel routes all pass138.760s, source-after matches,
+combined peak2847.9MiB. The fresh v96 complete test/go run remains running;
+its binary is25932224bytes, SHA-256
+`5eebfcc25db09970055d55bdaa5724b656019e12cddf4d15e3a6bc357799fb94`,
+build peak8480.8MiB. This is80bytes larger than v92's same full test binary,
+not a whole-program performance claim.
+
+The complete unfiltered v92 test/go run finishes **271/271**, zero failures
+or skips, at16:21:18 UTC with matching source-after16:21:21; all children and
+private scratch are joined/reclaimed. Binary is
+`7a46512471fe16bfe0baaddf79429cbe7b0e670e0e2513b8cb53c7b16f9766c8`.
+Memory numbers are phase-specific: v92 build peak8346.6MiB, runtime phase
+peak6797.1MiB. Likewise the earlier full v90 has build peak8764.8MiB and
+runtime peak6824.2MiB; the latter is not the whole cohort's memory maximum.
+
+Actual v92/v96 binary inspection identifies a pre-existing remaining cost:
+DeferredPanicTraceActive and deferredPanicTraceScope both have coroutine
+primaries; the v96 observer ramp requests504bytes. The new borrowed-storage
+getter is inlined; linkAwaitChild is one plain18-instruction ARM64 helper and
+allocates nothing. Only the owner-only readonly scope primitive now carries
+the existing no-preempt contract, without suppressing callee suspend/unwind.
+The v97 annotation-only experiment correctly fails physical validation on
+original issue75764: analysis selects a synchronous outcome but physical cycle
+validation does not yet consume its frozen no-preempt certificate. The original
+failure/source-after is retained; v97 broad compiler132.283s/1289.3MiB and
+analysis core race18.345s/1556.2MiB passing are not mistaken for actual success.
+
+The replacement physical gate consumes the same exact-body certificate as
+analysis, never a late comment, symbol name or missing NeedsPreempt bit. New
+native/wasm32 tests reproduce the original rejection (0.486s/1227.7MiB), then
+pass with the valid proof and reject absent/empty proof even while an unrelated
+function remains certified. Ordinary preemptive-loop polls and bounded-cycle
+tests stay unchanged. Final selected race passes1.679s/1183.8MiB. Actual binary
+and unchanged panic/traceback gates remain pending for this experiment.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;

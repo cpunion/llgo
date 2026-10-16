@@ -23,8 +23,79 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xgo-dev/llgo/internal/coro"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
+
+func TestCoroNoPreemptOutcomeCycleRequiresFrozenCertificate(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			pkg, _, files := buildGoSSAPkg(t, `package foo
+type link struct { next *link }
+//llgo:nopreempt
+func Walk(node *link) *link {
+    for node.next != nil { node = node.next }
+    return node
+}
+func Root(node *link) *link { return Walk(node) }
+//llgo:nopreempt
+func Other() {}
+`)
+			prog := newLLSSAProgForTarget(t, target.arch)
+			defer prog.Dispose()
+			u, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inventory, err := coro.NewSSAEmissionUniverse(pkg.Prog, u.Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := u.FunctionIDConfig()
+			ids.CoroABI, ids.SchedulerABI, ids.ArchiveReady = coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, true
+			plan, err := coro.AnalyzeSSA(pkg.Prog, coro.Roots{{Function: pkg.Func("Root"), Demand: coro.AsyncDemand}}, coro.SSAConfig{
+				EmissionUniverse: inventory, FunctionIDs: ids, MaxPlainInstructions: -1,
+				OutcomeMode: coro.OutcomeExplicitStatus, ClassifyLocalBody: u.CoroLocalBodyFacts,
+				ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+					_, present, err := u.CoroNoPreemptCertificate(fn)
+					return coro.SSAFunctionPolicy{TrustedNoPreempt: present}, err
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			walk := pkg.Func("Walk")
+			fact, present := plan.FunctionPlan(walk)
+			if !present || fact.Emission != coro.EmitOutcomePlain || fact.Exec.Contains(coro.NeedsPreempt) {
+				t.Fatalf("certified metadata walk did not select a synchronous outcome entry: %+v", fact)
+			}
+			validate := func() error {
+				return validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(
+					walk, fact, plan, u, true, true, false, true, coro.FrameRetentionParkABIV2,
+				)
+			}
+			if err := validate(); err != nil {
+				t.Fatalf("physical validation lost the frozen no-preempt certificate: %v", err)
+			}
+			delete(u.noPreempt, walk) // A stale/absent proof must not authorize a cyclic outcome body.
+			if _, present, err := u.CoroNoPreemptCertificate(pkg.Func("Other")); err != nil || !present {
+				t.Fatalf("unrelated certificate disappeared: present=%t error=%v", present, err)
+			}
+			if err := validate(); err == nil || !strings.Contains(err.Error(), "cyclic CFG requires needs-preempt") {
+				t.Fatalf("uncertified cyclic outcome body escaped physical validation: %v", err)
+			}
+			u.noPreempt[walk] = ""
+			if err := validate(); err == nil || !strings.Contains(err.Error(), "cyclic CFG requires needs-preempt") {
+				t.Fatalf("empty no-preempt certificate authorized a cyclic outcome body: %v", err)
+			}
+		})
+	}
+}
 
 func TestEmissionUniverseFreezesExactNoPreemptDirective(t *testing.T) {
 	testProg := newEmissionTestProgram()
