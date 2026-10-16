@@ -80,8 +80,9 @@ The complete v60 package, including nested compiler probes, passed all 268
 top-level tests with zero failures/skips at 06:30 UTC. Run peak was 6439.4MiB;
 all children joined, private scratch was reclaimed, and source-after matched.
 This is a whole-package result, not an aggregation of the repeated selections.
-The newer v64 compiler/runtime has a separate fresh whole-package run in
-progress; it does not inherit the v60 pass.
+The newer v64 compiler/runtime's separate whole-package run completed with
+266 passes and two caller-PC regressions, detailed below. It does not inherit
+the v60 pass.
 
 A separate runtime follow-up replaces the unbound uint64/empty
 runtime/debug.readGCStats stub with the signed-duration buffer protocol and
@@ -123,6 +124,21 @@ this observable marker. The build integration oracle accepts both inferred
 outcome and coroutine helper entries while retaining exact token allocation,
 zeroing, propagation and update checks; its previous outcome-only match caused
 PR #264's initial single CI failure, and the corrected focused gate passes.
+
+The complete v64 `test/go` run exposed two additional regressions:
+`TestRuntimeLineInfoAndStack` and `TestRuntimeStatementLineInfo`. The registry
+incorrectly rejected tag 2, the legal `Callers` return-PC minus one used by
+panic-spliced Caller and FuncForPC. It now accepts all three nonzero marker
+forms while rejecting aligned/non-synthetic markers. The production-extracted
+race test reproduces this rejection before the fix and passes after it;
+the permanent linked fixture now covers adjusted PCs and recovered panic frames.
+Immutable v67 source manifest is
+`917b11b1bafa42d4c8711c8981ec0c2d40cb4c7f33fd83d384504e31deedafcf`.
+Using the unchanged v64 compiler, the fixture passes 100 native executions and
+actual Node/wasm execution (2126.7MiB combined build/run peak). Both original
+failing test programs also pass unchanged (116.77s and 84.46s, 2989.1MiB tree
+peak), with source-after matched. The retained v64 whole-package failure is not
+rewritten as a pass; a fresh post-fix complete run remains required.
 
 The v48 GOROOT rerun reached case 213/1082 before its 8GiB private-scratch cap
 stopped it (sampled tree peak 17313MiB). This is a resource interruption, not
@@ -693,7 +709,7 @@ delivery/performance acceptance.
 | `test/llgoext` | 23 passed | Fixed v54 compiler/source, including defer-head isolation and 130-G ID allocation |
 | `test/std/runtime` | 5 passed | Fixed v35 compiler/source, uncached compile and execution |
 | C fault recovery, foreign reentry, traceback | 4 passed | v7 compiler; probes compile, link and execute with LLGo |
-| Full `test/go` | Fixed v60: all 268 top-level tests passed, zero failures/skips | Completed 2026-10-16 06:30 UTC, run peak 6439.4 MiB including nested compilers. Exact retained binary and source hashes match; scratch reclaimed after child join. Includes cross-package anonymous member ABI, closed plain descriptor families, main-panic peers, generic/static spawn, rangefunc, C faults, foreign reentry, logical stacks and reflection Call/MakeFunc. The newer v64 caller-PC/wasm source has its own full run in progress; no implicit acceptance transfer. |
+| Full `test/go` | v60: 268 passed; v64: 266 passed / 2 failed, then both original failures pass on v67 | v60 completed 2026-10-16 06:30 UTC, peak 6439.4 MiB including nested compilers. v64 source-after matches and scratch is reclaimed; its two failures expose the adjusted caller-PC regression fixed on v67. Both original probes pass unchanged with the fix, alongside the native/wasm permanent fixture. A fresh complete post-fix run remains required; no implicit acceptance transfer. |
 | Top-level `_demo/go` | Fixed v46: all 73/73 passed, zero semantic failures | Completed 2026-10-16 01:14 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Disk/monitor interruptions remain in the journal; only completed exact-input package passes were reused. |
 | `test/std/os`, `test/std/net` | 85 passed; 129 passed / 5 skipped, respectively | Full packages compiled and executed with fixed source snapshot and v35, cache disabled |
 | `test/std/reflect` | v25: 68 passed | Separate real LLGo compile and generated-binary execution; build peak 5768 MiB |
