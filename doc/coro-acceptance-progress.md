@@ -1145,6 +1145,38 @@ Immutable FD/GC/cleanup and optimization-mode replays are still required before
 folding the experiment into #283; the separate branch remains available for
 comparison.
 
+Immutable v116 (`31c1663e1`) completes those return-alias gates: broad compiler
+222.713s/1254.1MiB, all18 archive executions216.369s/1922.2MiB, ABI/build gates,
+the full-runtime large recovery case31.954s/1262.9MiB, and three executions
+each at O0/O3-full (combined1447.6MiB). All120 FD executions, six opaque
+nonresource controls and three reflection/GC routes pass60.313s+127.342s,
+source-after matching, peak2768.6MiB. Compiler SHA-256 is
+`739071727ed87e1cf869883a75e28afec9223382208441bd5ecd9e10258a290b`;
+source manifest is
+`165fadcdbea36f07ba2f65cc4d3748d65ed20157b29aa6880ea96556b41efcd1`.
+The complete v116 test/go and four runtime packages are independent live
+cohorts, not yet recorded as passing.
+
+A further isolated combination gate joins real FD custody with a131088-byte
+result containing both a large array and a Go pointer. It covers canceled
+ordinary calls, independent fallback, static defer and captured dynamic defer;
+the drop itself yields and forces GC before checking the retained payload.
+The old v116 compiler crashes before execution in the open dynamic call's
+plain-result branch. Saved post-CoroSplit IR and standalone LLVM22 llc locate
+the remaining whole-tuple load/extract tree; a mixed-version diagnostic is not
+relabeled as immutable acceptance. The first diagnostic command's unsupported
+development flag is an invalid harness attempt, despite the CLI's zero exit.
+
+The existing ABI pass now validates the complete store/projection use tree,
+keeps one immutable evaluated snapshot and projects large submembers directly
+to memory users. Call results reuse their existing indirect result cell;
+nested large members acquire no second snapshot. Scalar/pointer projections
+retain source-value semantics, including mutation after the original load;
+packed members use conservative alignment. Volatile accesses and unsupported
+nested users remain all-or-nothing exclusions. The new projection tests fail
+before the correction and the full ABI suite passes afterwards (0.469s).
+Actual combined FD/GC execution and a fresh immutable cohort remain required.
+
 Immutable v108 completes the four runtime packages with **68 passes and one
 helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
 llgoext23. Source-after20:47:34 matches, children join and private scratch is

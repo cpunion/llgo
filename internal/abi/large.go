@@ -81,7 +81,7 @@ func (l largeAggregateLowerer) transformLargeMemory(m llvm.Module) {
 				}
 				load := instr.IsALoadInst()
 				if !load.IsNil() && !load.IsVolatile() && l.isLargeAggregate(load.Type()) {
-					if _, ok := storedLoadUsers(load); ok || load.FirstUse().IsNil() {
+					if _, _, ok := l.largeMemoryUsers(load); ok {
 						loads = append(loads, load)
 					}
 				}
@@ -105,16 +105,26 @@ func (l largeAggregateLowerer) transformLargeMemory(m llvm.Module) {
 	}
 }
 
-func storedLoadUsers(load llvm.Value) ([]llvm.Value, bool) {
-	var stores []llvm.Value
-	for use := load.FirstUse(); !use.IsNil(); use = use.NextUse() {
-		store := use.User().IsAStoreInst()
-		if store.IsNil() || store.IsVolatile() || store.Operand(0) != load {
-			return nil, false
+// Projections must share the same evaluated snapshot as stores. A large
+// projected member is admissible only when its entire use tree has the same
+// memory form; otherwise even one remaining extract scalarizes the parent.
+func (l largeAggregateLowerer) largeMemoryUsers(value llvm.Value) (stores, extracts []llvm.Value, ok bool) {
+	for use := value.FirstUse(); !use.IsNil(); use = use.NextUse() {
+		user := use.User()
+		if store := user.IsAStoreInst(); !store.IsNil() && !store.IsVolatile() && store.Operand(0) == value {
+			stores = append(stores, store)
+		} else if extract := user.IsAExtractValueInst(); !extract.IsNil() {
+			if l.isLargeAggregate(extract.Type()) {
+				if _, _, valid := l.largeMemoryUsers(extract); !valid {
+					return nil, nil, false
+				}
+			}
+			extracts = append(extracts, extract)
+		} else {
+			return nil, nil, false
 		}
-		stores = append(stores, store)
 	}
-	return stores, len(stores) != 0
+	return stores, extracts, true
 }
 
 func (l largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Value) {
@@ -122,7 +132,7 @@ func (l largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Valu
 		load.EraseFromParentAsInstruction()
 		return
 	}
-	stores, ok := storedLoadUsers(load)
+	stores, extracts, ok := l.largeMemoryUsers(load)
 	if !ok {
 		return
 	}
@@ -132,7 +142,7 @@ func (l largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Valu
 	typ := load.Type()
 
 	b.SetInsertPointBefore(load)
-	if len(stores) == 1 && llvm.NextInstruction(load) == stores[0] {
+	if len(stores) == 1 && len(extracts) == 0 && llvm.NextInstruction(load) == stores[0] {
 		copy := l.callMemmove(ctx, b, stores[0].Operand(1), load.Operand(0), typ)
 		copy.InstructionSetDebugLoc(load.InstructionDebugLoc())
 		stores[0].EraseFromParentAsInstruction()
@@ -142,13 +152,7 @@ func (l largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Valu
 	snapshot := l.allocResult(m, ctx, b, typ)
 	copy := l.callMemcpy(ctx, b, snapshot, load.Operand(0), typ)
 	copy.InstructionSetDebugLoc(load.InstructionDebugLoc())
-	for _, store := range stores {
-		b.SetInsertPointBefore(store)
-		copy := l.callMemcpy(ctx, b, store.Operand(1), snapshot, typ)
-		copy.InstructionSetDebugLoc(store.InstructionDebugLoc())
-		store.EraseFromParentAsInstruction()
-	}
-	load.EraseFromParentAsInstruction()
+	l.rewriteMemoryUsers(ctx, load, snapshot, typ, stores, extracts)
 }
 
 func (l largeAggregateLowerer) transformCall(m llvm.Module, call llvm.Value) {
@@ -285,14 +289,18 @@ func (l largeAggregateLowerer) rewriteReturns(ctx llvm.Context, fn llvm.Value, r
 }
 
 func (l largeAggregateLowerer) rewriteStoredResult(ctx llvm.Context, value, result llvm.Value, typ llvm.Type) {
-	var stores []llvm.Value
-	for use := value.FirstUse(); !use.IsNil(); use = use.NextUse() {
-		store := use.User().IsAStoreInst()
-		if store.IsNil() || store.IsVolatile() || store.Operand(0) != value {
-			return
-		}
-		stores = append(stores, store)
+	stores, extracts, ok := l.largeMemoryUsers(value)
+	if !ok {
+		return
 	}
+	l.rewriteMemoryUsers(ctx, value, result, typ, stores, extracts)
+}
+
+// The backing cell is an immutable evaluated result, not the mutable source
+// address. Project large members directly into their memory users so this
+// lowering neither recreates an aggregate SSA value nor allocates a second
+// snapshot for a nested member. Scalar projections remain ordinary loads.
+func (l largeAggregateLowerer) rewriteMemoryUsers(ctx llvm.Context, value, result llvm.Value, typ llvm.Type, stores, extracts []llvm.Value) {
 	b := ctx.NewBuilder()
 	defer b.Dispose()
 	for _, store := range stores {
@@ -300,9 +308,30 @@ func (l largeAggregateLowerer) rewriteStoredResult(ctx llvm.Context, value, resu
 		l.callMemcpy(ctx, b, store.Operand(1), result, typ)
 		store.EraseFromParentAsInstruction()
 	}
-	if len(stores) != 0 || value.FirstUse().IsNil() {
-		value.EraseFromParentAsInstruction()
+	for _, extract := range extracts {
+		b.SetInsertPointBefore(extract)
+		indices := []llvm.Value{llvm.ConstInt(ctx.Int32Type(), 0, false)}
+		for _, index := range extract.Indices() {
+			indices = append(indices, llvm.ConstInt(ctx.Int32Type(), uint64(index), false))
+		}
+		field := b.CreateInBoundsGEP(typ, result, indices, "")
+		if l.isLargeAggregate(extract.Type()) {
+			stores, projections, valid := l.largeMemoryUsers(extract)
+			if !valid {
+				panic("large result projection lost its validated memory users")
+			}
+			l.rewriteMemoryUsers(ctx, extract, field, extract.Type(), stores, projections)
+		} else {
+			projected := b.CreateLoad(extract.Type(), field, "")
+			// A packed member may not have its type's ABI alignment even
+			// when the enclosing snapshot itself is naturally aligned.
+			projected.SetAlignment(1)
+			projected.InstructionSetDebugLoc(extract.InstructionDebugLoc())
+			extract.ReplaceAllUsesWith(projected)
+			extract.EraseFromParentAsInstruction()
+		}
 	}
+	value.EraseFromParentAsInstruction()
 }
 
 func (l largeAggregateLowerer) allocResult(m llvm.Module, ctx llvm.Context, b llvm.Builder, typ llvm.Type) llvm.Value {
