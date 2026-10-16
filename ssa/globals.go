@@ -59,14 +59,13 @@ func (pkg Package) ConstBytes(value []byte) Expr {
 	return Expr{cv, styp}
 }
 
-// constantAddress materializes immutable package-local storage for an LLVM
-// constant. Interface values whose physical representation is indirect may
-// point at this storage instead of allocating and copying an identical value
-// on every conversion. The address must never escape as writable Go storage;
-// callers use it only as the read-only data word of an interface value.
-func (pkg Package) constantAddress(value Expr) Expr {
+// ConstAddress materializes immutable package-local storage for an LLVM
+// constant. Callers must not expose the address as writable Go storage.
+// Interface data words and compiler-owned immutable images can share this
+// storage without a runtime allocation or initialization call.
+func (pkg Package) ConstAddress(value Expr) Expr {
 	if value.IsNil() || value.impl.IsAConstant().IsNil() {
-		panic("ssa: constantAddress requires an LLVM constant")
+		panic("ssa: ConstAddress requires an LLVM constant")
 	}
 	global := llvm.AddGlobal(pkg.mod, value.impl.Type(), "")
 	global.SetInitializer(value.impl)
@@ -106,6 +105,16 @@ func (pkg Package) ConstSlice(name string, t Type, values []Expr) Expr {
 	n := prog.IntVal(uint64(len(values)), prog.Int())
 	cv := llvm.ConstNamedStruct(t.ll, []llvm.Value{data.impl, n.impl, n.impl})
 	return Expr{cv, t}
+}
+
+// ConstReadOnlySlice creates a private immutable slice image. It is only for
+// compiler-owned storage that cannot be mutated through a Go slice value.
+func (pkg Package) ConstReadOnlySlice(name string, t Type, values []Expr) Expr {
+	value := pkg.ConstSlice(name, t, values)
+	data := pkg.VarOf(name)
+	data.impl.SetGlobalConstant(true)
+	data.impl.SetLinkage(llvm.PrivateLinkage)
+	return value
 }
 
 // ConstStruct creates an LLVM constant struct expression.

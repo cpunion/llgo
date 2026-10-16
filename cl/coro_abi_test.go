@@ -1236,6 +1236,15 @@ func init() {
 	if !strings.Contains(module.String(), "asset.txt") || !strings.Contains(module.String(), "payload") {
 		t.Fatalf("package init coroutine did not apply compiler-generated embed initialization:\n%s", packageInitIR)
 	}
+	image := module.NamedGlobal("foo.Files$embed.files")
+	if image.IsNil() || !image.IsGlobalConstant() || image.Linkage() != llvm.PrivateLinkage {
+		t.Fatal("package init did not receive a private constant embed image")
+	}
+	for _, allocation := range []string{"MakeSlice", "AllocZ"} {
+		if strings.Contains(packageInitIR, allocation) {
+			t.Fatalf("package init retained a hidden embed allocation %q:\n%s", allocation, packageInitIR)
+		}
+	}
 	if !regexp.MustCompile(`call void @"?embed\.init"?\(`).MatchString(packageInitIR) {
 		t.Fatalf("package init lost its exact known-external no-suspend call:\n%s", packageInitIR)
 	}
