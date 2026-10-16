@@ -13,7 +13,8 @@ static _Atomic int opens, closes, waiting, close_waiting, released, fixture_mode
 
 static void check_finished(void) {
     int fd = atomic_load(&owned);
-    int wanted = atomic_load(&fixture_mode) ? 2 : 3;
+    int mode = atomic_load(&fixture_mode);
+    int wanted = mode == 0 || mode == 5 ? 3 : 2;
     int waited = atomic_load(&fixture_mode) == 1 ? atomic_load(&close_waiting) : atomic_load(&waiting);
     if (atomic_load(&opens) != wanted || atomic_load(&closes) != wanted || fd != -1 ||
         !waited || !atomic_load(&released)) {
@@ -33,7 +34,7 @@ static void check_finished(void) {
 
 void llgo_delivery_install(void) {
     const char *mode = getenv("LLGO_DELIVERY_FIXTURE_MODE");
-    atomic_store(&fixture_mode, mode && mode[0] >= '1' && mode[0] <= '2' && mode[1] == '\0' ? mode[0] - '0' : 0);
+    atomic_store(&fixture_mode, mode && mode[0] >= '1' && mode[0] <= '5' && mode[1] == '\0' ? mode[0] - '0' : 0);
     if (atexit(check_finished) != 0) _Exit(88);
 }
 

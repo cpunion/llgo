@@ -3,6 +3,7 @@
 package cl
 
 import (
+	"go/ast"
 	"go/types"
 	"strings"
 	"testing"
@@ -13,6 +14,120 @@ import (
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
+
+func TestCoroDeliveryLargeFallbackAllocatesOnlyOnNilOutput(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			source := newEmissionTestProgram()
+			source.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+			runtimePkg := source.addPackage(t, llssa.PkgRuntime, `package runtime
+import "unsafe"
+func AllocZ(size uintptr) unsafe.Pointer { return nil }
+func AssertNilDeref(value bool) {}
+`)
+			foo := source.addPackage(t, "foo", `package foo
+import "unsafe"
+type Result = struct { R0 [131073]byte }
+func initialize(out *Result) { out.R0[0] = 1 }
+func drop(out *Result, _ unsafe.Pointer) { out.R0[0] = 0 }
+//go:linkname borrow llgo.coroBorrowResult
+func borrow(func(*Result), func(*Result, unsafe.Pointer)) *Result
+func Acquire() [131073]byte { out := borrow(initialize, drop); return out.R0 }
+func Root() byte { return Acquire()[0] }
+`)
+			source.ssa.Build()
+			prog := newLLSSAProgForTarget(t, target.arch)
+			defer prog.Dispose()
+			u, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+				{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+				{SSA: foo.ssa, Files: []*ast.File{foo.file}},
+			}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sources, err := coro.NewSSAEmissionUniverse(foo.ssa.Prog, u.Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := u.FunctionIDConfig()
+			ids.CoroABI, ids.SchedulerABI, ids.ArchiveReady = coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, true
+			plan, err := coro.AnalyzeSSA(foo.ssa.Prog, coro.Roots{{Function: foo.ssa.Func("Root"), Demand: coro.AsyncDemand}}, coro.SSAConfig{
+				EmissionUniverse: sources, FunctionIDs: ids, MaxPlainInstructions: -1,
+				OutcomeMode: coro.OutcomeExplicitStatus, ClassifyLocalBody: u.CoroLocalBodyFacts,
+				ClassifyLoweredCalls: u.CoroLoweredCalls,
+				ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+					if fn == foo.ssa.Func("Acquire") {
+						return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+					}
+					return coro.SSAFunctionPolicy{}, nil
+				},
+				ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+					fact, found, err := u.CoroCallSitePlan(call)
+					return found && fact.ElidesCall(), err
+				},
+				ClassifyStaticFunctionReferenceCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+					return u.CoroStaticFunctionReferenceCallArgument(call, argument)
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: u}
+			enableCoroChildAwaitCompilation(compilation)
+			compilation.PanicABI = coro.PanicExplicitStatusABIV0
+			pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, foo.ssa, []*ast.File{foo.file}, goembed.VarMap{}, PackageOptions{Compilation: compilation})
+			if err != nil {
+				t.Fatal(err)
+			}
+			module := pkg.Module()
+			defer module.Dispose()
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("large delivery before split: %v\n%s", err, module.String())
+			}
+			producer := requireCoroPhysicalFunction(t, module, "foo.Acquire")
+			allocations := 0
+			for _, block := range producer.BasicBlocks() {
+				for call := block.FirstInstruction(); !call.IsNil(); call = llvm.NextInstruction(call) {
+					if call.InstructionOpcode() != llvm.Call || call.CalledValue().Name() != llssa.PkgRuntime+".AllocZ" {
+						continue
+					}
+					allocations++
+					if block == producer.FirstBasicBlock() {
+						t.Fatalf("fallback aggregate allocated unconditionally in the ramp:\n%s", producer.String())
+					}
+					// The allocation block must be selected only when the hidden
+					// caller output is nil; a provided output bypasses it entirely.
+					guarded := false
+					for _, predecessor := range producer.BasicBlocks() {
+						branch := predecessor.LastInstruction()
+						if branch.InstructionOpcode() != llvm.Br || branch.SuccessorsCount() != 2 || branch.Successor(1) != block {
+							continue
+						}
+						condition := branch.Operand(0)
+						guarded = condition.InstructionOpcode() == llvm.ICmp && condition.IntPredicate() == llvm.IntNE && condition.Operand(0) == producer.Param(1) && condition.Operand(1).IsNull()
+					}
+					if !guarded {
+						t.Fatalf("fallback AllocZ lacks exact nil-output branch:\n%s", producer.String())
+					}
+				}
+			}
+			if allocations != 1 {
+				t.Fatalf("fallback AllocZ count=%d, want one conditional allocation:\n%s", allocations, producer.String())
+			}
+			runCoroABITestPipeline(t, prog, module)
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+			if size := coroFrameAllocationSize(t, module.NamedFunction("foo.Acquire$coro"), prog.PointerSize()*8); size >= 128*1024 {
+				t.Fatalf("fallback aggregate inflated the coroutine frame to %d bytes", size)
+			}
+		})
+	}
+}
 
 const coroDeliverySourceFixture = `package foo
 import "unsafe"

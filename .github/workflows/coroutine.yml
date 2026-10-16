@@ -511,8 +511,8 @@ jobs:
           # which GOMEMLIMIT alone does not cover. Keep nested builds serial.
           ulimit -v 6291456
           go build -p=1 -o "$LLGO_TEST_LLGO" ./cmd/llgo
-          timeout 12m go test -p=1 ./internal/build \
-            -run '^TestCoroBorrowedResourceCleanupAcceptance$' -v -count=1 -timeout=11m
+          timeout 18m go test -p=1 ./internal/build \
+            -run '^TestCoro(BorrowedResourceCleanup|ResourceDeliverySlot)Acceptance$' -v -count=1 -timeout=17m
 
       - name: Test main return racing channel completion
         if: matrix.lane == 'fleet-e2e'

@@ -3536,6 +3536,7 @@ func (p *context) callEx(
 			if act != llssa.Call || ds != nil {
 				panic("llgo.coroBorrowResult requires its exact producer entry call")
 			}
+			observePhysicalInstruction(coroPhysicalInstructionBorrowedResult)
 			ret = p.compileCoroBorrowedResult(b)
 		case llgoCoroHostOperation:
 			if act != llssa.Call || ds != nil {

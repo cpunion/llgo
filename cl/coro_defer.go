@@ -501,7 +501,10 @@ func prepareCoroStaticCleanupPlan(
 				if !explicitPanic {
 					return nil, fmt.Errorf("resource delivery cleanup requires the explicit-status panic ABI")
 				}
-				return &coroStaticCleanupPlan{delivery: delivery, implicitReturns: coroDeliveryImplicitReturns(fn, ir)}, nil
+				// Resource-only cleanup already runs at physical completion.
+				// It is not a source RunDefers pass: inventing one would spill
+				// and copy every return value before the same terminal drainer.
+				return &coroStaticCleanupPlan{delivery: delivery}, nil
 			}
 			return nil, fmt.Errorf("needs-cleanup-frame body has no supported static defer site")
 		}
@@ -546,12 +549,6 @@ func prepareCoroStaticCleanupPlan(
 			dynamicAlloc:   allocator,
 			dynamicFree:    releaser,
 			delivery:       delivery,
-			implicitReturns: func() map[*ssa.Return]none {
-				if delivery != nil {
-					return coroDeliveryImplicitReturns(fn, ir)
-				}
-				return nil
-			}(),
 		}, nil
 	}
 	if fn.Recover == nil {

@@ -27,21 +27,6 @@ type coroDeliveryFunctionPlan struct {
 	calls    []coroDeliveryGuardPlan
 }
 
-func coroDeliveryImplicitReturns(fn *ssa.Function, ir *coroProgramIR) map[*ssa.Return]none {
-	returns := make(map[*ssa.Return]none)
-	for block := range ir.coroReachableBlocks(fn) {
-		if block == fn.Recover {
-			continue
-		}
-		for _, instruction := range block.Instrs {
-			if ret, returning := instruction.(*ssa.Return); returning {
-				returns[ret] = none{}
-			}
-		}
-	}
-	return returns
-}
-
 func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *coroProgramIR, source coroDeliverySourceUniverse) (*coroDeliveryFunctionPlan, error) {
 	if ir == nil || source == nil || len(ir.deliveryProducers) == 0 {
 		return nil, nil
@@ -114,11 +99,12 @@ type coroDeliveryGuardState struct {
 }
 
 type coroDeliveryFunctionState struct {
-	plan           *coroDeliveryFunctionPlan
-	active         llssa.Expr
-	calls          map[ssa.CallInstruction]*coroDeliveryGuardState
-	fallbackActive llssa.Expr
-	fallback       llssa.Expr
+	plan            *coroDeliveryFunctionPlan
+	active          llssa.Expr
+	calls           map[ssa.CallInstruction]*coroDeliveryGuardState
+	fallbackActive  llssa.Expr
+	fallback        llssa.Expr
+	fallbackManaged bool
 }
 
 func (s *coroStaticCleanupState) bindDelivery(p *context, plan *coroDeliveryFunctionPlan) {
@@ -133,7 +119,7 @@ func (s *coroStaticCleanupState) bindDelivery(p *context, plan *coroDeliveryFunc
 		delivery.active = p.coroFrameAlloc(p.prog.Uint32())
 	}
 	for _, site := range plan.calls {
-		guard := &coroDeliveryGuardState{plan: site, result: p.coroResultSlot(p.prog.Type(site.recipe.result, llssa.InGo))}
+		guard := &coroDeliveryGuardState{plan: site}
 		if site.hasEnv {
 			guard.env = p.coroFrameAlloc(p.prog.VoidPtr())
 		}
@@ -144,7 +130,15 @@ func (s *coroStaticCleanupState) bindDelivery(p *context, plan *coroDeliveryFunc
 	}
 	if plan.fallback != nil {
 		delivery.fallbackActive = p.coroFrameAlloc(p.prog.Bool())
-		delivery.fallback = p.coroResultSlot(p.prog.Type(plan.fallback.result, llssa.InGo))
+		typ := p.prog.Type(plan.fallback.result, llssa.InGo)
+		delivery.fallbackManaged = p.prog.LocalAllocExceedsNativeStack(typ)
+		if delivery.fallbackManaged {
+			// A borrowed parent sink needs no second aggregate. Retain only
+			// a zeroed pointer, allocating the fallback on the nil-output lane.
+			delivery.fallback = p.coroFrameAlloc(p.prog.Pointer(typ))
+		} else {
+			delivery.fallback = p.coroResultSlot(typ)
+		}
 	}
 	s.delivery = delivery
 }
@@ -165,6 +159,10 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 	if len(args) != len(guard.args) {
 		panic("resource delivery call lost its exact typed captures")
 	}
+	// Bind through the source occurrence so the existing managed-slot helper
+	// and its exact SitePlan are observed together. coroResultSlot still places
+	// physical storage in the dominating ramp, once per static call site.
+	guard.result = p.coroResultSlot(p.prog.Type(guard.plan.recipe.result, llssa.InGo))
 	if guard.plan.hasEnv {
 		if env.IsNil() {
 			panic("resource delivery call lost its frozen closure environment")
@@ -245,21 +243,27 @@ func (p *context) compileCoroBorrowedResult(b llssa.Builder) llssa.Expr {
 	provided, fallback, initialized, joined := p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock()
 	b.If(b.BinOp(token.NEQ, incoming, p.prog.Nil(p.prog.VoidPtr())), provided, fallback)
 	b.SetBlockEx(fallback, llssa.AtEnd, false)
-	b.StoreKnownNonNil(delivery.fallback, p.prog.Zero(p.prog.Elem(delivery.fallback.Type)))
+	storage := delivery.fallback
+	if delivery.fallbackManaged {
+		storage = b.AllocZAs(p.prog.Elem(p.prog.Elem(storage.Type)), coroManagedFrameSlotAllocZCall)
+		b.StoreKnownNonNil(delivery.fallback, storage)
+	} else {
+		b.StoreKnownNonNil(storage, p.prog.Zero(p.prog.Elem(storage.Type)))
+	}
 	recipe := delivery.plan.fallback
-	p.compileCoroDeliveryHelper(b, coroDeliveryInitializeCall, recipe.initializer, []llssa.Expr{delivery.fallback})
+	p.compileCoroDeliveryHelper(b, coroDeliveryInitializeCall, recipe.initializer, []llssa.Expr{storage})
 	b.Jump(initialized)
 	b.SetBlockEx(initialized, llssa.AtEnd, false)
 	b.StoreKnownNonNil(delivery.fallbackActive, p.prog.BoolVal(true))
 	b.Jump(joined)
 	b.SetBlockEx(provided, llssa.AtEnd, false)
-	parent := b.Convert(delivery.fallback.Type, incoming)
+	parent := b.Convert(storage.Type, incoming)
 	b.Jump(joined)
 	b.SetBlockContinuation(joined)
-	result := b.Phi(delivery.fallback.Type)
+	result := b.Phi(storage.Type)
 	result.AddIncoming(b, []llssa.BasicBlock{initialized, provided}, func(index int, _ llssa.BasicBlock) llssa.Expr {
 		if index == 0 {
-			return delivery.fallback
+			return storage
 		}
 		return parent
 	})
@@ -284,6 +288,9 @@ func (s *coroStaticCleanupState) emitDeliveryFallback(p *context, b llssa.Builde
 	b.If(b.BinOp(token.EQL, b.LoadKnownNonNil(s.continuation), p.prog.IntVal(uint64(coroStaticCleanupContinueComplete), p.prog.Uint32())), committed, done)
 	b.SetBlock(committed)
 	b.StoreKnownNonNil(delivery.fallbackActive, p.prog.BoolVal(false))
+	if delivery.fallbackManaged {
+		b.StoreVolatile(delivery.fallback, p.prog.Zero(p.prog.Elem(delivery.fallback.Type)))
+	}
 	b.Jump(done)
 	b.SetBlock(call)
 	b.StoreKnownNonNil(delivery.fallbackActive, p.prog.BoolVal(false))
@@ -295,7 +302,12 @@ func (s *coroStaticCleanupState) emitDeliveryFallback(p *context, b llssa.Builde
 	if base == 3 {
 		env = b.Convert(p.prog.VoidPtr(), p.fn.PhysicalParam(2))
 	}
-	args := []llssa.Expr{delivery.fallback, env}
+	storage := delivery.fallback
+	if delivery.fallbackManaged {
+		storage = b.LoadKnownNonNil(delivery.fallback)
+		b.StoreVolatile(delivery.fallback, p.prog.Zero(p.prog.Elem(delivery.fallback.Type)))
+	}
+	args := []llssa.Expr{storage, env}
 	recipe := delivery.plan.fallback
 	for index := 0; index < recipe.signature.Params().Len(); index++ {
 		args = append(args, p.fn.PhysicalParam(base+index))

@@ -234,7 +234,10 @@ entry、reflect 第二次交付，以及标准库 wrapper 的预注册 adoption�
 证明这一点；标准库的 libc/host acquisition 也必须有等价 adapter。输出槽不得逃出
 physical join 的借用期；trusted adapter 的 noescape/结果写入契约不能由 C 类型猜测。
 大型 result 的 fallback 也不能在 parent 已提供槽时额外 eager 分配一份 managed
-aggregate；该优化及其冻结 helper placement 属于 public-seed 前的待完成 gate。
+aggregate。当前 closed-static 实现只在 nil-output 分支分配，普通借用路径不分配
+第二份 aggregate；冻结 helper placement 与 native/wasm32 pre/post-CoroSplit gate
+同时约束这一点。resource-only cleanup 直接使用 terminal drainer，不合成源码
+RunDefers 和额外的返回值 spill/copy。该机制仍须随完整 public-seed 路径一起验收。
 
 只在有限 produce/transfer/release 边界保留准确事实，不改变普通 Go API 类型，
 不要求给所有调用者加注释。内部 acquisition

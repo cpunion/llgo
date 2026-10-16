@@ -92,6 +92,26 @@ func failingOwner() {
 	escaped()
 }
 
+func deferredOwner() { defer acquire(1) }
+
+func sequence(yield func(int) bool) { yield(0) }
+
+func rangeOwner() {
+	for range sequence {
+		defer func() {}() // Registered on rangeOwner, not on its yield frame.
+		acquire(1)
+		escaped()
+	}
+}
+
+func secondSiteOwner() {
+	fd := acquire(0)
+	checkAlive(fd)
+	closeFD(fd)
+	acquire(1)
+	escaped()
+}
+
 func main() {
 	runtime.GOMAXPROCS(1)
 	install()
@@ -116,9 +136,16 @@ func main() {
 		// without losing the retained shutdown base.
 		return
 	}
-	if fixtureMode() == 2 {
+	switch fixtureMode() {
+	case 2:
 		go acquire(1) // Canceled independent entry: nil-output fallback owns it.
-	} else {
+	case 3:
+		go deferredOwner()
+	case 4:
+		go rangeOwner()
+	case 5:
+		go secondSiteOwner()
+	default:
 		baseline := runtime.NumGoroutine()
 		go acquire(0)
 		for openCount() != 2 || runtime.NumGoroutine() != baseline {

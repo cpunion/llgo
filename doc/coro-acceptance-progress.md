@@ -167,6 +167,35 @@ parent cancellation and late stop during panic-driven internal drop. This is not
 dynamic descriptor, bodyless archive, reflection second-handoff or stdlib
 adoption acceptance; public standard-library seeds remain unchanged.
 
+The corrected immutable v79 linked fd fixture passes all three modes and
+**30/30 repeat runs**: normal discarded results stay open, independent and
+parent-owned canceled acquisitions close exactly once, and a panic-driven
+internal drop finishes its second await despite late shutdown. Source-after
+matches. Compiler SHA-256 is
+`f88b5f727b95acf572e259b9eed8c9720de358e84771b7dbeea27f273eefa361`,
+manifest `e042c061b8a3e12f0546a5b111e12ac69c541ace30b4ae3bb72373e535744495`,
+and linked image
+`8fe73d05a05177a05762cec449635ef8d2474ce1786fe173384484f09b4bed0d`.
+Removing only the compiler's internal shield leaves modes 0/2 passing but
+mode 1 fails with `open=2 close=1` (exit 86, explicit fd reclaim); the existing
+parent-prefix omission negative independently proves parent custody.
+
+Further review removes a synthetic pre-return RunDefers pass for resource-only
+frames: the existing terminal drainer already owns that cleanup. This avoids
+another result spill/copy. Large nil-output fallbacks now allocate only on the
+nil-output branch; a provided parent slot bypasses the allocation. Native and
+wasm32 IR gates require the exact branch, no unconditional aggregate AllocZ,
+no oversized frame, and pre/post-CoroSplit verification. The selected compiler
+gate passes 8.052s and the unchanged architecture gate 1.072s (1286.2MiB peak).
+The next actual cohort adds deferred, range-yield and second-site acquisitions;
+these routes are not yet recorded as passing. Permanent native CI now includes
+the typed resource fixture rather than relying only on local scripts.
+
+GOROOT shard 1 also reports `fixedbugs/issue27695b.go` in the reflection/GC
+path. A strict unchanged-case v79 rerun still fails with `invalid zero-ticket
+coroutine run decision` (228.29s case; 2086.2MiB peak, source-after matched).
+This remains a real implementation gap, not an ABI exclusion or a new xfail.
+
 The v58 expvar retry now compiles and executes all four tests successfully.
 It retains source `d5d6c5627`, source-manifest SHA-256
 `4e19f44822bab94594cd031dccfa17ff0d8d9932a909d98ea6f692d1ccf11fe3`
