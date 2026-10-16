@@ -67,6 +67,23 @@ type coroNativeFleetTestTask struct {
 	pollFinished  bool
 }
 
+func TestCoroNativeFleetCompletionAcceptsPostedCloseRaceOnly(t *testing.T) {
+	for route := coro.OperationRoutePostInvalid; route <= coro.OperationRoutePostStale; route++ {
+		for request := coro.ExecutorRequestInvalid; request <= coro.ExecutorRequestStale; request++ {
+			result := coro.OperationRouteIngressResult{Route: route, Executor: request}
+			want := route == coro.OperationRoutePosted &&
+				(request == coro.ExecutorRequestPublished || request == coro.ExecutorRequestIdleWake ||
+					request == coro.ExecutorRequestCoalesced || request == coro.ExecutorRequestClosed)
+			if got := coroNativeFleetCompletionAcceptedV1(result); got != want {
+				t.Fatalf("completion acceptance %+v = %t, want %t", result, got, want)
+			}
+		}
+	}
+	if coro.ExecutorRequestAccepted(coro.ExecutorRequestClosed) || coro.ExecutorRequestNeedsDoorbell(coro.ExecutorRequestClosed) {
+		t.Fatal("closed wake request became an accepted/ringing request")
+	}
+}
+
 var coroNativeFleetRunTestV1 struct {
 	sync.Mutex
 	tasks map[unsafe.Pointer]*coroNativeFleetTestTask

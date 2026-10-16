@@ -129,6 +129,22 @@ func settleRouteWorkerFixture(
 	want ScalarResultPayloadV1,
 ) {
 	t.Helper()
+	consumeRouteWorkerFixture(t, fixture, state, ticket, id, want)
+	if _, _, ok := PollExecutor(fixture.driver); !ok {
+		t.Fatal("acknowledge routed worker executor request")
+	}
+	closeTestExecutorDriver(t, fixture.driver)
+}
+
+func consumeRouteWorkerFixture(
+	t *testing.T,
+	fixture *routeWorkerFixture,
+	state *ParkState,
+	ticket ParkTicket,
+	id OperationID,
+	want ScalarResultPayloadV1,
+) {
+	t.Helper()
 	if published, lost, ok := fixture.worker.PublishPass(fixture.p); !ok || published != 1 || lost != 0 {
 		t.Fatalf("publish routed worker = (%d, %d, %t)", published, lost, ok)
 	}
@@ -147,10 +163,48 @@ func settleRouteWorkerFixture(
 		t.Fatalf("consume routed worker = (%d, %d, %+v, %t)", outcome, caseID, lease, consumed)
 	}
 	finishWorkerOperations(t, fixture.worker, fixture.p, []OperationID{id}, lease, want)
-	if _, _, ok := PollExecutor(fixture.driver); !ok {
-		t.Fatal("acknowledge routed worker executor request")
+}
+
+func TestOperationRouteConsumedWorkerMayRaceExecutorCloseBeforeRequest(t *testing.T) {
+	routes := new(OperationRouteRegistry)
+	route, ok := routes.Allocate()
+	if !ok {
+		t.Fatal("allocate worker close-race route")
 	}
-	closeTestExecutorDriver(t, fixture.driver)
+	executors := new(ExecutorRegistry)
+	fixture := bindRouteWorkerFixture(t, executors, route)
+	if !routes.Bind(route, fixture.driver) {
+		t.Fatal("bind worker close-race route")
+	}
+	state, ticket, ids := reserveWorkerWaitSet(t, fixture.worker, fixture.p, 154, []uint32{1})
+	id, payload := ids[0], workerPayloadForTest(t, 3, 7, 8, 9)
+	slot, found := operationRouteSlotFor(routes, route)
+	if !found || !fixture.worker.MarkSubmitted(fixture.p, id) || !operationRouteAcquireProducer(slot) {
+		t.Fatal("enter complete worker callback tail")
+	}
+	// Pause one real route transaction between its durable Post and Request.
+	// The owner can consume that result and seal its adopted executor first;
+	// the route lease still protects the callback's exact executor generation.
+	if fixture.worker.Post(id, payload) != WorkerOperationPosted {
+		t.Fatal("publish close-race worker result")
+	}
+	consumeRouteWorkerFixture(t, fixture, state, ticket, id, payload)
+	if _, _, ok := PollExecutor(fixture.driver); !ok || !BeginExecutorClose(fixture.driver) {
+		t.Fatal("close executor after consuming the worker result")
+	}
+	if result := executors.Request(fixture.handle); result != ExecutorRequestClosed {
+		t.Fatalf("request after successful delivery and close = %d", result)
+	}
+	if !routes.BeginClose(route) || routes.ConfirmQuiesced(route) {
+		t.Fatal("route retirement failed to join the admitted completion tail")
+	}
+	operationRouteReleaseProducer(slot)
+	if !routes.ConfirmQuiesced(route) || !routes.Retire(route) || !ConfirmExecutorClose(fixture.driver) {
+		t.Fatal("finish strong join and final source drain after the callback")
+	}
+	if !routes.AllRetired() || !executors.CanRelease() {
+		t.Fatal("worker close-race left a live binding")
+	}
 }
 
 func TestOperationIDRouteCodecIsFrozenTwoWordPOD(t *testing.T) {

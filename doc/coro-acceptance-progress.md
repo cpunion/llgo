@@ -950,6 +950,25 @@ investigation is not erased by v108's passing cohort. A fresh v107 full test/go,
 v108 four-package runtime cohort, v103 demos and older stdlib/GOROOT evaluations
 remain separately running; none is relabeled as a final-head whole-suite pass.
 
+The isolated v109 runtime diagnostic subsequently reproduces the worker abort
+at matrix cycle13/mode2/attempt1 (1321 prior successful executions). Its status
+`0x3004` identifies a successful source Post followed by ExecutorRequestClosed,
+not a failed source, stale generation or deferred-M activation failure. Mode2
+is the original static discarded-entry case, so this is not capture-specific.
+ExecutorRegistry.BeginClose already explicitly permits this Post->Request race
+and requires the final post-join durable-source drain. The adapter now accepts
+that exact successful-Post/Closed pair while preserving all invalid, stale,
+duplicate and source-closed rejections. Ordinary RequestAccepted and doorbell
+semantics remain unchanged. A deterministic core model consumes the result,
+closes the executor before the delayed Request, proves the route lease still
+blocks retirement, then joins and confirms the final drain. It passes under
+race instrumentation; the adapter's full result matrix fails before the fix
+at {Route:Posted,Executor:Closed}, then passes with the whole native fleet host
+race suite. The single-owner native profile also preserves its typed Request
+result instead of erasing Closed into a boolean. Final actual-program stress
+and integration of this correction remain pending; diagnostic reason codes
+and fprintf are confined to the experiment branch, not production.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
