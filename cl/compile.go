@@ -2303,8 +2303,12 @@ func (p *context) compilePhi(b llssa.Builder, v *ssa.Phi) (ret llssa.Expr) {
 		if p.coroEmissionPlan() != nil || p.physicalReachable != nil {
 			livePreds := make([]*ssa.BasicBlock, 0, len(preds))
 			liveEdges := make([]ssa.Value, 0, len(edges))
+			var program *coroProgramIR
+			if p.emissionUniverse != nil {
+				program = p.emissionUniverse.coroProgramIR
+			}
 			for index, pred := range preds {
-				if p.coroSourceBlockReachable(pred) {
+				if p.coroSourceBlockReachable(pred) && program.coroSelectedEdge(pred, v.Block()) {
 					livePreds = append(livePreds, pred)
 					liveEdges = append(liveEdges, edges[index])
 				}
@@ -3598,8 +3602,18 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		b.Return(results...)
 	case *ssa.If:
-		cond := p.compileValue(b, v.Cond)
 		succs := v.Block().Succs
+		if v != p.patchOriginalInitIf && (p.coroEmissionPlan() != nil || p.physicalReachable != nil) {
+			var program *coroProgramIR
+			if p.emissionUniverse != nil {
+				program = p.emissionUniverse.coroProgramIR
+			}
+			if selected := program.coroSuccessors(v.Block()); len(selected) == 1 {
+				b.Jump(p.sourceBlock(selected[0].Index))
+				break
+			}
+		}
+		cond := p.compileValue(b, v.Cond)
 		thenIndex, elseIndex := 0, 1
 		if v == p.patchOriginalInitIf {
 			// The public patch initializer already claimed init$guard. Enter the
