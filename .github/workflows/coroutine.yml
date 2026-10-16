@@ -90,7 +90,7 @@ jobs:
             ./internal/runtime/coro_run_decision.go \
             ./internal/runtime/coro_run_decision_test.go \
             -run '^Test(CoroRunDecisionOutputModeV1|NormalCoroRunDecisionWordsV1|CoroRunDecisionWrapperRejectsMalformedNormalOnlyMode)$' -count=1
-          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerV2SourceABI|TestNativeTimerCapacity|TestTimeSleep|TestCoroGCNotification)' -count=1
+          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerV2SourceABI|TestNativeTimerCapacity|TestTimeSleep|TestCoroGCNotification|TestCallerPCRegistryProductionRace)' -count=1
           go test -race ./internal/lib/runtime/time_coro_gc_llgo.go \
             ./internal/lib/runtime/time_coro_gc_test.go -count=1 -timeout=60s
           # The complete LLGo runtime package intentionally owns symbols that

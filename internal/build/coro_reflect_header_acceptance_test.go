@@ -37,6 +37,7 @@ func TestCoroReflectHeaderGCAcceptance(t *testing.T) {
 		{"gc-await", "./internal/build/_testgo/coro_reflect_header_gc", "reflect header exact owner survives GC and await"},
 		{"consumed-pointer-result", "./internal/build/_testgo/coro_consumed_pointer_gc", "consumed pointer result is collectible with a live caller"},
 		{"dynamic-pointer-result", "./internal/build/_testgo/coro_dynamic_pointer_result", "dynamic pointer results survive single consumption and GC"},
+		{"shared-caller-pc", filepath.Join(root, "runtime", "_testgo", "coro_shared_caller_pc", "main.go"), "shared caller PC identity passed"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			image := filepath.Join(t.TempDir(), "header")
