@@ -54,6 +54,15 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 			return nil, fmt.Errorf("llgo.coroBorrowResult requires a bound physical resource-delivery guard for descriptor publication")
 		}
 		if recipe.archive == nil {
+			if recipe.loan.Value != recipe.borrow || recipe.loan.FunctionsVisited == 0 {
+				return nil, fmt.Errorf("llgo.coroBorrowResult requires its frozen borrowed output lifetime proof")
+			}
+			for ordinal, helper := range []*ssa.Function{recipe.initializer, recipe.drop} {
+				proof := recipe.helperLoans[ordinal]
+				if proof.Function != helper || proof.Index != 0 || proof.FunctionsVisited == 0 {
+					return nil, fmt.Errorf("llgo.coroBorrowResult requires its exact helper output lifetime proof")
+				}
+			}
 			plan.fallback = &recipe
 		}
 	}

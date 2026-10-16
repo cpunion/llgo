@@ -101,7 +101,7 @@ ABI hash、true/false predicate mask）及最终 FunctionPlan，未使用的 hel
 同一个 ABI hash 构造器，并绑定实际 target layout。物理调用复用现有 descriptor/thunk、
 child await 与 cleanup drainer；不增加 runtime 字段或第二套调度/取消协议。当前测试
 覆盖 native/wasm32 CoroSplit 前后，以及真实 native archive 的运行期显式取消。
-source producer 动态发布、FFI 第二次资源交付和 output-loan lifetime 仍是独立 gate，
+source producer 动态发布和 FFI 第二次资源交付仍是独立 gate，
 不能仅凭类型元数据或符号存在而放开。普通 main 退出不等价于可等待的显式任务取消，
 正常丢弃返回值（包括 defer）也不自动 drop。
 
@@ -172,6 +172,17 @@ physical join 和 cleanup drainer，不增加另一套资源 capsule 框架。20
 普通 scalar 的 Take/Discard 已闭环，但清除一个 fd、host handle 或 opaque C
 pointer 的数值，不等于释放它代表的资源。当前 worker/host 的成功文件路径可运行，
 仍不能据此宣称资源返回与任意 task cancellation 的组合已经安全。
+
+结果 sink 的地址不能比生产调用活得更久。ProgramIR 在所有 call-site contract
+冻结后，复用已有 allocation/parameter borrow analyzer，分别证明 borrow 返回值、
+initializer 第一个参数和 drop 第一个参数的完整地址图；不增加另一套逃逸分析。
+普通 managed Go helper 递归推导；C/worker 调用只消费已冻结的
+`ArgumentsBorrowedUntilCompletion`，不以 inert stub 证明生命周期。全局保存、
+interior address 逃逸、interface/unsafe 转存、闭包捕获、go、未知动态调用等无法
+证明的边均拒绝。当前证明保守地拒绝保留借用地址的 defer，不授予 detached work
+权限。物理 preflight 要求三个精确 proof identity；旧产物不能用类型相同绕过检查，
+guard ABI v2 进入现有 source/library ABI hash。该证明只有编译期开销，不增添 frame
+字段、分配、检查指令或源码注释。
 
 最初的确定性回归将真实打开的 fd 经过现有 WorkerOperationSource、HostOperationAdapter 和
 ResumePacket。正常消费正例通过；以下两种取消都会留下未关闭的 fd：

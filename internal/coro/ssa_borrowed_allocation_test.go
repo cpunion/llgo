@@ -207,6 +207,57 @@ func root() {
 	}
 }
 
+func TestSSABorrowedValueUsesTheSameClosedAddressGraph(t *testing.T) {
+	_, pkg := buildCoroTestSSA(t, "borrowed_value.go", `package coroid
+type result struct { value int }
+func sink() *result
+func mutate(p *result) { p.value = 7 }
+func local() int { p := sink(); mutate(p); return p.value }
+var escaped *int
+func interiorEscape() { p := sink(); escaped = &p.value }
+func foreign(*result)
+func external() { p := sink(); foreign(p) }
+`)
+	root := func(name string) *ssa.Call {
+		t.Helper()
+		for _, block := range packageFunction(t, pkg, name).Blocks {
+			for _, instruction := range block.Instrs {
+				if call, ok := instruction.(*ssa.Call); ok && call.Common().StaticCallee() == packageFunction(t, pkg, "sink") {
+					return call
+				}
+			}
+		}
+		t.Fatal("missing pointer result")
+		return nil
+	}
+	local := root("local")
+	proof, proven := ProveSSABorrowedValueWithConfig(local, SSABorrowedAllocationConfig{})
+	if !proven || proof.Value != local || proof.FunctionsVisited != 2 || proof.ParametersProven != 1 {
+		t.Fatalf("ordinary closed helper lost the result loan: %+v, %t", proof, proven)
+	}
+	if _, proven := ProveSSABorrowedValueWithConfig(local, SSABorrowedAllocationConfig{
+		ResolveCalleeBody: func(*ssa.Function) (*ssa.Function, bool) { return nil, false },
+	}); proven {
+		t.Fatal("an inert/replaced source body proved a loan")
+	}
+	for _, name := range []string{"interiorEscape", "external"} {
+		if _, proven := ProveSSABorrowedValueWithConfig(root(name), SSABorrowedAllocationConfig{}); proven {
+			t.Fatalf("%s received an open lifetime proof", name)
+		}
+	}
+	external := root("external")
+	if _, proven := ProveSSABorrowedValueWithConfig(external, SSABorrowedAllocationConfig{
+		BorrowedCallArgument: func(call *ssa.Call, index int) bool {
+			return call.Common().StaticCallee() == packageFunction(t, pkg, "foreign") && index == 0
+		},
+	}); !proven {
+		t.Fatal("the exact frontend-owned call certificate was ignored")
+	}
+	if _, proven := ProveSSABorrowedValueWithConfig(nil, SSABorrowedAllocationConfig{}); proven {
+		t.Fatal("nil value received a loan proof")
+	}
+}
+
 func exactHeapAllocation(t *testing.T, function *ssa.Function) *ssa.Alloc {
 	t.Helper()
 	var result *ssa.Alloc
