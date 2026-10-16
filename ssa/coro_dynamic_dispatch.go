@@ -75,8 +75,9 @@ type CoroDispatchCallOptions struct {
 	// fail-closed until that physical guard is bound.
 	TrustedDescriptor bool
 	// DeliveryGuard permits HasDelivery only for a consumer which binds the
-	// returned helpers into its existing result/cleanup transaction. Default
-	// calls reject that capability instead of silently losing custody.
+	// returned helpers into its existing result/cleanup transaction, or invokes
+	// an independently owned coroutine entry with nil output and its guarded
+	// fallback. Default calls reject the capability instead of losing custody.
 	DeliveryGuard bool
 }
 

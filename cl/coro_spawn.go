@@ -266,6 +266,10 @@ func (p *context) compileCoroDispatchSpawnTransaction(
 		Version: coroPlainDispatchVersion,
 		ABIHash: abi.hash,
 		Result:  p.prog.Type(abi.resultSlotType, llssa.InC),
+		// The independent entry receives a nil output and owns the existing
+		// discarded-result fallback. Accept its checked delivery capability
+		// without creating a result guard in the spawning parent.
+		DeliveryGuard: true,
 	}
 	// Preserve Go evaluation order: the callee and arguments are complete
 	// before the nil-call check. The physical parent then owns the structured

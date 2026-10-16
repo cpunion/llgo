@@ -241,6 +241,14 @@ func SpawnCaptured() { go Factory(7)("spawn") }
 				EmissionUniverse: universe, FunctionIDs: ids, MaxPlainInstructions: 64,
 				OutcomeMode: coro.OutcomeExplicitStatus, ClassifyLocalBody: u.CoroLocalBodyFacts,
 				ClassifyLoweredCalls: u.CoroLoweredCalls,
+				ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+					// Match the production spawn planner's preemptible owner/target
+					// seed while keeping this focused fixture on the shared SSA API.
+					if function == pkg.Func("SpawnCaptured") || function == pkg.Func("Factory").AnonFuncs[0] {
+						return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+					}
+					return coro.SSAFunctionPolicy{}, nil
+				},
 				ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (coro.UnknownTarget, error) {
 					return coro.UnknownManagedDispatch, nil
 				},
@@ -278,9 +286,9 @@ func SpawnCaptured() { go Factory(7)("spawn") }
 			if strings.Contains(closed, "coro.dispatch.delivery") {
 				t.Fatalf("closed nonresource family retained delivery machinery:\n%s", closed)
 			}
-			spawn := requireCoroPhysicalFunction(t, module, "foo.SpawnCaptured").String()
-			if strings.Contains(spawn, "coro.dispatch.delivery") {
-				t.Fatalf("spawn borrowed parent-owned result custody instead of using the entry fallback:\n%s", spawn)
+			spawnDelivery, err := prepareCoroDeliveryFunctionPlan(pkg.Func("SpawnCaptured"), plan, u.coroProgramIR, u)
+			if err != nil || spawnDelivery != nil {
+				t.Fatalf("spawn borrowed parent-owned result custody instead of using the entry fallback: %+v, %v", spawnDelivery, err)
 			}
 			closure := pkg.Func("Factory").AnonFuncs[0]
 			if fact, present := plan.FunctionPlan(closure); !present || fact.FuncRep != coro.Dispatch || len(closure.FreeVars) != 1 {
