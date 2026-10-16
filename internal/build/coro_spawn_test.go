@@ -292,7 +292,7 @@ func launch(callback func(int), value int) {
 	if spawn == nil {
 		t.Fatal("launch has no method spawn")
 	}
-	target, targetPlan, err := resolveCoroDirectStaticSpawnPlan(plan, spawn)
+	target, targetPlan, err := plan.ResolveClosedStaticSpawn(spawn)
 	if err != nil {
 		t.Fatalf("resolve method spawn: %v", err)
 	}

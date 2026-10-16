@@ -224,8 +224,11 @@ func (p *SSAPlan) ResolveExactInterfaceCall(
 // ResolveClosedStaticSpawn proves the exact source and whole-plan shape used
 // by the first stackless goroutine-spawn lowering. The target is selected by
 // the immutable CallPlan, never by a display name or a runtime callback. The
-// target must be context-free: either a package function or an exact source
-// literal with no captured variables. It has one coroutine primary even when
+// target must be context-free: a package function, an exact declared method,
+// or an exact source literal with no captured variables. A method's receiver
+// is the first SSA argument, not an implicit closure environment. The same
+// proof is consumed by build admission and physical lowering.
+// It has one coroutine primary even when
 // its source body is bounded:
 // this preserves preemption if that goroutine becomes CPU-heavy and lets sync
 // callers reuse the same body through ordinary async-effect propagation.
@@ -269,30 +272,40 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 		return nil, FunctionPlan{}, fmt.Errorf("target %q is a generic declaration", targetPlan.ID)
 	}
 	sig := target.Signature
-	if sig == nil || sig.Recv() != nil ||
+	if sig == nil ||
 		(sig.TypeParams() != nil && sig.TypeParams().Len() != 0) ||
 		(sig.RecvTypeParams() != nil && sig.RecvTypeParams().Len() != 0) {
-		return nil, FunctionPlan{}, fmt.Errorf("target %q must have one non-method, non-generic signature", targetPlan.ID)
+		return nil, FunctionPlan{}, fmt.Errorf("target %q must have one concrete non-generic signature", targetPlan.ID)
 	}
 	argumentSignature := sig
 	if redirected && direct {
 		callSignature, callErr := p.CallableSignature(call.Parent(), common.Signature())
 		targetSignature, targetErr := p.CallableSignature(target, sig)
-		if callErr != nil || targetErr != nil || !types.Identical(callSignature, targetSignature) {
+		if callErr != nil || targetErr != nil || !types.Identical(callSignature, targetSignature) ||
+			(callSignature.Recv() == nil) != (targetSignature.Recv() == nil) ||
+			callSignature.Recv() != nil && !types.Identical(callSignature.Recv().Type(), targetSignature.Recv().Type()) {
 			return nil, FunctionPlan{}, fmt.Errorf("target %q does not preserve the source spawn signature", targetPlan.ID)
 		}
 		// SSA arguments retain the caller's source identities. The equality
 		// above proves that those exact types project to the target's types.
 		argumentSignature = common.Signature()
 	}
-	if len(common.Args) != sig.Params().Len() {
+	parameterBase := 0
+	if sig.Recv() != nil {
+		parameterBase = 1
+	}
+	if len(common.Args) != sig.Params().Len()+parameterBase {
 		return nil, FunctionPlan{}, fmt.Errorf(
 			"target %q spawn arguments=%d do not match parameters=%d",
-			targetPlan.ID, len(common.Args), sig.Params().Len(),
+			targetPlan.ID, len(common.Args), sig.Params().Len()+parameterBase,
 		)
 	}
 	for index, argument := range common.Args {
-		if argument == nil || !types.Identical(argument.Type(), argumentSignature.Params().At(index).Type()) {
+		parameter := argumentSignature.Recv()
+		if index >= parameterBase {
+			parameter = argumentSignature.Params().At(index - parameterBase)
+		}
+		if argument == nil || !types.Identical(argument.Type(), parameter.Type()) {
 			return nil, FunctionPlan{}, fmt.Errorf("target %q spawn argument %d does not preserve its exact type", targetPlan.ID, index)
 		}
 	}

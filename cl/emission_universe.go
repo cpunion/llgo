@@ -1174,6 +1174,10 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	}
 	for alias := range u.aliases {
 		if canonical, frozen := u.Resolve(alias); frozen {
+			if adapter := u.managedForeignWraps[alias]; adapter != nil {
+				u.coroProgramIR.managedMethodTargets[alias] = adapter
+				continue
+			}
 			if target := u.coroProgramIR.managedMethodTargets[canonical]; target != nil {
 				if target == canonical {
 					target = alias // ordinary aliases retain their source receiver view
@@ -4011,6 +4015,19 @@ func (u *EmissionUniverse) physicalName(ownerSSA *ssa.Package, fn *ssa.Function,
 	if name := u.physicalNames[emissionFunctionOwnerKey{function: fn, owner: owner}]; name != "" {
 		return name, nil
 	}
+	if _, carrier := u.managedForeignWrapInfo[fn]; carrier {
+		// A compiler-owned callable facade is defined in its implementation
+		// archive, not in each descriptor user's package. Its SSA function has
+		// no Pkg, so the legacy spelling depends on the requesting context.
+		// Consume the existing frozen definition key for every reference.
+		home := u.ownerOf(fn)
+		key := u.finalKeys[emissionFunctionOwnerKey{function: fn, owner: home}]
+		kind, name, _, valid := splitManagedSymbolKey(key)
+		if !valid || kind != goFunc || name == "" {
+			return "", fmt.Errorf("coroutine entry resolution: managed callable carrier %q has no frozen Go definition symbol", fn.Name())
+		}
+		return name, nil
+	}
 	if isEmissionGeneratedWrapper(fn) {
 		// A package may emit an ABI method table for a named type declared by
 		// another package. Its pointer-receiver adapter is a Pkg-nil SSA wrapper,
@@ -4426,12 +4443,20 @@ func (u *EmissionUniverse) selectABITypeMethods(prepared *preparedEmissionPackag
 				return err
 			}
 		}
+		source := fn
 		fn = u.canonicalAlias(fn)
 		if fn == nil {
 			return fmt.Errorf("prepare emission universe: ABI method table for %v reached a cyclic method alias", typ)
 		}
 		if _, frozen := u.required[fn]; !frozen {
 			return fmt.Errorf("prepare emission universe: ABI method table for %v references method %q outside the frozen emission universe", typ, fn.Name())
+		}
+		if source != fn && source.Signature != nil && source.Signature.Recv() != nil {
+			if adapted, err := u.materializeManagedForeignFunctionValueAdapter(source, prepared); err != nil {
+				return err
+			} else if adapted {
+				fn = u.managedForeignWraps[source]
+			}
 		}
 		methods = append(methods, fn)
 		return nil
@@ -5786,7 +5811,7 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 				return fmt.Errorf("prepare emission universe: managed Go winner %q for owner %q is not emitted", function.Name(), prepared.identity)
 			}
 
-			if len(function.Blocks) == 0 {
+			if len(function.Blocks) == 0 || bodylessManagedGoDeclaration(function) {
 				continue
 			}
 			pairKeys, err := (emissionCanonicalIndex{
@@ -5830,8 +5855,23 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 		}
 		for _, pkg := range memberPackages {
 			for _, member := range pkg.Members {
-				if function, ok := member.(*ssa.Function); ok {
-					memberSet[function] = none{}
+				switch member := member.(type) {
+				case *ssa.Function:
+					memberSet[member] = none{}
+				case *ssa.Type:
+					kind, _ := PkgKindOf(pkg.Pkg)
+					named, ok := types.Unalias(member.Type()).(*types.Named)
+					if kind != PkgDeclOnly || !ok || named.TypeParams().Len() != 0 {
+						continue
+					}
+					// Methods are not package members. A decl-only package omits
+					// their definitions just as it omits ordinary function bodies;
+					// pair the declared method, never a synthesized method wrapper.
+					for index := 0; index < named.NumMethods(); index++ {
+						if function := u.goProg.FuncValue(named.Method(index)); function != nil {
+							memberSet[function] = none{}
+						}
+					}
 				}
 			}
 		}
@@ -6212,12 +6252,20 @@ func (u *EmissionUniverse) activateBodylessGoLinknameAlias(declaration *ssa.Func
 }
 
 func bodylessManagedGoDeclaration(function *ssa.Function) bool {
-	if function == nil || len(function.Blocks) != 0 || functionNeedsLinkOnce(function) || function.Pkg == nil ||
-		function.Parent() != nil || function.Signature == nil || function.Signature.Recv() != nil {
+	if function == nil || functionNeedsLinkOnce(function) || function.Pkg == nil || function.Pkg.Pkg == nil ||
+		function.Parent() != nil || function.Signature == nil {
 		return false
 	}
 	declaration, _ := function.Syntax().(*ast.FuncDecl)
-	return declaration != nil && declaration.Body == nil
+	if declaration == nil {
+		return false
+	}
+	if kind, _ := PkgKindOf(function.Pkg.Pkg); kind == PkgDeclOnly {
+		// SSA can retain a gc implementation even though the physical frontend
+		// emits declarations only. Its source body is not an LLGo definition.
+		return true
+	}
+	return len(function.Blocks) == 0 && function.Signature.Recv() == nil && declaration.Body == nil
 }
 
 func bodylessGoLinknameDeclaration(function *ssa.Function) (bool, error) {
@@ -6744,7 +6792,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		if directCall {
 			return nil
 		}
-		if adapted, err := u.materializeManagedForeignFunctionValueAdapter(canonicalTarget, owner); err != nil {
+		if adapted, err := u.materializeManagedForeignFunctionValueAdapter(target, owner); err != nil {
 			return err
 		} else if adapted {
 			return nil
@@ -6899,6 +6947,14 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 						continue
 					}
 					directFunction := root.directFunction
+					if _, deferred := call.(*ssa.Defer); deferred && root.value == call.Common().Value {
+						if _, paired := u.goLinknameDefinitions[target]; paired {
+							// Capture through the same typed carrier as a function
+							// value when the implementation has another source ABI.
+							// Ordinary static calls still use their direct facade.
+							directFunction = false
+						}
+					}
 					if spawn, ok := call.(*ssa.Go); ok && spawn.Common() != nil && root.value == spawn.Common().Value {
 						// A direct intrinsic has no callable body. The legacy
 						// Builder.Do path generated a carrier around its buildCall

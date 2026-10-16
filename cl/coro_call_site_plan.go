@@ -463,6 +463,26 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						plan.ManagedStaticTarget = managedStaticTarget
 						plan.ManagedStaticTargetCertificate = managedStaticCertificate.ID
 					}
+					if !frontendUnevaluated && classifyErr == nil && !plan.ElidesCall() {
+						_, deferred := call.(*ssa.Defer)
+						_, spawned := call.(*ssa.Go)
+						if deferred || spawned {
+							source := call.Common().StaticCallee()
+							adapter := u.managedForeignWraps[source]
+							if _, paired := u.goLinknameDefinitions[source]; paired &&
+								adapter != nil && u.managedForeignWrapInfo[adapter] == source {
+								if u.syntheticKeys[adapter] == "" {
+									classifyErr = fmt.Errorf("typed linkname carrier has no frozen structural identity")
+								} else if managedStatic || intrinsic || generatedCgoCertified || pythonOperation || patchRedirect || noInit {
+									classifyErr = fmt.Errorf("typed linkname carrier overlaps another invocation recipe")
+								} else {
+									plan.ManagedStaticTarget = adapter
+									plan.ManagedStaticTargetCertificate = emissionDigest(u.syntheticKeys[adapter])
+									managedStatic = true
+								}
+							}
+						}
+					}
 					if spawn, spawned := call.(*ssa.Go); spawned && classifyErr == nil {
 						if _, builtin := spawn.Common().Value.(*ssa.Builtin); builtin {
 							wrapper, wrapped := u.builtinSpawnWraps[builtinSpawnWrapperKey{

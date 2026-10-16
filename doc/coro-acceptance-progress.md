@@ -12,7 +12,48 @@ PRs [#262](https://github.com/cpunion/llgo/pull/262) and
 as `113f68c32` and `7cc805a0d`. Their exact heads `06502a0a8` and `3b9571606`
 each passed all 18 coroutine CI jobs (runs `38856508230` and `38857042105`);
 review, inline-comment and issue-comment inventories were empty. No main
-branch was synchronized or changed. PR #264 is the follow-up, not yet merged.
+branch was synchronized or changed. PR
+[#264](https://github.com/cpunion/llgo/pull/264) is also merged as `5e6cd10b8`:
+head `4f5aaa575` passed all 18 coroutine CI jobs in run `38866563774`, with
+empty review/comment/thread inventories. Its fresh v67 complete `test/go`
+run passed **268/268**, zero failures/skips, including nested compiler probes
+and both original caller-PC regressions. It completed at 08:00:52 UTC with
+matching source-after, joined children and reclaimed private scratch. Binary
+SHA-256 is `5ca681fc6f646bd6fc78eb8551ce2a87625cf35543017831ff8b17944c781dc8`;
+run peak is 6360.5MiB. The v64 failed cohort remains retained separately.
+
+The six previously rejected byte-alias-dependent standard-library packages
+now all have complete actual passing reruns: v65 covers `net/rpc`,
+`net/http/cookiejar`, `net/http/httputil`, `net/http/fcgi` and
+`net/http/pprof`; v69 covers `net/rpc/jsonrpc` (3 tests). Both cohorts match
+source-after and reclaim private scratch. They are affected gates, not a
+single-snapshot 180-package pass.
+
+The declaration-only `runtime/cgo` package retains gc SSA bodies that LLGo
+does not emit. Exact managed-link pairing now includes those omitted bodies
+and declared methods. Its complete actual package passes 2/2 tests on v66
+and v69. Managed constructor/method values additionally need a source-typed
+forwarding facade, owned by the emitted implementation package. The existing
+Go forwarding adapter is reused for function values, methods, interfaces,
+reflection and go/defer; ordinary direct calls retain the canonical fast path.
+Build admission and lowering now share the exact static spawn proof in SSAPlan,
+removing their duplicate method resolvers. Receiver/argument types, non-capture,
+closed targets and preemptible coroutine-primary checks remain enforced.
+Host race, native/wasm32 CoroSplit and unchanged architecture-budget gates pass.
+The IR test helper now obtains immutable runtime type declarations from the
+production loader rather than host-Go importing LLGo-only sources; the existing
+metadata and noinline assertions pass unchanged.
+
+The stronger actual cgo route fixture deliberately covers constructor values,
+bound/method-expression/interface/reflect calls, deferred deletion, spawned
+deletion, yield/GC and P=1/2. It exposed successive adapter admission and
+cross-package symbol failures in v66/v68/v69/v70; none is recorded as passing.
+Carrier publication now freezes its ordinary Go definition symbol and every
+consumer reads that same definition key; a missing key fails closed. Restoring
+the old symbol lookup fails the new three-package identity test. A fresh
+linked-program run is still required before this follow-up is integrated.
+Immutable v70 separately starts new complete `test/go`, 73-demo and
+180-package stdlib cohorts; the v65 eight-shard GOROOT rerun remains ongoing.
 
 The v58 expvar retry now compiles and executes all four tests successfully.
 It retains source `d5d6c5627`, source-manifest SHA-256
@@ -138,7 +179,8 @@ Using the unchanged v64 compiler, the fixture passes 100 native executions and
 actual Node/wasm execution (2126.7MiB combined build/run peak). Both original
 failing test programs also pass unchanged (116.77s and 84.46s, 2989.1MiB tree
 peak), with source-after matched. The retained v64 whole-package failure is not
-rewritten as a pass; a fresh post-fix complete run remains required.
+rewritten as a pass. The fresh post-fix complete v67 run now passes all 268
+top-level tests, as recorded at the current checkpoint above.
 
 The v48 GOROOT rerun reached case 213/1082 before its 8GiB private-scratch cap
 stopped it (sampled tree peak 17313MiB). This is a resource interruption, not
