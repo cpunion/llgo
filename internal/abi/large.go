@@ -40,6 +40,7 @@ func (l largeAggregateLowerer) indirectType(ctx llvm.Context, typ llvm.Type) llv
 }
 
 func (l largeAggregateLowerer) transformModule(m llvm.Module) {
+	l.foldLargeAggregateProjections(m)
 	var calls []llvm.Value
 	var funcs []llvm.Value
 	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
@@ -63,6 +64,60 @@ func (l largeAggregateLowerer) transformModule(m llvm.Module) {
 		l.transformFunc(m, fn)
 	}
 	l.transformLargeMemory(m)
+}
+
+// A source multi-result call may assemble a tuple and immediately extract its
+// fields. Canonicalize those exact SSA identities before looking for memory
+// copies, rather than letting a dead insert/extract chain hide a large load
+// until LLVM's later optimization pipeline, after this mandatory lowering.
+func (l largeAggregateLowerer) foldLargeAggregateProjections(m llvm.Module) {
+	var extracts, inserts []llvm.Value
+	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
+			for value := bb.FirstInstruction(); !value.IsNil(); value = llvm.NextInstruction(value) {
+				if !value.IsAExtractValueInst().IsNil() && l.isLargeAggregate(value.Operand(0).Type()) {
+					extracts = append(extracts, value)
+				} else if !value.IsAInsertValueInst().IsNil() && l.isLargeAggregate(value.Type()) {
+					inserts = append(inserts, value)
+				}
+			}
+		}
+	}
+	for _, extract := range extracts {
+		if value, exact := insertedAggregateProjection(extract.Operand(0), extract.Indices()); exact {
+			extract.ReplaceAllUsesWith(value)
+			extract.EraseFromParentAsInstruction()
+		}
+	}
+	// Builder.Aggregate emits each construction chain in one basic block.
+	// Reverse order drops the now-dead chain, exposing its original loads to
+	// the existing memory lowerer. Live/partially overwritten tuples stay put.
+	for index := len(inserts) - 1; index >= 0; index-- {
+		if value := inserts[index]; value.FirstUse().IsNil() {
+			value.EraseFromParentAsInstruction()
+		}
+	}
+}
+
+func insertedAggregateProjection(value llvm.Value, path []uint32) (llvm.Value, bool) {
+	for !value.IsAInsertValueInst().IsNil() {
+		written := value.Indices()
+		common := 0
+		for common < len(path) && common < len(written) && path[common] == written[common] {
+			common++
+		}
+		if common == len(written) {
+			if common == len(path) {
+				return value.Operand(1), true
+			}
+			return insertedAggregateProjection(value.Operand(1), path[common:])
+		}
+		if common == len(path) {
+			return llvm.Value{}, false // A subfield overwrite changed this container.
+		}
+		value = value.Operand(0) // This insertion wrote a disjoint member.
+	}
+	return llvm.Value{}, false
 }
 
 // transformLargeMemory keeps large zero stores, discarded loads and copies

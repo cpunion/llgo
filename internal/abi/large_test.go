@@ -429,6 +429,39 @@ entry:
   store volatile [65537 x i8] %bytes, ptr %dst, align 1
   ret void
 }
+
+define void @repacked_projection(ptr %src, ptr %dst, ptr %owner) {
+entry:
+  %bytes = load [65537 x i8], ptr %src, align 1
+  %a = insertvalue %Rooted undef, [65537 x i8] %bytes, 0
+  %b = insertvalue %Rooted %a, ptr %owner, 1, 0
+  %copy = extractvalue %Rooted %b, 0
+  store [65537 x i8] %copy, ptr %dst, align 1
+  ret void
+}
+
+define void @discarded_repacked_load(ptr %src) {
+entry:
+  %bytes = load [65537 x i8], ptr %src, align 1
+  %tuple = insertvalue %Rooted undef, [65537 x i8] %bytes, 0
+  ret void
+}
+
+define { ptr, i32 } @partial_container_overwrite(ptr %owner) {
+entry:
+  %a = insertvalue %Rooted undef, { ptr, i32 } zeroinitializer, 1
+  %b = insertvalue %Rooted %a, ptr %owner, 1, 0
+  %inner = extractvalue %Rooted %b, 1
+  ret { ptr, i32 } %inner
+}
+
+define ptr @nested_insert_projection(ptr %owner) {
+entry:
+  %inner = insertvalue { ptr, i32 } undef, ptr %owner, 0
+  %outer = insertvalue %Rooted undef, { ptr, i32 } %inner, 1
+  %root = extractvalue %Rooted %outer, 1, 0
+  ret ptr %root
+}
 `
 	ctx := llvm.NewContext()
 	defer ctx.Dispose()
@@ -470,6 +503,19 @@ entry:
 		if body := mod.NamedFunction(name).String(); !strings.Contains(body, "load %Rooted") || strings.Contains(body, "llvm.memcpy") {
 			t.Fatalf("%s was only partially rewritten:\n%s", name, body)
 		}
+	}
+	for _, name := range []string{"repacked_projection", "discarded_repacked_load"} {
+		body := mod.NamedFunction(name).String()
+		if strings.Contains(body, "insertvalue") || strings.Contains(body, "extractvalue") ||
+			strings.Contains(body, "load [65537 x i8]") || strings.Contains(body, "store [65537 x i8]") {
+			t.Fatalf("%s hid a large copy behind a redundant tuple:\n%s", name, body)
+		}
+	}
+	if body := mod.NamedFunction("partial_container_overwrite").String(); !strings.Contains(body, "extractvalue %Rooted") {
+		t.Fatalf("partial overwrite was incorrectly replaced by its old container:\n%s", body)
+	}
+	if body := mod.NamedFunction("nested_insert_projection").String(); strings.Contains(body, "extractvalue") || !strings.Contains(body, "ret ptr %owner") {
+		t.Fatalf("nested exact projection lost its original SSA value:\n%s", body)
 	}
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("projection module is invalid: %v\n%s", err, mod.String())
