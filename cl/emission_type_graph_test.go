@@ -23,6 +23,94 @@ import (
 	"testing"
 )
 
+func TestCoroStructuralTypeKeysCanonicalizePredeclaredAliases(t *testing.T) {
+	wrappers := []struct {
+		name string
+		wrap func(types.Type) types.Type
+	}{
+		{"scalar", func(t types.Type) types.Type { return t }},
+		{"slice", func(t types.Type) types.Type { return types.NewSlice(t) }},
+		{"array", func(t types.Type) types.Type { return types.NewArray(t, 3) }},
+		{"pointer", func(t types.Type) types.Type { return types.NewPointer(t) }},
+		{"map", func(t types.Type) types.Type { return types.NewMap(t, types.NewSlice(t)) }},
+		{"channel", func(t types.Type) types.Type { return types.NewChan(types.SendRecv, t) }},
+		{"signature", func(t types.Type) types.Type {
+			return types.NewSignatureType(nil, nil, nil,
+				types.NewTuple(types.NewParam(token.NoPos, nil, "arg", types.NewSlice(t))),
+				types.NewTuple(types.NewParam(token.NoPos, nil, "result", t)), true)
+		}},
+	}
+	for _, name := range []string{"byte", "rune"} {
+		alias := types.Universe.Lookup(name).Type()
+		basic, ok := types.Unalias(alias).(*types.Basic)
+		if !ok {
+			t.Fatalf("predeclared %s is not basic", name)
+		}
+		canonical := types.Typ[basic.Kind()]
+		for _, wrapper := range wrappers {
+			t.Run(name+"/"+wrapper.name, func(t *testing.T) {
+				left, right := wrapper.wrap(alias), wrapper.wrap(canonical)
+				if !types.Identical(left, right) {
+					t.Fatal("fixture types are not Go-identical")
+				}
+				for mode := emissionTypeKeyStrict; mode <= emissionTypeKeyCFunctionABI; mode++ {
+					if structuralEmissionTypeKeyForMode(mode, left) != structuralEmissionTypeKeyForMode(mode, right) {
+						t.Errorf("mode %d distinguishes predeclared aliases %s and %s", mode, left, right)
+					}
+				}
+			})
+		}
+	}
+	for mode := emissionTypeKeyStrict; mode <= emissionTypeKeyCFunctionABI; mode++ {
+		if structuralEmissionTypeKeyForMode(mode, types.Typ[types.Uint8]) ==
+			structuralEmissionTypeKeyForMode(mode, types.Typ[types.Uint16]) {
+			t.Errorf("mode %d erased a real basic-kind difference", mode)
+		}
+	}
+	defined := types.NewNamed(types.NewTypeName(token.NoPos, types.NewPackage("example.com/defined", "defined"), "Octet", nil), types.Typ[types.Uint8], nil)
+	for _, mode := range []emissionTypeKeyMode{emissionTypeKeyStrict, emissionTypeKeyStrictABI} {
+		if structuralEmissionTypeKeyForMode(mode, defined) == structuralEmissionTypeKeyForMode(mode, types.Universe.Lookup("byte").Type()) {
+			t.Errorf("mode %d erased a defined type's identity", mode)
+		}
+	}
+}
+
+func TestCoroStructuralABIKeysRespectMemberVisibility(t *testing.T) {
+	left := types.NewPackage("example.com/left", "left")
+	right := types.NewPackage("example.com/right", "right")
+	structure := func(pkg *types.Package, name, tag string) types.Type {
+		return types.NewStruct([]*types.Var{types.NewField(token.NoPos, pkg, name, types.Typ[types.Int], false)}, []string{tag})
+	}
+	methodSet := func(pkg *types.Package, name string) types.Type {
+		signature := types.NewSignatureType(nil, nil, nil, types.NewTuple(), types.NewTuple(), false)
+		return types.NewInterfaceType([]*types.Func{types.NewFunc(token.NoPos, pkg, name, signature)}, nil).Complete()
+	}
+	for _, test := range []struct {
+		name        string
+		left, right types.Type
+		identical   bool
+	}{
+		{"exported field", structure(left, "R0", ""), structure(right, "R0", ""), true},
+		{"generated exported field", structure(left, "R0", ""), structure(nil, "R0", ""), true},
+		{"unexported field", structure(left, "r0", ""), structure(right, "r0", ""), false},
+		{"field tag", structure(left, "R0", "json:\"a\""), structure(left, "R0", "json:\"b\""), false},
+		{"exported method", methodSet(left, "Read"), methodSet(right, "Read"), true},
+		{"generated exported method", methodSet(left, "Read"), methodSet(nil, "Read"), true},
+		{"unexported method", methodSet(left, "read"), methodSet(right, "read"), false},
+		{"named types", types.NewNamed(types.NewTypeName(token.NoPos, left, "T", nil), structure(left, "R0", ""), nil),
+			types.NewNamed(types.NewTypeName(token.NoPos, right, "T", nil), structure(right, "R0", ""), nil), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if identical := types.Identical(test.left, test.right); identical != test.identical {
+				t.Fatalf("Go identity=%t, want %t", identical, test.identical)
+			}
+			if equal := structuralEmissionABITypeKey(test.left) == structuralEmissionABITypeKey(test.right); equal != test.identical {
+				t.Fatalf("strict ABI equality=%t, want Go identity=%t", equal, test.identical)
+			}
+		})
+	}
+}
+
 func TestStructuralGoLinknameABITypeKeyCompactsSharedTypeDAG(t *testing.T) {
 	left := testSharedGoLinknameType("example.com/left", 20, types.Typ[types.Uintptr])
 	right := testSharedGoLinknameType("example.com/right", 20, types.Typ[types.Uintptr])

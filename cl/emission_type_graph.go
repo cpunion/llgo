@@ -268,6 +268,14 @@ func (b *emissionTypeGraphBuilder) describe(typ types.Type) emissionTypeGraphNod
 		}
 		return llssa.PathOf(pkg)
 	}
+	memberPkgKey := func(object types.Object) string {
+		// Only unexported field/method identities are package-qualified in
+		// Go. Named type declarations retain their package identity below.
+		if object.Exported() {
+			return ""
+		}
+		return pkgKey(object.Pkg())
+	}
 	if typ == nil {
 		text("nil-type")
 		return node
@@ -278,7 +286,10 @@ func (b *emissionTypeGraphBuilder) describe(typ types.Type) emissionTypeGraphNod
 			text("opaque-pointer")
 			break
 		}
-		text("basic", strconv.Itoa(int(typ.Kind())), typ.Name())
+		// byte/rune are predeclared aliases represented by distinct Basic
+		// objects, not types.Alias. Their spelling cannot change Go identity
+		// or any of the structural ABI modes used by managed descriptors.
+		text("basic", strconv.Itoa(int(typ.Kind())), types.Typ[typ.Kind()].Name())
 	case *types.Pointer:
 		if b.options.opaquePointers {
 			text("opaque-pointer")
@@ -330,7 +341,7 @@ func (b *emissionTypeGraphBuilder) describe(typ types.Type) emissionTypeGraphNod
 			field := typ.Field(index)
 			if !b.options.omitStructFieldMetadata {
 				text(
-					pkgKey(field.Pkg()),
+					memberPkgKey(field),
 					field.Name(),
 					strconv.FormatBool(field.Embedded()),
 					typ.Tag(index),
@@ -368,7 +379,7 @@ func (b *emissionTypeGraphBuilder) describe(typ types.Type) emissionTypeGraphNod
 		text("interface", strconv.Itoa(typ.NumMethods()), strconv.Itoa(typ.NumEmbeddeds()))
 		for index := 0; index < typ.NumMethods(); index++ {
 			method := typ.Method(index)
-			text(pkgKey(method.Pkg()), method.Name())
+			text(memberPkgKey(method), method.Name())
 			edge(method.Type())
 		}
 		for index := 0; index < typ.NumEmbeddeds(); index++ {

@@ -8,6 +8,7 @@ package cl
 
 import (
 	"fmt"
+	"go/token"
 	"go/types"
 
 	"github.com/xgo-dev/llgo/internal/coro"
@@ -119,7 +120,69 @@ func (ir *coroProgramIR) freezeDeliveryProducer(recipe coroSourceDeliveryRecipe)
 		}
 		return nil // Same source site projected through another exact type owner.
 	}
+	if err := validateCoroDeliveryResultProjection(recipe); err != nil {
+		return err
+	}
 	ir.deliveryProducers[recipe.producer] = recipe
+	return nil
+}
+
+// A borrowed producer publishes its already protected result cells, not cached
+// source return values. Keep this finite boundary structural: ordinary Go
+// wrappers do not acquire resource ownership merely by calling the producer.
+// The physical consumer must still bind both parent and discarded-entry guards
+// before this source fact can authorize exposing the hidden result address.
+func validateCoroDeliveryResultProjection(recipe coroSourceDeliveryRecipe) error {
+	fail := func(reason string) error {
+		return fmt.Errorf("llgo.coroBorrowResult: %s", reason)
+	}
+	entry := recipe.producer.Blocks[0]
+	for _, instruction := range entry.Instrs {
+		if instruction == recipe.borrow {
+			break
+		}
+		if _, call := instruction.(ssa.CallInstruction); call {
+			return fail("borrow must precede source calls, go and defer registrations")
+		}
+	}
+	for _, block := range recipe.producer.Blocks {
+		for _, instruction := range block.Instrs {
+			ret, returning := instruction.(*ssa.Return)
+			if !returning {
+				continue
+			}
+			if len(ret.Results) != recipe.result.NumFields() {
+				return fail("return does not project the exact borrowed result tuple")
+			}
+			projections := make(map[ssa.Instruction]bool, 2*len(ret.Results))
+			for index, result := range ret.Results {
+				load, ok := result.(*ssa.UnOp)
+				if !ok || load.Op != token.MUL || load.Block() != block {
+					return fail("return must load each exact borrowed result field in its return block")
+				}
+				field, ok := load.X.(*ssa.FieldAddr)
+				if !ok || field.X != recipe.borrow || field.Field != index {
+					return fail("return must project each exact borrowed result field in order")
+				}
+				projections[load], projections[field] = true, true
+			}
+			loaded := false
+			for _, candidate := range block.Instrs {
+				if candidate == ret {
+					break
+				}
+				if projections[candidate] {
+					if _, load := candidate.(*ssa.UnOp); load {
+						loaded = true
+					}
+					continue
+				}
+				if _, debug := candidate.(*ssa.DebugRef); !debug && loaded {
+					return fail("borrowed result loads must be followed only by the remaining projections and return")
+				}
+			}
+		}
+	}
 	return nil
 }
 

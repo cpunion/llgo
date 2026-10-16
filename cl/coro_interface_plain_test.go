@@ -85,6 +85,49 @@ func TestCoroManagedClosedInterfaceInvokeSurvivesCoroSplit(t *testing.T) {
 	}
 }
 
+func TestCoroClosedInterfacePredeclaredAliasABI(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	const source = `package foo
+var gate chan uint32
+type Value interface { Value([]byte) uint32 }
+type concrete uint32
+func (value concrete) Value(buffer []uint8) uint32 {
+	<-gate
+	return uint32(value) + uint32(len(buffer))
+}
+func Root(value Value) uint32 { return value.Value(nil) }
+`
+	for _, alias := range []struct{ name, canonical string }{{"byte", "uint8"}, {"rune", "int32"}} {
+		for _, target := range []struct {
+			name string
+			arch *llssa.Target
+		}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+			t.Run(alias.name+"/"+target.name, func(t *testing.T) {
+				text := strings.NewReplacer("byte", alias.name, "uint8", alias.canonical).Replace(source)
+				ssaPkg, _, files := buildGoSSAPkg(t, text)
+				prog := newLLSSAProgForTarget(t, target.arch)
+				defer prog.Dispose()
+				universe, plan, _, _, _ := prepareCoroClosedInterfacePlainPlan(t, prog, ssaPkg, files, coro.DynamicCHAClosed)
+				pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+					PackageOptions{Compilation: coroClosedInterfacePlainCompilation(plan, universe)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				module := pkg.Module()
+				defer module.Dispose()
+				if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+					t.Fatal(err)
+				}
+				assertCoroManagedClosedInterfaceIR(t, requireCoroPhysicalFunction(t, module, "foo.Root").String())
+				runCoroABITestPipeline(t, prog, module)
+				if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
 func TestCoroClosedInterfacePlainTargetMayAlsoHaveStaticCalls(t *testing.T) {
 	const source = `package foo
 var gate chan uint32

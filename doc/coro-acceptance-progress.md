@@ -7,6 +7,36 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-16 (Asia/Shanghai)
 
+The v58 expvar retry now compiles and executes all four tests successfully.
+It retains source `d5d6c5627`, source-manifest SHA-256
+`4e19f44822bab94594cd031dccfa17ff0d8d9932a909d98ea6f692d1ccf11fe3`
+and compiler SHA-256
+`7e23b89ae2f218b4aaf3a2406fe76c3cb3427132b6713f005e20fb1dc8459ddc`.
+The build uses a 24GiB hard cap and 8GiB Go soft limit, peaks at 15521.4MiB,
+and produces binary SHA-256
+`0a42885d908653bcaae5715f88590fdab7243b6b664124ace2254dd3079d95c5`.
+The cohort finishes with its source unchanged and private scratch reclaimed.
+The earlier 16GiB failure remains a separate resource-limited attempt.
+
+A follow-up structural-key correction removes source-package qualification
+from exported struct fields and interface methods only, matching Go identity.
+Private members, named types and field tags remain distinct. It also makes
+compiler-generated delivery result tuples agree with their source-expressible
+anonymous aliases; it does not enable physical resource guards. Native64 and
+wasm32 interface IR passes verification before/after CoroSplit, visibility and
+delivery-key gates pass, and the broad compiler selection passes (290.167s).
+Restoring only the old key builder fails the new positive cases while retaining
+the private/tag/named negative distinctions. The new executable `test/go`
+regression covers interface calls, bound method values and reflection with an
+actual channel suspension and a by-value aggregate. Its Go control passes all
+three subtests; LLGo execution is still pending a fresh compiler snapshot.
+
+PR [cpunion/llgo#261](https://github.com/cpunion/llgo/pull/261) is now merged as
+`d292d73d5`, after head `33887a5bd` passed all 18 coroutine CI jobs in run
+`38849290434`; review, inline and issue-comment inventories were empty. It
+closes the maphash/Go-types, Darwin x509 and frozen panic-phi gaps below. This
+remains a development checkpoint, not full-objective completion.
+
 PR [cpunion/llgo#260](https://github.com/cpunion/llgo/pull/260) was merged into
 `llvm-coro` as `941e17146` after head `37b115dbc` completed all 18 coroutine CI
 jobs in run `38844866845`. Review, inline-comment and issue-comment inventories
@@ -482,8 +512,72 @@ intermediate implementation failed LLVM verification because it removed phi
 operands but retained the old conditional edge; the final gate covers that
 consistency requirement. No new frame/runtime state, annotation or effect graph
 is added. Selected cl regressions pass (145.205s), SSA passes (0.718s), and the
-architecture/source-binding gates pass (2.232s). Original TLS/expvar executable
-validation is still in progress on immutable v56, not yet a closed failure.
+architecture/source-binding gates pass (2.232s). Immutable v56 then compiles and
+runs the complete original TLS package: 59 passed, zero skips/failures. Source
+manifest SHA-256 is
+`d2d451647bb88c13326f1c6480c1dd579bc82011e6ebbcc33db2b104e7297d7a`;
+compiler SHA-256 is
+`9ec7b275fc45849dde5ff60e4065f66e631fa30a98e8547ca8206109e1760f79`;
+test binary SHA-256 is
+`29ace0da4a7764a17a80f9d9f26292a9e45891651781d1fb673975b768f5a539`.
+Build/run peaks are 12100.7/80.0 MiB under unchanged hard caps. The same cohort's
+expvar build passes the old phi check but fails strict method ABI matching of
+Go-identical `[]byte` and `[]uint8`; no executable was produced. The Go control
+passes. The cohort joins children, reclaims scratch and matches source-after.
+
+The follow-up canonicalizes predeclared Basic spellings by their existing
+BasicKind, without changing defined-type identity, interface rules or runtime
+dispatch. byte/rune and seven scalar/composite/signature forms pass across all
+five type-key modes; native64/wasm32 real interface modules verify before/after
+CoroSplit. Restoring only the old graph builder fails all four interface cases
+and all fourteen alias-form cases. Different basic kinds and strict named-type
+identity remain distinct. The focused type/IR gate passes (4.926s / 1218.4 MiB).
+No new annotation, runtime field, scheduler or function version is added.
+
+The same follow-up hardens the still-private borrowed-result declaration:
+normal returns must freshly project the protected result tuple, and borrow
+must precede source call/go/defer. Source facts reject stale result caches,
+invented values and cleanup after result evaluation; ordinary Go wrappers are
+unrestricted. All focused producer gates pass (1.712s / 1225.0 MiB); restoring
+only the previous validator loses all ten new negative checks. Physical guards
+still fail closed, so this is not public Open delivery acceptance.
+
+Immutable v57 freezes source `15e8ddeb9`, manifest SHA-256
+`d0f1bae1e244293eb1f5c84289af866cb82822087640363d7e9f7a15747a062e`,
+compiler SHA-256
+`120be9993e3748e6428f08c495c2d06a09d5113535088d7c4bfb3057a7b0bff6`.
+The full `internal/coro` race/shuffle gate passes (38.649s / 1637.4 MiB).
+Broad cl regressions pass (204.762s / 1239.3 MiB). The complete SMTP package
+passes four tests, with test binary SHA-256
+`989f67751fa0a7a0608fcb0d405306b127a0f121e61cf7e5e8cf549791c96ae3`.
+The cohort finishes with matching source-after and reclaimed private scratch;
+it is not a whole passing cohort: expvar's compilation exceeds the 16GiB cap
+(16405.5 MiB peak / exit 137), and filepath reproduces a separate exact-plain
+target validation failure. No executable pass is inferred from the expvar
+resource failure. A higher-cap independent retry still needs memory admission.
+
+The filepath failure has a closed, non-nil DirectPlain call occurrence, but its
+target also has a descriptor consumer elsewhere. The per-value carrier was
+already correct; validation incorrectly required a syntactic StaticCallee to
+reuse that target's existing plain primary. Removing only that condition keeps
+no-capture/no-method, effect, execution and foreign-contract checks intact.
+Native64/wasm32 gates assert one direct primary call before/after CoroSplit,
+a frame-free synchronous caller and no redundant target coroutine body or
+dynamic capability branch. The focused gate passes (2.037s / 1255.9 MiB);
+restoring only the previous validator rejects both target cases. No additional
+lowering path, function version, annotation or runtime field is added.
+
+Immutable v58 freezes this change as source `d5d6c5627`, manifest SHA-256
+`4e19f44822bab94594cd031dccfa17ff0d8d9932a909d98ea6f692d1ccf11fe3`,
+compiler SHA-256
+`7e23b89ae2f218b4aaf3a2406fe76c3cb3427132b6713f005e20fb1dc8459ddc`.
+Broad cl regressions pass (154.554s / 1208.0 MiB), and SSA passes
+(10.479s / 762.6 MiB). The complete original filepath package now compiles and
+executes successfully; test binary SHA-256 is
+`6aac372b965541cd7e86677e25ca4e250550b6c06581a0ea980b90bac62b17e5`.
+Children joined, private scratch was reclaimed, and source-after matches.
+These follow-up changes are in PR #262 to llvm-coro; fresh head-specific CI
+and review checks remain required. They do not inherit PR #261's green run.
 
 The merged PR checkpoint also has a fresh v54 four-package executable pass:
 68 tests plus one helper skip, tree peak 7192.5 MiB. Source manifest SHA-256
@@ -665,8 +759,9 @@ bound is still explicit.
 1. Finish current executable acceptance on immutable compiler/source pairs.
    Fresh v46 `test/go` passes 266/266 and `_demo/go` passes 73/73; v47 basic
    executable packages pass 68 tests with one helper skip. The v46 stdlib
-   evaluation has 60 completed package passes across fixed cohorts after 15
-   initial passes; two remaining lanes are active and two are joined/stopped.
+   evaluation has 82 distinct completed package passes across fixed v46
+   cohorts; lanes 0/1 remain active. Previously joined lanes 2/3 have restarted
+   as new immutable v56 cohorts, without adopting old-version partial passes.
    The full v48 GOROOT selection is active, not a complete pass. Keep private
    cache reclamation, unchanged source/compiler
    inputs and every interrupted receipt. A fresh final GOROOT selection is
