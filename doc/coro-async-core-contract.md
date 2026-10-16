@@ -97,6 +97,10 @@ Import 时 summary 参与与源码函数相同的固定点；link 时验证版�
 精确 lowered edge 统一传播 effect/demand，producer 已闭包的 service/predicate fact
 在该 edge 上进入现有固定点。Plan digest v43 同时绑定 imported fact（含符号、完整
 ABI hash、true/false predicate mask）及最终 FunctionPlan，未使用的 helper 不成为 root。
+调用方首次把 imported direct 函数变成函数值时，可单向提升为 Dispatch，包装同一个
+producer primary；不改参数/结果 schema、effect、entry、symbol 或 ABI hash，不要求库
+预先取址，也不生成第二份 body。plain/outcome/coroutine capability 仍须精确成立，
+raw/opaque、不匹配的 primary 和反向降级均不授权。未 demand 的值不因此产生符号。
 静态 bodyless producer 的 helper 签名由完整返回 tuple 推导，复用 producer/consumer
 同一个 ABI hash 构造器，并绑定实际 target layout。物理调用复用现有 descriptor/thunk、
 child await 与 cleanup drainer；不增加 runtime 字段或第二套调度/取消协议。当前测试

@@ -18,6 +18,60 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
+func TestCoroImportedRepresentationOnlyPromotesAnExactManagedPrimary(t *testing.T) {
+	plain := coro.FunctionPlan{External: coro.ExternalKnown, Emission: coro.EmitExternal,
+		Primary: coro.PrimaryExternal, ManagedEntry: coro.ManagedEntryPlain, FuncRep: coro.Dispatch}
+	structured := plain
+	structured.ManagedEntry, structured.Effect, structured.Exec = coro.ManagedEntryCoroutine, coro.MayPark, coro.MayUnwind
+	outcome := plain
+	outcome.ManagedEntry, outcome.Effect, outcome.StaticOutcome = coro.ManagedEntryOutcomePlain, coro.OutcomeStructured, true
+	unwinding, blocking := plain, plain
+	unwinding.Exec, blocking.Exec = coro.MayUnwind, coro.BlockForeign
+	unused := structured
+	unused.Emission = coro.EmitNone
+	for _, test := range []struct {
+		name     string
+		producer coro.FuncRep
+		plan     coro.FunctionPlan
+		accepted bool
+	}{
+		{"plain-to-descriptor", coro.DirectPlain, plain, true},
+		{"coroutine-to-descriptor", coro.DirectCoro, structured, true},
+		{"outcome-to-descriptor", coro.DirectCoro, outcome, true},
+		{"descriptor-preserved", coro.Dispatch, structured, true},
+		{"unused-not-emitted", coro.DirectCoro, unused, true},
+		{"unwinding-plain", coro.DirectPlain, unwinding, false},
+		{"blocking-plain", coro.DirectPlain, blocking, false},
+		{"invalid-producer", coro.FuncRep(255), structured, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := coroImportedRepresentationMatches(test.plan, coro.LibraryEffectFunction{FuncRep: test.producer}); got != test.accepted {
+				t.Fatalf("representation compatibility=%t, want %t", got, test.accepted)
+			}
+		})
+	}
+	for name, mutate := range map[string]func(*coro.FunctionPlan){
+		"downgrade":       func(p *coro.FunctionPlan) { p.FuncRep = coro.DirectCoro },
+		"direct-rewrite":  func(p *coro.FunctionPlan) { p.FuncRep = coro.DirectPlain },
+		"raw-demand":      func(p *coro.FunctionPlan) { p.RawPlainDemand = true },
+		"raw-only":        func(p *coro.FunctionPlan) { p.RawPlainOnly = true },
+		"unknown-primary": func(p *coro.FunctionPlan) { p.Primary = coro.PrimaryCoroutine },
+		"opaque":          func(p *coro.FunctionPlan) { p.Exec |= coro.OpaqueExec },
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := structured
+			producer := coro.DirectCoro
+			mutate(&plan)
+			if name == "downgrade" {
+				producer = coro.Dispatch
+			}
+			if coroImportedRepresentationMatches(plan, coro.LibraryEffectFunction{FuncRep: producer}) {
+				t.Fatal("representation promotion rewrote an unsupported producer contract")
+			}
+		})
+	}
+}
+
 func TestCoroArchiveBodylessParametersAreNotClosureContext(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	declarations, _, _ := buildGoSSAPkg(t, `package foo

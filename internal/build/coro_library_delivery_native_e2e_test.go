@@ -141,9 +141,6 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 		if producer {
 			roots = coro.Roots{{Function: source.Func("Acquire"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}, {Function: source.Func("Stats"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}, {Function: source.Func("DropInfo"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}}
 		}
-		if dynamic && producer {
-			roots = append(roots, coro.Root{Function: source.Func("init"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true})
-		}
 		input := CoroPlanInput{Program: source.Prog, EmissionUniverse: universe,
 			resolveFunction: u.Resolve, localBodyFacts: u.CoroLocalBodyFacts, functionBackground: u.FunctionBackground,
 			callSitePlan: u.CoroCallSitePlan, loweredCalls: u.CoroLoweredCalls,
@@ -234,11 +231,7 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 		}
 		return emitCoroSpawnNativeE2EObject(t, prog, module, filepath.Join(temp, "consumer.o")), match[1], capabilities
 	}
-	producerSource := librarySource
-	if dynamic {
-		producerSource += "\nvar Published = Acquire\n"
-	}
-	producer, files := buildCoroPlanTestPackage(t, libraryPath, producerSource, nil)
+	producer, files := buildCoroPlanTestPackage(t, libraryPath, librarySource, nil)
 	build(newProgram(), producer, files, true)
 	declarations, _ := buildCoroPlanTestPackage(t, libraryPath, "package library\nfunc Acquire(uint32) uint32\nfunc Stats() uint32\nfunc DropInfo() uint32\n", nil)
 	consumerSource := `package main
