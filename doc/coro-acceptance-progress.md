@@ -10,15 +10,9 @@ source compatibility, and one platform's result does not establish another's.
 Integration is in `coro/sync-main-20260830-r2`. Commit `d0838f492` completes the
 existing merge of parents `97572a91d` and `c4941f9ae`; no newer main was merged.
 Draft PR [cpunion/llgo#260](https://github.com/cpunion/llgo/pull/260) carries this
-checkpoint. Follow-up commit `d93ff685c` fixes dynamic pointer-result consumption;
-Coroutine run `38817134420` checks that head and is queued. The preceding run
-`38814074088` passed Cortex-M timer, native fleet E2E and JS/WASM command-reactor
-jobs before the new commit superseded it. Those passes do not establish the
-current head's CI status. No reviews, inline review comments or issue comments
-were present at the latest inspection. Later CI/review observations must name
-the checked head.
-Latest integrated CI observation: head `7170ce7a7` in run `38826618373` has
-16/18 successful jobs and two running, with no failure. This includes the
+checkpoint. Follow-up commit `d93ff685c` fixes dynamic pointer-result consumption.
+Latest integrated CI observation: head `7170ce7a7` in run `38826618373` completed
+all 18 coroutine workflow jobs successfully, with no failure. This includes the
 repaired WASI cache-discovery and host-SSA build-tag lanes. The separate
 resource-delivery branch is at `73095ebc0`; its newer cleanup changes are tested
 below and are not silently included in that CI head.
@@ -267,6 +261,14 @@ annotations. Zero result storage before initialization, finish initialization
 before arming the resource guard, and do not start acquisition until afterward.
 Existing plain/outcome/coro completion owns initialization failure/cancellation;
 no additional partial-initialization resource state is needed.
+
+The final v46 demo attempt retained 47/73 passes before the shared filesystem
+again reached the 10GiB floor while building `reflectfunc`. It reclaimed its
+private scratch and verified source hashes. The six stdlib package passes and
+233 partial test/go passes remain unchanged; all three full local cohorts are
+currently stopped, not running. Sufficient stable free disk is still needed
+to finish these gates. Completed v47 focused tests have no remaining compiler
+processes and do not replace the incomplete full cohorts.
 
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
