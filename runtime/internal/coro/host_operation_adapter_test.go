@@ -34,7 +34,10 @@ func TestHostOperationActionV1LayoutAndCompletion(t *testing.T) {
 	id := hostOperationIDForTest(t, 3, 7)
 	highWord := uintptr(^uint32(0))
 	if unsafe.Sizeof(uintptr(0)) == 8 {
-		highWord = uintptr(uint64(0x01234567)<<32 | 0x89abcdef)
+		// Keep the conversion nonconstant: even an unreachable 64-bit branch
+		// must type-check on the wasm32/embedded hosts whose ABI is tested here.
+		wide := uint64(0x01234567)<<32 | 0x89abcdef
+		highWord = uintptr(wide)
 	}
 	if !adapter.Submit(id, 41, []uintptr{5, highWord}) {
 		t.Fatal("submit host operation")
