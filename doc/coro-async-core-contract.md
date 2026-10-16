@@ -97,12 +97,20 @@ Import 时 summary 参与与源码函数相同的固定点；link 时验证版�
 精确 lowered edge 统一传播 effect/demand，producer 已闭包的 service/predicate fact
 在该 edge 上进入现有固定点。Plan digest v43 同时绑定 imported fact（含符号、完整
 ABI hash、true/false predicate mask）及最终 FunctionPlan，未使用的 helper 不成为 root。
+调用方首次把 imported direct 函数变成函数值时，可单向提升为 Dispatch，包装同一个
+producer primary；不改参数/结果 schema、effect、entry、symbol 或 ABI hash，不要求库
+预先取址，也不生成第二份 body。plain/outcome/coroutine capability 仍须精确成立，
+raw/opaque、不匹配的 primary 和反向降级均不授权。未 demand 的值不因此产生符号。
 静态 bodyless producer 的 helper 签名由完整返回 tuple 推导，复用 producer/consumer
 同一个 ABI hash 构造器，并绑定实际 target layout。物理调用复用现有 descriptor/thunk、
 child await 与 cleanup drainer；不增加 runtime 字段或第二套调度/取消协议。当前测试
 覆盖 native/wasm32 CoroSplit 前后，以及真实 native archive 的运行期显式取消。
-source producer 动态发布和 FFI 第二次资源交付仍是独立 gate，
-不能仅凭类型元数据或符号存在而放开。普通 main 退出不等价于可等待的显式任务取消，
+context-free source/archive producer 可在物理 guard、生命周期证明和精确 helper
+绑定都成立后发布冷的 `HasDelivery` tail。descriptor 与普通两字函数值在编译期同时
+保留类型信息；不能从擦除后的 code word 反向找回元数据。普通 descriptor 仍是原有
+九字段 base；resource tail 只存版本和两个已有 managed helper descriptor，不扩大
+funcval。捕获环境、receiver/bound-method adapter、raw/plain capability 和 FFI 第二次
+资源交付仍是独立 gate，不能仅凭类型元数据或符号存在而放开。普通 main 退出不等价于可等待的显式任务取消，
 正常丢弃返回值（包括 defer）也不自动 drop。
 
 ### 3.3 Lowering matrix

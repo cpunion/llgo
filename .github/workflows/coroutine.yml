@@ -491,6 +491,7 @@ jobs:
             TestCoroExplicitPanicNativeNoStdlibRuntimeE2E
             TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E
             TestCoroArchiveDeliveryNativeNoStdlibRuntimeE2E
+            TestCoroArchiveDynamicDeliveryNativeNoStdlibRuntimeE2E
           )
           for test in "${tests[@]}"; do
             go test ./internal/build -run "^${test}$" -timeout=10m -count=1

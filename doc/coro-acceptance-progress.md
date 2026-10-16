@@ -810,8 +810,58 @@ parameters separately reproduce the missing check. A real indexed archive
 still passes three cancellation/cleanup executions (25.357s/722.7MiB), and the
 shared value/parameter/allocation proof race group passes1.418s/346.8MiB.
 The invalid bodyful-C/declaration fixture is rejected by the existing contract
-shape gate, not treated as a causal lifetime failure. Whole-compiler/final
-immutable acceptance of this follow-up remains pending.
+shape gate, not treated as a causal lifetime failure. Immutable v102 then passes
+the full compiler regression146.628s/1264.5MiB and three real archive executions
+32.547s/767.8MiB. The original60FD+6opaque resource runs and all three reflection
+routes also pass, combined peak2815.6MiB and source-after matching. Final whole
+test/go/stdlib/platform acceptance of this follow-up remains pending.
+
+The next isolated experiment publishes guarded context-free resource producer
+descriptors from the same source/archive recipe. Ordinary descriptors keep the
+nine-field base and funcval stays two words; resource-only cold tails reference
+the existing typed initializer/drop descriptors. The emitter carries the exact
+descriptor type beside the function value instead of recovering it from an
+erased code word. Real export-data declarations additionally require the exact
+checked library identity and structural ABI; their synthetic marker alone is
+never authority. Captured/receiver adapters, raw/plain resource publication,
+external defer owners and reflection/FFI second custody handoff remain closed.
+
+An independent API-only probe against immutable v102 reproduces the original
+publication rejection (0.519s/1193.8MiB), then passes on the new implementation
+(1.136s/1218.7MiB); earlier probes with an opaque-call fixture or renamed test
+helper fail for unrelated reasons and are not causal evidence. Native/wasm32
+publication and original missing-guard gates pass1.690s/1239.4MiB. Real static
+and dynamic indexed archives pass six executable runs together
+(64.855s/1250.7MiB); the dynamic child must have a managed Dispatch/ResultDelivery
+CallPlan and an actual capability branch before cancellation, not a silently
+devirtualized call. Each executable checks one cleanup of resource99, both
+async drop steps and no canceled user continuation. Unchanged architecture
+passes0.704s/551.6MiB; broad compiler regression145.278s/1290.7MiB. This experiment is not yet integrated or whole-suite
+accepted.
+
+The next small follow-up removes the need for a library to take its producer's
+address first: a consumer can promote DirectPlain/DirectCoro to Dispatch around
+the exact same compatible published primary. ABI/effect/entry/symbol checks,
+argument/result schemas and raw/opaque rejection remain unchanged; no producer
+fact is mutated, no reverse downgrade or extra body is allowed, and no-demand
+values emit no symbol. The real archive fixture now has no Published seed.
+It reproduces the old representation mismatch (0.549s/590.3MiB), then passes
+three dynamic cleanup runs. Combined direct/dynamic execution passes six times
+(73.778s/1198.7MiB), broad compiler149.634s/1279.5MiB and selected race
+37.978s/1179.2MiB. This replaces the artificially pre-published fixture rather
+than weakening its dispatch/custody assertions.
+
+Immutable v101 full test/go completes **271/271**, zero failures/skips, at
+19:16:36 UTC; source-after19:16:39 matches, all children join and scratch is
+reclaimed. Retained binary SHA-256 is
+`652ab791224c41cdeee7e41c741048143fe589d360f0633b4d8195b7ad8f68cb`
+(25931536bytes); build/run peaks8325.8/6552.8MiB are separate maxima. This is
+the archive-consumption candidate, not final acceptance of the later lifetime
+or descriptor changes. Immutable v103 passes broad compiler152.903s/1229.9MiB,
+two real archives63.470s/1204.7MiB, selected race53.429s+1.411s/1341.4MiB,
+and original60FD+6opaque plus three reflection routes/source-after matching
+with peak2752.4MiB. Its73-demo cohort is still running. Current CI/review gates
+for PR277/278/279 remain open; no previous-head CI is substituted.
 
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper

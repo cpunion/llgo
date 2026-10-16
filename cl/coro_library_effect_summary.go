@@ -336,6 +336,25 @@ func (view CoroLibraryEffectView) ValidateForeignCallable(
 	return nil
 }
 
+// A consumer may form the first managed function value of a library function.
+// Its descriptor wraps the unchanged published primary; it neither changes
+// argument/result schemas nor asks the producer to clone or re-emit a body.
+// All other producer ABI/effect/entry checks remain exact at both callers.
+func coroImportedRepresentationMatches(plan coro.FunctionPlan, fact coro.LibraryEffectFunction) bool {
+	if plan.FuncRep == fact.FuncRep {
+		return true
+	}
+	if plan.FuncRep != coro.Dispatch || fact.FuncRep != coro.DirectPlain && fact.FuncRep != coro.DirectCoro ||
+		plan.RawPlainOnly || plan.RawPlainDemand {
+		return false
+	}
+	if plan.Emission == coro.EmitNone && plan.Demand == coro.NoDemand {
+		return plan.External == coro.ExternalKnown && plan.Primary == coro.PrimaryExternal
+	}
+	plain, structured := coroExternalManagedDescriptorEntry(plan)
+	return plain || structured
+}
+
 // validateCoroLibraryEffects repeats the consumer-side boundary proof at cl's
 // immutable preflight gate. The build driver owns archive discovery, but code
 // generation must still reject a manually assembled Compilation that supplies
@@ -437,7 +456,7 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 			functionPlan.DeclaredExec != fact.Exec ||
 			functionPlan.LocalExec != fact.Exec ||
 			functionPlan.Exec != fact.Exec ||
-			functionPlan.FuncRep != fact.FuncRep ||
+			!coroImportedRepresentationMatches(functionPlan, fact) ||
 			functionPlan.ManagedEntry != fact.ManagedEntry ||
 			functionPlan.AtomicCost != fact.AtomicCost ||
 			functionPlan.AtomicCostProof != fact.AtomicCostProof ||

@@ -351,7 +351,7 @@ func TestCoroDeliverySourceFreezesExactTypedHelperIdentities(t *testing.T) {
 		{name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
 	} {
 		t.Run(target.name, func(t *testing.T) {
-			testCoroDeliveryTypedHelperIdentities(t, target.arch, false)
+			testCoroDeliveryTypedHelperIdentities(t, target.arch, false, false)
 		})
 	}
 }
@@ -363,12 +363,24 @@ func TestCoroDeliveryRejectsUnboundDescriptorPublication(t *testing.T) {
 		arch *llssa.Target
 	}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
 		t.Run(target.name, func(t *testing.T) {
-			testCoroDeliveryTypedHelperIdentities(t, target.arch, true)
+			testCoroDeliveryTypedHelperIdentities(t, target.arch, true, false)
 		})
 	}
 }
 
-func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target, publish bool) {
+func TestCoroDeliveryPublishesGuardedDescriptors(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			testCoroDeliveryTypedHelperIdentities(t, target.arch, true, true)
+		})
+	}
+}
+
+func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target, publish, bound bool) {
 	source := coroDeliverySourceFixture
 	if publish {
 		source = strings.Replace(source, "func Root() { Acquire(\"fixture\") }", "var Published = Acquire\nfunc Root() { Published(\"fixture\") }", 1)
@@ -434,8 +446,12 @@ func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target, p
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	var plan *coro.SSAPlan
+	planRoots := coro.Roots{{Function: pkg.Func("Root"), Demand: coro.AsyncDemand}}
+	if bound {
+		planRoots = append(planRoots, coro.Root{Function: pkg.Func("init"), Demand: coro.AsyncDemand})
+	}
 	for _, asyncHelper := range []*ssa.Function{recipe.initializer, recipe.drop} {
-		plan, err = coro.AnalyzeSSA(pkg.Prog, coro.Roots{{Function: pkg.Func("Root"), Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		plan, err = coro.AnalyzeSSA(pkg.Prog, planRoots, coro.SSAConfig{
 			EmissionUniverse: ssaUniverse, FunctionIDs: functionIDs, MaxPlainInstructions: -1,
 			OutcomeMode:       coro.OutcomeExplicitStatus,
 			ClassifyLocalBody: universe.CoroLocalBodyFacts,
@@ -453,11 +469,17 @@ func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target, p
 				return universe.CoroStaticFunctionReferenceCallArgument(call, argument)
 			},
 			ClassifyLoweredCalls: universe.CoroLoweredCalls,
+			ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (coro.UnknownTarget, error) {
+				if bound {
+					return coro.UnknownManagedDispatch, nil
+				}
+				return coro.UnknownManaged, nil
+			},
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if publish {
+		if publish && !bound {
 			fact, found := plan.FunctionPlan(producer)
 			if !found || fact.FuncRep != coro.Dispatch {
 				t.Fatalf("publication fixture did not demand its producer descriptor: %+v", fact)
@@ -529,6 +551,27 @@ func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target, p
 	}
 	module := compiled.Module()
 	defer module.Dispose()
+	if bound {
+		published := 0
+		for global := module.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+			if !strings.HasPrefix(global.Name(), coroPlainDispatchDescriptorPrefix) {
+				continue
+			}
+			initializer := global.Initializer()
+			if initializer.OperandsCount() != 2 {
+				continue
+			}
+			base, tail := initializer.Operand(0), initializer.Operand(1)
+			if base.OperandsCount() != 9 || base.Operand(1).ZExtValue()&uint64(llssa.CoroDispatchFlagHasDelivery) == 0 ||
+				tail.OperandsCount() != 4 || tail.Operand(2).IsNull() || tail.Operand(3).IsNull() {
+				t.Fatalf("published producer lost its complete guarded tail: %s", global)
+			}
+			published++
+		}
+		if published != 1 {
+			t.Fatalf("resource descriptor tails=%d, want exactly one", published)
+		}
+	}
 	// Cold delivery metadata reuses the already demanded primary; publishing
 	// it must not fabricate a Dispatch value-flow fact or compile a second body.
 	helperContext, err := universe.functionABIContext(producer, universe.ownerOf(producer))
@@ -560,10 +603,10 @@ func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target, p
 			if index == 1 {
 				wrong = initializeSignature
 			}
-			helperContext.emitCoroDeliveryHelperValue(body, helper, wrong)
+			helperContext.emitCoroDeliveryHelper(body, helper, wrong)
 		}()
-		value := helperContext.emitCoroDeliveryHelperValue(body, helper, signature)
-		body.Return(body.Field(value, 0))
+		value := helperContext.emitCoroDeliveryHelper(body, helper, signature)
+		body.Return(body.Field(value.value, 0))
 		body.EndBuild()
 		body.Dispose()
 		if after, _ := plan.FunctionPlan(helper); after != before || after.FuncRep == coro.Dispatch {

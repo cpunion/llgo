@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,15 @@ import (
 // The consumer's imported type package has only exported declarations: neither
 // private helper gets an invented SSA function or a substitute runtime body.
 func TestCoroArchiveDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
+	testCoroArchiveDeliveryNativeRuntime(t, false)
+}
+
+func TestCoroArchiveDynamicDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
+	testCoroArchiveDeliveryNativeRuntime(t, true)
+}
+
+func testCoroArchiveDeliveryNativeRuntime(t *testing.T, dynamic bool) {
+	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native archive delivery requires POSIX")
 	}
@@ -141,6 +151,13 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 		if err != nil {
 			t.Fatal(err)
 		}
+		if dynamic && !producer {
+			call := onlyBuildTestCall(t, source.Func("child"))
+			fact, planned := plan.CallPlan(call)
+			if !planned || fact.Rep != coro.Dispatch || fact.Transport != coro.ManagedTransport || !fact.ResultDelivery || fact.RawPlain {
+				t.Fatalf("child did not consume a guarded managed descriptor: %+v", fact)
+			}
+		}
 		if err := u.ValidateCoroPlan(plan); err != nil {
 			t.Fatal(err)
 		}
@@ -172,6 +189,9 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 		}
 		module := pkg.Module()
 		defer module.Dispose()
+		if dynamic && !producer && !strings.Contains(module.String(), "coro.dispatch.delivery") {
+			t.Fatal("actual consumer omitted its dynamic delivery-capability branch")
+		}
 		if dir := os.Getenv("LLGO_CORO_ARCHIVE_DEBUG_DIR"); dir != "" {
 			if err := os.WriteFile(filepath.Join(dir, source.Pkg.Name()+"-presplit.ll"), []byte(module.String()), 0o600); err != nil {
 				t.Fatal(err)
@@ -214,8 +234,8 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 	producer, files := buildCoroPlanTestPackage(t, libraryPath, librarySource, nil)
 	build(newProgram(), producer, files, true)
 	declarations, _ := buildCoroPlanTestPackage(t, libraryPath, "package library\nfunc Acquire(uint32) uint32\nfunc Stats() uint32\nfunc DropInfo() uint32\n", nil)
-	consumer, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, `package main
-import lib "`+libraryPath+`"
+	consumerSource := `package main
+import lib "` + libraryPath + `"
 import _ "unsafe"
 //go:linkname yield llgo.coroYield
 func yield()
@@ -228,7 +248,14 @@ func main() {
  for CancelIssued == 0 { yield() }
  for lib.Stats() != 212 || lib.DropInfo() != 1099 { yield() }
 }
-`, coroPlanTestImporter{libraryPath: declarations.Pkg, "unsafe": types.Unsafe})
+`
+	if dynamic {
+		consumerSource = strings.ReplaceAll(consumerSource, "lib.Acquire(", "acquire(")
+		consumerSource = strings.Replace(consumerSource, "func child() {", "func child(acquire func(uint32) uint32) {", 1)
+		consumerSource = strings.Replace(consumerSource, "func main() {", "func main() {\n acquire := lib.Acquire", 1)
+		consumerSource = strings.Replace(consumerSource, "go child()", "go child(acquire)", 1)
+	}
+	consumer, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, consumerSource, coroPlanTestImporter{libraryPath: declarations.Pkg, "unsafe": types.Unsafe})
 	consumerProg := newProgram()
 	consumerObject, anchor, capabilities := build(consumerProg, consumer, files, false)
 	observerSymbols := map[string]string{coroProgramRunSliceSymbolV2: "__llgo_archive_delivery_run", coroProgramContinueSliceSymbolV2: "__llgo_archive_delivery_continue"}

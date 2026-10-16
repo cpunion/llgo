@@ -573,7 +573,7 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			e.plan.Primary != coro.PrimaryExternal ||
 			e.plan.Effect != e.libraryEffect.Effect ||
 			e.plan.Exec != e.libraryEffect.Exec ||
-			e.plan.FuncRep != e.libraryEffect.FuncRep ||
+			!coroImportedRepresentationMatches(e.plan, e.libraryEffect) ||
 			e.plan.ManagedEntry != e.libraryEffect.ManagedEntry ||
 			e.plan.AtomicCost != e.libraryEffect.AtomicCost ||
 			e.plan.AtomicCostProof != e.libraryEffect.AtomicCostProof ||

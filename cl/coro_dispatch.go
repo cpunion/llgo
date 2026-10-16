@@ -197,7 +197,22 @@ func validateCoroManagedDescriptorPrimary(fn *ssa.Function, plan coro.FunctionPl
 	}
 	managedForeignWrapper := false
 	managedIntrinsicWrapper := false
+	libraryDeclaration := false
 	if universe != nil {
+		if (externalPlain || externalStructured) && fn.Synthetic == "from type information" && universe.libraryImports != nil {
+			metadata := universe.libraryImports.Metadata()
+			ids := universe.FunctionIDConfig()
+			ids.CoroABI, ids.SchedulerABI, ids.ArchiveReady = metadata.CoroABI, metadata.SchedulerABI, true
+			id, err := coro.StableFunctionID(fn, ids)
+			fact, indexed := universe.libraryImports.Lookup(id)
+			if err != nil || id != plan.ID || !indexed {
+				return fail("type-information declaration lacks its exact frozen library identity")
+			}
+			if err := universe.libraryEffects.ValidateFunction(fn, metadata, fact); err != nil {
+				return fail("type-information declaration library ABI: %v", err)
+			}
+			libraryDeclaration = true
+		}
 		if _, compilerOwned := universe.managedForeignWrapInfo[fn]; compilerOwned {
 			if err := universe.validateManagedForeignFunctionValueWrapper(fn); err != nil {
 				return fail("invalid managed foreign function-value adapter: %v", err)
@@ -212,7 +227,7 @@ func validateCoroManagedDescriptorPrimary(fn *ssa.Function, plan coro.FunctionPl
 		}
 	}
 	if fn.Synthetic != "" && !genericInstance && !boundMethod && !methodExpression && !rangeYield &&
-		!managedForeignWrapper && !managedIntrinsicWrapper {
+		!managedForeignWrapper && !managedIntrinsicWrapper && !libraryDeclaration {
 		return fail("synthetic function %q is outside the plain dispatch ABI", fn.Synthetic)
 	}
 	if params := fn.TypeParams(); params != nil && params.Len() != 0 && !genericInstance && !rangeYield {
@@ -1193,15 +1208,22 @@ func (p *context) emitCoroDynamicDispatchValue(
 	if err := validateCoroDynamicDispatchTarget(entry.function, entry.plan, p.immutableEmissionUniverse()); err != nil {
 		panic(fmt.Errorf("emit coroutine dynamic descriptor: %w", err))
 	}
-	return p.emitCoroManagedPrimaryValue(b, entry, target, bindings, nil)
+	return p.emitCoroManagedPrimary(b, entry, target, bindings, nil).value
+}
+
+// Keep compiler-owned descriptor type information alongside the ordinary
+// two-word function value. Cold metadata must not recover it from an erased
+// code word or infer it again from a physical address.
+type coroManagedCallable struct {
+	value, descriptor llssa.Expr
 }
 
 // This is the shared descriptor/thunk factory, not another source-function
 // emission path. requiredSignature is the exact typed contract of a private
 // helper; public function values derive their signature from their frozen ABI.
-func (p *context) emitCoroManagedPrimaryValue(
+func (p *context) emitCoroManagedPrimary(
 	b llssa.Builder, entry plannedFunctionSymbol, source *ssa.Function, bindings []llssa.Expr, requiredSignature *types.Signature,
-) llssa.Expr {
+) coroManagedCallable {
 	var (
 		abi coroPlainDispatchABI
 		err error
@@ -1299,7 +1321,8 @@ func (p *context) emitCoroManagedPrimaryValue(
 			rawPlainTarget = b.ChangeType(p.prog.Type(carrierSig, llssa.InC), rawPhysical.Expr)
 		}
 	}
-	return p.emitCoroManagedPrimaryDescriptor(b, entry.plan, abi, physical.Expr, plainTarget, rawPlainTarget, closureCtx, captured, env)
+	delivery := p.coroDeliveryDescriptorOptions(b, entry, abi.signature)
+	return p.emitCoroManagedPrimaryDescriptor(b, entry.plan, abi, physical.Expr, plainTarget, rawPlainTarget, closureCtx, captured, env, delivery)
 }
 
 // Both source and archive-only helpers use this one descriptor/thunk factory.
@@ -1308,7 +1331,8 @@ func (p *context) emitCoroManagedPrimaryValue(
 func (p *context) emitCoroManagedPrimaryDescriptor(
 	b llssa.Builder, plan coro.FunctionPlan, abi coroPlainDispatchABI,
 	physical, plainTarget, rawPlainTarget llssa.Expr, closureCtx types.Type, captured bool, env llssa.Expr,
-) llssa.Expr {
+	delivery *llssa.CoroDispatchDeliveryOptions,
+) coroManagedCallable {
 	targetHash := sha256.Sum256([]byte(plan.ID))
 	targetKey := hex.EncodeToString(targetHash[:8]) + "." + hex.EncodeToString(abi.hash[:])
 	result := p.prog.Type(abi.resultSlotType, llssa.InC)
@@ -1361,6 +1385,9 @@ func (p *context) emitCoroManagedPrimaryDescriptor(
 		if !captured {
 			flags |= llssa.CoroDispatchFlagNoCapture
 		}
+		if delivery != nil {
+			flags |= llssa.CoroDispatchFlagHasDelivery
+		}
 		descriptor = p.pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
 			Version:      coroPlainDispatchVersion,
 			Flags:        flags,
@@ -1371,13 +1398,14 @@ func (p *context) emitCoroManagedPrimaryDescriptor(
 			CoroEntry:    coroEntry,
 			CodeEntry:    physical,
 			Result:       result,
+			Delivery:     delivery,
 		})
 		if p.coroPlainDescriptors == nil {
 			p.coroPlainDescriptors = make(map[string]llssa.Expr)
 		}
 		p.coroPlainDescriptors[descriptorName] = descriptor
 	}
-	return b.MakeCoroDispatchValue(abi.signature, descriptor, env)
+	return coroManagedCallable{value: b.MakeCoroDispatchValue(abi.signature, descriptor, env), descriptor: descriptor}
 }
 
 // newCoroDynamicDispatchEntryThunk adapts the stable descriptor ABI to the
