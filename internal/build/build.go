@@ -5943,6 +5943,8 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		coroRecoverTakeSymbolV1,
 		coroRecoverAliasBeginSymbolV1,
 		coroRecoverAliasEndSymbolV1,
+		coroCleanupShieldBeginSymbolV1,
+		coroCleanupShieldEndSymbolV1,
 		"__llgo_coro_fault_payload_v1",
 		"__llgo_coro_fault_payload_v2",
 		"__llgo_coro_spawn_begin_v1",
@@ -6017,6 +6019,23 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 						"coroutine recover take ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) signature",
 						name,
 					)
+				}
+			}
+		}
+		if name == coroCleanupShieldBeginSymbolV1 || name == coroCleanupShieldEndSymbolV1 {
+			sig := fn.Signature
+			parameters, result := 2, types.Typ[types.UnsafePointer]
+			if name == coroCleanupShieldEndSymbolV1 {
+				parameters, result = 3, types.Typ[types.Uint32]
+			}
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != parameters ||
+				sig.Results().Len() != 1 || !types.Identical(sig.Results().At(0).Type(), result) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine cleanup shield ABI %q has an inexact signature", name)
+			}
+			for index := 0; index < parameters; index++ {
+				if !types.Identical(sig.Params().At(index).Type(), types.Typ[types.UnsafePointer]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine cleanup shield ABI %q argument %d must be unsafe.Pointer", name, index)
 				}
 			}
 		}

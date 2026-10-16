@@ -37,6 +37,9 @@ const (
 
 	coroAwaitRecoverNone   uint64 = 0
 	coroAwaitRecoverDirect uint64 = 1
+
+	coroCleanupShieldBeginHookV1 = "__llgo_coro_cleanup_shield_begin_v1"
+	coroCleanupShieldEndHookV1   = "__llgo_coro_cleanup_shield_end_v1"
 )
 
 // resolveCoroStaticAwait proves the exact subset implemented by the physical
@@ -702,6 +705,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		b.Convert(p.prog.VoidPtr(), resultSlot),
 	)
 	callArgs = append(callArgs, physicalArgs...)
+	endShield := p.beginCoroCleanupShield(b, cleanup)
 	child := b.Call(childFn.Expr, callArgs...)
 	if child.Type == nil || !types.Identical(child.RawType(), types.Typ[types.UnsafePointer]) {
 		var childType types.Type
@@ -727,6 +731,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	} else if transparentRecoverAlias {
 		afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
 	}
+	afterConsume = chainCoroReconciliation(afterConsume, endShield)
 	value := p.awaitCoroChildWithRecoveryAndConsume(
 		b, child, resultSlot, sourceSig.Results(), invocation, keepaliveSlots, afterConsume,
 	)
@@ -736,6 +741,57 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		physicalCalls: []coroPhysicalCall{{
 			call: child, argCount: len(callArgs), resultArg: 1,
 		}},
+	}
+}
+
+func chainCoroReconciliation(first, second func(llssa.Builder)) func(llssa.Builder) {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(b llssa.Builder) { first(b); second(b) }
+}
+
+// beginCoroCleanupShield protects only an already-selected cleanup invocation.
+// Ordinary calls emit no scope or storage. The receipt lives in its owner's
+// existing LLVM frame and is reconciled on both child-completion lanes.
+func (p *context) beginCoroCleanupShield(b llssa.Builder, cleanup *coroStaticCleanupState) func(llssa.Builder) {
+	if cleanup == nil {
+		return nil
+	}
+	body := p.coroBody()
+	if body == nil || body.cleanup != cleanup || b == nil || b.Func != p.fn || body.terminalStatus.IsNil() {
+		panic("cleanup shield requires its exact active physical drainer")
+	}
+	pointer := types.Typ[types.UnsafePointer]
+	parameters := func(count int) *types.Tuple {
+		values := make([]*types.Var, count)
+		for index := range values {
+			values[index] = types.NewParam(token.NoPos, nil, "", pointer)
+		}
+		return types.NewTuple(values...)
+	}
+	beginSignature := types.NewSignatureType(nil, nil, nil, parameters(2),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "", pointer)), false)
+	endSignature := types.NewSignatureType(nil, nil, nil, parameters(3),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "", types.Typ[types.Uint32])), false)
+	begin := p.pkg.NewFunc(coroCleanupShieldBeginHookV1, beginSignature, llssa.InC)
+	end := p.pkg.NewFunc(coroCleanupShieldEndHookV1, endSignature, llssa.InC)
+	handle := body.coro.Handle()
+	receipt := b.Call(begin.Expr, body.task, handle)
+	return func(done llssa.Builder) {
+		if done == nil || done.Func != p.fn {
+			panic("cleanup shield reconciliation escaped its owner")
+		}
+		kind := done.Call(end.Expr, body.task, handle, receipt)
+		done.IfThen(done.BinOp(token.NEQ, kind, p.prog.IntVal(0, p.prog.Uint32())), func() {
+			// End has validated and claimed Abort=1/Shutdown=2. Preserve the
+			// panic overlay while replacing only the terminal cleanup base.
+			done.Store(body.terminalStatus, done.BinOp(token.ADD, kind, p.prog.IntVal(2, p.prog.Uint32())))
+			cleanup.setCancellationBase(done)
+		})
 	}
 }
 
