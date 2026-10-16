@@ -2184,6 +2184,24 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		return semantics, true, nil
 	}
 	switch opcode {
+	case llgoCoroBorrowResult:
+		recipe, err := planCoroDeliveryBorrow(u, ctx, direct)
+		if err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		if err := u.coroProgramIR.freezeDeliveryProducer(recipe); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		// Hidden fallback initialization and cleanup are ordinary managed calls.
+		// Freeze them into the same graph as source calls before effect/demand
+		// analysis; a metadata reference alone must not erase their effects.
+		if err := u.recordCoroLoweredCall(recipe.producer, coroDeliveryInitializeCall, recipe.initializer); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		if err := u.recordCoroLoweredCall(recipe.producer, coroDeliveryDropCall, recipe.drop); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
 	case llgoSkip:
 		// The intentionally polymorphic llgo.skip contract has no narrower
 		// signature to validate. The exact-direct-call check above is the full
@@ -3006,12 +3024,12 @@ func (u *EmissionUniverse) CoroRawFunctionAddressCallArgument(call ssa.CallInstr
 	return argument == 0, nil
 }
 
-// CoroStaticCodeAddressCallArgument reports an exact FuncPCABI0 or
-// FuncPCABIInternal operand whose selected entry PC is observed but cannot be
-// invoked through the result. This keeps the transient MakeInterface out of
+// CoroStaticFunctionReferenceCallArgument reports exact compiler-metadata
+// operands and FuncPCABI0/FuncPCABIInternal code observations, neither of which
+// publishes a callable Go function value. This keeps transient boxes out of
 // the descriptor ABI without manufacturing a synchronous entry demand for the
 // observed function.
-func (u *EmissionUniverse) CoroStaticCodeAddressCallArgument(call ssa.CallInstruction, argument int) (bool, error) {
+func (u *EmissionUniverse) CoroStaticFunctionReferenceCallArgument(call ssa.CallInstruction, argument int) (bool, error) {
 	if call == nil || call.Common() == nil || argument < 0 || argument >= len(call.Common().Args) {
 		return false, nil
 	}
@@ -3021,6 +3039,11 @@ func (u *EmissionUniverse) CoroStaticCodeAddressCallArgument(call ssa.CallInstru
 	}
 	if frozen.failure != "" {
 		return false, fmt.Errorf("%s", frozen.failure)
+	}
+	if frozen.plan.Intrinsic && frozen.opcode == llgoCoroBorrowResult {
+		// The declaration's two exact function operands were already bound by
+		// ProgramIR. They carry helper identity, not a runtime code address.
+		return argument < 2, nil
 	}
 	if !frozen.plan.Intrinsic || frozen.opcode != llgoFuncPCABI0 {
 		return false, nil
@@ -3274,6 +3297,8 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// Typed-FFI adapters receive the active physical task directly. The
 		// intrinsic emits no call and is valid only in their managed owner.
 		return CoroIntrinsicCallInlineNoSuspend
+	case llgoCoroBorrowResult:
+		return CoroIntrinsicCallInlineWithLoweredCalls
 	case llgoAllocaCStr, llgoAllocaCStrs:
 		// The C-string allocation intrinsics lower their size arithmetic and
 		// storage directly, then call runtime.AllocU/CStrCopy in a physical

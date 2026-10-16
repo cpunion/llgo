@@ -515,6 +515,25 @@ type coroAwaitedValue struct {
 	physicalCalls []coroPhysicalCall
 }
 
+// coroCleanupInvocation separates drainer ownership from Go's direct-defer
+// recover permission. Compiler-owned drops/helpers retain the owner's cleanup
+// shielding and panic overlay, but must not expose that panic to recover().
+// This is emission-only state: it adds no field to a frame or runtime packet.
+type coroCleanupInvocation struct {
+	state         *coroStaticCleanupState
+	recoverParent bool
+}
+
+func coroSourceDeferInvocation(state *coroStaticCleanupState) coroCleanupInvocation {
+	return coroCleanupInvocation{state: state, recoverParent: state != nil}
+}
+
+func (invocation coroCleanupInvocation) validate() {
+	if invocation.recoverParent && invocation.state == nil {
+		panic("coroutine parent recovery requires its exact cleanup owner")
+	}
+}
+
 func (p *context) recordCoroValueAddress(value ssa.Value, address llssa.Expr) {
 	if value == nil || address.IsNil() {
 		return
@@ -554,7 +573,10 @@ func (p *context) compileCoroCleanupTargetAwait(
 	if body == nil || body.cleanup == nil {
 		panic("coroutine cleanup await requires the active static cleanup drainer")
 	}
-	return p.compileCoroTargetAwaitWithContextAndRecovery(b, callee, llssa.Nil, args, body.cleanup, keepalive)
+	return p.compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
+		b, p.mustFunctionSymbol(callee), llssa.Nil, args,
+		coroCleanupInvocation{state: body.cleanup}, keepalive, false,
+	).value
 }
 
 func (p *context) compileCoroTargetAwaitWithContextAndRecovery(
@@ -581,7 +603,7 @@ func (p *context) compileCoroTargetAwaitWithContextAndRecoveryAliasResult(
 	transparentRecoverAlias bool,
 ) coroAwaitedValue {
 	return p.compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
-		b, p.mustFunctionSymbol(callee), closureContext, args, cleanup, keepaliveSlots,
+		b, p.mustFunctionSymbol(callee), closureContext, args, coroSourceDeferInvocation(cleanup), keepaliveSlots,
 		transparentRecoverAlias,
 	)
 }
@@ -596,15 +618,20 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecovery(
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
 	return p.compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
-		b, entry, closureContext, args, cleanup, keepaliveSlots, false,
+		b, entry, closureContext, args, coroSourceDeferInvocation(cleanup), keepaliveSlots, false,
 	).value
 }
 
 func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	b llssa.Builder, entry plannedFunctionSymbol, closureContext llssa.Expr, args []llssa.Expr,
-	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+	invocation coroCleanupInvocation, keepaliveSlots []llssa.Expr,
 	transparentRecoverAlias bool,
 ) coroAwaitedValue {
+	invocation.validate()
+	cleanup := invocation.state
+	if cleanup != nil && transparentRecoverAlias {
+		panic("cleanup child cannot also be a transparent recovery wrapper")
+	}
 	body := p.coroBody()
 	if body == nil || p.compilation == nil || p.immutablePlan() == nil {
 		owner := "<unknown>"
@@ -692,7 +719,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	// proof point.
 	b.MarkCoroElideSafe(child)
 	var afterConsume func(llssa.Builder)
-	if cleanup != nil {
+	if invocation.recoverParent {
 		afterConsume = p.beginCoroRecoverAliasScope(
 			b, llssa.Nil, child, b.Load(cleanup.panicActive),
 		)
@@ -700,7 +727,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
 	}
 	value := p.awaitCoroChildWithRecoveryAndConsume(
-		b, child, resultSlot, sourceSig.Results(), cleanup, keepaliveSlots, afterConsume,
+		b, child, resultSlot, sourceSig.Results(), invocation, keepaliveSlots, afterConsume,
 	)
 	return coroAwaitedValue{
 		value:   value,
@@ -997,7 +1024,7 @@ func (p *context) awaitCoroChildWithRecovery(
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
 	return p.awaitCoroChildWithRecoveryAndConsume(
-		b, child, resultSlot, results, cleanup, keepaliveSlots, nil,
+		b, child, resultSlot, results, coroSourceDeferInvocation(cleanup), keepaliveSlots, nil,
 	)
 }
 
@@ -1007,13 +1034,13 @@ func (p *context) awaitCoroChildWithRecovery(
 // before loading their shared result storage.
 func (p *context) awaitCoroChildWithRecoveryAndConsume(
 	b llssa.Builder, child, resultSlot llssa.Expr, results *types.Tuple,
-	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+	invocation coroCleanupInvocation, keepaliveSlots []llssa.Expr,
 	afterConsume func(llssa.Builder),
 ) llssa.Expr {
 	if resultSlot.IsNil() {
 		panic("coroutine child await requires a result slot")
 	}
-	p.awaitCoroChildCompletionWithRecovery(b, child, cleanup, keepaliveSlots, afterConsume)
+	p.awaitCoroChildCompletionWithRecovery(b, child, invocation, keepaliveSlots, afterConsume)
 	return p.loadCoroAwaitResult(b, resultSlot, results)
 }
 
@@ -1024,15 +1051,20 @@ func (p *context) awaitCoroChildWithRecoveryAndConsume(
 // transaction, preserving recover-alias and other lexical reconciliation.
 func (p *context) awaitCoroChildCompletionWithRecovery(
 	b llssa.Builder, child llssa.Expr,
-	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
+	invocation coroCleanupInvocation, keepaliveSlots []llssa.Expr,
 	afterConsume func(llssa.Builder),
 ) {
+	invocation.validate()
+	cleanup := invocation.state
 	body := p.coroBody()
 	if body == nil {
 		panic("coroutine child await requires an active PhysicalABIV1 body")
 	}
 	if b == nil || b.Func != p.fn || child.IsNil() {
 		panic("coroutine child await requires a child handle in the active function")
+	}
+	if cleanup != nil && cleanup != body.cleanup {
+		panic("cleanup child await escaped its exact owner drainer")
 	}
 	childHeader := b.CoroPromise(child, coroHeaderType(p.prog))
 	b.Store(b.FieldAddr(childHeader, coroHeaderParent), body.coro.Handle())
@@ -1041,7 +1073,7 @@ func (p *context) awaitCoroChildCompletionWithRecovery(
 	recoverData := p.prog.Nil(p.prog.VoidPtr())
 	line := p.coroCurrentSourceLine()
 	publishedLine := p.prog.IntVal(uint64(line), p.prog.Uint32())
-	if cleanup != nil {
+	if invocation.recoverParent {
 		recoverMode, recoverType, recoverData, publishedLine = cleanup.recoverAwaitArguments(p, b, publishedLine)
 	}
 	body.suspendForChild(b, publishedLine)
@@ -1147,10 +1179,7 @@ func (p *context) awaitCoroChildCompletionWithRecovery(
 		cancelDispatch.Case(p.prog.IntVal(coroAwaitCompletionShutdown, p.prog.Uint32()), shutdownCancel)
 		cancelDispatch.Case(p.prog.IntVal(coroAwaitCompletionGoexit, p.prog.Uint32()), goexitedCancel)
 		var recoveredCancel llssa.BasicBlock
-		if cleanup != nil {
-			if cleanup != ownerCleanup {
-				panic("deferred child cancellation recovery escaped its owner cleanup")
-			}
+		if invocation.recoverParent {
 			recoveredCancel = p.fn.MakeBlock()
 			cancelDispatch.Case(p.prog.IntVal(coroAwaitCompletionReturnRecovered, p.prog.Uint32()), recoveredCancel)
 		}
@@ -1174,7 +1203,7 @@ func (p *context) awaitCoroChildCompletionWithRecovery(
 		body.enterGoexit(cancelBuilder)
 		cancelBuilder.SetBlockEx(invalidCancel, llssa.AtEnd, false)
 		cancelBuilder.Unreachable()
-		if cleanup != nil {
+		if invocation.recoverParent {
 			cancelBuilder.SetBlockEx(recoveredCancel, llssa.AtEnd, false)
 			cleanup.reconcileDeferredChildReturn(p, cancelBuilder, coroAwaitCompletionReturnRecovered)
 			cancelBuilder.Jump(drainCancel)
@@ -1223,7 +1252,7 @@ func (p *context) awaitCoroChildCompletionWithRecovery(
 	dispatch.Case(p.prog.IntVal(coroAwaitCompletionShutdown, p.prog.Uint32()), shutdown)
 	dispatch.Case(p.prog.IntVal(coroAwaitCompletionGoexit, p.prog.Uint32()), goexited)
 	var recovered llssa.BasicBlock
-	if cleanup != nil {
+	if invocation.recoverParent {
 		recovered = p.fn.MakeBlock()
 		dispatch.Case(p.prog.IntVal(coroAwaitCompletionReturnRecovered, p.prog.Uint32()), recovered)
 	}
@@ -1252,7 +1281,7 @@ func (p *context) awaitCoroChildCompletionWithRecovery(
 
 	b.SetBlockEx(invalid, llssa.AtEnd, false)
 	b.Unreachable()
-	if cleanup != nil {
+	if invocation.recoverParent {
 		b.SetBlockEx(recovered, llssa.AtEnd, false)
 		cleanup.reconcileDeferredChildReturn(p, b, coroAwaitCompletionReturnRecovered)
 		b.Jump(returned)

@@ -249,6 +249,35 @@ microtask 链饿死实际 I/O callback。公开 `syscall.Open` 仍保留原调�
 守卫，不能因为调用了 Open 就被认定为资源生产函数。未知 C 的 int/pointer 返回仍不
 猜测所有权。`Dup2(oldfd, oldfd)` 不产生新资源，不能套用 Dup 的 acquire 契约。
 
+源码侧使用私有 `llgo.coroBorrowResult(init, drop)` 声明借用，两个参数必须是编译期
+可确定、无捕获的 Go 函数身份，签名由 producer 的规范化参数/结果机械生成。它们不
+物化为函数值，不从运行时地址反查；普通函数值发布仍保留原有 descriptor 语义。
+精确 recipe 只冻结一次到已有 ProgramIR，普通调用者不继承 acquisition 身份。
+fallback initializer/drop 的隐藏调用也纳入已有 lowered-call 图，不依赖源码额外调用
+helper 来触发染色；两者独立的 suspend/exec 需求均通过原固定点自动传播。
+当前实现只完成源码事实与自动染色的前端验证，物理 guard 未绑定时后端明确拒绝，
+不会因为出现这个声明就把尚未保护的 hidden output 指针交给适配器。
+
+初始化空槽也消费已有 callable effect/exec 事实，不能为了要求 initializer 是 plain
+而新增 no-panic/no-suspend 标注：普通 typed pointer store 就可能保守包含 nil fault。
+先把含指针的结果存储清零，再按已有 plain/outcome/coro 路径调用 initializer；只有
+它正常完成后才注册资源临时 guard，之后才可开始 acquisition。初始化阶段尚未获得
+资源，panic/cancel 走原调用者 cleanup，不对部分初始化槽调用 drop，也不新增一套
+“部分初始化”的状态协议。initializer 的边界语义只允许建立空态，不能做资源 acquisition。
+
+编译器内部守卫不等同于用户的 Go `defer`。它必须复用同一 drainer 的 join、panic
+overlay 和 cancellation shielding，但不能让 drop 获得恢复调用者原 panic 的直接
+`recover` 权限。drop 自己产生的 panic 仍可由它自己的 Go defer 恢复；用户原有 defer
+的直接 recover 语义保持不变。没有源码 defer 的调用者没有 SSA `Recover` block，
+共享 completion dispatcher 必须支持这种 owner，不能伪造恢复后正常返回的源码路径。
+`TestCoroCleanupCompletionWithoutSourceRecover` 已验证该 dispatcher 的唯一 complete
+case 与 invalid-continuation trap。统一 await 已把 owner 与 parent-recover 权限分开；
+deferred builtin 的真实生成 helper 在 native/wasm32 的 CoroSplit 前后均不获得此权限，
+恢复旧行为的负对照失败。新增 resource drop 的物理接线必须复用此路径。
+隐藏 helper 若选择同步 outcome 入口，同样必须把已有 drainer 传给共用 completion
+分派；panic/nil fault 替换 overlay 而不重置原有正常/取消清理 continuation。
+对应 native/wasm32 前后 CoroSplit 门禁和仅恢复旧接线的负对照均已验证。
+
 static 与 descriptor 调用消费同一个冻结事实、同一个结果槽和 cleanup 路径：
 
 1. 按 Go 顺序求值 callee/参数，再初始化结果槽并注册临时 cleanup；资源动作此时尚未开始。
@@ -322,6 +351,12 @@ release 分派。对可以静态证明无取消/跨 await 的边界允许消去�
 实施顺序为永久 core oracle → 单一 typed recipe/validator → static/dynamic 共用消费及
 descriptor/archive 闭环 → 有限 native public adapter → reflection/os wrapper → Node/WASI。
 第一批不得在物理消费者闭环前启用 public API seed，不保留没有消费者的并行 custody 框架。
+还须单独覆盖 `go acquisition(...)` 等丢弃结果的入口：当前 spawn 传 nil result sink，
+没有普通调用者的接管守卫。fallback typed slot 的释放责任必须保持到真正的 terminal
+Return 交付点；不能仅在源码 return 前设置 `done=true`，因为后续的 compiler poll
+仍可能选择取消。调用结果临时守卫在源 defer 之前执行；入口自持结果守卫则在源 defer
+之后处理失败出口，并且只在最后的正常结果发布路径撤销。两者仍使用原 drainer 和
+completion 协议，不增加 G 字段或另一套资源生命周期状态机。该入口接线尚未实现。
 以下强制门不变：
 
 1. 正常消费、submit 前取消、Post 前后取消、物化后取消、迁移后取消均逐阶段验证。

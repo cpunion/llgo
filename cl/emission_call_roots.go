@@ -48,6 +48,7 @@ const (
 	emissionIntrinsicFuncAddr
 	emissionIntrinsicFuncPCABI0
 	emissionIntrinsicAsm
+	emissionIntrinsicStaticFunctions
 )
 
 // emissionIntrinsicPolicy is intentionally exhaustive for valid, type-checked
@@ -87,6 +88,8 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 		return emissionIntrinsicFuncPCABI0, nil
 	case llgoAsm:
 		return emissionIntrinsicAsm, nil
+	case llgoCoroBorrowResult:
+		return emissionIntrinsicStaticFunctions, nil
 
 	case llgoSyscall, llgoSyscall32, llgoSyscallPtr:
 		return emissionIntrinsicRawAllValues, nil
@@ -253,6 +256,16 @@ func (u *EmissionUniverse) intrinsicCallValueRoots(instruction int, arguments []
 			roots = append(roots, emissionCallValueRoot{value: value.X})
 		}
 		return roots, nil
+	case emissionIntrinsicStaticFunctions:
+		if len(arguments) != 2 {
+			return nil, fmt.Errorf("llgo.coroBorrowResult requires exact initializer and drop functions")
+		}
+		for _, argument := range arguments {
+			if function, exact := argument.(*ssa.Function); !exact || len(function.FreeVars) != 0 {
+				return nil, fmt.Errorf("llgo.coroBorrowResult helper must be an exact context-free function, got %T", argument)
+			}
+		}
+		return emissionRoots(arguments, true), nil
 	default:
 		return nil, fmt.Errorf("unsupported llgo intrinsic operand policy %d", policy)
 	}

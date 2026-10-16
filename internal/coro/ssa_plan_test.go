@@ -1325,7 +1325,7 @@ func owner() uintptr { return observePC(codeTarget) }
 		t.Fatal("owner has no observePC call")
 	}
 	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
-		ClassifyStaticCodeAddressCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+		ClassifyStaticFunctionReferenceCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
 			return caller == owner && call == observedCall && argument == 0, nil
 		},
 		MaxPlainInstructions: -1,
@@ -1333,7 +1333,7 @@ func owner() uintptr { return observePC(codeTarget) }
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !plan.StaticCodeAddressArgument(observedCall, 0) || plan.RawFunctionAddressArgument(observedCall, 0) {
+	if !plan.StaticFunctionReferenceArgument(observedCall, 0) || plan.RawFunctionAddressArgument(observedCall, 0) {
 		t.Fatal("code-address observation was not kept distinct from a raw invocation capability")
 	}
 	got := functionPlanFor(t, plan, target)
@@ -1347,8 +1347,10 @@ func TestAnalyzeSSAStaticCodeAddressOnlyTargetDoesNotEnterManagedCHA(t *testing.
 		name                string
 		ordinaryPublication string
 		wantRep             FuncRep
+		bareIdentity        bool
 	}{
 		{name: "code address only", wantRep: DirectCoro},
+		{name: "compiler identity only", bareIdentity: true, wantRep: DirectCoro},
 		{
 			name: "ordinary publication remains managed",
 			ordinaryPublication: `
@@ -1357,22 +1359,34 @@ func publish() { published = codeTarget }
 `,
 			wantRep: Dispatch,
 		},
+		{
+			name: "compiler identity plus ordinary publication",
+			ordinaryPublication: `
+var published func()
+func publish() { published = codeTarget }
+`,
+			bareIdentity: true, wantRep: Dispatch,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			prog, pkg := buildCoroTestSSA(t, "static_code_address_cha.go", `package coroid
+			source := `package coroid
 var channel chan int
 func codeTarget() { <-channel }
 func observePC(any) uintptr { return 0 }
 func owner() uintptr { return observePC(codeTarget) }
 func dormant(callback func()) { callback() }
-`+test.ordinaryPublication)
+` + test.ordinaryPublication
+			if test.bareIdentity {
+				source = strings.Replace(source, "observePC(any)", "observePC(func())", 1)
+			}
+			prog, pkg := buildCoroTestSSA(t, "static_code_address_cha.go", source)
 			owner := packageFunction(t, pkg, "owner")
 			target := packageFunction(t, pkg, "codeTarget")
 			observer := packageFunction(t, pkg, "observePC")
 			observedCall := onlyNonBuiltinCall(t, owner)
 			plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
 				DynamicResolution: DynamicCHAOpen,
-				ClassifyStaticCodeAddressCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+				ClassifyStaticFunctionReferenceCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
 					return caller == owner && call == observedCall && call.Common().StaticCallee() == observer && argument == 0, nil
 				},
 				MaxPlainInstructions: -1,
@@ -2187,7 +2201,7 @@ func seed() { observePC(codeTarget); invoke(foreign) }
 			config := SSAConfig{
 				DynamicResolution: DynamicCHAClosed,
 				EmissionUniverse:  universe,
-				ClassifyStaticCodeAddressCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+				ClassifyStaticFunctionReferenceCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
 					return caller == seed && call.Common().StaticCallee() == observer && argument == 0, nil
 				},
 				ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {

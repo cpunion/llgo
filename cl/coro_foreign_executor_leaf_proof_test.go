@@ -244,8 +244,8 @@ func Forward() { RunFault() }
 					site, found, err := consumer.CoroCallSitePlan(call)
 					return found && site.ElidesCall(), err
 				},
-				ClassifyStaticCodeAddressCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
-					return consumer.CoroStaticCodeAddressCallArgument(call, argument)
+				ClassifyStaticFunctionReferenceCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+					return consumer.CoroStaticFunctionReferenceCallArgument(call, argument)
 				},
 			})
 			if err != nil {

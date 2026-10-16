@@ -440,7 +440,7 @@ func (p *context) compileCoroStaticOutcomeCall(
 	}
 	result := p.compileCoroStaticOutcomeTargetCallAliasResult(
 		b, callee, args, instructionPlan.directOutcomeNativeResult,
-		instructionPlan.recoverAlias,
+		instructionPlan.recoverAlias, nil,
 	)
 	if reflectCheck, ok := reflectValueMethodByNameCheck(call.Common()); ok {
 		markCoroReflectValueMethodByNameCalls(b, reflectCheck, result.physicalCalls)
@@ -476,7 +476,7 @@ func (p *context) compileCoroStaticOutcomeTargetCallResult(
 	nativeResult bool,
 ) coroAwaitedValue {
 	return p.compileCoroStaticOutcomeTargetCallAliasResult(
-		b, callee, args, nativeResult, false,
+		b, callee, args, nativeResult, false, nil,
 	)
 }
 
@@ -486,9 +486,13 @@ func (p *context) compileCoroStaticOutcomeTargetCallAliasResult(
 	args []llssa.Expr,
 	nativeResult bool,
 	transparentRecoverAlias bool,
+	cleanup *coroStaticCleanupState,
 ) coroAwaitedValue {
 	if !p.hasStructuredOutcomePhysicalBody() || callee == nil || len(callee.FreeVars) != 0 {
 		panic("static outcome target call escaped its context-free structured body")
+	}
+	if cleanup != nil && (p.coroCleanup() != cleanup || transparentRecoverAlias) {
+		panic("static outcome cleanup escaped its exact drainer or acquired parent-recover authority")
 	}
 	entry := p.mustOutcomePlainFunctionSymbol(callee)
 	sourceSig, err := p.emissionUniverse.coroPhysicalSourceSignature(callee)
@@ -550,7 +554,7 @@ func (p *context) compileCoroStaticOutcomeTargetCallAliasResult(
 	} else {
 		physicalCall = b.Call(calleeFn.Expr, physicalArgs...)
 	}
-	p.dispatchOutcomePlainCompletion(b, completion)
+	p.dispatchOutcomePlainCompletionWithRecovery(b, completion, cleanup)
 	return coroAwaitedValue{
 		value:   p.loadCoroAwaitResult(b, resultSlot, sourceSig.Results()),
 		address: p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()),

@@ -83,9 +83,9 @@ func Root() { `+test.body+` }
 				classify := func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
 					return call.Common().StaticCallee() == pkg.ssa.Func("address") && argument == 0, nil
 				}
-				config := coro.SSAConfig{MaxPlainInstructions: -1, ClassifyStaticCodeAddressCallArgument: classify}
+				config := coro.SSAConfig{MaxPlainInstructions: -1, ClassifyStaticFunctionReferenceCallArgument: classify}
 				if test.raw {
-					config.ClassifyStaticCodeAddressCallArgument = nil
+					config.ClassifyStaticFunctionReferenceCallArgument = nil
 					config.ClassifyRawFunctionAddressCallArgument = classify
 				}
 				plan, err := coro.AnalyzeSSA(program.ssa, coro.Roots{{Function: pkg.ssa.Func("Root"), Demand: coro.AsyncDemand}}, config)

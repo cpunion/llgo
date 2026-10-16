@@ -10,13 +10,12 @@ source compatibility, and one platform's result does not establish another's.
 Integration is in `coro/sync-main-20260830-r2`. Commit `d0838f492` completes the
 existing merge of parents `97572a91d` and `c4941f9ae`; no newer main was merged.
 Draft PR [cpunion/llgo#260](https://github.com/cpunion/llgo/pull/260) carries this
-checkpoint. Follow-up commit `d93ff685c` fixes dynamic pointer-result consumption;
-Coroutine run `38817134420` checks that head and is queued. The preceding run
-`38814074088` passed Cortex-M timer, native fleet E2E and JS/WASM command-reactor
-jobs before the new commit superseded it. Those passes do not establish the
-current head's CI status. No reviews, inline review comments or issue comments
-were present at the latest inspection. Later CI/review observations must name
-the checked head.
+checkpoint. Follow-up commit `d93ff685c` fixes dynamic pointer-result consumption.
+Latest integrated CI observation: head `7170ce7a7` in run `38826618373` completed
+all 18 coroutine workflow jobs successfully, with no failure. This includes the
+repaired WASI cache-discovery and host-SSA build-tag lanes. The separate
+resource-delivery branch includes `2ac5ee5fc`; its newer cleanup/source changes are tested
+below and are not silently included in that CI head.
 The destination is `cpunion/llgo:llvm-coro`. The acceptance environment is
 Darwin/arm64, Go 1.27 and LLVM 22. No new upstream-main synchronization is
 required for this work.
@@ -156,6 +155,22 @@ as host tests; FD tests run with race detection (2.366s / 397.2 MiB). Physical
 static/dynamic cleanup, reflection, archives and public API adapters remain
 unimplemented. Those type/model tests do not close public resource delivery.
 
+The resource-delivery development branch extends the existing archive summary
+to v17, without adding a second metadata section. Optional producer records
+resolve initializer/drop identities and exact ABI hashes through the shared
+cross-package index; malformed, missing and target-width-incompatible records
+fail before lowering. Ordinary functions omit the record. Framed record
+round-trip, cross-package lookup, immutable value and negative tests pass with
+race detection (1.516s / 376.3 MiB). This validates metadata transport/index
+consumption only: compiler publication, typed physical helper binding and actual
+source-unavailable archive execution are still pending.
+The complete `internal/coro` race/shuffle suite passes on this branch
+(95.035s / 1660.3 MiB). Compiler import/publication also explicitly rejects a
+nonzero delivery record until its physical cleanup recipe is bound; the real
+imported-entry/descriptor LLVM gate passes with a new unbound-record negative
+case (0.573s / 1231.3 MiB including host compilation). Metadata is not silently
+dropped into ordinary resource-result lowering.
+
 The `02606d89a` CI run 38820862342 exposed three acceptance-wiring problems:
 both WASM target lanes selected the basic network host runner for the stdlib
 TCP fixture; target-core compiled an incomplete host-Go runtime configuration;
@@ -180,9 +195,19 @@ does not change source/compiler inputs, but disk admission still prevents a
 fresh full-suite run. These are infrastructure stops, not new suite passes.
 
 After disk recovery the same v46 cohorts resumed with the repaired PATH. Full
-test/go compiles successfully (7633.7 MiB sampled process-tree peak) and is now
-executing; the demo and fresh 180-package stdlib cohorts are also running. They
-remain incomplete. CI head `bb860510d` passes the earlier target/clock/TCP
+test/go compiles successfully (7633.7 MiB sampled process-tree peak). At
+00:13 UTC all three cohorts stopped again at the unchanged 10GiB disk floor:
+32/73 demos and 6/180 stdlib packages passed; test/go recorded 233 top-level
+passes and no semantic failure before interruption. None is a complete v46
+suite pass. Demo/stdlib runners joined their children, reclaimed private scratch
+and verified their source fingerprints. The full-test outer interruption left
+a nested join marker: the marked PIDs and all snapshot/compiler processes were
+subsequently absent, absolute-path lsof found no scratch handles, and the source
+and retained test-binary hashes still matched. Scratch and the lock were moved
+to `scratch-interrupted-disk-0013` / `interrupted-disk-0013.lock`, not deleted or
+misrepresented as an automatic join receipt. Resuming that package must rerun
+the whole test binary; its 233 partial passes are not reusable package acceptance.
+CI head `bb860510d` passes the earlier target/clock/TCP
 corrections. Two later workflow gates exposed further host-test wiring:
 WASI reactor discovery used the obsolete `.llgo/clibs_build` location instead
 of the current XDG crosscompile cache, and a host-SSA test lacked its matching
@@ -190,6 +215,121 @@ of the current XDG crosscompile cache, and a host-SSA test lacked its matching
 (0.648s / 91.6 MiB); the llgo-tag package test passes (0.424s / 265.3 MiB), as
 do analyzer/build vet and production-tagged runtime vet. No runtime fallback or
 semantic test assertion is removed by these corrections.
+
+Resource-cleanup review also removes the completion dispatcher's assumption
+that every compiler-owned cleanup has a source SSA Recover block. The LLVM
+regression and existing static-cleanup/parent-drain gates pass (1.976s /
+1245.4 MiB). This enables a no-source-defer drainer but does not yet insert a
+resource guard. Two required integration gates are explicit in the core
+contract: internal drops cannot recover a parent's panic, and discarded-result
+entry ownership must remain protected until actual terminal Return rather than
+an early source-level commit followed by a compiler preemption poll.
+
+The shared static/descriptor await path now carries explicit emission-only
+cleanup ownership and parent-recover permission separately. Generated helpers
+for deferred builtins use the former without the latter: they pass no parent
+panic payload, publish no recover alias, and reject ReturnRecovered, while
+retaining strong join and the existing cleanup panic/cancellation reconciliation.
+Native/wasm32 pre/post-CoroSplit deferred-print gates pass alongside source
+defer/recover, dynamic cleanup and parent-drain regressions (2.857s / 1221.5 MiB).
+There are no new runtime/frame fields. Actual resource guard insertion and the
+discarded-result entry guard are still pending.
+All selected `TestCoro*` / `TestEmission*` compiler tests then pass (93.136s /
+1263.6 MiB), followed by the monotonic architecture gate (0.602s / 686.6 MiB).
+The final targeted positive run passes (1.341s / 408.3 MiB). An isolated Go
+overlay changing only the internal helper back to source-defer permission
+fails both native/wasm32 cases at the actual handoff's leaked panic authority
+(0.477s / 1228.6 MiB); production sources are not reverted. Earlier attempts
+to add a source panic hit missing runtime-type helpers in the small test
+fixture and are retained as setup failures, not the negative control.
+
+Fixed v47 source is commit `73095ebc0`; compiler SHA-256 is
+`06f2532dfa11ae2b16003b5368e8704fd120d079167da891ffd4e8d47af59092`.
+The source manifest SHA-256 is
+`517b7f580a9c21f7698ae404835efe8a193274f34b15beca45a9c9c4ea5a6346`,
+and matches after executable acceptance. The real `TestBuiltinPrintOutputMatchesGo`
+passes (31.352s / 868.1 MiB including host test and child compilers). The native
+borrowed-FD fixture passes ten executions and its Node counterpart passes three
+(48.299s / 1247.7 MiB including both builds). Each task uses a bounded private
+Go cache reclaimed on completion. This validates the changed cleanup path,
+not the unimplemented public acquisition-return guard.
+
+Initializer review retains ordinary automatic coloring. A proposed plain-only
+initializer gate was tested locally but not retained: a typed pointer store may
+carry a nil-fault effect, and denying that effect would require unnecessary
+annotations. Zero result storage before initialization, finish initialization
+before arming the resource guard, and do not start acquisition until afterward.
+Existing plain/outcome/coro completion owns initialization failure/cancellation;
+no additional partial-initialization resource state is needed.
+
+The final v46 demo attempt retained 47/73 passes before the shared filesystem
+again reached the 10GiB floor while building `reflectfunc`. It reclaimed its
+private scratch and verified source hashes. The six stdlib package passes and
+233 partial test/go passes remain unchanged; all three full local cohorts are
+currently stopped, not running. Sufficient stable free disk is still needed
+to finish these gates. Completed v47 focused tests have no remaining compiler
+processes and do not replace the incomplete full cohorts.
+
+At 00:48 UTC the shared filesystem recovered over 190GiB free. All three v46
+cohorts resumed with identical fingerprinted inputs and unchanged limits.
+Full test/go rebuilds and reruns the entire package, rather than adopting the
+233 interrupted test results; demos/stdlib reuse only completed package passes.
+The preserved full-test scratch/lock and its manual inspection receipt remain.
+
+The resumed v46 demo cohort completed at 01:14 UTC: **73/73 passed**, zero
+semantic failures, scratch reclaimed and source hashes unchanged. The v47
+four-package executable gate also completed: `test` 41 passed / 1 helper skipped,
+`test/cgo` 3 passed, `test/syncpool` 1 passed, and `test/llgoext` 23 passed
+(4845.7 MiB sampled process-tree peak). The source manifest still matches.
+Full v46 test/go completed at 01:27 UTC: **266/266 passed**, zero failures or
+skips, run peak 6454.0 MiB. The retained binary SHA-256 is
+`789b4c4becb69976fbfdba6f9ac88144a2dfba3994a41b8380afb31040339db9`;
+all children joined, private scratch was reclaimed and source hashes match.
+After 15/180
+stdlib package passes, the sequential runner was deliberately terminated and
+joined to repartition the other 165 packages into four disjoint lanes. Its
+interrupted AES compilation is retained as an infrastructure interruption, not
+a semantic failure. All four lanes keep the same source/compiler and per-stage
+limits; their aggregate compile bound is 48GiB, plus 12GiB for full test/go.
+
+The typed borrowed-result source frontend now freezes exact initializer/drop
+identities and canonical result types in the existing ProgramIR. Its compiler-
+only function operands reuse the static-reference analysis capability instead
+of manufacturing runtime funcvals or descriptor demand; ordinary publication
+of the same function still retains managed dynamic-call semantics. Invalid
+shapes and a missing physical guard fail closed. This is source planning only:
+it does not expose an unprotected output pointer or enable a public acquisition
+adapter. All selected compiler `TestCoro*` / `TestEmission*` regressions pass
+(91.422s / 1162.0 MiB), the complete core race/shuffle suite passes
+(17.733s / 1648.4 MiB), and the architecture/selected build gates pass
+(0.663s / 698.6 MiB). No architecture budget was relaxed.
+Hidden initializer/drop calls are now frozen as ordinary lowered managed calls
+in that same graph, even without explicit source calls. Independent initializer-
+only and drop-only suspension/executor seeds both color producer and caller
+automatically without requiring Dispatch (1.405s / 1239.7 MiB). The architecture
+and affected build gates still pass (0.776s / 324.5 MiB). The broad build-driver
+selection first hit its 4GiB process-tree bound (4098.8 MiB). Restarting that
+whole selection at 8GiB passes (790.155s / 7888.6 MiB), including the enabled
+native scheduler/cleanup E2E and production code-generation probes; opt-in
+platform/resource acceptance tests remain explicitly skipped. The first run's
+resource diagnostic is retained, not relabeled as a semantic failure.
+
+The shared lowered-helper resolver also had a cleanup-specific optimization
+gap: selecting a synchronous outcome entry lost the active drainer and reset
+its panic/nil-fault continuation as if executing ordinary source code. The
+outcome transaction now carries that existing owner into its existing cleanup-
+aware completion dispatcher. No new runtime/frame fields or cancellation
+protocol are added. Native/wasm32 LLVM verification and exact continuation-
+storage checks pass before and after CoroSplit (0.592s / 1230.4 MiB). Restoring
+only the old resolver with a Go overlay fails both targets at the intended
+panic/nil-fault base reset; this is the final negative control. Earlier attempts
+with a symbol mismatch or source-line/continuation-value collision are retained
+as fixture-check failures, not extra runtime regressions. All selected compiler
+`TestCoro*` / `TestEmission*` tests pass (150.552s / 388.1 MiB), followed by the
+architecture gate (0.798s). Vet passes with the existing CI policy: full vet for
+core/build and `-unsafeptr=false` for cl's intentional unsafe-pointer fixtures.
+An initial unrestricted cl vet reports the unchanged builtin fixture at line
+569; no source assertion or CI policy is changed to suppress a new warning.
 
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
@@ -199,14 +339,14 @@ this is storage reclamation, not loss of the earlier source evidence.
 
 | Gate | Latest observed result | Scope |
 | --- | --- | --- |
-| `test` | 41 passed, 1 skipped | Fixed v35 compiler/source, uncached compile and execution |
-| `test/cgo` | 3 passed | Fixed v35 compiler/source, uncached compile and execution |
-| `test/syncpool` | 1 passed | Fixed v35 compiler/source, uncached compile and execution |
-| `test/llgoext` | 23 passed | Fixed v35 compiler/source, including defer-head isolation and 130-G ID allocation |
+| `test` | 41 passed, 1 skipped | Fixed v47 compiler/source, uncached compile and execution |
+| `test/cgo` | 3 passed | Fixed v47 compiler/source, uncached compile and execution |
+| `test/syncpool` | 1 passed | Fixed v47 compiler/source, uncached compile and execution |
+| `test/llgoext` | 23 passed | Fixed v47 compiler/source, including defer-head isolation and 130-G ID allocation |
 | `test/std/runtime` | 5 passed | Fixed v35 compiler/source, uncached compile and execution |
 | C fault recovery, foreign reentry, traceback | 4 passed | v7 compiler; probes compile, link and execute with LLGo |
-| Full `test/go` | v42: all 266 top-level tests passed, zero failures/skips | Exact retained binary, source hashes match before/after. Build 236s / 7590.0 MiB; complete run 1678s / 6601.8 MiB, including nested compilers. The original 6GiB run stopped for resources; the 12GiB rerun starts from the beginning and passes. Includes new main-panic peers, generic/static spawn and rangefunc gates, as well as C faults, foreign reentry, logical stacks and reflection Call/MakeFunc. v35's 258-test pass remains historical evidence; newer raw-helper/GC changes are not included in this v42 result. |
-| Top-level `_demo/go` | Fixed v25 run: all 73/73 passed, zero semantic failures | Source hashes match before/after; each demo compiles and runs in its own copied directory. Final run took 3004s, reusing 11 verified successes with identical compiler/source/SDK and rebuilding/running 62. `embedunexport-1598` hit the original 6 GiB compile cap, then passed at 8 GiB; maximum compile RSS was 7621.8 MiB (`goimporter-1389`). Generated runs retain a 2 GiB cap. This is v25 acceptance, not a v35 whole-demo claim. |
+| Full `test/go` | Fixed v46: all 266 top-level tests passed, zero failures/skips | Completed 2026-10-16 01:27 UTC, run peak 6454.0 MiB including nested compilers. Exact retained binary and source hashes match; scratch reclaimed after child join. This entire rerun starts from the beginning rather than adopting 233 interrupted passes. Includes main-panic peers, generic/static spawn, rangefunc, C faults, foreign reentry, logical stacks and reflection Call/MakeFunc. Later v47 cleanup and source-front-end changes have separate affected gates, not an implicit full-v46 acceptance transfer. |
+| Top-level `_demo/go` | Fixed v46: all 73/73 passed, zero semantic failures | Completed 2026-10-16 01:14 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Disk/monitor interruptions remain in the journal; only completed exact-input package passes were reused. |
 | `test/std/os`, `test/std/net` | 85 passed; 129 passed / 5 skipped, respectively | Full packages compiled and executed with fixed source snapshot and v35, cache disabled |
 | `test/std/reflect` | v25: 68 passed | Separate real LLGo compile and generated-binary execution; build peak 5768 MiB |
 | `synctest` execution | Run/Wait, inheritance, channel/select/Cond, fake time, heap association and WaitGroup passed | Real LLGo programs also verify detached children, finalizers and AddCleanup outside the bubble; associated objects remain collectible. Host race tests are not LLGo race-instrumentation acceptance. |
@@ -367,19 +507,16 @@ bound is still explicit.
 ## Remaining work, in order
 
 1. Finish current executable acceptance on immutable compiler/source pairs.
-   v42 `test/go` now passes all 266 tests; its first run reached a nested
-   compiler's 6GiB process-tree limit, without a preceding assertion failure.
-   The successful second run reuses the exact test binary from the start under
-   a 12GiB tree cap. The
-   180-package `test/std` evaluation retains 20 completed passes and is stopped
-   at its 10GiB disk floor, as is the newest demo cohort after five passes.
-   Resume only after sufficient disk recovery, with private cache reclamation
-   and unchanged source/compiler inputs. Preserve every interrupted run.
-   v35 basic-package and v25 73-demo passes remain dated evidence, not a new
-   final-snapshot claim. Rerun affected executable gates after later fixes;
+   Fresh v46 `test/go` passes 266/266 and `_demo/go` passes 73/73; v47 basic
+   executable packages pass 68 tests with one helper skip. The v46 stdlib
+   evaluation continues in four disjoint remaining-package cohorts after 15
+   initial passes. Keep private cache reclamation, unchanged source/compiler
+   inputs and every interrupted receipt. A fresh final GOROOT selection is
+   still required; focused fixes do not replace the whole selection.
+   Rerun affected executable gates after later fixes;
    do not update instruction goldens to hide runtime failures.
-2. Close the specific stale-GC-root regression found in `typeparam/chans.go`.
-   The production three-file correction passes the GC-only fixed cohort:
+2. Preserve the closed stale-GC-root regression while finishing the final
+   GOROOT evaluation. The production correction passes the GC-only fixed cohort:
    placement is frozen, safepoint/critical cost and exact helper observation
    remain checked, and live-root retention/cancellation gates pass. Combining
    it with the raw-helper optimization exposed a separate static-outcome

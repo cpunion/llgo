@@ -521,6 +521,19 @@ func Export() func(uint32) uint32 { return Imported }
 			},
 			want: "primary symbol",
 		},
+		{
+			name: "unbound resource delivery",
+			edit: func(fact *coro.LibraryEffectFunction) {
+				fact.Delivery = coro.DeliveryRecipeRecord{
+					Version:  coro.DeliveryRecipeVersionV1,
+					Producer: fact.ID, ProducerABI: fact.ABIHash,
+					Initializer: "llgo.function.v0:test.delivery.init", InitializerABI: strings.Repeat("a", 64),
+					Drop: "llgo.function.v0:test.delivery.drop", DropABI: strings.Repeat("b", 64),
+					ResultSize: 8, ResultAlign: 8,
+				}
+			},
+			want: "bound physical resource-delivery recipe",
+		},
 	} {
 		t.Run("reject "+test.name+" mismatch", func(t *testing.T) {
 			badFact := fact

@@ -577,15 +577,15 @@ type SSAConfig struct {
 	// representation; all ordinary uses keep their canonical descriptor boundary.
 	ClassifyRawFunctionAddressCallArgument func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error)
 
-	// ClassifyStaticCodeAddressCallArgument identifies the same exact transient
-	// MakeInterface{X:*ssa.Function} shape when the frontend only observes X's
-	// selected code address (for example internal/abi.FuncPCABIInternal). Unlike
-	// ClassifyRawFunctionAddressCallArgument, the resulting pointer is not a
+	// ClassifyStaticFunctionReferenceCallArgument identifies one exact static
+	// function operand (optionally in a transient MakeInterface) consumed only
+	// as compiler metadata or a code-address observation. Unlike
+	// ClassifyRawFunctionAddressCallArgument, this reference grants no
 	// synchronous invocation capability and therefore must not demand a plain
 	// entry. The exact use still suppresses interface materialization and
 	// Dispatch representation; ordinary uses of the same value remain canonical
 	// descriptor boundaries.
-	ClassifyStaticCodeAddressCallArgument func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error)
+	ClassifyStaticFunctionReferenceCallArgument func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error)
 
 	// ClassifyErasedFunctionInterface identifies one exact MakeInterface whose
 	// frontend lowering consumes the concrete function operand and emits no Go
@@ -835,7 +835,7 @@ type SSAPlan struct {
 	elidedCallCertificates  map[ssa.CallInstruction]string
 	rawAddressArgs          map[ssaCallArgumentUse]struct{}
 	rawAddressTargets       map[ssaCallArgumentUse]FunctionID
-	codeAddressArgs         map[ssaCallArgumentUse]struct{}
+	staticReferenceArgs     map[ssaCallArgumentUse]struct{}
 	conditionalStores       map[*ssa.Store]*ssa.Function
 	safeFixedArrayIndexes   map[ssa.Instruction]int64
 	loweredCalls            map[*ssa.Function][]SSALoweredCall
@@ -1714,7 +1714,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
-	staticCodeAddressCallArguments, err := classifySSAStaticCodeAddressCallArguments(bodyFunctions, config)
+	staticFunctionReferenceCallArguments, err := classifySSAStaticFunctionReferenceCallArguments(bodyFunctions, config)
 	if err != nil {
 		return nil, err
 	}
@@ -1723,19 +1723,19 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		return nil, err
 	}
 	functionAddressCallArguments := append([]ssaCallArgumentUse(nil), rawFunctionAddressCallArguments...)
-	addressKinds := make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)+len(staticCodeAddressCallArguments))
+	addressKinds := make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)+len(staticFunctionReferenceCallArguments))
 	for _, use := range rawFunctionAddressCallArguments {
 		addressKinds[use] = struct{}{}
 	}
-	for _, use := range staticCodeAddressCallArguments {
+	for _, use := range staticFunctionReferenceCallArguments {
 		if _, duplicate := addressKinds[use]; duplicate {
 			return nil, fmt.Errorf("coro: call argument is classified as both a raw invocation address and a code-address observation")
 		}
 		addressKinds[use] = struct{}{}
 		functionAddressCallArguments = append(functionAddressCallArguments, use)
 	}
-	dynamicCandidates, err = filterSSAStaticCodeAddressOnlyCandidates(
-		dynamicCandidates, allFunctions, staticCodeAddressCallArguments, canonicalizer,
+	dynamicCandidates, err = filterSSAStaticReferenceOnlyCandidates(
+		dynamicCandidates, allFunctions, staticFunctionReferenceCallArguments, canonicalizer,
 		config.ResolveManagedFunctionValue,
 	)
 	if err != nil {
@@ -2287,7 +2287,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := addSSAReferenceEdges(
 		graph, bodyFunctions, includedSet, ids, flow,
 		directPlainCallArguments, rawDirectPlainCallArguments,
-		rawFunctionAddressCallArguments, staticCodeAddressCallArguments, syncOnlyDescriptorArguments,
+		rawFunctionAddressCallArguments, staticFunctionReferenceCallArguments, syncOnlyDescriptorArguments,
 		conditionalStores, rawCConversionTargets,
 	); err != nil {
 		return nil, err
@@ -2391,7 +2391,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		elidedCallCertificates:  elidedCallCertificates,
 		rawAddressArgs:          make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)),
 		rawAddressTargets:       make(map[ssaCallArgumentUse]FunctionID, len(rawFunctionAddressCallArguments)),
-		codeAddressArgs:         make(map[ssaCallArgumentUse]struct{}, len(staticCodeAddressCallArguments)),
+		staticReferenceArgs:     make(map[ssaCallArgumentUse]struct{}, len(staticFunctionReferenceCallArguments)),
 		conditionalStores:       make(map[*ssa.Store]*ssa.Function, len(conditionalStores)),
 		safeFixedArrayIndexes:   safeFixedArrayIndexes,
 		loweredCalls:            loweredCalls,
@@ -2435,8 +2435,8 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		}
 		result.rawAddressTargets[use] = id
 	}
-	for _, use := range staticCodeAddressCallArguments {
-		result.codeAddressArgs[use] = struct{}{}
+	for _, use := range staticFunctionReferenceCallArguments {
+		result.staticReferenceArgs[use] = struct{}{}
 	}
 	for store, target := range conditionalStores {
 		result.conditionalStores[store] = target
@@ -3635,14 +3635,14 @@ func addSSAReferenceEdges(
 	directPlainCallArguments []ssaCallArgumentUse,
 	rawDirectPlainCallArguments []ssaCallArgumentUse,
 	rawFunctionAddressCallArguments []ssaCallArgumentUse,
-	staticCodeAddressCallArguments []ssaCallArgumentUse,
+	staticFunctionReferenceCallArguments []ssaCallArgumentUse,
 	syncOnlyDescriptorCallArguments []ssaCallArgumentUse,
 	conditionalStores map[*ssa.Store]*ssa.Function,
 	rawCConversionTargets map[ssa.Value]*ssa.Function,
 ) error {
 	syncOnlyArguments := make(map[ssaCallArgumentUse]struct{}, len(directPlainCallArguments))
 	rawPlainArguments := make(map[ssaCallArgumentUse]struct{}, len(rawDirectPlainCallArguments)+len(rawFunctionAddressCallArguments))
-	functionAddressArguments := make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)+len(staticCodeAddressCallArguments))
+	functionAddressArguments := make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)+len(staticFunctionReferenceCallArguments))
 	functionAddressBoxes := make(map[*ssa.MakeInterface]struct{}, len(functionAddressArguments))
 	for _, use := range directPlainCallArguments {
 		syncOnlyArguments[use] = struct{}{}
@@ -3654,7 +3654,7 @@ func addSSAReferenceEdges(
 		rawPlainArguments[use] = struct{}{}
 		functionAddressArguments[use] = struct{}{}
 	}
-	for _, use := range staticCodeAddressCallArguments {
+	for _, use := range staticFunctionReferenceCallArguments {
 		functionAddressArguments[use] = struct{}{}
 	}
 	for use := range functionAddressArguments {
@@ -3915,9 +3915,9 @@ func classifySSARawFunctionAddressCallArguments(functions []*ssa.Function, confi
 	)
 }
 
-func classifySSAStaticCodeAddressCallArguments(functions []*ssa.Function, config SSAConfig) ([]ssaCallArgumentUse, error) {
+func classifySSAStaticFunctionReferenceCallArguments(functions []*ssa.Function, config SSAConfig) ([]ssaCallArgumentUse, error) {
 	return classifySSAFunctionAddressCallArguments(
-		functions, config.ClassifyStaticCodeAddressCallArgument, "static code-address", true,
+		functions, config.ClassifyStaticFunctionReferenceCallArgument, "static function-reference", true,
 	)
 }
 
@@ -4003,6 +4003,13 @@ func classifySSAFunctionAddressCallArguments(
 					}
 					if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
 						return nil, fmt.Errorf("coro: trusted %s argument %d in %q cannot belong to a builtin call", kind, argument, caller.Name())
+					}
+					if target, exact := value.(*ssa.Function); staticOnly && exact {
+						if len(target.FreeVars) != 0 {
+							return nil, fmt.Errorf("coro: trusted %s argument %d in %q has captured state", kind, argument, caller.Name())
+						}
+						result = append(result, ssaCallArgumentUse{call: call, argument: argument})
+						continue
 					}
 					boxed, ok := value.(*ssa.MakeInterface)
 					if !ok {
@@ -4620,7 +4627,7 @@ func filterSSADynamicCandidateSites(
 	return result, nil
 }
 
-// filterSSAStaticCodeAddressOnlyCandidates removes non-method CHA candidates
+// filterSSAStaticReferenceOnlyCandidates removes non-method CHA candidates
 // whose only address-taking occurrences are exact frontend-certified code
 // observations. Such an occurrence emits no managed function value and cannot
 // make the target callable by an unrelated dynamic Go call. Canonicalization
@@ -4630,18 +4637,18 @@ func filterSSADynamicCandidateSites(
 // filtering a raw code observation could erase an unrelated Go publication.
 // An unresolved ordinary
 // publication remains eligible and therefore keeps closed-world analysis open.
-func filterSSAStaticCodeAddressOnlyCandidates(
+func filterSSAStaticReferenceOnlyCandidates(
 	candidates map[ssa.CallInstruction]map[*ssa.Function]struct{},
 	functions []*ssa.Function,
-	codeAddressUses []ssaCallArgumentUse,
+	staticReferenceUses []ssaCallArgumentUse,
 	canonicalizer *ssaFunctionCanonicalizer,
 	resolver SSAManagedFunctionValueResolver,
 ) (map[ssa.CallInstruction]map[*ssa.Function]struct{}, error) {
-	if len(candidates) == 0 || len(codeAddressUses) == 0 {
+	if len(candidates) == 0 || len(staticReferenceUses) == 0 {
 		return candidates, nil
 	}
 	managedAddresses, err := restrictedSSAManagedAddressTakenFunctionsExcluding(
-		functions, canonicalizer, resolver, codeAddressUses,
+		functions, canonicalizer, resolver, staticReferenceUses,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("coro: filter code-address-only CHA candidates: %w", err)

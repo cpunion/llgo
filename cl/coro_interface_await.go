@@ -160,7 +160,7 @@ func (p *context) compileCoroInterfaceDispatchAwait(
 		case candidate.plan.HasStaticOutcome():
 			awaited := p.compileCoroStaticOutcomeTargetCallAliasResult(
 				b, candidate.function, physical, outcomeParent,
-				instructionPlan.recoverAlias,
+				instructionPlan.recoverAlias, nil,
 			)
 			result = awaited.value
 			markCoroReflectTypeMethodByNameCalls(

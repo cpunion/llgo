@@ -143,38 +143,38 @@ type CoroPlanInput struct {
 	Program          *ssa.Program
 	EmissionUniverse *coro.SSAEmissionUniverse
 
-	resolveFunction                func(*ssa.Function) (*ssa.Function, bool)
-	managedFunctionValueTarget     func(*ssa.Function) (*ssa.Function, bool, error)
-	augmentFunctionIDs             func(coro.FunctionIDConfig) coro.FunctionIDConfig
-	localBodyFacts                 func(*ssa.Function) (coro.SSAFunctionBodyFacts, error)
-	functionBackground             func(*ssa.Function) (llssa.Background, bool, error)
-	rawCFunctionType               func(types.Type) (bool, error)
-	foreignNoBlock                 func(*ssa.Function) (cl.CoroForeignNoBlockCertificate, bool, error)
-	foreignSync                    func(*ssa.Function) (cl.CoroForeignSyncCertificate, bool, error)
-	foreignWorker                  func(*ssa.Function) (cl.CoroForeignWorkerCertificate, bool, error)
-	callableIdentity               func(*ssa.Function) (cl.CoroCallableIdentityCertificate, bool, error)
-	callableContract               func(*ssa.Function) (cl.CoroCallableContractCertificate, bool, error)
-	noPreempt                      func(*ssa.Function) (string, bool, error)
-	noUnwind                       func(*ssa.Function) (string, bool, error)
-	trustedInlineCall              func(*ssa.Function, ssa.CallInstruction) (coro.SSATrustedInlineCallCertificate, bool, error)
-	assemblyNoSuspend              func(*ssa.Function) (string, bool, error)
-	dynamicImplements              func(types.Type, *types.Interface) (bool, error)
-	dynamicSignature               func(*ssa.Function, *types.Signature) (*types.Signature, error)
-	callSitePlan                   func(ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error)
-	rawFunctionAddressCallArgument func(ssa.CallInstruction, int) (bool, error)
-	staticCodeAddressCallArgument  func(ssa.CallInstruction, int) (bool, error)
-	erasedFunctionInterface        func(*ssa.MakeInterface) (bool, error)
-	demandReferences               func(*ssa.Function) ([]*ssa.Function, error)
-	syncDemandReferences           func(*ssa.Function) ([]*ssa.Function, error)
-	plainLoweredCalls              func(*ssa.Function) ([]coro.SSALoweredCall, error)
-	managedValueReferences         func(*ssa.Function) ([]*ssa.Function, error)
-	loweredCalls                   func(*ssa.Function) ([]coro.SSALoweredCall, error)
-	requiredRoots                  coro.Roots
-	requiredPlain                  map[*ssa.Function]struct{}
-	requiredHostPlain              map[*ssa.Function]struct{}
-	requiredDirectPlain            []requiredCoroDirectPlainCallArgument
-	requiredClosedDynamic          map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
-	requiredGlobalFunctionSlots    map[ssa.CallInstruction]coroGlobalFunctionSlotProof
+	resolveFunction                     func(*ssa.Function) (*ssa.Function, bool)
+	managedFunctionValueTarget          func(*ssa.Function) (*ssa.Function, bool, error)
+	augmentFunctionIDs                  func(coro.FunctionIDConfig) coro.FunctionIDConfig
+	localBodyFacts                      func(*ssa.Function) (coro.SSAFunctionBodyFacts, error)
+	functionBackground                  func(*ssa.Function) (llssa.Background, bool, error)
+	rawCFunctionType                    func(types.Type) (bool, error)
+	foreignNoBlock                      func(*ssa.Function) (cl.CoroForeignNoBlockCertificate, bool, error)
+	foreignSync                         func(*ssa.Function) (cl.CoroForeignSyncCertificate, bool, error)
+	foreignWorker                       func(*ssa.Function) (cl.CoroForeignWorkerCertificate, bool, error)
+	callableIdentity                    func(*ssa.Function) (cl.CoroCallableIdentityCertificate, bool, error)
+	callableContract                    func(*ssa.Function) (cl.CoroCallableContractCertificate, bool, error)
+	noPreempt                           func(*ssa.Function) (string, bool, error)
+	noUnwind                            func(*ssa.Function) (string, bool, error)
+	trustedInlineCall                   func(*ssa.Function, ssa.CallInstruction) (coro.SSATrustedInlineCallCertificate, bool, error)
+	assemblyNoSuspend                   func(*ssa.Function) (string, bool, error)
+	dynamicImplements                   func(types.Type, *types.Interface) (bool, error)
+	dynamicSignature                    func(*ssa.Function, *types.Signature) (*types.Signature, error)
+	callSitePlan                        func(ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error)
+	rawFunctionAddressCallArgument      func(ssa.CallInstruction, int) (bool, error)
+	staticFunctionReferenceCallArgument func(ssa.CallInstruction, int) (bool, error)
+	erasedFunctionInterface             func(*ssa.MakeInterface) (bool, error)
+	demandReferences                    func(*ssa.Function) ([]*ssa.Function, error)
+	syncDemandReferences                func(*ssa.Function) ([]*ssa.Function, error)
+	plainLoweredCalls                   func(*ssa.Function) ([]coro.SSALoweredCall, error)
+	managedValueReferences              func(*ssa.Function) ([]*ssa.Function, error)
+	loweredCalls                        func(*ssa.Function) ([]coro.SSALoweredCall, error)
+	requiredRoots                       coro.Roots
+	requiredPlain                       map[*ssa.Function]struct{}
+	requiredHostPlain                   map[*ssa.Function]struct{}
+	requiredDirectPlain                 []requiredCoroDirectPlainCallArgument
+	requiredClosedDynamic               map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
+	requiredGlobalFunctionSlots         map[ssa.CallInstruction]coroGlobalFunctionSlotProof
 	// importedLibraryEffects contains only exact bodyless managed-Go
 	// declarations whose producer metadata, FunctionID, structural ABI, target
 	// ABI, and physical symbol were preflighted by the build driver. Go callers
@@ -1340,13 +1340,13 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			return compilerRequired, nil
 		}
 	}
-	if in.staticCodeAddressCallArgument != nil || config.ClassifyStaticCodeAddressCallArgument != nil {
-		classifyCodeAddress := config.ClassifyStaticCodeAddressCallArgument
-		config.ClassifyStaticCodeAddressCallArgument = func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+	if in.staticFunctionReferenceCallArgument != nil || config.ClassifyStaticFunctionReferenceCallArgument != nil {
+		classifyCodeAddress := config.ClassifyStaticFunctionReferenceCallArgument
+		config.ClassifyStaticFunctionReferenceCallArgument = func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
 			compilerRequired := false
 			var err error
-			if in.staticCodeAddressCallArgument != nil {
-				compilerRequired, err = in.staticCodeAddressCallArgument(call, argument)
+			if in.staticFunctionReferenceCallArgument != nil {
+				compilerRequired, err = in.staticFunctionReferenceCallArgument(call, argument)
 				if err != nil {
 					return false, fmt.Errorf("classify frozen static code-address argument %d in %q: %w", argument, caller.Name(), err)
 				}
@@ -4759,7 +4759,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		}
 		input.callSitePlan = ctx.coroEmission.CoroCallSitePlan
 		input.rawFunctionAddressCallArgument = ctx.coroEmission.CoroRawFunctionAddressCallArgument
-		input.staticCodeAddressCallArgument = ctx.coroEmission.CoroStaticCodeAddressCallArgument
+		input.staticFunctionReferenceCallArgument = ctx.coroEmission.CoroStaticFunctionReferenceCallArgument
 		input.erasedFunctionInterface = ctx.coroEmission.CoroErasedFunctionInterface
 		input.demandReferences = ctx.coroEmission.CoroDemandReferences
 		input.syncDemandReferences = ctx.coroEmission.CoroSyncDemandReferences

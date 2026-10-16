@@ -203,7 +203,7 @@ func (p *context) compileCoroManagedDispatchOutcomeOnlyValueResult(
 }
 
 type coroManagedDispatchAwaitOptions struct {
-	cleanup                 *coroStaticCleanupState
+	cleanup                 coroCleanupInvocation
 	keepaliveSlots          []llssa.Expr
 	recoverAliasChild       bool
 	transparentRecoverAlias bool
@@ -228,6 +228,11 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature,
 	options coroManagedDispatchAwaitOptions,
 ) coroAwaitedValue {
+	options.cleanup.validate()
+	cleanup := options.cleanup.state
+	if cleanup != nil && options.transparentRecoverAlias {
+		panic("cleanup descriptor cannot also be a transparent recovery wrapper")
+	}
 	body := p.coroBody()
 	if body == nil {
 		panic("managed dispatch await requires an active physical coroutine body")
@@ -258,26 +263,26 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	if options.descriptorNonNil {
 		// Interface method lookup has already proved both the itab and its
 		// compiler-owned method descriptor non-nil.
-	} else if options.cleanup == nil {
+	} else if cleanup == nil {
 		p.compileCoroImplicitNilAccessGuard(b, descriptorWord)
 	} else {
 		fault := p.fn.MakeBlock()
 		nonNil := p.fn.MakeBlock()
 		b.If(b.BinOp(token.EQL, descriptorWord, p.prog.Nil(descriptorWord.Type)), fault, nonNil)
 		b.SetBlockEx(fault, llssa.AtEnd, false)
-		options.cleanup.replaceFault(p, b, coroFaultNilV1)
+		cleanup.replaceFault(p, b, coroFaultNilV1)
 		b.SetBlockContinuation(nonNil)
 	}
 	dispatchOptions.DescriptorNonNil = true
 	awaitChild := func(child llssa.Expr) {
 		var afterConsume func(llssa.Builder)
-		if options.cleanup != nil {
+		if options.cleanup.recoverParent {
 			token := descriptorWord
 			if options.recoverAliasChild {
 				token = child
 			}
 			afterConsume = p.beginCoroRecoverAliasScope(
-				b, llssa.Nil, token, b.Load(options.cleanup.panicActive),
+				b, llssa.Nil, token, b.Load(cleanup.panicActive),
 			)
 		} else if options.transparentRecoverAlias {
 			afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
@@ -347,7 +352,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	} else {
 		outcomeCall = callOutcome()
 	}
-	p.dispatchOutcomePlainCompletionWithRecovery(b, completion, options.cleanup)
+	p.dispatchOutcomePlainCompletionWithRecovery(b, completion, cleanup)
 	b.Jump(join)
 
 	b.SetBlockEx(plainBlock, llssa.AtEnd, false)

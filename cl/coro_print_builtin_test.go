@@ -329,10 +329,15 @@ func TestCoroPrintBuiltinRequiresExactLoweredFacts(t *testing.T) {
 
 func prepareCoroPrintTestPlan(t *testing.T, target *llssa.Target, loweredCalls, blockingPlain bool) coroPrintTestPlan {
 	t.Helper()
+	return prepareCoroPrintTestPlanSource(t, target, coroPrintFixture, loweredCalls, blockingPlain)
+}
+
+func prepareCoroPrintTestPlanSource(t *testing.T, target *llssa.Target, source string, loweredCalls, blockingPlain bool) coroPrintTestPlan {
+	t.Helper()
 	testProg := newEmissionTestProgram()
 	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
 	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, coroPrintRuntimeFixture)
-	fooPkg := testProg.addPackage(t, "foo", coroPrintFixture)
+	fooPkg := testProg.addPackage(t, "foo", source)
 	testProg.ssa.Build()
 
 	var prog llssa.Program

@@ -199,9 +199,9 @@ func restrictedSSAManagedAddressTakenFunctionsExcluding(
 	functions []*ssa.Function,
 	canonicalizer *ssaFunctionCanonicalizer,
 	resolver SSAManagedFunctionValueResolver,
-	codeAddressUses []ssaCallArgumentUse,
+	staticReferenceUses []ssaCallArgumentUse,
 ) (map[*ssa.Function]bool, error) {
-	addressTaken := restrictedSSAAddressTakenFunctionsExcluding(functions, codeAddressUses)
+	addressTaken := restrictedSSAAddressTakenFunctionsExcluding(functions, staticReferenceUses)
 	if len(addressTaken) == 0 || (resolver == nil && canonicalizer == nil) {
 		return addressTaken, nil
 	}
@@ -229,23 +229,26 @@ func restrictedSSAManagedAddressTakenFunctionsExcluding(
 }
 
 // restrictedSSAAddressTakenFunctionsExcluding is the managed scalar-function
-// publication inventory used by restricted CHA. An exact static-code-address
-// operand is not a Go function value: the frontend proved that its transient
-// MakeInterface has one structural address consumer and is never materialized.
+// publication inventory used by restricted CHA. An exact compiler-only
+// function reference is not a Go function value. A transient MakeInterface
+// must have one structural consumer; a direct identity operand needs no box.
 // Exclusion is occurrence-local; any other publication of the same function
 // still places it in the managed candidate set.
 func restrictedSSAAddressTakenFunctionsExcluding(
 	functions []*ssa.Function,
-	codeAddressUses []ssaCallArgumentUse,
+	staticReferenceUses []ssaCallArgumentUse,
 ) map[*ssa.Function]bool {
 	result := make(map[*ssa.Function]bool)
-	codeAddressBoxes := make(map[*ssa.MakeInterface]struct{}, len(codeAddressUses))
-	for _, use := range codeAddressUses {
+	codeAddressBoxes := make(map[*ssa.MakeInterface]struct{}, len(staticReferenceUses))
+	staticOperands := make(map[*ssa.Value]struct{}, len(staticReferenceUses))
+	for _, use := range staticReferenceUses {
 		if use.call == nil || use.call.Common() == nil || use.argument < 0 || use.argument >= len(use.call.Common().Args) {
 			continue
 		}
 		if boxed, ok := use.call.Common().Args[use.argument].(*ssa.MakeInterface); ok {
 			codeAddressBoxes[boxed] = struct{}{}
+		} else {
+			staticOperands[&use.call.Common().Args[use.argument]] = struct{}{}
 		}
 	}
 	operands := make([]*ssa.Value, 0, 8)
@@ -261,6 +264,9 @@ func restrictedSSAAddressTakenFunctionsExcluding(
 				operands = instruction.Operands(operands[:0])
 				for _, operand := range operands {
 					if operand == nil {
+						continue
+					}
+					if _, metadata := staticOperands[operand]; metadata {
 						continue
 					}
 					target, ok := (*operand).(*ssa.Function)

@@ -150,8 +150,10 @@ func FreezeDeliveryRecipe(
 	if initializer.ResultSize != 0 || initializer.ResultAlign != 0 || drop.ResultSize != 0 || drop.ResultAlign != 0 {
 		return DeliveryRecipe{}, fmt.Errorf("coro: delivery initializer and drop must not publish source results")
 	}
-	result := ResultSlotType(producer.Signature.Results())
-	wantInit, wantDrop := deliveryHelperSignatures(producer.Signature, result)
+	result, wantInit, wantDrop, err := DeliveryHelperSignatures(producer.Signature)
+	if err != nil {
+		return DeliveryRecipe{}, err
+	}
 	if !types.Identical(initializer.Signature, wantInit) {
 		return DeliveryRecipe{}, fmt.Errorf("coro: delivery initializer signature %s, want %s", initializer.Signature, wantInit)
 	}
@@ -171,6 +173,22 @@ func validateDeliverySignature(signature *types.Signature) error {
 		return fmt.Errorf("delivery requires a normalized non-generic callable signature")
 	}
 	return nil
+}
+
+// DeliveryHelperSignatures is the single typed contract used by source
+// borrowed-result declarations and archive recipe binding. It does not grant
+// physical custody: the caller still needs a protected output/cleanup proof.
+func DeliveryHelperSignatures(producer *types.Signature) (result *types.Struct, initializer, drop *types.Signature, err error) {
+	if err = validateDeliverySignature(producer); err != nil {
+		return
+	}
+	if producer.Results().Len() == 0 {
+		err = fmt.Errorf("coro: delivery producer has no result storage")
+		return
+	}
+	result = ResultSlotType(producer.Results())
+	initializer, drop = deliveryHelperSignatures(producer, result)
+	return
 }
 
 func deliveryHelperSignatures(producer *types.Signature, result *types.Struct) (*types.Signature, *types.Signature) {

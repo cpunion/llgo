@@ -1523,6 +1523,7 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 	add(emissionIntrinsicFuncAddr, "funcAddr")
 	add(emissionIntrinsicFuncPCABI0, "funcPCABI0", "funcPCABIInternal")
 	add(emissionIntrinsicAsm, "asm")
+	add(emissionIntrinsicStaticFunctions, "coroBorrowResult")
 	add(emissionIntrinsicRawAllValues, "syscall32", "syscallPtr")
 
 	for name, instruction := range llgoInstrs {
