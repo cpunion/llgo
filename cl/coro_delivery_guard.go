@@ -44,7 +44,7 @@ type coroDeliveryFunctionPlan struct {
 }
 
 func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *coroProgramIR, source coroDeliverySourceUniverse) (*coroDeliveryFunctionPlan, error) {
-	if ir == nil || source == nil || len(ir.deliveryProducers) == 0 {
+	if ir == nil || source == nil {
 		return nil, nil
 	}
 	plan := new(coroDeliveryFunctionPlan)

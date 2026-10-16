@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v43"
+const PlanDigestSchema = "llgo.coro.plan-digest.v44"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -143,6 +143,7 @@ type planDigestDocument struct {
 	Roots             []planDigestRoot             `json:"roots"`
 	Functions         []planDigestFunction         `json:"functions"`
 	ImportedFunctions []SSAImportedFunctionPlan    `json:"imported_functions,omitempty"`
+	References        []ReferenceEdge              `json:"references,omitempty"`
 	Calls             []planDigestCall             `json:"calls"`
 	LoweredCalls      []planDigestLoweredCall      `json:"lowered_calls"`
 	ElidedCalls       []planDigestElidedCall       `json:"elided_calls,omitempty"`
@@ -334,6 +335,14 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 	if err != nil {
 		return planDigestDocument{}, err
 	}
+	references := p.plan.References()
+	for index, reference := range references {
+		_, owner := p.plan.Lookup(reference.Owner)
+		_, target := p.plan.Lookup(reference.Target)
+		if !owner || !target || (reference.SyncOnly || reference.ObservationOnly) && reference.RawPlain || index != 0 && !referenceEdgeLess(references[index-1], reference) {
+			return planDigestDocument{}, fmt.Errorf("coro: malformed frozen publication reference")
+		}
+	}
 	definitions, err := p.digestValueDefinitions()
 	if err != nil {
 		return planDigestDocument{}, err
@@ -351,6 +360,7 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		Roots:             roots,
 		Functions:         functions,
 		ImportedFunctions: importedFunctions,
+		References:        references,
 		Calls:             make([]planDigestCall, 0, len(p.callPlans)),
 		LoweredCalls:      loweredCalls,
 		ElidedCalls:       make([]planDigestElidedCall, 0, len(p.elidedCalls)),

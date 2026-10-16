@@ -185,6 +185,26 @@ func deriveCoroFunctionProgramCapabilities(
 			return nil, fmt.Errorf("imported capability seed targets unplanned function %q", function.Name())
 		}
 	}
+	// Publication is not an effect/call edge, but a library factory must retain
+	// the services and specialization dependencies of the managed values it
+	// publishes. Reuse the sole graph's frozen reference edges, including stores
+	// into returned aggregates; an aggregate load may have an open ValuePlan.
+	for _, reference := range plan.BasePlan().References() {
+		if reference.RawPlain || reference.PhysicalABI || reference.ObservationOnly {
+			continue
+		}
+		owner, ownerFound := plan.Function(reference.Owner)
+		target, targetFound := plan.Function(reference.Target)
+		if !ownerFound || !targetFound {
+			return nil, fmt.Errorf("publication reference lost its source owner/target")
+		}
+		entry, _ := plan.FunctionPlan(owner)
+		if entry.Emission != coro.EmitNone {
+			if err := addEdge(owner, target); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	for _, item := range functions {
 		caller := item.Function

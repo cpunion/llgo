@@ -30,15 +30,28 @@ import (
 // The consumer's imported type package has only exported declarations: neither
 // private helper gets an invented SSA function or a substitute runtime body.
 func TestCoroArchiveDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
-	testCoroArchiveDeliveryNativeRuntime(t, false)
+	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveStaticDelivery)
 }
 
 func TestCoroArchiveDynamicDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
-	testCoroArchiveDeliveryNativeRuntime(t, true)
+	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveDirectValueDelivery)
 }
 
-func testCoroArchiveDeliveryNativeRuntime(t *testing.T, dynamic bool) {
+func TestCoroArchivePrivateCallableDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
+	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveFactoryValueDelivery)
+}
+
+type coroArchiveDeliveryMode uint8
+
+const (
+	coroArchiveStaticDelivery coroArchiveDeliveryMode = iota
+	coroArchiveDirectValueDelivery
+	coroArchiveFactoryValueDelivery
+)
+
+func testCoroArchiveDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode) {
 	t.Helper()
+	dynamic, factory := mode != coroArchiveStaticDelivery, mode == coroArchiveFactoryValueDelivery
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native archive delivery requires POSIX")
 	}
@@ -107,6 +120,9 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 			if library == nil || library.Func("initialize") != nil || library.Func("drop") != nil {
 				t.Fatal("consumer did not isolate private helper declarations")
 			}
+			if factory && (library.Func("Acquire") != nil || library.Func("acquire") != nil) {
+				t.Fatal("private resource producer acquired a fabricated consumer declaration")
+			}
 			inputs = append(inputs, cl.EmissionPackage{SSA: library, Identity: libraryPath})
 		}
 		for _, input := range inputs {
@@ -128,8 +144,12 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !producer && len(imports) != 2 {
-			t.Fatalf("archive-only helpers = %d, want 2", len(imports))
+		wantImports := 2
+		if factory {
+			wantImports = 0
+		}
+		if !producer && len(imports) != wantImports {
+			t.Fatalf("archive-only helpers = %d, want %d", len(imports), wantImports)
 		}
 		universe, err := coro.NewSSAEmissionUniverse(source.Prog, u.Functions())
 		if err != nil {
@@ -139,7 +159,11 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 		ids.CoroABI, ids.SchedulerABI, ids.ArchiveReady = metadata.CoroABI, metadata.SchedulerABI, true
 		roots := coro.Roots{{Function: source.Func("main"), Demand: coro.AsyncDemand}}
 		if producer {
-			roots = coro.Roots{{Function: source.Func("Acquire"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}, {Function: source.Func("Stats"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}, {Function: source.Func("DropInfo"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}}
+			entry := "Acquire"
+			if factory {
+				entry = "Callable"
+			}
+			roots = coro.Roots{{Function: source.Func(entry), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}, {Function: source.Func("Stats"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}, {Function: source.Func("DropInfo"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}}
 		}
 		input := CoroPlanInput{Program: source.Prog, EmissionUniverse: universe,
 			resolveFunction: u.Resolve, localBodyFacts: u.CoroLocalBodyFacts, functionBackground: u.FunctionBackground,
@@ -231,9 +255,15 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 		}
 		return emitCoroSpawnNativeE2EObject(t, prog, module, filepath.Join(temp, "consumer.o")), match[1], capabilities
 	}
-	producer, files := buildCoroPlanTestPackage(t, libraryPath, librarySource, nil)
+	producerSource := librarySource
+	declarationSource := "package library\nfunc Acquire(uint32) uint32\nfunc Stats() uint32\nfunc DropInfo() uint32\n"
+	if factory {
+		producerSource = strings.Replace(producerSource, "func Acquire(", "func acquire(", 1) + "\nfunc Callable() func(uint32) uint32 { return acquire }\n"
+		declarationSource = "package library\nfunc Callable() func(uint32) uint32\nfunc Stats() uint32\nfunc DropInfo() uint32\n"
+	}
+	producer, files := buildCoroPlanTestPackage(t, libraryPath, producerSource, nil)
 	build(newProgram(), producer, files, true)
-	declarations, _ := buildCoroPlanTestPackage(t, libraryPath, "package library\nfunc Acquire(uint32) uint32\nfunc Stats() uint32\nfunc DropInfo() uint32\n", nil)
+	declarations, _ := buildCoroPlanTestPackage(t, libraryPath, declarationSource, nil)
 	consumerSource := `package main
 import lib "` + libraryPath + `"
 import _ "unsafe"
@@ -254,6 +284,9 @@ func main() {
 		consumerSource = strings.Replace(consumerSource, "func child() {", "func child(acquire func(uint32) uint32) {", 1)
 		consumerSource = strings.Replace(consumerSource, "func main() {", "func main() {\n acquire := lib.Acquire", 1)
 		consumerSource = strings.Replace(consumerSource, "go child()", "go child(acquire)", 1)
+		if factory {
+			consumerSource = strings.Replace(consumerSource, "acquire := lib.Acquire", "acquire := lib.Callable()", 1)
+		}
 	}
 	consumer, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, consumerSource, coroPlanTestImporter{libraryPath: declarations.Pkg, "unsafe": types.Unsafe})
 	consumerProg := newProgram()

@@ -116,6 +116,9 @@ type CallEdge struct {
 type ReferenceEdge struct {
 	Owner  FunctionID
 	Target FunctionID
+	// ObservationOnly retains an entry for a certified code-address observation,
+	// not a callable value. It propagates demand but no publication services.
+	ObservationOnly bool
 	// PhysicalABI marks a demand-only raw code address embedded in a
 	// frontend/runtime ABI, such as an equality/hash callback. It still uses
 	// managed demand for graph reachability, but the target must keep the
@@ -180,11 +183,12 @@ type edgeKey struct {
 }
 
 type referenceKey struct {
-	owner       FunctionID
-	target      FunctionID
-	physicalABI bool
-	syncOnly    bool
-	rawPlain    bool
+	owner           FunctionID
+	target          FunctionID
+	physicalABI     bool
+	syncOnly        bool
+	rawPlain        bool
+	observationOnly bool
 }
 
 type unknownKey struct {
@@ -355,9 +359,13 @@ func (g *Graph) AddReference(edge ReferenceEdge) error {
 	if edge.SyncOnly && edge.RawPlain {
 		return fmt.Errorf("coro: reference from %q to %q is both managed sync-only and raw-plain", edge.Owner, edge.Target)
 	}
+	if edge.ObservationOnly && edge.RawPlain {
+		return fmt.Errorf("coro: reference mixes code observation and raw invocation")
+	}
 	key := referenceKey{
 		owner: edge.Owner, target: edge.Target, physicalABI: edge.PhysicalABI,
 		syncOnly: edge.SyncOnly, rawPlain: edge.RawPlain,
+		observationOnly: edge.ObservationOnly,
 	}
 	g.references[key] = edge
 	return nil
@@ -982,8 +990,9 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 	}
 
 	plan := &Plan{
-		functions: make([]FunctionPlan, 0, len(ids)),
-		byID:      make(map[FunctionID]int, len(ids)),
+		functions:  make([]FunctionPlan, 0, len(ids)),
+		byID:       make(map[FunctionID]int, len(ids)),
+		references: references,
 	}
 	for _, id := range ids {
 		spec := g.functions[id]
@@ -1067,19 +1076,7 @@ func (g *Graph) sortedReferences() ([]ReferenceEdge, error) {
 		references = append(references, edge)
 	}
 	sort.Slice(references, func(i, j int) bool {
-		if references[i].Owner != references[j].Owner {
-			return references[i].Owner < references[j].Owner
-		}
-		if references[i].Target != references[j].Target {
-			return references[i].Target < references[j].Target
-		}
-		if references[i].RawPlain != references[j].RawPlain {
-			return !references[i].RawPlain && references[j].RawPlain
-		}
-		if references[i].PhysicalABI != references[j].PhysicalABI {
-			return !references[i].PhysicalABI && references[j].PhysicalABI
-		}
-		return !references[i].SyncOnly && references[j].SyncOnly
+		return referenceEdgeLess(references[i], references[j])
 	})
 	for _, edge := range references {
 		if _, ok := g.functions[edge.Owner]; !ok {
@@ -1090,6 +1087,25 @@ func (g *Graph) sortedReferences() ([]ReferenceEdge, error) {
 		}
 	}
 	return references, nil
+}
+
+func referenceEdgeLess(left, right ReferenceEdge) bool {
+	if left.Owner != right.Owner {
+		return left.Owner < right.Owner
+	}
+	if left.Target != right.Target {
+		return left.Target < right.Target
+	}
+	if left.RawPlain != right.RawPlain {
+		return !left.RawPlain
+	}
+	if left.PhysicalABI != right.PhysicalABI {
+		return !left.PhysicalABI
+	}
+	if left.SyncOnly != right.SyncOnly {
+		return !left.SyncOnly
+	}
+	return !left.ObservationOnly && right.ObservationOnly
 }
 
 func (g *Graph) sortedEdges() ([]CallEdge, error) {

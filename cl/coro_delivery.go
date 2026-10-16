@@ -243,7 +243,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 		}
 		ir.deliveryProducers[producer] = recipe
 	}
-	if len(ir.deliveryProducers) == 0 {
+	if len(ir.deliveryProducers) == 0 && !u.libraryImports.HasDelivery() {
 		return nil
 	}
 	for producer, recipe := range ir.deliveryProducers {

@@ -981,6 +981,31 @@ library模式还必须在producer侧把exported、address-taken、method及其�
 roots，并为开放function-value边界发布递归FuncRep/layout capability，不能拿一次最终程序恰好产生的
 demand代替library ABI。
 
+2026-10-17 的私有函数值工厂闭环进一步明确两个互相独立的事实：
+
+- **可能交付资源**：已校验的 `LibraryEffectIndex.HasDelivery()` 包括无 consumer SSA
+  declaration 的私有 producer。只要存在这类归档事实，开放 managed call 就保留既有的条件
+  result-delivery recipe；实际执行仍检查 typed descriptor capability，index 本身不授予物理
+  ABI。消费者不伪造 producer/helper SSA，也不通过函数地址反查资源语义。
+- **发布 callable 的依赖**：工厂即使不调用其返回的函数，也必须在自身 archive summary 中
+  保留该 callable 的可选服务和 true/false specialization 依赖。复用唯一 Graph 已冻结的
+  `ReferenceEdge`，投影到现有 capability/predicate fixed point；包括返回 aggregate 内的函数值，
+  不再扫描 source return 或建立第二套 value-flow/call graph。它不把 publication 当作 effect
+  invocation，不使普通函数仅因发布异步函数而被染成异步。
+
+代码地址观察与 callable publication 必须分开。同一 owner/target 可以同时有观察边和发布边；
+`ObservationOnly` 来自现有 exact call-argument classifier，只保留 demand，不传播 callable
+服务。raw/plain 与 frontend physical-ABI 引用继续使用各自原有边界。不能因为目标在别处已经
+拥有 Dispatch descriptor，就把当前的地址观察误当成调用或发布。
+
+这些冻结引用及其分类进入 plan digest **v44**；archive summary 升为 **v18**，拒绝旧版本中
+尚未保存工厂传递依赖的记录。这里只增加 compiler-only 元信息：funcval、descriptor base、G、
+frame 和 runtime operation 均不加字段、分配或调度路径。真实归档执行门覆盖静态调用、公开
+producer 函数值及私有工厂返回函数值；无 consumer producer/helper declaration 的最后一路
+仍须验证 Dispatch/ResultDelivery、实际 capability branch 和取消后的唯一 cleanup。
+捕获闭包/receiver resource adapter、reflection/FFI 二次 custody handoff 和外部 range defer
+owner 尚不能由本项验证推定完成。
+
 ## 13. 代码迁移映射
 
 | 当前位置 | 迁移后职责 |
