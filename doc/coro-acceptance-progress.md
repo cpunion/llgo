@@ -11,11 +11,12 @@ Integration is in `coro/sync-main-20260830-r2`. Commit `d0838f492` completes the
 existing merge of parents `97572a91d` and `c4941f9ae`; no newer main was merged.
 Draft PR [cpunion/llgo#260](https://github.com/cpunion/llgo/pull/260) carries this
 checkpoint. Follow-up commit `d93ff685c` fixes dynamic pointer-result consumption.
-Latest integrated CI observation: head `7170ce7a7` in run `38826618373` completed
-all 18 coroutine workflow jobs successfully, with no failure. This includes the
-repaired WASI cache-discovery and host-SSA build-tag lanes. The separate
-resource-delivery branch includes `2ac5ee5fc`; its newer cleanup/source changes are tested
-below and are not silently included in that CI head.
+Latest integrated CI observation: head `09db805cd` in run `38837055083` completed
+all 18 coroutine workflow jobs successfully, with no failure. Cleanup/source
+follow-ups through that head are now included in draft PR #260; the preceding
+`7170ce7a7` run remains separate historical evidence. Latest review, inline
+comment and issue-comment inventories are empty. The later Darwin x509
+experiment described below is not yet included in that integrated head.
 The destination is `cpunion/llgo:llvm-coro`. The acceptance environment is
 Darwin/arm64, Go 1.27 and LLVM 22. No new upstream-main synchronization is
 required for this work.
@@ -330,6 +331,43 @@ architecture gate (0.798s). Vet passes with the existing CI policy: full vet for
 core/build and `-unsafeptr=false` for cl's intentional unsafe-pointer fixtures.
 An initial unrestricted cl vet reports the unchanged builtin fixture at line
 569; no source assertion or CI policy is changed to suppress a new warning.
+
+Fixed v48 source is `09db805cd`, manifest SHA-256
+`de7de50fb475e9baae13ed16499cf951dc10225338250a819a269aecf7d5d344`;
+compiler SHA-256 is
+`bbb7ca35ee684a82c437142087d6cc8887b585246e84ae0c0a8e2404fae22a5e`.
+Real defer-print output passes against Go (53.216s / 804.5 MiB); native borrowed
+FD cleanup passes ten executions and Node three (72.765s / 1298.7 MiB including
+builds). Source and compiler hashes still match. The four-package basic rerun
+completes `test`, `test/cgo` and `test/syncpool`, but is stopped by repeated `ps`
+sampling timeouts while compiling `test/llgoext` (tree peak 5558.5 MiB). This is
+not a complete four-package v48 gate; the v47 complete result is retained.
+
+The v46 stdlib cohorts have 35 distinct package passes at this observation
+(15 original plus 20 disjoint remaining-package passes). `crypto/ecdh`,
+`crypto/ecdsa` and `crypto/elliptic` reach the 25-minute compilation bound;
+`crypto/x509` fails semantic preflight at its unsupported floating-point syscall
+bridge. These are different failure classes. After load rose to 44.57 and `ps`
+sampling repeatedly timed out, remaining-package lanes 2 and 3 were terminated
+and joined; their scratch was reclaimed and source hashes match. Lanes 0/1
+continue. Interrupted hex/hpke compilations and every prior receipt remain;
+no complete package pass is discarded and no resource guard is disabled.
+
+The v48 full 1082-case GOROOT selection has also started, with 24GiB per-case
+and 28GiB outer RSS caps, a 25-minute build timeout, unchanged CI case selection
+and unchanged xfail/not-applicable files. The first attempt's PATH omitted
+`/usr/sbin`, so its memory guard refused `sysctl` before case execution. The
+second attempt appends the system directories and restarts the whole selection;
+it is running and is not a fresh full-GOROOT success claim.
+
+The Darwin x509 development branch uses an exact five-word-plus-float C
+function type at the existing low-level bridge. It reuses typed foreign-worker
+record lowering, rather than extending word-call.v1 or pretending a float is a
+uintptr. The parsed production-source LLVM gate verifies park/resume and the
+actual double C operand; selected typed/raw-worker regressions pass
+(2.533s / 1251.2 MiB). Actual x509 package compilation/execution and the broader
+source-patch selection remain pending; this is an isolated experiment, not
+claimed stdlib acceptance or resource-cancellation delivery completion.
 
 Completed v18-v41 source snapshots have been compressed individually under
 `root/completed-snapshots/`. Every archive was extracted and checked against
