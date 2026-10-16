@@ -18,6 +18,7 @@ package cl
 
 import (
 	"fmt"
+	"go/token"
 
 	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
@@ -275,6 +276,20 @@ func (p *context) coroCleanup() *coroStaticCleanupState {
 		return nil
 	}
 	return body.cleanup
+}
+
+// reconcileCoroCleanupTaskStop is the narrow mutation capability for a joined
+// cleanup call. Consumers cannot retain the mutable body or replace its panic
+// overlay. The private runtime hook has already validated/claimed kind 0/1/2.
+func (p *context) reconcileCoroCleanupTaskStop(b llssa.Builder, owner *coroStaticCleanupState, kind llssa.Expr) {
+	body := p.activeCoroEmissionBody()
+	if body == nil || body.cleanup != owner || owner == nil || body.terminalStatus.IsNil() || b == nil || b.Func != p.fn {
+		panic("cleanup task stop escaped its exact physical owner")
+	}
+	b.IfThen(b.BinOp(token.NEQ, kind, p.prog.IntVal(0, p.prog.Uint32())), func() {
+		b.Store(body.terminalStatus, b.BinOp(token.ADD, kind, p.prog.IntVal(2, p.prog.Uint32())))
+		owner.setCancellationBase(b)
+	})
 }
 
 // emitCoroPanicTraceReplacement exposes the narrow cleanup capability without

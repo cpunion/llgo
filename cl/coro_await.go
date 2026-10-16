@@ -761,8 +761,8 @@ func (p *context) beginCoroCleanupShield(b llssa.Builder, cleanup *coroStaticCle
 	if cleanup == nil {
 		return nil
 	}
-	body := p.coroBody()
-	if body == nil || body.cleanup != cleanup || b == nil || b.Func != p.fn || body.terminalStatus.IsNil() {
+	task, handle := p.coroTask(), p.activeCoroHandle()
+	if task.IsNil() || handle.IsNil() || p.coroCleanup() != cleanup || b == nil || b.Func != p.fn {
 		panic("cleanup shield requires its exact active physical drainer")
 	}
 	pointer := types.Typ[types.UnsafePointer]
@@ -779,19 +779,13 @@ func (p *context) beginCoroCleanupShield(b llssa.Builder, cleanup *coroStaticCle
 		types.NewTuple(types.NewParam(token.NoPos, nil, "", types.Typ[types.Uint32])), false)
 	begin := p.pkg.NewFunc(coroCleanupShieldBeginHookV1, beginSignature, llssa.InC)
 	end := p.pkg.NewFunc(coroCleanupShieldEndHookV1, endSignature, llssa.InC)
-	handle := body.coro.Handle()
-	receipt := b.Call(begin.Expr, body.task, handle)
+	receipt := b.Call(begin.Expr, task, handle)
 	return func(done llssa.Builder) {
 		if done == nil || done.Func != p.fn {
 			panic("cleanup shield reconciliation escaped its owner")
 		}
-		kind := done.Call(end.Expr, body.task, handle, receipt)
-		done.IfThen(done.BinOp(token.NEQ, kind, p.prog.IntVal(0, p.prog.Uint32())), func() {
-			// End has validated and claimed Abort=1/Shutdown=2. Preserve the
-			// panic overlay while replacing only the terminal cleanup base.
-			done.Store(body.terminalStatus, done.BinOp(token.ADD, kind, p.prog.IntVal(2, p.prog.Uint32())))
-			cleanup.setCancellationBase(done)
-		})
+		kind := done.Call(end.Expr, task, handle, receipt)
+		p.reconcileCoroCleanupTaskStop(done, cleanup, kind)
 	}
 }
 
