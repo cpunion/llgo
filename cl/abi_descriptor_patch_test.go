@@ -19,7 +19,13 @@ func TestPatchedMethodDescriptorsShareSignatureIdentity(t *testing.T) {
 	oldPkg := types.NewPackage("example.com/methodresult", "methodresult")
 	newPkg := types.NewPackage(oldPkg.Path(), oldPkg.Name())
 	result := func(pkg *types.Package) *types.Named {
-		object := types.NewTypeName(0, pkg, "Result", nil)
+		// Replacement declarations come from a different source file. Their
+		// detached physical TypeNames must not accidentally share position zero.
+		position := token.Pos(101)
+		if pkg == newPkg {
+			position = 202
+		}
+		object := types.NewTypeName(position, pkg, "Result", nil)
 		typ := types.NewNamed(object, types.NewStruct([]*types.Var{
 			types.NewField(0, pkg, "Callback", types.NewSignatureType(nil, nil, nil, nil, nil, false), false),
 		}, nil), nil)
