@@ -50,7 +50,7 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 	plan := new(coroDeliveryFunctionPlan)
 	if recipe, present := ir.deliveryProducers[fn]; present {
 		fact, found := whole.FunctionPlan(fn)
-		if !found || fact.FuncRep == coro.Dispatch && (len(fn.FreeVars) != 0 || fn.Signature.Recv() != nil ||
+		if !found || fact.FuncRep == coro.Dispatch && (fn.Signature.Recv() != nil ||
 			whole.HasRawPlainVariant(fn) || fact.RawPlainOnly ||
 			fact.ManagedEntry != coro.ManagedEntryCoroutine && fact.ManagedEntry != coro.ManagedEntryOutcomePlain) {
 			return nil, fmt.Errorf("llgo.coroBorrowResult requires a bound physical resource-delivery guard for descriptor publication")

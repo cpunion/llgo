@@ -194,6 +194,7 @@ func TestCoroDeliveryDynamicPhysicalGuardNativeAndWasm(t *testing.T) {
 			runtimePkg := source.addPackage(t, llssa.PkgRuntime, `package runtime
 import "unsafe"
 func AllocU(size uintptr) unsafe.Pointer { return nil }
+func AllocZ(size uintptr) unsafe.Pointer { return nil }
 func FreeDeferNode(pointer unsafe.Pointer) {}
 func AssertNilDeref(value bool) {}
 `)
@@ -204,6 +205,13 @@ func LoopedDynamic(f func(string) (int, error)) { for i := 0; i < 2; i++ { defer
 func Plain(string) (int, error) { return 1, nil }
 func Other(string) (int, error) { return 2, nil }
 func Closed(flag bool) (int, error) { f := Plain; if flag { f = Other }; return f("closed") }
+func Factory(seed int) func(string) (int, error) {
+ return func(path string) (int, error) {
+  out := borrow(initFD, dropFD); out.R0 = seed + len(path)
+  return out.R0, out.R1
+ }
+}
+func Captured() { f := Factory(7); Apply(f) }
 `)
 			source.ssa.Build()
 			pkg, files := foo.ssa, []*ast.File{foo.file}
@@ -226,6 +234,7 @@ func Closed(flag bool) (int, error) { f := Plain; if flag { f = Other }; return 
 				{Function: pkg.Func("DeferredDynamic"), Demand: coro.AsyncDemand},
 				{Function: pkg.Func("LoopedDynamic"), Demand: coro.AsyncDemand},
 				{Function: pkg.Func("Closed"), Demand: coro.AsyncDemand},
+				{Function: pkg.Func("Captured"), Demand: coro.AsyncDemand},
 			}, coro.SSAConfig{
 				EmissionUniverse: universe, FunctionIDs: ids, MaxPlainInstructions: 64,
 				OutcomeMode: coro.OutcomeExplicitStatus, ClassifyLocalBody: u.CoroLocalBodyFacts,
@@ -266,6 +275,22 @@ func Closed(flag bool) (int, error) { f := Plain; if flag { f = Other }; return 
 			closed := module.NamedFunction("foo.Closed").String()
 			if strings.Contains(closed, "coro.dispatch.delivery") {
 				t.Fatalf("closed nonresource family retained delivery machinery:\n%s", closed)
+			}
+			closure := pkg.Func("Factory").AnonFuncs[0]
+			if fact, present := plan.FunctionPlan(closure); !present || fact.FuncRep != coro.Dispatch || len(closure.FreeVars) != 1 {
+				t.Fatalf("fixture did not publish its captured resource producer: %+v", fact)
+			}
+			descriptors := 0
+			for global := module.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+				if strings.HasPrefix(global.Name(), coroPlainDispatchDescriptorPrefix) {
+					value := global.Initializer()
+					if value.OperandsCount() == 2 && value.Operand(0).Operand(1).ZExtValue()&uint64(llssa.CoroDispatchFlagHasDelivery) != 0 {
+						descriptors++
+					}
+				}
+			}
+			if descriptors != 1 {
+				t.Fatalf("captured resource descriptors=%d, want one", descriptors)
 			}
 			runCoroABITestPipeline(t, prog, module)
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {

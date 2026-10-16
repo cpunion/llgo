@@ -42,10 +42,13 @@ func (p *context) coroDeliveryDescriptorOptions(b llssa.Builder, entry plannedFu
 	if !present {
 		return nil
 	}
-	if entry.plan.FuncRep != coro.Dispatch || len(entry.function.FreeVars) != 0 || entry.function.Signature.Recv() != nil ||
+	// The shared callable factory has already validated and bound the producer's
+	// closure environment. Custody retains that same funcval env for drop;
+	// initializer/drop helpers themselves remain exact context-free entries.
+	if entry.plan.FuncRep != coro.Dispatch || entry.function.Signature.Recv() != nil ||
 		entry.plan.ManagedEntry != coro.ManagedEntryCoroutine && entry.plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
 		p.immutablePlan().HasRawPlainVariant(entry.function) || !types.Identical(signature, canonicalCoroPlainDispatchSignature(recipe.signature)) {
-		panic("resource descriptor publication requires its exact guarded context-free managed entry")
+		panic("resource descriptor publication requires its exact guarded managed entry")
 	}
 	_, initializer, drop, err := coro.DeliveryHelperSignatures(recipe.signature)
 	if err != nil {

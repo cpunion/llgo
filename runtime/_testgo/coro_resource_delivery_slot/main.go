@@ -11,6 +11,8 @@ const LLGoFiles = "wrap/delivery.c"
 
 type result = struct{ R0 int32 }
 
+var capturedFixture bool
+
 //go:linkname borrow llgo.coroBorrowResult
 func borrow(func(*result), func(*result, unsafe.Pointer, uint32)) *result
 
@@ -52,7 +54,10 @@ func escaped()
 
 func initialize(out *result) { out.R0 = -1 }
 
-func drop(out *result, _ unsafe.Pointer, mode uint32) {
+func drop(out *result, env unsafe.Pointer, mode uint32) {
+	if capturedFixture && env == nil {
+		escaped()
+	}
 	fd := out.R0
 	out.R0 = -1
 	if fd >= 0 {
@@ -70,6 +75,30 @@ func acquire(mode uint32) int32 {
 		panic("acquisition failed after producing its resource")
 	}
 	return out.R0
+}
+
+func capturedAcquire() func(uint32) int32 {
+	state := new([128]byte)
+	state[0] = 37
+	return func(mode uint32) int32 {
+		out := borrow(initialize, drop)
+		openInto(out, mode)
+		if state[0] != 37 {
+			escaped()
+		}
+		return out.R0
+	}
+}
+
+func capturedOwner(acquire func(uint32) int32) {
+	acquire(1)
+	escaped()
+}
+
+func capturedDeferredOwner(acquire func(uint32) int32) {
+	for i := 0; i < 1; i++ {
+		defer acquire(1)
+	}
 }
 
 func releaseWait() { release() }
@@ -115,6 +144,7 @@ func secondSiteOwner() {
 func main() {
 	runtime.GOMAXPROCS(1)
 	install()
+	capturedFixture = fixtureMode() >= 6
 	fd := acquire(0)
 	runtime.Gosched()
 	runtime.GC()
@@ -145,6 +175,18 @@ func main() {
 		go rangeOwner()
 	case 5:
 		go secondSiteOwner()
+	case 6:
+		go capturedOwner(capturedAcquire())
+	case 7:
+		go capturedDeferredOwner(capturedAcquire())
+	case 8:
+		go capturedAcquire()(1) // A captured discarded-result entry owns fallback custody.
+	case 9:
+		acquire := capturedAcquire()
+		fd := acquire(0)
+		checkAlive(fd)
+		closeFD(fd)
+		go capturedOwner(acquire)
 	default:
 		baseline := runtime.NumGoroutine()
 		go acquire(0)
