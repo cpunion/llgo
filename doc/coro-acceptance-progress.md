@@ -707,6 +707,43 @@ function remains certified. Ordinary preemptive-loop polls and bounded-cycle
 tests stay unchanged. Final selected race passes1.679s/1183.8MiB. Actual binary
 and unchanged panic/traceback gates remain pending for this experiment.
 
+The complete unfiltered v96 test/go cohort now finishes **271/271**, zero
+failures/skips, at16:59:15 UTC, source-after16:59:20, joined children and
+reclaimed scratch. Build peak8480.8MiB and runtime peak6732.8MiB are separate
+phase maxima. PR275 passes all18 CI jobs at exact head `17b394366`, fresh
+paginated review/comment/thread inventories are empty, and it merges at17:09:07
+UTC as `4e7bdc0dc`. Receipt is `root/ci-38932391824-complete.json`.
+
+Immutable v98 source `4187b0d73` completes the observer proof-consumption
+replacement: compiler
+`2173ddb0d29b39247b5c0419a23761d558feb27818a1580fd258d888ac9a912b`,
+manifest `afbde3c6e691a89e9eb32c81958ce4a183b81a40f7683c78d27525cf1166ff91`.
+Build passes/735.2MiB; selected native/wasm32 certificate/poll/bounded-loop race
+passes1.636s/1176.2MiB; unchanged architecture0.714s/720.5MiB; broad compiler
+132.802s/1331.6MiB. All three unchanged GOROOT originals `issue75764`,
+`issue5856`, `issue29504` pass with source-after matches, combined peak2891.5MiB.
+An independently built unchanged issue75764 image also passes P=1/2 and retains
+SHA-256 `53b6f88a1e056a8b1369dd2ab87d6e245299424c9a5020fa3e6764407d4c2361`.
+Both observer primaries are now `$outcome`, with no coroutine/resume/destroy
+entry, rather than the pre-existing504-byte coroutine observer ramp. A direct
+disassembly of the actual outcome symbols is retained in
+`root/trace-observer-v98-outcome-assembly.txt`; no coroutine-frame allocator
+call is present. The wrapper uses128bytes of bounded native stack and preserves
+cold panic-trace propagation; this is not a claim that all status overhead or
+the entire runtime.Callers path is eliminated. The first audit asks for the
+plain spelling and reports a missing-symbol warning; the separate outcome
+disassembly supplies the actual instruction proof.
+
+A separate field-snapshot experiment (`00b113ac7`, immutable v99) makes pointer
+checks explicit and caches header/parent values without a nounwind annotation.
+Its core race passes10.160s/408.2MiB and broad compiler169.129s/1257.2MiB;
+the same original cases also pass. Binary inspection still selects the same
+outcome ABI, with no additional demonstrated benefit. It is deliberately not
+promoted: the branch/artifacts remain, and development switches back to the
+verified no-preempt/proof-consumption branch instead of deleting or resetting
+the experiment. Bodyless helper binding, resource publication and the other
+remaining semantic gates are unchanged and still unfinished.
+
 The first PR270 CI head fails only the new host SSA fixture's missing `!llgo`
 test-domain constraint; `1d139f475` supplies the same constraint as its helper
 tests. The llgo-tag gate passes 0.433s and the full host race suite 22.317s;
