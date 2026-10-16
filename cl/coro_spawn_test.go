@@ -192,6 +192,9 @@ func TestCoroClosedStaticSpawnNativeAndWasm32(t *testing.T) {
 
 			ir := module.String()
 			parent := requireCoroPhysicalFunction(t, module, "foo.Parent").String()
+			if strings.Contains(parent, coroCleanupShieldBeginHookV1) || strings.Contains(parent, coroCleanupShieldEndHookV1) {
+				t.Fatalf("ordinary static await/spawn acquired cleanup shielding:\n%s", parent)
+			}
 			if !module.NamedFunction("foo.Plain").IsNil() || module.NamedFunction("foo.Plain"+coroPrimarySuffix).IsNil() {
 				t.Fatalf("bounded sync+spawn target did not retain exactly one preemptible coroutine primary:\n%s", ir)
 			}

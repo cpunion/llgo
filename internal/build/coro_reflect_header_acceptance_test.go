@@ -39,6 +39,7 @@ func TestCoroReflectHeaderGCAcceptance(t *testing.T) {
 		{"dynamic-pointer-result", "./internal/build/_testgo/coro_dynamic_pointer_result", "dynamic pointer results survive single consumption and GC"},
 		{"shared-caller-pc", filepath.Join(root, "runtime", "_testgo", "coro_shared_caller_pc", "main.go"), "shared caller PC identity passed"},
 		{"cgo-handle-routes", filepath.Join(root, "runtime", "_testgo", "coro_cgo_handle_routes", "main.go"), "cgo handle managed routes passed"},
+		{"claimed-cleanup-channel", filepath.Join(root, "runtime", "_testgo", "coro_claimed_cleanup_channel", "main.go"), "claimed asynchronous cleanup channel completed"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			image := filepath.Join(t.TempDir(), "header")

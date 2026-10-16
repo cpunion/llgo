@@ -208,12 +208,13 @@ release 进入现有 task-cleanup 屏蔽期后，不因新一轮取消再入或�
 close callback，只有 callback physical join 后才能撤销 custody。此处要复用已有
 cleanup cancellation shielding，不能另建任务调度/取消状态机。
 
-2026-10-16 的独立反例又区分了 **已有 task cancellation 的 cleanup** 与 **正常返回
-已经开始的 async cleanup，此时才收到新 stop**。后者尚无完整屏蔽：冻结 v74 的
-`coro_normal_cleanup_cancel` 已进入 normal defer 并等待 channel；shutdown sentinel
-确实释放了 channel，但 final close 计数仍为 0，程序以 86 失败退出并自行回收 fd。
-不能用已有 cancellation-cleanup 测试替代此门禁，也不能把单纯 Go main 退出时的
-source-independent direct destroy 当作同一个反例。
+2026-10-16 review 明确区分 **已领取 task cancellation 的 cleanup** 与 **正常返回时
+开始的内部资源 drop**。Go main 返回不保证其他 goroutine 的普通 defer 执行完毕；
+冻结 v74 的 normal-defer 诊断虽以 86 失败、fd 已自行回收，但不能据此要求屏蔽
+所有源码 Go defer。广义屏蔽的 v75 实验也保留其 channel-close 失败记录，不作为
+正向验收。新的 `coro_claimed_cleanup_channel` 专门验证 LLGo 已有 structured shutdown：
+两个任务先领取 stop，再在 cleanup 内通过 channel rendezvous 并显式 close fd。
+它是内部生命周期回归，不把 Go 未承诺的 main-exit 行为变成通用语言保证。
 
 隔离开发分支已有 core scope 原型：复用既有一字节 task-cancel phase，增加
 Shielded/ShieldedRequested 两态，不扩展 G、Frame、ParkState、CompletionRecord 或
@@ -222,10 +223,19 @@ preemption 仍有效。exact outer owner 的 receipt 只在 child strong join �
 已消费后结束；嵌套调用不取得新的 outer receipt。结束时返回并 claim 延后的 stop，
 编译器必须保留其 Abort/Shutdown cleanup base 与原 panic overlay，不能返回用户正常
 continuation，也不能赋予 drop 直接 recover 权限。它不是用户可用的取消 mask。
-native 全 core race 与 Node/wasm core 测试通过，balanced scope 为零分配；两次 wasm
-测试因继承 GOMAXPROCS=2 在 gc runtime 初始化即失败，改为 wasm 支持的 1 后通过。
-**编译器 scope begin/end、各 await/outcome 路径及实际反例的正向闭环尚未接线**，因此
-当前不能宣称 normal cleanup 的 late-cancel 或 public resource delivery 已修复。
+编译器 static/dynamic async helper 的 begin/end 已接入同一 await transaction，且仅
+用于内部 cleanup invocation；source Go defer 不新增 scope。End 发生在 child joined、
+completion 已消费之后；延后的 stop 只修改 cleanup base，保留 panic overlay。同步
+outcome/plain helper 没有挂起窗口，不增加异步 scope。native/wasm32 CoroSplit 前后
+IR 验证内部 helper 有 scope、源码 Go defer 和普通调用无 scope；架构预算未提高。
+
+compact channel 的旧 fast path 只接受 None/Idle，不能用于已领取或屏蔽中的 cleanup。
+现在 prepare、commit 和 local/routed completion 共享有效 cancellation 状态检查，
+只让不会中断当前 operation 的状态完成；真正 Requested 仍走原取消处理，非法组合
+拒绝且不修改 spill。兼容 prepare 重建 ParkState 时保留 task receipt，不重置其原因。
+24 种准备/完成组合、14 个非法或 interrupting 输入、全 core race/shuffle 和 Node/wasm
+测试通过；真实 linked 回归与 public delivery 仍须分别验收。此原型不表示公开资源
+返回、标准库 adoption 或全部平台已经闭环。
 
 真实 fd 的 `TestResourceDeliveryBoundary` 是这个差异的永久 core oracle：child physical
 destroy 后再取消，normal/cancel lane 消费完全相同的 nil-payload Return；parent guard

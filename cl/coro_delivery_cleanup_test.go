@@ -257,6 +257,50 @@ func TestCoroInternalCleanupAwaitDoesNotGrantParentRecover(t *testing.T) {
 				if countCoroIRDirectCalls(fn, coroRecoverAliasBeginHookV1) != 0 {
 					t.Fatalf("internal cleanup published a direct-recover alias:\n%s", fn.String())
 				}
+				if begins, ends := countCoroIRDirectCalls(fn, coroCleanupShieldBeginHookV1), countCoroIRDirectCalls(fn, coroCleanupShieldEndHookV1); begins != 1 || ends != 2 {
+					t.Fatalf("cleanup scopes begin=%d end=%d, want one deferred helper and reconciliation on normal/canceled lanes:\n%s", begins, ends, fn.String())
+				}
+			}
+			check(requireCoroPhysicalFunction(t, module, "foo.Root"))
+			runCoroABITestPipeline(t, fixture.prog, module)
+			check(module.NamedFunction("foo.Root$coro.resume"))
+		})
+	}
+}
+
+// Go main returning need not wait for another goroutine's source defers. The
+// finite compiler-owned drop scope must not become a general Go defer mask.
+func TestCoroSourceDeferDoesNotMaskTaskCancellation(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			source := strings.Replace(coroPrintFixture, "\tword := uintptr(pointer)", "\tdefer cleanup()\n\tword := uintptr(pointer)", 1) + "\nfunc cleanup() { println(\"cleanup\") }\n"
+			fixture := prepareCoroPrintTestPlanSource(t, target.arch, source, true, false)
+			defer fixture.prog.Dispose()
+			compilation := &Compilation{CoroPlan: fixture.plan, EmissionUniverse: fixture.universe}
+			enableCoroChildAwaitCompilation(compilation)
+			compilation.PanicABI = coro.PanicExplicitStatusABIV0
+			pkg, _, err := NewPackageExWithEmbedOptions(
+				fixture.prog, nil, nil, nil, fixture.fooPkg.ssa, []*ast.File{fixture.fooPkg.file}, goembed.VarMap{},
+				PackageOptions{Compilation: compilation},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			module := pkg.Module()
+			defer module.Dispose()
+			check := func(fn llvm.Value) {
+				t.Helper()
+				if countCoroIRDirectCalls(fn, coroCleanupShieldBeginHookV1) != 0 ||
+					countCoroIRDirectCalls(fn, coroCleanupShieldEndHookV1) != 0 {
+					t.Fatalf("source Go defer acquired an internal cleanup mask:\n%s", fn.String())
+				}
 			}
 			check(requireCoroPhysicalFunction(t, module, "foo.Root"))
 			runCoroABITestPipeline(t, fixture.prog, module)

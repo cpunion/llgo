@@ -50,10 +50,13 @@ deletion, yield/GC and P=1/2. It exposed successive adapter admission and
 cross-package symbol failures in v66/v68/v69/v70; none is recorded as passing.
 Carrier publication now freezes its ordinary Go definition symbol and every
 consumer reads that same definition key; a missing key fails closed. Restoring
-the old symbol lookup fails the new three-package identity test. A fresh
-linked-program run is still required before this follow-up is integrated.
-Immutable v70 separately starts new complete `test/go`, 73-demo and
-180-package stdlib cohorts; the v65 eight-shard GOROOT rerun remains ongoing.
+the old symbol lookup fails the new three-package identity test. The fresh
+linked-program result is recorded below. Immutable v70 also completes a new
+whole `test/go` run: **268/268**, zero failures/skips, source-after matching,
+children joined and scratch reclaimed at 08:41:59 UTC. Binary SHA-256 is
+`6813a06a978452cb944ff975e6233efa5c5cea050b0e206877124c5d30db0e17`;
+run peak is 6503.3MiB. Its 73-demo and 180-package stdlib cohorts remain live;
+the v65 eight-shard GOROOT rerun remains ongoing.
 
 The cgo follow-up is now [PR #265](https://github.com/cpunion/llgo/pull/265),
 head `bea4a1ff7`, targeting `llvm-coro` only. Immutable v71 completes the
@@ -64,20 +67,40 @@ source manifest is `c55615ceac327f9454430dbad4bfb5f3f6908b67226cdc24203ad7693fcc
 binary is `164e49ea966d91d62eaa97cf86c10d0d06951b4f988707d4fbb547000d8496be`.
 Source-after matches; combined build/run peak is 2706.1MiB. The broad gate
 passes cl 155.553s, cltest 8.183s and the actual architecture gate 0.495s,
-with unchanged budgets. CI run `38871898480` is still in progress, so this
-is not yet a merged/current-head CI completion claim.
+with unchanged budgets. CI run `38871898480` completes all 18 jobs successfully.
+After rechecking the empty review/comment/thread inventories, the exact head
+is merged as `a616440ee` at 08:40:54 UTC. No main branch is changed.
 
-An isolated resource-delivery branch retains a separate late-cancel failure:
-normal async cleanup starts before shutdown, its channel is released by the
-shutdown sentinel, but its explicit final close is skipped (v74 exit 86;
-source-after matches; the probe itself reclaims its fd). The core-only
-cleanup-scope prototype reuses the existing cancellation phase word and adds
-no G/frame/park/completion fields; full native race and selected Node/wasm
-core tests pass. It preserves operation cancellation, exact owner receipt,
-strong-join/completion ordering, the frozen stop cause, no direct recover
-authority and zero-allocation balanced scopes. It is **not wired into compiler
-invocations**, the linked negative remains failing, and public resource API
-seeds remain disabled. This prototype is not part of PR #265.
+GOROOT shard 0 completes 136 cases with 135 passes and one `inline_callers.go`
+stdout mismatch on the older v65 source. The unchanged original case passes a
+focused strict v71 rerun (63.49s; matching source before/after, 2835.2MiB peak).
+The older failure remains in its original cohort; this is not an eight-shard
+or final-head full-GOROOT pass.
+
+Cleanup scope work is isolated from the merged PRs. Review rejects the broad
+all-source-defer experiment: Go main return does not promise completion of
+other goroutines' ordinary defers, so the v74 normal-defer diagnostic is not
+an oracle for a Go semantic violation. Its exit 86 and reclaimed fd remain
+recorded; the broad v75 attempt also retains its channel-close failure. The
+new executable regression instead tests LLGo's existing structured shutdown:
+both tasks claim their stop before entering cleanup, then rendezvous through
+channels and close an actual fd exactly once. Its linked rerun is still pending.
+
+The private finite internal-cleanup scope now uses the shared static/dynamic
+await reconciliation; source Go defers do not acquire this mask. Native and
+wasm32 pre/post-CoroSplit tests check that distinction and ordinary-call zero
+overhead; the architecture access budget is unchanged. The scope retains the
+existing cancellation byte, exact owner receipt, physical join, consumed
+completion, panic overlay, frozen cause, operation cancellation and preemption.
+It adds no G/frame/park/completion fields or allocations. The compact channel
+path previously accepted only None/Idle and rejected valid cleanup states at
+prepare, commit or completion. One validated cancellation predicate now admits
+only ordinary or deferred/frozen stops and preserves the receipt across park
+reuse. A 24-combination test covers issued/compatibility preparation and local,
+routed and pre-suspend completion; 14 invalid/interrupting inputs stay
+zero-mutation rejections. Full core race/shuffle and selected Node/wasm core
+tests pass (4.756s / 0.166s, combined peak 369.8MiB). Public resource API seeds
+remain disabled; these gates do not establish public resource delivery.
 
 The v58 expvar retry now compiles and executes all four tests successfully.
 It retains source `d5d6c5627`, source-manifest SHA-256

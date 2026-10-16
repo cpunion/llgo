@@ -169,7 +169,7 @@ func validCommittedCompactDirectChannelPark(g *G, frame *Frame, wait *WaitSetRec
 	// that pending transition; no producer can change it before Resumed.
 	park := &g.park
 	return park.ticket == wait.ticket && park.phase == parkParked && !park.resolving &&
-		park.taskCancelKind == TaskCancelNone && park.taskCancelPhase == taskCancelIdle &&
+		taskCancelParkMayComplete(park) &&
 		park.cancelKind == ParkCancelNone && park.outcome == ParkOutcomePending
 }
 
@@ -207,7 +207,8 @@ func PrepareCurrentDirectChannelPark(
 		// caller) certifies fresh Wait/Completion storage. Recheck only mutable
 		// facts which this operation itself consumes.
 		if p.current != g || !p.inResume || !p.runDecisionTaken ||
-			!gPreemptEnabledAtDepthZero(g) || g.pending.kind != pendingNone {
+			!gPreemptEnabledAtDepthZero(g) || g.pending.kind != pendingNone ||
+			!taskCancelParkMayComplete(&g.park) {
 			return nil, 0
 		}
 		frame := g.active
@@ -313,7 +314,7 @@ func prepareCurrentDirectChannelParkCompatibility(
 		action.Handle == nil || p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
 		!gPreemptEnabledAtDepthZero(g) || g.pending.kind != pendingNone ||
 		g.spawnChild != nil || g.waiting || g.park.resolving ||
-		g.park.taskCancelKind != TaskCancelNone || g.park.taskCancelPhase != taskCancelIdle ||
+		!taskCancelParkMayComplete(&g.park) ||
 		(wait.state != waitSetRecordUnused || wait.resume != nil) ||
 		directChannelCompletionState(preemptLoad(&completion.state)) != directChannelCompletionUnused {
 		return nil, 0
@@ -341,7 +342,7 @@ func prepareCurrentDirectChannelParkCompatibility(
 			return nil, 0
 		}
 	case parkConsumed:
-		if !validReusableSingleParkState(&g.park) {
+		if !validParkState(&g.park) {
 			return nil, 0
 		}
 	default:
@@ -351,7 +352,12 @@ func prepareCurrentDirectChannelParkCompatibility(
 	if !ok {
 		return nil, 0
 	}
-	g.park = ParkState{ticket: ticket, phase: parkParked}
+	// Reusing the physical park must not erase an outer cleanup receipt or the
+	// already claimed terminal cause. Both stay owner-only across this wait.
+	g.park = ParkState{
+		ticket: ticket, phase: parkParked,
+		taskCancelKind: g.park.taskCancelKind, taskCancelPhase: g.park.taskCancelPhase,
+	}
 	*completion = DirectChannelCompletion{
 		owner: driver, wait: wait, context: context,
 		route: driver.route, state: uint32(directChannelCompletionBound),
@@ -501,7 +507,7 @@ func completeDirectChannelWait(
 		if !validTaskCancelKind(state.taskCancelKind) || state.cancelKind < ParkCancelTaskAbort {
 			return false
 		}
-	} else if state.taskCancelKind != TaskCancelNone || state.taskCancelPhase != taskCancelIdle ||
+	} else if !taskCancelParkMayComplete(state) ||
 		state.cancelKind != ParkCancelNone || small == ResumeSmallInvalid {
 		return false
 	}
@@ -622,7 +628,7 @@ func FinishDirectChannelCompletionFromCompilerTask(
 			}
 			state := &g.park
 			if state.ticket != wait.ticket || state.phase != parkParked ||
-				state.taskCancelKind != TaskCancelNone || state.taskCancelPhase != taskCancelIdle ||
+				!taskCancelParkMayComplete(state) ||
 				state.cancelKind != ParkCancelNone || p.readyCount == ^uint32(0) {
 				return nil, 0, DirectChannelCompletionFinishInvalid
 			}

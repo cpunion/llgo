@@ -289,7 +289,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 			panic("coroutine-only descriptor await requires a trusted publication proof")
 		}
 		selection := b.PrepareCoroDispatchStructuredOnly(fn, dispatchOptions, false)
-		endShield := p.beginCoroCleanupShield(b, cleanup)
+		endShield := p.beginCoroCleanupShield(b, options.cleanup)
 		child := b.CallPreparedCoroDispatchCoroOnly(
 			selection,
 			body.task,
@@ -319,7 +319,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	b.If(hasOutcome, outcomeBlock, plainBlock)
 
 	b.SetBlockEx(coroutineBlock, llssa.AtEnd, false)
-	endShield := p.beginCoroCleanupShield(b, cleanup)
+	endShield := p.beginCoroCleanupShield(b, options.cleanup)
 	child := b.CallPreparedCoroDispatchCoro(
 		selection,
 		body.task,

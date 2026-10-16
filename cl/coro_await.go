@@ -705,7 +705,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		b.Convert(p.prog.VoidPtr(), resultSlot),
 	)
 	callArgs = append(callArgs, physicalArgs...)
-	endShield := p.beginCoroCleanupShield(b, cleanup)
+	endShield := p.beginCoroCleanupShield(b, invocation)
 	child := b.Call(childFn.Expr, callArgs...)
 	if child.Type == nil || !types.Identical(child.RawType(), types.Typ[types.UnsafePointer]) {
 		var childType types.Type
@@ -757,8 +757,13 @@ func chainCoroReconciliation(first, second func(llssa.Builder)) func(llssa.Build
 // beginCoroCleanupShield protects only an already-selected cleanup invocation.
 // Ordinary calls emit no scope or storage. The receipt lives in its owner's
 // existing LLVM frame and is reconciled on both child-completion lanes.
-func (p *context) beginCoroCleanupShield(b llssa.Builder, cleanup *coroStaticCleanupState) func(llssa.Builder) {
-	if cleanup == nil {
+func (p *context) beginCoroCleanupShield(b llssa.Builder, invocation coroCleanupInvocation) func(llssa.Builder) {
+	invocation.validate()
+	cleanup := invocation.state
+	// Go main return may terminate other goroutines without completing their
+	// user defers. Only compiler-owned finite cleanup is masked; source-defer
+	// recover authority is a separate capability and never enables this scope.
+	if cleanup == nil || invocation.recoverParent {
 		return nil
 	}
 	task, handle := p.coroTask(), p.activeCoroHandle()
