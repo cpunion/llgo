@@ -78,6 +78,7 @@ type coroStaticCleanupPlan struct {
 	dynamicTrigger            *ssa.Defer
 	dynamicAlloc              *ssa.Function
 	dynamicFree               *ssa.Function
+	delivery                  *coroDeliveryFunctionPlan
 }
 
 // CoroStaticCleanupPlainTarget reports the narrow EmitPlain exception usable
@@ -258,6 +259,10 @@ func prepareCoroStaticCleanupPlan(
 	var ir *coroProgramIR
 	if universe != nil {
 		ir = universe.coroProgramIR
+	}
+	delivery, err := prepareCoroDeliveryFunctionPlan(fn, whole, ir, universe)
+	if err != nil {
+		return nil, err
 	}
 	dynamicCleanup := coroFunctionRequiresDynamicCleanup(fn, ir)
 	if !external && len(scanFunctions) != 1 {
@@ -492,8 +497,11 @@ func prepareCoroStaticCleanupPlan(
 
 	if len(byInstruction) == 0 {
 		if caller.Exec.Contains(coro.NeedsCleanupFrame) {
-			if implicitDelivery {
-				return nil, fmt.Errorf("llgo.coroBorrowResult requires a bound physical resource-delivery guard")
+			if implicitDelivery && delivery != nil {
+				if !explicitPanic {
+					return nil, fmt.Errorf("resource delivery cleanup requires the explicit-status panic ABI")
+				}
+				return &coroStaticCleanupPlan{delivery: delivery, implicitReturns: coroDeliveryImplicitReturns(fn, ir)}, nil
 			}
 			return nil, fmt.Errorf("needs-cleanup-frame body has no supported static defer site")
 		}
@@ -537,6 +545,13 @@ func prepareCoroStaticCleanupPlan(
 			dynamicTrigger: dynamicTrigger,
 			dynamicAlloc:   allocator,
 			dynamicFree:    releaser,
+			delivery:       delivery,
+			implicitReturns: func() map[*ssa.Return]none {
+				if delivery != nil {
+					return coroDeliveryImplicitReturns(fn, ir)
+				}
+				return nil
+			}(),
 		}, nil
 	}
 	if fn.Recover == nil {
@@ -602,6 +617,7 @@ func prepareCoroStaticCleanupPlan(
 			dynamicTrigger:            dynamicTrigger,
 			dynamicAlloc:              allocator,
 			dynamicFree:               releaser,
+			delivery:                  delivery,
 		}, nil
 	}
 
@@ -631,6 +647,7 @@ func prepareCoroStaticCleanupPlan(
 		sites:                     ordered,
 		terminalResultAllocations: terminalResultAllocations,
 		implicitReturns:           implicitReturns,
+		delivery:                  delivery,
 	}, nil
 }
 
@@ -1477,6 +1494,7 @@ type coroStaticCleanupState struct {
 	complete      llssa.BasicBlock
 	panic         llssa.BasicBlock
 	run           []coroStaticCleanupContinuation
+	delivery      *coroDeliveryFunctionState
 }
 
 // beginCoroStaticCleanup allocates and initializes every owner value before the
@@ -1485,7 +1503,7 @@ type coroStaticCleanupState struct {
 // range-over-func yield plan is registration-only: it retains the frozen node
 // layouts but adds no unused drainer or capture slots to the yield frame.
 func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanupPlan) *coroStaticCleanupState {
-	if plan == nil || len(plan.sites) == 0 {
+	if plan == nil || len(plan.sites) == 0 && plan.delivery == nil {
 		return nil
 	}
 	state := &coroStaticCleanupState{
@@ -2021,10 +2039,12 @@ func (s *coroStaticCleanupState) emit(p *context, b llssa.Builder) {
 		}
 		next = check
 	}
+	next = s.emitDeliveryPrefix(p, b, next)
 	b.SetBlock(s.entry)
 	b.Jump(next)
 
 	b.SetBlock(done)
+	s.emitDeliveryFallback(p, b)
 	s.emitCompletionDispatch(p, b)
 }
 
@@ -2047,6 +2067,15 @@ func (s *coroStaticCleanupState) emitDynamic(p *context, b llssa.Builder) {
 	}
 
 	b.SetBlock(s.entry)
+	prefix := s.emitDeliveryPrefix(p, b, nonempty)
+	b.SetBlock(s.entry)
+	if prefix != nonempty {
+		// The original LIFO loop remains the source-defer reducer. A resource
+		// child guard is a bounded prefix, not a second cleanup engine.
+		b.Jump(prefix)
+		b.SetBlock(nonempty)
+		nonempty = p.fn.MakeBlock()
+	}
 	record := b.Load(s.dynamicHead)
 	b.If(b.BinOp(token.NEQ, record, p.prog.Nil(p.prog.VoidPtr())), nonempty, done)
 
@@ -2093,7 +2122,7 @@ func (s *coroStaticCleanupState) emitDynamic(p *context, b llssa.Builder) {
 				b.LoadKnownNonNil(b.FieldAddrKnownNonNil(node, site.keepaliveField+keepalive)),
 			)
 		}
-		finishSite := s.beginRelocatedSiteEmission(p, site)
+		finishSite := s.beginRelocatedSiteEmission(p, site.plan.instruction)
 		s.releaseDynamicRecord(p, b, site, record)
 		args := make([]llssa.Expr, len(site.args))
 		for argument := range args {
@@ -2109,6 +2138,7 @@ func (s *coroStaticCleanupState) emitDynamic(p *context, b llssa.Builder) {
 	b.SetBlock(invalid)
 	b.Unreachable()
 	b.SetBlock(done)
+	s.emitDeliveryFallback(p, b)
 	s.emitCompletionDispatch(p, b)
 }
 
@@ -2126,12 +2156,12 @@ func (s *coroStaticCleanupState) releaseDynamicRecord(p *context, b llssa.Builde
 
 func (s *coroStaticCleanupState) beginRelocatedSiteEmission(
 	p *context,
-	site *coroStaticCleanupSiteState,
+	instruction ssa.Instruction,
 ) func() {
-	if s == nil || p == nil || site == nil || site.plan == nil || site.plan.instruction == nil {
+	if s == nil || p == nil || instruction == nil {
 		panic("coroutine cleanup relocated emission has no exact source site")
 	}
-	return p.beginCoroRelocatedSiteEmission(site.plan.instruction, coroRuntimeHelperAtCleanup)
+	return p.beginCoroRelocatedSiteEmission(instruction, coroRuntimeHelperAtCleanup)
 }
 
 func (s *coroStaticCleanupState) emitSiteCall(
@@ -2193,7 +2223,7 @@ func (s *coroStaticCleanupState) emitSiteCall(
 	case coroStaticCleanupBuiltin:
 		finishSite := func() {}
 		if !siteEmissionActive {
-			finishSite = s.beginRelocatedSiteEmission(p, site)
+			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction)
 		}
 		deferred := site.plan.instruction
 		if deferred == nil {
@@ -2255,7 +2285,7 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		}
 		finishSite := func() {}
 		if !siteEmissionActive {
-			finishSite = s.beginRelocatedSiteEmission(p, site)
+			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction)
 		}
 		p.compileCoroGeneratedCgoTransaction(
 			b, *site.plan.generatedCgo, args, site.keepalives,
@@ -2268,7 +2298,7 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		}
 		finishSite := func() {}
 		if !siteEmissionActive {
-			finishSite = s.beginRelocatedSiteEmission(p, site)
+			finishSite = s.beginRelocatedSiteEmission(p, site.plan.instruction)
 		}
 		p.compileCoroWorkerForeignTransaction(
 			b, *site.plan.foreignWorker, llssa.Nil, args, site.keepalives,

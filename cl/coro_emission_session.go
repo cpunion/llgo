@@ -278,6 +278,14 @@ func (p *context) coroCleanup() *coroStaticCleanupState {
 	return body.cleanup
 }
 
+func (p *context) coroIncomingResultSlot() llssa.Expr {
+	body := p.activeCoroEmissionBody()
+	if body == nil {
+		return llssa.Nil
+	}
+	return body.resultSlot
+}
+
 // reconcileCoroCleanupTaskStop is the narrow mutation capability for a joined
 // cleanup call. Consumers cannot retain the mutable body or replace its panic
 // overlay. The private runtime hook has already validated/claimed kind 0/1/2.

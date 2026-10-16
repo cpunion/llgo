@@ -221,11 +221,17 @@ func (view CoroLibraryEffectView) ValidateFunction(
 			fact.ID, base, fact.RawPlainSymbol,
 		)
 	}
-	// Transport/index validation does not authorize ownership lowering. Until
-	// the exact typed initializer/drop and parent cleanup recipe are bound in
-	// ProgramIR, neither imports nor producer publication may silently discard
-	// this capability and emit an ordinary result transfer.
-	if !fact.Delivery.IsZero() {
+	// A source producer must publish its contract, not silently downgrade to an
+	// ordinary result transfer. A bodyless import still cannot consume it until
+	// its exact helpers and parent guard have been bound in ProgramIR.
+	recipe, bound, err := view.SourceDeliveryRecord(function, metadata)
+	if err != nil {
+		return err
+	}
+	if bound && fact.Delivery != recipe {
+		return fmt.Errorf("coroutine library function %q has a missing or mismatched source delivery recipe", fact.ID)
+	}
+	if !bound && !fact.Delivery.IsZero() {
 		return fmt.Errorf("coroutine library function %q requires a bound physical resource-delivery recipe", fact.ID)
 	}
 	return nil
@@ -742,6 +748,11 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 				}
 				return ""
 			}(),
+		}
+		if delivery, present, err := universe.CoroLibraryEffects().SourceDeliveryRecord(function, metadata); err != nil {
+			return fmt.Errorf("coroutine library summary: delivery recipe for %q: %w", functionPlan.ID, err)
+		} else if present {
+			fact.Delivery = delivery
 		}
 		if err := universe.CoroLibraryEffects().ValidateFunction(function, metadata, fact); err != nil {
 			return fmt.Errorf("coroutine library summary: preflight %q: %w", functionPlan.ID, err)

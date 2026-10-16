@@ -698,7 +698,13 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	}
 
 	resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
-	resultSlot := p.coroResultSlot(resultType)
+	guard := p.beginCoroDeliveryCall(b, callee, closureContext, args)
+	var resultSlot llssa.Expr
+	if guard != nil {
+		resultSlot = guard.result
+	} else {
+		resultSlot = p.coroResultSlot(resultType)
+	}
 	callArgs := make([]llssa.Expr, 0, len(physicalArgs)+2)
 	callArgs = append(callArgs,
 		body.task,
@@ -735,6 +741,9 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	value := p.awaitCoroChildWithRecoveryAndConsume(
 		b, child, resultSlot, sourceSig.Results(), invocation, keepaliveSlots, afterConsume,
 	)
+	if guard != nil {
+		body.cleanup.delivery.claim(b, guard)
+	}
 	return coroAwaitedValue{
 		value:   value,
 		address: p.coroAwaitResultAddress(b, resultSlot, sourceSig.Results()),

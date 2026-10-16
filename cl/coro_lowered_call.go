@@ -30,10 +30,21 @@ import (
 // is a compiler-plan error: falling back to the legacy symbol would recreate a
 // hidden call edge after the whole-program fixed point was sealed.
 func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, marker llssa.Expr, args []llssa.Expr) (llssa.Expr, bool) {
+	return p.resolveCoroLoweredHelperCall(b, helper, marker, args, nil)
+}
+
+// expectedTarget is non-nil only for a typed compiler-owned helper whose exact
+// source signature and identity were already frozen in ProgramIR. This shares
+// edge validation, SitePlan observation and physical selection with rtFunc;
+// it does not create another emitter-time call authority.
+func (p *context) resolveCoroLoweredHelperCall(b llssa.Builder, helper string, marker llssa.Expr, args []llssa.Expr, expectedTarget *ssa.Function) (llssa.Expr, bool) {
+	if expectedTarget != nil && !p.hasStructuredOutcomePhysicalBody() {
+		panic("typed compiler helper requires its exact managed physical owner")
+	}
 	if p.compilation == nil {
 		return llssa.Nil, false
 	}
-	if p.emissionUniverse == nil || !p.emissionUniverse.CompleteRuntimeABI() {
+	if p.emissionUniverse == nil || expectedTarget == nil && !p.emissionUniverse.CompleteRuntimeABI() {
 		// Isolated package/report tests do not carry the production runtime ABI
 		// and must keep the legacy rtFunc marker. internal/build always prepares
 		// a complete universe for active entry resolution, where every missing
@@ -116,30 +127,35 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 	if err != nil {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q: derive target %q signature: %w", helper, p.goFn.Name(), targetPlan.ID, err))
 	}
-	markerSig, ok := types.Unalias(marker.RawType()).(*types.Signature)
-	if !ok {
-		panic(fmt.Errorf(
-			"coroutine lowered runtime call %q in %q target %q marker has non-signature type %T (%v)",
-			helper, p.goFn.Name(), targetPlan.ID, types.Unalias(marker.RawType()), marker.RawType(),
-		))
-	}
 	// The compiler-created rtFunc marker already carries LLGo's physical Go ABI:
 	// function values are {fn,env}, interfaces use their runtime headers, and
 	// other source types have crossed the same target-specific conversion.
 	// Convert the frozen logical source signature through that one canonical
 	// boundary before comparing. x/tools SSA has also packed a variadic
 	// invocation into the final slice argument, so normalize both sides.
-	markerSig = coroPhysicalNormalizeSourceSignature(markerSig)
-	physicalSourceSig := coroPhysicalNormalizeSourceSignature(
-		p.prog.PhysicalFuncDecl(sourceSig, llssa.InGo),
-	)
-	if !types.Identical(markerSig, physicalSourceSig) {
-		panic(fmt.Errorf(
-			"coroutine lowered runtime call %q in %q target %q has a different effective source signature: marker=%s target=%s",
-			helper, p.goFn.Name(), targetPlan.ID,
-			types.TypeString(markerSig, types.RelativeTo(nil)),
-			types.TypeString(physicalSourceSig, types.RelativeTo(nil)),
-		))
+	if expectedTarget != nil {
+		if target != expectedTarget || plainOnly || rawPlainOccurrence || explicitStatusLegacyPlain ||
+			frozenCall.ExplicitStatusElided || sourceSig.Results().Len() != 0 || len(args) != sourceSig.Params().Len() {
+			panic(fmt.Errorf("typed compiler helper %q has no exact non-elided managed call", helper))
+		}
+	} else {
+		markerSig, ok := types.Unalias(marker.RawType()).(*types.Signature)
+		if !ok {
+			panic(fmt.Errorf(
+				"coroutine lowered runtime call %q in %q target %q marker has non-signature type %T (%v)",
+				helper, p.goFn.Name(), targetPlan.ID, types.Unalias(marker.RawType()), marker.RawType(),
+			))
+		}
+		markerSig = coroPhysicalNormalizeSourceSignature(markerSig)
+		physicalSourceSig := coroPhysicalNormalizeSourceSignature(p.prog.PhysicalFuncDecl(sourceSig, llssa.InGo))
+		if !types.Identical(markerSig, physicalSourceSig) {
+			panic(fmt.Errorf(
+				"coroutine lowered runtime call %q in %q target %q has a different effective source signature: marker=%s target=%s",
+				helper, p.goFn.Name(), targetPlan.ID,
+				types.TypeString(markerSig, types.RelativeTo(nil)),
+				types.TypeString(physicalSourceSig, types.RelativeTo(nil)),
+			))
+		}
 	}
 	if plainOnly || rawPlainOccurrence || explicitStatusLegacyPlain {
 		if !targetPlan.RawPlainDemand || !p.immutablePlan().HasRawPlainVariant(target) {
@@ -161,6 +177,16 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		}
 		return b.Call(fn.Expr, args...), true
 	}
+	return p.emitCoroResolvedManagedHelper(b, helper, target, targetPlan, sourceSig, args, printKeepaliveSlots), true
+}
+
+// emitCoroResolvedManagedHelper is the common physical entry selector after
+// a caller has consumed its exact frozen lowered-call edge. Resource adapters
+// use the same plain/outcome/coroutine paths as ordinary runtime helpers.
+func (p *context) emitCoroResolvedManagedHelper(
+	b llssa.Builder, helper string, target *ssa.Function, targetPlan coro.FunctionPlan,
+	sourceSig *types.Signature, args, keepaliveSlots []llssa.Expr,
+) llssa.Expr {
 	if p.hasStructuredOutcomePhysicalBody() && targetPlan.HasStaticOutcome() {
 		nativeResult := !p.prog.LocalGoTypeExceedsNativeStack(
 			newOutcomePlainPhysicalABI(sourceSig).resultSlotType,
@@ -174,7 +200,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		}
 		return p.compileCoroStaticOutcomeTargetCallAliasResult(
 			b, target, args, nativeResult, false, cleanup,
-		).value, true
+		).value
 	}
 
 	switch targetPlan.Emission {
@@ -186,7 +212,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		if fn == nil || kind != goFunc {
 			panic(fmt.Errorf("coroutine lowered runtime call %q in %q target %q did not resolve to a Go entry", helper, p.goFn.Name(), targetPlan.ID))
 		}
-		return b.Call(fn.Expr, args...), true
+		return b.Call(fn.Expr, args...)
 	case coro.EmitCoroutine:
 		if !p.hasStructuredOutcomePhysicalBody() {
 			ownerPlan, _ := p.immutablePlan().FunctionPlan(p.goFn)
@@ -199,12 +225,12 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 			))
 		}
 		if site := p.coroEmissionSite(); site != nil && site.placement == coroRuntimeHelperAtCleanup {
-			return p.compileCoroCleanupTargetAwait(b, target, args, printKeepaliveSlots), true
+			return p.compileCoroCleanupTargetAwait(b, target, args, keepaliveSlots)
 		}
-		if len(printKeepaliveSlots) != 0 {
-			return p.compileCoroTargetAwaitWithKeepalive(b, target, args, printKeepaliveSlots), true
+		if len(keepaliveSlots) != 0 {
+			return p.compileCoroTargetAwaitWithKeepalive(b, target, args, keepaliveSlots)
 		}
-		return p.compileCoroTargetAwait(b, target, args), true
+		return p.compileCoroTargetAwait(b, target, args)
 	case coro.EmitRawPlain:
 		panic(fmt.Errorf(
 			"coroutine lowered runtime call %q in managed body %q targets raw-plain-only function %q without a managed entry",

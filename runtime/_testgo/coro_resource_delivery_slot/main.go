@@ -1,0 +1,97 @@
+//go:build darwin || linux
+
+package main
+
+import (
+	"runtime"
+	"unsafe"
+)
+
+const LLGoFiles = "wrap/delivery.c"
+
+type result = struct{ R0 int32 }
+
+//go:linkname borrow llgo.coroBorrowResult
+func borrow(func(*result), func(*result, unsafe.Pointer, uint32)) *result
+
+//go:linkname install C.llgo_delivery_install
+func install()
+
+//go:linkname openInto C.llgo_delivery_open
+func openInto(*result, uint32)
+
+//go:linkname closeFD C.llgo_delivery_close
+func closeFD(int32)
+
+//go:linkname checkAlive C.llgo_delivery_check_alive
+func checkAlive(int32)
+
+//go:linkname closedCount C.llgo_delivery_closed
+func closedCount() int32
+
+//go:linkname blocked C.llgo_delivery_blocked
+func blocked() int32
+
+//go:linkname release C.llgo_delivery_release
+func release()
+
+//go:linkname escaped C.llgo_delivery_escaped
+func escaped()
+
+func initialize(out *result) { out.R0 = -1 }
+
+func drop(out *result, _ unsafe.Pointer, _ uint32) {
+	fd := out.R0
+	out.R0 = -1
+	if fd >= 0 {
+		closeFD(fd)
+	}
+}
+
+func acquire(mode uint32) int32 {
+	out := borrow(initialize, drop)
+	openInto(out, mode)
+	return out.R0
+}
+
+func releaseWait() { release() }
+
+func sentinel(ready chan struct{}) {
+	defer releaseWait()
+	close(ready)
+	var never chan struct{}
+	<-never
+}
+
+func canceledOwner() {
+	acquire(1)
+	escaped()
+}
+
+func main() {
+	runtime.GOMAXPROCS(1)
+	install()
+	fd := acquire(0)
+	runtime.Gosched()
+	runtime.GC()
+	checkAlive(fd) // Normal Return transfers ownership; it must not auto-drop.
+	closeFD(fd)
+
+	go acquire(0) // No result sink: the independent entry must own its fallback.
+	for closedCount() != 2 {
+		runtime.Gosched()
+	}
+
+	ready := make(chan struct{})
+	go sentinel(ready)
+	<-ready
+	go canceledOwner()
+	for blocked() == 0 {
+		runtime.Gosched()
+	}
+	runtime.GC()
+	runtime.GC()
+	// Only the sentinel's claimed shutdown cleanup releases the C worker.
+	// The acquisition result then belongs to the parent's canceled lane, not
+	// to user continuation. The C checker requires exactly one physical close.
+}

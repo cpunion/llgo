@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
+	"sort"
 
 	"github.com/xgo-dev/llgo/internal/coro"
 	llssa "github.com/xgo-dev/llgo/ssa"
@@ -25,12 +26,14 @@ const (
 // not a second effect graph or a runtime callback record. Only ProgramIR's
 // source builder writes it; physical binding/publication remain fail-closed.
 type coroSourceDeliveryRecipe struct {
-	producer    *ssa.Function
-	borrow      *ssa.Call
-	initializer *ssa.Function
-	drop        *ssa.Function
-	signature   *types.Signature
-	result      *types.Struct
+	producer           *ssa.Function
+	borrow             *ssa.Call
+	initializer        *ssa.Function
+	drop               *ssa.Function
+	signature          *types.Signature
+	result             *types.Struct
+	consumerInitialize string
+	consumerDrop       string
 }
 
 type coroDeliverySourceUniverse interface {
@@ -211,6 +214,15 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 	if len(ir.deliveryProducers) == 0 {
 		return nil
 	}
+	for producer, recipe := range ir.deliveryProducers {
+		identity := emissionDigest(u.finalIdentity(producer))
+		recipe.consumerInitialize = coroDeliveryInitializeCall + ":" + identity
+		recipe.consumerDrop = coroDeliveryDropCall + ":" + identity
+		ir.deliveryProducers[producer] = recipe
+		if err := builder.freezeDeliveryHelperPlacements(ir, recipe.borrow, coroDeliveryInitializeCall, coroDeliveryDropCall); err != nil {
+			return err
+		}
+	}
 	requireCleanup := func(function *ssa.Function) error {
 		facts, present := ir.localBodyFacts[function]
 		if !present {
@@ -272,20 +284,86 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 				if err := requireCleanup(function); err != nil {
 					return err
 				}
-				identity := emissionDigest(u.finalIdentity(target))
 				for _, helper := range []struct {
 					name   string
 					target *ssa.Function
 				}{
-					{coroDeliveryInitializeCall, recipe.initializer},
-					{coroDeliveryDropCall, recipe.drop},
+					{recipe.consumerInitialize, recipe.initializer},
+					{recipe.consumerDrop, recipe.drop},
 				} {
-					if err := u.recordCoroLoweredCall(function, helper.name+":"+identity, helper.target); err != nil {
+					if err := u.recordCoroLoweredCall(function, helper.name, helper.target); err != nil {
 						return err
 					}
+				}
+				if err := builder.freezeDeliveryHelperPlacements(ir, call, recipe.consumerInitialize, recipe.consumerDrop); err != nil {
+					return err
 				}
 			}
 		}
 	}
 	return nil
+}
+
+// Resource helpers are ordinary frozen managed edges with exact source and
+// cleanup placements, not an emitter-time exception to the SitePlan verifier.
+func (builder coroProgramIRBuilder) freezeDeliveryHelperPlacements(
+	ir *coroProgramIR, call ssa.CallInstruction, initializer, drop string,
+) error {
+	u := builder.canonical.universe
+	if ir == nil || ir.callsFrozen || u == nil || call == nil || initializer == "" || drop == "" {
+		return fmt.Errorf("delivery helper placement requires the active ProgramIR builder")
+	}
+	placement := coroRuntimeHelperAtSource
+	if _, deferred := call.(*ssa.Defer); deferred {
+		placement = coroRuntimeHelperAtCleanup
+	}
+	for _, owner := range u.sortedUseOwners(call.Parent()) {
+		key := emissionFunctionOwnerKey{function: call.Parent(), owner: owner}
+		site, present := ir.sitePlans[key][call]
+		if !present {
+			return fmt.Errorf("delivery helper call %q lacks its frozen owner SitePlan", call.String())
+		}
+		site.managedRuntimeHelpers = append(site.managedRuntimeHelpers,
+			coroPlannedRuntimeHelper{name: initializer, placement: placement},
+			coroPlannedRuntimeHelper{name: drop, placement: coroRuntimeHelperAtCleanup},
+		)
+		sort.Slice(site.managedRuntimeHelpers, func(i, j int) bool {
+			first, second := site.managedRuntimeHelpers[i], site.managedRuntimeHelpers[j]
+			if first.name != second.name {
+				return first.name < second.name
+			}
+			return first.placement < second.placement
+		})
+		ir.sitePlans[key][call] = site
+	}
+	return nil
+}
+
+func (ir *coroProgramIR) deliverySiteHelpers(instruction ssa.Instruction) (initializer, drop string, present bool) {
+	call, callable := instruction.(ssa.CallInstruction)
+	if !callable {
+		return "", "", false
+	}
+	if _, spawned := call.(*ssa.Go); spawned {
+		return "", "", false
+	}
+	frozen := ir.callPlans[call]
+	if recipe, found := ir.deliveryProducers[frozen.deliveryProducer]; found {
+		return recipe.consumerInitialize, recipe.consumerDrop, true
+	}
+	if recipe, found := ir.deliveryProducers[call.Parent()]; found && recipe.borrow == instruction {
+		return coroDeliveryInitializeCall, coroDeliveryDropCall, true
+	}
+	return "", "", false
+}
+
+func (p *context) compileCoroDeliveryHelper(
+	b llssa.Builder, name string, target *ssa.Function, args []llssa.Expr,
+) {
+	if target == nil {
+		panic("resource delivery helper requires an exact frozen target")
+	}
+	if _, emitted := p.resolveCoroLoweredHelperCall(b, name, llssa.Nil, args, target); !emitted {
+		panic(fmt.Sprintf("resource delivery helper %q lost its frozen managed edge", name))
+	}
 }

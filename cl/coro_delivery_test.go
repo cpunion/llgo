@@ -3,13 +3,14 @@
 package cl
 
 import (
-	"fmt"
 	"go/types"
 	"strings"
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/coro"
 	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
+	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -28,8 +29,23 @@ func Root() { Acquire("fixture") }
 `
 
 func TestCoroDeliverySourceFreezesExactTypedHelperIdentities(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			testCoroDeliveryTypedHelperIdentities(t, target.arch)
+		})
+	}
+}
+
+func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target) {
 	pkg, _, files := buildGoSSAPkg(t, coroDeliverySourceFixture)
-	prog := newLLSSAProg(t)
+	prog := newLLSSAProgForTarget(t, target)
 	defer prog.Dispose()
 	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
 	if err != nil {
@@ -50,6 +66,13 @@ func TestCoroDeliverySourceFreezesExactTypedHelperIdentities(t *testing.T) {
 	if err != nil || !frozen || !site.Intrinsic || !site.ElidesCall() ||
 		site.IntrinsicSemantics != CoroIntrinsicCallInlineWithLoweredCalls {
 		t.Fatalf("borrow site=%+v frozen=%t error=%v", site, frozen, err)
+	}
+	for _, owner := range universe.sortedUseOwners(producer) {
+		key := emissionFunctionOwnerKey{function: producer, owner: owner}
+		frozen := universe.coroProgramIR.sitePlans[key][recipe.borrow]
+		if source, cleanup := frozen.managedRuntimeHelpersAt(coroRuntimeHelperAtSource), frozen.managedRuntimeHelpersAt(coroRuntimeHelperAtCleanup); len(source) != 1 || source[0] != coroDeliveryInitializeCall || len(cleanup) != 1 || cleanup[0] != coroDeliveryDropCall {
+			t.Fatalf("borrow fallback helper placement source=%v cleanup=%v", source, cleanup)
+		}
 	}
 	roots, err := universe.intrinsicCallValueRoots(llgoCoroBorrowResult, recipe.borrow.Common().Args, fnNormal)
 	if err != nil || len(roots) != 2 || !roots[0].directFunction || !roots[1].directFunction ||
@@ -121,25 +144,46 @@ func TestCoroDeliverySourceFreezesExactTypedHelperIdentities(t *testing.T) {
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
-	diagnostic := func() (diagnostic string) {
-		defer func() {
-			if failure := recover(); failure != nil {
-				diagnostic = fmt.Sprint(failure)
-			}
-		}()
-		compiled, _, err := NewPackageExWithEmbedOptions(
-			prog, nil, nil, nil, pkg, files, goembed.VarMap{}, PackageOptions{Compilation: compilation},
-		)
-		if compiled != nil {
-			defer compiled.Module().Dispose()
+	metadata := coro.LibraryEffectMetadata{
+		FunctionIDSchema: coro.FunctionIDSchema,
+		CoroABI:          compilation.CoroABI, SchedulerABI: compilation.SchedulerABI,
+		PanicABI: compilation.PanicABI, FuncRepABI: compilation.FuncRepABI,
+		TargetTriple: prog.TargetSpec().Triple, PointerBits: prog.PointerSize() * 8,
+		Endianness: "little", DataLayout: prog.DataLayout(),
+	}
+	record, present, err := universe.CoroLibraryEffects().SourceDeliveryRecord(producer, metadata)
+	if err != nil || !present || record.ResultSize != uint64(3*prog.PointerSize()) || record.ResultAlign != uint64(prog.PointerSize()) {
+		t.Fatalf("source archive recipe=%+v present=%t error=%v", record, present, err)
+	}
+	for index, function := range []*ssa.Function{producer, recipe.initializer, recipe.drop} {
+		fact, _ := plan.FunctionPlan(function)
+		if ids := [3]coro.FunctionID{record.Producer, record.Initializer, record.Drop}; ids[index] != fact.ID {
+			t.Fatal("archive recipe reconstructed another callable identity")
 		}
-		if err != nil {
-			return err.Error()
+	}
+	compiled, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, pkg, files, goembed.VarMap{}, PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := compiled.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify guarded source delivery: %v\n%s", err, module.String())
+	}
+	for _, name := range []string{"foo.Root", "foo.Acquire"} {
+		fn := requireCoroPhysicalFunction(t, module, name)
+		if countCoroIRDirectCalls(fn, coroRecoverAliasBeginHookV1) != 0 {
+			t.Fatalf("resource guard gained source-defer recover permission: %s", fn.String())
 		}
-		return ""
-	}()
-	if !strings.Contains(diagnostic, "bound physical resource-delivery guard") {
-		t.Fatalf("unprotected result slot was exposed or rejected by another gate: %s", diagnostic)
+		if begins, ends := countCoroIRDirectCalls(fn, coroCleanupShieldBeginHookV1), countCoroIRDirectCalls(fn, coroCleanupShieldEndHookV1); begins != 1 || ends != 2 {
+			t.Fatalf("%s finite drop scopes begin=%d end=%d, want one joined internal drop: %s", name, begins, ends, fn.String())
+		}
+	}
+	runCoroABITestPipeline(t, prog, module)
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify split resource guards: %v\n%s", err, module.String())
 	}
 }
 
@@ -264,8 +308,24 @@ func Unrelated() {}
 				}
 				for _, owner := range u.sortedUseOwners(fn) {
 					key := emissionFunctionOwnerKey{function: fn, owner: owner}
-					if site := u.coroProgramIR.sitePlans[key][instruction]; !sameCoroFrozenCallSitePlan(site.callPlan, frozen) {
+					site := u.coroProgramIR.sitePlans[key][instruction]
+					if !sameCoroFrozenCallSitePlan(site.callPlan, frozen) {
 						t.Fatal("consumer and owner SitePlan disagree about one delivery recipe")
+					}
+					source, cleanup := site.managedRuntimeHelpersAt(coroRuntimeHelperAtSource), site.managedRuntimeHelpersAt(coroRuntimeHelperAtCleanup)
+					switch test.name {
+					case "SpawnOnly":
+						if len(source) != 0 || len(cleanup) != 0 {
+							t.Fatalf("spawn executed entry fallback on parent: source=%v cleanup=%v", source, cleanup)
+						}
+					case "Deferred":
+						if len(source) != 0 || len(cleanup) != 2 || cleanup[0] != recipe.consumerDrop || cleanup[1] != recipe.consumerInitialize {
+							t.Fatalf("deferred delivery placement source=%v cleanup=%v", source, cleanup)
+						}
+					default:
+						if len(source) != 1 || source[0] != recipe.consumerInitialize || len(cleanup) != 1 || cleanup[0] != recipe.consumerDrop {
+							t.Fatalf("ordinary delivery placement source=%v cleanup=%v", source, cleanup)
+						}
 					}
 				}
 			}
