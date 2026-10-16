@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"runtime"
 	"strings"
 )
@@ -46,5 +47,8 @@ func main() {
 	}
 	check(second, "secondMarker")
 	check(first, "firstMarker")
-	println("shared caller PC identity passed")
+	const marker = "shared caller PC identity passed\n"
+	if count, err := os.Stdout.WriteString(marker); err != nil || count != len(marker) {
+		panic("caller PC completion marker was not written")
+	}
 }
