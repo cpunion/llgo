@@ -44,7 +44,6 @@ const (
 	callerPCMask         = uintptr(3)
 	callerPCValue        = uintptr(1)
 	callersPCValue       = uintptr(3)
-	callerPCHashInit     = 64
 	callerPCSyntheticTop = ^uintptr(0) &^ callerPCMask
 )
 
@@ -69,12 +68,10 @@ func callerSyntheticPCSequence(pc uintptr) uintptr {
 }
 
 type callerLocationStore struct {
-	frames        []CallerFrame
-	stack         []CallerFrame
-	synthetic     []CallerFrame
-	syntheticHash []uintptr
+	frames []CallerFrame
+	stack  []CallerFrame
 	// Memoized synthetic PC bases for the static frames emitted around every
-	// Callers walk. Per-store because synthetic sequences are per-store.
+	// Callers walk. The identities themselves are shared across all Gs.
 	callersPCBase uintptr
 	mainPCBase    uintptr
 	goexitPCBase  uintptr
@@ -892,26 +889,6 @@ func FrameForPC(pc uintptr) (CallerFrame, bool) {
 	return CallerFrame{}, false
 }
 
-func syntheticFrameForPC(pc uintptr) (CallerFrame, bool) {
-	store := callerLocationStoreCurrent
-	if store == nil {
-		return CallerFrame{}, false
-	}
-	seq := callerSyntheticPCSequence(pc)
-	if seq == 0 || seq > uintptr(len(store.synthetic)) {
-		return CallerFrame{}, false
-	}
-	frame := store.synthetic[seq-1]
-	if callerSyntheticPCSequence(frame.PC) != seq {
-		return CallerFrame{}, false
-	}
-	frame.PC = pc
-	if frame.Entry == 0 {
-		frame.Entry = pc
-	}
-	return frame, true
-}
-
 func callerLocationStoreForGoroutine() *callerLocationStore {
 	store := callerLocationStoreCurrent
 	if store == nil {
@@ -922,10 +899,8 @@ func callerLocationStoreForGoroutine() *callerLocationStore {
 }
 
 func (s *callerLocationStore) captureFrame(frame CallerFrame, pcValue uintptr) CallerFrame {
-	idx := s.internSyntheticFrame(frame)
-	rec := s.synthetic[idx]
-	seq := uintptr(idx + 1)
-	rec.PC = callerSyntheticPCBase(seq) | pcValue
+	rec := internSyntheticCallerFrame(frame).frame
+	rec.PC = rec.PC&^callerPCMask | pcValue
 	if rec.Entry == 0 {
 		rec.Entry = rec.PC
 	}
@@ -939,8 +914,7 @@ func (s *callerLocationStore) capturePC(frame *CallerFrame, pcValue uintptr) uin
 	if frame.captured != 0 {
 		return frame.captured | pcValue
 	}
-	idx := s.internSyntheticFrame(*frame)
-	base := callerSyntheticPCBase(uintptr(idx + 1))
+	base := internSyntheticCallerFrame(*frame).frame.PC &^ callerPCMask
 	frame.captured = base
 	return base | pcValue
 }
@@ -948,8 +922,8 @@ func (s *callerLocationStore) capturePC(frame *CallerFrame, pcValue uintptr) uin
 // captureFrameAt is capturePC plus the full frame copy Caller needs.
 func (s *callerLocationStore) captureFrameAt(frame *CallerFrame, pcValue uintptr) CallerFrame {
 	pc := s.capturePC(frame, pcValue)
-	seq := callerSyntheticPCSequence(pc)
-	rec := s.synthetic[seq-1]
+	rec := *frame
+	rec.captured = 0
 	rec.PC = pc
 	if rec.Entry == 0 {
 		rec.Entry = rec.PC
@@ -961,57 +935,9 @@ func (s *callerLocationStore) captureFrameAt(frame *CallerFrame, pcValue uintptr
 // runtime.main) in the per-store cache slot.
 func (s *callerLocationStore) staticPC(frame CallerFrame, cache *uintptr, pcValue uintptr) uintptr {
 	if *cache == 0 {
-		*cache = callerSyntheticPCBase(uintptr(s.internSyntheticFrame(frame) + 1))
+		*cache = internSyntheticCallerFrame(frame).frame.PC &^ callerPCMask
 	}
 	return *cache | pcValue
-}
-
-func (s *callerLocationStore) internSyntheticFrame(frame CallerFrame) int {
-	frame.captured = 0
-	if len(s.syntheticHash) == 0 {
-		s.syntheticHash = make([]uintptr, callerPCHashInit)
-	}
-	if len(s.synthetic)*2 >= len(s.syntheticHash) {
-		s.rehashSyntheticFrames(len(s.syntheticHash) * 2)
-	}
-	slot := s.syntheticSlot(frame)
-	for {
-		idx := s.syntheticHash[slot]
-		if idx == 0 {
-			frame.PC = callerSyntheticPCBase(uintptr(len(s.synthetic)+1)) | callerPCValue
-			s.synthetic = append(s.synthetic, frame)
-			s.syntheticHash[slot] = uintptr(len(s.synthetic))
-			return len(s.synthetic) - 1
-		}
-		existing := s.synthetic[idx-1]
-		if sameSyntheticFrame(existing, frame) {
-			return int(idx - 1)
-		}
-		slot = (slot + 1) & (uintptr(len(s.syntheticHash)) - 1)
-	}
-}
-
-func (s *callerLocationStore) rehashSyntheticFrames(size int) {
-	old := s.syntheticHash
-	s.syntheticHash = make([]uintptr, size)
-	for _, idx := range old {
-		if idx == 0 {
-			continue
-		}
-		frame := s.synthetic[idx-1]
-		slot := s.syntheticSlot(frame)
-		for s.syntheticHash[slot] != 0 {
-			slot = (slot + 1) & (uintptr(len(s.syntheticHash)) - 1)
-		}
-		s.syntheticHash[slot] = idx
-	}
-}
-
-func (s *callerLocationStore) syntheticSlot(frame CallerFrame) uintptr {
-	h := frame.Entry ^ (uintptr(frame.Line) << 12) ^ (uintptr(frame.StartLine) << 24)
-	h ^= uintptr(len(frame.Function)) << 4
-	h ^= uintptr(len(frame.File)) << 8
-	return h & (uintptr(len(s.syntheticHash)) - 1)
 }
 
 func sameSyntheticFrame(a, b CallerFrame) bool {

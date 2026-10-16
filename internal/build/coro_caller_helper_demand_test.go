@@ -69,8 +69,11 @@ func main() {
 	legacyLogicalUpdateCalls := make(map[string][]string)
 	callerTokenAlloca := regexp.MustCompile(`^(%[-A-Za-z0-9._]+) = alloca \{ ptr, i64 \}, align `)
 	callerTokenZero := regexp.MustCompile(`@llvm\.memset\.[^(]*\(ptr (%[-A-Za-z0-9._]+), i8 0, i64 [1-9][0-9]*, i1 false\)`)
+	// Whole-program inference may require either the outcome entry's three
+	// hidden arguments or the coroutine entry's two. In both cases the next
+	// argument must be the one compiler-owned logical frame token.
 	callerTokenPush := regexp.MustCompile(
-		`PushCallerLocationFrame\$outcome"\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr (%[-A-Za-z0-9._]+),`,
+		`PushCallerLocationFrame\$(?:outcome"\(ptr [^,]+, ptr [^,]+, ptr [^,]+|coro"\(ptr [^,]+, ptr [^,]+), ptr (%[-A-Za-z0-9._]+),`,
 	)
 	callerTokenUpdate := regexp.MustCompile(
 		`UpdateLogicalCallerLocation"\(ptr (%[-A-Za-z0-9._]+),`,
@@ -83,6 +86,7 @@ func main() {
 		updates []string
 	}
 	tokenFunctions := make(map[string]*callerTokenIR)
+	var tokenPushCalls []string
 
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
@@ -115,6 +119,9 @@ func main() {
 		for _, line := range strings.Split(pkg.LPkg.String(), "\n") {
 			trimmed := strings.TrimSpace(line)
 			if pkg.PkgPath == "command-line-arguments" {
+				if strings.Contains(trimmed, "PushCallerLocationFrame") {
+					tokenPushCalls = append(tokenPushCalls, trimmed)
+				}
 				if match := callerTokenFunction.FindStringSubmatch(trimmed); len(match) == 2 {
 					currentFunction = match[1]
 				}
@@ -235,7 +242,7 @@ func main() {
 		}
 	}
 	if tokenFunctionCount != 2 {
-		t.Errorf("logical caller token functions = %d, want caller and main", tokenFunctionCount)
+		t.Errorf("logical caller token functions = %d, want caller and main; push calls:\n%s", tokenFunctionCount, strings.Join(tokenPushCalls, "\n"))
 	}
 	for pkgPath, calls := range legacyLogicalUpdateCalls {
 		t.Errorf(

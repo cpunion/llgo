@@ -1153,7 +1153,9 @@ func (p *context) shouldTrackCallerFrames() bool {
 	if !p.runtimeCallerFuncs[p.goFn] {
 		return false
 	}
-	if target := p.prog.Target(); target != nil && (target.Target != "" || target.GOARCH == "wasm") {
+	// Stackless wasm frames use the same logical stack as native coroutines;
+	// native PC anchors/frame pointers are a separate target capability.
+	if target := p.prog.Target(); target != nil && target.Target != "" && target.GOARCH != "wasm" {
 		return false
 	}
 	pkgPath := ""

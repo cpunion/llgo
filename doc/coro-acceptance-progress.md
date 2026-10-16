@@ -7,6 +7,13 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-16 (Asia/Shanghai)
 
+PRs [#262](https://github.com/cpunion/llgo/pull/262) and
+[#263](https://github.com/cpunion/llgo/pull/263) are merged into `llvm-coro`
+as `113f68c32` and `7cc805a0d`. Their exact heads `06502a0a8` and `3b9571606`
+each passed all 18 coroutine CI jobs (runs `38856508230` and `38857042105`);
+review, inline-comment and issue-comment inventories were empty. No main
+branch was synchronized or changed. PR #264 is the follow-up, not yet merged.
+
 The v58 expvar retry now compiles and executes all four tests successfully.
 It retains source `d5d6c5627`, source-manifest SHA-256
 `4e19f44822bab94594cd031dccfa17ff0d8d9932a909d98ea6f692d1ccf11fe3`
@@ -34,8 +41,12 @@ LLGo, with source-manifest SHA-256
 `bc21bb7e11a3ce7c826c6b9282f71740987d6f6dcedb5c3222f77c08c782d486`
 and compiler SHA-256
 `21b1ba92c1668b659c31cb8a7bc818dd8d221105a4c78a586e0a8a90c12ac034`.
-The fresh 267-test whole-package run (including nested compiler probes) is
-still active; its early successes are not a completed suite result.
+The fresh 267-test whole-package run was interrupted by three consecutive
+transient scratch-scan ENOENT races, not a semantic test failure. Its partial
+successes are not a completed suite result. The separate r7 acceptance runner
+retries only this exact transient diagnostic, under one unchanged five-second
+deadline; 11 fault-injection tests retain fail-closed behavior for exhausted
+retries, missing roots, permissions, mixed errors and incomplete totals.
 
 The next compiler correction closes another real rejection: a closed dynamic
 call with only plain targets used to manufacture an unreachable coroutine
@@ -52,8 +63,87 @@ as do the full internal/coro race/shuffle gate (25.232s) and monotonic
 architecture gate (0.997s). Restoring only the preceding inference rejects all
 eight new frame-free assertions; the deferred plain cases remain passing.
 The original native/wasm32 fixture separately reproduces the old invented-await
-rejection. A new executable aggregate/nil/deferred-callback regression passes
-its Go control; LLGo execution and final broad regressions are pending.
+rejection. Broad cl selection passes (163.256s / 1237.0MiB), SSA selection
+passes (0.589s) and broad host build selection passes (576.659s / 8096.3MiB).
+The latter host selection spans the working-tree follow-up; it is not an
+immutable whole-source executable gate. Immutable v60 freezes compiler source
+`3b9571606`, source-manifest SHA-256
+`9089511effe3e59af0ad6f2313ab031dd8eb1f618cb19476721c680af0915ebc`
+and compiler SHA-256
+`ea0af20049350841d443d90a3787e03f035e1396e9d746ee2fa4f24de0b224ab`.
+The new aggregate/nil/deferred-callback regression and the cross-package
+interface/method-value/reflection regression pass 100 executions each (200
+top-level passes), under a 4GiB tree cap; sampled peak is 24.1MiB. Source and
+binary SHA-256 match before/after; binary SHA-256 is
+`888387e61c3ea7ab684e6ee55e036543fed04affa12fdffac711a879016ff5c1`.
+The complete v60 package, including nested compiler probes, passed all 268
+top-level tests with zero failures/skips at 06:30 UTC. Run peak was 6439.4MiB;
+all children joined, private scratch was reclaimed, and source-after matched.
+This is a whole-package result, not an aggregation of the repeated selections.
+The newer v64 compiler/runtime's separate whole-package run completed with
+266 passes and two caller-PC regressions, detailed below. It does not inherit
+the v60 pass.
+
+A separate runtime follow-up replaces the unbound uint64/empty
+runtime/debug.readGCStats stub with the signed-duration buffer protocol and
+the existing collector's ReadMemStats snapshot. It reports real cycle counts
+and available pause data only; collectors without pause timestamps retain an
+empty history rather than invented zero-duration pauses. The consistency and
+stale-quantile Go control passes ten repetitions. Runtime source v61 is frozen
+as `80755b9f9`, manifest SHA-256
+`56904406135fd8bd24f88fc5994f692e869328d158f1c96bc8cb8d6b7e88db17`.
+It reuses the unchanged v60 compiler with explicit LLGO_ROOT. The initial v61
+actual package run passed six tests but exposed stale cross-goroutine caller
+PC identities in PrintStack. After the independent caller-PC correction below,
+v63 passes all seven actual runtime/debug tests, with source-after matched
+and private scratch reclaimed. This does not implement unavailable collector
+pause telemetry or the other debug setting/heap-dump stubs, and is not a full
+runtime/debug semantic compatibility claim.
+
+Logical caller PCs now identify immutable process-wide frame metadata instead
+of G-local sequence numbers. The previous IDs aliased in process-wide symbol
+caches and could not be decoded by another G. The fix removes each G's
+synthetic-frame table, uses one 64-bucket atomic append-only metadata registry,
+and retains O(1) live-frame PC memoization. Production-extracted host race
+tests cover concurrent publication, deduplication, immutable old PCs, collisions,
+invalid tags and namespace exhaustion (2.613s / 125.4MiB). The same real LLGo
+cross-G program fails on v62, then passes 100 native executions on v63
+(6.8MiB sampled peak); source hashes match after execution.
+
+The existing logical-stack instrumentation is also enabled for default and
+named wasm targets; it does not require native frame pointers or PC-line asm.
+Explicit metadata-free mode and named non-wasm target boundaries are retained.
+Focused compiler gates pass (17.547s / 1258.9MiB). With v64 compiler and v65
+source manifest
+`780722bce8895d5d7a8eee00284ecddd3c45bdbae74eb01b8871f3c483b0f72b`,
+the actual Node/wasm cross-G program passes all identity/file/line assertions
+and writes the exact completion marker through standard os.Stdout. The old
+compiler's wasm execution panics. This is not baremetal caller-stack or wasm
+dynamic-reflection acceptance. The native CI fixture and JS CI lane now require
+this observable marker. The build integration oracle accepts both inferred
+outcome and coroutine helper entries while retaining exact token allocation,
+zeroing, propagation and update checks; its previous outcome-only match caused
+PR #264's initial single CI failure, and the corrected focused gate passes.
+
+The complete v64 `test/go` run exposed two additional regressions:
+`TestRuntimeLineInfoAndStack` and `TestRuntimeStatementLineInfo`. The registry
+incorrectly rejected tag 2, the legal `Callers` return-PC minus one used by
+panic-spliced Caller and FuncForPC. It now accepts all three nonzero marker
+forms while rejecting aligned/non-synthetic markers. The production-extracted
+race test reproduces this rejection before the fix and passes after it;
+the permanent linked fixture now covers adjusted PCs and recovered panic frames.
+Immutable v67 source manifest is
+`917b11b1bafa42d4c8711c8981ec0c2d40cb4c7f33fd83d384504e31deedafcf`.
+Using the unchanged v64 compiler, the fixture passes 100 native executions and
+actual Node/wasm execution (2126.7MiB combined build/run peak). Both original
+failing test programs also pass unchanged (116.77s and 84.46s, 2989.1MiB tree
+peak), with source-after matched. The retained v64 whole-package failure is not
+rewritten as a pass; a fresh post-fix complete run remains required.
+
+The v48 GOROOT rerun reached case 213/1082 before its 8GiB private-scratch cap
+stopped it (sampled tree peak 17313MiB). This is a resource interruption, not
+a completed suite; no new xfail is added. Its original noinit private-gc-ABI
+failure and prior full-suite evidence remain recorded separately.
 
 PR [cpunion/llgo#261](https://github.com/cpunion/llgo/pull/261) is now merged as
 `d292d73d5`, after head `33887a5bd` passed all 18 coroutine CI jobs in run
@@ -619,7 +709,7 @@ delivery/performance acceptance.
 | `test/llgoext` | 23 passed | Fixed v54 compiler/source, including defer-head isolation and 130-G ID allocation |
 | `test/std/runtime` | 5 passed | Fixed v35 compiler/source, uncached compile and execution |
 | C fault recovery, foreign reentry, traceback | 4 passed | v7 compiler; probes compile, link and execute with LLGo |
-| Full `test/go` | Fixed v46: all 266 top-level tests passed, zero failures/skips | Completed 2026-10-16 01:27 UTC, run peak 6454.0 MiB including nested compilers. Exact retained binary and source hashes match; scratch reclaimed after child join. This entire rerun starts from the beginning rather than adopting 233 interrupted passes. Includes main-panic peers, generic/static spawn, rangefunc, C faults, foreign reentry, logical stacks and reflection Call/MakeFunc. Later v47 cleanup and source-front-end changes have separate affected gates, not an implicit full-v46 acceptance transfer. |
+| Full `test/go` | v60: 268 passed; v64: 266 passed / 2 failed, then both original failures pass on v67 | v60 completed 2026-10-16 06:30 UTC, peak 6439.4 MiB including nested compilers. v64 source-after matches and scratch is reclaimed; its two failures expose the adjusted caller-PC regression fixed on v67. Both original probes pass unchanged with the fix, alongside the native/wasm permanent fixture. A fresh complete post-fix run remains required; no implicit acceptance transfer. |
 | Top-level `_demo/go` | Fixed v46: all 73/73 passed, zero semantic failures | Completed 2026-10-16 01:14 UTC. Source hashes match; private scratch reclaimed after child join and handle checks. Compiler caps are 8GiB except the recorded 12GiB importer override; generated programs retain a 2GiB cap. Disk/monitor interruptions remain in the journal; only completed exact-input package passes were reused. |
 | `test/std/os`, `test/std/net` | 85 passed; 129 passed / 5 skipped, respectively | Full packages compiled and executed with fixed source snapshot and v35, cache disabled |
 | `test/std/reflect` | v25: 68 passed | Separate real LLGo compile and generated-binary execution; build peak 5768 MiB |
@@ -783,8 +873,10 @@ bound is still explicit.
 1. Finish current executable acceptance on immutable compiler/source pairs.
    Fresh v46 `test/go` passes 266/266 and `_demo/go` passes 73/73; v47 basic
    executable packages pass 68 tests with one helper skip. The v46 stdlib
-   evaluation has 82 distinct completed package passes across fixed v46
-   cohorts; lanes 0/1 remain active. Previously joined lanes 2/3 have restarted
+   evaluation has 94 distinct completed package passes and 20 distinct failed
+   packages (including resource stops) across fixed v46 cohorts; lanes 0/1
+   have now completed, joined children, reclaimed scratch and matched
+   source-after. Previously joined lanes 2/3 have restarted
    as new immutable v56 cohorts, without adopting old-version partial passes.
    The full v48 GOROOT selection is active, not a complete pass. Keep private
    cache reclamation, unchanged source/compiler

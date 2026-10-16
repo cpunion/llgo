@@ -90,7 +90,7 @@ jobs:
             ./internal/runtime/coro_run_decision.go \
             ./internal/runtime/coro_run_decision_test.go \
             -run '^Test(CoroRunDecisionOutputModeV1|NormalCoroRunDecisionWordsV1|CoroRunDecisionWrapperRejectsMalformedNormalOnlyMode)$' -count=1
-          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerV2SourceABI|TestNativeTimerCapacity|TestTimeSleep|TestCoroGCNotification)' -count=1
+          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerV2SourceABI|TestNativeTimerCapacity|TestTimeSleep|TestCoroGCNotification|TestCallerPCRegistryProductionRace)' -count=1
           go test -race ./internal/lib/runtime/time_coro_gc_llgo.go \
             ./internal/lib/runtime/time_coro_gc_test.go -count=1 -timeout=60s
           # The complete LLGo runtime package intentionally owns symbols that
@@ -289,6 +289,13 @@ jobs:
             <(sort targets/wasm-undefined.txt) \
             <(llvm-nm --undefined-only --format=just-symbols "$output" | sort)
           node targets/wasm_exec.js "$output"
+
+          caller=/tmp/llgo-js-shared-caller-pc.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-js-wasm build -p=1 -target=wasm -o "$caller" \
+            runtime/_testgo/coro_shared_caller_pc/main.go
+          result="$(timeout 30s node --max-old-space-size=256 --unhandled-rejections=strict targets/wasm_exec.js "$caller")"
+          test "$result" = 'shared caller PC identity passed'
 
           filesystem=/tmp/llgo-js-wasm-stdlib-file.wasm
           GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
