@@ -271,8 +271,20 @@ func (s *coroStaticCleanupState) emitDeliveryFallback(p *context, b llssa.Builde
 		return
 	}
 	delivery := s.delivery
-	call, done := p.fn.MakeBlock(), p.fn.MakeBlock()
-	b.If(b.LoadKnownNonNil(delivery.fallbackActive), call, done)
+	inspect, call, normal, committed, done := p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock(), p.fn.MakeBlock()
+	b.If(b.LoadKnownNonNil(delivery.fallbackActive), inspect, done)
+	b.SetBlock(inspect)
+	returns := b.BinOp(token.AND, p.coroCleanupReturnsNormally(b, s), b.UnOp(token.NOT, b.LoadKnownNonNil(s.panicActive)))
+	b.If(returns, normal, call)
+	b.SetBlock(normal)
+	// RunDefers can resume source result reloads before terminal Return. Keep
+	// fallback custody through that interval. Only the completion pass follows
+	// the actual source Return commit. A normal discarded result then follows
+	// Go semantics: no implicit physical close merely because no caller kept it.
+	b.If(b.BinOp(token.EQL, b.LoadKnownNonNil(s.continuation), p.prog.IntVal(uint64(coroStaticCleanupContinueComplete), p.prog.Uint32())), committed, done)
+	b.SetBlock(committed)
+	b.StoreKnownNonNil(delivery.fallbackActive, p.prog.BoolVal(false))
+	b.Jump(done)
 	b.SetBlock(call)
 	b.StoreKnownNonNil(delivery.fallbackActive, p.prog.BoolVal(false))
 	base := p.coroEmissionSourceParamBase()

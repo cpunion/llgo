@@ -26,8 +26,11 @@ func closeFD(int32)
 //go:linkname checkAlive C.llgo_delivery_check_alive
 func checkAlive(int32)
 
-//go:linkname closedCount C.llgo_delivery_closed
-func closedCount() int32
+//go:linkname openCount C.llgo_delivery_opened
+func openCount() int32
+
+//go:linkname ownedFD C.llgo_delivery_owned
+func ownedFD() int32
 
 //go:linkname blocked C.llgo_delivery_blocked
 func blocked() int32
@@ -63,6 +66,9 @@ func drop(out *result, _ unsafe.Pointer, mode uint32) {
 func acquire(mode uint32) int32 {
 	out := borrow(initialize, drop)
 	openInto(out, mode)
+	if mode == 2 {
+		panic("acquisition failed after producing its resource")
+	}
 	return out.R0
 }
 
@@ -80,6 +86,12 @@ func canceledOwner() {
 	escaped()
 }
 
+func failingOwner() {
+	defer func() { recover() }()
+	acquire(2)
+	escaped()
+}
+
 func main() {
 	runtime.GOMAXPROCS(1)
 	install()
@@ -92,24 +104,32 @@ func main() {
 	go sentinel(ready)
 	<-ready
 	if fixtureMode() == 1 {
-		go acquire(2)
+		go failingOwner()
 		for closing() == 0 {
 			runtime.Gosched()
 		}
 		runtime.GC()
 		runtime.GC()
-		// A normal discarded-entry drop has already started and is awaiting
-		// waitClose, not the physical close itself. The late task stop must
-		// defer until the second await actually closes the fd.
+		// Panic cleanup has started before any task stop and is awaiting
+		// waitClose, not the physical close itself. Shutdown must defer until
+		// the second await closes the fd; the older defer recovers the panic
+		// without losing the retained shutdown base.
 		return
 	}
-
-	go acquire(0) // No result sink: the independent entry must own its fallback.
-	for closedCount() != 2 {
-		runtime.Gosched()
+	if fixtureMode() == 2 {
+		go acquire(1) // Canceled independent entry: nil-output fallback owns it.
+	} else {
+		baseline := runtime.NumGoroutine()
+		go acquire(0)
+		for openCount() != 2 || runtime.NumGoroutine() != baseline {
+			runtime.Gosched()
+		}
+		fd = ownedFD()
+		checkAlive(fd) // Go does not auto-close a normally discarded raw fd.
+		closeFD(fd)
+		go canceledOwner()
 	}
 
-	go canceledOwner()
 	for blocked() == 0 {
 		runtime.Gosched()
 	}

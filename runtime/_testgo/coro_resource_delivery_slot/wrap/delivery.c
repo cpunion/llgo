@@ -14,7 +14,7 @@ static _Atomic int opens, closes, waiting, close_waiting, released, fixture_mode
 static void check_finished(void) {
     int fd = atomic_load(&owned);
     int wanted = atomic_load(&fixture_mode) ? 2 : 3;
-    int waited = atomic_load(&fixture_mode) ? atomic_load(&close_waiting) : atomic_load(&waiting);
+    int waited = atomic_load(&fixture_mode) == 1 ? atomic_load(&close_waiting) : atomic_load(&waiting);
     if (atomic_load(&opens) != wanted || atomic_load(&closes) != wanted || fd != -1 ||
         !waited || !atomic_load(&released)) {
         /* Negative controls reclaim their own resource before reporting. */
@@ -26,14 +26,14 @@ static void check_finished(void) {
     }
     static const char normal[] = "typed resource delivery normal, discarded and canceled passed\n";
     static const char shielded[] = "typed resource drop survives late cancellation\n";
-    const char *marker = atomic_load(&fixture_mode) ? shielded : normal;
-    size_t length = atomic_load(&fixture_mode) ? sizeof(shielded) - 1 : sizeof(normal) - 1;
+    const char *marker = atomic_load(&fixture_mode) == 1 ? shielded : normal;
+    size_t length = atomic_load(&fixture_mode) == 1 ? sizeof(shielded) - 1 : sizeof(normal) - 1;
     if (write(1, marker, length) != length) _Exit(87);
 }
 
 void llgo_delivery_install(void) {
     const char *mode = getenv("LLGO_DELIVERY_FIXTURE_MODE");
-    atomic_store(&fixture_mode, mode && mode[0] == '1' && mode[1] == '\0');
+    atomic_store(&fixture_mode, mode && mode[0] >= '1' && mode[0] <= '2' && mode[1] == '\0' ? mode[0] - '0' : 0);
     if (atexit(check_finished) != 0) _Exit(88);
 }
 
@@ -60,7 +60,8 @@ void llgo_delivery_check_alive(int32_t fd) {
     if (fd < 0 || atomic_load(&owned) != fd || fcntl(fd, F_GETFD) < 0) _Exit(91);
 }
 
-int32_t llgo_delivery_closed(void) { return atomic_load(&closes); }
+int32_t llgo_delivery_opened(void) { return atomic_load(&opens); }
+int32_t llgo_delivery_owned(void) { return atomic_load(&owned); }
 int32_t llgo_delivery_blocked(void) { return atomic_load(&waiting); }
 int32_t llgo_delivery_closing(void) { return atomic_load(&close_waiting); }
 int32_t llgo_delivery_fixture_mode(void) { return atomic_load(&fixture_mode); }

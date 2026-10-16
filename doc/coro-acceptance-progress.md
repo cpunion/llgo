@@ -151,8 +151,19 @@ user continuation never resumes on the canceled lane. Source-after matches;
 compiler SHA-256 is `09cbd6e13d984204f42bec32a62f1e14bdbbe8054c89d12f76b967a255a4e135`,
 source manifest `4260c9262ab8fc6b11be9a3832c56653eff127abc06c62066b444408bb70b539`,
 binary `066464c7dd0daae1b5b831fb85b185bfcc2d2efd3cb1ae0e3ec77d6bf679ae58`.
-Combined peak is 1183.9MiB. A one-prefix omission negative and a normal drop
-interrupted between two awaits are being tested separately. This is not yet
+Combined peak is 1183.9MiB. A one-prefix omission negative builds successfully
+but fails with `open=3 close=2` (exit 86), then explicitly reclaims its fd;
+source-after matches. v78 also executes an internal drop interrupted between
+two awaits successfully. These initial prototypes auto-dropped a normal
+discarded entry, so **they do not establish Go-compatible normal-discard
+semantics**. Review corrects that rule: normal discarded raw fd results must
+remain open, while canceled or panicking undelivered results are dropped.
+The fallback stays armed through source RunDefers and is retired only at
+terminal Return commit, using existing status/continuation words. Native and
+wasm32 IR, dynamic/library selections and unchanged architecture gates pass
+(cl 12.585s, architecture 1.530s; 1301.1MiB peak). A new actual cohort covers
+normal-discard preservation, cancellation of an independent nil-output entry,
+parent cancellation and late stop during panic-driven internal drop. This is not yet
 dynamic descriptor, bodyless archive, reflection second-handoff or stdlib
 adoption acceptance; public standard-library seeds remain unchanged.
 

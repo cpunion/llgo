@@ -286,6 +286,14 @@ func (p *context) coroIncomingResultSlot() llssa.Expr {
 	return body.resultSlot
 }
 
+func (p *context) coroCleanupReturnsNormally(b llssa.Builder, owner *coroStaticCleanupState) llssa.Expr {
+	body := p.activeCoroEmissionBody()
+	if body == nil || body.cleanup != owner || body.terminalStatus.IsNil() {
+		panic("resource delivery termination escaped its exact cleanup owner")
+	}
+	return b.BinOp(token.EQL, b.LoadKnownNonNil(body.terminalStatus), p.prog.IntVal(coroAwaitCompletionReturn, p.prog.Uint32()))
+}
+
 // reconcileCoroCleanupTaskStop is the narrow mutation capability for a joined
 // cleanup call. Consumers cannot retain the mutable body or replace its panic
 // overlay. The private runtime hook has already validated/claimed kind 0/1/2.

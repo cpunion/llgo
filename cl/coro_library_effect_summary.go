@@ -121,6 +121,7 @@ func (view CoroLibraryEffectView) FunctionABIHash(
 		strconv.Itoa(metadata.PointerBits),
 		metadata.Endianness,
 		metadata.DataLayout,
+		coroDeliveryGuardABI,
 		u.emissionTypeKeys.strictABI(signature),
 	)), nil
 }

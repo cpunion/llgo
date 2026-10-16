@@ -522,6 +522,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		types.TypeString(resultSlotType, qualified),
 	)
 	key += "\x00cleanup-shield=" + coroCleanupShieldBeginHookV1 + "/" + coroCleanupShieldEndHookV1
+	key += "\x00delivery=" + coroDeliveryGuardABI
 	sum := sha256.Sum256([]byte(key))
 	var hash [16]byte
 	copy(hash[:], sum[:len(hash)])

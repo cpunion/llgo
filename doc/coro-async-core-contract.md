@@ -208,6 +208,11 @@ drop/claim 信息**，不能称为已经完成的 resource-atomic handoff。
   与上述 active tag 混为一个标记。它仅在没有 parent-owned 输出槽时启用，初始化后
   才承担资源；child physical destroy、panic、取消和 discarded `go` entry 均仍受其
   保护。正常有 parent slot 的入口不得重复初始化或抢先 drop parent 资源。
+  **普通正常 Return 丢弃结果不等于 Close**：例如 `go syscall.Open(...)` 正常返回时，
+  不能仅因返回的裸 fd 无人保存就替 Go 程序关闭它。fallback 仅在 panic/取消等未交付
+  路径 drop；source RunDefers 尚未到 terminal Return 时保留归属，实际正常 Return
+  commit 后才撤销而不释放。这复用既有 terminal status 与 cleanup continuation，
+  不新增一个动态“是否已提交”字段。正常丢弃必须有 fd 仍存活的兼容性对照。
 - 临时 child guard 的 drop 在共享 cleanup drainer 中先于普通 source defer 执行；
   fallback 的最后归属则在 source cleanup 之后结算。两者均在调用 drop 前撤销本次
   active 标记；drop 的 await/panic 重新进入原 drainer 时不能重复执行同一资源记录。
@@ -223,6 +228,13 @@ entry、reflect 第二次交付，以及标准库 wrapper 的预注册 adoption�
 的外部 defer owner 与当前 yield frame 的临时 guard 必须区分，不能错误地把后者
 挂到父函数；缺口应明确拒绝而非借普通函数指针静默绕过。每条路径都要有真实资源
 计数及故意移除 guard 的负对照，最后再启用 public API seed。
+
+底层 acquisition 必须在 physical producer 内写入借出的槽，而不是等 generic worker
+返回一个裸 fd、回到 Go wrapper 后才复制。当前真实 C adapter 使用 `openInto(out, ...)`
+证明这一点；标准库的 libc/host acquisition 也必须有等价 adapter。输出槽不得逃出
+physical join 的借用期；trusted adapter 的 noescape/结果写入契约不能由 C 类型猜测。
+大型 result 的 fallback 也不能在 parent 已提供槽时额外 eager 分配一份 managed
+aggregate；该优化及其冻结 helper placement 属于 public-seed 前的待完成 gate。
 
 只在有限 produce/transfer/release 边界保留准确事实，不改变普通 Go API 类型，
 不要求给所有调用者加注释。内部 acquisition
