@@ -3574,8 +3574,12 @@ func resolveCoroStaticPlainCall(plan *coro.SSAPlan, call ssa.CallInstruction) (*
 		effectiveExec |= selectedExec
 	}
 	unsupportedExec := effectiveExec &^ allowedExec
+	// CallPlan proves this occurrence's exact direct carrier independently of
+	// the target's first-class publication elsewhere. A named conversion of a
+	// closed, context-free function can still use its existing plain primary
+	// even when another CHA/descriptor consumer requires FuncRep=Dispatch.
 	directEntry := targetPlan.FuncRep == coro.DirectPlain ||
-		(common.StaticCallee() != nil && targetPlan.FuncRep == coro.Dispatch && validBody)
+		(targetPlan.FuncRep == coro.Dispatch && validBody)
 	if (!validBody && !validExternal && !validTrustedExternal) || !directEntry || targetPlan.Effect != coro.NoSuspend ||
 		targetPlan.Demand == coro.NoDemand || unsupportedExec != 0 {
 		return nil, coro.FunctionPlan{}, fmt.Errorf(
