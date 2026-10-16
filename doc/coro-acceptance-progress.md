@@ -523,8 +523,37 @@ Immutable v57 freezes source `15e8ddeb9`, manifest SHA-256
 compiler SHA-256
 `120be9993e3748e6428f08c495c2d06a09d5113535088d7c4bfb3057a7b0bff6`.
 The full `internal/coro` race/shuffle gate passes (38.649s / 1637.4 MiB).
-Broad cl regressions and actual expvar/filepath/SMTP package runs are pending;
-do not transfer the preceding CI pass or count these packages as accepted.
+Broad cl regressions pass (204.762s / 1239.3 MiB). The complete SMTP package
+passes four tests, with test binary SHA-256
+`989f67751fa0a7a0608fcb0d405306b127a0f121e61cf7e5e8cf549791c96ae3`.
+The cohort finishes with matching source-after and reclaimed private scratch;
+it is not a whole passing cohort: expvar's compilation exceeds the 16GiB cap
+(16405.5 MiB peak / exit 137), and filepath reproduces a separate exact-plain
+target validation failure. No executable pass is inferred from the expvar
+resource failure. A higher-cap independent retry still needs memory admission.
+
+The filepath failure has a closed, non-nil DirectPlain call occurrence, but its
+target also has a descriptor consumer elsewhere. The per-value carrier was
+already correct; validation incorrectly required a syntactic StaticCallee to
+reuse that target's existing plain primary. Removing only that condition keeps
+no-capture/no-method, effect, execution and foreign-contract checks intact.
+Native64/wasm32 gates assert one direct primary call before/after CoroSplit,
+a frame-free synchronous caller and no redundant target coroutine body or
+dynamic capability branch. The focused gate passes (2.037s / 1255.9 MiB);
+restoring only the previous validator rejects both target cases. No additional
+lowering path, function version, annotation or runtime field is added.
+
+Immutable v58 freezes this change as source `d5d6c5627`, manifest SHA-256
+`4e19f44822bab94594cd031dccfa17ff0d8d9932a909d98ea6f692d1ccf11fe3`,
+compiler SHA-256
+`7e23b89ae2f218b4aaf3a2406fe76c3cb3427132b6713f005e20fb1dc8459ddc`.
+Broad cl regressions pass (154.554s / 1208.0 MiB), and SSA passes
+(10.479s / 762.6 MiB). The complete original filepath package now compiles and
+executes successfully; test binary SHA-256 is
+`6aac372b965541cd7e86677e25ca4e250550b6c06581a0ea980b90bac62b17e5`.
+Children joined, private scratch was reclaimed, and source-after matches.
+These follow-up changes are in PR #262 to llvm-coro; fresh head-specific CI
+and review checks remain required. They do not inherit PR #261's green run.
 
 The merged PR checkpoint also has a fresh v54 four-package executable pass:
 68 tests plus one helper skip, tree peak 7192.5 MiB. Source manifest SHA-256
