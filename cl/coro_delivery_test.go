@@ -163,13 +163,29 @@ func TestCoroDeliverySourceFreezesExactTypedHelperIdentities(t *testing.T) {
 		{name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
 	} {
 		t.Run(target.name, func(t *testing.T) {
-			testCoroDeliveryTypedHelperIdentities(t, target.arch)
+			testCoroDeliveryTypedHelperIdentities(t, target.arch, false)
 		})
 	}
 }
 
-func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target) {
-	pkg, _, files := buildGoSSAPkg(t, coroDeliverySourceFixture)
+func TestCoroDeliveryRejectsUnboundDescriptorPublication(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			testCoroDeliveryTypedHelperIdentities(t, target.arch, true)
+		})
+	}
+}
+
+func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target, publish bool) {
+	source := coroDeliverySourceFixture
+	if publish {
+		source = strings.Replace(source, "func Root() { Acquire(\"fixture\") }", "var Published = Acquire\nfunc Root() { Published(\"fixture\") }", 1)
+	}
+	pkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProgForTarget(t, target)
 	defer prog.Dispose()
 	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
@@ -252,6 +268,17 @@ func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target) {
 		})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if publish {
+			fact, found := plan.FunctionPlan(producer)
+			if !found || fact.FuncRep != coro.Dispatch {
+				t.Fatalf("publication fixture did not demand its producer descriptor: %+v", fact)
+			}
+			_, err := prepareCoroDeliveryFunctionPlan(producer, plan, universe.coroProgramIR, universe)
+			if err == nil || !strings.Contains(err.Error(), "requires a bound physical resource-delivery guard for descriptor publication") {
+				t.Fatalf("unbound producer descriptor escaped publication gate: %v", err)
+			}
+			return
 		}
 		for _, function := range []*ssa.Function{producer, pkg.Func("Root")} {
 			fact, found := plan.FunctionPlan(function)

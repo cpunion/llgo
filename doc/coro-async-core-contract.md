@@ -222,6 +222,18 @@ drop/claim 信息**，不能称为已经完成的 resource-atomic handoff。
   descriptor、outcome、spawn/defer、reflect 不得各自创建另一套 cleanup 或 winner。
   没有资源契约的调用保持零额外 tag、存储和 hook。
 
+dynamic publication 的冷元信息采用 `HasDelivery` capability 和可选 tail：
+`{base-v2, {version, reserved, initializer-descriptor, drop-descriptor}}`。
+普通函数仍只有原九字段 base，funcval 仍为 `{descriptor, env}`。tail 从完整、
+含 target padding 的 base 之后开始，不能在 wasm32 上占用 base 的尾部 padding。
+helper 使用现有 context-free managed descriptor，精确校验 output pointer、原始参数、
+ABI hash 和 void result，不另设 raw callback ABI、地址反查表或调度器。
+仅有已绑定 result/cleanup transaction 的 consumer 才可打开 tail；读取必须被
+`HasDelivery` 正分支支配，普通 unguarded dispatch 拒绝该 capability。已有窄化
+structured-only fast path 要求无 delivery 的冻结证明，不能拿该证明绕过资源 guard。
+这只是物理 ABI 基元；在调用图、frame guard、library helper 和 reflect 第二次交付
+全部绑定前，source producer 的 descriptor publication 继续明确拒绝，public seed 不启用。
+
 启用 seed 前，必须同时具备：producer borrowed-address/fallback、static normal/cancel
 交付、dynamic descriptor 可选契约与 ABI 校验、库元信息消费、defer/go discarded
 entry、reflect 第二次交付，以及标准库 wrapper 的预注册 adoption。range-over-func

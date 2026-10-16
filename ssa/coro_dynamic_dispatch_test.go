@@ -291,6 +291,7 @@ func TestCoroDispatchTrustedDescriptorSkipsRepeatedContractValidation(t *testing
 			"coro.dispatch.flags.unknown",
 			"coro.dispatch.hash.invalid",
 			"coro.dispatch.result.size.invalid",
+			"coro.dispatch.delivery",
 		} {
 			if strings.Contains(body, forbidden) {
 				t.Fatalf("trusted descriptor fixture %q retained %q:\n%s", name, forbidden, body)
@@ -539,10 +540,14 @@ func TestCoroDynamicDispatchAcceptsPackedVariadicSignature(t *testing.T) {
 	}
 }
 
-func newCoroDynamicDispatchTestFixture(t *testing.T) *coroDynamicDispatchTestFixture {
+func newCoroDynamicDispatchTestFixture(t *testing.T, targets ...*Target) *coroDynamicDispatchTestFixture {
 	t.Helper()
 	Initialize(InitAll)
-	prog := NewProgram(nil)
+	var target *Target
+	if len(targets) != 0 {
+		target = targets[0]
+	}
+	prog := NewProgram(target)
 	installCoroPlainDispatchTestRuntime(prog)
 	pkg := prog.NewPackage("corodynamicdispatch", "coro/dynamic/dispatch")
 	t.Cleanup(func() {

@@ -3,17 +3,18 @@
 package ffi
 
 import (
+	"fmt"
 	"testing"
 	"unsafe"
 )
 
 func TestDispatchDescriptorABIBits(t *testing.T) {
 	if dispatchVersionV2 != 2 || dispatchHasPlain != 1 || dispatchHasOutcome != 2 || dispatchHasCoro != 4 ||
-		dispatchNoCapture != 8 || dispatchRuntimeTyped != 16 || dispatchPlainNoUnwind != 32 {
+		dispatchNoCapture != 8 || dispatchRuntimeTyped != 16 || dispatchPlainNoUnwind != 32 || dispatchHasDelivery != 64 {
 		t.Fatalf(
-			"dispatch descriptor v%d flags = plain:%d outcome:%d coro:%d no-capture:%d runtime-typed:%d plain-no-unwind:%d, want v2 1/2/4/8/16/32",
+			"dispatch descriptor v%d flags = plain:%d outcome:%d coro:%d no-capture:%d runtime-typed:%d plain-no-unwind:%d delivery:%d, want v2 1/2/4/8/16/32/64",
 			dispatchVersionV2, dispatchHasPlain, dispatchHasOutcome, dispatchHasCoro,
-			dispatchNoCapture, dispatchRuntimeTyped, dispatchPlainNoUnwind,
+			dispatchNoCapture, dispatchRuntimeTyped, dispatchPlainNoUnwind, dispatchHasDelivery,
 		)
 	}
 }
@@ -32,6 +33,10 @@ func TestDispatchDescriptorPlainUnwindFlags(t *testing.T) {
 		{"plain unproved", dispatchHasPlain, false},
 		{"orphan proof", dispatchHasCoro | dispatchPlainNoUnwind, false},
 		{"outcome coro conflict", dispatchHasOutcome | dispatchHasCoro, false},
+		{"resource coro", dispatchHasCoro | dispatchHasDelivery, true},
+		{"resource outcome", dispatchHasOutcome | dispatchHasDelivery, true},
+		{"resource plain", dispatchHasPlain | dispatchPlainNoUnwind | dispatchHasDelivery, false},
+		{"resource runtime", dispatchHasCoro | dispatchRuntimeTyped | dispatchHasDelivery, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := validDispatchPlainUnwindFlags(test.flags); got != test.want {
@@ -80,5 +85,35 @@ func TestRuntimeCoroDescriptorUsesV2StructuredEntry(t *testing.T) {
 	}
 	if got := CodeEntry(descriptor); got != entry {
 		t.Fatalf("CodeEntry = %p, want %p", got, entry)
+	}
+}
+
+func TestResourceDescriptorIdentityDoesNotAuthorizeUnboundReflection(t *testing.T) {
+	entry := unsafe.Pointer(new(byte))
+	d := dispatchDescriptorV2{
+		Version: dispatchVersionV2, Flags: dispatchHasCoro | dispatchHasDelivery,
+		StructuredEntry: entry, CodeEntry: entry, ResultSize: 8, ResultAlign: 8,
+	}
+	descriptor := unsafe.Pointer(&d)
+	if got := CodeEntry(descriptor); got != entry {
+		t.Fatal("resource metadata broke non-invoking code identity queries")
+	}
+	for _, test := range []struct {
+		name string
+		call func()
+	}{
+		{"unprotected-entry", func() { CoroEntry(descriptor) }},
+		// CallLLGo's guard is independently testable without linking its LLGo
+		// compiler intrinsics or native libffi symbols into the host-Go test.
+		{"unprotected-call-guard", func() { rejectUnboundResourceDelivery(d.Flags) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			defer func() {
+				if got := fmt.Sprint(recover()); got != "llgo: resource result delivery through reflection is not bound" {
+					t.Fatalf("unprotected resource invocation panic=%s", got)
+				}
+			}()
+			test.call()
+		})
 	}
 }

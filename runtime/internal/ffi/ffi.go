@@ -98,9 +98,10 @@ const (
 	dispatchNoCapture     uint32 = 1 << 3
 	dispatchRuntimeTyped  uint32 = 1 << 4
 	dispatchPlainNoUnwind uint32 = 1 << 5
+	dispatchHasDelivery   uint32 = 1 << 6
 
 	dispatchCapabilityMask = dispatchHasPlain | dispatchHasOutcome | dispatchHasCoro
-	dispatchKnownFlags     = dispatchCapabilityMask | dispatchNoCapture | dispatchRuntimeTyped | dispatchPlainNoUnwind
+	dispatchKnownFlags     = dispatchCapabilityMask | dispatchNoCapture | dispatchRuntimeTyped | dispatchPlainNoUnwind | dispatchHasDelivery
 )
 
 const dispatchRuntimeTypeMagicV2 uint64 = 0x4c4c474f52545932 // "LLGORTY2"
@@ -111,6 +112,7 @@ func validDispatchPlainUnwindFlags(flags uint32) bool {
 	hasCoro := flags&dispatchHasCoro != 0
 	plainNoUnwind := flags&dispatchPlainNoUnwind != 0
 	return !(hasOutcome && hasCoro) &&
+		(flags&dispatchHasDelivery == 0 || !hasPlain && flags&dispatchRuntimeTyped == 0) &&
 		(!plainNoUnwind || hasPlain) &&
 		(!hasPlain || hasOutcome || hasCoro || plainNoUnwind)
 }
@@ -181,7 +183,16 @@ func CoroEntry(descriptor unsafe.Pointer) unsafe.Pointer {
 		d.CodeEntry == nil {
 		panic("llgo: invalid managed function descriptor")
 	}
+	rejectUnboundResourceDelivery(flags)
 	return d.StructuredEntry
+}
+
+func rejectUnboundResourceDelivery(flags uint32) {
+	// Reflection must own the second handoff into []reflect.Value before it
+	// may consume this capability. Identity queries do not invoke a producer.
+	if flags&dispatchHasDelivery != 0 {
+		panic("llgo: resource result delivery through reflection is not bound")
+	}
 }
 
 // CodeEntry returns the compiler-injected physical function identity carried
@@ -273,6 +284,8 @@ func CallLLGo(
 		d.ResultAlign != resultAlign {
 		panic("llgo: invalid managed function descriptor")
 	}
+
+	rejectUnboundResourceDelivery(flags)
 
 	if flags&(dispatchHasOutcome|dispatchHasCoro) != 0 {
 		// Every structured entry receives a non-nil out pointer, including a

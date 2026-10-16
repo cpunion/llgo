@@ -258,13 +258,55 @@ storage instead, preserves ordinary typed storage, and adds an indirect unsafe
 storage-wrapper case. All nine origins, closed plain families, native/wasm32
 universal-entry IR and the unchanged Linux mmap/read discrimination now pass
 (core race selection 1.238s, cl 6.252s, architecture 0.912s; 1279.5MiB peak).
-The broad rerun and actual final-refinement execution remain required. No
-pointer-proof expectation or architecture budget is relaxed.
+The broad rerun and actual final-refinement execution are complete on v84:
+cl 180.453s, unfiltered cltest 7.561s, architecture 0.767s and full core race
+24.585s pass. Immutable actual execution passes all six resource modes (60/60),
+unchanged reflection/GC, cgo-handle and claimed-cleanup-channel routes
+(2753.0MiB combined peak, matching source-after). Source is `8d3209239`,
+compiler SHA-256 `ba4afdad5e59390f94ab13d3ca426702b30631a3fee8bcaf7975ece5eae9371c`,
+manifest `66df1c59ada538c676f6f7d9e31150bc2c4ded3450f63e9a000eec6904edfb5a`.
+[PR #268](https://github.com/cpunion/llgo/pull/268) is merged as `cec411c36`
+at 11:42:49 UTC after all 18 jobs in run `38893085392` pass at the exact head.
+Paginated reviews, inline/issue comments and threads are empty directly before
+merge. No pointer-proof expectation or architecture budget is relaxed.
+
+Old shard 2 also reports `fixedbugs/issue27695c.go`; a strict unchanged-case
+v84 rerun passes (135.434s LLGo build / 323ms application, 2039.2MiB peak,
+matching source-after). The first launcher supplies `v84` instead of numeric
+`84` and exits before running a case; corrected `r2` is the actual pass.
+
+The next isolated branch implements the optional typed descriptor delivery
+tail. Ordinary descriptors retain all nine base fields; extensions nest the
+complete base, preserving wasm32 padding, and contain only version, reserved
+and two existing managed helper descriptors. Publication checks exact output,
+environment and argument types, helper ABI hashes, context-free provenance and
+void results. Positive capability control flow dominates each tail read.
+Unguarded universal dispatch and reflection refuse the capability; code identity
+queries remain valid. Narrow closed nonresource calls retain their one-word
+entry load. Source producer publication still rejects until its physical guard,
+graph placements, library helpers and reflection second handoff are bound.
+This is an ABI primitive, **not completed dynamic/public resource acceptance**;
+public standard-library seeds remain off.
+
+The first broad compiler rerun is retained as a failure: creating a descriptor
+trap before a later package-owned `llvm.trap` declaration produces the invalid
+renamed intrinsic `llvm.trap.1`. The shared package declaration path now adopts
+an already-created LLVM intrinsic only with the exact C signature, no closure
+environment and no instantiated linkage; mismatches reject. Standalone native
+and wasm32 tests cover this declaration-order regression. The existing closed
+plain-family gates pass again (11.870s), without altering verifier checks.
+The delivery capability is also folded into the existing allowed-flags mask:
+ordinary universal calls retain precisely the old validation mask/trap, and
+frozen closed nonresource calls gain no delivery probe. Full SSA passes 17.482s,
+unfiltered cltest 15.260s, initial selected compiler 43.199s, architecture 2.215s
+and host FFI tests 0.299s. The final broad rerun and immutable actual execution
+of this optional-tail source are still required.
 
 GOROOT shard 1 also reports `fixedbugs/issue27695b.go` in the reflection/GC
 path. A strict unchanged-case v79 rerun still fails with `invalid zero-ticket
 coroutine run decision` (228.29s case; 2086.2MiB peak, source-after matched).
-This remains a real implementation gap, not an ABI exclusion or a new xfail.
+At that snapshot this is a real implementation gap, not an ABI exclusion or a
+new xfail; subsequent v82/v84 passes and the causal negative are recorded above.
 
 The v58 expvar retry now compiles and executes all four tests successfully.
 It retains source `d5d6c5627`, source-manifest SHA-256
@@ -1127,7 +1169,7 @@ bound is still explicit.
    Complete v67/v70 `test/go` cohorts pass 268/268 each; v70 native Go demos
    pass 73/73. A fresh v83 `test/go` is executing after the opaque-callable fix;
    v82's compiled-only attempt stopped on a missing `lsof` in the caller PATH.
-   The single-snapshot v70 180-package stdlib evaluation has 39 completed
+   The single-snapshot v70 180-package stdlib evaluation has 46 completed
    package passes and no failure so far; it remains active. The older fixed
    v65-source/v64-compiler eight-shard GOROOT evaluation has completed shards
    0/1 and is running shard 2. Preserve every older failure/resource stop;

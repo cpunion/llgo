@@ -51,10 +51,13 @@ const (
 	// with only HasPlain must carry this bit so coroutine cleanup and ordinary
 	// dynamic-await fallback remain structured.
 	CoroDispatchFlagPlainNoUnwind
+	// CoroDispatchFlagHasDelivery advertises the optional typed result-custody
+	// tail. Ordinary descriptors retain exactly the nine-field base layout.
+	CoroDispatchFlagHasDelivery
 
 	CoroDispatchCapabilityMaskV2 = CoroDispatchFlagHasPlain | CoroDispatchFlagHasOutcome | CoroDispatchFlagHasCoro
 	CoroDispatchKnownFlagsV2     = CoroDispatchCapabilityMaskV2 | CoroDispatchFlagNoCapture |
-		CoroDispatchFlagRuntimeTyped | CoroDispatchFlagPlainNoUnwind
+		CoroDispatchFlagRuntimeTyped | CoroDispatchFlagPlainNoUnwind | CoroDispatchFlagHasDelivery
 	CoroPlainDispatchFlagsV2 = CoroDispatchFlagHasPlain | CoroDispatchFlagNoCapture |
 		CoroDispatchFlagPlainNoUnwind
 )
@@ -373,7 +376,8 @@ func (p Package) isCoroDispatchDescriptor(descriptor Expr) bool {
 		return false
 	}
 	want := p.Prog.Pointer(p.Prog.coroDispatchDescriptorType())
-	return types.Identical(descriptor.RawType(), want.RawType())
+	return types.Identical(descriptor.RawType(), want.RawType()) ||
+		types.Identical(descriptor.RawType(), p.Prog.Pointer(p.Prog.coroDeliveryDescriptorType()).RawType())
 }
 
 func (p Package) matchesCoroPlainDispatchDescriptor(

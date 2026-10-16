@@ -48,6 +48,9 @@ type CoroDispatchDescriptorOptions struct {
 	// reflection. It is never invoked through the descriptor dispatch ABI.
 	CodeEntry Expr
 	Result    Type
+	// Delivery is cold, optional metadata for a producer whose existing typed
+	// output must be protected until its caller consumes completion and results.
+	Delivery *CoroDispatchDeliveryOptions
 }
 
 // CoroDispatchCallOptions is the caller's exact v2 ABI contract. Capability is
@@ -67,8 +70,14 @@ type CoroDispatchCallOptions struct {
 	// descriptor schema, ABI hash, result layout, environment contract, and
 	// advertised entries. The call still performs the language-level nil check
 	// unless DescriptorNonNil is also set, but it does not repeat those invariant
-	// checks on every invocation.
+	// checks on every invocation. Without DeliveryGuard the proof must also
+	// establish a closed nonresource target family; producer publication remains
+	// fail-closed until that physical guard is bound.
 	TrustedDescriptor bool
+	// DeliveryGuard permits HasDelivery only for a consumer which binds the
+	// returned helpers into its existing result/cleanup transaction. Default
+	// calls reject that capability instead of silently losing custody.
+	DeliveryGuard bool
 }
 
 // CoroDispatchSelection is one validated immutable descriptor snapshot. Its
@@ -78,14 +87,22 @@ type CoroDispatchCallOptions struct {
 // Keeping the selected entries live across successor blocks also prevents each
 // branch from reloading and revalidating the complete nine-word descriptor.
 type CoroDispatchSelection struct {
-	prepared   coroDispatchPreparedCall
-	hasOutcome Expr
-	hasCoro    Expr
+	prepared    coroDispatchPreparedCall
+	hasOutcome  Expr
+	hasCoro     Expr
+	hasDelivery Expr
 }
 
 func (selection CoroDispatchSelection) HasOutcome() Expr { return selection.hasOutcome }
 func (selection CoroDispatchSelection) HasCoro() Expr    { return selection.hasCoro }
 func (selection CoroDispatchSelection) CodeEntry() Expr  { return selection.prepared.code }
+
+func (selection CoroDispatchSelection) HasDelivery() Expr {
+	if selection.hasDelivery.IsNil() {
+		panic("ssa: coroutine delivery probe requires a guarded consumer")
+	}
+	return selection.hasDelivery
+}
 
 // CoroDispatchStructuredOnlySelection is the narrow descriptor snapshot used
 // by a frozen closed call whose complete target set is proven to publish one
@@ -111,8 +128,9 @@ func (selection CoroDispatchStructuredOnlySelection) CodeEntry() Expr {
 	return selection.prepared.code
 }
 
-// NewCoroDispatchDescriptor defines one link-once nine-field descriptor. It
-// only publishes typed entry points; allocation, child registration, awaiting,
+// NewCoroDispatchDescriptor defines one link-once nine-field descriptor with
+// an optional delivery tail. It only publishes typed entry points;
+// allocation, child registration, awaiting,
 // cancellation, and result consumption remain frontend/scheduler operations.
 func (p Package) NewCoroDispatchDescriptor(
 	name string, opts CoroDispatchDescriptorOptions,
@@ -131,6 +149,7 @@ func (p Package) NewCoroDispatchDescriptor(
 		panic("ssa: coroutine dispatch descriptor: " + err.Error())
 	}
 	validateCoroDispatchResult(p.Prog, opts.Result, "descriptor")
+	delivery := p.validateCoroDispatchDelivery(opts)
 
 	plain := p.validateCoroDispatchEntry(
 		opts.PlainEntry,
@@ -166,7 +185,7 @@ func (p Package) NewCoroDispatchDescriptor(
 		panic(fmt.Sprintf("ssa: coroutine dispatch symbol %q already exists", name))
 	}
 	return p.newCoroDispatchDescriptorGlobal(
-		name, opts.Version, opts.Flags, opts.ABIHash, plain, structured, code, opts.Result,
+		name, opts.Version, opts.Flags, opts.ABIHash, plain, structured, code, opts.Result, delivery...,
 	)
 }
 
@@ -339,11 +358,16 @@ func (b Builder) PrepareCoroDispatchCall(
 			Type: b.Prog.Bool(),
 		}
 	}
-	return CoroDispatchSelection{
+	selection := CoroDispatchSelection{
 		prepared:   call,
 		hasOutcome: boolean(hasOutcome),
 		hasCoro:    boolean(hasCoro),
 	}
+	if opts.DeliveryGuard {
+		selection.hasDelivery = boolean(llvm.CreateAnd(b.impl, call.flags.impl,
+			b.Prog.IntVal(uint64(CoroDispatchFlagHasDelivery), b.Prog.Uint32()).impl))
+	}
+	return selection
 }
 
 // PrepareCoroDispatchStructuredOnly snapshots only the words required by a
@@ -351,13 +375,17 @@ func (b Builder) PrepareCoroDispatchCall(
 // mandatory. Unlike PrepareCoroDispatchCall, this operation intentionally
 // omits runtime schema, hash, layout, and capability probes because
 // whole-program/library metadata has already proved the exact descriptor
-// family at this occurrence.
+// family at this occurrence, including the absence of result-delivery custody.
+// A guarded producer must use the full capability selection instead.
 //
 // needCodeEntry should be true only for transparent-recover bookkeeping. The
 // returned selection invokes only the typed structured entry.
 func (b Builder) PrepareCoroDispatchStructuredOnly(
 	fn Expr, opts CoroDispatchCallOptions, needCodeEntry bool,
 ) CoroDispatchStructuredOnlySelection {
+	if opts.DeliveryGuard {
+		panic("ssa: guarded delivery requires the full descriptor capability selection")
+	}
 	if !opts.TrustedDescriptor {
 		panic("ssa: structured-only coroutine dispatch requires a trusted descriptor proof")
 	}
@@ -549,6 +577,8 @@ type coroDispatchPreparedCall struct {
 	env        Expr
 	flags      Expr
 	signature  *types.Signature
+	descriptor Expr
+	result     Type
 }
 
 func (b Builder) requireCoroDispatchSelection(
@@ -629,6 +659,8 @@ func (b Builder) prepareCoroDispatchCall(
 			flags:      fields[1],
 			code:       fields[8],
 			signature:  sig,
+			descriptor: descriptorPtr,
+			result:     opts.Result,
 		}
 		if capability == CoroDispatchFlagHasPlain {
 			prepared.entry = fields[4]
@@ -652,9 +684,15 @@ func (b Builder) prepareCoroDispatchCall(
 	)
 	flags := fields[1].impl
 	zeroFlags := b.Prog.IntVal(0, b.Prog.Uint32()).impl
+	allowedFlags := CoroDispatchKnownFlagsV2
+	if !opts.DeliveryGuard {
+		// Reuse the existing unknown-capability check. Ordinary consumers keep
+		// precisely their old mask and do not pay for another branch/probe.
+		allowedFlags &^= CoroDispatchFlagHasDelivery
+	}
 	unknown := llvm.CreateAnd(
 		b.impl, flags,
-		b.Prog.IntVal(uint64(^uint32(CoroDispatchKnownFlagsV2)), b.Prog.Uint32()).impl,
+		b.Prog.IntVal(uint64(^allowedFlags), b.Prog.Uint32()).impl,
 	)
 	addInvalid("coro.dispatch.flags.unknown", llvm.CreateICmp(b.impl, llvm.IntNE, unknown, zeroFlags))
 	capabilities := llvm.CreateAnd(
@@ -724,6 +762,12 @@ func (b Builder) prepareCoroDispatchCall(
 		llvm.CreateAnd(b.impl, flags, b.Prog.IntVal(uint64(CoroDispatchFlagRuntimeTyped), b.Prog.Uint32()).impl),
 		zeroFlags,
 	)
+	if opts.DeliveryGuard {
+		deliveryFlag := llvm.CreateICmp(b.impl, llvm.IntNE,
+			llvm.CreateAnd(b.impl, flags, b.Prog.IntVal(uint64(CoroDispatchFlagHasDelivery), b.Prog.Uint32()).impl), zeroFlags)
+		addInvalid("coro.dispatch.delivery.flags.invalid", llvm.CreateAnd(b.impl, deliveryFlag,
+			b.impl.CreateOr(plainFlag, runtimeTyped, "")))
+	}
 	hashLoMismatch := llvm.CreateICmp(
 		b.impl, llvm.IntNE, fields[2].impl,
 		b.Prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[:8]), b.Prog.Uint64()).impl,
@@ -777,6 +821,8 @@ func (b Builder) prepareCoroDispatchCall(
 		flags:      fields[1],
 		code:       fields[8],
 		signature:  sig,
+		descriptor: descriptorPtr,
+		result:     opts.Result,
 	}
 	if capability == CoroDispatchFlagHasPlain {
 		prepared.entry = fields[4]
@@ -834,8 +880,12 @@ func (p Package) validateCoroDispatchCodeEntry(entry Expr) llvm.Value {
 func (p Package) newCoroDispatchDescriptorGlobal(
 	name string, version, flags uint32, hash [16]byte,
 	plain, structured, code llvm.Value, result Type,
+	delivery ...llvm.Value,
 ) Expr {
 	descriptorType := p.Prog.coroDispatchDescriptorType()
+	if len(delivery) != 0 {
+		descriptorType = p.Prog.coroDeliveryDescriptorType()
+	}
 	descriptor := p.NewVarEx(name, p.Prog.Pointer(descriptorType))
 	if plain.IsNil() {
 		plain = p.Prog.Nil(p.Prog.VoidPtr()).impl
@@ -854,11 +904,16 @@ func (p Package) newCoroDispatchDescriptorGlobal(
 		p.Prog.IntVal(p.Prog.AlignOf(result), p.Prog.Uintptr()).impl,
 		code,
 	}
-	descriptor.impl.SetInitializer(p.Prog.ctx.ConstStruct(fields, false))
+	initializer := p.Prog.ctx.ConstStruct(fields, false)
+	if len(delivery) != 0 {
+		initializer = p.Prog.ctx.ConstStruct([]llvm.Value{initializer,
+			p.Prog.ctx.ConstStruct(delivery, false)}, false)
+	}
+	descriptor.impl.SetInitializer(initializer)
 	descriptor.impl.SetGlobalConstant(true)
 	descriptor.impl.SetLinkage(llvm.LinkOnceODRLinkage)
 	descriptor.impl.SetUnnamedAddr(true)
-	return descriptor.Expr
+	return Expr{descriptor.impl, p.Prog.Pointer(p.Prog.coroDispatchDescriptorType())}
 }
 
 func (p Package) matchesCoroDispatchDescriptor(
@@ -868,6 +923,13 @@ func (p Package) matchesCoroDispatchDescriptor(
 		return false
 	}
 	initializer := descriptor.impl.Initializer()
+	if opts.Delivery != nil {
+		if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 2 ||
+			!p.matchesCoroDispatchDelivery(initializer.Operand(1), *opts.Delivery) {
+			return false
+		}
+		initializer = initializer.Operand(0)
+	}
 	if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 9 {
 		return false
 	}
@@ -925,6 +987,9 @@ func validateCoroDispatchContract(version, flags uint32) {
 	}
 	if hasPlain && !hasOutcome && !hasCoro && !plainNoUnwind {
 		panic("ssa: coroutine dispatch plain-only capability requires PlainNoUnwind")
+	}
+	if flags&CoroDispatchFlagHasDelivery != 0 && (hasPlain || flags&CoroDispatchFlagRuntimeTyped != 0) {
+		panic("ssa: coroutine delivery requires a compiler-owned structured-only descriptor")
 	}
 }
 
