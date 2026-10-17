@@ -634,7 +634,9 @@ func (source *ManualOperationSource) BeginClose(p *P, id OperationID) ManualOper
 // source-owned record identity. It is the production SourceSet path: unrelated
 // live slots are neither inspected nor changed. Closing producer admission is
 // independent of physical quiescence, so the ParkLink may detach immediately
-// after the source has acknowledged winner/loser/canceled disposition.
+// after the source has acknowledged winner/loser/canceled disposition, unless
+// an automatic packet consumer must enter cleanup/Confirm in the same epoch.
+// Those consumers first join admitted posts and drain their final mailbox.
 func (source *ManualOperationSource) ApplyOne(p *P, id OperationID, record *OperationRecord) OperationApplyResult {
 	slot, ok := manualOperationSlotFor(source, id)
 	if !ok || !validManualOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
