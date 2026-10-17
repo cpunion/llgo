@@ -47,7 +47,7 @@ func freezeSSAImportedFunctions(facts []LibraryEffectFunction, source map[Functi
 		}
 		// A helper's own resource result would need a further custody handoff.
 		// Do not turn declaration-only support into permission to omit that guard.
-		if !fact.Delivery.IsZero() {
+		if !fact.Delivery.IsZero() || fact.DeliveryUnbound {
 			return nil, fmt.Errorf("coro: imported archive helper %q cannot itself publish resource results", fact.ID)
 		}
 		ret[fact.ID] = fact
@@ -74,7 +74,7 @@ func (p *SSAPlan) canonicalDigestImportedFunctions() ([]SSAImportedFunctionPlan,
 		if err := validateDigestFunctionID(fact.ID); err != nil {
 			return nil, err
 		}
-		if !fact.Delivery.IsZero() || fact.ID != plan.ID || index != 0 && previous >= fact.ID {
+		if !fact.Delivery.IsZero() || fact.DeliveryUnbound || fact.ID != plan.ID || index != 0 && previous >= fact.ID {
 			return nil, fmt.Errorf("coro: malformed imported archive helper inventory at %q", fact.ID)
 		}
 		previous = fact.ID

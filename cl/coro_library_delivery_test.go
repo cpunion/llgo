@@ -221,6 +221,40 @@ func Deferred() { defer Acquire("discard") }
 				}
 				return index
 			}
+			t.Run("unbound-requirement", func(t *testing.T) {
+				unbound := facts[0]
+				unbound.Delivery, unbound.DeliveryUnbound = coro.DeliveryRecipeRecord{}, true
+				physicalProg := newLLSSAProgForTarget(t, target.arch)
+				defer physicalProg.Dispose()
+				u, err := prepareStacklessEmissionUniverseWithOptions(physicalProg, nil,
+					[]EmissionPackage{{SSA: pkg, Files: files}}, EmissionUniverseOptions{CoroLibraryEffects: makeIndex([]coro.LibraryEffectFunction{unbound})})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := u.CoroLibraryEffects().ValidateFunction(pkg.Func("Acquire"), metadata, unbound); err != nil {
+					t.Fatalf("negative archive identity was lost: %v", err)
+				}
+				if _, present, err := u.coroProgramIR.sourceDelivery(pkg.Func("Acquire")); present || err == nil {
+					t.Fatalf("unbound archive import became an ordinary callable: present=%t err=%v", present, err)
+				}
+				for _, name := range []string{"Root", "Deferred"} {
+					for _, block := range pkg.Func(name).Blocks {
+						for _, instruction := range block.Instrs {
+							call, ok := instruction.(ssa.CallInstruction)
+							if !ok || call.Common().StaticCallee() != pkg.Func("Acquire") {
+								continue
+							}
+							if _, found, err := u.CoroCallSitePlan(call); !found || err == nil {
+								t.Fatalf("%s lost its imported receiver requirement: present=%t err=%v", name, found, err)
+							}
+						}
+					}
+				}
+				unbound.DeliveryUnbound = false
+				if err := u.CoroLibraryEffects().ValidateFunction(pkg.Func("Acquire"), metadata, unbound); err == nil {
+					t.Fatal("archive publication silently removed the frozen unbound requirement")
+				}
+			})
 			bound, err := view.bindArchiveDeliveryRecipe(pkg.Func("Acquire"), metadata, facts[0], makeIndex(facts))
 			if err != nil || bound.recipe.Record() != record {
 				t.Fatalf("private helper binding: %+v: %v", bound, err)

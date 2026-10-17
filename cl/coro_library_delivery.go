@@ -181,7 +181,7 @@ func (view CoroLibraryEffectView) bindArchiveDeliveryRecipe(
 	var callables [2]coro.DeliveryCallable
 	for ordinal, helperID := range [2]coro.FunctionID{record.Initializer, record.Drop} {
 		helper, present := index.Lookup(helperID)
-		if !present || !helper.Delivery.IsZero() {
+		if !present || !helper.Delivery.IsZero() || helper.DeliveryUnbound {
 			return fail("helper %q has no ordinary exact archive entry", helperID)
 		}
 		helperSignature := initialize
@@ -247,6 +247,15 @@ func (builder coroProgramIRBuilder) freezeArchiveDeliveryProducers(ir *coroProgr
 			continue
 		} // A source definition is authoritative.
 		fact, found := u.libraryImports.Lookup(id)
+		if found && fact.DeliveryUnbound {
+			if err := u.libraryEffects.validateFunctionEntry(function, metadata, fact); err != nil {
+				return err
+			}
+			facts := ir.localBodyFacts[function]
+			facts.deliveryReceiver, facts.ResultDelivery = function, true
+			ir.localBodyFacts[function] = facts
+			continue
+		}
 		if !found || fact.Delivery.IsZero() {
 			continue
 		}

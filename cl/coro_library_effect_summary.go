@@ -181,6 +181,12 @@ func (view CoroLibraryEffectView) ValidateFunction(
 	if err := view.validateFunctionEntry(function, metadata, fact); err != nil {
 		return err
 	}
+	if unbound := view.index.universe.coroProgramIR.localBodyFacts[function].deliveryReceiver != nil; unbound || fact.DeliveryUnbound {
+		if !unbound || !fact.DeliveryUnbound || !fact.Delivery.IsZero() {
+			return fmt.Errorf("coroutine library function %q has a missing or mismatched unbound delivery requirement", fact.ID)
+		}
+		return nil
+	}
 	// A source producer must publish its contract, not silently downgrade to an
 	// ordinary result transfer. A bodyless import still cannot consume it until
 	// its exact helpers and parent guard have been bound in ProgramIR.
@@ -788,6 +794,7 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			StaticOutcome:         functionPlan.StaticOutcome,
 			PrimarySymbol:         entry.name,
 			RawPlainSymbol:        rawPlainSymbol,
+			DeliveryUnbound:       universe.coroProgramIR.localBodyFacts[function].deliveryReceiver != nil,
 			ProgramCapabilities:   programCapabilities,
 			ProgramPredicates:     programPredicates,
 			ExportIngress: func() bool {
@@ -801,15 +808,19 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 				return ""
 			}(),
 		}
-		if delivery, present, err := universe.CoroLibraryEffects().SourceDeliveryRecord(function, metadata); err != nil {
-			return fmt.Errorf("coroutine library summary: delivery recipe for %q: %w", functionPlan.ID, err)
-		} else if present {
-			fact.Delivery = delivery
-			if !delivery.DropView.IsZero() {
-				recipe := universe.coroProgramIR.deliveryProducers[function]
-				primary := p.coroDeliveryRecipeHelperPrimary(recipe, 1)
-				if primary.physical.Name() != delivery.DropView.Symbol {
-					return fmt.Errorf("delivery archive view differs from its published physical symbol")
+		// ABI-only method identities retain a negative requirement across
+		// archives; the missing recipe must not imply ordinary results.
+		if !fact.DeliveryUnbound {
+			if delivery, present, err := universe.CoroLibraryEffects().SourceDeliveryRecord(function, metadata); err != nil {
+				return fmt.Errorf("coroutine library summary: delivery recipe for %q: %w", functionPlan.ID, err)
+			} else if present {
+				fact.Delivery = delivery
+				if !delivery.DropView.IsZero() {
+					recipe := universe.coroProgramIR.deliveryProducers[function]
+					primary := p.coroDeliveryRecipeHelperPrimary(recipe, 1)
+					if primary.physical.Name() != delivery.DropView.Symbol {
+						return fmt.Errorf("delivery archive view differs from its published physical symbol")
+					}
 				}
 			}
 		}

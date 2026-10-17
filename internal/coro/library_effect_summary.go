@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	LibraryEffectSummaryVersion = "v19"
+	LibraryEffectSummaryVersion = "v20"
 
 	// LibraryEffectExportIngressABIV1 identifies the compiler-generated exact
 	// C-to-managed adapter published by LibraryEffectExportIngress. It is
@@ -61,7 +61,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 19,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 20,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -136,6 +136,10 @@ type LibraryEffectFunction struct {
 	// omitzero preserves the compact ordinary-function record. Value semantics
 	// keep canonical summaries and the immutable import index free of aliases.
 	Delivery DeliveryRecipeRecord `json:"delivery,omitzero"`
+	// DeliveryUnbound preserves a known resource forwarding requirement whose
+	// evaluated receiver cannot yet be retained. It is negative callability
+	// metadata, never an ordinary result contract or a usable helper recipe.
+	DeliveryUnbound bool `json:"delivery_unbound,omitempty"`
 }
 
 func (function LibraryEffectFunction) HasStaticOutcome() bool {
@@ -369,6 +373,10 @@ func (function LibraryEffectFunction) validate() error {
 		if function.Delivery.Producer != function.ID || function.Delivery.ProducerABI != function.ABIHash {
 			return fmt.Errorf("coro: library function %q delivery does not bind its producer identity and ABI", function.ID)
 		}
+	}
+	if function.DeliveryUnbound && (!function.Delivery.IsZero() || function.RawPlainSymbol != "" ||
+		function.ManagedEntry != ManagedEntryCoroutine && function.ManagedEntry != ManagedEntryOutcomePlain) {
+		return fmt.Errorf("coro: library function %q unbound delivery requires a structured-only entry without a usable recipe", function.ID)
 	}
 	if err := function.Effect.Validate(); err != nil {
 		return err
@@ -860,7 +868,7 @@ func (function LibraryEffectFunction) ImportedPolicy() (SSAFunctionPolicy, error
 		AtomicCostProof:       function.AtomicCostProof,
 		AtomicCostCertificate: function.AtomicCostCertificate,
 		StaticOutcome:         function.StaticOutcome,
-		ResultDelivery:        !function.Delivery.IsZero(),
+		ResultDelivery:        !function.Delivery.IsZero() || function.DeliveryUnbound,
 		IgnoreBody:            true,
 		External:              ExternalKnown,
 		OverrideExternal:      true,
@@ -906,6 +914,7 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 				return nil, fmt.Errorf("coro: duplicate imported library effect function %q", function.ID)
 			}
 			index.functions[function.ID] = function
+			index.hasDelivery = index.hasDelivery || function.DeliveryUnbound
 			if !function.Delivery.IsZero() {
 				deliveries = append(deliveries, function)
 			}
@@ -953,7 +962,7 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 			if !found || fact.ABIHash != helper.abi {
 				return nil, fmt.Errorf("coro: library delivery %q has no exact %s %q ABI", function.ID, helper.role, helper.id)
 			}
-			if !fact.Delivery.IsZero() {
+			if !fact.Delivery.IsZero() || fact.DeliveryUnbound {
 				return nil, fmt.Errorf("coro: library delivery %q %s must not itself publish resource results", function.ID, helper.role)
 			}
 		}
@@ -964,7 +973,7 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 			}
 		}
 	}
-	index.hasDelivery = len(deliveries) != 0
+	index.hasDelivery = index.hasDelivery || len(deliveries) != 0
 	return index, nil
 }
 
