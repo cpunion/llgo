@@ -41,6 +41,7 @@ func TestCoroReflectHeaderGCAcceptance(t *testing.T) {
 		{"shared-caller-pc", filepath.Join(root, "runtime", "_testgo", "coro_shared_caller_pc", "main.go"), "shared caller PC identity passed"},
 		{"cgo-handle-routes", filepath.Join(root, "runtime", "_testgo", "coro_cgo_handle_routes", "main.go"), "cgo handle managed routes passed"},
 		{"claimed-cleanup-channel", filepath.Join(root, "runtime", "_testgo", "coro_claimed_cleanup_channel", "main.go"), "claimed asynchronous cleanup channel completed"},
+		{"large-recovery-slot", filepath.Join(root, "runtime", "_testgo", "coro_large_recovery_slot", "main.go"), "large recovery slots preserve named and unnamed results"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			image := filepath.Join(t.TempDir(), "header")

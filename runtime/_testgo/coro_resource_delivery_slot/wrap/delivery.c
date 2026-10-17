@@ -14,7 +14,7 @@ static _Atomic int opens, closes, waiting, close_waiting, released, fixture_mode
 static void check_finished(void) {
     int fd = atomic_load(&owned);
     int mode = atomic_load(&fixture_mode);
-    int wanted = mode == 0 || mode == 5 || mode == 9 ? 3 : 2;
+    int wanted = mode == 0 || mode == 5 || mode == 9 || mode >= 12 ? 3 : 2;
     int waited = atomic_load(&fixture_mode) == 1 ? atomic_load(&close_waiting) : atomic_load(&waiting);
     if (atomic_load(&opens) != wanted || atomic_load(&closes) != wanted || fd != -1 ||
         !waited || !atomic_load(&released)) {
@@ -36,7 +36,7 @@ void llgo_delivery_install(void) {
     const char *mode = getenv("LLGO_DELIVERY_FIXTURE_MODE");
     char *end = NULL;
     long value = mode ? strtol(mode, &end, 10) : 0;
-    atomic_store(&fixture_mode, mode && end != mode && *end == '\0' && value >= 1 && value <= 11 ? (int)value : 0);
+    atomic_store(&fixture_mode, mode && end != mode && *end == '\0' && value >= 1 && value <= 15 ? (int)value : 0);
     if (atexit(check_finished) != 0) _Exit(88);
 }
 
@@ -51,6 +51,10 @@ void llgo_delivery_open(int32_t *out, uint32_t mode) {
         while (!atomic_load(&released)) pthread_cond_wait(&ready, &lock);
         pthread_mutex_unlock(&lock);
     }
+}
+
+void llgo_delivery_open_large(int32_t *out, uint32_t mode) {
+    llgo_delivery_open(out, mode);
 }
 
 void llgo_delivery_close(int32_t fd) {

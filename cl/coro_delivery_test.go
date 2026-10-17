@@ -122,6 +122,9 @@ func DynamicLoopDeferred(f func() [131073]byte) { for i := 0; i < 2; i++ { defer
 				t.Fatalf("large delivery before split: %v\n%s", err, module.String())
 			}
 			producer := requireCoroPhysicalFunction(t, module, "foo.Acquire")
+			if strings.Contains(producer.String(), "store [131073 x i8]") {
+				t.Fatalf("borrowed output was copied back into its own physical result sink:\n%s", producer.String())
+			}
 			allocations := 0
 			for _, block := range producer.BasicBlocks() {
 				for call := block.FirstInstruction(); !call.IsNil(); call = llvm.NextInstruction(call) {

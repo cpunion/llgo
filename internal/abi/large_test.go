@@ -286,6 +286,24 @@ entry:
   store %Small %value, ptr %dst, align 1
   ret void
 }
+
+define void @large_zero(ptr %dst) {
+entry:
+  store %Large zeroinitializer, ptr %dst, align 1
+  ret void
+}
+
+define void @volatile_large_zero(ptr %dst) {
+entry:
+  store volatile %Large zeroinitializer, ptr %dst, align 1
+  ret void
+}
+
+define void @dead_large_load(ptr %src) {
+entry:
+  %unused = load %Large, ptr %src, align 1
+  ret void
+}
 `
 
 	ctx := llvm.NewContext()
@@ -329,14 +347,184 @@ entry:
 		t.Fatalf("copy_once retained a direct large aggregate copy:\n%s", copyOnce)
 	}
 	mixed := mod.NamedFunction("mixed_use").String()
-	if !strings.Contains(mixed, "load [65537 x i8]") || !strings.Contains(mixed, "store [65537 x i8]") {
-		t.Fatalf("mixed non-store use was unexpectedly rewritten:\n%s", mixed)
+	if strings.Contains(mixed, "load [65537 x i8]") || strings.Contains(mixed, "store [65537 x i8]") ||
+		!strings.Contains(mixed, "load i8") || strings.Count(mixed, "call void @llvm.memcpy") != 2 {
+		t.Fatalf("mixed scalar projection did not share the immutable snapshot:\n%s", mixed)
 	}
 	small := mod.NamedFunction("small_copy").String()
 	if !strings.Contains(small, "load [65536 x i8]") || !strings.Contains(small, "store [65536 x i8]") {
 		t.Fatalf("aggregate at the threshold was unexpectedly rewritten:\n%s", small)
 	}
+	zero := mod.NamedFunction("large_zero").String()
+	if !strings.Contains(zero, "call void @llvm.memset") || strings.Contains(zero, "store [65537 x i8]") {
+		t.Fatalf("large zero store reached target aggregate scalarization:\n%s", zero)
+	}
+	volatile := mod.NamedFunction("volatile_large_zero").String()
+	if !strings.Contains(volatile, "store volatile [65537 x i8]") || strings.Contains(volatile, "llvm.memset") {
+		t.Fatalf("observable volatile store was rewritten as ordinary memory:\n%s", volatile)
+	}
+	if dead := mod.NamedFunction("dead_large_load").String(); strings.Contains(dead, "load [65537 x i8]") {
+		t.Fatalf("discarded large value reached target aggregate scalarization:\n%s", dead)
+	}
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("stored-load module is invalid: %v\n%s", err, mod.String())
+	}
+}
+
+func TestLowerLargeAggregateSnapshotProjections(t *testing.T) {
+	const testIR = `
+%Rooted = type { [65537 x i8], { ptr, i32 } }
+%Packed = type <{ [65537 x i8], ptr }>
+declare %Rooted @produce()
+
+define ptr @loaded_projection(ptr %src, ptr %dst, ptr %payload) {
+entry:
+  %value = load %Rooted, ptr %src, align 1
+  %source_field = getelementptr %Rooted, ptr %src, i32 0, i32 1, i32 0
+  store ptr null, ptr %source_field
+  store %Rooted %value, ptr %dst, align 1
+  %bytes = extractvalue %Rooted %value, 0
+  store [65537 x i8] %bytes, ptr %payload, align 1
+  %root = extractvalue %Rooted %value, 1, 0
+  ret ptr %root
+}
+
+define ptr @call_projection(ptr %dst, ptr %payload) {
+entry:
+  %value = call %Rooted @produce()
+  store %Rooted %value, ptr %dst, align 1
+  %bytes = extractvalue %Rooted %value, 0
+  store [65537 x i8] %bytes, ptr %payload, align 1
+  %root = extractvalue %Rooted %value, 1, 0
+  ret ptr %root
+}
+
+define ptr @volatile_projection(ptr %src) {
+entry:
+  %value = load volatile %Rooted, ptr %src, align 1
+  %root = extractvalue %Rooted %value, 1, 0
+  ret ptr %root
+}
+
+define ptr @packed_projection(ptr %src) {
+entry:
+  %value = load %Packed, ptr %src, align 1
+  %root = extractvalue %Packed %value, 1
+  ret ptr %root
+}
+
+define void @unsupported_nested_user(ptr %src, ptr %dst, i1 %condition) {
+entry:
+  %value = load %Rooted, ptr %src, align 1
+  %bytes = extractvalue %Rooted %value, 0
+  %chosen = select i1 %condition, [65537 x i8] %bytes, [65537 x i8] zeroinitializer
+  store [65537 x i8] %chosen, ptr %dst, align 1
+  ret void
+}
+
+define void @volatile_nested_store(ptr %src, ptr %dst) {
+entry:
+  %value = load %Rooted, ptr %src, align 1
+  %bytes = extractvalue %Rooted %value, 0
+  store volatile [65537 x i8] %bytes, ptr %dst, align 1
+  ret void
+}
+
+define void @repacked_projection(ptr %src, ptr %dst, ptr %owner) {
+entry:
+  %bytes = load [65537 x i8], ptr %src, align 1
+  %a = insertvalue %Rooted undef, [65537 x i8] %bytes, 0
+  %b = insertvalue %Rooted %a, ptr %owner, 1, 0
+  %copy = extractvalue %Rooted %b, 0
+  store [65537 x i8] %copy, ptr %dst, align 1
+  ret void
+}
+
+define void @discarded_repacked_load(ptr %src) {
+entry:
+  %bytes = load [65537 x i8], ptr %src, align 1
+  %tuple = insertvalue %Rooted undef, [65537 x i8] %bytes, 0
+  ret void
+}
+
+define { ptr, i32 } @partial_container_overwrite(ptr %owner) {
+entry:
+  %a = insertvalue %Rooted undef, { ptr, i32 } zeroinitializer, 1
+  %b = insertvalue %Rooted %a, ptr %owner, 1, 0
+  %inner = extractvalue %Rooted %b, 1
+  ret { ptr, i32 } %inner
+}
+
+define ptr @nested_insert_projection(ptr %owner) {
+entry:
+  %inner = insertvalue { ptr, i32 } undef, ptr %owner, 0
+  %outer = insertvalue %Rooted undef, { ptr, i32 } %inner, 1
+  %root = extractvalue %Rooted %outer, 1, 0
+  ret ptr %root
+}
+`
+	for _, target := range []struct{ name, layout string }{
+		{"native64", "e-m:o-i64:64-i128:128-n32:64-S128"},
+		{"wasm32", "e-m:e-p:32:32-i64:64-n32:64-S128"},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			ctx := llvm.NewContext()
+			defer ctx.Dispose()
+			path := filepath.Join(t.TempDir(), "large_projections.ll")
+			if err := os.WriteFile(path, []byte(testIR), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			buf, err := llvm.NewMemoryBufferFromFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mod, err := ctx.ParseIR(buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mod.Dispose()
+			td := llvm.NewTargetData(target.layout)
+			defer td.Dispose()
+			LowerLargeAggregates(td, mod)
+			for _, name := range []string{"loaded_projection", "call_projection"} {
+				body := mod.NamedFunction(name).String()
+				if strings.Contains(body, "load %Rooted") || strings.Contains(body, "store %Rooted") ||
+					strings.Contains(body, "extractvalue") || !strings.Contains(body, "load ptr") ||
+					strings.Contains(body, "load [65537 x i8]") || strings.Contains(body, "store [65537 x i8]") ||
+					strings.Count(body, "call ptr @\""+runtimeAllocU+"\"") != 1 {
+					t.Fatalf("%s did not project from its one immutable result cell:\n%s", name, body)
+				}
+				if name == "loaded_projection" && strings.Index(body, "call void @llvm.memcpy") >= strings.Index(body, "store ptr null") {
+					t.Fatalf("projection snapshot was moved after source mutation:\n%s", body)
+				}
+			}
+			if body := mod.NamedFunction("volatile_projection").String(); !strings.Contains(body, "load volatile %Rooted") || strings.Contains(body, "llvm.memcpy") {
+				t.Fatalf("observable projection load was rewritten:\n%s", body)
+			}
+			if body := mod.NamedFunction("packed_projection").String(); strings.Contains(body, "extractvalue") || !strings.Contains(body, "load ptr") || !strings.Contains(body, "align 1") {
+				t.Fatalf("packed projection lost its conservative alignment:\n%s", body)
+			}
+			for _, name := range []string{"unsupported_nested_user", "volatile_nested_store"} {
+				if body := mod.NamedFunction(name).String(); !strings.Contains(body, "load %Rooted") || strings.Contains(body, "llvm.memcpy") {
+					t.Fatalf("%s was only partially rewritten:\n%s", name, body)
+				}
+			}
+			for _, name := range []string{"repacked_projection", "discarded_repacked_load"} {
+				body := mod.NamedFunction(name).String()
+				if strings.Contains(body, "insertvalue") || strings.Contains(body, "extractvalue") ||
+					strings.Contains(body, "load [65537 x i8]") || strings.Contains(body, "store [65537 x i8]") {
+					t.Fatalf("%s hid a large copy behind a redundant tuple:\n%s", name, body)
+				}
+			}
+			if body := mod.NamedFunction("partial_container_overwrite").String(); !strings.Contains(body, "extractvalue %Rooted") {
+				t.Fatalf("partial overwrite was incorrectly replaced by its old container:\n%s", body)
+			}
+			if body := mod.NamedFunction("nested_insert_projection").String(); strings.Contains(body, "extractvalue") || !strings.Contains(body, "ret ptr %owner") {
+				t.Fatalf("nested exact projection lost its original SSA value:\n%s", body)
+			}
+			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("projection module is invalid: %v\n%s", err, mod.String())
+			}
+		})
 	}
 }

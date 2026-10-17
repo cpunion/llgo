@@ -6948,7 +6948,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		return nil
 	}
 	if isCgo {
-		functionShape, shapeErr := prepareCoroEmissionFunctionShape(fn, u.coroProgramIR)
+		functionShape, shapeErr := prepareCoroEmissionFunctionShape(ctx, fn, u.coroProgramIR)
 		if shapeErr != nil {
 			return fmt.Errorf("prepare emission universe: cgo function %q SitePlan shape: %w", fn.Name(), shapeErr)
 		}
@@ -6985,7 +6985,7 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 		}
 		return u.materializeABITypeDemandsOfFunction(fn, owner, emissionState)
 	}
-	functionShape, err := prepareCoroEmissionFunctionShape(fn, u.coroProgramIR)
+	functionShape, err := prepareCoroEmissionFunctionShape(ctx, fn, u.coroProgramIR)
 	if err != nil {
 		return fmt.Errorf("prepare emission universe: function %q SitePlan shape: %w", fn.Name(), err)
 	}

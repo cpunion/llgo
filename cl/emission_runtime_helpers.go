@@ -310,12 +310,12 @@ func (plan coroFunctionPreamblePlan) loweringRecipe() (coro.RecipeID, error) {
 	return coro.RecipeID(strings.TrimSuffix(string(recipe), ".v0") + ".recover-frame.v0"), nil
 }
 
-func prepareCoroEmissionFunctionShape(fn *ssa.Function, programs ...*coroProgramIR) (coroEmissionFunctionShape, error) {
+func prepareCoroEmissionFunctionShape(ctx *context, fn *ssa.Function, programs ...*coroProgramIR) (coroEmissionFunctionShape, error) {
 	shape := coroEmissionFunctionShape{
 		dynamicCleanup:           coroFunctionRequiresDynamicCleanup(fn, programs...),
 		terminalResultAllocation: make(map[*ssa.Alloc]none),
 	}
-	allocations, err := coroStaticTerminalReconstructionAllocations(fn, programs...)
+	allocations, err := coroStaticTerminalReconstructionAllocations(fn, ctx, programs...)
 	if err != nil {
 		return coroEmissionFunctionShape{}, err
 	}

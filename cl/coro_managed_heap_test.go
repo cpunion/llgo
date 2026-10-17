@@ -112,7 +112,7 @@ func Loop(value, count uint32) *Node {
 func TestCoroTerminalReconstructionAllocationSubset(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, coroManagedHeapFixture)
 	captured := ssaPkg.Func("CapturedResults")
-	selected, err := coroStaticTerminalReconstructionAllocations(captured)
+	selected, err := coroStaticTerminalReconstructionAllocations(captured, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestCoroTerminalReconstructionAllocationSubset(t *testing.T) {
 		if len(allocations) == 0 {
 			t.Fatalf("%s fixture has no ordinary heap allocation", name)
 		}
-		selected, err := coroStaticTerminalReconstructionAllocations(function)
+		selected, err := coroStaticTerminalReconstructionAllocations(function, nil)
 		if err != nil {
 			t.Fatalf("%s collector: %v", name, err)
 		}
@@ -186,7 +186,7 @@ func RecoveredResults() (recovered any, ran bool) {
 			}
 		}
 	}
-	selected, err := coroStaticTerminalReconstructionAllocations(function)
+	selected, err := coroStaticTerminalReconstructionAllocations(function, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,6 +197,40 @@ func RecoveredResults() (recovered any, ran bool) {
 		if !allocation.Heap || allocation.Block() == nil || allocation.Block().Index != 0 {
 			t.Fatalf("Recover reconstruction selected non-entry heap cell %v", allocation)
 		}
+	}
+}
+
+func TestCoroTerminalReconstructionIncludesTargetPromotedLocal(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			pkg, _, _ := buildGoSSAPkg(t, `package foo
+func cleanup() {}
+func Large() [131073]byte { defer cleanup(); var value [131073]byte; value[0] = 37; return value }
+func Small() [8]byte { defer cleanup(); var value [8]byte; value[0] = 37; return value }
+`)
+			prog := newLLSSAProgForTarget(t, target.arch)
+			defer prog.Dispose()
+			for _, name := range []string{"Large", "Small"} {
+				fn := pkg.Func(name)
+				selected, err := coroStaticTerminalReconstructionAllocations(fn, &context{prog: prog})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if name == "Small" {
+					if len(selected) != 0 {
+						t.Fatalf("small terminal local acquired managed storage: %v", selected)
+					}
+					continue
+				}
+				if len(selected) != 1 || selected[0].Heap || selected[0].Block().Index != 0 {
+					t.Fatalf("target-promoted result lost its source-local entry identity: %v", selected)
+				}
+			}
+		})
 	}
 }
 

@@ -11,16 +11,28 @@ const LLGoFiles = "wrap/delivery.c"
 
 type result = struct{ R0 int32 }
 
+type largeResult = struct {
+	R0 int32
+	R1 [131073]byte
+	R2 *[128]byte
+}
+
 var capturedFixture bool
 
 //go:linkname borrow llgo.coroBorrowResult
 func borrow(func(*result), func(*result, unsafe.Pointer, uint32)) *result
+
+//go:linkname borrowLarge llgo.coroBorrowResult
+func borrowLarge(func(*largeResult), func(*largeResult, unsafe.Pointer, uint32)) *largeResult
 
 //go:linkname install C.llgo_delivery_install
 func install()
 
 //go:linkname openInto C.llgo_delivery_open
 func openInto(*result, uint32)
+
+//go:linkname openLargeInto C.llgo_delivery_open_large
+func openLargeInto(*int32, uint32)
 
 //go:linkname closeFD C.llgo_delivery_close
 func closeFD(int32)
@@ -75,6 +87,62 @@ func acquire(mode uint32) int32 {
 		panic("acquisition failed after producing its resource")
 	}
 	return out.R0
+}
+
+func initializeLarge(out *largeResult) { out.R0 = -1 }
+
+func checkLarge(payload *[131073]byte, owner *[128]byte) {
+	if payload[0] != 17 || payload[len(payload)-1] != 91 || owner == nil || owner[0] != 37 {
+		escaped()
+	}
+}
+
+func dropLarge(out *largeResult, env unsafe.Pointer, mode uint32) {
+	if capturedFixture && env == nil {
+		escaped()
+	}
+	runtime.Gosched()
+	runtime.GC()
+	checkLarge(&out.R1, out.R2)
+	fd := out.R0
+	out.R0, out.R2 = -1, nil
+	if fd >= 0 {
+		closeFD(fd)
+	}
+}
+
+func acquireLarge(mode uint32) (int32, [131073]byte, *[128]byte) {
+	out := borrowLarge(initializeLarge, dropLarge)
+	out.R1[0], out.R1[len(out.R1)-1] = 17, 91
+	out.R2 = new([128]byte)
+	out.R2[0] = 37
+	openLargeInto(&out.R0, mode)
+	return out.R0, out.R1, out.R2
+}
+
+func capturedLargeAcquire() func(uint32) (int32, [131073]byte, *[128]byte) {
+	state := new([128]byte)
+	state[0] = 37
+	return func(mode uint32) (int32, [131073]byte, *[128]byte) {
+		out := borrowLarge(initializeLarge, dropLarge)
+		out.R1[0], out.R1[len(out.R1)-1] = 17, 91
+		out.R2 = state
+		openLargeInto(&out.R0, mode)
+		return out.R0, out.R1, out.R2
+	}
+}
+
+func largeOwner() {
+	acquireLarge(1)
+	escaped()
+}
+
+func largeDeferredOwner() { defer acquireLarge(1) }
+
+func largeDynamicDeferredOwner(acquire func(uint32) (int32, [131073]byte, *[128]byte)) {
+	for i := 0; i < 1; i++ {
+		defer acquire(1)
+	}
 }
 
 func capturedAcquire() func(uint32) int32 {
@@ -157,12 +225,20 @@ func main() {
 	runtime.GOMAXPROCS(1)
 	install()
 	mode := fixtureMode()
-	capturedFixture = mode >= 6 && mode <= 9 || mode == 11
+	capturedFixture = mode >= 6 && mode <= 9 || mode == 11 || mode == 15
 	fd := acquire(0)
 	runtime.Gosched()
 	runtime.GC()
 	checkAlive(fd) // Normal Return transfers ownership; it must not auto-drop.
 	closeFD(fd)
+	if mode >= 12 {
+		fd, payload, owner := acquireLarge(0)
+		runtime.Gosched()
+		runtime.GC()
+		checkLarge(&payload, owner)
+		checkAlive(fd)
+		closeFD(fd)
+	}
 	ready := make(chan struct{})
 	go sentinel(ready)
 	<-ready
@@ -204,6 +280,14 @@ func main() {
 		go rangeDeferredOwner()
 	case 11:
 		go rangeDynamicDeferredOwner(capturedAcquire())
+	case 12:
+		go largeOwner()
+	case 13:
+		go acquireLarge(1) // Oversized independent fallback, not a caller-owned slot.
+	case 14:
+		go largeDeferredOwner()
+	case 15:
+		go largeDynamicDeferredOwner(capturedLargeAcquire())
 	default:
 		baseline := runtime.NumGoroutine()
 		go acquire(0)

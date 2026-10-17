@@ -225,6 +225,13 @@ func NestedRangeDynamic(f func(string) (int, error)) {
  for range Sequence { for range Sequence { defer f("nested") } }
 }
 func RangeStatic() { for range Sequence { defer Acquire("static") } }
+var ByteSink byte
+func LargeRecoverySlot(f func(string) (int, error)) {
+ var payload [131073]byte
+ defer f("large-slot")
+ payload[0] = 37
+ ByteSink = payload[0]
+}
 `)
 			source.ssa.Build()
 			pkg, files := foo.ssa, []*ast.File{foo.file}
@@ -252,6 +259,7 @@ func RangeStatic() { for range Sequence { defer Acquire("static") } }
 				{Function: pkg.Func("RangeDynamic"), Demand: coro.AsyncDemand},
 				{Function: pkg.Func("NestedRangeDynamic"), Demand: coro.AsyncDemand},
 				{Function: pkg.Func("RangeStatic"), Demand: coro.AsyncDemand},
+				{Function: pkg.Func("LargeRecoverySlot"), Demand: coro.AsyncDemand},
 				{Function: runtimePkg.ssa.Func("Panic"), RawPlainDemand: true},
 				{Function: runtimePkg.ssa.Func("strequal"), RawPlainDemand: true},
 				{Function: runtimePkg.ssa.Func("memequalptr"), RawPlainDemand: true},
@@ -314,6 +322,12 @@ func RangeStatic() { for range Sequence { defer Acquire("static") } }
 			defer module.Dispose()
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("verify dynamic delivery before split: %v\n%s", err, module.String())
+			}
+			largeRecovery := requireCoroPhysicalFunction(t, module, "foo.LargeRecoverySlot").String()
+			if pkg.Func("LargeRecoverySlot").Recover == nil ||
+				!strings.Contains(largeRecovery, "AllocZ") ||
+				regexp.MustCompile(`(?:load|store) volatile (?:\[131073 x i8\]|i8\b)`).MatchString(largeRecovery) {
+				t.Fatalf("explicit-status cleanup retained longjmp barriers on a large ordinary local:\n%s", largeRecovery)
 			}
 			for _, name := range []string{"foo.Apply", "foo.DeferredDynamic", "foo.LoopedDynamic"} {
 				body := requireCoroPhysicalFunction(t, module, name).String()

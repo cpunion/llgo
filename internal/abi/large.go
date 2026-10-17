@@ -40,6 +40,7 @@ func (l largeAggregateLowerer) indirectType(ctx llvm.Context, typ llvm.Type) llv
 }
 
 func (l largeAggregateLowerer) transformModule(m llvm.Module) {
+	l.foldLargeAggregateProjections(m)
 	var calls []llvm.Value
 	var funcs []llvm.Value
 	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
@@ -62,47 +63,131 @@ func (l largeAggregateLowerer) transformModule(m llvm.Module) {
 	for _, fn := range funcs {
 		l.transformFunc(m, fn)
 	}
-	l.transformStoredLoads(m)
+	l.transformLargeMemory(m)
 }
 
-// transformStoredLoads prevents a large aggregate load from reaching
-// SelectionDAG as one enormous SSA value. Lower an adjacent load/store pair
-// directly to memmove. When the value is stored later or more than once,
-// preserve Go assignment semantics by taking one snapshot at the original
-// load and copying that snapshot to every destination at the original sites.
-func (l largeAggregateLowerer) transformStoredLoads(m llvm.Module) {
-	var loads []llvm.Value
+// A source multi-result call may assemble a tuple and immediately extract its
+// fields. Canonicalize those exact SSA identities before looking for memory
+// copies, rather than letting a dead insert/extract chain hide a large load
+// until LLVM's later optimization pipeline, after this mandatory lowering.
+func (l largeAggregateLowerer) foldLargeAggregateProjections(m llvm.Module) {
+	var extracts, inserts []llvm.Value
+	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
+			for value := bb.FirstInstruction(); !value.IsNil(); value = llvm.NextInstruction(value) {
+				if !value.IsAExtractValueInst().IsNil() && l.isLargeAggregate(value.Operand(0).Type()) {
+					extracts = append(extracts, value)
+				} else if !value.IsAInsertValueInst().IsNil() && l.isLargeAggregate(value.Type()) {
+					inserts = append(inserts, value)
+				}
+			}
+		}
+	}
+	for _, extract := range extracts {
+		if value, exact := insertedAggregateProjection(extract.Operand(0), extract.Indices()); exact {
+			extract.ReplaceAllUsesWith(value)
+			extract.EraseFromParentAsInstruction()
+		}
+	}
+	// Builder.Aggregate emits each construction chain in one basic block.
+	// Reverse order drops the now-dead chain, exposing its original loads to
+	// the existing memory lowerer. Live/partially overwritten tuples stay put.
+	for index := len(inserts) - 1; index >= 0; index-- {
+		if value := inserts[index]; value.FirstUse().IsNil() {
+			value.EraseFromParentAsInstruction()
+		}
+	}
+}
+
+func insertedAggregateProjection(value llvm.Value, path []uint32) (llvm.Value, bool) {
+	for !value.IsAInsertValueInst().IsNil() {
+		written := value.Indices()
+		common := 0
+		for common < len(path) && common < len(written) && path[common] == written[common] {
+			common++
+		}
+		if common == len(written) {
+			if common == len(path) {
+				return value.Operand(1), true
+			}
+			return insertedAggregateProjection(value.Operand(1), path[common:])
+		}
+		if common == len(path) {
+			return llvm.Value{}, false // A subfield overwrite changed this container.
+		}
+		value = value.Operand(0) // This insertion wrote a disjoint member.
+	}
+	return llvm.Value{}, false
+}
+
+// transformLargeMemory keeps large zero stores, discarded loads and copies
+// out of target aggregate scalarization. Lower an adjacent load/store pair to
+// memmove; delayed/multiple stores retain one snapshot at the original load.
+// Volatile accesses remain untouched: ordinary memcpy/memset must not replace
+// observable source memory operations.
+func (l largeAggregateLowerer) transformLargeMemory(m llvm.Module) {
+	var loads, zeroStores []llvm.Value
 	for fn := m.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
 		for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
 			for instr := bb.FirstInstruction(); !instr.IsNil(); instr = llvm.NextInstruction(instr) {
+				if store := instr.IsAStoreInst(); !store.IsNil() && !store.IsVolatile() &&
+					!store.Operand(0).IsAConstantAggregateZero().IsNil() && l.isLargeAggregate(store.Operand(0).Type()) {
+					zeroStores = append(zeroStores, store)
+				}
 				load := instr.IsALoadInst()
 				if !load.IsNil() && !load.IsVolatile() && l.isLargeAggregate(load.Type()) {
-					if _, ok := storedLoadUsers(load); ok {
+					if _, _, ok := l.largeMemoryUsers(load); ok {
 						loads = append(loads, load)
 					}
 				}
 			}
 		}
 	}
+	ctx := m.Context()
+	b := ctx.NewBuilder()
+	defer b.Dispose()
+	for _, store := range zeroStores {
+		b.SetInsertPointBefore(store)
+		size := llvm.ConstInt(ctx.IntType(l.td.PointerSize()*8), l.td.TypeAllocSize(store.Operand(0).Type()), false)
+		zero := b.CreateIntrinsic(ctx.VoidType(), llvm.LookupIntrinsicID("llvm.memset"), []llvm.Value{
+			store.Operand(1), llvm.ConstInt(ctx.Int8Type(), 0, false), size, llvm.ConstInt(ctx.Int1Type(), 0, false),
+		}, "")
+		zero.InstructionSetDebugLoc(store.InstructionDebugLoc())
+		store.EraseFromParentAsInstruction()
+	}
 	for _, load := range loads {
 		l.transformStoredLoad(m, load)
 	}
 }
 
-func storedLoadUsers(load llvm.Value) ([]llvm.Value, bool) {
-	var stores []llvm.Value
-	for use := load.FirstUse(); !use.IsNil(); use = use.NextUse() {
-		store := use.User().IsAStoreInst()
-		if store.IsNil() || store.IsVolatile() || store.Operand(0) != load {
-			return nil, false
+// Projections must share the same evaluated snapshot as stores. A large
+// projected member is admissible only when its entire use tree has the same
+// memory form; otherwise even one remaining extract scalarizes the parent.
+func (l largeAggregateLowerer) largeMemoryUsers(value llvm.Value) (stores, extracts []llvm.Value, ok bool) {
+	for use := value.FirstUse(); !use.IsNil(); use = use.NextUse() {
+		user := use.User()
+		if store := user.IsAStoreInst(); !store.IsNil() && !store.IsVolatile() && store.Operand(0) == value {
+			stores = append(stores, store)
+		} else if extract := user.IsAExtractValueInst(); !extract.IsNil() {
+			if l.isLargeAggregate(extract.Type()) {
+				if _, _, valid := l.largeMemoryUsers(extract); !valid {
+					return nil, nil, false
+				}
+			}
+			extracts = append(extracts, extract)
+		} else {
+			return nil, nil, false
 		}
-		stores = append(stores, store)
 	}
-	return stores, len(stores) != 0
+	return stores, extracts, true
 }
 
 func (l largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Value) {
-	stores, ok := storedLoadUsers(load)
+	if load.FirstUse().IsNil() {
+		load.EraseFromParentAsInstruction()
+		return
+	}
+	stores, extracts, ok := l.largeMemoryUsers(load)
 	if !ok {
 		return
 	}
@@ -112,7 +197,7 @@ func (l largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Valu
 	typ := load.Type()
 
 	b.SetInsertPointBefore(load)
-	if len(stores) == 1 && llvm.NextInstruction(load) == stores[0] {
+	if len(stores) == 1 && len(extracts) == 0 && llvm.NextInstruction(load) == stores[0] {
 		copy := l.callMemmove(ctx, b, stores[0].Operand(1), load.Operand(0), typ)
 		copy.InstructionSetDebugLoc(load.InstructionDebugLoc())
 		stores[0].EraseFromParentAsInstruction()
@@ -122,13 +207,7 @@ func (l largeAggregateLowerer) transformStoredLoad(m llvm.Module, load llvm.Valu
 	snapshot := l.allocResult(m, ctx, b, typ)
 	copy := l.callMemcpy(ctx, b, snapshot, load.Operand(0), typ)
 	copy.InstructionSetDebugLoc(load.InstructionDebugLoc())
-	for _, store := range stores {
-		b.SetInsertPointBefore(store)
-		copy := l.callMemcpy(ctx, b, store.Operand(1), snapshot, typ)
-		copy.InstructionSetDebugLoc(store.InstructionDebugLoc())
-		store.EraseFromParentAsInstruction()
-	}
-	load.EraseFromParentAsInstruction()
+	l.rewriteMemoryUsers(ctx, load, snapshot, typ, stores, extracts)
 }
 
 func (l largeAggregateLowerer) transformCall(m llvm.Module, call llvm.Value) {
@@ -265,14 +344,18 @@ func (l largeAggregateLowerer) rewriteReturns(ctx llvm.Context, fn llvm.Value, r
 }
 
 func (l largeAggregateLowerer) rewriteStoredResult(ctx llvm.Context, value, result llvm.Value, typ llvm.Type) {
-	var stores []llvm.Value
-	for use := value.FirstUse(); !use.IsNil(); use = use.NextUse() {
-		store := use.User().IsAStoreInst()
-		if store.IsNil() || store.IsVolatile() || store.Operand(0) != value {
-			return
-		}
-		stores = append(stores, store)
+	stores, extracts, ok := l.largeMemoryUsers(value)
+	if !ok {
+		return
 	}
+	l.rewriteMemoryUsers(ctx, value, result, typ, stores, extracts)
+}
+
+// The backing cell is an immutable evaluated result, not the mutable source
+// address. Project large members directly into their memory users so this
+// lowering neither recreates an aggregate SSA value nor allocates a second
+// snapshot for a nested member. Scalar projections remain ordinary loads.
+func (l largeAggregateLowerer) rewriteMemoryUsers(ctx llvm.Context, value, result llvm.Value, typ llvm.Type, stores, extracts []llvm.Value) {
 	b := ctx.NewBuilder()
 	defer b.Dispose()
 	for _, store := range stores {
@@ -280,9 +363,30 @@ func (l largeAggregateLowerer) rewriteStoredResult(ctx llvm.Context, value, resu
 		l.callMemcpy(ctx, b, store.Operand(1), result, typ)
 		store.EraseFromParentAsInstruction()
 	}
-	if len(stores) != 0 || value.FirstUse().IsNil() {
-		value.EraseFromParentAsInstruction()
+	for _, extract := range extracts {
+		b.SetInsertPointBefore(extract)
+		indices := []llvm.Value{llvm.ConstInt(ctx.Int32Type(), 0, false)}
+		for _, index := range extract.Indices() {
+			indices = append(indices, llvm.ConstInt(ctx.Int32Type(), uint64(index), false))
+		}
+		field := b.CreateInBoundsGEP(typ, result, indices, "")
+		if l.isLargeAggregate(extract.Type()) {
+			stores, projections, valid := l.largeMemoryUsers(extract)
+			if !valid {
+				panic("large result projection lost its validated memory users")
+			}
+			l.rewriteMemoryUsers(ctx, extract, field, extract.Type(), stores, projections)
+		} else {
+			projected := b.CreateLoad(extract.Type(), field, "")
+			// A packed member may not have its type's ABI alignment even
+			// when the enclosing snapshot itself is naturally aligned.
+			projected.SetAlignment(1)
+			projected.InstructionSetDebugLoc(extract.InstructionDebugLoc())
+			extract.ReplaceAllUsesWith(projected)
+			extract.EraseFromParentAsInstruction()
+		}
 	}
+	value.EraseFromParentAsInstruction()
 }
 
 func (l largeAggregateLowerer) allocResult(m llvm.Module, ctx llvm.Context, b llvm.Builder, typ llvm.Type) llvm.Value {

@@ -753,16 +753,16 @@ func (p *context) beginCoroBody(
 				descriptorPtr,
 				resultSlot,
 			)
-			// A named result captured by a defer is an ordinary Go heap object,
-			// but x/tools reloads it from compiler-owned RunDefers continuations.
+			// Captured named results and target-promoted oversized locals use
+			// managed objects reloaded by compiler-owned RunDefers continuations.
 			// Define only that structurally certified subset after frame/header
 			// publication and before the initial suspend. Its pointer then dominates
 			// every normal, cancellation, and cleanup continuation, and CoroSplit
 			// retains it exactly when live without changing heap identity.
 			for _, allocation := range terminalResultAllocations {
-				if allocation == nil || !allocation.Heap || allocation.Parent() != p.goFn ||
+				if allocation == nil || !coroAllocationUsesManagedStorage(p, allocation) || allocation.Parent() != p.goFn ||
 					allocation.Block() == nil || allocation.Block().Index != 0 {
-					panic("coroutine terminal-result allocation lost its exact source-entry heap proof")
+					panic("coroutine terminal-result allocation lost its exact source-entry managed proof")
 				}
 				if _, duplicate := body.terminalResultAllocs[allocation]; duplicate {
 					panic("duplicate coroutine terminal-result allocation")
@@ -1895,7 +1895,7 @@ func validateCoroPhysicalABIForOwner(
 	// runnable-scheduler gate below guarantees bounded execution between polls.
 	// PhysicalABIV0 remains leaf-only and retains its separate rejection.
 	cleanupPlan, cleanupErr := prepareCoroStaticCleanupPlan(
-		fn, whole, universe, frameRetentionABI, explicitPanic,
+		fn, whole, universe, frameRetentionABI, explicitPanic, owner,
 	)
 	if cleanupErr != nil {
 		return fail("static cleanup: %v", cleanupErr)

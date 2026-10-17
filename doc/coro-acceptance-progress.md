@@ -1028,6 +1028,214 @@ No runtime fields, allocation category, scheduler or second drainer are added.
 This closes external range defer custody, not the remaining large archive,
 receiver/reflect resource-adapter or public Open seed gates.
 
+The range-owner follow-up is [PR #282](https://github.com/cpunion/llgo/pull/282),
+exact head `d151abc71`, stacked on #281 and still targeting `llvm-coro` only.
+Run `38968146897` is queued; all review/comment/thread inventories are empty.
+A fresh unfiltered v113 `test/go` cohort is running with separate 12GiB
+build/run caps and joined nested compiler probes. Neither result is a final
+integration/whole-suite passing receipt yet.
+
+The next isolated large-archive gate uses a131080-byte result, with checks on
+the first/last payload bytes, normal transfer, ignored defer output, canceled
+value99, exactly one drop and both asynchronous drop steps. Static, direct
+function-value and private-factory paths now pass9/9 actual executions in the
+working branch (69.556s/1677.1MiB); immutable final-source replay is pending.
+Initial missing AllocZ/frontend-certificate bindings were fixture setup errors,
+not accepted negative compiler results. The fixture now models the linked
+zero allocator, supplies the complete runtime-helper ABI and consumes the same
+frozen foreign contracts. It also runs production's mandatory large-aggregate
+lowering before CoroSplit instead of feeding raw frontend aggregates to codegen.
+
+The stronger gate then exposed two code-generation gaps. Managed physical
+bodies still inherited legacy longjmp `recoverSlots` for large ordinary locals;
+they use explicit status/CFG instead, so the old volatile barriers are removed
+only there, preserving the native longjmp path. A new native/wasm32 IR gate
+fails before that correction and passes after it. The existing mandatory ABI
+lowerer additionally missed large nonvolatile zero stores and unused aggregate
+loads. These now become memset/no load, without new allocation, while volatile
+operations, threshold-sized aggregates, mixed-use values and delayed-copy
+snapshot semantics remain unchanged. The new ABI zero-store test fails before
+the correction; the complete ABI suite passes after it. Saved LLVM22 AArch64
+SelectionDAG failures remain retained, not erased by passing reruns.
+
+A new full-runtime program covers large named results modified by ordinary and
+recovering asynchronous defers, plus an unnamed return whose local is changed
+after result evaluation. Its Go control passes; LLGo immutable execution,
+broader gates and CI are still pending. A possible redundant copy when a
+borrowed producer returns its already-aliased result remains a separate
+code-generation optimization to review, not an optimization claimed here.
+
+Immutable v114 (`1f443819a`) passes broad compiler gates134.850s/1312.7MiB,
+ABI/build gates0.786s/661.1MiB, and all six small/large archive functions
+(18 executions)152.782s/1936.1MiB. Its120 fd runs plus6 opaque controls pass
+49.641s, and3 reflection/GC routes pass204.591s, source-after matching,
+peak2781.8MiB. Compiler SHA-256 is
+`28fc197c2aeccb7c42c2802ac240fc7eea7ef260e0b4ba01e183e59a05ff7db6`;
+source manifest is
+`e11abffdae2ea297e183561374b6ee513f55802b63d3f7fc5e0595f0a367ccb8`.
+
+The new full-runtime large-recovery case correctly remains **FAIL** on v114:
+frontend verification reports a non-dominating AllocZ pointer in the unnamed
+return reconstruction before any object emission (12.290s/830.8MiB, matching
+source-after). The existing relocation collector only recognized SSA Heap;
+oversized source-local result cells are also promoted to managed storage by
+target layout. They now consume the same existing allocation predicate and
+terminal-result ramp recipe, with the exact effective type owner passed from
+physical planning. Small locals retain inline frame storage and ordinary
+conditional/loop allocations stay at their source sites. Target-size native/
+wasm unit gates pass0.557s/1260.6MiB; the affected compiler selection passes
+30.615s/1318.4MiB. A new immutable actual-program rerun is required.
+
+Read-only upstream inspection finds that current main (`1e93b1548`) already
+contains large zero-store lowering. No duplicate issue is filed, no upstream
+code is changed, and main is not synchronized into this branch.
+
+Immutable v115 (`a71f09512`) closes the target-promoted terminal-result gap:
+the unchanged full-runtime recovery program now passes48.115s/1290.8MiB with
+matching source-after. Explicit `-O0` and `-O3 -lto=full` images each pass three
+additional executions, also matching source-after (combined peak1503.8MiB).
+O0 image SHA-256 is
+`1b6b207792fe1286553beecf82703d6eed46c02be3750f6d6b78cb4ec2cef071`;
+O3-full image SHA-256 is
+`ae5d48d7535856664daf8b9ad38ef4f0f378a733e50ea30894a6d918f1b8ff1f`.
+The source result cells preserve named-return cleanup writes, recovered panic
+returns and unnamed-result evaluation before deferred mutation across yield/GC.
+
+The same v115 passes broad compiler gates271.191s/1234.7MiB, all six small/large
+archive functions (18 executions)321.077s/1915.9MiB, ABI/build gates1.226s/
+723.3MiB,120 fd runs and6 opaque controls71.810s, then3 reflection/GC routes
+196.575s, matching source-after and peak2757.4MiB. These elapsed times include
+concurrent acceptance load and are not a compiler-performance comparison.
+Compiler SHA-256 is
+`45f13449080d3336e9891b38fc7b3c7e2077d5386be4e49d6721acffa04c1db9`;
+source manifest is
+`65f4e6a914b27880c7bd17ee710c7db668c0a200ef224c0372b694ca1f9cf7f6`.
+The first compiler build was started before freeze completion was explicitly
+observed, so it is not used as acceptance evidence; the independent second
+build follows complete freeze and source verification. Older failed cohorts
+remain retained. Receiver/reflect resource adapters, public Open seeds and
+final whole-suite/platform/performance gates remain open.
+
+The large-result/recovery follow-up is [PR #283](https://github.com/cpunion/llgo/pull/283),
+initial head `381a2b723`, stacked on #282 with CI run `38972363387` queued.
+The separate v113 full `test/go` cohort now completes **271/271**, zero failures/
+skips, including nested compiler probes. Source-after matches at21:55:25 UTC;
+children join and private scratch is reclaimed. Its binary SHA-256 is
+`5b1fb2b3d197d5de2dc746af414ac7883a6cef12b5ad2066a7e2dcade09eed28`
+(25931536bytes), separate build/run peaks8247.2/6616.6MiB. This validates the
+range-owner snapshot, not the later large-result compiler changes.
+
+A new isolated return-alias experiment removes a redundant borrowed-output
+copy. The existing frozen producer proof requires every source Return to load
+the exact borrowed fields unchanged; BorrowResult has already selected the
+incoming sink or the independent nil-output fallback. Physical Return therefore
+keeps arity/status/completion and cancellation custody but does not copy those
+fields back to their identical sink. Ordinary Go returns and archive consumers
+retain their original publication path. No new SSA scan, runtime branch/state,
+ABI mode or ownership shortcut is introduced. The existing mandatory aggregate
+lowerer removes the resulting unused large load.
+
+The new native/wasm no-self-copy gate fails before that optimization. Working
+compiler delivery gates then pass10.528s/1284.6MiB, and all18 small/large archive
+executions pass147.513s/1883.9MiB, including a no-snapshot-allocation assertion.
+The retained old131080-byte producer IR has one AllocU and two memcpy calls
+for this redundant snapshot; the optimized producer has no such allocation.
+This is a concrete code-generation saving, not a general throughput claim.
+Immutable FD/GC/cleanup and optimization-mode replays are still required before
+folding the experiment into #283; the separate branch remains available for
+comparison.
+
+Immutable v116 (`31c1663e1`) completes those return-alias gates: broad compiler
+222.713s/1254.1MiB, all18 archive executions216.369s/1922.2MiB, ABI/build gates,
+the full-runtime large recovery case31.954s/1262.9MiB, and three executions
+each at O0/O3-full (combined1447.6MiB). All120 FD executions, six opaque
+nonresource controls and three reflection/GC routes pass60.313s+127.342s,
+source-after matching, peak2768.6MiB. Compiler SHA-256 is
+`739071727ed87e1cf869883a75e28afec9223382208441bd5ecd9e10258a290b`;
+source manifest is
+`165fadcdbea36f07ba2f65cc4d3748d65ed20157b29aa6880ea96556b41efcd1`.
+The v116 whole-test/go and four-runtime-package launches are infrastructure
+interruptions: the launch PATH omitted lsof, so cleanup failed after build or
+the first package. Their parents/stages have exited, owned scratch is reclaimed
+after token/handle checks, retained images are fingerprinted, and source-after
+matches. Neither interrupted cohort is counted as a complete pass.
+
+A further isolated combination gate joins real FD custody with a131088-byte
+result containing both a large array and a Go pointer. It covers canceled
+ordinary calls, independent fallback, static defer and captured dynamic defer;
+the drop itself yields and forces GC before checking the retained payload.
+The old v116 compiler crashes before execution in the open dynamic call's
+plain-result branch. Saved post-CoroSplit IR and standalone LLVM22 llc locate
+the remaining whole-tuple load/extract tree; a mixed-version diagnostic is not
+relabeled as immutable acceptance. The first diagnostic command's unsupported
+development flag is an invalid harness attempt, despite the CLI's zero exit.
+
+The existing ABI pass now validates the complete store/projection use tree,
+keeps one immutable evaluated snapshot and projects large submembers directly
+to memory users. Call results reuse their existing indirect result cell;
+nested large members acquire no second snapshot. Scalar/pointer projections
+retain source-value semantics, including mutation after the original load;
+packed members use conservative alignment. Volatile accesses and unsupported
+nested users remain all-or-nothing exclusions. The new projection tests fail
+before the correction and the full ABI suite passes afterwards (0.469s).
+Actual combined FD/GC execution and a fresh immutable cohort remain required.
+
+Immutable v117 (`3fde9d612`) passes the broad compiler gate171.844s/1209.7MiB,
+18 archive executions191.534s/1912.8MiB, ABI/build gates0.692s/685.9MiB,
+large recovery39.629s/1250.7MiB and the six O0/O3-full recovery executions.
+The combined resource gate is nevertheless **failed**: all original modes0–11
+and opaque controls pass, while new modes12–15 exit92 under default optimization
+(330.204s including compilation). Its three separate reflection/GC routes pass
+147.501s; source-after matches, combined peak2772.8MiB. The unchanged large
+resource fixture freshly built at O0 passes all four new modes with matching
+source-after (1895.3MiB). These are distinct outcomes, not a whole v117 pass.
+
+An isolated diagnostic shows corruption before GC: firstbyte17, lastbyte17
+(expected91), pointee37. Before/after-ABI and final IR show that an assembled
+then immediately extracted source tuple hid the array load from the mandatory
+memory lowerer; only later LLVM optimization removed the redundant tuple,
+leaving a131073-byte SSA copy for target register expansion. A compiler sample
+also locates the several-minute cost in LLVM machine scheduling. The diagnostic
+branch's print calls and hard-coded IR dumps are not part of the implementation.
+
+The ABI lowerer now folds only exact insert/extract projection identities and
+removes their dead same-block tuple chains before its existing copy lowering.
+Nested exact/disjoint writes are supported; a partial subfield overwrite does
+not authorize substituting the old container. This adds no runtime compensation,
+Go-SSA analysis, second backend path or late emitter inference. The new tuple
+gate fails before this correction and full ABI tests pass afterwards0.317s.
+Immutable v118 (`2c63c4d07`) completes that replay. Its source manifest is
+`38ad2a75d701e6a4da2259ff55409ea7f19f6dc18991c4d96f2f310955a9bb68`,
+compiler SHA-256
+`08db68b95320c570545ac2436efea05b8a8bea18cfefcc4977d16e20497047ec`.
+Broad compiler gates pass214.414s/1271.4MiB, all18 archive executions
+252.541s/1972.5MiB, and ABI/build gates0.953s/768.0MiB, unchanged budgets.
+The large recovery program and six O0/O3-full recovery executions pass.
+All160 FD executions, six opaque nonresource controls and three reflection/GC
+routes pass79.533s+169.041s, source-after matching, peak2849.0MiB. No diagnostic
+printing, hard-coded paths or optional checks are present in this compiler.
+
+Independent persisted images additionally pass all16 resource modes three
+times each at Os and O3-full: **96/96 executions**, source-after matching,
+peak1529.1MiB. O0 passes three runs of each newly added large-result mode:
+**12/12**, source-after matching, peak1025.9MiB. The source Go and C files
+are byte-identical between v117/v118. For this exact fixture at O0, executable
+size falls from14918064 to2943776bytes (about80.3%); Os/O3-full images are
+1474592/1500560bytes. This is a same-source code-size result, not a runtime
+throughput or quiet-host compiler-time comparison. A subsequent test-only
+commit runs the projection/overwrite/alignment gate on native64 and wasm32
+layouts (full ABI suite0.380s/127.2MiB); production code is unchanged from v118.
+
+The old v70 standard-library evaluation has171 package passes and one retained
+failure so far: testing/quick's custom Generator case. A complete focused v117
+rerun reproduces it, with matching source-after and reclaimed scratch. This is
+not added to xfails. The minimal executable narrows it to the Generator invoke
+after a successful reflect.TypeAssert: the method has not entered before a
+nil-access panic, while the Go control completes. v117 whole-test/go and all
+native Go demos continue as separate fresh cohorts. Its four runtime packages
+complete with68 passes and the original helper-process skip, zero failures,
+matching source-after22:49:51 UTC, joined children and reclaimed scratch.
+
 Immutable v108 completes the four runtime packages with **68 passes and one
 helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
 llgoext23. Source-after20:47:34 matches, children join and private scratch is

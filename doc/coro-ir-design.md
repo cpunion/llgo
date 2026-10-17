@@ -1026,6 +1026,13 @@ ledger 消费同一归属。注册时 AllocU 仍在 yield，外层继续复用�
 同时保存条件 source FunctionID 和物理 owner，避免相同 block/instruction ordinal 混淆。
 archive summary 仍为 v18：没有新增 archive record 或运行时布局。
 
+source producer 的普通 Return 可以复用同一个冻结的 output projection proof：它只允许
+按序重新读取借用结果字段并立即返回，不允许中间计算、调用或来自另一单元的结果。
+`BorrowResult` 已经选择了 incoming output sink 或 nil-output fallback，因此不再把这些
+字段复制回原槽。仍然执行既有正常 completion、fallback disarm 和父级消费/取消协议；
+这不是提前转移所有权。普通返回函数、透明 wrapper 和 archive consumer 没有这项 source
+proof，继续原有发布路径；不会仅因为具有资源 capability 就省略返回存储。
+
 defer 忽略返回值不等于取消窗口内可以放弃结果托管。外层 guard 仍在 child completion 被
 消费后才解除；取消/panic 继续使用同一 typed result、捕获环境和内部 drop scope。不能只因
 语言层面丢弃结果就无条件换成 nil-output fallback，否则 producer return 到 owner claim

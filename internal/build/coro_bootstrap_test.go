@@ -580,6 +580,7 @@ func main() {}
 
 func createCoroBootstrapV2SSAPackage(
 	t *testing.T, prog *ssa.Program, fset *token.FileSet, pkgPath, source string,
+	importers ...types.Importer,
 ) (*ssa.Package, []*ast.File, *types.Package, *types.Info) {
 	t.Helper()
 	file, err := parser.ParseFile(fset, pkgPath+".go", source, parser.ParseComments)
@@ -595,7 +596,11 @@ func createCoroBootstrapV2SSAPackage(
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 		Scopes:     make(map[ast.Node]*types.Scope),
 	}
-	typesPkg, err := (&types.Config{}).Check(pkgPath, fset, files, info)
+	config := &types.Config{}
+	if len(importers) != 0 {
+		config.Importer = importers[0]
+	}
+	typesPkg, err := config.Check(pkgPath, fset, files, info)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -235,6 +235,7 @@ func prepareCoroStaticCleanupPlan(
 	universe *EmissionUniverse,
 	frameRetentionABI string,
 	explicitPanic bool,
+	owners ...*preparedEmissionPackage,
 ) (*coroStaticCleanupPlan, error) {
 	if fn == nil || whole == nil {
 		return nil, nil
@@ -565,7 +566,18 @@ func prepareCoroStaticCleanupPlan(
 	if !explicitPanic {
 		return nil, fmt.Errorf("static coroutine defer cleanup requires the explicit-status panic ABI; legacy panic cannot guarantee cleanup")
 	}
-	terminalResultAllocations, err := coroStaticTerminalReconstructionAllocations(fn, ir)
+	var targetContext *context
+	if universe != nil {
+		owner := universe.ownerOf(fn)
+		if len(owners) != 0 {
+			owner = owners[0]
+		}
+		targetContext, err = universe.functionABIContext(fn, owner)
+		if err != nil {
+			return nil, err
+		}
+	}
+	terminalResultAllocations, err := coroStaticTerminalReconstructionAllocations(fn, targetContext, ir)
 	if err != nil {
 		return nil, err
 	}
@@ -872,12 +884,14 @@ func coroStaticRunDefersReconstructionAllocations(
 }
 
 // coroStaticTerminalReconstructionAllocations returns the deterministic union
-// of ordinary heap cells whose values are reconstructed after RunDefers or by
+// of managed cells whose values are reconstructed after RunDefers or by
 // x/tools' canonical exceptional Recover return. Only source-entry cells are
 // eligible: moving a conditional or loop allocation to the coroutine prologue
 // would change its execution count. Stack/frame cells need no special
 // treatment because coroFrameAlloc already defines them in the physical ramp.
-func coroStaticTerminalReconstructionAllocations(fn *ssa.Function, programs ...*coroProgramIR) ([]*ssa.Alloc, error) {
+// Target-promoted oversized locals use managed storage even when SSA Heap is
+// false, so they need the same dominating allocation as escaping result cells.
+func coroStaticTerminalReconstructionAllocations(fn *ssa.Function, ctx *context, programs ...*coroProgramIR) ([]*ssa.Alloc, error) {
 	ir := coroSelectedProgramIR(programs)
 	if fn == nil {
 		return nil, nil
@@ -924,11 +938,11 @@ func coroStaticTerminalReconstructionAllocations(fn *ssa.Function, programs ...*
 	}
 	selected := make(map[*ssa.Alloc]struct{})
 	keep := func(allocation *ssa.Alloc, context string) error {
-		if !allocation.Heap {
+		if !coroAllocationUsesManagedStorage(ctx, allocation) {
 			return nil
 		}
 		if allocation.Block() == nil || allocation.Block().Index != 0 {
-			return fmt.Errorf("%s terminal heap allocation %q is outside source block zero", context, allocation.Name())
+			return fmt.Errorf("%s terminal managed allocation %q is outside source block zero", context, allocation.Name())
 		}
 		selected[allocation] = struct{}{}
 		return nil
