@@ -302,7 +302,9 @@ func PanicWrapNilPointer(value bool, receiver, method string) { if value { abort
 		llabi.LowerLargeAggregates(prog.TargetData(), module)
 		if large && producer {
 			name := "Acquire"
-			if factory {
+			if forwarded {
+				name = "acquireIntoBorrowed"
+			} else if factory {
 				name = "acquire"
 			}
 			body := module.NamedFunction(libraryPath + "." + name + "$coro")
