@@ -663,12 +663,13 @@ func (source *ManualOperationSource) ApplyOne(p *P, id OperationID, record *Oper
 		return OperationApplyInvalid
 	}
 	park, ticket, wait := slot.record.link.park, slot.record.link.ticket, slot.record.link.wait
-	if wait != nil {
+	if wait != nil && (wait.resumeKind == resumeBindingCleanup || wait.resumeKind == resumeBindingSingle) {
 		// A remote owner can observe Posted before Post releases its producer
 		// admission. Do not send a scheduler wait into typed cleanup/Confirm
 		// until that shim has joined and any late mailbox has been drained.
-		// Reuse the bounded retry epoch; standalone detach keeps its explicit
-		// backend-join contract and does not pass through this scheduler gate.
+		// Reuse the bounded retry epoch for automatic packet consumers. A bare
+		// wait/standalone detach keeps its explicit backend-join contract; in
+		// particular, B may still drain its late mailbox after A detached it.
 		if !producerSourceSlotQuiesced(&slot.producerSourceSlot) {
 			return OperationApplyRetryBudget
 		}
