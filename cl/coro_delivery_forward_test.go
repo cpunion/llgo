@@ -71,6 +71,12 @@ func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Ch
 						t.Fatalf("%s did not retain its exact real forwarding call: %+v: %v", name, recipe, err)
 					}
 				}
+				chain := u.coroProgramIR.deliveryProducers[foo.ssa.Func("Chain")]
+				if chain.forwardBase != foo.ssa.Func("Acquire") || len(chain.forwardArgs) != 2 ||
+					chain.forwardArgs[0].constant == nil || chain.forwardArgs[0].constant.Value.ExactString() != "7" ||
+					chain.forwardArgs[1].sourceParameter != 0 {
+					t.Fatalf("multi-layer drop projection was not composed in ProgramIR: %+v", chain)
+				}
 				if _, present, _ := u.coroProgramIR.sourceDelivery(foo.ssa.Func("Changed")); present {
 					t.Fatal("changed return acquired resource custody")
 				}
@@ -135,13 +141,16 @@ func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Ch
 				}
 				helperPlan, _ := plan.FunctionPlan(foo.ssa.Func("drop"))
 				prefix := 0
+				helperName := "foo.drop"
 				switch helperPlan.ManagedEntry {
 				case coro.ManagedEntryCoroutine:
 					prefix = 2
+					helperName += coroPrimarySuffix
 				case coro.ManagedEntryOutcomePlain:
 					prefix = 3
+					helperName += coroOutcomePlainPrimarySuffix
 				}
-				for _, name := range []string{"Permuted", "Identity"} {
+				for _, name := range []string{"Permuted", "Identity", "Chain"} {
 					view := module.NamedFunction(coroDeliveryViewSymbol(u.finalIdentity(foo.ssa.Func(name))))
 					if view.IsNil() || view.BasicBlocksCount() != 1 {
 						t.Fatalf("%s has no pure typed helper view", name)
@@ -152,6 +161,15 @@ func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Ch
 							continue
 						}
 						calls++
+						if instruction.CalledValue().Name() != helperName {
+							t.Fatalf("%s helper view did not call the real helper directly: %s", name, instruction.String())
+						}
+						if name == "Chain" {
+							if !instruction.Operand(prefix+2).IsConstant() || instruction.Operand(prefix+2).ZExtValue() != 7 || instruction.Operand(prefix+3).C != view.Param(prefix+2).C {
+								t.Fatalf("composed Chain lost literal/parameter order: %s", instruction.String())
+							}
+							continue
+						}
 						first, second := prefix+2, prefix+3
 						if name == "Permuted" {
 							first, second = second, first

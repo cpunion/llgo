@@ -41,6 +41,10 @@ type coroSourceDeliveryRecipe struct {
 	// forward is a frozen, value-only exact-return call, never a fabricated
 	// borrow site. Its target's real helpers remain the logical callees.
 	forward *coroForwardingSourceShape
+	// Compose once in ProgramIR, directly to the real helper's producer.
+	// Emission never builds intermediate helper-view chains or replays SSA.
+	forwardBase *ssa.Function
+	forwardArgs []coroForwardingSourceArgument
 }
 
 func (recipe coroSourceDeliveryRecipe) anchor() *ssa.Call {

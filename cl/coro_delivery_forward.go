@@ -55,6 +55,10 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		if !present {
 			return nil
 		}
+		arguments, base, composed := composeCoroDeliveryForwardingArguments(shape, target)
+		if !composed {
+			return nil
+		}
 		signature, err := u.coroPhysicalSourceSignature(function)
 		if err != nil {
 			return err
@@ -66,13 +70,13 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		// Numeric conversions may have source semantics even if LLVM happens
 		// to use equal-width words. Only the existing exact transport proof
 		// grants the zero-allocation retag used by helper ABI views.
-		for _, argument := range shape.args {
+		for _, argument := range arguments {
 			if argument.sourceParameter >= 0 && coroPhysicalTransportTypeKey(u, argument.projectedType) != coroPhysicalTransportTypeKey(u, argument.valueType) {
 				return nil
 			}
 		}
 		recipe := coroSourceDeliveryRecipe{producer: function, signature: signature, result: result,
-			initializer: target.initializer, drop: target.drop, forward: shape}
+			initializer: target.initializer, drop: target.drop, forward: shape, forwardBase: base, forwardArgs: arguments}
 		// An archive's real private helpers remain checked opaque facts. They
 		// are not converted to made-up source function bodies.
 		if target.archive != nil {
@@ -118,17 +122,50 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 	return nil
 }
 
+func composeCoroDeliveryForwardingArguments(shape *coroForwardingSourceShape, target coroSourceDeliveryRecipe) ([]coroForwardingSourceArgument, *ssa.Function, bool) {
+	if target.forward == nil {
+		return shape.args, target.producer, true
+	}
+	if target.forwardBase == nil {
+		return nil, nil, false
+	}
+	arguments := make([]coroForwardingSourceArgument, len(target.forwardArgs))
+	for index, projection := range target.forwardArgs {
+		argument := projection
+		if projection.sourceParameter >= 0 {
+			if projection.sourceParameter >= len(shape.args) {
+				return nil, nil, false
+			}
+			argument = shape.args[projection.sourceParameter]
+			if len(projection.fieldPath) != 0 {
+				projected, ok := coroForwardingProjectedType(argument.projectedType, projection.fieldPath)
+				if !ok || argument.constant != nil {
+					return nil, nil, false
+				}
+				argument.fieldPath = append(append([]int(nil), argument.fieldPath...), projection.fieldPath...)
+				argument.projectedType = projected
+			}
+			argument.valueType = projection.valueType
+		} else if projection.constant == nil {
+			// A callee's capture belongs to a different environment. Only the
+			// source function's own immutable captures can later be projected.
+			return nil, nil, false
+		}
+		arguments[index] = argument
+	}
+	return arguments, target.forwardBase, true
+}
+
 // Apply the frozen source mapping to the producer arguments of a drop call.
 // The result address and closure environment are carried unchanged; projections
 // are values, so no receiver dereference or additional lifetime is introduced.
 func (p *context) coroForwardedDeliveryArguments(b llssa.Builder, recipe coroSourceDeliveryRecipe, args []llssa.Expr) (coroSourceDeliveryRecipe, []llssa.Expr) {
-	for recipe.forward != nil {
-		shape := recipe.forward
+	if recipe.forward != nil {
 		if len(args) != recipe.signature.Params().Len()+2 {
 			panic("forwarded delivery lost its typed arguments")
 		}
 		forwarded := append([]llssa.Expr(nil), args[:2]...)
-		for _, argument := range shape.args {
+		for _, argument := range recipe.forwardArgs {
 			var value llssa.Expr
 			if argument.sourceParameter >= 0 {
 				value = args[2+argument.sourceParameter]
@@ -144,7 +181,7 @@ func (p *context) coroForwardedDeliveryArguments(b llssa.Builder, recipe coroSou
 			forwarded = append(forwarded, value)
 		}
 		var found bool
-		recipe, found = p.emissionUniverse.coroProgramIR.deliveryProducers[shape.target]
+		recipe, found = p.emissionUniverse.coroProgramIR.deliveryProducers[recipe.forwardBase]
 		if !found {
 			panic("forwarded delivery lost its proven producer")
 		}
@@ -169,7 +206,7 @@ type coroDeliveryHelperPrimary struct {
 
 func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecipe, ordinal int) coroDeliveryHelperPrimary {
 	if recipe.forward != nil {
-		target := p.emissionUniverse.coroProgramIR.deliveryProducers[recipe.forward.target]
+		target := p.emissionUniverse.coroProgramIR.deliveryProducers[recipe.forwardBase]
 		primary := p.coroDeliveryRecipeHelperPrimary(target, ordinal)
 		if ordinal == 0 {
 			return primary
@@ -192,7 +229,7 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 		arguments := []llssa.CoroHelperViewArgument{{Parameter: 0}, {Parameter: 1}}
 		literals := p.pkg.FuncOf(primary.physical.Name()).NewBuilder()
 		defer literals.Dispose()
-		for _, argument := range recipe.forward.args {
+		for _, argument := range recipe.forwardArgs {
 			mapped := llssa.CoroHelperViewArgument{Parameter: -1}
 			if argument.sourceParameter >= 0 {
 				mapped.Parameter = argument.sourceParameter + 2
