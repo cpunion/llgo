@@ -509,6 +509,7 @@ jobs:
         env:
           LLGO_CORO_RESOURCE_ACCEPTANCE: "1"
           LLGO_TEST_LLGO: /tmp/llgo-resource-cleanup
+          LLGO_CORO_RESOURCE_OUTPUT: /tmp/llgo-resource-artifacts
           GOMAXPROCS: "2"
           GOMEMLIMIT: 2GiB
         run: |
@@ -518,6 +519,30 @@ jobs:
           go build -p=1 -o "$LLGO_TEST_LLGO" ./cmd/llgo
           timeout 18m go test -p=1 ./internal/build \
             -run '^TestCoro(BorrowedResourceCleanup|ResourceDeliverySlot|ResourceDeliveryForward)Acceptance$' -v -count=1 -timeout=17m
+
+      - name: Record failed native resource environment
+        if: failure() && matrix.lane == 'native-e2e'
+        run: |
+          mkdir -p /tmp/llgo-resource-artifacts
+          {
+            go version
+            llvm-config-${{ matrix.llvm }} --version
+            dpkg-query -W libgc1 libgc-dev libc6
+            sha256sum /tmp/llgo-resource-cleanup
+            find /tmp/llgo-resource-artifacts -type f -name resource -exec sha256sum {} \;
+            find /tmp/llgo-resource-artifacts -type f -name resource -exec ldd {} \;
+          } > /tmp/llgo-resource-artifacts/environment.txt 2>&1
+
+      - name: Upload failed native resource images
+        if: failure() && matrix.lane == 'native-e2e'
+        uses: actions/upload-artifact@v7
+        with:
+          name: failed-native-resource-llvm${{ matrix.llvm }}
+          path: |
+            /tmp/llgo-resource-cleanup
+            /tmp/llgo-resource-artifacts
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Test main return racing channel completion
         if: matrix.lane == 'fleet-e2e'

@@ -76,7 +76,7 @@ func coroTargetBeginRunSliceV1(
 	}
 	target := coroRunTargetCapabilityV1{physicalReturn: osThreadPossible}
 	state := &coroNativeFleetV1State
-	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
+	if coroNativeFleetPhysicalOwnerV1State.stop.Sealed() {
 		return target, true
 	}
 	if state.lifecycle != coroNativeFleetActiveV1 {
@@ -117,7 +117,7 @@ func coroTargetBeginRunSliceV1(
 // slice capability above; revalidating the complete quota lifetime and limit
 // after every action adds no safety because TryAcquire remains authoritative.
 func coroTargetReadyDistributionV1(target coroRunTargetCapabilityV1) (distribute, stop, ok bool) {
-	stop = coroNativeFleetPhysicalOwnerV1State.stop.Quiesced()
+	stop = coroNativeFleetPhysicalOwnerV1State.stop.Sealed()
 	return target.readyDistribution && !stop, stop, true
 }
 
@@ -126,7 +126,7 @@ func coroTargetReadyDistributionV1(target coroRunTargetCapabilityV1) (distribute
 // policy epoch; ordinary channel/park/complete actions do not read it. An
 // unrelated explicit yield with an unchanged epoch keeps the current slice.
 func coroTargetRefreshRunSliceV1(target coroRunTargetCapabilityV1) (distribute, restart, ok bool) {
-	stop := coroNativeFleetPhysicalOwnerV1State.stop.Quiesced()
+	stop := coroNativeFleetPhysicalOwnerV1State.stop.Sealed()
 	if stop {
 		// BeginRunSlice intentionally omits distribution's policy epoch after
 		// this one-way barrier. Shielded shutdown cleanup may still Yield:
@@ -156,7 +156,7 @@ func coroTargetAfterStableRunActionV1(
 	if source == nil {
 		return false, coroTargetReadyDistributionFailV1("native ready distribution lacks source owner")
 	}
-	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
+	if coroNativeFleetPhysicalOwnerV1State.stop.Sealed() {
 		// Fleet shutdown is a one-way ownership barrier. A peer action which
 		// committed concurrently with program-main return is still valid, but
 		// it must not publish another transfer after the stop boundary.
@@ -227,7 +227,7 @@ func coroTargetAfterSourceReductionV1(
 	if source == nil {
 		return false, coroTargetReadyDistributionFailV1("native source distribution lacks source owner")
 	}
-	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
+	if coroNativeFleetPhysicalOwnerV1State.stop.Sealed() {
 		return false, true
 	}
 	if state.lifecycle != coroNativeFleetActiveV1 {

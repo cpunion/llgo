@@ -520,19 +520,21 @@ func (p *context) compileCoroStaticOutcomeTargetCallAliasResult(
 			panic(fmt.Errorf("publish imported outcome atomic-cost dependency: %w", err))
 		}
 	}
-	resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
 	// Reuse the coroutine result-slot policy even though this exact call cannot
 	// suspend. In particular, an outcome target may still return a very
 	// large parameter; it must not turn into an unbounded alloca on a resume
 	// function's fixed native stack.
-	var resultSlot llssa.Expr
-	if p.hasCoroPhysicalBody() {
-		resultSlot = p.coroResultSlot(resultType)
-	} else {
-		if !p.hasOutcomePlainPhysicalBody() || !nativeResult {
-			panic("outcome-plain DAG call result escaped its frozen native-stack bound")
+	if !p.hasCoroPhysicalBody() && (!p.hasOutcomePlainPhysicalBody() || !nativeResult) {
+		panic("outcome-plain DAG call result escaped its frozen native-stack bound")
+	}
+	resultSlot := p.prog.Nil(p.prog.VoidPtr())
+	if sourceSig.Results().Len() != 0 {
+		resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
+		if p.hasCoroPhysicalBody() {
+			resultSlot = p.coroResultSlot(resultType)
+		} else {
+			resultSlot = p.structuredOutcomeAlloca(resultType, false)
 		}
-		resultSlot = p.structuredOutcomeAlloca(resultType, false)
 	}
 	// The completion record is three fixed words and is consumed before the next
 	// suspension. Keep it in the physical function entry: loop iterations reuse

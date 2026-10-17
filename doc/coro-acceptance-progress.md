@@ -35,12 +35,126 @@ executable SHA-256 is
 the guarded process-tree peak is 2777.0MiB. This affected rerun does not relabel
 the original whole-demo cohort as an all-passing single-snapshot run.
 
-PR #287 still has a real Linux CI failure in timer/ticker weak collection at
-P=2, despite passing the other 17 jobs. It is not merged or reclassified. PR
-#288 contains the separately validated context-free resource helper-view
-cohort and remains draft pending its complete CI and the remaining integration
-blockers. No instruction goldens, collection deadline or semantic assertions
-were relaxed to obtain these results.
+PRs #288 (helper views), #289 (manual producer join), and #287 (shutdown fix
+and failed-image retention) are now merged into `llvm-coro` as `520e3958c`,
+`0720fddd7`, and `e6a2a9b93`. Their exact final heads each passed all 18 CI jobs
+in runs `39003055947`, `39004800766`, and `39004983371`, respectively; fresh
+paginated review, inline-comment, issue-comment and thread inventories were
+empty before each merge. PR #287's earlier 17/18 run still contains the real
+P=2 timer/ticker weak-collection failure. Subsequent green runs do not establish
+its cause or reclassify it. Failed native timer images and their exact compiler,
+hashes, library paths and environment are now retained by CI for investigation.
+No instruction goldens, collection deadline or semantic assertions were relaxed.
+
+### Void call result transport (v147)
+
+PR #290's exact head `e5661d7c7` has a retained native linked CI failure in
+run `39007948622`: `TestCoroResourceDeliveryForwardAcceptance/3`, P=2,
+iteration 3, reaches its unchanged 30-second execution deadline. This is the
+forwarded source-defer shutdown route; the other FD modes pass in that run.
+The earlier local 220/220 passing cohort does not erase this failure or prove
+it unrelated to the result-slot change. The PR must not merge on that evidence.
+Native resource gates now support opt-in retention of their exact linked
+images, and CI records compiler/image hashes and library versions on failure.
+Assertions and execution deadlines are unchanged. Follow-up head `427e94da4`
+passes all 18 CI jobs in run `39010261089`; that alone is not a causal fix.
+The deterministic shutdown-order investigation below supplies separate evidence.
+
+A source call with no return values now uses a nil output address through
+direct coroutine, managed descriptor, synchronous outcome and original-init
+bridge calls. Completion, panic and cancellation still use their existing
+separate completion protocol. Interface invocation already used this rule.
+A source return value of type `struct{}` is **not** void and retains its typed
+output cell; no result-layout, callable ABI or runtime state is added.
+
+The test-only precursor fails on native/wasm32 empty allocas and non-nil void
+outputs. Corrected direct/descriptor regressions pass, as do **538** existing
+top-level coro/physical-ABI/generic-patch/emission-contract compiler tests.
+Frozen v147 (`0e63ced6e6d87cc661c4f26c4ec5b41d433ca900`, manifest SHA-256
+`f6d92ab6baa2610c1500b6c5c638206273f7fdd51bff37fbf223492c92faca42`)
+uses compiler SHA-256
+`1edc7097f3c2feb641e06736bb144671a14aab9e2df8bc24277153e4e46c002a`.
+It passes **64/64** original sync-demo executions (16 each at P=1/2/4/8),
+the original **320** and forwarded **220** FD delivery executions, six opaque
+nonresource controls and borrowed-result cleanup, plus all three native and
+all three WASI Timer/GC acceptance fixtures. Source-after matches.
+
+This does not solve the separate large-function compile-time outlier:
+`fixedbugs/issue9604b.go`'s generated arithmetic program still hits the explicit
+eight-minute profiling bound, after the earlier original 25-minute evaluation
+timeout. Native samples locate the hotspot in LLVM 22's
+`CoroCleanup -> SimplifyCFG`, not Go effect analysis. Its retained presplit
+module has 7,106 slice argument cells and, before v147, 7,106 empty result cells.
+The failed whole profiling cohort remains failed even though all subsequent
+resource/timer subsets pass; its peak is 7334.2MiB under a 16GiB guard. Neither
+the global no-elision experiment nor unproven early optimization passes were
+merged. Full-suite and quiet performance evaluation remain outstanding.
+
+### Broadcast shutdown before any domain drain (v149/v150)
+
+A fixed-topology extension of the forwarded-resource fixture establishes P1
+as the static main/worker route and P2 as the sentinel route. The sentinel
+shrinks GOMAXPROCS to one before publishing readiness, keeping existing routes
+alive but disabling later transfers. The main remains runnable while the peer
+is placed; no sleep or LockOSThread is used. Runtime route assertions and a
+pre-return marker distinguish topology setup from shutdown.
+
+The old runtime drains P1 before publishing P2 shutdown at target close. Its
+worker waits for P2's shutdown defer, so that ordering has a wait cycle. Frozen
+v149 (`2c29cbbbf`, manifest SHA-256
+`ae158aebfe63084688e6148fc8e6edfcc0fba3f6f60a3e6da4486b299ad3bfa7`)
+reaches the topology-ready marker and times out at the unchanged 30-second
+execution bound. Source-after matches. The failed executable SHA-256 is
+`3dc9dd7bb9976836cd24448de95fec28578771c5ab619ba0379f6d3a76bff74d`.
+
+The correction splits publication from strong join, using the existing atomic
+stop ingress and coordinator lifecycle. Both the normal FinishMain path and
+the pending-source runner reentry publish peer stop before local cleanup.
+All domains can then drain concurrently; joining owners, retiring sources and
+stopping workers remain in the existing final close. Peers do not consume a
+new non-atomic shutdown flag. Shutdown cleanup may resize the logical execution
+quota without starting another physical owner after the barrier is sealed.
+
+With the **same v147 compiler and byte-identical fixture**, frozen v150
+(`df4e42dff`, manifest SHA-256
+`bdbbd9484ced6c0ac3d38ebd4257d543af21ecb326740365d8da0f6f3cd7f8c8`)
+passes **16/16** fixed-topology executions and **96/96** original mode-3 runs
+(32 each at P=1/2/4). Source-after matches; executable SHA-256 is
+`cf92592abad3ed6e4600ffc020372d77a4ddde0534321c7f69fb4138916e639e`.
+The guarded build/run tree peaks at 1245.3MiB. The named-source program adapter
+passes all 41 tests with race/shuffle for ten repetitions; 52 selected core
+shutdown/cancellation/ingress/quota tests pass three race/shuffle repetitions,
+and seven architecture/target-selection tests pass. An initial model launch
+before snapshot extraction completed is retained as an infrastructure failure,
+not a semantic test result; the corrected launch uses the completed snapshot.
+
+This establishes and fixes a shutdown-order defect in the same resource-defer
+path, not a proof that every historical timeout has this single cause. Frozen
+v151 passes the complete borrowed cleanup, **320** original FD runs, six opaque
+controls and **476** forwarded runs, including an initial cleanup-quota mode;
+source-after matches and the guarded peak is 1257.0MiB. Frozen v152 strengthens
+that mode to verify logical quota **1 -> 8** during cancellation cleanup and
+passes **16/16** actual executions, with matching source-after.
+
+Final protocol review separates publication from succession join as well:
+`TargetIngress.Sealed` reads the existing phase bits even with a held lease;
+all peer-stop and ready-placement observers use it. `Quiesced` remains the
+strong-join prerequisite. Thus a peer cannot consume the stop wake while a
+succession lease is live and then sleep waiting for a publication it missed.
+The held-lease unit regression and architecture gates enforce this distinction;
+no separate physical succession interleaving reproduction is claimed.
+
+Frozen v153 (`fe9912101`, manifest SHA-256
+`bce8a0f15241e8fa3786c83697c31c65e6b0ec27dbbc8ffccdfccaa09dc17272`)
+passes all **571** core tests with race/shuffle for three repetitions, all 41
+program-adapter tests for ten race/shuffle repetitions, and seven architecture/
+target-selection gates, with no failures or skips. It independently passes all
+**476** forwarded executions, including the strengthened **1 -> 8** mode;
+source-after matches and peak build/run RSS is 1221.2MiB. The same v147 compiler
+is used throughout; its compiler production sources are unchanged. Final
+forwarded executable SHA-256 is
+`4fdb0d0fb7eec303b468ca4b0c44a496c94356192282da8c7e0548bea59fb2ff`.
+Final-head CI, review and platform gates remain required before integration.
 
 ### Latest executable refresh: v117/v118/v120
 

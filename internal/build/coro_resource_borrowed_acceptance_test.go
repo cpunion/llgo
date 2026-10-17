@@ -14,6 +14,36 @@ import (
 	"time"
 )
 
+func coroResourceAcceptanceImage(t *testing.T, fixture string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if output := os.Getenv("LLGO_CORO_RESOURCE_OUTPUT"); output != "" {
+		dir = filepath.Join(output, fixture)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return filepath.Join(dir, "resource")
+}
+
+func TestCoroResourceAcceptanceImageRetention(t *testing.T) {
+	t.Setenv("LLGO_CORO_RESOURCE_OUTPUT", "")
+	if image := coroResourceAcceptanceImage(t, "ordinary"); filepath.Base(image) != "resource" {
+		t.Fatal("unexpected temporary image:", image)
+	}
+	output := t.TempDir()
+	t.Setenv("LLGO_CORO_RESOURCE_OUTPUT", output)
+	for _, fixture := range []string{"coro_resource_borrowed_fd", "coro_resource_delivery_slot", "coro_resource_delivery_forward"} {
+		image := coroResourceAcceptanceImage(t, fixture)
+		if image != filepath.Join(output, fixture, "resource") {
+			t.Fatal("unexpected retained image:", image)
+		}
+		if info, err := os.Stat(filepath.Dir(image)); err != nil || !info.IsDir() {
+			t.Fatalf("retained image parent: %v, %v", info, err)
+		}
+	}
+}
+
 // This is a physical borrowed-output/defer gate, not a claim that arbitrary
 // syscall.Open results already have cancellation-safe child-to-parent delivery.
 // Shared-machine callers must bound the process tree's RSS. The dedicated
@@ -37,7 +67,7 @@ func TestCoroBorrowedResourceCleanupAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	image := filepath.Join(t.TempDir(), "borrowed-resource")
+	image := coroResourceAcceptanceImage(t, "coro_resource_borrowed_fd")
 	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Minute)
 	defer cancel()
 	build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-o", image, "./_testgo/coro_resource_borrowed_fd")
@@ -65,7 +95,7 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 }
 
 func TestCoroResourceDeliveryForwardAcceptance(t *testing.T) {
-	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15})
+	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15, 16, 17})
 }
 
 func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []int) {
@@ -88,7 +118,7 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 	if err != nil {
 		t.Fatal(err)
 	}
-	image := filepath.Join(t.TempDir(), "resource-delivery")
+	image := coroResourceAcceptanceImage(t, fixture)
 	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Minute)
 	defer cancel()
 	build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-o", image, "./_testgo/"+fixture+"/main.go")
@@ -114,19 +144,32 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 		"typed resource delivery normal, discarded and canceled passed", // Large independent fallback.
 		"typed resource delivery normal, discarded and canceled passed", // Large static resource defer.
 		"typed resource delivery normal, discarded and canceled passed", // Large captured dynamic resource defer.
+		"cross-P shutdown topology ready\ntyped resource delivery normal, discarded and canceled passed",
+		"cross-P shutdown topology ready\ntyped resource delivery normal, discarded and canceled passed", // Resize during shutdown cleanup.
 	}
 	for _, mode := range modes {
 		expected := expectedByMode[mode]
 		t.Run(strconv.Itoa(mode), func(t *testing.T) {
-			for _, owners := range []string{"1", "2"} {
-				for attempt := 0; attempt < 10; attempt++ {
+			repetitions := 10
+			if fixture == "coro_resource_delivery_forward" && mode == 3 {
+				// This source-defer shutdown route has timed out intermittently
+				// on P=2 CI. Keep the same image, assertions and per-run deadline.
+				repetitions = 128
+			}
+			ownerCounts := []string{"1", "2"}
+			if mode == 16 || mode == 17 {
+				ownerCounts = []string{"2"} // The fixture proves P1 -> worker -> P2 cleanup.
+			}
+			for _, owners := range ownerCounts {
+				for attempt := 0; attempt < repetitions; attempt++ {
 					runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
 					run := exec.CommandContext(runCtx, image)
 					run.Env = append(os.Environ(), "GOMAXPROCS="+owners, "LLGO_DELIVERY_FIXTURE_MODE="+strconv.Itoa(mode))
 					output, err := run.CombinedOutput()
+					deadline := runCtx.Err()
 					runCancel()
 					if err != nil || strings.TrimSpace(string(output)) != expected {
-						t.Fatalf("resource delivery P=%s run %d: %v\n%s", owners, attempt, err, output)
+						t.Fatalf("resource delivery P=%s run %d: %v, deadline: %v, image: %s\n%s", owners, attempt, err, deadline, image, output)
 					}
 				}
 			}

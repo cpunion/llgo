@@ -348,6 +348,9 @@ func Seed() {
 		t.Fatalf("verify dual-capability descriptor target: %v\n%s", err, module.String())
 	}
 	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	if strings.Contains(rootIR, "alloca {}") {
+		t.Errorf("void dynamic await retained an empty result sink:\n%s", rootIR)
+	}
 	if strings.Contains(rootIR, " and i32 ") ||
 		strings.Contains(rootIR, "load { i32, i32, i64, i64, ptr, ptr") ||
 		!strings.Contains(rootIR, ", i32 0, i32 5") ||

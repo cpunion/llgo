@@ -104,6 +104,10 @@ func TestCoroDirectChannelPublisherDoesNotReadOwnerCursor(t *testing.T) {
 }
 
 func TestCoroRunnableDistributionHasOneGenericTargetPath(t *testing.T) {
+	placement := readRuntimePollFile(t, "internal/runtime/coro_ready_distribution_fleet_llgo.go")
+	if !strings.Contains(placement, ".stop.Sealed()") || strings.Contains(placement, ".stop.Quiesced()") {
+		t.Error("placement must stop at Seal, not wait for the last succession lease to leave")
+	}
 	paths := []string{
 		"internal/runtime/coro_native_fleet.go",
 		"internal/runtime/coro_native_fleet_owner_llgo.go",
@@ -170,6 +174,7 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"coroNativeMRunReplacementOwnerV1(slot)",
 		"owner.baton.Valid() {\n\t\treturn 2",
 		"state.stop.Quiesced()",
+		"peer.lifecycle == coroNativeFleetPhysicalActiveV1 && state.stop.Sealed()",
 	} {
 		if !strings.Contains(owner, required) {
 			t.Errorf("native fleet physical owner lacks fixed-topology marker %q", required)

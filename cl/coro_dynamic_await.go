@@ -242,7 +242,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	if options.cleanup.discardResult {
 		results = types.NewTuple()
 	}
-	if retainResult && !deferredAllocation && (abi.signature.Results().Len() != 0 || options.entry != coro.ManagedEntryOutcomePlain) {
+	if retainResult && !deferredAllocation && abi.signature.Results().Len() != 0 {
 		resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
 		if p.hasCoroPhysicalBody() {
 			resultSlot = p.coroResultSlot(resultType)

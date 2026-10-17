@@ -701,18 +701,18 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		panic(fmt.Sprintf("coroutine child await: target %q did not resolve to a Go entry", entry.plan.ID))
 	}
 
-	resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
 	guard := p.beginCoroDeliveryCall(b, callee, closureContext, args)
 	var resultSlot llssa.Expr
 	if guard != nil {
 		resultSlot = guard.result
-	} else if invocation.discardResult {
+	} else if invocation.discardResult || sourceSig.Results().Len() == 0 {
 		// Go discards a deferred call's results. A nonresource invocation
 		// needs neither an aggregate sink nor a managed allocation merely
-		// to throw that aggregate away after joining the child.
+		// to throw that aggregate away after joining the child. A void source
+		// call has no result transport at all; completion has its own record.
 		resultSlot = p.prog.Nil(p.prog.VoidPtr())
 	} else {
-		resultSlot = p.coroResultSlot(resultType)
+		resultSlot = p.coroResultSlot(p.prog.Type(abi.resultSlotType, llssa.InGo))
 	}
 	callArgs := make([]llssa.Expr, 0, len(physicalArgs)+2)
 	callArgs = append(callArgs,
@@ -950,11 +950,9 @@ func (p *context) compileCoroPatchInitAwait(b llssa.Builder) {
 			panic("patch original initializer outcome target did not resolve to a Go entry")
 		}
 		completion := p.structuredOutcomeScratch()
-		resultType := p.prog.Type(newOutcomePlainPhysicalABI(original.Signature).resultSlotType, llssa.InGo)
-		resultSlot := p.structuredOutcomeAlloca(resultType, false)
 		b.Call(calleeFn.Expr,
 			p.managedPhysicalTask(),
-			b.Convert(p.prog.VoidPtr(), resultSlot),
+			p.prog.Nil(p.prog.VoidPtr()),
 			b.Convert(p.prog.VoidPtr(), completion),
 		)
 		p.dispatchOutcomePlainCompletion(b, completion)

@@ -256,6 +256,9 @@ func (pending *coroProgramPendingMainReturnV1) resumeChild(driver *coroProgramTe
 	if driver.childResumeCalls != 2 || coroProgramLifecycleV1State != coroProgramMainReturnRequestedV1 {
 		t.Fatal("pending child entered user continuation after main return")
 	}
+	if coroProgramTestTargetV1State.shutdownRequests == 0 {
+		t.Fatal("local pending-child drain started before peer shutdown publication")
+	}
 	var outcome coro.ParkOutcome
 	var task coro.TaskCancelKind
 	var ok bool
