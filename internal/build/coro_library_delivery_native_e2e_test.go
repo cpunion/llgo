@@ -291,6 +291,17 @@ func AssertNilDeref(value bool) { if value { abort() } }
 			t.Fatalf("actual producer records: %v (%d bytes)", err, len(records))
 		}
 		runCoroSpawnNativeE2EPasses(t, prog, module)
+		if producer && forwarded {
+			// The view can have no local address user: its only public
+			// reference is a symbol string in the archived effect record.
+			// Exercise compiler DCE before the independent consumer links it.
+			options := llvm.NewPassBuilderOptions()
+			defer options.Dispose()
+			options.SetVerifyEach(true)
+			if err := module.RunPasses("globaldce", prog.TargetMachine(), options); err != nil {
+				t.Fatalf("archive helper view DCE: %v", err)
+			}
+		}
 		if dir := os.Getenv("LLGO_CORO_ARCHIVE_DEBUG_DIR"); dir != "" {
 			if err := os.WriteFile(filepath.Join(dir, source.Pkg.Name()+"-postsplit.ll"), []byte(module.String()), 0o600); err != nil {
 				t.Fatal(err)
