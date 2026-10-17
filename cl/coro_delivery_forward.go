@@ -121,7 +121,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 				return err
 			}
 		}
-		if u.prog != nil && u.prog.LocalGoTypeExceedsNativeStack(result) {
+		if u.prog != nil && u.prog.LocalGoTypeExceedsNativeStack(llssa.CoroDeliveryStorageGoType(result)) {
 			runtime := u.byPath[llssa.PkgRuntime]
 			if runtime == nil || u.pathDup[llssa.PkgRuntime] {
 				return fmt.Errorf("large forwarded result requires its exact runtime allocator")

@@ -245,7 +245,11 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	if retainResult && !deferredAllocation && abi.signature.Results().Len() != 0 {
 		resultType := p.prog.Type(abi.resultSlotType, llssa.InGo)
 		if p.hasCoroPhysicalBody() {
-			resultSlot = p.coroResultSlot(resultType)
+			if options.delivery != nil {
+				resultSlot = p.coroDeliveryResultSlot(resultType)
+			} else {
+				resultSlot = p.coroResultSlot(resultType)
+			}
 		} else {
 			if options.entry != coro.ManagedEntryOutcomePlain || !options.nativeResult {
 				panic("synchronous descriptor result escaped its native-stack proof")

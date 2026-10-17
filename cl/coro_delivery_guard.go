@@ -207,13 +207,14 @@ func (s *coroStaticCleanupState) bindDelivery(p *context, plan *coroDeliveryFunc
 	if plan.fallback != nil {
 		delivery.fallbackActive = p.coroFrameAlloc(p.prog.Bool())
 		typ := p.prog.Type(plan.fallback.result, llssa.InGo)
-		delivery.fallbackManaged = p.prog.LocalAllocExceedsNativeStack(typ)
+		storage := p.prog.NewCoroDeliveryStorage(typ)
+		delivery.fallbackManaged = p.prog.LocalAllocExceedsNativeStack(storage.Type())
 		if delivery.fallbackManaged {
 			// A borrowed parent sink needs no second aggregate. Retain only
 			// a zeroed pointer, allocating the fallback on the nil-output lane.
 			delivery.fallback = p.coroFrameAlloc(p.prog.Pointer(typ))
 		} else {
-			delivery.fallback = p.coroResultSlot(typ)
+			delivery.fallback = p.coroDeliveryResultSlot(typ)
 		}
 	}
 	s.delivery = delivery
@@ -245,7 +246,7 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 			panic(err)
 		}
 		if guard.plan.dynamic.allocate == "" {
-			guard.result = p.coroResultSlot(p.prog.Type(guard.plan.resultType(), llssa.InGo))
+			guard.result = p.coroDeliveryResultSlot(p.prog.Type(guard.plan.resultType(), llssa.InGo))
 		}
 		p.armCoroDynamicDeliveryCall(b, guard, env, args,
 			p.emitCoroRecipeDeliveryHelper(b, guard.plan.recipe, 0, initializer).value,
@@ -258,7 +259,7 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 	// Bind through the source occurrence so the existing managed-slot helper
 	// and its exact SitePlan are observed together. coroResultSlot still places
 	// physical storage in the dominating ramp, once per static call site.
-	guard.result = p.coroResultSlot(p.prog.Type(guard.plan.recipe.result, llssa.InGo))
+	guard.result = p.coroDeliveryResultSlot(p.prog.Type(guard.plan.recipe.result, llssa.InGo))
 	if !guard.resultAddress.IsNil() {
 		b.StoreKnownNonNil(guard.resultAddress, guard.result)
 	}
@@ -369,7 +370,9 @@ func (p *context) compileCoroBorrowedResult(b llssa.Builder) llssa.Expr {
 	b.SetBlockEx(fallback, llssa.AtEnd, false)
 	storage := delivery.fallback
 	if delivery.fallbackManaged {
-		storage = b.AllocZAs(p.prog.Elem(p.prog.Elem(storage.Type)), coroManagedFrameSlotAllocZCall)
+		layout := p.prog.NewCoroDeliveryStorage(p.prog.Elem(p.prog.Elem(storage.Type)))
+		allocation := b.AllocZAs(layout.Type(), coroManagedFrameSlotAllocZCall)
+		storage = layout.ResultAddress(b, allocation)
 		b.StoreKnownNonNil(delivery.fallback, storage)
 	} else {
 		b.StoreKnownNonNil(storage, p.prog.Zero(p.prog.Elem(storage.Type)))

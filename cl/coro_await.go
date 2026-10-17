@@ -1053,6 +1053,15 @@ func (p *context) coroFrameByteAlloca(b llssa.Builder, size int64) llssa.Expr {
 // native-stack limit instead uses the separately planned managed-slot helper,
 // so the coroutine frame retains one pointer rather than the whole aggregate.
 func (p *context) coroResultSlot(typ llssa.Type) llssa.Expr {
+	return p.coroResultStorageSlot(typ, nil)
+}
+
+func (p *context) coroDeliveryResultSlot(typ llssa.Type) llssa.Expr {
+	layout := p.prog.NewCoroDeliveryStorage(typ)
+	return p.coroResultStorageSlot(layout.Type(), &layout)
+}
+
+func (p *context) coroResultStorageSlot(typ llssa.Type, delivery *llssa.CoroDeliveryStorage) llssa.Expr {
 	if !p.hasCoroPhysicalBody() || p.fn == nil || typ == nil {
 		panic("coroutine result slot requires an active physical body and type")
 	}
@@ -1060,10 +1069,17 @@ func (p *context) coroResultSlot(typ llssa.Type) llssa.Expr {
 	alloc := p.fn.NewBuilder()
 	defer alloc.Dispose()
 	alloc.SetBlockEx(entry, llssa.AtStart, true)
+	var storage llssa.Expr
 	if p.prog.LocalAllocExceedsNativeStack(typ) {
-		return alloc.AllocZAs(typ, coroManagedFrameSlotAllocZCall)
+		storage = alloc.AllocZAs(typ, coroManagedFrameSlotAllocZCall)
+	} else {
+		storage = alloc.AllocaT(typ)
 	}
-	return alloc.AllocaT(typ)
+	if delivery != nil {
+		alloc.StoreKnownNonNil(alloc.FieldAddrKnownNonNil(storage, 0), p.prog.Nil(p.prog.VoidPtr()))
+		return delivery.ResultAddress(alloc, storage)
+	}
+	return storage
 }
 
 // coroFrameAlloc emits zero-initialized function-lifetime storage in the

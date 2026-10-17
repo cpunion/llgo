@@ -138,7 +138,7 @@ func (builder coroProgramIRBuilder) freezeDynamicDeliveryConsumer(ir *coroProgra
 		}
 	}
 	var extra []coroPlannedRuntimeHelper
-	if _, deferred := call.(*ssa.Defer); deferred && u.prog.LocalGoTypeExceedsNativeStack(result) {
+	if _, deferred := call.(*ssa.Defer); deferred && u.prog.LocalGoTypeExceedsNativeStack(llssa.CoroDeliveryStorageGoType(result)) {
 		recipe.largeResult = true
 		// Consume only a runtime dependency already present in the frozen
 		// inventory. An active consumer without this binding fails physical
@@ -291,7 +291,8 @@ func (p *context) armCoroDynamicDeliveryCall(
 		// Deferred results are discarded. Allocate large custody storage
 		// only on the positive delivery-capability lane, never in the ramp
 		// or for a base-only descriptor returning an ordinary large value.
-		guard.result = b.AllocZAs(p.prog.Type(guard.plan.resultType(), llssa.InGo), helper)
+		layout := p.prog.NewCoroDeliveryStorage(p.prog.Type(guard.plan.resultType(), llssa.InGo))
+		guard.result = layout.ResultAddress(b, b.AllocZAs(layout.Type(), helper))
 	}
 	if env.IsNil() {
 		env = p.prog.Nil(p.prog.VoidPtr())

@@ -5,6 +5,7 @@ package cl
 import (
 	"go/ast"
 	"go/types"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,7 +21,13 @@ func TestCoroDeliveryLargeFallbackAllocatesOnlyOnNilOutput(t *testing.T) {
 	for _, target := range []struct {
 		name string
 		arch *llssa.Target
-	}{{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		size int
+	}{
+		{name: "native", size: 131073},
+		{name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, size: 131073},
+		{name: "native-boundary", size: 131072},
+		{name: "wasm32-boundary", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, size: 131072},
+	} {
 		t.Run(target.name, func(t *testing.T) {
 			source := newEmissionTestProgram()
 			source.ssa.CreatePackage(types.Unsafe, nil, nil, true)
@@ -31,7 +38,7 @@ func AllocU(size uintptr) unsafe.Pointer { return nil }
 func FreeDeferNode(pointer unsafe.Pointer) {}
 func AssertNilDeref(value bool) {}
 `)
-			foo := source.addPackage(t, "foo", `package foo
+			foo := source.addPackage(t, "foo", strings.ReplaceAll(`package foo
 import "unsafe"
 type Result = struct { R0 [131073]byte }
 func initialize(out *Result) { out.R0[0] = 1 }
@@ -43,7 +50,7 @@ func Root() byte { return Acquire()[0] }
 func Deferred() { defer Acquire() }
 func DynamicDeferred(f func() [131073]byte) { defer f() }
 func DynamicLoopDeferred(f func() [131073]byte) { for i := 0; i < 2; i++ { defer f() } }
-`)
+`, "131073", strconv.Itoa(target.size)))
 			source.ssa.Build()
 			prog := newLLSSAProgForTarget(t, target.arch)
 			defer prog.Dispose()
@@ -122,7 +129,7 @@ func DynamicLoopDeferred(f func() [131073]byte) { for i := 0; i < 2; i++ { defer
 				t.Fatalf("large delivery before split: %v\n%s", err, module.String())
 			}
 			producer := requireCoroPhysicalFunction(t, module, "foo.Acquire")
-			if strings.Contains(producer.String(), "store [131073 x i8]") {
+			if strings.Contains(producer.String(), "store ["+strconv.Itoa(target.size)+" x i8]") {
 				t.Fatalf("borrowed output was copied back into its own physical result sink:\n%s", producer.String())
 			}
 			allocations := 0

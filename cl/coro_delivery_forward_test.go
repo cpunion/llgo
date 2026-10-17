@@ -525,7 +525,7 @@ func Root(pointer *PointerReceiver) {
 				// result layout. A structural prefix can also match a source
 				// input aggregate and falsely count its ordinary local copy.
 				layout := types.NewSignatureType(nil, nil, nil, types.NewTuple(types.NewParam(0, nil, "result",
-					u.coroProgramIR.deliveryProducers[foo.ssa.Func("Acquire")].result)), nil, false)
+					llssa.CoroDeliveryStorageGoType(u.coroProgramIR.deliveryProducers[foo.ssa.Func("Acquire")].result))), nil, false)
 				probe := pkg.NewFunc("__test_delivery_result_layout", layout, llssa.InGo)
 				resultType := module.NamedFunction(probe.Name()).GlobalValueType().ParamTypes()[0]
 				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline", "Projected", "ProjectedChain"} {
