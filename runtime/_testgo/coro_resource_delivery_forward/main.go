@@ -149,7 +149,7 @@ func sentinel(ready chan struct{}) {
 	<-never
 }
 
-func peerSentinel(ready chan struct{}) {
+func peerSentinel(ready chan struct{}, resizeOnShutdown bool) {
 	for currentRoute() != 2 {
 		runtime.Gosched()
 	}
@@ -160,6 +160,11 @@ func peerSentinel(ready chan struct{}) {
 	runtime.GOMAXPROCS(1)
 	if currentRoute() != 2 {
 		panic("shutdown sentinel moved from P2")
+	}
+	if resizeOnShutdown {
+		// Cancellation cleanup still has the full Go API. Growing the logical
+		// quota here must not try to start another M behind the sealed barrier.
+		defer runtime.GOMAXPROCS(2)
 	}
 	sentinel(ready)
 }
@@ -203,11 +208,11 @@ func main() {
 		closeFD(fd)
 	}
 	ready := make(chan struct{})
-	if mode == 16 {
+	if mode == 16 || mode == 17 {
 		if runtime.GOMAXPROCS(0) != 2 {
 			panic("cross-P shutdown fixture requires GOMAXPROCS=2")
 		}
-		go peerSentinel(ready)
+		go peerSentinel(ready, mode == 17)
 		// Keep main runnable until the sentinel reaches P2: a lone already-run
 		// G deliberately cannot bounce between idle routes.
 	readyLoop:
@@ -252,7 +257,7 @@ func main() {
 		go largeDeferredOwner()
 	case 15:
 		go largeDynamicDeferredOwner(publishedLarge)
-	case 16:
+	case 16, 17:
 		go crossPDeferredOwner()
 	default:
 		escaped()
@@ -262,7 +267,7 @@ func main() {
 	}
 	runtime.GC()
 	runtime.GC()
-	if mode == 16 {
+	if mode == 16 || mode == 17 {
 		if currentRoute() != 1 {
 			panic("shutdown coordinator moved from P1")
 		}
