@@ -950,11 +950,9 @@ func (p *context) compileCoroPatchInitAwait(b llssa.Builder) {
 			panic("patch original initializer outcome target did not resolve to a Go entry")
 		}
 		completion := p.structuredOutcomeScratch()
-		resultType := p.prog.Type(newOutcomePlainPhysicalABI(original.Signature).resultSlotType, llssa.InGo)
-		resultSlot := p.structuredOutcomeAlloca(resultType, false)
 		b.Call(calleeFn.Expr,
 			p.managedPhysicalTask(),
-			b.Convert(p.prog.VoidPtr(), resultSlot),
+			p.prog.Nil(p.prog.VoidPtr()),
 			b.Convert(p.prog.VoidPtr(), completion),
 		)
 		p.dispatchOutcomePlainCompletion(b, completion)
