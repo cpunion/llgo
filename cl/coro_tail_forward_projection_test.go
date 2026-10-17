@@ -114,6 +114,10 @@ func Parent(value Outer, pointer *Outer) int {
 		valuePhysical.tailForward.args[0].fieldPath[0] != 1 {
 		t.Fatalf("value promoted wrapper tail-forward plan = %+v", valuePhysical.tailForward)
 	}
+	shape, err := universe.coroProgramIR.forwardingSourceShape(valueWrapper)
+	if err != nil || shape == nil || !shape.methodProjection || len(shape.args) == 0 || len(shape.args[0].fieldPath) != 1 || shape.args[0].fieldPath[0] != 1 {
+		t.Fatalf("promoted wrapper lost its frozen source projection: %+v, error=%v", shape, err)
+	}
 	if pointerPhysical.tailForward != nil {
 		t.Fatalf("nullable pointer promoted wrapper escaped into frame-free projection: %+v", pointerPhysical.tailForward)
 	}

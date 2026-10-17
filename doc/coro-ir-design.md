@@ -271,6 +271,27 @@ Phase R开始前实现已越过“只是原型代码多”的范围，存在可�
 
 需要保留的复杂度也同样明确：`OperationRecord`、`ParkState`、`WaitSetRecord`、result lease、cancel/detach/quiescence、producer admission和A/ack/B防丢唤醒分别表示独立并发事实。没有linearizability证据时，不能为了行数把它们折叠为一个`done`位或让producer直接持有G/P/frame指针。
 
+### 3.9 共享 forwarding source shape（2026-10-17）
+
+已有 tail-forward 的结构证明前移到 ProgramIR 的同一个 local-function
+fact 中，与 `SSAFunctionBodyFacts` 同属一个 owner；不新增 effect graph、独立
+runtime drainer 或 report-only 副本。`freezeSiteOwner` 只为 canonical function
+构造一次 source shape，之后的 intrinsic/cleanup 语义细化保留这个观察。
+
+shape 记录唯一 exact static call、原参数/常量/值字段/retag 投影及原样返回。
+它不证明某条指令无 fault，也不授予取消资源交接或 frame elision 权限。physical
+consumer 仍逐项绑定最终 semantic recipe、managed target certificate、精确 ABI、
+recover、NoInline/debug、cleanup、critical、递归及 coroutine-primary 条件；不再
+扫描函数的 blocks/instructions/locals 或重新追溯 receiver spill。原 source
+reader 在迁移中删除，nullable pointer receiver 与非纯返回仍不进入 frame-free
+路径。
+
+gate 要求 source constructor 只能从 `freezeSiteOwner` 调用，physical consumer
+不得调用 source reader；同时保留 native/wasm 的 tail-forward、promoted method、
+retag、managed linkname、recover 与一调用/零 frame IR 验证。后续资源 forwarding
+应消费同一 source shape 并另外冻结 delivery 权限；本次结构迁移不放宽现有
+receiver/interface 资源发布拒绝条件，也不启用尚未闭环的 public Open seed。
+
 ## 4. 方案比较
 
 | 方案 | 优点 | 主要问题 | 结论 |
