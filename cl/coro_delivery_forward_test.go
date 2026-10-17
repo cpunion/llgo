@@ -44,10 +44,16 @@ func Chain(a int) (int,error) { return Literal(a) }
 //go:noinline
 func NoInline(a int) (int,error) { return Literal(a) }
 func Changed(a int) (int,error) { n,e:=Acquire(a,0); return n+1,e }
+func dropPath(out *Result, _ unsafe.Pointer, path string) { out.R0 = len(path) }
+//go:linkname borrowPath llgo.coroBorrowResult
+func borrowPath(func(*Result), func(*Result, unsafe.Pointer, string)) *Result
+func AcquirePath(path string) (int,error) { out := borrowPath(initialize,dropPath); out.R0=len(path); return out.R0,out.R1 }
+func FixedPath() (int,error) { return AcquirePath("fixed") }
 var Published = Chain
 var PublishedPermutation = Permuted
 var PublishedIdentity = Identity
-func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Changed(7); PublishedPermutation(8,9); PublishedIdentity(10,11) }
+var PublishedPath = FixedPath
+func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Changed(7); PublishedPermutation(8,9); PublishedIdentity(10,11); FixedPath(); PublishedPath() }
 `)
 				source.ssa.Build()
 				prog := newLLSSAProgForTarget(t, target.arch)
@@ -59,7 +65,7 @@ func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Ch
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline"} {
+				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline", "FixedPath"} {
 					recipe, present, err := u.coroProgramIR.sourceDelivery(foo.ssa.Func(name))
 					if err != nil || !present || recipe.forward == nil || recipe.borrow != nil || recipe.anchor() != recipe.forward.call {
 						t.Fatalf("%s did not retain its exact real forwarding call: %+v: %v", name, recipe, err)
@@ -80,7 +86,7 @@ func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Ch
 					EmissionUniverse: inventory, FunctionIDs: ids, MaxPlainInstructions: -1, OutcomeMode: coro.OutcomeExplicitStatus,
 					ClassifyLocalBody: u.CoroLocalBodyFacts, ClassifyLoweredCalls: u.CoroLoweredCalls,
 					ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
-						if fn == foo.ssa.Func("Acquire") || asyncHelper && fn == foo.ssa.Func("drop") {
+						if fn == foo.ssa.Func("Acquire") || fn == foo.ssa.Func("AcquirePath") || asyncHelper && fn == foo.ssa.Func("drop") {
 							return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
 						}
 						return coro.SSAFunctionPolicy{}, nil
@@ -99,7 +105,7 @@ func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Ch
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline"} {
+				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline", "FixedPath"} {
 					guard, err := prepareCoroDeliveryFunctionPlan(foo.ssa.Func(name), plan, u.coroProgramIR, u)
 					if err != nil || guard == nil || guard.fallback == nil || len(guard.calls) != 1 || !guard.calls[0].forward {
 						t.Fatalf("%s guard lost single incoming/fallback owner: %+v: %v", name, guard, err)
