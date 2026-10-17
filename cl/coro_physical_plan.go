@@ -659,17 +659,6 @@ type coroPhysicalTailForwardArgument struct {
 	retagTransportKey string
 }
 
-func coroPhysicalTailForwardProjectedType(source types.Type, fields []int) (types.Type, bool) {
-	for _, field := range fields {
-		structure, ok := types.Unalias(source).Underlying().(*types.Struct)
-		if !ok || field < 0 || field >= structure.NumFields() {
-			return nil, false
-		}
-		source = structure.Field(field).Type()
-	}
-	return source, source != nil
-}
-
 // coroPhysicalTailForwardPlan proves that a source function contributes no
 // physical state of its own: it performs one exact static coroutine call and
 // returns that call's results unchanged. Its public $coro symbol remains the
@@ -727,7 +716,7 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 			if argument.sourceParameter >= sourceSig.Params().Len() {
 				return fmt.Errorf("tail-forward argument %d has an incompatible source parameter", index)
 			}
-			sourceType, projected := coroPhysicalTailForwardProjectedType(
+			sourceType, projected := coroForwardingProjectedType(
 				sourceSig.Params().At(argument.sourceParameter).Type(), argument.fieldPath,
 			)
 			if !projected {
@@ -755,140 +744,6 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 		}
 	}
 	return nil
-}
-
-// coroPhysicalTailForwardValueProjection collapses the one compiler-created
-// receiver spill used by x/tools/ssa's promoted value-method wrappers. The
-// result is deliberately a value-only field path: an address rooted in a
-// source pointer can fault, while an address of the eliminated spill cannot be
-// handed to a child coroutine because that storage would outlive this ramp.
-// Keeping those two cases outside the language makes the recipe safe both in
-// the public frame-free ramp and when a static caller flattens it completely.
-func coroPhysicalTailForwardValueProjection(
-	physical *coroPhysicalFunctionPlan,
-	function *ssa.Function,
-	value ssa.Value,
-) (parameter *ssa.Parameter, fields []int, consumed map[ssa.Instruction]none, ok bool) {
-	if physical == nil || physical.function != function || function == nil || len(function.Blocks) != 1 ||
-		len(function.Locals) != 1 || function.Locals[0] == nil {
-		return nil, nil, nil, false
-	}
-	spill := function.Locals[0]
-	if spill.Heap {
-		return nil, nil, nil, false
-	}
-	var store *ssa.Store
-	for _, instruction := range function.Blocks[0].Instrs {
-		candidate, isStore := instruction.(*ssa.Store)
-		if !isStore || candidate.Addr != spill {
-			continue
-		}
-		if store != nil {
-			return nil, nil, nil, false
-		}
-		store = candidate
-	}
-	if store == nil {
-		return nil, nil, nil, false
-	}
-	root, rootIsParameter := store.Val.(*ssa.Parameter)
-	if !rootIsParameter || root == nil || root.Parent() != function {
-		return nil, nil, nil, false
-	}
-
-	consumed = make(map[ssa.Instruction]none)
-	var valueProjection func(ssa.Value) (*ssa.Parameter, []int, bool)
-	var addressProjection func(ssa.Value) (*ssa.Parameter, []int, bool)
-	appendField := func(sourceType types.Type, path []int, field int) ([]int, bool) {
-		candidate := append(append([]int(nil), path...), field)
-		if _, exact := coroPhysicalTailForwardProjectedType(sourceType, candidate); !exact {
-			return nil, false
-		}
-		return candidate, true
-	}
-	addressProjection = func(address ssa.Value) (*ssa.Parameter, []int, bool) {
-		switch address := address.(type) {
-		case *ssa.Alloc:
-			if address != spill {
-				return nil, nil, false
-			}
-			consumed[spill] = none{}
-			consumed[store] = none{}
-			return root, nil, true
-		case *ssa.FieldAddr:
-			base, path, exact := addressProjection(address.X)
-			if !exact {
-				return nil, nil, false
-			}
-			path, exact = appendField(base.Type(), path, address.Field)
-			if !exact {
-				return nil, nil, false
-			}
-			consumed[address] = none{}
-			return base, path, true
-		default:
-			// In particular, never turn &pointer.Field into a ramp-time
-			// projection: it owns a Go nil edge that needs a coroutine outcome.
-			return nil, nil, false
-		}
-	}
-	valueProjection = func(candidate ssa.Value) (*ssa.Parameter, []int, bool) {
-		switch candidate := candidate.(type) {
-		case *ssa.Parameter:
-			if candidate.Parent() != function {
-				return nil, nil, false
-			}
-			return candidate, nil, true
-		case *ssa.UnOp:
-			if candidate.Op != token.MUL {
-				return nil, nil, false
-			}
-			base, path, exact := addressProjection(candidate.X)
-			if !exact {
-				return nil, nil, false
-			}
-			consumed[candidate] = none{}
-			return base, path, true
-		case *ssa.Field:
-			base, path, exact := valueProjection(candidate.X)
-			if !exact {
-				return nil, nil, false
-			}
-			path, exact = appendField(base.Type(), path, candidate.Field)
-			if !exact {
-				return nil, nil, false
-			}
-			consumed[candidate] = none{}
-			return base, path, true
-		default:
-			return nil, nil, false
-		}
-	}
-	parameter, fields, ok = valueProjection(value)
-	if !ok {
-		return nil, nil, nil, false
-	}
-	for instruction := range consumed {
-		instructionPlan, frozen := physical.instructions[instruction]
-		if !frozen || !instructionPlan.semantic.evaluated || instructionPlan.mayFault() ||
-			instructionPlan.control != coroPhysicalControlNone ||
-			instructionPlan.operation != coroPhysicalOperationNone ||
-			instructionPlan.outcome != coroPhysicalOutcomeNone || instructionPlan.elideValue {
-			return nil, nil, nil, false
-		}
-		switch instruction.(type) {
-		case *ssa.Alloc:
-			if instructionPlan.recipe != coroPhysicalInstructionOrdinary &&
-				instructionPlan.recipe != coroPhysicalInstructionFrameAllocation {
-				return nil, nil, nil, false
-			}
-		default:
-			if instructionPlan.recipe != coroPhysicalInstructionOrdinary {
-				return nil, nil, nil, false
-			}
-		}
-	}
-	return parameter, fields, consumed, true
 }
 
 // planCoroPhysicalExactInterfaceMakeElision derives interface-box removal from
@@ -1256,6 +1111,17 @@ func (plan *coroPhysicalFunctionPlan) validateAllocationPlacements() error {
 // literals makes target invocation independent of the removed frame and
 // prevents code generation from rediscovering SSA value semantics after
 // ProgramIR preflight.
+// coroPhysicalForwardingInstructionSafe binds a frozen structural observation
+// to its final semantic lowering. Source grammar alone never authorizes frame
+// elision, fault removal, or storage elision.
+func coroPhysicalForwardingInstructionSafe(physical *coroPhysicalFunctionPlan, instruction ssa.Instruction, allocation bool) bool {
+	plan, frozen := physical.instructions[instruction]
+	return frozen && plan.semantic.evaluated && !plan.mayFault() &&
+		plan.control == coroPhysicalControlNone && plan.operation == coroPhysicalOperationNone &&
+		plan.outcome == coroPhysicalOutcomeNone && !plan.elideValue &&
+		(plan.recipe == coroPhysicalInstructionOrdinary || allocation && plan.recipe == coroPhysicalInstructionFrameAllocation)
+}
+
 func planCoroPhysicalTailForward(
 	physical *coroPhysicalFunctionPlan,
 	whole *coro.SSAPlan,
@@ -1273,129 +1139,69 @@ func planCoroPhysicalTailForward(
 	if err != nil {
 		return nil, fmt.Errorf("tail-forward function preamble: %w", err)
 	}
-	// A frame-free ramp cannot erase managed source-entry semantics. Plain
-	// EnterLocalContext belongs only to the separate native entry and therefore
-	// does not block forwarding the scheduler-owned physical entry.
+	// Keep source-entry, debug, cleanup, recover, and recursion boundaries.
+	// ProgramIR's structural observation does not grant any of these permissions.
 	if len(preamble.managedRuntimeHelpers) != 0 {
 		return nil, nil
 	}
 	logical, planned := whole.FunctionPlan(function)
 	if !planned || logical.Emission != coro.EmitCoroutine ||
 		logical.ManagedEntry != coro.ManagedEntryCoroutine || logical.Recursive ||
-		len(function.Blocks) != 1 || len(function.Blocks[0].Succs) != 0 ||
 		len(function.FreeVars) != 0 || function.Recover != nil ||
-		function.Signature == nil || function.Signature.Variadic() ||
-		hasNoInlineDirective(function) {
+		function.Signature == nil || function.Signature.Variadic() || hasNoInlineDirective(function) {
 		return nil, nil
 	}
-
-	// DebugRef is intentionally not ignored. A debug-symbol build keeps the
-	// ordinary frame so its source parameter locations and physical inline
-	// boundary remain representable without a second debug-only recipe.
-	instructions := function.Blocks[0].Instrs
-	if len(instructions) < 2 {
+	shape, err := universe.coroProgramIR.forwardingSourceShape(function)
+	if err != nil {
+		return nil, err
+	}
+	if shape == nil {
 		return nil, nil
 	}
-	adapterParameters := make(map[ssa.Value]*ssa.Parameter)
-	callIndex := 0
-scanAdapters:
-	for callIndex < len(instructions) {
-		var source ssa.Value
-		switch adapter := instructions[callIndex].(type) {
-		case *ssa.ChangeType:
-			source = adapter.X
-		case *ssa.Convert:
-			source = adapter.X
-		default:
-			break scanAdapters
-		}
-		parameter, exact := source.(*ssa.Parameter)
-		instructionPlan, frozen := physical.instructions[instructions[callIndex]]
-		if !exact || parameter == nil || instructionPlan.recipe != coroPhysicalInstructionOrdinary ||
-			!frozen || !instructionPlan.semantic.evaluated || instructionPlan.mayFault() ||
-			instructionPlan.control != coroPhysicalControlNone ||
-			instructionPlan.operation != coroPhysicalOperationNone ||
-			instructionPlan.outcome != coroPhysicalOutcomeNone || instructionPlan.elideValue ||
-			instructions[callIndex].(ssa.Value).Type() == nil || parameter.Type() == nil ||
-			universe == nil ||
-			coroPhysicalTransportTypeKey(universe, parameter.Type()) !=
-				coroPhysicalTransportTypeKey(universe, instructions[callIndex].(ssa.Value).Type()) {
+	for _, adapter := range shape.adapters {
+		if !coroPhysicalForwardingInstructionSafe(physical, adapter.instruction, false) ||
+			adapter.sourceType == nil || adapter.resultType == nil ||
+			coroPhysicalTransportTypeKey(universe, adapter.sourceType) != coroPhysicalTransportTypeKey(universe, adapter.resultType) {
 			return nil, nil
 		}
-		adapterParameters[instructions[callIndex].(ssa.Value)] = parameter
-		callIndex++
 	}
-	var call *ssa.Call
-	if callIndex < len(instructions) {
-		call, _ = instructions[callIndex].(*ssa.Call)
-	}
-	methodValueProjection := false
-	if call == nil {
-		if validateCoroExactMethodWrapper(function) != nil {
+	for _, instruction := range shape.projections {
+		_, allocation := instruction.(*ssa.Alloc)
+		if !coroPhysicalForwardingInstructionSafe(physical, instruction, allocation) {
 			return nil, nil
 		}
-		for index, instruction := range instructions {
-			candidate, isCall := instruction.(*ssa.Call)
-			if !isCall || candidate.Common() == nil || candidate.Common().StaticCallee() == nil {
-				continue
-			}
-			if call != nil {
-				return nil, nil
-			}
-			call, callIndex = candidate, index
-		}
-		if call == nil {
-			return nil, nil
-		}
-		methodValueProjection = true
-		adapterParameters = nil
 	}
-	if call == nil || call.Common() == nil || call.Common().IsInvoke() ||
-		call.Common().Method != nil || call.Common().StaticCallee() == nil {
-		return nil, nil
-	}
+	call := shape.call
 	callPhysical, frozen := physical.instructions[call]
 	if !frozen || callPhysical.semantic.recipe != coro.RecipeID("cl.ssa.call.v1") ||
 		!callPhysical.semantic.evaluated || callPhysical.control != coroPhysicalControlDirectAwait ||
-		callPhysical.operation != coroPhysicalOperationNone ||
-		callPhysical.outcome != coroPhysicalOutcomeNone ||
-		callPhysical.controlFailure != "" || callPhysical.operationFailure != "" ||
-		callPhysical.outcomeFailure != "" {
+		callPhysical.operation != coroPhysicalOperationNone || callPhysical.outcome != coroPhysicalOutcomeNone ||
+		callPhysical.controlFailure != "" || callPhysical.operationFailure != "" || callPhysical.outcomeFailure != "" {
 		return nil, nil
 	}
-	target := callPhysical.controlTarget
-	rawTarget := call.Common().StaticCallee()
-	if target == nil || target == function || rawTarget == nil ||
-		len(target.FreeVars) != 0 || target.Signature == nil || target.Signature.Variadic() {
+	target, rawTarget := callPhysical.controlTarget, shape.target
+	if target == nil || target == function || rawTarget == nil || len(target.FreeVars) != 0 ||
+		target.Signature == nil || target.Signature.Variadic() {
 		return nil, nil
 	}
-	if _, ok := whole.FunctionPlan(target); !ok {
+	if _, present := whole.FunctionPlan(target); !present {
 		return nil, nil
 	}
-	// A tail-forward ramp returns the target's handle and deliberately removes
-	// the source activation. If the target can directly recover (including a
-	// compiler-transparent wrapper), making the source a deferred call would
-	// incorrectly promote that nested recover to the direct deferred child.
-	// This gate is independent of current call-site reachability so descriptors
-	// and downstream library consumers cannot observe a different Go boundary.
+	// Preserve a nested recover boundary even for descriptor/library consumers.
 	if audit.ctx == nil || audit.ctx.needsRecoverScope(target) {
 		return nil, nil
 	}
 	if target != rawTarget {
-		if universe == nil {
-			return nil, nil
-		}
 		_, paired, err := universe.managedGoLinknameCallFacade(rawTarget, target)
 		if err != nil {
 			return nil, fmt.Errorf("tail-forward managed go:linkname target: %w", err)
 		}
 		if !paired {
-			site, frozen, err := universe.CoroCallSitePlan(call)
+			site, present, err := universe.CoroCallSitePlan(call)
 			if err != nil {
 				return nil, fmt.Errorf("tail-forward managed static target: %w", err)
 			}
-			if !frozen || site.ManagedStaticTarget != target ||
-				site.ManagedStaticTargetCertificate == "" {
+			if !present || site.ManagedStaticTarget != target || site.ManagedStaticTargetCertificate == "" {
 				return nil, nil
 			}
 		}
@@ -1406,137 +1212,51 @@ scanAdapters:
 		callPlan.MayBeNil || callPlan.Rep != coro.DirectCoro || len(callPlan.Targets) != 1 ||
 		!targetPlanned || targetPlan.ID != callPhysical.controlTargetID ||
 		callPlan.Targets[0] != targetPlan.ID || targetPlan.Emission != coro.EmitCoroutine ||
-		targetPlan.ManagedEntry != coro.ManagedEntryCoroutine ||
-		targetPlan.Primary != coro.PrimaryCoroutine ||
+		targetPlan.ManagedEntry != coro.ManagedEntryCoroutine || targetPlan.Primary != coro.PrimaryCoroutine ||
 		(targetPlan.FuncRep != coro.DirectCoro && targetPlan.FuncRep != coro.Dispatch) {
 		return nil, nil
 	}
-
 	sourceSig := coroPhysicalNormalizeSourceSignature(function.Signature)
 	targetSig := coroPhysicalNormalizeSourceSignature(target.Signature)
-	if sourceSig.Params().Len() != len(function.Params) ||
-		targetSig.Params().Len() != len(call.Common().Args) ||
+	if sourceSig.Params().Len() != len(function.Params) || targetSig.Params().Len() != len(shape.args) ||
 		!types.Identical(sourceSig.Results(), targetSig.Results()) {
 		return nil, nil
 	}
-	parameterIndex := make(map[*ssa.Parameter]int, len(function.Params))
-	for index, parameter := range function.Params {
-		parameterIndex[parameter] = index
-	}
-	arguments := make([]coroPhysicalTailForwardArgument, len(call.Common().Args))
-	usedAdapters := make(map[ssa.Value]none, len(adapterParameters))
-	usedProjectionInstructions := make(map[ssa.Instruction]none)
-	for index, value := range call.Common().Args {
+	arguments := make([]coroPhysicalTailForwardArgument, len(shape.args))
+	for index, source := range shape.args {
 		targetType := targetSig.Params().At(index).Type()
-		parameter, directParameter := value.(*ssa.Parameter)
-		var fieldPath []int
-		if methodValueProjection {
-			var consumed map[ssa.Instruction]none
-			var projected bool
-			parameter, fieldPath, consumed, projected = coroPhysicalTailForwardValueProjection(
-				physical, function, value,
-			)
-			if projected {
-				for instruction := range consumed {
-					usedProjectionInstructions[instruction] = none{}
-				}
-				directParameter = len(fieldPath) == 0 && value == parameter
-			}
-		} else if !directParameter {
-			parameter = adapterParameters[value]
-		}
-		if parameter != nil {
-			sourceIndex, owned := parameterIndex[parameter]
-			projectedType, projected := coroPhysicalTailForwardProjectedType(parameter.Type(), fieldPath)
-			if !projected {
+		if source.sourceParameter >= 0 {
+			if source.sourceParameter >= sourceSig.Params().Len() || source.projectedType == nil || source.valueType == nil {
 				return nil, nil
 			}
-			retag := !types.Identical(projectedType, targetType)
-			retagTransportKey := ""
+			retag := !types.Identical(source.projectedType, targetType)
+			transportKey := ""
 			if retag {
-				sourceKey := coroPhysicalTransportTypeKey(universe, projectedType)
-				targetKey := coroPhysicalTransportTypeKey(universe, targetType)
-				if sourceKey != targetKey {
+				transportKey = coroPhysicalTransportTypeKey(universe, source.projectedType)
+				if transportKey != coroPhysicalTransportTypeKey(universe, targetType) {
 					return nil, nil
 				}
-				retagTransportKey = sourceKey
 			}
-			if !owned || value.Type() == nil || !types.Identical(value.Type(), targetType) ||
-				(!methodValueProjection && ((directParameter && retag) || (!directParameter && !retag))) ||
-				(retag && retagTransportKey == "") {
+			if !types.Identical(source.valueType, targetType) ||
+				(!shape.methodProjection && ((source.direct && retag) || (!source.direct && !retag))) ||
+				(retag && transportKey == "") {
 				return nil, nil
 			}
-			if !methodValueProjection && !directParameter {
-				usedAdapters[value] = none{}
-			}
 			arguments[index] = coroPhysicalTailForwardArgument{
-				sourceParameter:   sourceIndex,
-				targetType:        targetType,
-				fieldPath:         append([]int(nil), fieldPath...),
-				retagTransportKey: retagTransportKey,
+				sourceParameter: source.sourceParameter, targetType: targetType,
+				fieldPath: append([]int(nil), source.fieldPath...), retagTransportKey: transportKey,
 			}
 			continue
 		}
-		literal, ok := value.(*ssa.Const)
-		if !ok || literal.Type() == nil ||
-			(!types.AssignableTo(literal.Type(), targetType) &&
-				!types.Identical(types.Default(literal.Type()), targetType)) {
+		literal := source.constant
+		if literal == nil || literal.Type() == nil ||
+			(!types.AssignableTo(literal.Type(), targetType) && !types.Identical(types.Default(literal.Type()), targetType)) {
 			return nil, nil
 		}
-		arguments[index] = coroPhysicalTailForwardArgument{
-			sourceParameter: -1,
-			constant:        literal,
-			targetType:      targetType,
-		}
+		arguments[index] = coroPhysicalTailForwardArgument{sourceParameter: -1, constant: literal, targetType: targetType}
 	}
-	if methodValueProjection {
-		for index := 0; index < callIndex; index++ {
-			if _, consumed := usedProjectionInstructions[instructions[index]]; !consumed {
-				return nil, nil
-			}
-		}
-	} else if len(usedAdapters) != len(adapterParameters) {
-		return nil, nil
-	}
-
-	resultCount := sourceSig.Results().Len()
-	returned := make([]ssa.Value, 0, resultCount)
-	cursor := callIndex + 1
-	switch resultCount {
-	case 0:
-	case 1:
-		returned = append(returned, call)
-	default:
-		for index := 0; index < resultCount; index++ {
-			if cursor >= len(instructions)-1 {
-				return nil, nil
-			}
-			extract, ok := instructions[cursor].(*ssa.Extract)
-			if !ok || extract.Tuple != call || extract.Index != index {
-				return nil, nil
-			}
-			returned = append(returned, extract)
-			cursor++
-		}
-	}
-	if cursor != len(instructions)-1 {
-		return nil, nil
-	}
-	ret, ok := instructions[cursor].(*ssa.Return)
-	if !ok || len(ret.Results) != len(returned) {
-		return nil, nil
-	}
-	for index := range returned {
-		if ret.Results[index] != returned[index] {
-			return nil, nil
-		}
-	}
-
 	forward := &coroPhysicalTailForwardPlan{
-		target:              target,
-		targetID:            targetPlan.ID,
-		args:                arguments,
-		recoverBoundarySafe: true,
+		target: target, targetID: targetPlan.ID, args: arguments, recoverBoundarySafe: true,
 	}
 	if err := forward.validate(function, whole); err != nil {
 		return nil, fmt.Errorf("tail-forward physical plan: %w", err)

@@ -40,7 +40,7 @@ type coroProgramIR struct {
 	siteOwners               map[emissionFunctionOwnerKey]none
 	functionPreambles        map[emissionFunctionOwnerKey]coroFunctionPreamblePlan
 	semanticPlans            map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan
-	localBodyFacts           map[*ssa.Function]coro.SSAFunctionBodyFacts
+	localBodyFacts           map[*ssa.Function]coroLocalFunctionFacts
 	callPlans                map[ssa.CallInstruction]coroFrozenCallSitePlan
 	erasedFunctionInterfaces map[*ssa.MakeInterface]none
 	callsFrozen              bool
@@ -62,6 +62,14 @@ type coroCallableClassification struct {
 	intrinsic  bool
 }
 
+// The local semantic summary and its source-only structural observations have
+// one ProgramIR owner. Final effect refinement preserves the source shape;
+// physical lowering must not reconstruct it from a second SSA body walk.
+type coroLocalFunctionFacts struct {
+	coro.SSAFunctionBodyFacts
+	forwarding *coroForwardingSourceShape
+}
+
 // coroProgramIRBuilder is the sole mutable construction capability for hidden
 // function- and instruction-level recipes. It reuses the canonical index so
 // planning cannot acquire a second function-identity authority.
@@ -80,7 +88,7 @@ func newCoroProgramIR() *coroProgramIR {
 		siteOwners:               make(map[emissionFunctionOwnerKey]none),
 		functionPreambles:        make(map[emissionFunctionOwnerKey]coroFunctionPreamblePlan),
 		semanticPlans:            make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan),
-		localBodyFacts:           make(map[*ssa.Function]coro.SSAFunctionBodyFacts),
+		localBodyFacts:           make(map[*ssa.Function]coroLocalFunctionFacts),
 		callPlans:                make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
 		erasedFunctionInterfaces: make(map[*ssa.MakeInterface]none),
 		wasmImports:              make(map[*ssa.Function]wasmImportSpec),
@@ -254,10 +262,16 @@ func (ir *coroProgramIR) freezeSiteOwner(
 	if err != nil {
 		return err
 	}
-	if previous, exists := ir.localBodyFacts[function]; exists && !previous.Same(facts) {
-		return fmt.Errorf("function %q acquired owner-dependent local semantic facts", function.Name())
+	if previous, exists := ir.localBodyFacts[function]; exists {
+		if !previous.Same(facts) {
+			return fmt.Errorf("function %q acquired owner-dependent local semantic facts", function.Name())
+		}
+	} else {
+		ir.localBodyFacts[function] = coroLocalFunctionFacts{
+			SSAFunctionBodyFacts: facts,
+			forwarding:           deriveCoroForwardingSourceShape(function),
+		}
 	}
-	ir.localBodyFacts[function] = facts
 	ir.siteOwners[key] = none{}
 	return nil
 }
@@ -561,7 +575,12 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 			}
 			final = facts
 		}
-		ir.localBodyFacts[function] = final
+		facts, present := ir.localBodyFacts[function]
+		if !present {
+			return fmt.Errorf("finalize intrinsic body %q: no frozen local source facts", function.Name())
+		}
+		facts.SSAFunctionBodyFacts = final
+		ir.localBodyFacts[function] = facts
 	}
 	return nil
 }
