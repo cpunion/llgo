@@ -318,6 +318,10 @@ matching source-after manifest
 this adds the missing/unevaluated projection rejection gate and retains the
 native/wasm32 pre/post-CoroSplit checks. Its guarded peak is recorded separately
 from the still-running actual archive and full runtime cohorts.
+The complete v165 `^TestCoro` compiler cohort has also finished successfully,
+with matching source-after, zero failures/skips and a 384.5MiB guarded peak.
+It uses the same production compiler sources as v163; the later v167 change
+only adds the fail-closed missing-type projection check described above.
 
 The v161 shared-fixture dependency follow-up passes all three affected native
 E2Es (static plain defer, explicit panic, channel/closed static spawn), with
