@@ -343,11 +343,11 @@ func TestLibraryForeignCallableFaultDemandRoundTrip(t *testing.T) {
 	}
 	// Older records cannot silently turn a missing implementation fact into
 	// proof that a direct executor call needs no native landing boundary.
-	for _, version := range []byte{13, 14, 15, 16, 17} {
+	for _, version := range []byte{13, 14, 15, 16, 17, 18} {
 		oldRecord := bytes.Clone(record)
 		oldRecord[len(libraryEffectSummaryRecordMagic)-1] = version
 		if _, err := ParseLibraryEffectSummaryRecords(oldRecord); err == nil {
-			t.Fatalf("accepted archive v%d without current fault/predicate metadata", version)
+			t.Fatalf("accepted archive v%d without current fault/predicate/helper-view metadata", version)
 		}
 	}
 }

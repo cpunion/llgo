@@ -61,6 +61,15 @@ func TestCoroBorrowedResourceCleanupAcceptance(t *testing.T) {
 // discarded-result semantics from cancellation/panic custody, including a stop
 // arriving between two asynchronous steps of the internal drop.
 func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
+	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_slot", []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15})
+}
+
+func TestCoroResourceDeliveryForwardAcceptance(t *testing.T) {
+	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15})
+}
+
+func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []int) {
+	t.Helper()
 	if os.Getenv("LLGO_CORO_RESOURCE_ACCEPTANCE") != "1" {
 		t.Skip("set LLGO_CORO_RESOURCE_ACCEPTANCE=1 for linked typed resource delivery acceptance")
 	}
@@ -82,13 +91,13 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 	image := filepath.Join(t.TempDir(), "resource-delivery")
 	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Minute)
 	defer cancel()
-	build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-o", image, "./_testgo/coro_resource_delivery_slot/main.go")
+	build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-o", image, "./_testgo/"+fixture+"/main.go")
 	build.Dir = filepath.Join(root, "runtime")
 	build.Env = append(os.Environ(), "LLGO_ROOT="+root, "LLGO_BUILD_CACHE=off")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("resource delivery build: %v\n%s", err, output)
 	}
-	for mode, expected := range []string{
+	expectedByMode := []string{
 		"typed resource delivery normal, discarded and canceled passed",
 		"typed resource drop survives late cancellation",
 		"typed resource delivery normal, discarded and canceled passed",
@@ -105,7 +114,9 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 		"typed resource delivery normal, discarded and canceled passed", // Large independent fallback.
 		"typed resource delivery normal, discarded and canceled passed", // Large static resource defer.
 		"typed resource delivery normal, discarded and canceled passed", // Large captured dynamic resource defer.
-	} {
+	}
+	for _, mode := range modes {
+		expected := expectedByMode[mode]
 		t.Run(strconv.Itoa(mode), func(t *testing.T) {
 			for _, owners := range []string{"1", "2"} {
 				for attempt := 0; attempt < 10; attempt++ {
@@ -120,6 +131,9 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 				}
 			}
 		})
+	}
+	if fixture != "coro_resource_delivery_slot" {
+		return
 	}
 	t.Run("opaque-nonresource-callable", func(t *testing.T) {
 		image := filepath.Join(t.TempDir(), "opaque-callable")
