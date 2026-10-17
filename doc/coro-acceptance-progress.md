@@ -122,9 +122,9 @@ passes **16/16** fixed-topology executions and **96/96** original mode-3 runs
 (32 each at P=1/2/4). Source-after matches; executable SHA-256 is
 `cf92592abad3ed6e4600ffc020372d77a4ddde0534321c7f69fb4138916e639e`.
 The guarded build/run tree peaks at 1245.3MiB. The named-source program adapter
-passes all 41 tests with race/shuffle for ten repetitions; 53 selected core
+passes all 41 tests with race/shuffle for ten repetitions; 52 selected core
 shutdown/cancellation/ingress/quota tests pass three race/shuffle repetitions,
-and four architecture/target-selection tests pass. An initial model launch
+and seven architecture/target-selection tests pass. An initial model launch
 before snapshot extraction completed is retained as an infrastructure failure,
 not a semantic test result; the corrected launch uses the completed snapshot.
 
