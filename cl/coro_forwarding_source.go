@@ -36,11 +36,14 @@ type coroForwardingSourceAdapter struct {
 
 type coroForwardingSourceArgument struct {
 	sourceParameter int
-	constant        *ssa.Const
-	valueType       types.Type
-	projectedType   types.Type
-	fieldPath       []int
-	direct          bool
+	// A bound method captures its receiver value directly. Observing this
+	// identity does not authorize rereading an indirect lexical capture cell.
+	capture       *ssa.FreeVar
+	constant      *ssa.Const
+	valueType     types.Type
+	projectedType types.Type
+	fieldPath     []int
+	direct        bool
 }
 
 func coroForwardingProjectedType(source types.Type, fields []int) (types.Type, bool) {
@@ -192,6 +195,15 @@ scanAdapters:
 			if !methodProjection && !direct {
 				usedAdapters[value] = none{}
 			}
+		} else if capture, exact := value.(*ssa.FreeVar); exact && capture.Parent() == function {
+			owned := false
+			for _, free := range function.FreeVars {
+				owned = owned || free == capture
+			}
+			if !owned {
+				return nil
+			}
+			argument.capture, argument.projectedType, argument.direct = capture, capture.Type(), true
 		} else {
 			literal, exact := value.(*ssa.Const)
 			if !exact || literal.Type() == nil {

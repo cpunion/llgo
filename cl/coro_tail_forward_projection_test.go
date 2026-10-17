@@ -12,6 +12,36 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func TestCoroForwardingSourceShapeKeepsBoundReceiverValue(t *testing.T) {
+	pkg, _, _ := buildGoSSAPkg(t, `package foo
+type Receiver struct { Token int }
+func (receiver Receiver) Open(a, b int) int { return receiver.Token+a+b }
+func Bind(receiver Receiver) func(int,int) int {
+ bound := receiver.Open
+ receiver.Token = 99
+ return bound
+}
+`)
+	var closure *ssa.MakeClosure
+	for _, block := range pkg.Func("Bind").Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.MakeClosure); ok {
+				closure = candidate
+			}
+		}
+	}
+	if closure == nil || len(closure.Bindings) != 1 {
+		t.Fatal("missing bound receiver value")
+	}
+	function := closure.Fn.(*ssa.Function)
+	shape := deriveCoroForwardingSourceShape(function)
+	if shape == nil || len(shape.args) != 3 || len(function.FreeVars) != 1 ||
+		shape.args[0].capture != function.FreeVars[0] || shape.args[0].sourceParameter != -1 ||
+		!shape.args[0].direct || !types.Identical(shape.args[0].projectedType, closure.Bindings[0].Type()) {
+		t.Fatalf("bound receiver lost its exact captured value: %+v", shape)
+	}
+}
+
 func TestCoroPromotedMethodWrapperSSAProjectionShape(t *testing.T) {
 	const source = `package foo
 type Inner struct{ Value int }

@@ -16,14 +16,20 @@ import (
 )
 
 // CoroHelperViewArgument is one already typed, compiler-owned ABI projection.
-// Exactly one of Parameter (nonnegative) and Constant is present. Fields only
-// projects struct values; it never dereferences a receiver or borrows storage.
+// Exactly one of Parameter (nonnegative) and Constant is present. Fields
+// projects struct values unless the exact borrowed Environment is supplied;
+// it never follows pointers stored in that context or mutable capture cells.
 // The final conversion may retag an identical LLVM representation, not perform
 // a numeric conversion, allocation, source call, or runtime type lookup.
 type CoroHelperViewArgument struct {
 	Parameter int
 	Constant  Expr
 	Fields    []int
+	// Environment is the exact compiler-bound context pointer type (a closure
+	// environment or boxed value receiver). Only the existing explicit env
+	// word may be read, along the checked value-field path. The frontend must
+	// prove the context immutable and borrowed through helper completion.
+	Environment Type
 }
 
 const coroHelperViewAttribute = "llgo.coro.helper.view.v1"
@@ -74,7 +80,7 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 			fail("must preserve exact task, output and completion prefix words")
 		}
 	}
-	if len(arguments) == 0 || arguments[0].Parameter != 0 || !arguments[0].Constant.IsNil() || len(arguments[0].Fields) != 0 ||
+	if len(arguments) == 0 || arguments[0].Parameter != 0 || !arguments[0].Constant.IsNil() || len(arguments[0].Fields) != 0 || arguments[0].Environment != nil ||
 		!types.Identical(signature.Params().At(prefix).Type(), targetSignature.Params().At(prefix).Type()) {
 		fail("must pass the same exact typed resource output cell")
 	}
@@ -82,10 +88,11 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 		fail("requires a typed resource output pointer")
 	}
 	var identity strings.Builder
+	var environment Type
 	fmt.Fprintf(&identity, "%s\x00%d", target.Name(), prefix)
 	for index, argument := range arguments {
 		parameter, literal := argument.Parameter >= 0, !argument.Constant.IsNil()
-		if parameter == literal || literal && len(argument.Fields) != 0 {
+		if parameter == literal || literal && (len(argument.Fields) != 0 || argument.Environment != nil) {
 			fail("argument must select exactly one parameter or immutable literal")
 		}
 		var typ Type
@@ -99,6 +106,19 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 				fail("literal projection must not capture an instruction")
 			}
 			typ = argument.Constant.Type
+		}
+		if argument.Environment != nil {
+			pointer, ok := types.Unalias(argument.Environment.RawType()).(*types.Pointer)
+			if !ok || argument.Environment.ll.Context().C != p.Prog.ctx.C || argument.Parameter != 1 ||
+				!types.Identical(typ.RawType(), types.Typ[types.UnsafePointer]) {
+				fail("environment projection requires its exact typed explicit env word")
+			}
+			if environment != nil && !types.Identical(environment.RawType(), argument.Environment.RawType()) {
+				fail("environment projections require one frozen layout")
+			}
+			environment = argument.Environment
+			typ = p.Prog.Type(pointer.Elem(), InGo)
+			fmt.Fprintf(&identity, "\x00env:%s", typ.ll.String())
 		}
 		for _, field := range argument.Fields {
 			structure, ok := types.Unalias(typ.RawType()).Underlying().(*types.Struct)
@@ -147,8 +167,16 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 		if argument.Parameter >= 0 {
 			value = view.PhysicalParam(prefix + argument.Parameter)
 		}
-		for _, field := range argument.Fields {
-			value = b.Field(value, field)
+		if argument.Environment != nil {
+			value = b.Convert(argument.Environment, value)
+			for _, field := range argument.Fields {
+				value = b.FieldAddrKnownNonNil(value, field)
+			}
+			value = b.LoadKnownNonNil(value)
+		} else {
+			for _, field := range argument.Fields {
+				value = b.Field(value, field)
+			}
 		}
 		want := p.Prog.Type(targetSignature.Params().At(prefix+index).Type(), InGo)
 		if !types.Identical(value.RawType(), want.RawType()) {
