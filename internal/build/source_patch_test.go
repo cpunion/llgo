@@ -119,6 +119,70 @@ func TestDarwinX509PointerSourcePatchKeepsExactTypes(t *testing.T) {
 	}
 }
 
+func TestCoroPublicOpenSourcePatchTargets(t *testing.T) {
+	if !llruntime.HasSourcePatchPkg("os") || llruntime.HasAltPkg("os") {
+		t.Fatal("os must retain the standard package with a source patch")
+	}
+	for _, target := range []struct {
+		goos, goarch, tags string
+		want               bool
+	}{
+		{"darwin", "amd64", "", true},
+		{"darwin", "arm64", "", true},
+		{"linux", "amd64", "", true},
+		{"linux", "arm64", "", true},
+		{"linux", "arm", "baremetal", false},
+		{"linux", "arm", "tinygo.wasm,wasip2", false},
+		{"js", "wasm", "", false},
+		{"wasip1", "wasm", "", false},
+	} {
+		t.Run(target.goos+"-"+target.goarch+"-"+target.tags, func(t *testing.T) {
+			overlay, files, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+				goos: target.goos, goarch: target.goarch, goversion: runtime.Version(),
+				buildFlags: []string{"-tags=llgo,llgo_coro," + target.tags},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(files["os"]); (got == 3) != target.want || !target.want && got != 0 {
+				t.Fatalf("public File patches = %v, native=%t", files["os"], target.want)
+			}
+			if !target.want {
+				for _, file := range files["syscall"] {
+					if filepath.Base(file) == "open_posix_coro.go" {
+						t.Fatal("native Open custody patch selected for a freestanding target")
+					}
+				}
+				return
+			}
+			// Type-check the os replacements with the host Go loader. Other LLGo
+			// overlays replace assembly with compiler intrinsics and are validated
+			// by linked LLGo builds rather than the host compiler.
+			osOverlay := make(map[string][]byte)
+			osDir := filepath.Join(runtime.GOROOT(), "src", "os")
+			for file, contents := range overlay {
+				if filepath.Dir(file) == osDir {
+					osOverlay[file] = contents
+				}
+			}
+			pkgs, err := packages.LoadEx(nil, func(types.Sizes, string, string) types.Sizes {
+				return &types.StdSizes{WordSize: 8, MaxAlign: 8}
+			}, &packages.Config{
+				Mode: loadSyntax | packages.NeedDeps | packages.NeedExportFile,
+				Env:  append(os.Environ(), "GOOS="+target.goos, "GOARCH="+target.goarch, "CGO_ENABLED=0"),
+				Fset: token.NewFileSet(), Overlay: osOverlay,
+			}, "os")
+			if err != nil || len(pkgs) != 1 {
+				t.Fatalf("load patched os: count=%d error=%v", len(pkgs), err)
+			}
+			if pkgs[0].IllTyped {
+				logPackageErrors(t, pkgs[0], make(map[string]bool))
+				t.Fatal("public File custody patch does not type-check")
+			}
+		})
+	}
+}
+
 func TestWASIP1CoroSyscallMetadataSourcePatch(t *testing.T) {
 	goroot := runtime.GOROOT()
 	overlay, _, err := buildSourcePatchOverlayForGOROOT(
@@ -354,6 +418,7 @@ func TestSyscallSourcePatchPreservesTargetImplementations(t *testing.T) {
 			asm: []string{"asm_darwin_amd64.s", "zsyscall_darwin_amd64.s"},
 			patches: []string{
 				"fork_rawcritical_darwin_go126.go",
+				"open_posix_coro.go",
 				"syscall_darwin.go",
 				"syscall_darwin_readdir_amd64_go126.go",
 				"syscall_darwin_worker_catalog_amd64_go126.go",
@@ -367,6 +432,7 @@ func TestSyscallSourcePatchPreservesTargetImplementations(t *testing.T) {
 			asm: []string{"asm_darwin_arm64.s", "zsyscall_darwin_arm64.s"},
 			patches: []string{
 				"fork_rawcritical_darwin_go126.go",
+				"open_posix_coro.go",
 				"syscall_darwin.go",
 				"syscall_darwin_readdir_arm64_go126.go",
 				"syscall_darwin_worker_catalog_arm64_go126.go",
@@ -379,14 +445,14 @@ func TestSyscallSourcePatchPreservesTargetImplementations(t *testing.T) {
 			goos: "linux", goarch: "amd64",
 			asm: []string{"asm_linux_amd64.s"},
 			patches: []string{
-				"fork_rawcritical_linux_go126.go", "syscall_linux.go", "syscall_linux_coro.go", "syscall_unix.go",
+				"fork_rawcritical_linux_go126.go", "open_posix_coro.go", "syscall_linux.go", "syscall_linux_coro.go", "syscall_unix.go",
 			},
 		},
 		{
 			goos: "linux", goarch: "arm64",
 			asm: []string{"asm_linux_arm64.s"},
 			patches: []string{
-				"fork_rawcritical_linux_go126.go", "syscall_linux.go", "syscall_linux_coro.go", "syscall_unix.go",
+				"fork_rawcritical_linux_go126.go", "open_posix_coro.go", "syscall_linux.go", "syscall_linux_coro.go", "syscall_unix.go",
 			},
 		},
 	} {

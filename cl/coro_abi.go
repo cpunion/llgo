@@ -4310,6 +4310,12 @@ func validateCoroPhysicalConsumersCapabilities(
 					// resolving the otherwise non-emitted function operand.
 					continue
 				}
+				if call, ok := instr.(ssa.CallInstruction); ok && plan.ElidesCall(call) {
+					// Frozen CFG exclusion covers every call shape, including go.
+					// An unevaluated spawn has no invocation or CallPlan and does
+					// not require the scheduler capability checked below.
+					continue
+				}
 				if spawn, ok := instr.(*ssa.Go); ok {
 					if !staticSpawn {
 						return coroLeafInstructionError(fn, function.Plan, instr, "goroutine spawn requires scheduler root lowering")
@@ -4336,9 +4342,6 @@ func validateCoroPhysicalConsumersCapabilities(
 					continue
 				}
 				if call, ok := instr.(ssa.CallInstruction); ok {
-					if plan.ElidesCall(call) {
-						continue
-					}
 					// SSA builtins are compiler-lowered operations, not managed
 					// function consumers. AnalyzeSSA deliberately does not create
 					// CallPlans for them, so keep the physical-ABI check focused on
