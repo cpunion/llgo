@@ -267,6 +267,59 @@ Source-after matches both snapshots, with a 1201.0MiB guarded tree peak. The
 original shard4 process-exit -1 remains an independent unresolved failure; these
 nine controls do not erase or explain it.
 
+### Immutable value-field forwarding (v162-v167, local experiment)
+
+Ordinary nested fields of by-value parameters now reuse the same frozen
+projection as promoted wrappers. A local parameter copy must have one exact
+initializing store before use, and every prefix instruction must be consumed
+by the checked projection. Pointer reads, mutation and pre-initialization
+reads remain negative gates. Pure physical helper views add no storage; the
+ordinary nonresource tail-forward gate also verifies no frame or split entries.
+No runtime state, new directive or descriptor ABI is added.
+
+The initial v162 cohort exposes a real source/physical type-domain mismatch:
+dynamic delivery compares converted aggregate parameters containing func
+values with unconverted helper parameters. v163 normalizes both signatures
+through the existing Go-to-physical converter while preserving exact type
+identity; equal-layout distinct named arguments and untyped outputs remain
+rejected. All ten selected SSA delivery/helper-view top-level tests pass on
+native/wasm32. The corrected v165 resource/forwarding compiler cohort passes
+**26/26** top-level tests with no failure/skip and matching source-after
+(`ef0ebc9668ba26d9d250cb5cc877d29440fc3013c3d6fd304f7ebcf43c0a5968`).
+Test-only follow-ups explicitly demand published views, use the real ordinary
+function symbol, and count custody slots by the exact converted result type
+rather than mistaking an input aggregate for another output slot.
+
+Frozen v163 passes the complete borrowed cleanup, result-slot and expanded
+forwarded FD cohorts, plus **240/240** additional field-mode executions at
+P=1/2/4. That is **1,292/1,292** actual linked native executions, including
+static, dynamic, source-defer and discarded-entry field forwarding. The source
+aggregate includes a func field; the source copy is mutated/cleared after
+argument evaluation, and cancellation must still clean the original token17
+and close the FD exactly once. Source-after matches manifest
+`96e971ace55d8d548ad1e61087786741c39ddb0c23cf9888b1e05b82d1429247`;
+compiler SHA-256 is
+`271713468eab56d8236041fe569e264ba3d11ff6f65acd6d22f39ff71a30687b`,
+forwarded image SHA-256 is
+`7a75613742594b4e028b70b0053a72ddb8f0c0eb858b83d9fb0cbfeb241cae5c`,
+and guarded peak build/run RSS is 1227.7MiB. v162's earlier compile failure is
+retained, not relabeled as passing. This is POSIX acceptance, not actual wasm.
+
+The added independent archive nested-capture gate first fails at v166 on an
+unevaluated receiver's missing projection type. v167 rejects that composition
+safely and retains the explicit unsupported receiver-snapshot boundary.
+Current v167 actual archive/FD reruns, the broader compiler cohort and the new
+whole test/go evaluation are still in progress. No feature PR or remote
+integration is claimed; public Open/File and reflect/FFI secondary custody
+remain incomplete.
+
+The v161 shared-fixture dependency follow-up passes all three affected native
+E2Es (static plain defer, explicit panic, channel/closed static spawn), with
+source-after matching and a 1544.9MiB peak. The baseline v120 GOROOT shard6
+also finishes **135/135** under its existing classification, source-after
+matching, peak3676.0MiB. These results do not erase shard4's original failure
+or complete the still-running whole standard-library/GOROOT evaluation.
+
 ### Latest executable refresh: v117/v118/v120
 
 The v117 complete `test/go` cohort passes **271/271**, with zero failures or
