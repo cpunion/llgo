@@ -204,8 +204,14 @@ The typed-pointer identity gate also passes native/wasm32 pre/post-CoroSplit:
 the view forwards the exact receiver word, unchanged output and nil base env,
 with one helper call and no pointee read or storage. The expanded host IR run
 took 5.99s with a 160.4MiB peak; this is not a linked pointer-resource run.
-The broader resource cohort and new archive matrices are still pending;
-no feature PR is open and this work is not integrated.
+Frozen v156 passes **18/18** discovered `TestCoro.*Delivery` host tests in fresh
+isolated processes, including the former interface failure, with no exclusions.
+Source-after matches manifest
+`41e297a58965a49074106e42598d63db300b33cc358150923ad4f4311d031b03`,
+and the guarded tree peak is 183.8MiB. This includes existing opaque-archive IR
+gates, not the new captured/archive actual-runtime matrix. New linked pointer
+identity modes 23/24 are staged but not yet accepted. No feature PR is open and
+this work is not integrated.
 Receiver-dependent value wrappers still need an evaluated snapshot; descriptor
 publication now rejects that boundary instead of silently omitting custody.
 

@@ -118,6 +118,30 @@ type resourceFactory interface{ fixedAcquire(uint32) int32 }
 func interfaceOwner(owner resourceFactory)         { owner.fixedAcquire(1); escaped() }
 func interfaceDeferredOwner(owner resourceFactory) { defer owner.fixedAcquire(1) }
 
+type pointerFactory struct{ token uint32 }
+
+//go:linkname borrowPointer llgo.coroBorrowResult
+func borrowPointer(func(*result), func(*result, unsafe.Pointer, *pointerFactory, uint32)) *result
+
+func dropPointer(out *result, env unsafe.Pointer, receiver *pointerFactory, mode uint32) {
+	if receiver == nil || receiver.token != 17 {
+		println("interface drop lost its original receiver pointer")
+		escaped()
+	}
+	drop(out, env, receiver.token, mode)
+}
+
+func (receiver *pointerFactory) pointerAcquire(mode uint32) int32 {
+	out := borrowPointer(initialize, dropPointer)
+	openInto(out, mode)
+	return out.R0
+}
+
+type pointerResourceFactory interface{ pointerAcquire(uint32) int32 }
+
+func pointerInterfaceOwner(owner pointerResourceFactory)         { owner.pointerAcquire(1); escaped() }
+func pointerInterfaceDeferredOwner(owner pointerResourceFactory) { defer owner.pointerAcquire(1) }
+
 func boundOwner() {
 	token := factory(opened() + 15) // Runtime value 17, not a folded capture.
 	bound := token.acquire
@@ -322,6 +346,19 @@ func main() {
 			go interfaceDeferredOwner(owner)
 		}
 		owner = nil
+	case 23, 24:
+		receiver := &pointerFactory{token: uint32(opened() + 15)}
+		var owner pointerResourceFactory = receiver
+		receiver = &pointerFactory{token: 99}
+		if receiver.token != 99 {
+			escaped()
+		}
+		if mode == 23 {
+			go pointerInterfaceOwner(owner)
+		} else {
+			go pointerInterfaceDeferredOwner(owner)
+		}
+		owner, receiver = nil, nil
 	default:
 		escaped()
 	}
