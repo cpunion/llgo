@@ -420,8 +420,11 @@ drop 的静态参数、动态 typed view 和 archive facts 使用同一个组合
 含 func 字段的结构必须先经过相同 Go-to-physical 类型转换再比较确切类型，不能
 只比较 LLVM size/layout。不同命名类型仍拒绝互换。未求值 receiver 的缺失类型
 必须返回无法投影，不能进入字段读取或默认为零值。该实验没有新增 runtime
-状态、注释、descriptor ABI 或第二套调度/cleanup 机制；独立 archive 的嵌套
-capture 新增验收尚在进行，不能由普通按值参数的 passing gate 宣称它已经完成。
+状态、注释、descriptor ABI 或第二套调度/cleanup 机制。独立 archive 的嵌套
+capture 已在 v167 通过 small/large 共 6 次实际 native AOT/link 运行：private
+receiver 含 func 字段和嵌套 token，绑定后修改源变量，opaque consumer 在取消
+及两步可挂起 drop 中仍必须使用原 token17。该 counter-based runtime island
+验收不是 wasm 执行、OS FD 或完整 runtime GC 的替代证明。
 
 ## 4. 方案比较
 

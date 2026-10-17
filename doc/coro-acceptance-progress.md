@@ -308,18 +308,25 @@ retained, not relabeled as passing. This is POSIX acceptance, not actual wasm.
 The added independent archive nested-capture gate first fails at v166 on an
 unevaluated receiver's missing projection type. v167 rejects that composition
 safely and retains the explicit unsupported receiver-snapshot boundary.
-Current v167 actual archive/FD reruns, the broader compiler cohort and the new
-whole test/go evaluation are still in progress. No feature PR or remote
-integration is claimed; public Open/File and reflect/FFI secondary custody
-remain incomplete.
+The v167 independent archive nested-capture gate now passes both small/large
+cases, **6/6** actual native AOT/link executions. The private receiver has an
+unused func field plus a nested token field, is bound and then mutated; the
+opaque consumer must still use token17 through cancellation and both yielding
+drop steps. Source-after matches, peak1181.6MiB. Retained small/large image hashes
+are `8c23c09f1057276a32727cd4f4ee07286ecacc349f0ba33b4180bae24a84dcd5`
+and `e3c143ded3d7e333506ac278d2891280a999baff24a2340a7e482731d811c893`.
+These are counter-based scheduler-island tests, not FD or full-runtime GC tests.
+The latest v167 FD rerun and whole test/go evaluation remain in progress.
+No feature PR or remote integration is claimed; public Open/File and
+reflect/FFI secondary custody remain incomplete.
 The exact v167 focused compiler cohort passes **27/27** top-level tests with
 matching source-after manifest
 `38419382365c5cfa5c17767d605995ebddc7b66e897ff42739b1268c29549bae`;
 this adds the missing/unevaluated projection rejection gate and retains the
 native/wasm32 pre/post-CoroSplit checks. Its guarded peak is recorded separately
 from the still-running actual archive and full runtime cohorts.
-The complete v165 `^TestCoro` compiler cohort has also finished successfully,
-with matching source-after, zero failures/skips and a 384.5MiB guarded peak.
+The complete v165 `^TestCoro` compiler cohort also passes **534/534** top-level
+tests, matching source-after, zero failures/skips and a 384.5MiB guarded peak.
 It uses the same production compiler sources as v163; the later v167 change
 only adds the fail-closed missing-type projection check described above.
 
