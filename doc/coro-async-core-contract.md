@@ -554,6 +554,20 @@ raw-fd guard 与 File finalizer 同时认为自己拥有同一个描述符。成
 
 #### 反射与库的交付边界
 
+接收者求值快照使用结果 guard 自己的私有存储前缀：`{State unsafe.Pointer; Data ExactResult}`。
+physical out 仍指向原有 `Data`，public tuple、funcval、G/P 和 operation ABI 不变；Data 为
+零大小时保留尾部字节，使 out 仍是 allocation 内部指针。state 仅在已经证明的 pointer-to-value
+method wrapper 中创建，保存终端 producer drop 所需的整组准确 typed arguments。原 primary 的
+load、nil check 和求值顺序照常执行，之后在实际 acquisition 前发布 state。不能重新读取 *T，
+也不复制 source CFG、建立 runtime binder/registry 或增加另一套取消状态机。
+
+多层精确转发共享同一结果槽和最深层的 state，不重复快照或替换 binding。typed drop view
+从 state 读取冻结参数；独立 archive consumer 不需要知道 producer 私有 state 布局。初始化
+空槽或 receiver nil panic 期间尚无 state，`RequiresState` consumer 跳过 drop；完成 caller
+acceptance 时清 state，取消路径则持有到原 cleanup drainer 的 helper join 完成后清除。
+library v22、guard v5 与 delivery cold-tail v3 一起绑定这项保证，旧 archive/descriptor
+不能被默认为已绑定。无 snapshot 要求的 producer 不分配 invocation record。
+
 `reflect.ValueOf(syscall.Open).Call` 必须保留实际 target 的 recipe。只保护 ffi invocation
 到 reflect 内部不够：现有 `Value.call` 在 invoke 后构造 `[]Value`，然后还需通过
 `call/Call` 返回，存在第二交付窗口。有限 reflection bridge 要在 acquisition 前建立并

@@ -13,13 +13,14 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-func TestCoroDeliveryReceiverSnapshotCannotDisappearAcrossForwarders(t *testing.T) {
+func TestCoroDeliveryReceiverSnapshotSurvivesForwarders(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	source := newEmissionTestProgram()
 	source.ssa.CreatePackage(types.Unsafe, nil, nil, true)
 	runtimePkg := source.addPackage(t, llssa.PkgRuntime, `package runtime
 import "unsafe"
 func AllocU(size uintptr) unsafe.Pointer { return nil }
+func AllocZ(size uintptr) unsafe.Pointer { return nil }
 func AssertNilDeref(value bool) {}
 func PanicWrapNilPointer(value bool, receiver, method string) {}
 `)
@@ -66,16 +67,30 @@ func Root(p *Receiver, outer *Outer) {
 		t.Fatal(err)
 	}
 	ir := u.coroProgramIR
+	metadata := coro.LibraryEffectMetadata{FunctionIDSchema: coro.FunctionIDSchema, CoroABI: coro.PhysicalABIV1,
+		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV2,
+		TargetTriple: prog.TargetSpec().Triple, PointerBits: prog.PointerSize() * 8, Endianness: "little", DataLayout: prog.DataLayout()}
+	var shared *coroDeliveryReceiverSnapshot
 	for _, name := range []string{"Direct", "Chain", "NoInline", "Promoted"} {
 		function := foo.ssa.Func(name)
 		if !ir.localBodyFacts[function].ResultDelivery {
 			t.Fatalf("%s lost the result-delivery requirement needed to exclude unbound targets from trusted nonresource dispatch", name)
 		}
-		if _, present, err := ir.sourceDelivery(function); present || err == nil || !strings.Contains(err.Error(), "evaluated receiver snapshot") {
-			t.Fatalf("%s silently downgraded a receiver-dependent resource result: present=%t err=%v", name, present, err)
+		recipe, present, err := ir.sourceDelivery(function)
+		if !present || err != nil || !recipe.requiresState() || recipe.snapshot == nil || recipe.snapshot.value == nil {
+			t.Fatalf("%s lost its evaluated receiver snapshot: present=%t recipe=%+v err=%v", name, present, recipe, err)
 		}
-		if _, present, err := u.CoroLibraryEffects().SourceDeliveryRecord(function, coro.LibraryEffectMetadata{}); present || err == nil {
-			t.Fatalf("%s archive publication lost its receiver requirement: present=%t err=%v", name, present, err)
+		if recipe.snapshot.box.NumFields() != 3 {
+			t.Fatalf("%s did not capture both terminal cleanup arguments and padding: %s", name, recipe.snapshot.box)
+		}
+		if name != "Promoted" {
+			if shared != nil && recipe.snapshot != shared {
+				t.Fatalf("%s replaced the deepest evaluated snapshot", name)
+			}
+			shared = recipe.snapshot
+		}
+		if record, present, err := u.CoroLibraryEffects().SourceDeliveryRecord(function, metadata); !present || err != nil || !record.RequiresState {
+			t.Fatalf("%s archive publication lost its receiver requirement: present=%t record=%+v err=%v", name, present, record, err)
 		}
 	}
 	for _, name := range []string{"Discard", "Deferred", "Spawned"} {
@@ -87,8 +102,8 @@ func Root(p *Receiver, outer *Outer) {
 					continue
 				}
 				_, present, err := u.CoroCallSitePlan(call)
-				if !present || err == nil || !strings.Contains(err.Error(), "evaluated receiver snapshot") {
-					t.Fatalf("%s call escaped its receiver binding: present=%t err=%v", name, present, err)
+				if !present || err != nil {
+					t.Fatalf("%s call lost its receiver binding: present=%t err=%v", name, present, err)
 				}
 				found++
 			}
@@ -106,8 +121,9 @@ func Root(p *Receiver, outer *Outer) {
 				}
 				continue
 			}
-			if ir.validateInterfaceDeliveryReceiver(function) == nil {
-				t.Fatalf("%s interface descriptor silently lost resource custody", function)
+			recipe, present, err := ir.sourceDelivery(function)
+			if err != nil || !present || !recipe.requiresState() || recipe.snapshot == nil || ir.validateInterfaceDeliveryReceiver(function) != nil {
+				t.Fatalf("%s interface descriptor lost resource custody: present=%t recipe=%+v err=%v", function, present, recipe, err)
 			}
 			wrappers++
 		}

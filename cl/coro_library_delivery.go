@@ -75,8 +75,9 @@ func (view CoroLibraryEffectView) SourceDeliveryRecord(
 	result := u.prog.Type(recipe.result, llssa.InGo)
 	callables[0].ResultSize, callables[0].ResultAlign = u.prog.SizeOf(result), u.prog.AlignOf(result)
 	record := coro.DeliveryRecipeRecord{
-		Version:  coro.DeliveryRecipeVersionV1,
-		Producer: callables[0].ID, ProducerABI: callables[0].ABIHash,
+		RequiresState: recipe.requiresState(),
+		Version:       coro.DeliveryRecipeVersionV1,
+		Producer:      callables[0].ID, ProducerABI: callables[0].ABIHash,
 		Initializer: callables[1].ID, InitializerABI: callables[1].ABIHash,
 		Drop: callables[2].ID, DropABI: callables[2].ABIHash,
 		ResultSize: callables[0].ResultSize, ResultAlign: callables[0].ResultAlign,

@@ -54,7 +54,7 @@ func (p *context) coroDeliveryDescriptorOptions(b llssa.Builder, entry plannedFu
 	if err != nil {
 		panic(err)
 	}
-	options := &llssa.CoroDispatchDeliveryOptions{Version: llssa.CoroDispatchDeliveryVersionV2}
+	options := &llssa.CoroDispatchDeliveryOptions{Version: llssa.CoroDispatchDeliveryVersionV3, RequiresState: recipe.requiresState()}
 	for ordinal, signature := range []*types.Signature{initializer, drop} {
 		abi, err := newCoroPlainDispatchEffectiveABI(p, signature)
 		if err != nil {
@@ -270,19 +270,19 @@ func (p *context) beginCoroDynamicDeliveryCall(
 	if err != nil {
 		panic(err)
 	}
-	initializer, drop := b.PrepareCoroDispatchDelivery(selection, recipe.initializer, recipe.drop,
+	initializer, drop, required := b.PrepareCoroDispatchDelivery(selection, recipe.initializer, recipe.drop,
 		llssa.CoroDispatchDeliveryABI{Initializer: initializerABI.hash, Drop: dropABI.hash})
 	// The nil environment of the helper is not another retained frame word.
 	// Only its descriptor, the producer environment and exact arguments survive
 	// a child suspension in the existing owner frame.
-	p.armCoroDynamicDeliveryCall(b, guard, b.Field(fn, 1), args, initializer, drop, invocation)
+	p.armCoroDynamicDeliveryCall(b, guard, b.Field(fn, 1), args, initializer, drop, required, invocation)
 	b.Jump(ready)
 	b.SetBlockContinuation(ready)
 }
 
 func (p *context) armCoroDynamicDeliveryCall(
 	b llssa.Builder, guard *coroDeliveryGuardState, env llssa.Expr, args []llssa.Expr,
-	initializer, drop llssa.Expr, invocation coroCleanupInvocation,
+	initializer, drop, required llssa.Expr, invocation coroCleanupInvocation,
 ) {
 	if len(args) != len(guard.args) || guard.plan.dynamic == nil || guard.dropDescriptor.IsNil() {
 		panic("dynamic delivery lost its exact typed captures")
@@ -299,6 +299,7 @@ func (p *context) armCoroDynamicDeliveryCall(
 	}
 	b.StoreKnownNonNil(guard.env, b.Convert(p.prog.VoidPtr(), env))
 	b.StoreKnownNonNil(guard.dropDescriptor, b.Field(drop, 0))
+	b.StoreKnownNonNil(guard.stateRequired, required)
 	if !guard.resultAddress.IsNil() {
 		b.StoreKnownNonNil(guard.resultAddress, guard.result)
 	}

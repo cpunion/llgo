@@ -41,8 +41,11 @@ type coroForwardingSourceArgument struct {
 	sourceParameter int
 	// A bound method captures its receiver value directly. Observing this
 	// identity does not authorize rereading an indirect lexical capture cell.
-	capture       *ssa.FreeVar
-	constant      *ssa.Const
+	capture  *ssa.FreeVar
+	constant *ssa.Const
+	// evaluation is populated only by the custody projection for an exact
+	// already-evaluated canonical receiver. It never permits a late pointee read.
+	evaluation    ssa.Value
 	valueType     types.Type
 	projectedType types.Type
 	fieldPath     []int

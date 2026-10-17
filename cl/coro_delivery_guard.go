@@ -159,6 +159,7 @@ type coroDeliveryGuardState struct {
 	env            llssa.Expr
 	dropDescriptor llssa.Expr
 	resultAddress  llssa.Expr
+	stateRequired  llssa.Expr
 }
 
 type coroDeliveryFunctionState struct {
@@ -192,6 +193,7 @@ func (s *coroStaticCleanupState) bindDelivery(p *context, plan *coroDeliveryFunc
 		}
 		if site.dynamic != nil {
 			guard.dropDescriptor = p.coroFrameAlloc(p.prog.VoidPtr())
+			guard.stateRequired = p.coroFrameAlloc(p.prog.Bool())
 		}
 		if _, deferred := site.call.(*ssa.Defer); deferred && (s.dynamic || site.dynamic != nil && site.dynamic.largeResult) {
 			// A heterogeneous drainer emits its prefix before its site bodies.
@@ -235,6 +237,7 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 	}
 	if guard.plan.forward {
 		guard.result = p.compileCoroBorrowedResult(b)
+		p.bindCoroDeliverySnapshot(b, *cleanup.delivery.plan.fallback, guard.result)
 		return guard
 	}
 	if guard.plan.dynamic != nil {
@@ -250,7 +253,8 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 		}
 		p.armCoroDynamicDeliveryCall(b, guard, env, args,
 			p.emitCoroRecipeDeliveryHelper(b, guard.plan.recipe, 0, initializer).value,
-			p.emitCoroRecipeDeliveryHelper(b, guard.plan.recipe, 1, drop).value, p.coroDeliveryHelperInvocation())
+			p.emitCoroRecipeDeliveryHelper(b, guard.plan.recipe, 1, drop).value,
+			p.prog.BoolVal(guard.plan.recipe.requiresState()), p.coroDeliveryHelperInvocation())
 		return guard
 	}
 	if len(args) != len(guard.args) {
@@ -282,6 +286,26 @@ func (s *coroDeliveryFunctionState) claim(b llssa.Builder, guard *coroDeliveryGu
 	if guard.plan.forward {
 		return
 	} // Incoming/fallback custody survives child consumption.
+	if guard.plan.dynamic != nil {
+		// A base-only descriptor may share this source occurrence. A large
+		// discarded result has no allocation on that lane.
+		clear, done := b.Func.MakeBlock(), b.Func.MakeBlock()
+		b.If(b.BinOp(token.EQL, b.LoadKnownNonNil(s.active), b.Prog.IntVal(uint64(guard.plan.tag), b.Prog.Uint32())), clear, done)
+		b.SetBlockEx(clear, llssa.AtEnd, false)
+		result := guard.result
+		if !guard.resultAddress.IsNil() {
+			result = b.LoadKnownNonNil(guard.resultAddress)
+		}
+		clearCoroDeliveryState(b, result)
+		b.Jump(done)
+		b.SetBlockContinuation(done)
+	} else {
+		clearCoroDeliveryState(b, guard.result)
+	}
+	s.disarm(b, guard)
+}
+
+func (s *coroDeliveryFunctionState) disarm(b llssa.Builder, guard *coroDeliveryGuardState) {
 	b.StoreKnownNonNil(s.active, b.Prog.IntVal(0, b.Prog.Uint32()))
 	guard.clearCaptures(b)
 }
@@ -298,6 +322,9 @@ func (guard *coroDeliveryGuardState) clearCaptures(b llssa.Builder) {
 	}
 	for _, argument := range guard.args {
 		b.StoreVolatile(argument, b.Prog.Zero(b.Prog.Elem(argument.Type)))
+	}
+	if !guard.stateRequired.IsNil() {
+		b.StoreVolatile(guard.stateRequired, b.Prog.BoolVal(false))
 	}
 }
 
@@ -338,7 +365,15 @@ func (s *coroStaticCleanupState) emitDeliveryPrefix(p *context, b llssa.Builder,
 			drop = b.Aggregate(p.prog.Closure(site.dynamic.drop),
 				b.LoadKnownNonNil(guard.dropDescriptor), p.prog.Nil(p.prog.VoidPtr()))
 		}
-		delivery.claim(b, guard)
+		required := p.prog.BoolVal(site.recipe.requiresState())
+		if !guard.stateRequired.IsNil() {
+			required = b.LoadKnownNonNil(guard.stateRequired)
+		}
+		delivery.disarm(b, guard)
+		dropBody, dropped := p.fn.MakeBlock(), p.fn.MakeBlock()
+		bound := p.coroDeliveryStateBound(b, result)
+		b.If(b.BinOp(token.OR, b.UnOp(token.NOT, required), bound), dropBody, dropped)
+		b.SetBlock(dropBody)
 		finish := s.beginRelocatedSiteEmission(p, site.call, coroRuntimeHelperAtResultDrop)
 		if site.dynamic != nil {
 			p.compileCoroDynamicDeliveryHelper(b, site.dynamic.release, drop, site.dynamic.drop, args, coroCleanupInvocation{state: s})
@@ -346,6 +381,9 @@ func (s *coroStaticCleanupState) emitDeliveryPrefix(p *context, b llssa.Builder,
 			p.compileCoroRecipeDeliveryHelper(b, site.recipe.consumerDrop, site.recipe, 1, args)
 		}
 		finish()
+		b.Jump(dropped)
+		b.SetBlock(dropped)
+		clearCoroDeliveryState(b, result)
 		b.Jump(next)
 	}
 	b.SetBlock(entry)
@@ -415,6 +453,11 @@ func (s *coroStaticCleanupState) emitDeliveryFallback(p *context, b llssa.Builde
 	b.If(b.BinOp(token.EQL, b.LoadKnownNonNil(s.continuation), p.prog.IntVal(uint64(coroStaticCleanupContinueComplete), p.prog.Uint32())), committed, done)
 	b.SetBlock(committed)
 	b.StoreKnownNonNil(delivery.fallbackActive, p.prog.BoolVal(false))
+	accepted := delivery.fallback
+	if delivery.fallbackManaged {
+		accepted = b.LoadKnownNonNil(delivery.fallback)
+	}
+	clearCoroDeliveryState(b, accepted)
 	if delivery.fallbackManaged {
 		b.StoreVolatile(delivery.fallback, p.prog.Zero(p.prog.Elem(delivery.fallback.Type)))
 	}
@@ -439,9 +482,19 @@ func (s *coroStaticCleanupState) emitDeliveryFallback(p *context, b llssa.Builde
 	for index := 0; index < recipe.signature.Params().Len(); index++ {
 		args = append(args, p.fn.PhysicalParam(base+index))
 	}
+	dropBody, dropped := p.fn.MakeBlock(), p.fn.MakeBlock()
+	if recipe.requiresState() {
+		b.If(p.coroDeliveryStateBound(b, storage), dropBody, dropped)
+	} else {
+		b.Jump(dropBody)
+	}
+	b.SetBlock(dropBody)
 	finish := s.beginRelocatedSiteEmission(p, recipe.anchor(), coroRuntimeHelperAtResultDrop)
 	p.compileCoroRecipeDeliveryHelper(b, coroDeliveryDropCall, *recipe, 1, args)
 	finish()
+	b.Jump(dropped)
+	b.SetBlock(dropped)
+	clearCoroDeliveryState(b, storage)
 	b.Jump(done)
 	b.SetBlockContinuation(done)
 }

@@ -36,6 +36,7 @@ const DeliveryRecipeVersionV1 = 1
 // Publication additionally requires the frontend's physical borrowed-output
 // and cleanup proof; validating this record alone does not grant that proof.
 type DeliveryRecipeRecord struct {
+	RequiresState  bool       `json:"requires_state,omitzero"`
 	Version        uint32     `json:"version"`
 	Producer       FunctionID `json:"producer"`
 	ProducerABI    string     `json:"producer_abi"`

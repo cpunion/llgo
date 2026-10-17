@@ -8,6 +8,7 @@ package cl
 
 import (
 	"fmt"
+	"go/token"
 	"go/types"
 
 	"github.com/xgo-dev/llgo/internal/coro"
@@ -60,13 +61,30 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		if !present {
 			return nil
 		}
-		if coroDeliveryNeedsReceiverSnapshot(shape, target) {
-			facts.deliveryReceiver = function
-			facts.ResultDelivery = true
-			ir.localBodyFacts[function] = facts
-			return nil
+		snapshot := target.snapshot
+		stateOnly := target.requiresState()
+		if !stateOnly && coroDeliveryNeedsReceiverSnapshot(shape, target) {
+			// The primary retains the original loads and nil checks. Capture
+			// their SSA value once, before the real producer acquires anything.
+			value := shape.receiverEvaluation
+			snapshot = &coroDeliveryReceiverSnapshot{owner: function, value: value}
+			copy := *shape
+			copy.args = append([]coroForwardingSourceArgument(nil), shape.args...)
+			copy.args[0].evaluation, copy.args[0].projectedType = value, value.Type()
+			shape = &copy
 		}
-		sourceArguments, base, composed := composeCoroDeliveryForwardingArguments(shape, target)
+		var sourceArguments []coroForwardingSourceArgument
+		base, composed := target.producer, true
+		if stateOnly {
+			// A state-bound helper ignores every original producer argument.
+			// Its deepest owner captured the complete cleanup tuple, so an
+			// outer wrapper must neither reread nor replace that state.
+			if target.forward != nil {
+				base = target.forwardBase
+			}
+		} else {
+			sourceArguments, base, composed = composeCoroDeliveryForwardingArguments(shape, target)
+		}
 		if !composed {
 			return nil
 		}
@@ -89,16 +107,24 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		if err != nil || !types.Identical(result, target.result) {
 			return nil
 		}
+		if snapshot != nil && snapshot.owner == function {
+			fields := make([]*types.Var, 0, len(arguments)+1)
+			for index, argument := range arguments {
+				fields = append(fields, types.NewField(token.NoPos, nil, fmt.Sprintf("Arg%d", index), argument.valueType, false))
+			}
+			fields = append(fields, types.NewField(token.NoPos, nil, "padding", types.Typ[types.Byte], false))
+			snapshot.box = types.NewStruct(fields, nil)
+		}
 		// Numeric conversions may have source semantics even if LLVM happens
 		// to use equal-width words. Only the existing exact transport proof
 		// grants the zero-allocation retag used by helper ABI views.
 		for _, argument := range arguments {
-			if (argument.sourceParameter >= 0 || argument.capture != nil) && coroPhysicalTransportTypeKey(u, argument.projectedType) != coroPhysicalTransportTypeKey(u, argument.valueType) {
+			if (argument.sourceParameter >= 0 || argument.capture != nil || argument.evaluation != nil) && coroPhysicalTransportTypeKey(u, argument.projectedType) != coroPhysicalTransportTypeKey(u, argument.valueType) {
 				return nil
 			}
 		}
 		recipe := coroSourceDeliveryRecipe{producer: function, signature: signature, result: result,
-			initializer: target.initializer, drop: target.drop, forward: shape, forwardBase: base, forwardArgs: arguments}
+			initializer: target.initializer, drop: target.drop, forward: shape, forwardBase: base, forwardArgs: arguments, snapshot: snapshot}
 		// An archive's real private helpers remain checked opaque facts. They
 		// are not converted to made-up source function bodies.
 		if target.archive != nil {
@@ -106,6 +132,11 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 			recipe.archive = &copy
 		}
 		ir.deliveryProducers[function] = recipe
+		if snapshot != nil && snapshot.owner == function {
+			if err := builder.freezeDeliverySnapshotAllocator(function); err != nil {
+				return err
+			}
+		}
 		for ordinal, name := range []string{coroDeliveryInitializeCall, coroDeliveryDropCall} {
 			helper := recipe.initializer
 			if ordinal == 1 {
@@ -208,6 +239,12 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwardingArguments(function *
 		argument := coroDeliveryForwardArgument{coroForwardingSourceArgument: projection}
 		switch {
 		case projection.sourceParameter >= 0, projection.constant != nil:
+		case projection.evaluation != nil:
+			instruction, ok := projection.evaluation.(ssa.Instruction)
+			shape := u.coroProgramIR.localBodyFacts[function].forwarding
+			if !ok || instruction.Parent() != function || shape == nil || !shape.methodProjection || shape.receiverEvaluation != projection.evaluation {
+				return nil, false, fmt.Errorf("delivery snapshot lost its exact primary receiver evaluation")
+			}
 		case projection.capture != nil:
 			environment, hasEnv, err := u.closureEnvironments.entryEnvironment(function)
 			if err != nil {
@@ -253,7 +290,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwardingArguments(function *
 // Apply the frozen source mapping to the producer arguments of a drop call.
 // The result address is unchanged. The terminal producer is context-free, so
 // its helper receives nil, never a forwarding wrapper's unrelated funcval env.
-func (p *context) coroForwardedDeliveryArguments(b llssa.Builder, recipe coroSourceDeliveryRecipe, args []llssa.Expr) (coroSourceDeliveryRecipe, []llssa.Expr) {
+func (p *context) coroProjectDeliveryArguments(b llssa.Builder, recipe coroSourceDeliveryRecipe, args []llssa.Expr) (coroSourceDeliveryRecipe, []llssa.Expr) {
 	if recipe.forward != nil {
 		if len(args) != recipe.signature.Params().Len()+2 {
 			panic("forwarded delivery lost its typed arguments")
@@ -276,6 +313,11 @@ func (p *context) coroForwardedDeliveryArguments(b llssa.Builder, recipe coroSou
 						address = b.FieldAddrKnownNonNil(address, field)
 					}
 					value = b.LoadKnownNonNil(address)
+				}
+			} else if argument.evaluation != nil {
+				value = p.compileValue(b, argument.evaluation)
+				for _, field := range argument.fieldPath {
+					value = b.Field(value, field)
 				}
 			} else {
 				value = p.compileValueAs(b, argument.constant, argument.valueType)
@@ -323,22 +365,34 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 		arguments := []llssa.CoroHelperViewArgument{{Parameter: 0}, {Parameter: -1, Constant: p.prog.Nil(p.prog.VoidPtr())}}
 		literals := p.pkg.FuncOf(primary.physical.Name()).NewBuilder()
 		defer literals.Dispose()
-		for _, argument := range recipe.forwardArgs {
-			mapped := llssa.CoroHelperViewArgument{Parameter: -1}
-			if argument.sourceParameter >= 0 {
-				mapped.Parameter = argument.sourceParameter + 2
-				mapped.Fields = argument.fieldPath
-			} else if argument.capture != nil {
-				if argument.environment == nil {
-					mapped.Constant = p.prog.Zero(p.prog.Type(argument.valueType, llssa.InGo))
+		if recipe.requiresState() {
+			for index := 0; index < target.signature.Params().Len(); index++ {
+				if recipe.snapshot != nil {
+					arguments = append(arguments, llssa.CoroHelperViewArgument{Parameter: 0,
+						ResultState: p.prog.Pointer(p.prog.Type(recipe.snapshot.box, llssa.InGo)), Fields: []int{index}})
 				} else {
-					mapped.Parameter, mapped.Environment = 1, p.prog.Type(argument.environment.Type(), llssa.InGo)
-					mapped.Fields = append([]int{argument.environmentField}, argument.fieldPath...)
+					arguments = append(arguments, llssa.CoroHelperViewArgument{Parameter: -1,
+						Constant: p.prog.Zero(p.prog.Type(target.signature.Params().At(index).Type(), llssa.InGo))})
 				}
-			} else {
-				mapped.Constant = literals.Const(argument.constant.Value, p.prog.Type(argument.valueType, llssa.InGo))
 			}
-			arguments = append(arguments, mapped)
+		} else {
+			for _, argument := range recipe.forwardArgs {
+				mapped := llssa.CoroHelperViewArgument{Parameter: -1}
+				if argument.sourceParameter >= 0 {
+					mapped.Parameter = argument.sourceParameter + 2
+					mapped.Fields = argument.fieldPath
+				} else if argument.capture != nil {
+					if argument.environment == nil {
+						mapped.Constant = p.prog.Zero(p.prog.Type(argument.valueType, llssa.InGo))
+					} else {
+						mapped.Parameter, mapped.Environment = 1, p.prog.Type(argument.environment.Type(), llssa.InGo)
+						mapped.Fields = append([]int{argument.environmentField}, argument.fieldPath...)
+					}
+				} else {
+					mapped.Constant = literals.Const(argument.constant.Value, p.prog.Type(argument.valueType, llssa.InGo))
+				}
+				arguments = append(arguments, mapped)
+			}
 		}
 		symbol := coroDeliveryViewSymbol(p.emissionUniverse.finalIdentity(recipe.producer))
 		return p.coroDeliveryTypedHelperView(primary, signature, symbol, arguments)

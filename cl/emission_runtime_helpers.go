@@ -1641,7 +1641,7 @@ func emissionCallNeedsManagedCoroResultSlot(ctx *context, call *ssa.Call) bool {
 }
 
 func coroRuntimeHelperTargetName(logicalName string) string {
-	if logicalName == coroManagedFrameSlotAllocZCall || logicalName == llssa.ArrayEqualScratchAllocZ {
+	if logicalName == coroManagedFrameSlotAllocZCall || logicalName == coroDeliveryStateAllocZCall || logicalName == llssa.ArrayEqualScratchAllocZ {
 		return "AllocZ"
 	}
 	return logicalName

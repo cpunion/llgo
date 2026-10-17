@@ -36,7 +36,7 @@ void llgo_delivery_install(void) {
     const char *mode = getenv("LLGO_DELIVERY_FIXTURE_MODE");
     char *end = NULL;
     long value = mode ? strtol(mode, &end, 10) : 0;
-    atomic_store(&fixture_mode, mode && end != mode && *end == '\0' && value >= 1 && value <= 31 ? (int)value : 0);
+    atomic_store(&fixture_mode, mode && end != mode && *end == '\0' && value >= 1 && value <= 44 ? (int)value : 0);
     if (atexit(check_finished) != 0) _Exit(88);
 }
 

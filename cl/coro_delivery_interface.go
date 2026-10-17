@@ -77,7 +77,17 @@ func (p *context) coroInterfaceDeliveryDescriptorOptions(entry plannedFunctionSy
 		}
 		return argument
 	}
-	if recipe.forward != nil {
+	if recipe.requiresState() {
+		for index := 0; index < base.signature.Params().Len(); index++ {
+			if recipe.snapshot != nil {
+				arguments = append(arguments, llssa.CoroHelperViewArgument{Parameter: 0,
+					ResultState: p.prog.Pointer(p.prog.Type(recipe.snapshot.box, llssa.InGo)), Fields: []int{index}})
+			} else {
+				arguments = append(arguments, llssa.CoroHelperViewArgument{Parameter: -1,
+					Constant: p.prog.Zero(p.prog.Type(base.signature.Params().At(index).Type(), llssa.InGo))})
+			}
+		}
+	} else if recipe.forward != nil {
 		for _, argument := range recipe.forwardArgs {
 			switch {
 			case argument.sourceParameter >= 0:
@@ -107,7 +117,7 @@ func (p *context) coroInterfaceDeliveryDescriptorOptions(entry plannedFunctionSy
 	if err != nil {
 		panic(err)
 	}
-	return &llssa.CoroDispatchDeliveryOptions{Version: llssa.CoroDispatchDeliveryVersionV2,
+	return &llssa.CoroDispatchDeliveryOptions{Version: llssa.CoroDispatchDeliveryVersionV3, RequiresState: recipe.requiresState(),
 		Initializer: llssa.CoroDispatchDeliveryHelper{Descriptor: initializer.descriptor, Signature: initialize, ABIHash: initializeABI.hash},
 		Drop:        llssa.CoroDispatchDeliveryHelper{Descriptor: dropCallable.descriptor, Signature: drop, ABIHash: dropABI.hash},
 	}

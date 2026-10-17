@@ -32,6 +32,7 @@ func TestCoroDeliveryForwardingPreservesOneCustodySlotAndTypedViews(t *testing.T
 				runtimePkg := source.addPackage(t, llssa.PkgRuntime, `package runtime
 import "unsafe"
 func AllocU(size uintptr) unsafe.Pointer { return nil }
+func AllocZ(size uintptr) unsafe.Pointer { return nil }
 func AssertNilDeref(value bool) {}
 func AssertNilDerefPtr(value unsafe.Pointer) unsafe.Pointer { return value }
 func PanicWrapNilPointer(value bool, receiver, method string) {}
@@ -198,19 +199,20 @@ func Root(pointer *PointerReceiver) {
 				if captures != 1 {
 					t.Fatalf("bound captured receiver recipes=%d, want one", captures)
 				}
-				receiverSnapshotRejections := 0
+				receiverSnapshots := 0
 				for _, function := range u.Functions() {
 					if function.Name() != "Bound" || function.Signature.Recv() == nil ||
 						function.Signature.Recv().Type().String() != "*foo.Token" {
 						continue
 					}
-					receiverSnapshotRejections++
-					if u.coroProgramIR.validateInterfaceDeliveryReceiver(function) == nil {
-						t.Fatal("unevaluated pointer-to-value receiver acquired a false interface capability")
+					receiverSnapshots++
+					recipe, present, err := u.coroProgramIR.sourceDelivery(function)
+					if !present || err != nil || !recipe.requiresState() || recipe.snapshot == nil || u.coroProgramIR.validateInterfaceDeliveryReceiver(function) != nil {
+						t.Fatalf("pointer-to-value receiver lost its bound snapshot: present=%t recipe=%+v err=%v", present, recipe, err)
 					}
 				}
-				if receiverSnapshotRejections != 1 {
-					t.Fatalf("receiver snapshot negative gates=%d, want one real pointer wrapper", receiverSnapshotRejections)
+				if receiverSnapshots != 1 {
+					t.Fatalf("receiver snapshots=%d, want one real pointer wrapper", receiverSnapshots)
 				}
 				if _, present, _ := u.coroProgramIR.sourceDelivery(foo.ssa.Func("Changed")); present {
 					t.Fatal("changed return acquired resource custody")
