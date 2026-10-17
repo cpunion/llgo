@@ -54,7 +54,7 @@ func (p *context) coroDeliveryDescriptorOptions(b llssa.Builder, entry plannedFu
 	if err != nil {
 		panic(err)
 	}
-	options := &llssa.CoroDispatchDeliveryOptions{Version: llssa.CoroDispatchDeliveryVersionV1}
+	options := &llssa.CoroDispatchDeliveryOptions{Version: llssa.CoroDispatchDeliveryVersionV2}
 	for ordinal, signature := range []*types.Signature{initializer, drop} {
 		abi, err := newCoroPlainDispatchEffectiveABI(p, signature)
 		if err != nil {
@@ -257,7 +257,16 @@ func (p *context) beginCoroDynamicDeliveryCall(
 	b.If(selection.HasDelivery(), present, ready)
 	b.SetBlockEx(present, llssa.AtEnd, false)
 	recipe := guard.plan.dynamic
-	initializer, drop := b.PrepareCoroDispatchDelivery(selection, recipe.initializer, recipe.drop)
+	initializerABI, err := newCoroPlainDispatchEffectiveABI(p, recipe.initializer)
+	if err != nil {
+		panic(err)
+	}
+	dropABI, err := newCoroPlainDispatchEffectiveABI(p, recipe.drop)
+	if err != nil {
+		panic(err)
+	}
+	initializer, drop := b.PrepareCoroDispatchDelivery(selection, recipe.initializer, recipe.drop,
+		llssa.CoroDispatchDeliveryABI{Initializer: initializerABI.hash, Drop: dropABI.hash})
 	// The nil environment of the helper is not another retained frame word.
 	// Only its descriptor, the producer environment and exact arguments survive
 	// a child suspension in the existing owner frame.

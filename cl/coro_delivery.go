@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	coroDeliveryGuardABI       = "llgo.coro.borrowed-result-guards.v2"
+	coroDeliveryGuardABI       = "llgo.coro.borrowed-result-guards.v3"
 	coroDeliveryInitializeCall = "coro.delivery.initialize"
 	coroDeliveryDropCall       = "coro.delivery.drop"
 )
