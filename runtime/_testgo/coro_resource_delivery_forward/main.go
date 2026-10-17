@@ -5,6 +5,8 @@ package main
 import (
 	"runtime"
 	"unsafe"
+
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 // Reuse the existing exact FD-count/strong-join checker, not a mock scheduler.
@@ -55,6 +57,12 @@ func release()
 
 //go:linkname escaped C.llgo_delivery_escaped
 func escaped()
+
+// The exact runtime type is intentional: the private route is uint16, not a
+// guessed machine word. This fixture observes placement, never changes it.
+//
+//go:linkname currentRoute github.com/xgo-dev/llgo/runtime/internal/runtime.coroCurrentTaskRouteV1
+func currentRoute() coro.RouteID
 
 func initialize(out *result) { out.R0 = -1 }
 func drop(out *result, _ unsafe.Pointer, token, mode uint32) {
@@ -140,6 +148,28 @@ func sentinel(ready chan struct{}) {
 	var never chan struct{}
 	<-never
 }
+
+func peerSentinel(ready chan struct{}) {
+	for currentRoute() != 2 {
+		runtime.Gosched()
+	}
+	// Keep the peer route alive, but disable further runnable transfers before
+	// publishing readiness. Thus its shutdown defer stays on P2 and the next
+	// child, created by the static main G, stays on P1. No OS-thread lock or
+	// timing sleep is involved in establishing this dependency.
+	runtime.GOMAXPROCS(1)
+	if currentRoute() != 2 {
+		panic("shutdown sentinel moved from P2")
+	}
+	sentinel(ready)
+}
+
+func crossPDeferredOwner() {
+	if currentRoute() != 1 {
+		panic("shutdown worker did not start on P1")
+	}
+	defer chained(1)
+}
 func owner()                                                                     { noinline(1); escaped() }
 func failingOwner()                                                              { defer func() { recover() }(); chained(2); escaped() }
 func deferredOwner()                                                             { defer chained(1) }
@@ -173,8 +203,26 @@ func main() {
 		closeFD(fd)
 	}
 	ready := make(chan struct{})
-	go sentinel(ready)
-	<-ready
+	if mode == 16 {
+		if runtime.GOMAXPROCS(0) != 2 {
+			panic("cross-P shutdown fixture requires GOMAXPROCS=2")
+		}
+		go peerSentinel(ready)
+		// Keep main runnable until the sentinel reaches P2: a lone already-run
+		// G deliberately cannot bounce between idle routes.
+	readyLoop:
+		for {
+			select {
+			case <-ready:
+				break readyLoop
+			default:
+				runtime.Gosched()
+			}
+		}
+	} else {
+		go sentinel(ready)
+		<-ready
+	}
 	if mode == 1 {
 		go failingOwner()
 		for closing() == 0 {
@@ -204,6 +252,8 @@ func main() {
 		go largeDeferredOwner()
 	case 15:
 		go largeDynamicDeferredOwner(publishedLarge)
+	case 16:
+		go crossPDeferredOwner()
 	default:
 		escaped()
 	}
@@ -212,6 +262,12 @@ func main() {
 	}
 	runtime.GC()
 	runtime.GC()
+	if mode == 16 {
+		if currentRoute() != 1 {
+			panic("shutdown coordinator moved from P1")
+		}
+		println("cross-P shutdown topology ready")
+	}
 	// Shutdown's claimed sentinel releases the foreign operation. Its result
 	// must be strong-joined and closed exactly once, without user continuation.
 }
