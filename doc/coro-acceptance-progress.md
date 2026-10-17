@@ -48,6 +48,17 @@ No instruction goldens, collection deadline or semantic assertions were relaxed.
 
 ### Void call result transport (v147)
 
+PR #290's exact head `e5661d7c7` has a retained native linked CI failure in
+run `39007948622`: `TestCoroResourceDeliveryForwardAcceptance/3`, P=2,
+iteration 3, reaches its unchanged 30-second execution deadline. This is the
+forwarded source-defer shutdown route; the other FD modes pass in that run.
+The earlier local 220/220 passing cohort does not erase this failure or prove
+it unrelated to the result-slot change. The PR must not merge on that evidence.
+Native resource gates now support opt-in retention of their exact linked
+images, and CI records compiler/image hashes and library versions on failure.
+Assertions and execution deadlines are unchanged. Reproduction and root-cause
+analysis remain open; image retention is diagnostic infrastructure, not a fix.
+
 A source call with no return values now uses a nil output address through
 direct coroutine, managed descriptor, synchronous outcome and original-init
 bridge calls. Completion, panic and cancellation still use their existing

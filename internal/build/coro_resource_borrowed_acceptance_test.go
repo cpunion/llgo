@@ -14,6 +14,36 @@ import (
 	"time"
 )
 
+func coroResourceAcceptanceImage(t *testing.T, fixture string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if output := os.Getenv("LLGO_CORO_RESOURCE_OUTPUT"); output != "" {
+		dir = filepath.Join(output, fixture)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return filepath.Join(dir, "resource")
+}
+
+func TestCoroResourceAcceptanceImageRetention(t *testing.T) {
+	t.Setenv("LLGO_CORO_RESOURCE_OUTPUT", "")
+	if image := coroResourceAcceptanceImage(t, "ordinary"); filepath.Base(image) != "resource" {
+		t.Fatal("unexpected temporary image:", image)
+	}
+	output := t.TempDir()
+	t.Setenv("LLGO_CORO_RESOURCE_OUTPUT", output)
+	for _, fixture := range []string{"coro_resource_borrowed_fd", "coro_resource_delivery_slot", "coro_resource_delivery_forward"} {
+		image := coroResourceAcceptanceImage(t, fixture)
+		if image != filepath.Join(output, fixture, "resource") {
+			t.Fatal("unexpected retained image:", image)
+		}
+		if info, err := os.Stat(filepath.Dir(image)); err != nil || !info.IsDir() {
+			t.Fatalf("retained image parent: %v, %v", info, err)
+		}
+	}
+}
+
 // This is a physical borrowed-output/defer gate, not a claim that arbitrary
 // syscall.Open results already have cancellation-safe child-to-parent delivery.
 // Shared-machine callers must bound the process tree's RSS. The dedicated
@@ -37,7 +67,7 @@ func TestCoroBorrowedResourceCleanupAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	image := filepath.Join(t.TempDir(), "borrowed-resource")
+	image := coroResourceAcceptanceImage(t, "coro_resource_borrowed_fd")
 	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Minute)
 	defer cancel()
 	build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-o", image, "./_testgo/coro_resource_borrowed_fd")
@@ -88,7 +118,7 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 	if err != nil {
 		t.Fatal(err)
 	}
-	image := filepath.Join(t.TempDir(), "resource-delivery")
+	image := coroResourceAcceptanceImage(t, fixture)
 	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Minute)
 	defer cancel()
 	build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-o", image, "./_testgo/"+fixture+"/main.go")
@@ -124,9 +154,10 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 					run := exec.CommandContext(runCtx, image)
 					run.Env = append(os.Environ(), "GOMAXPROCS="+owners, "LLGO_DELIVERY_FIXTURE_MODE="+strconv.Itoa(mode))
 					output, err := run.CombinedOutput()
+					deadline := runCtx.Err()
 					runCancel()
 					if err != nil || strings.TrimSpace(string(output)) != expected {
-						t.Fatalf("resource delivery P=%s run %d: %v\n%s", owners, attempt, err, output)
+						t.Fatalf("resource delivery P=%s run %d: %v, deadline: %v, image: %s\n%s", owners, attempt, err, deadline, image, output)
 					}
 				}
 			}
