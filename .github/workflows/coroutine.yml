@@ -27,6 +27,7 @@ jobs:
           - { llvm: 22, go: "1.27.0", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "fault-e2e", check: "test native fault landing E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "archive-e2e", check: "test independent archive E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "fleet-e2e", check: "test native fleet E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (LLVM 22, Go 1.27.0)" }
@@ -490,14 +491,21 @@ jobs:
             TestCoroStaticPlainDeferNativeNoStdlibRuntimeE2E
             TestCoroExplicitPanicNativeNoStdlibRuntimeE2E
             TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E
-            TestCoroArchiveDeliveryNativeNoStdlibRuntimeE2E
-            TestCoroArchiveDynamicDeliveryNativeNoStdlibRuntimeE2E
-            TestCoroArchivePrivateCallableDeliveryNativeNoStdlibRuntimeE2E
-            TestCoroArchiveLargeDeliveryNativeNoStdlibRuntimeE2E
-            TestCoroArchiveForwardedDeliveryNativeNoStdlibRuntimeE2E
-            TestCoroArchiveCapturedDeliveryNativeNoStdlibRuntimeE2E
-            TestCoroArchiveCapturedFieldDeliveryNativeNoStdlibRuntimeE2E
           )
+          for test in "${tests[@]}"; do
+            go test ./internal/build -run "^${test}$" -timeout=10m -count=1
+          done
+
+      - name: Test independent archive coroutine islands
+        if: matrix.lane == 'archive-e2e'
+        # Keep the complete archive cohort off the physical FD lane's job
+        # budget. Every discovered test still runs in its own fresh process.
+        run: |
+          set -euo pipefail
+          pattern='^TestCoroArchive.*DeliveryNativeNoStdlibRuntimeE2E$'
+          go test ./internal/build -list "$pattern" > /tmp/llgo-coro-archive-tests.log
+          mapfile -t tests < <(sed -n '/^TestCoroArchive.*DeliveryNativeNoStdlibRuntimeE2E$/p' /tmp/llgo-coro-archive-tests.log)
+          test "${#tests[@]}" -gt 0
           for test in "${tests[@]}"; do
             go test ./internal/build -run "^${test}$" -timeout=10m -count=1
           done
