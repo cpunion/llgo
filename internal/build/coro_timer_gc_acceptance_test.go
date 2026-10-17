@@ -57,7 +57,17 @@ func testCoroTimerGCAcceptance(t *testing.T, wasi bool) {
 		{"coro_stdlib_timer_go126", "standard Timer/Ticker semantics ok"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
-			image := filepath.Join(t.TempDir(), "timer")
+			imageDir := t.TempDir()
+			// Opt-in CI/debug retention preserves the exact failed linked image,
+			// including when the test process times out. A local test's ordinary
+			// temporary directory is still reclaimed by testing.T.
+			if output := os.Getenv("LLGO_CORO_TIMER_GC_OUTPUT"); output != "" {
+				imageDir = filepath.Join(output, fixture.name)
+				if err := os.MkdirAll(imageDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			image := filepath.Join(imageDir, "timer")
 			if wasi {
 				image += ".wasm"
 			}
