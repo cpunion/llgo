@@ -7,6 +7,41 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-17 (Asia/Shanghai)
 
+### Manual completion admission and current integration blockers
+
+The complete v120 `test/go` cohort passes **272/272**, with zero failures or
+skips. All 73 demo directories build, but the original runtime cohort passes
+only **72/73**: `_demo/go/sync` exposes a manual-completion race. The full
+180-package standard-library refresh and GOROOT shards remain in progress;
+these are not recorded as complete compatibility passes.
+
+`ManualOperationSource.Post` publishes its mailbox before releasing producer
+admission. An owner already polling another source can therefore observe the
+completion while that admission is still live. Automatic resume consumers
+previously detached and entered strict `ConfirmQuiesced` too early. They now
+reuse the existing bounded retry epoch until admitted producers have joined
+and any late mailbox has drained. Standalone and explicit-consumer detach/join
+semantics, including the strict A/B fairness assertions, are unchanged.
+
+The deterministic publication-before-return regression fails before this fix;
+the corrected runtime core passes in full, including late-post cancellation.
+Frozen v142 (`f8022f11d5680538074220c06fee11b79994520c`, manifest SHA-256
+`c1805e0fae4a54456dccb77f03114c10bbc11340be1a3481d6049a537db6bdeb`)
+uses the unchanged v120 compiler and original sync demo. The v131 runtime
+control fails **6/16** P=4 executions; v142 passes **128/128** actual executions
+(32 each at P=1/2/4/8). All three source-after checks match. The corrected
+executable SHA-256 is
+`88b5f4ce70ac1c9a05807c333253fa591373734d8c8959fdd1743a9ac332eba7`;
+the guarded process-tree peak is 2777.0MiB. This affected rerun does not relabel
+the original whole-demo cohort as an all-passing single-snapshot run.
+
+PR #287 still has a real Linux CI failure in timer/ticker weak collection at
+P=2, despite passing the other 17 jobs. It is not merged or reclassified. PR
+#288 contains the separately validated context-free resource helper-view
+cohort and remains draft pending its complete CI and the remaining integration
+blockers. No instruction goldens, collection deadline or semantic assertions
+were relaxed to obtain these results.
+
 ### Latest executable refresh: v117/v118/v120
 
 The v117 complete `test/go` cohort passes **271/271**, with zero failures or
