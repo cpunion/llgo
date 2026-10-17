@@ -41,6 +41,18 @@ type coroSourceDeliveryRecipe struct {
 	// forward is a frozen, value-only exact-return call, never a fabricated
 	// borrow site. Its target's real helpers remain the logical callees.
 	forward *coroForwardingSourceShape
+	// Compose once in ProgramIR, directly to the real helper's producer.
+	// Emission never builds intermediate helper-view chains or replays SSA.
+	forwardBase *ssa.Function
+	forwardArgs []coroDeliveryForwardArgument
+}
+
+// A source projection plus its already frozen immutable context layout. A
+// captured value with no environment is allowed only after a zero-size proof.
+type coroDeliveryForwardArgument struct {
+	coroForwardingSourceArgument
+	environment      *types.Var
+	environmentField int
 }
 
 func (recipe coroSourceDeliveryRecipe) anchor() *ssa.Call {
@@ -302,7 +314,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
 				call, ok := instruction.(ssa.CallInstruction)
-				if !ok || call.Common() == nil || call.Common().IsInvoke() {
+				if !ok || call.Common() == nil {
 					continue
 				}
 				frozen, present := ir.callPlans[call]

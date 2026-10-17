@@ -333,6 +333,99 @@ coro helper、native64/wasm32、小/大结果、incoming/nil-output、go/defer�
 receiver/bound/interface、动态 target 选择所需的 initializer context、
 reflect/FFI 第二次交接及 public Open/File seed 的限制均不因本实验解除。
 
+### 3.11 composed delivery projection 与不可变 receiver context（实验，2026-10-17）
+
+后续实验把参数映射在 ProgramIR 中合成为 `forwardBase/forwardArgs`，直接指向
+真实 helper 的 producer。静态 cleanup、descriptor helper 和 archive summary
+消费同一映射，不再逐层重建 helper view 链。逻辑 helper 的 FunctionID、effect、
+demand 和既有 ownership/cleanup transaction 不变。
+
+这区分两个独立权限：drop 不需要的 receiver 可以从参数映射中消去，但其
+原函数体的求值不能消去。canonical method wrapper 的间接读取/nil-check
+由 `receiverEvaluation` 标为必须执行；physical tail-forward 明确拒绝这个标记。
+因此不会为取消清理重新读取可能已变化的 pointer receiver，也不会漏掉原 nil panic。
+必需的间接求值尚无快照证明时仍不发布相应 custody recipe。
+
+bound method 捕获的是 receiver 值本身，不是可重新读取的词法 capture cell。
+ProgramIR 将所需 capture 的字段 index、确切 context 类型与既有
+`closureEnvironments` fact 一起冻结。直接 cleanup 和纯物理 helper view 都只读
+这个已绑定的不可变字段；不从函数地址反查类型，不新增注释、runtime registry、
+coroutine frame 或分派模式。只有物理尺寸确实为零的 capture 值可以用零值重建；
+被省略环境的非空指针不能因此变成 nil。
+
+forwarding wrapper 的 env 仅用于读取自己的 capture。已验证 context-free 的
+最终 producer，其真实 drop 的 data-env 必须是 nil，不能把外层 funcval env
+误当作原 producer 的环境。真实 helper 的独立 closure env 仍为 nil；两个参数
+角色不可混淆。SSA helper view 另外验证 context layout、字段路径和 LLVM retag，
+只发出所需字段的读取及一次真实 helper 调用，不复制整个 context 或增加 storage。
+
+native64/wasm32、plain/asynchronous helper、pre/post-CoroSplit 的 gate 验证
+声明方法、bound method、method expression、pointer wrapper，以及需要读取
+capture 的 receiver；bound drop view 必须只有一次 load/一次真实 call，没有
+alloca/store。测试使用生产 canonical resolver 与非移动 GC profile，原有错误
+profile/global-pointer-store 的负向 gate 保持有效。
+
+冻结 v154 使用新编译器运行完整 **536** 次 forwarded FD 验收，并补充静态/
+动态/defer bound call × P=1/2/4 ×16，共 **680** 次实际执行全部通过。
+receiver 来自运行时 C atomic 读取，绑定后修改原变量，再在 GC/取消和异步 cleanup
+中核对原 token 与精确 close 次数；源码前后 manifest 匹配。此结果仅证明该 cohort。
+当时接口 conditional consumer、receiver 求值快照、一般结构字段表达式和新增
+captured/archive 矩阵尚未完成；后续进展见下文。reflect/FFI 二次交接和 public
+Open/File 也仍未完成，不得由这些 passing gates 推导为完整标准库资源兼容性。
+
+接口 follow-up 复用已有 method descriptor 的可选 delivery tail、conditional
+helper edges 和 owner-local guard，源级 signature 保持 receiver-free，drop view
+直接投影到真实 helper。清理不需要的 normalized receiver 可以消去；需要的指针
+receiver 只保留指针 identity，不重新读取 pointee。资源调用暂不走 exact-interface
+装箱消除，以保证调用和 custody 使用同一 env/capability transaction。
+需要先求值再保存的 value-method pointer wrapper 仍是未完成项；缺少这项 binding
+时明确拒绝 descriptor publication，不能退化成没有资源能力的普通调用。
+receiver-independent 接口 drop view 已通过 native/wasm32、plain/asynchronous
+helper 的 pre/post-CoroSplit 验证：只有一次真实 helper call，映射精确，没有
+load/alloca/store；混合 resource/nonresource 候选保留原条件推导。
+另有 direct pointer-method gate 验证 helper 接收到的就是原 receiver pointer
+identity，不解引用 pointee、不增加 storage；同样通过 native/wasm32 CoroSplit。
+冻结 v155 用新编译器通过 **576** 次完整 forwarded FD 验收及 **96** 次额外
+interface call/defer × P=1/2/4 ×16，源码前后校验一致，受限进程树峰值1235.0MiB。
+这些是 POSIX native 执行，不是 wasm 实际 runtime 或完整接口资源兼容性的声明。
+随后 frozen v157 通过 **616** 次完整 FD 矩阵及 **96** 次额外 pointer-interface
+call/defer 验收。调用方把原 receiver 绑定给接口后改绑原变量，再清空两者；GC 和
+取消后 drop 仍须读到原对象的 token17，并精确 close。生产编译器/runtime 没有
+变化，使用同一 v155 编译器；源码前后校验一致，峰值1209.5MiB。值 receiver 的
+求值快照仍未完成，不能由 pointer identity 验收推导其正确性。
+
+独立 archive 捕获验收在 frozen v161 已覆盖 small/large bound callable，各运行
+三次：producer 使用函数参数构造 receiver、绑定后改写原变量；consumer 只有
+导出声明与 effect/ABI 元信息，没有私有 producer/helper SSA。实际 AOT/link
+执行验证 normal、defer discarded result、cancel 及两步可挂起 drop 仍使用
+原 token17。这是 counter-based custody 验收，不是 OS FD/GC stress 声明。
+完整 archive 矩阵按 CI 相同的顶层测试隔离方式运行，6 个顶层测试、14 个独立
+链接镜像、42 次实际执行全部通过，无失败/跳过；源码前后匹配，峰值1879.2MiB。
+
+receiver 的求值时点另有 Go/LLGo 共同通过的运行回归：`defer iface.M()` 在调用时
+读取 `*T` 的 value receiver，直接 `defer value.M()` 在注册时复制；接口 method
+value 在跨 await/GC 后仍在实际调用时读取，typed-nil 也在调用时才 panic。
+任何通用 context preparation 都必须保持这些区别，不能在创建 method value
+或注册所有 defer 时提前复制。仅保留装箱 `T` 类型信息的实验仍在独立 WIP 分支，
+完整资源 IR gate 因 `PtrToThis` 还需 `*T` 快照而失败，未集成。
+
+普通按值参数的嵌套字段现在复用同一个 source projection，而非另加一套 resource
+识别器。允许纯 `Field`，以及本函数内由一个参数初始化且先初始化、后读取的非逃逸
+local copy；必须证明 call 前每个 alloc/store/field/load 都属于消费到的值路径。
+多个参数可以各有自己的 local copy。原指针的 pointee 读取、字段修改、初始化前
+读取和未消费的 source 操作仍不能授权转发。source fact 也不自动授权 frame
+elision，physical consumer 继续逐指令检查既有 effect/outcome/cleanup 条件。
+
+drop 的静态参数、动态 typed view 和 archive facts 使用同一个组合字段路径；
+含 func 字段的结构必须先经过相同 Go-to-physical 类型转换再比较确切类型，不能
+只比较 LLVM size/layout。不同命名类型仍拒绝互换。未求值 receiver 的缺失类型
+必须返回无法投影，不能进入字段读取或默认为零值。该实验没有新增 runtime
+状态、注释、descriptor ABI 或第二套调度/cleanup 机制。独立 archive 的嵌套
+capture 已在 v167 通过 small/large 共 6 次实际 native AOT/link 运行：private
+receiver 含 func 字段和嵌套 token，绑定后修改源变量，opaque consumer 在取消
+及两步可挂起 drop 中仍必须使用原 token17。该 counter-based runtime island
+验收不是 wasm 执行、OS FD 或完整 runtime GC 的替代证明。
+
 ## 4. 方案比较
 
 | 方案 | 优点 | 主要问题 | 结论 |

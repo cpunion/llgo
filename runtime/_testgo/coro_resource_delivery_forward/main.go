@@ -43,6 +43,9 @@ func checkAlive(int32)
 //go:linkname blocked C.llgo_delivery_blocked
 func blocked() int32
 
+//go:linkname opened C.llgo_delivery_opened
+func opened() int32
+
 //go:linkname closing C.llgo_delivery_closing
 func closing() int32
 
@@ -65,7 +68,11 @@ func escaped()
 func currentRoute() coro.RouteID
 
 func initialize(out *result) { out.R0 = -1 }
-func drop(out *result, _ unsafe.Pointer, token, mode uint32) {
+func drop(out *result, env unsafe.Pointer, token, mode uint32) {
+	if env != nil {
+		println("context-free base drop received a forwarding environment")
+		escaped()
+	}
 	if token != 17 {
 		println("forwarded small drop token mismatch", token, mode)
 		escaped()
@@ -99,6 +106,73 @@ func noinline(mode uint32) int32 { return chained(mode) }
 
 var published = chained
 var publishedPermutation = permuted
+
+type fieldInputs struct {
+	unused func()
+	inner  struct{ token uint32 }
+}
+type fieldAlias = fieldInputs
+
+func projected(value fieldAlias, mode uint32) int32      { return acquire(value.inner.token, mode) }
+func projectedChain(value fieldAlias, mode uint32) int32 { return projected(value, mode) }
+
+var publishedProjected = projectedChain
+
+func projectedOwner(value fieldAlias)         { projectedChain(value, 1); escaped() }
+func projectedDeferredOwner(value fieldAlias) { defer projectedChain(value, 1) }
+func projectedDynamicOwner(f func(fieldAlias, uint32) int32, value fieldAlias) {
+	f(value, 1)
+	escaped()
+}
+func projectedDynamicDeferredOwner(f func(fieldAlias, uint32) int32, value fieldAlias) {
+	defer f(value, 1)
+}
+
+type factory uint32
+
+func (token factory) acquire(mode uint32) int32 { return acquire(uint32(token), mode) }
+
+func (factory) fixedAcquire(mode uint32) int32 { return acquire(17, mode) }
+
+type resourceFactory interface{ fixedAcquire(uint32) int32 }
+
+func interfaceOwner(owner resourceFactory)         { owner.fixedAcquire(1); escaped() }
+func interfaceDeferredOwner(owner resourceFactory) { defer owner.fixedAcquire(1) }
+
+type pointerFactory struct{ token uint32 }
+
+//go:linkname borrowPointer llgo.coroBorrowResult
+func borrowPointer(func(*result), func(*result, unsafe.Pointer, *pointerFactory, uint32)) *result
+
+func dropPointer(out *result, env unsafe.Pointer, receiver *pointerFactory, mode uint32) {
+	if receiver == nil || receiver.token != 17 {
+		println("interface drop lost its original receiver pointer")
+		escaped()
+	}
+	drop(out, env, receiver.token, mode)
+}
+
+func (receiver *pointerFactory) pointerAcquire(mode uint32) int32 {
+	out := borrowPointer(initialize, dropPointer)
+	openInto(out, mode)
+	return out.R0
+}
+
+type pointerResourceFactory interface{ pointerAcquire(uint32) int32 }
+
+func pointerInterfaceOwner(owner pointerResourceFactory)         { owner.pointerAcquire(1); escaped() }
+func pointerInterfaceDeferredOwner(owner pointerResourceFactory) { defer owner.pointerAcquire(1) }
+
+func boundOwner() {
+	token := factory(opened() + 15) // Runtime value 17, not a folded capture.
+	bound := token.acquire
+	token = 99
+	if token != 99 {
+		escaped()
+	}
+	bound(1)
+	escaped()
+}
 
 func initializeLarge(out *largeResult) { out.R0 = -1 }
 func checkLarge(payload *[131073]byte, owner *[128]byte) {
@@ -195,7 +269,14 @@ func main() {
 	// GOMAXPROCS is selected by the runner: do not collapse the P=2 gate to P=1.
 	install()
 	mode := fixtureMode()
-	fd := chained(0)
+	var fd int32
+	if mode >= 25 {
+		var value fieldAlias
+		value.inner.token = 17
+		fd = projectedChain(value, 0)
+	} else {
+		fd = chained(0)
+	}
 	runtime.Gosched()
 	runtime.GC()
 	checkAlive(fd)
@@ -265,6 +346,67 @@ func main() {
 		go largeDynamicDeferredOwner(publishedLarge)
 	case 16, 17:
 		go crossPDeferredOwner()
+	case 18:
+		go boundOwner()
+	case 19, 20:
+		token := factory(opened() + 15)
+		bound := token.acquire
+		token = 99
+		if token != 99 {
+			escaped()
+		}
+		if mode == 19 {
+			go dynamicOwner(bound)
+		} else {
+			go dynamicDeferredOwner(bound)
+		}
+		bound = nil
+	case 21, 22:
+		token := factory(opened() + 15)
+		var owner resourceFactory = token
+		token = 99
+		if token != 99 {
+			escaped()
+		}
+		if mode == 21 {
+			go interfaceOwner(owner)
+		} else {
+			go interfaceDeferredOwner(owner)
+		}
+		owner = nil
+	case 23, 24:
+		receiver := &pointerFactory{token: uint32(opened() + 15)}
+		var owner pointerResourceFactory = receiver
+		receiver = &pointerFactory{token: 99}
+		if receiver.token != 99 {
+			escaped()
+		}
+		if mode == 23 {
+			go pointerInterfaceOwner(owner)
+		} else {
+			go pointerInterfaceDeferredOwner(owner)
+		}
+		owner, receiver = nil, nil
+	case 25, 26, 27, 28, 29:
+		var value fieldAlias
+		value.inner.token = uint32(opened() + 15)
+		switch mode {
+		case 25:
+			go projectedOwner(value)
+		case 26:
+			go projectedDeferredOwner(value)
+		case 27:
+			go projectedDynamicOwner(publishedProjected, value)
+		case 28:
+			go projectedDynamicDeferredOwner(publishedProjected, value)
+		case 29:
+			go projectedChain(value, 1)
+		}
+		value.inner.token = 99
+		if value.inner.token != 99 {
+			escaped()
+		}
+		value = fieldAlias{}
 	default:
 		escaped()
 	}

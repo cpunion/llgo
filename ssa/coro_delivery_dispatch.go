@@ -51,7 +51,7 @@ func (p Program) coroDeliveryDescriptorType() Type {
 			p.Uint64(), p.Uint64(), p.Uint64(), p.Uint64()))
 }
 
-func validateCoroDeliveryHelperTypes(producer *types.Signature, result Type, initializer, drop *types.Signature) {
+func (p Program) validateCoroDeliveryHelperTypes(producer *types.Signature, result Type, initializer, drop *types.Signature) {
 	if producer == nil || producer.Results().Len() == 0 || result == nil ||
 		initializer == nil || drop == nil ||
 		validateCoroDispatchSignature(initializer) != nil || validateCoroDispatchSignature(drop) != nil ||
@@ -60,6 +60,13 @@ func validateCoroDeliveryHelperTypes(producer *types.Signature, result Type, ini
 		drop.Params().Len() != producer.Params().Len()+2 || drop.Results().Len() != 0 {
 		panic("ssa: coroutine delivery requires exact typed initializer and drop signatures")
 	}
+	// Publication starts with source signatures; prepared calls already carry
+	// physical signatures. Normalize both sides through the same conversion,
+	// including aggregates containing Go func values. Exact go/types identity
+	// is still required: equal LLVM layouts alone do not grant this contract.
+	producer = p.PhysicalFuncDecl(producer, InGo)
+	initializer = p.PhysicalFuncDecl(initializer, InGo)
+	drop = p.PhysicalFuncDecl(drop, InGo)
 	want := types.NewPointer(result.RawType())
 	if !types.Identical(initializer.Params().At(0).Type(), want) ||
 		!types.Identical(drop.Params().At(0).Type(), want) ||
@@ -90,7 +97,7 @@ func (p Package) validateCoroDispatchDelivery(opts CoroDispatchDescriptorOptions
 	if p.Prog.SizeOf(opts.Result) == 0 {
 		panic("ssa: coroutine delivery requires nonempty output storage")
 	}
-	validateCoroDeliveryHelperTypes(opts.Signature, opts.Result,
+	p.Prog.validateCoroDeliveryHelperTypes(opts.Signature, opts.Result,
 		delivery.Initializer.Signature, delivery.Drop.Signature)
 	for _, helper := range []CoroDispatchDeliveryHelper{delivery.Initializer, delivery.Drop} {
 		if !p.isCoroDispatchDescriptor(helper.Descriptor) {
@@ -163,7 +170,7 @@ func (b Builder) PrepareCoroDispatchDelivery(selection CoroDispatchSelection, in
 	if call.descriptor.IsNil() {
 		panic("ssa: coroutine delivery requires a prepared descriptor")
 	}
-	validateCoroDeliveryHelperTypes(call.signature, call.result, initializer, drop)
+	b.Prog.validateCoroDeliveryHelperTypes(call.signature, call.result, initializer, drop)
 	b.coroPlainDispatchTrapIf(b.UnOp(token.NOT, selection.HasDelivery()).impl)
 	pointer := Expr{call.descriptor.impl, b.Prog.Pointer(b.Prog.coroDeliveryDescriptorType())}
 	tail := b.LoadKnownNonNil(b.FieldAddrKnownNonNil(pointer, 1))

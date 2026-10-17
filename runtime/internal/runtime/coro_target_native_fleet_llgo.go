@@ -21,6 +21,7 @@ package runtime
 import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coroclock"
 )
 
 type coroNativeFleetTargetLifecycleV1 uint8
@@ -371,7 +372,8 @@ func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) co
 		return coroTargetDispatchInvalidV1
 	}
 	for index := uint32(1); index < count; index++ {
-		if !coroNativeFleetRetireDriverV1(handles[index]) {
+		now, clockOK := coroclock.MonotonicNano()
+		if !clockOK || !coroNativeFleetRetireDriverAtV1(handles[index], now) {
 			state.lifecycle = coroNativeFleetTargetFailedV1
 			return coroTargetDispatchInvalidV1
 		}

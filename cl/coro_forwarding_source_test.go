@@ -6,10 +6,23 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"strings"
 	"testing"
 )
+
+func TestCoroForwardingProjectionRejectsUnevaluatedReceiver(t *testing.T) {
+	structure := types.NewStruct([]*types.Var{types.NewField(0, nil, "Value", types.Typ[types.Int], false)}, nil)
+	for _, source := range []types.Type{nil, types.NewPointer(structure)} {
+		if projected, ok := coroForwardingProjectedType(source, []int{0}); ok || projected != nil {
+			t.Fatalf("unevaluated receiver %v acquired a value projection: %v", source, projected)
+		}
+	}
+	if projected, ok := coroForwardingProjectedType(structure, []int{0}); !ok || !types.Identical(projected, types.Typ[types.Int]) {
+		t.Fatal("evaluated value lost its exact field type")
+	}
+}
 
 func TestCoroForwardingSourceShapeIsFrozenProgramIRInput(t *testing.T) {
 	const source = `package foo
@@ -24,6 +37,13 @@ func ChangedResult(value int) int { return Child(value, 1) + 1 }
 func TwoCalls(value int) int { Child(value, 1); return Child(value, 2) }
 func Dynamic(call func(int, int) int, value int) int { return call(value, 1) }
 func SourceProjection(value struct { Number int }) int { return Child(value.Number, 1) }
+type Nested struct { Prefix int; Inner struct { Number int; Callback func() } }
+type NestedAlias = Nested
+func NestedProjection(value NestedAlias) int { return Child(value.Inner.Number, value.Prefix) }
+func TwoProjections(value NestedAlias, other struct { Number int }) int { return Child(value.Inner.Number, other.Number) }
+func PointerProjection(value *Nested) int { return Child(value.Inner.Number, 1) }
+func MutatedProjection(value Nested) int { value.Inner.Number++; return Child(value.Inner.Number, 1) }
+func UninitializedProjection(value Nested) int { var local Nested; number := local.Inner.Number; local = value; return Child(number, local.Prefix) }
 `
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
@@ -50,7 +70,32 @@ func SourceProjection(value struct { Number int }) int { return Child(value.Numb
 			t.Fatal("forwarding retag lost its source parameter and adapter")
 		}
 	}
-	for _, name := range []string{"ChangedResult", "TwoCalls", "Dynamic", "SourceProjection"} {
+	for _, name := range []string{"SourceProjection", "NestedProjection", "TwoProjections"} {
+		function := ssaPkg.Func(name)
+		shape, err := ir.forwardingSourceShape(function)
+		if err != nil || shape == nil || shape.target != ssaPkg.Func("Child") || shape.methodProjection || shape.receiverEvaluation != nil {
+			var listing strings.Builder
+			function.WriteTo(&listing)
+			t.Fatalf("%s value projection = %+v, error=%v\n%s", name, shape, err, listing.String())
+		}
+		wantFields := []int{0}
+		if name != "SourceProjection" {
+			wantFields = []int{1, 0}
+		}
+		argument := shape.args[0]
+		if argument.sourceParameter != 0 || len(argument.fieldPath) != len(wantFields) || len(shape.projections) < len(wantFields) {
+			t.Fatalf("%s lost its exact field path: %+v", name, shape)
+		}
+		for index, field := range wantFields {
+			if argument.fieldPath[index] != field {
+				t.Fatalf("%s field path = %v, want %v", name, argument.fieldPath, wantFields)
+			}
+		}
+		if name == "TwoProjections" && (shape.args[1].sourceParameter != 1 || len(shape.args[1].fieldPath) != 1 || shape.args[1].fieldPath[0] != 0) {
+			t.Fatalf("second parameter projection was confused with the first: %+v", shape)
+		}
+	}
+	for _, name := range []string{"ChangedResult", "TwoCalls", "Dynamic", "PointerProjection", "MutatedProjection", "UninitializedProjection"} {
 		shape, err := ir.forwardingSourceShape(ssaPkg.Func(name))
 		if err != nil || shape != nil {
 			t.Fatalf("unsupported %s acquired a forwarding source shape: %+v, error=%v", name, shape, err)

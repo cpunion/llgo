@@ -1155,7 +1155,7 @@ func planCoroPhysicalTailForward(
 	if err != nil {
 		return nil, err
 	}
-	if shape == nil {
+	if shape == nil || shape.receiverEvaluation != nil {
 		return nil, nil
 	}
 	for _, adapter := range shape.adapters {
@@ -1238,7 +1238,7 @@ func planCoroPhysicalTailForward(
 				}
 			}
 			if !types.Identical(source.valueType, targetType) ||
-				(!shape.methodProjection && ((source.direct && retag) || (!source.direct && !retag))) ||
+				(!shape.methodProjection && ((source.direct && retag) || (!source.direct && !retag && len(source.fieldPath) == 0))) ||
 				(retag && transportKey == "") {
 				return nil, nil
 			}
@@ -2423,6 +2423,11 @@ func planCoroPhysicalControlInstruction(
 			if err != nil {
 				result.controlFailure = "invalid exact interface call: " + err.Error()
 				return
+			}
+			if callPlanned && callPlan.ResultDelivery {
+				// Custody and the ordinary invocation must use the same immutable
+				// receiver context and descriptor capability transaction.
+				exact = false
 			}
 			if exact && coroExactInterfaceTargetDirectPlain(targetPlan) {
 				result.control = coroPhysicalControlExactInterfaceCall

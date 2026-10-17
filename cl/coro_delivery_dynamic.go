@@ -45,7 +45,7 @@ func (p *context) coroDeliveryDescriptorOptions(b llssa.Builder, entry plannedFu
 	// The shared callable factory has already validated and bound the producer's
 	// closure environment. Custody retains that same funcval env for drop;
 	// initializer/drop helpers themselves remain exact context-free entries.
-	if entry.plan.FuncRep != coro.Dispatch || entry.function.Signature.Recv() != nil ||
+	if entry.plan.FuncRep != coro.Dispatch ||
 		entry.plan.ManagedEntry != coro.ManagedEntryCoroutine && entry.plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
 		p.immutablePlan().HasRawPlainVariant(entry.function) || !types.Identical(signature, canonicalCoroPlainDispatchSignature(recipe.signature)) {
 		panic("resource descriptor publication requires its exact guarded managed entry")
@@ -73,7 +73,7 @@ func (p *context) coroDeliveryDescriptorOptions(b llssa.Builder, entry plannedFu
 
 func (builder coroProgramIRBuilder) freezeDynamicDeliveryConsumer(ir *coroProgramIR, call ssa.CallInstruction) (*coroDynamicDeliveryRecipe, error) {
 	u := builder.canonical.universe
-	if call.Common().StaticCallee() != nil || call.Common().IsInvoke() || call.Common().Signature().Results().Len() == 0 {
+	if call.Common().StaticCallee() != nil || call.Common().Signature().Results().Len() == 0 {
 		return nil, nil
 	}
 	if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
@@ -93,6 +93,11 @@ func (builder coroProgramIRBuilder) freezeDynamicDeliveryConsumer(ir *coroProgra
 	signature, ok := u.effectiveType(owner, call.Parent(), call.Common().Signature()).(*types.Signature)
 	if !ok {
 		return nil, fmt.Errorf("dynamic delivery call has no frozen source signature")
+	}
+	if call.Common().IsInvoke() {
+		// The interface payload supplies the receiver through the existing env
+		// word. Its helpers expose only the Go-visible invocation arguments.
+		signature = coroInterfaceDispatchCallableSignature(signature)
 	}
 	// Raw C function values do not publish managed delivery capabilities.
 	if llssa.IsNativeFuncBackground(u.prog.TypeBackground(signature)) {
@@ -193,7 +198,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryHelperCall(owner *ssa.Function
 	u := builder.canonical.universe
 	if u == nil || owner == nil || u.canonicalAlias(owner) != owner ||
 		source == nil || coro.SSAResultDeliveryOwner(source) != owner || source.Block() == nil || source.Common() == nil ||
-		source.Common().StaticCallee() != nil || source.Common().IsInvoke() ||
+		source.Common().StaticCallee() != nil ||
 		source.Common().Signature() == nil || source.Common().Signature().Results().Len() == 0 ||
 		name == "" || !utf8.ValidString(name) || strings.IndexByte(name, 0) >= 0 {
 		return fmt.Errorf("conditional delivery helper requires an exact owner-local typed dynamic result call")

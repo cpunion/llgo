@@ -2,6 +2,7 @@ package ssa
 
 import (
 	"encoding/binary"
+	"go/token"
 	"go/types"
 	"regexp"
 	"strings"
@@ -9,6 +10,44 @@ import (
 
 	"github.com/xgo-dev/llvm"
 )
+
+func TestCoroDeliveryHelperTypesNormalizeExactPhysicalAggregates(t *testing.T) {
+	for _, target := range []struct {
+		name string
+		arch *Target
+	}{{name: "native"}, {name: "wasm32", arch: &Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			f := newCoroDynamicDispatchTestFixture(t, target.arch)
+			callback := coroPlainDispatchTestSignature(nil, nil)
+			aggregate := types.NewStruct([]*types.Var{types.NewField(token.NoPos, nil, "callback", callback, false)}, nil)
+			argument := types.NewNamed(types.NewTypeName(token.NoPos, nil, "Argument", nil), aggregate, nil)
+			output := types.NewPointer(aggregate)
+			result := f.prog.Type(aggregate, InGo)
+			producer := coroPlainDispatchTestSignature([]types.Type{argument}, []types.Type{aggregate})
+			initializer := coroPlainDispatchTestSignature([]types.Type{output}, nil)
+			drop := coroPlainDispatchTestSignature([]types.Type{output, types.Typ[types.UnsafePointer], argument}, nil)
+			physicalProducer := f.prog.PhysicalFuncDecl(producer, InGo)
+			physicalDrop := f.prog.PhysicalFuncDecl(drop, InGo)
+			if types.Identical(physicalProducer.Params().At(0).Type(), argument) || types.Identical(result.RawType(), aggregate) {
+				t.Fatal("fixture did not exercise distinct source and physical aggregate types")
+			}
+			for _, source := range []*types.Signature{producer, physicalProducer} {
+				for _, helper := range []*types.Signature{drop, physicalDrop} {
+					f.prog.validateCoroDeliveryHelperTypes(source, result, initializer, helper)
+				}
+			}
+			other := types.NewNamed(types.NewTypeName(token.NoPos, nil, "OtherArgument", nil), aggregate, nil)
+			wrongDrop := coroPlainDispatchTestSignature([]types.Type{output, types.Typ[types.UnsafePointer], other}, nil)
+			coroPlainDispatchMustPanicContains(t, "exact producer arguments", func() {
+				f.prog.validateCoroDeliveryHelperTypes(physicalProducer, result, initializer, wrongDrop)
+			})
+			wrongInitializer := coroPlainDispatchTestSignature([]types.Type{types.Typ[types.UnsafePointer]}, nil)
+			coroPlainDispatchMustPanicContains(t, "exact output", func() {
+				f.prog.validateCoroDeliveryHelperTypes(physicalProducer, result, wrongInitializer, drop)
+			})
+		})
+	}
+}
 
 func coroDeliveryDispatchTestOptions(t *testing.T, f *coroDynamicDispatchTestFixture) CoroDispatchDescriptorOptions {
 	t.Helper()

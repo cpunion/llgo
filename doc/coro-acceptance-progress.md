@@ -154,7 +154,197 @@ source-after matches and peak build/run RSS is 1221.2MiB. The same v147 compiler
 is used throughout; its compiler production sources are unchanged. Final
 forwarded executable SHA-256 is
 `4fdb0d0fb7eec303b468ca4b0c44a496c94356192282da8c7e0548bea59fb2ff`.
-Final-head CI, review and platform gates remain required before integration.
+PR #290's exact final head `824e486d7` passes all 18 coroutine CI jobs in
+`39014762362`. Fresh paginated reviews, inline/issue comments and GraphQL review
+threads are empty; base `llvm-coro` is unchanged at `e6a2a9b93`. It is merged
+only into `cpunion/llgo:llvm-coro` at `f65a668d4` (08:26:25 UTC). The earlier
+failed runs remain retained and are not relabeled as passing.
+
+### Method/captured-context resource experiment (v154, not integrated)
+
+Separate local work composes drop-argument projections once in ProgramIR and
+adds typed reads of immutable bound-receiver values from the existing funcval
+context. No runtime state, annotation or new scheduler/cleanup protocol is
+added. Pointer-wrapper evaluation remains in its physical body; eliminating an
+unused helper argument does not authorize deleting a nil check. Native/wasm32
+pre/post-CoroSplit tests verify the exact capture mapping, one load/one real
+helper call, no view storage, and nil data-env for the context-free base helper.
+
+Frozen v154 is `106c40f6b4c1d0d459c56c97efaa01531207d1fe`, manifest SHA-256
+`5ad129baabc70c568e80623f42267467e8b2641556627c833a256c5538ae8038`, with new
+compiler SHA-256
+`e851f2ba59cc89ab35f27c2cdfb3293803e4859348c456e7dbcd833c71bd2dd3`.
+It passes **536/536** complete forwarded FD executions and **144/144** extra
+bound-method executions (static/dynamic/defer × P=1/2/4 ×16), with matching
+source-after and a 1201.4MiB guarded peak. The linked image SHA-256 is
+`fccecff94ee94a799bf754c6def769a6bc60609eb43f8f593ceb90b31f22b405`.
+This is not an old-compiler/runtime-only rerun. The broader method/interface
+source gate still fails on its one unresolved interface-consumer requirement;
+no feature PR is open and no full resource/standard-library completion is claimed.
+
+Local interface follow-up now freezes conditional consumers for invokes and
+routes resource calls through the existing capability-aware descriptor/guard.
+Typed drop views compose directly to the real helper, dropping the normalized
+receiver argument when unused; pointer identity can be retained without reading
+its pointee. No runtime field, mode, directive or new cleanup protocol is added.
+The source-fact method gate passes. The expanded native/wasm32 physical gate
+passes for receiver-independent cleanup, plain/asynchronous helpers and a mixed
+resource/nonresource interface family; it checks one real call, exact argument
+mapping and no load/alloca/store in the interface drop view. Linked frozen v155
+passes **576/576** complete forwarded FD executions plus **96/96** extra
+interface call/defer executions (P=1/2/4 ×16), source-after matched, peak1235.0MiB.
+The new compiler SHA-256 is
+`1c730956c5f02facb369467fd22d00c74d57b16e79acf8b6e8692190f0a85d09`,
+the source manifest is
+`c58fc7f52809da79019f158acbf809beb67acdec94cdfa70cfe53f0240407b3d`,
+and the retained linked image is
+`a39ea4075be2110db3507c7834aaa20c23e0ac7d6515126b194d3c4746fd7ea7`.
+These are native POSIX executions, not wasm actual-runtime acceptance.
+The typed-pointer identity gate also passes native/wasm32 pre/post-CoroSplit:
+the view forwards the exact receiver word, unchanged output and nil base env,
+with one helper call and no pointee read or storage. The expanded host IR run
+took 5.99s with a 160.4MiB peak; this is not a linked pointer-resource run.
+Frozen v156 passes **18/18** discovered `TestCoro.*Delivery` host tests in fresh
+isolated processes, including the former interface failure, with no exclusions.
+Source-after matches manifest
+`41e297a58965a49074106e42598d63db300b33cc358150923ad4f4311d031b03`,
+and the guarded tree peak is 183.8MiB. This includes existing opaque-archive IR
+gates, not the new captured/archive actual-runtime matrix.
+
+Frozen v157 adds linked pointer identity modes 23/24: the original receiver is
+bound into an interface, the source variable is rebound and cleared, and actual
+GC/cancellation cleanup must still read token17 from the original object. Both
+ordinary and source-defer paths pass. The **616/616** complete forwarded FD runs
+and **96/96** extra pointer-interface runs (P=1/2/4 ×16) pass, source-after
+matches, with a 1209.5MiB guarded tree peak. Compiler/runtime production sources
+are unchanged from v155 (checked exact diff), so this uses the same v155
+compiler, not a falsely claimed new compiler. Manifest SHA-256:
+`317e596aed21880a256ab876699ac98566bd7cacee87ea16e08836debea50cb0`;
+retained image:
+`ce3054729aa4535818e4d45939aead08a990daf9ad84ceb53b01c819f220b72e`.
+No feature PR is open and this work is not integrated.
+
+The captured archive follow-up adds a factory returning a bound receiver whose
+value comes from a public function parameter, then changes the source local.
+Independent consumers have only exported declarations and opaque effect/ABI
+records: private producers and initialize/drop helpers have no consumer SSA
+bodies. Frozen v161 passes small and large captured cases, three actual native
+executions each; normal delivery, ordinary defer result discarding, cancellation
+and two suspending cleanup steps retain the original token17. This is actual
+AOT/link execution of counter-based ownership, not an OS-FD or GC stress claim.
+The complete frozen v161 archive matrix passes **6/6** discovered top-level
+tests, **14** retained linked images and **42** actual executions in fresh
+top-level processes, with zero skips/failures. Source-after matches manifest
+`97b8556f0d485b50bef7b7d7e347287699521baa98bc91d4862d29f3e3e67a74`;
+the guarded process-tree peak is 1879.2MiB. These use the frozen host compiler
+API/AOT pipeline and the production scheduler island, not a claim of full CLI
+or full-runtime GC acceptance.
+An earlier aggregate v159 process hit its 4GiB RSS limit after completing the
+original cases; its exit137 remains recorded and is not a full-matrix pass.
+
+Three new `test/go/interface_receiver_timing_test.go` cases pass both Go and
+the v155 LLGo compiler on frozen v160: interface method values read a mutable
+`*T` at invocation, direct value defers capture at registration, and typed-nil
+value methods panic at invocation rather than method-value creation. The
+cross-await case includes GC. Source-after matches; the linked image is
+`e8f4e02bad9c53c0cf9bf025aa733850934c8c560cb5cded4e0402c4f3b99ab1`;
+the guarded build/run tree peak is 5072.4MiB. A new unfiltered whole `test/go`
+refresh is now running on the same frozen v160 sources/compiler; no whole-suite
+receipt is claimed yet.
+
+Receiver snapshot experiments remain isolated on local branch
+`coro/boxed-interface-context-20261017` at `ed49106c7`. Source receiver metadata
+and seven SSA/helper-view gates pass, but the expanded resource IR gate is RED:
+materializing `T` also materializes method-bearing `*T` through `PtrToThis`.
+Preserving only the immutable boxed case is insufficient. That WIP is neither
+merged into this working branch nor accepted as snapshot support.
+Receiver-dependent value wrappers still need an evaluated snapshot; descriptor
+publication now rejects that boundary instead of silently omitting custody.
+
+The unchanged Go 1.27 `fixedbugs/issue79186.go` RWMutex input passes three runs
+each under Go, frozen v120 and v154 in a separate retained-image control matrix.
+Source-after matches both snapshots, with a 1201.0MiB guarded tree peak. The
+original shard4 process-exit -1 remains an independent unresolved failure; these
+nine controls do not erase or explain it.
+
+### Immutable value-field forwarding (v162-v167, local experiment)
+
+Ordinary nested fields of by-value parameters now reuse the same frozen
+projection as promoted wrappers. A local parameter copy must have one exact
+initializing store before use, and every prefix instruction must be consumed
+by the checked projection. Pointer reads, mutation and pre-initialization
+reads remain negative gates. Pure physical helper views add no storage; the
+ordinary nonresource tail-forward gate also verifies no frame or split entries.
+No runtime state, new directive or descriptor ABI is added.
+
+The initial v162 cohort exposes a real source/physical type-domain mismatch:
+dynamic delivery compares converted aggregate parameters containing func
+values with unconverted helper parameters. v163 normalizes both signatures
+through the existing Go-to-physical converter while preserving exact type
+identity; equal-layout distinct named arguments and untyped outputs remain
+rejected. All ten selected SSA delivery/helper-view top-level tests pass on
+native/wasm32. The corrected v165 resource/forwarding compiler cohort passes
+**26/26** top-level tests with no failure/skip and matching source-after
+(`ef0ebc9668ba26d9d250cb5cc877d29440fc3013c3d6fd304f7ebcf43c0a5968`).
+Test-only follow-ups explicitly demand published views, use the real ordinary
+function symbol, and count custody slots by the exact converted result type
+rather than mistaking an input aggregate for another output slot.
+
+Frozen v163 passes the complete borrowed cleanup, result-slot and expanded
+forwarded FD cohorts, plus **240/240** additional field-mode executions at
+P=1/2/4. That is **1,292/1,292** actual linked native executions, including
+static, dynamic, source-defer and discarded-entry field forwarding. The source
+aggregate includes a func field; the source copy is mutated/cleared after
+argument evaluation, and cancellation must still clean the original token17
+and close the FD exactly once. Source-after matches manifest
+`96e971ace55d8d548ad1e61087786741c39ddb0c23cf9888b1e05b82d1429247`;
+compiler SHA-256 is
+`271713468eab56d8236041fe569e264ba3d11ff6f65acd6d22f39ff71a30687b`,
+forwarded image SHA-256 is
+`7a75613742594b4e028b70b0053a72ddb8f0c0eb858b83d9fb0cbfeb241cae5c`,
+and guarded peak build/run RSS is 1227.7MiB. v162's earlier compile failure is
+retained, not relabeled as passing. This is POSIX acceptance, not actual wasm.
+
+The added independent archive nested-capture gate first fails at v166 on an
+unevaluated receiver's missing projection type. v167 rejects that composition
+safely and retains the explicit unsupported receiver-snapshot boundary.
+The v167 independent archive nested-capture gate now passes both small/large
+cases, **6/6** actual native AOT/link executions. The private receiver has an
+unused func field plus a nested token field, is bound and then mutated; the
+opaque consumer must still use token17 through cancellation and both yielding
+drop steps. Source-after matches, peak1181.6MiB. Retained small/large image hashes
+are `8c23c09f1057276a32727cd4f4ee07286ecacc349f0ba33b4180bae24a84dcd5`
+and `e3c143ded3d7e333506ac278d2891280a999baff24a2340a7e482731d811c893`.
+These are counter-based scheduler-island tests, not FD or full-runtime GC tests.
+The final v167 compiler also passes the complete **1,292/1,292** native FD
+cohort described above, matching source-after, peak1227.0MiB. Its compiler hash
+is `86a0436778cc3375146798b298381de2a23afa15b7bdb3ec7b84c2d78eba18cb`;
+the retained forwarded image is
+`4703e3ce3238918f21f5da2eceb2d4226b6aa4341e968606e81289dde6b8e0df`.
+The independent full v163 archive refresh finishes **6/6** top-level tests,
+**14** retained images and **42** actual executions, source-after matching,
+peak1955.2MiB. This separate snapshot is not combined with the six new v167
+field executions into a falsely uniform same-source cohort.
+The whole test/go evaluation remains in progress.
+No feature PR or remote integration is claimed; public Open/File and
+reflect/FFI secondary custody remain incomplete.
+The exact v167 focused compiler cohort passes **27/27** top-level tests with
+matching source-after manifest
+`38419382365c5cfa5c17767d605995ebddc7b66e897ff42739b1268c29549bae`;
+this adds the missing/unevaluated projection rejection gate and retains the
+native/wasm32 pre/post-CoroSplit checks. Its guarded peak is recorded separately
+from the still-running actual archive and full runtime cohorts.
+The complete v165 `^TestCoro` compiler cohort also passes **534/534** top-level
+tests, matching source-after, zero failures/skips and a 384.5MiB guarded peak.
+It uses the same production compiler sources as v163; the later v167 change
+only adds the fail-closed missing-type projection check described above.
+
+The v161 shared-fixture dependency follow-up passes all three affected native
+E2Es (static plain defer, explicit panic, channel/closed static spawn), with
+source-after matching and a 1544.9MiB peak. The baseline v120 GOROOT shard6
+also finishes **135/135** under its existing classification, source-after
+matching, peak3676.0MiB. These results do not erase shard4's original failure
+or complete the still-running whole standard-library/GOROOT evaluation.
 
 ### Latest executable refresh: v117/v118/v120
 

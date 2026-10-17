@@ -95,7 +95,7 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 }
 
 func TestCoroResourceDeliveryForwardAcceptance(t *testing.T) {
-	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15, 16, 17})
+	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29})
 }
 
 func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []int) {
@@ -146,6 +146,18 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 		"typed resource delivery normal, discarded and canceled passed", // Large captured dynamic resource defer.
 		"cross-P shutdown topology ready\ntyped resource delivery normal, discarded and canceled passed",
 		"cross-P shutdown topology ready\ntyped resource delivery normal, discarded and canceled passed", // Resize during shutdown cleanup.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Bound method: receiver value survives mutation.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Dynamic bound method with owned environment.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred dynamic bound method.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Interface method with receiver-independent cleanup.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred interface method with receiver-independent cleanup.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Exact receiver pointer survives rebinding and GC.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred exact receiver pointer.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Nested value fields through a static wrapper.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred nested value fields.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Dynamic nested value fields.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred dynamic nested value fields.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Discarded-entry nested value fields.
 	}
 	for _, mode := range modes {
 		expected := expectedByMode[mode]

@@ -60,6 +60,12 @@ func coroProveExactInterfaceMakeElision(
 	if !structural || plan == nil {
 		return false, nil
 	}
+	if fact, present := plan.CallPlan(call); present && fact.ResultDelivery {
+		// Resource method descriptors borrow the existing immutable interface
+		// payload for cleanup. Do not elide that context while retaining its
+		// receiver-free helper ABI.
+		return false, nil
+	}
 	receiver, _, targetPlan, exact, err := plan.ResolveExactInterfaceCall(call)
 	if err != nil {
 		return false, err

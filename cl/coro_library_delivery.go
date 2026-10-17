@@ -48,8 +48,8 @@ func (view CoroLibraryEffectView) SourceDeliveryRecord(
 	ids.CoroABI, ids.SchedulerABI, ids.ArchiveReady = metadata.CoroABI, metadata.SchedulerABI, true
 	functions := [3]*ssa.Function{recipe.producer, recipe.initializer, recipe.drop}
 	base := recipe
-	for base.forward != nil {
-		base = u.coroProgramIR.deliveryProducers[base.forward.target]
+	if base.forward != nil {
+		base = u.coroProgramIR.deliveryProducers[base.forwardBase]
 	}
 	var callables [3]coro.DeliveryCallable
 	for index, target := range functions {
@@ -361,9 +361,7 @@ func (p *context) compileCoroRecipeDeliveryHelper(b llssa.Builder, name string, 
 		if ordinal == 1 {
 			recipe, args = p.coroForwardedDeliveryArguments(b, recipe, args)
 		} else {
-			for recipe.forward != nil {
-				recipe = p.emissionUniverse.coroProgramIR.deliveryProducers[recipe.forward.target]
-			}
+			recipe = p.emissionUniverse.coroProgramIR.deliveryProducers[recipe.forwardBase]
 		}
 	}
 	target := recipe.initializer
