@@ -73,6 +73,7 @@ func acquire(token, mode uint32) int32 {
 }
 
 type receiver struct{ Token uint32 }
+type promotedValue struct{ reflect.Value }
 
 func (r receiver) Acquire(mode uint32) int32 { return acquire(r.Token, mode) }
 
@@ -190,6 +191,14 @@ func invoke(mode uint32) int32 {
 			return []reflect.Value{reflect.ValueOf(fd)}
 		})
 		values = callback.Call([]reflect.Value{reflect.ValueOf(&token).Elem(), reflect.ValueOf(mode)})
+	case 32:
+		// Embedding Value also creates private promoted method roots. Their
+		// original standard-library ABI must still resolve to the patch.
+		value := promotedValue{reflect.ValueOf(acquire)}
+		values = value.Call([]reflect.Value{reflect.ValueOf(&token).Elem(), reflect.ValueOf(mode)})
+	case 33:
+		value := &promotedValue{reflect.ValueOf(acquireVariadic)}
+		values = value.CallSlice([]reflect.Value{reflect.ValueOf(&token).Elem(), reflect.ValueOf([]uint32{mode})})
 	default:
 		values = reflect.ValueOf(acquire).Call([]reflect.Value{reflect.ValueOf(&token).Elem(), reflect.ValueOf(mode)})
 	}

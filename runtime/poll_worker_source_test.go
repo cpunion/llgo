@@ -245,7 +245,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"//export __llgo_coro_native_worker_complete_v1",
 		"state.delivery != coroNativeWorkerDeliveryProgramV1",
 		"coroProgramWorkerSourceV1State.Post(id, payload)",
-		"coroTargetRequestExecutorV1(state.handle)",
+		"coroNativeRequestExecutorResultV1(state.handle)",
+		"request != coro.ExecutorRequestClosed",
 	} {
 		if !strings.Contains(programCompletion, required) {
 			t.Errorf("%s lacks static program worker completion marker %q", runtimeCoroWorkerProgramCompletionSource, required)
@@ -257,7 +258,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"//export __llgo_coro_native_worker_complete_v1",
 		"state.delivery != coroNativeWorkerDeliveryFleetV1",
 		"coroNativeFleetPostWorkerV1(id, payload)",
-		"result.Route != coro.OperationRoutePosted || !accepted",
+		"!coroNativeFleetCompletionAcceptedV1(result)",
 	} {
 		if !strings.Contains(fleetCompletion, required) {
 			t.Errorf("%s lacks static fleet worker completion marker %q", runtimeCoroWorkerFleetCompletionSource, required)

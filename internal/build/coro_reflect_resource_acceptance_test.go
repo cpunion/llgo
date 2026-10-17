@@ -41,7 +41,7 @@ func TestCoroReflectResourceAcceptance(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("reflected resource build: %v\n%s", err, output)
 	}
-	for _, mode := range []int{12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27, 28, 29, 31} {
+	for _, mode := range []int{12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27, 28, 29, 31, 32, 33} {
 		testCoroReflectResourceRuns(t, image, mode, false)
 	}
 }

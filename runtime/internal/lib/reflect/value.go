@@ -2266,7 +2266,7 @@ func (v Value) Call(in []Value) []Value {
 	bindCallDelivery(out, unsafe.Pointer(state))
 	v.mustBe(Func)
 	v.mustBeExported()
-	v.call("Call", in, state, out)
+	v.callInto("Call", in, state, out)
 	return out.R0
 }
 
@@ -2283,7 +2283,7 @@ func (v Value) CallSlice(in []Value) []Value {
 	bindCallDelivery(out, unsafe.Pointer(state))
 	v.mustBe(Func)
 	v.mustBeExported()
-	v.call("CallSlice", in, state, out)
+	v.callInto("CallSlice", in, state, out)
 	return out.R0
 }
 
@@ -2550,13 +2550,24 @@ func (v Value) closureFunc() *abi.FuncType {
 	return toFuncType(v.typ_.StructType())
 }
 
-func (v Value) call(op string, in []Value, state *callDeliveryState, loan *callDeliveryResult) {
+// Preserve the standard library's private method ABI too: generated promoted
+// wrappers may reference it before patch selection. It owns the same guard
+// through its caller's acceptance, and shares the single call implementation.
+func (v Value) call(op string, in []Value) []Value {
+	out := borrowInternalCallDelivery(initializeCallDelivery, dropInternalCallDelivery)
+	state := new(callDeliveryState)
+	bindCallDelivery(out, unsafe.Pointer(state))
+	v.callInto(op, in, state, out)
+	return out.R0
+}
+
+func (v Value) callInto(op string, in []Value, state *callDeliveryState, loan *callDeliveryResult) {
 	if v.flag&flagMethod != 0 {
 		rcvr, method := methodExpressionValue(op, v, int(v.flag)>>flagMethodShift)
 		args := make([]Value, len(in)+1)
 		args[0] = rcvr
 		copy(args[1:], in)
-		method.call(op, args, state, loan)
+		method.callInto(op, args, state, loan)
 		return
 	}
 

@@ -72,7 +72,7 @@ func TestFFIDynamicCallsMatchTargetCapability(t *testing.T) {
 	}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "CallLLGo" {
+		if !ok || fn.Name.Name != "callLLGoManaged" {
 			continue
 		}
 		guard, ok := fn.Body.List[0].(*ast.IfStmt)

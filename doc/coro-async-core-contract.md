@@ -307,6 +307,8 @@ CallSitePlan 的 inline projection：只能对本 producer 的原始 borrow SSA 
 一次，不能绑定 nil、外部地址或结果槽本身；load 只授权给对应的私有 drop helper。
 带此绑定的 drop 不得读取任何原始参数，其普通 Go 调用和函数值 publication 均拒绝。
 完整 state 绑定沿 exact-return forwarder 传递，外层 wrapper 不得再次覆盖它。
+标准库私有 `Value.call(op,in) []Value` 也保留原签名和独立 guard，避免补丁选择前
+生成的 promoted wrapper 失去 ABI 匹配；所有入口共享同一个 `callInto` 实现。
 
 反射仅在 descriptor 的 `HasDelivery` 分支打开 tail-v3，分别校验 helper 的
 独立 ABI hash、NoCapture、void result 和 capability。原始 `ffi.CallLLGo` 仍拒绝
