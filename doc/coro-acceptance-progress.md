@@ -312,6 +312,12 @@ Current v167 actual archive/FD reruns, the broader compiler cohort and the new
 whole test/go evaluation are still in progress. No feature PR or remote
 integration is claimed; public Open/File and reflect/FFI secondary custody
 remain incomplete.
+The exact v167 focused compiler cohort passes **27/27** top-level tests with
+matching source-after manifest
+`38419382365c5cfa5c17767d605995ebddc7b66e897ff42739b1268c29549bae`;
+this adds the missing/unevaluated projection rejection gate and retains the
+native/wasm32 pre/post-CoroSplit checks. Its guarded peak is recorded separately
+from the still-running actual archive and full runtime cohorts.
 
 The v161 shared-fixture dependency follow-up passes all three affected native
 E2Es (static plain defer, explicit panic, channel/closed static spawn), with
