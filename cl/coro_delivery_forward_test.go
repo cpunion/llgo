@@ -197,3 +197,80 @@ func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Ch
 		})
 	}
 }
+
+// This source-fact gate precedes physical ABI and actual cancellation gates.
+func TestCoroDeliveryMethodsKeepCustodyAcrossCompilerAdapters(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	source := newEmissionTestProgram()
+	source.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	runtimePkg := source.addPackage(t, llssa.PkgRuntime, `package runtime
+import "unsafe"
+func AllocU(size uintptr) unsafe.Pointer { return nil }
+func AssertNilDeref(value bool) {}
+`)
+	foo := source.addPackage(t, "foo", `package foo
+import "unsafe"
+type Result = struct { R0 int; R1 error }
+func initialize(out *Result) { out.R0 = -1 }
+func drop(out *Result, _ unsafe.Pointer, a, b int) { out.R0 = a*10+b }
+//go:linkname borrow llgo.coroBorrowResult
+func borrow(func(*Result), func(*Result, unsafe.Pointer, int, int)) *Result
+func Acquire(a, b int) (int,error) { out := borrow(initialize,drop); out.R0=a+b; return out.R0,out.R1 }
+type Receiver struct{}
+func (Receiver) Open(a, b int) (int,error) { return Acquire(a,b) }
+type Opener interface { Open(int,int) (int,error) }
+var MethodExpression = Receiver.Open
+func Root(receiver Receiver) {
+ receiver.Open(1,2)
+ bound := receiver.Open
+ bound(3,4)
+ MethodExpression(receiver,5,6)
+ var opener Opener = receiver
+ opener.Open(7,8)
+}
+`)
+	source.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	u, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+		{SSA: foo.ssa, Files: []*ast.File{foo.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := foo.types.Scope().Lookup("Receiver").Type().(*types.Named)
+	method := source.ssa.FuncValue(receiver.Method(0))
+	if recipe, present, err := u.coroProgramIR.sourceDelivery(method); err != nil || !present || recipe.forward == nil {
+		t.Errorf("declared method lost its receiver-normalized result custody: present=%t recipe=%+v error=%v", present, recipe, err)
+	}
+	adapters := 0
+	for _, function := range u.Functions() {
+		if function == foo.ssa.Func("Root") {
+			continue
+		}
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(*ssa.Call)
+				if !ok || call.Common().StaticCallee() != method {
+					continue
+				}
+				adapters++
+				if recipe, present, err := u.coroProgramIR.sourceDelivery(function); err != nil || !present || recipe.forward == nil {
+					t.Errorf("compiler adapter %s lost transparent custody: present=%t error=%v", function, present, err)
+				}
+			}
+		}
+	}
+	if adapters < 2 {
+		t.Errorf("expected bound and method-expression adapters, found %d", adapters)
+	}
+	for _, block := range foo.ssa.Func("Root").Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common().IsInvoke() && u.coroProgramIR.callPlans[call].dynamicDelivery == nil {
+				t.Error("interface invocation lost its conditional typed delivery consumer")
+			}
+		}
+	}
+}
