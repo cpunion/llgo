@@ -7,6 +7,44 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-18 (Asia/Shanghai)
 
+### Evaluated receiver cleanup state (6965ad3e4)
+
+Canonical pointer-to-value method wrappers now retain the cleanup inputs from
+the primary's real receiver evaluation before acquisition. The immutable typed
+record belongs to the protected result allocation's private State prefix;
+unchanged forwarders share that deepest binding. The public tuple and function
+value keep their layout. Normal caller acceptance clears State; cancellation
+keeps it until the existing drainer has joined the typed drop helper. Nil
+receiver panic before binding skips a snapshot-dependent drop.
+
+Library summary/record/digest v22, guard ABI v5 and delivery-tail v3 bind this
+contract. RequiresState is preserved through opaque archives. The actual v21
+resource.a is accepted by its old reader and rejected by v22 at import.
+Reflection/FFI invocation remains rejected in this checkpoint.
+
+Exact frozen head `6965ad3e4d5f022063683e86cd75ee2452689a6b` passes the complete
+compiler/SSA coro cohort, complete internal/coro protocol tests, **2417/2417**
+resource executions (**2318** delivery/FD and **99** public Open), and all
+**9** independent archive tests (**20 images, 60 executions**). These include
+mutation after receiver evaluation, static/dynamic/interface/go/defer and
+promoted/noinline paths, nil panic, large output, function fields with GC
+captures, and typed Method.Func calls. Omitting only State publication retains
+acquisition but exposes the expected unique-FD leak in **39/39** controls.
+Complete canonical source-after matches after fixture cleanup. Manifest and
+compiler SHA-256 are respectively
+`6188ea9e8719802d7e69ab5be0696f1db56226d0718ed72cb607170e324d8c07` and
+`b7da48392b641571a86350d80f29b86e5b351195842a8a21171d56dd08b7951e`.
+
+Exact-head CI run `39054986576` passes **19/19**. The first JS/WASM job stopped
+during dependency download with a TLS handshake timeout before compilation;
+the same-head single-job retry passes. Fresh paginated reviews, inline/issue
+comments and review threads are empty. PR #295 merged as
+`7bfe16c7256425cc63c2e09d0aeafb20e309dc07`. Full test/go continues on a separate
+copy of this same frozen version; it is not yet a completed compatibility
+receipt. Reflection second handoff and final unified compatibility, platform
+and performance acceptance remain open. Artifacts are retained under
+`~/.cache/llgo-coro-acceptance/20261018/result-state/`.
+
 ### Public POSIX Open and os.File custody (21f373c42)
 
 Public native syscall.Open now writes its descriptor directly into a guarded
