@@ -88,6 +88,23 @@ func TestCoroHelperViewPreservesManagedPrefixWithoutFrames(t *testing.T) {
 				if err := llvm.VerifyModule(f.pkg.Module(), llvm.ReturnStatusAction); err != nil {
 					t.Fatalf("invalid physical helper view: %v\n%s", err, f.pkg.String())
 				}
+				// No local caller or descriptor takes this view's address.
+				// Archive metadata nevertheless permits a future consumer to
+				// reference it; compiler retention must not pin the final link.
+				f.pkg.MaterializePreserveSyms()
+				if !f.pkg.Module().NamedGlobal("llvm.used").IsNil() {
+					t.Fatal("physical archive view acquired final-link retention")
+				}
+				options := llvm.NewPassBuilderOptions()
+				options.SetVerifyEach(true)
+				err := f.pkg.Module().RunPasses("globaldce", f.prog.TargetMachine(), options)
+				options.Dispose()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if kept := f.pkg.Module().NamedFunction("view"); kept.IsNil() || kept.BasicBlocksCount() == 0 {
+					t.Fatal("compiler DCE removed a metadata-discoverable helper view")
+				}
 			}
 		})
 	}

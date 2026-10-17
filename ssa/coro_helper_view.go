@@ -132,6 +132,11 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 	view.impl.SetLinkage(llvm.LinkOnceODRLinkage)
 	view.impl.SetUnnamedAddr(true)
 	view.Inline(AlwaysInline)
+	// An independently compiled consumer may discover this entry only by a
+	// symbol in the producer's archive metadata, not a local LLVM use. Keep
+	// its definition through object emission, but let final-link dead stripping
+	// discard unused views: this is not an llvm.used runtime registration root.
+	p.markLLVMUsed(view.impl)
 	b := view.MakeBody(1)
 	args := make([]Expr, 0, prefix+len(arguments))
 	for index := 0; index < prefix; index++ {
