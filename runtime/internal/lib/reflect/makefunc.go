@@ -387,11 +387,30 @@ func makeMethodValue(op string, v Value) Value {
 		panic("reflect: internal error: invalid use of makeMethodValue")
 	}
 
-	rcvr, method := methodExpressionValue(op, v, int(v.flag)>>flagMethodShift)
+	rcvr, method, record := methodExpressionRecord(op, v, int(v.flag)>>flagMethodShift)
+	ftyp := v.Type()
+	if ffi.HasResultDelivery((*closure)(method.ptr).fn) {
+		// The producer published this exact method's managed Ifn_ capability.
+		// Keep its existing receiver environment and typed delivery tail instead
+		// of passing resource results through an ordinary MakeFunc callback.
+		descriptor := unsafe.Pointer(record.Ifn_)
+		if !ffi.HasResultDelivery(descriptor) {
+			panic("reflect: resource method lacks its bound invocation descriptor")
+		}
+		var env unsafe.Pointer
+		if rcvr.Kind() == Pointer {
+			env = rcvr.pointer()
+		} else {
+			snapshot := New(toType(rcvr.typ())).Elem()
+			snapshot.Set(rcvr)
+			env = snapshot.ptr
+		}
+		words := &closure{fn: descriptor, env: env}
+		return Value{closureOf(ftyp.common().FuncType()), unsafe.Pointer(words), flagIndir | flag(Func) | v.flag&flagRO}
+	}
 	// A method value evaluates its receiver once. Boxing and unpacking it here
 	// copies value receivers while retaining pointer receiver identity.
 	rcvr = ValueOf(valueInterface(rcvr, false))
-	ftyp := v.Type()
 	variadic := ftyp.common().FuncType().Variadic()
 	bound := makeFunc(ftyp, func(args []Value) []Value {
 		in := make([]Value, len(args)+1)
@@ -413,6 +432,11 @@ func makeMethodValue(op string, v Value) Value {
 // word as a descriptor: Ifn_ may still be a raw one-word-receiver entry for
 // method families which have no managed interface invoke.
 func methodExpressionValue(op string, v Value, methodIndex int) (Value, Value) {
+	rcvr, method, _ := methodExpressionRecord(op, v, methodIndex)
+	return rcvr, method
+}
+
+func methodExpressionRecord(op string, v Value, methodIndex int) (Value, Value, *abi.Method) {
 	fl := v.flag & (flagRO | flagAddr | flagIndir)
 	fl |= flag(v.typ().Kind())
 	rcvr := Value{v.typ(), v.ptr, fl}
@@ -435,7 +459,8 @@ func methodExpressionValue(op string, v Value, methodIndex int) (Value, Value) {
 		if !ok {
 			panic("reflect: internal error: dynamic method is absent from concrete type")
 		}
-		return rcvr, method.Func
+		methods := rcvr.typ().ExportedMethods()
+		return rcvr, method.Func, &methods[method.Index]
 	}
 
 	methods := rcvr.typ().ExportedMethods()
@@ -443,7 +468,7 @@ func methodExpressionValue(op string, v Value, methodIndex int) (Value, Value) {
 		panic("reflect: internal error: invalid method index")
 	}
 	method := toRType(rcvr.typ()).Method(methodIndex)
-	return rcvr, method.Func
+	return rcvr, method.Func, &methods[methodIndex]
 }
 
 var unsafePointerType = rtypeOf(unsafe.Pointer(nil))

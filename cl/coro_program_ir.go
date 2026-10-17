@@ -42,6 +42,7 @@ type coroProgramIR struct {
 	semanticPlans            map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan
 	localBodyFacts           map[*ssa.Function]coroLocalFunctionFacts
 	callPlans                map[ssa.CallInstruction]coroFrozenCallSitePlan
+	functionOperands         map[*ssa.Function]map[ssa.Instruction]none
 	erasedFunctionInterfaces map[*ssa.MakeInterface]none
 	callsFrozen              bool
 	wasmImports              map[*ssa.Function]wasmImportSpec
@@ -198,6 +199,28 @@ func (ir *coroProgramIR) freezeSemanticInstruction(
 	}
 	if evaluated {
 		plan.evaluated = true
+		// Record exact function occurrences during the existing source pass.
+		// Private result-state readers later use this finite inventory to reject
+		// ordinary invocation/publication, without another body or value walk.
+		if ir.functionOperands == nil {
+			ir.functionOperands = make(map[*ssa.Function]map[ssa.Instruction]none)
+		}
+		for _, operand := range instruction.Operands(nil) {
+			if _, debug := instruction.(*ssa.DebugRef); debug {
+				break
+			}
+			if operand == nil {
+				continue
+			}
+			if target, ok := (*operand).(*ssa.Function); ok {
+				uses := ir.functionOperands[target]
+				if uses == nil {
+					uses = make(map[ssa.Instruction]none)
+					ir.functionOperands[target] = uses
+				}
+				uses[instruction] = none{}
+			}
+		}
 	} else {
 		plan = coroSemanticInstructionPlan{
 			class:  coro.OpPure,

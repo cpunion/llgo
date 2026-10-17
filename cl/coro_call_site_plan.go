@@ -570,6 +570,10 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						patchRedirect:      frozenPatchRedirect,
 						patchAttempted:     redirected || redirectErr != nil,
 					}
+					if intrinsic && classifyErr == nil && (opcode == llgoCoroBindResultState || opcode == llgoCoroLoadResultState) {
+						direct, _ := call.(*ssa.Call)
+						frozenCall.resultState, classifyErr = parseCoroResultStateAccess(ctx, direct, opcode)
+					}
 					if common := call.Common(); common.IsInvoke() && common.Method != nil {
 						signature, _ := ctx.patchType(common.Signature()).(*types.Signature)
 						frozenCall.interfaceMethodKey = coroManagedInterfaceMethodKey(
@@ -647,6 +651,7 @@ func cloneCoroWorkerIncomingEdges(source []coroWorkerSyscallIncomingEdge) []coro
 func sameCoroFrozenCallSitePlan(first, second coroFrozenCallSitePlan) bool {
 	if first.plan != second.plan || first.deliveryProducer != second.deliveryProducer || first.dynamicDelivery != second.dynamicDelivery || first.failure != second.failure || first.opcode != second.opcode ||
 		first.interfaceMethodKey != second.interfaceMethodKey ||
+		!sameCoroResultStateAccess(first.resultState, second.resultState) ||
 		first.intrinsicPlacement != second.intrinsicPlacement ||
 		first.hostOperation != second.hostOperation ||
 		first.workerCertificate != second.workerCertificate || first.workerCertified != second.workerCertified ||

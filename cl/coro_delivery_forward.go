@@ -124,7 +124,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 			}
 		}
 		recipe := coroSourceDeliveryRecipe{producer: function, signature: signature, result: result,
-			initializer: target.initializer, drop: target.drop, forward: shape, forwardBase: base, forwardArgs: arguments, snapshot: snapshot}
+			initializer: target.initializer, drop: target.drop, forward: shape, forwardBase: base, forwardArgs: arguments, snapshot: snapshot, stateBind: target.stateBind}
 		// An archive's real private helpers remain checked opaque facts. They
 		// are not converted to made-up source function bodies.
 		if target.archive != nil {

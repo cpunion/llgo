@@ -17,6 +17,10 @@ static char fixture_path[128];
 static struct stat fifo_stat, stdin_stat;
 static int stdin_valid;
 static uint32_t fixture_mode;
+
+static int at_file_stage(void) {
+  return (fixture_mode >= 8 && fixture_mode <= 10) || fixture_mode == 14 || fixture_mode == 15;
+}
 static _Atomic uint32_t reader_entered, writer_done, file_entered,
     file_released;
 
@@ -37,7 +41,7 @@ static int unobserved_fstat(int fd, struct stat *st) {
   return fn(fd, st);
 }
 static void observe_file_stage(uint64_t device, uint64_t inode) {
-  if (fixture_mode >= 8 && device == (uint64_t)fifo_stat.st_dev &&
+  if (at_file_stage() && device == (uint64_t)fifo_stat.st_dev &&
       inode == (uint64_t)fifo_stat.st_ino) {
     atomic_store_explicit(&file_entered, 1, memory_order_release);
     while (!atomic_load_explicit(&file_released, memory_order_acquire)) {
@@ -129,7 +133,7 @@ static void check_exit(void) {
                                       current.st_ino != stdin_stat.st_ino);
   unlink(fixture_path);
   if (!atomic_load_explicit(&writer_done, memory_order_acquire) || leaks != 0 ||
-      stdin_changed || (fixture_mode >= 8 && !atomic_load(&file_released))) {
+      stdin_changed || (at_file_stage() && !atomic_load(&file_released))) {
     fprintf(stderr,
             "public Open custody failed: writer=%u fifo_fds=%d "
             "stdin_changed=%d file_stage=%u file_released=%u\n",
