@@ -177,6 +177,7 @@ func AllocU(size uintptr) unsafe.Pointer { return zero(size) }
 //llgo:coro noblock
 func abort()
 func AssertNilDeref(value bool) { if value { abort() } }
+func PanicWrapNilPointer(value bool, receiver, method string) { if value { abort() } }
 `, coroPlanTestImporter{"unsafe": types.Unsafe})
 			runtimeSSA.Build()
 			inputs = append(inputs, cl.EmissionPackage{SSA: runtimeSSA, Files: runtimeFiles, Identity: llssa.PkgRuntime})
