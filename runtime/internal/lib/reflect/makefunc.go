@@ -41,10 +41,11 @@ type funcData struct {
 	invokeCIF   *ffi.Signature
 	invokeEntry unsafe.Pointer
 
-	recoverFrom unsafe.Pointer
-	recoverTo   unsafe.Pointer
-	method      Value
-	resultAlign uintptr
+	recoverFrom    unsafe.Pointer
+	recoverTo      unsafe.Pointer
+	method         Value
+	resultAlign    uintptr
+	methodDelivery bool
 }
 
 func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
@@ -99,6 +100,9 @@ func makeFuncWithMethod(typ Type, fn func(args []Value) (results []Value), recov
 	}
 	outs := toRuntimeTypes(ftyp.Out)
 	resultSize, resultAlign := llgoResultLayout(outs)
+	if method.IsValid() && prototype == nil && resultSize != 0 {
+		panic("reflect: method lacks its typed bound-result prototype")
+	}
 	closure := ffi.NewClosure()
 	invokeEntry := unsafe.Pointer(nil)
 	if method.IsValid() {
@@ -107,16 +111,17 @@ func makeFuncWithMethod(typ Type, fn func(args []Value) (results []Value), recov
 		invokeEntry = ffi.CoroEntry(invokerWords.fn)
 	}
 	userdata := &funcData{
-		ftyp:        ftyp,
-		tin:         ins,
-		fn:          fn,
-		nin:         len(ftyp.In),
-		tout:        outs,
-		invokeCIF:   invokeCIF,
-		invokeEntry: invokeEntry,
-		recoverTo:   recoverTo,
-		method:      method,
-		resultAlign: resultAlign,
+		ftyp:           ftyp,
+		tin:            ins,
+		fn:             fn,
+		nin:            len(ftyp.In),
+		tout:           outs,
+		invokeCIF:      invokeCIF,
+		invokeEntry:    invokeEntry,
+		recoverTo:      recoverTo,
+		method:         method,
+		resultAlign:    resultAlign,
+		methodDelivery: prototype != nil,
 	}
 	err = closure.Bind(entryCIF, bindMakeFuncCoro, unsafe.Pointer(userdata))
 	if err != nil {
@@ -182,15 +187,20 @@ func bindCoro(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, user
 	fdArg := userdata
 	outArg := out
 	valuesArg := values
-	if fd.method.IsValid() && out != nil {
-		// The public result owns this separate fixed-signature result cell.
-		// Its State is filled by the real borrowed-result producer below.
-		storage := new(struct {
-			State unsafe.Pointer
-			Data  boundMethodResult
-		})
-		out = unsafe.Pointer(&storage.Data)
-		*(*unsafe.Pointer)(unsafe.Add(outArg, -int(ffi.ResultStateOffset(fd.resultAlign)))) = out
+	if fd.method.IsValid() {
+		// Void and zero-sized public results have no resource prefix. The
+		// fixed invoker still uses its own ordinary nil-output fallback.
+		out = nil
+		if fd.methodDelivery && outArg != nil {
+			// The public result owns this separate fixed-signature result cell.
+			// Its State is filled by the real borrowed-result producer below.
+			storage := new(struct {
+				State unsafe.Pointer
+				Data  boundMethodResult
+			})
+			out = unsafe.Pointer(&storage.Data)
+			*(*unsafe.Pointer)(unsafe.Add(outArg, -int(ffi.ResultStateOffset(fd.resultAlign)))) = out
+		}
 	}
 	argv := [6]unsafe.Pointer{
 		unsafe.Pointer(&g),
@@ -427,9 +437,6 @@ func makeMethodValue(op string, v Value) Value {
 	variadic := ftyp.common().FuncType().Variadic()
 	if v.typ().Kind() == abi.Interface || ffi.HasResultDelivery((*closure)(method.ptr).fn) {
 		prototype := ffi.MethodResultPrototype(unsafe.Pointer(record.Tfn_))
-		if prototype == nil && len(ftyp.common().FuncType().Out) != 0 {
-			panic("reflect: method lacks its typed bound-result prototype")
-		}
 		bound := makeFuncWithMethod(ftyp, nil, method.UnsafePointer(), v, prototype)
 		bound.flag |= v.flag & flagRO
 		return bound

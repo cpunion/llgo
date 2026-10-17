@@ -76,6 +76,10 @@ type receiver struct{ Token uint32 }
 type promotedValue struct{ reflect.Value }
 type otherReceiver struct{ Token uint32 }
 type ordinaryReceiver struct{}
+type zeroReceiver struct{}
+
+func (zeroReceiver) Zero() struct{} { return struct{}{} }
+
 type borrowedReceiver struct{}
 
 var borrowedFD int32
@@ -310,6 +314,12 @@ func sentinel(ready chan struct{}) {
 
 func main() {
 	install()
+	var zero interface{ Zero() struct{} } = zeroReceiver{}
+	empty := reflect.ValueOf(&zero).Elem().MethodByName("Zero").Interface().(func() struct{})
+	_ = empty()
+	if out := reflect.ValueOf(empty).Call(nil); len(out) != 1 || out[0].Type() != reflect.TypeOf(struct{}{}) {
+		panic("zero-sized reflected method result")
+	}
 	if fixtureMode() == 31 || fixtureMode() == 41 {
 		expectBorrowed()
 	}

@@ -614,6 +614,8 @@ runtime 只为已知的资源方法或动态 interface 方法绑定该 contract�
 与任意公开 MakeFunc 不获得推断的资源所有权。interface 动态目标可以从资源 producer
 切换到普通借用结果，实际调用没有 delivery recipe 时，取消不得关闭那个普通整数/fd。
 library v23 将这项冷元信息纳入版本边界；旧 v22 archive 必须拒绝并重新编译。
+void 与零大小返回值不携带 public resource prefix。已知方法 bridge 对这两类调用只用
+自身的 nil-output fallback，不能把 public 空值地址当成固定 custody record 的输出槽。
 
 公开任意 `reflect.MakeFunc(type, callback)` 不能仅从 type 或 callback 返回的 `[]Value`
 推导资源所有权，其 descriptor 默认无 recipe。callback 若自行调用 Open，其结果已交给

@@ -51,6 +51,9 @@ func (p *context) coroMethodResultPrototype(signature *types.Signature) llssa.Ex
 	if err != nil {
 		panic(err)
 	}
+	if p.prog.SizeOf(p.prog.Type(abi.resultSlotType, llssa.InC)) == 0 {
+		return llssa.Nil // A zero-sized result cannot carry resource custody.
+	}
 	symbol := "__llgo_coro_method_result." + hex.EncodeToString(abi.hash[:])
 	// Helpers receive the packed final slice, while the published bound ABI
 	// retains its source variadic identity.

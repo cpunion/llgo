@@ -11,6 +11,9 @@ func (r reflectReceiver) Read() int        { return r.N }
 func (r reflectReceiver) Send(ch chan int) { ch <- r.N }
 
 type reflectOtherReceiver struct{ N int }
+type reflectZeroReceiver struct{}
+
+func (reflectZeroReceiver) Zero() struct{} { return struct{}{} }
 
 func (r reflectOtherReceiver) Read() int { return r.N + 100 }
 
@@ -31,6 +34,12 @@ func (r reflectOtherRecoverReceiver) Finish() int {
 }
 
 func TestReflectBoundMethodReceiverEvaluation(t *testing.T) {
+	var zero interface{ Zero() struct{} } = reflectZeroReceiver{}
+	empty := reflect.ValueOf(&zero).Elem().MethodByName("Zero").Interface().(func() struct{})
+	_ = empty()
+	if out := reflect.ValueOf(empty).Call(nil); len(out) != 1 || out[0].Type() != reflect.TypeOf(struct{}{}) {
+		t.Fatal("zero-sized reflected method result")
+	}
 	r := reflectReceiver{17}
 	f := reflect.ValueOf(&r).Elem().MethodByName("Read").Interface().(func() int)
 	r.N = 99
