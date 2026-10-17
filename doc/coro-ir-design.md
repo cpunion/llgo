@@ -316,10 +316,17 @@ helper ABI；原 Drop/DropABI 继续指向同一 graph 中的真实 helper fact�
 按 public view 声明物理调用，绝不把 private helper 反向伪装成该签名。现有
 delivery-v2 冷尾保留独立的 public helper hash，无新运行时字段或反向地址查型。
 
+view 即使没有本地 caller/descriptor，也可能被独立 consumer 从 archive metadata
+中的 symbol 引用。因此定义通过现有 `llvm.compiler.used` 保留到 object emission；
+不加入 `llvm.used`，不阻止最终 native linker 回收未使用的 view。真实 archive gate
+在 producer 导出前先执行 GlobalDCE，再由只含 public 声明的 consumer 独立链接执行。
+
 发布 gate：source 和独立 archive 均需覆盖参数重排/常量/链式包装、plain/outcome/
 coro helper、native64/wasm32、小/大结果、incoming/nil-output、go/defer、P=1/2
-取消/GC/精确 close 及生成代码检查。当前仅有部分 IR gate 通过，整项仍为未发布
-实验。receiver/bound/interface、动态 target 选择所需的 initializer context、
+取消/GC/精确 close 及生成代码检查。源码路径的真实 FD gate 已通过 66/66（P=1/2），
+并修复共享 output 在转发 child 消费时被误清 pointer handle 的问题。普通最终消费
+仍保留原 pointer retirement。独立 archive 的 GlobalDCE 缺符号已真实复现，修复后
+完整执行矩阵仍在验收；整项仍为未发布实验。receiver/bound/interface、动态 target 选择所需的 initializer context、
 reflect/FFI 第二次交接及 public Open/File seed 的限制均不因本实验解除。
 
 ## 4. 方案比较
