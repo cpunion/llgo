@@ -94,6 +94,7 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 	case llgoSyscall, llgoSyscall32, llgoSyscallPtr:
 		return emissionIntrinsicRawAllValues, nil
 	case llgoBoolToUint8,
+		llgoCoroBindResultState, llgoCoroLoadResultState,
 		llgoAtomicLoad, llgoAtomicStore, llgoAtomicCmpXchg,
 		llgoAtomicCmpXchgOK, llgoAtomicAddReturnNew,
 		llgoAtomicLoadUnsafe, llgoAtomicStoreUnsafe,

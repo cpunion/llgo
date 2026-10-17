@@ -111,7 +111,7 @@ func (p Package) validateCoroDispatchDelivery(opts CoroDispatchDescriptorOptions
 			panic("ssa: coroutine delivery helper must not publish another delivery tail")
 		}
 		flags := uint32(base.Operand(1).ZExtValue())
-		if flags&CoroDispatchFlagNoCapture == 0 || flags&(CoroDispatchFlagRuntimeTyped|CoroDispatchFlagHasDelivery|CoroDispatchFlagDeliveryUnbound) != 0 {
+		if flags&CoroDispatchFlagNoCapture == 0 || flags&(CoroDispatchFlagRuntimeTyped|CoroDispatchFlagHasDelivery|CoroDispatchFlagDeliveryUnbound|CoroDispatchFlagMethodResultPrototype) != 0 {
 			panic("ssa: coroutine delivery helper must be compiler-owned and context-free")
 		}
 		validateCoroDispatchContract(uint32(base.Operand(0).ZExtValue()), flags)

@@ -847,6 +847,8 @@ var llgoInstrs = map[string]int{
 	"coroFFICall":                llgoCoroFFICall,
 	"coroCurrentTask":            llgoCoroCurrentTask,
 	"coroBorrowResult":           llgoCoroBorrowResult,
+	"coroBindResultState":        llgoCoroBindResultState,
+	"coroLoadResultState":        llgoCoroLoadResultState,
 	"coroExecutionDomainEnabled": llgoCoroExecutionDomainEnabled,
 	"coroGCObservationEnabled":   llgoCoroGCObservationEnabled,
 	"coroPropagatePanic":         llgoCoroPropagatePanic,
@@ -3538,6 +3540,12 @@ func (p *context) callEx(
 			}
 			observePhysicalInstruction(coroPhysicalInstructionBorrowedResult)
 			ret = p.compileCoroBorrowedResult(b)
+		case llgoCoroBindResultState, llgoCoroLoadResultState:
+			if act != llssa.Call || ds != nil {
+				panic("result state access requires its exact owned call")
+			}
+			observePhysicalInstruction(coroPhysicalInstructionResultState)
+			ret = p.compileCoroResultStateAccess(b, sourceCall)
 		case llgoCoroHostOperation:
 			if act != llssa.Call || ds != nil {
 				panic("llgo.coroHostOperation requires an exact direct call")

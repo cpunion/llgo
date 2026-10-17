@@ -312,11 +312,35 @@ func TestCoroHelperViewProjectsOwnedResultState(t *testing.T) {
 			if loads != 2 || calls != 1 {
 				t.Fatalf("state view loads=%d calls=%d", loads, calls)
 			}
+			recordTarget := f.pkg.NewFunc("record_target", coroPlainDispatchTestSignature(append(append([]types.Type(nil), parameters...), types.NewPointer(record)), results), InGo)
+			recordView := f.pkg.NewCoroHelperView("record_view", signature, recordTarget.Expr, prefix,
+				[]CoroHelperViewArgument{{Parameter: 0, ResultState: stateType, StatePointer: true}})
+			loads, calls = 0, 0
+			for _, block := range recordView.impl.BasicBlocks() {
+				for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+					switch instruction.InstructionOpcode() {
+					case llvm.Alloca, llvm.Store:
+						t.Fatal("record view introduced owned storage:", instruction)
+					case llvm.Load:
+						loads++
+					case llvm.Call:
+						calls++
+						if instruction.CalledValue().C != recordTarget.impl.C {
+							t.Fatal("record view introduced a runtime binder")
+						}
+					}
+				}
+			}
+			if loads != 1 || calls != 1 {
+				t.Fatalf("record view loads=%d calls=%d", loads, calls)
+			}
 			for _, invalid := range []CoroHelperViewArgument{
 				{Parameter: 1, ResultState: stateType, Fields: []int{0}},
 				{Parameter: 0, ResultState: f.prog.Pointer(f.prog.Uint32())},
 				{Parameter: 0, ResultState: stateType, Environment: stateType, Fields: []int{0}},
 				{Parameter: 0, ResultState: stateType, Fields: []int{1}},
+				{Parameter: 0, StatePointer: true},
+				{Parameter: 0, ResultState: stateType, StatePointer: true, Fields: []int{0}},
 			} {
 				coroPlainDispatchMustPanicContains(t, "helper view", func() {
 					f.pkg.NewCoroHelperView("invalid_state_view", signature, callee.Expr, prefix, []CoroHelperViewArgument{{Parameter: 0}, invalid})

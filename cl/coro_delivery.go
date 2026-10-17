@@ -46,6 +46,9 @@ type coroSourceDeliveryRecipe struct {
 	forwardBase *ssa.Function
 	forwardArgs []coroDeliveryForwardArgument
 	snapshot    *coroDeliveryReceiverSnapshot
+	// A source binding is complete only when drop consumes no original
+	// producer arguments. Forwarders inherit that same deepest binding.
+	stateBind *ssa.Call
 }
 
 type coroDeliveryReceiverSnapshot struct {
@@ -55,7 +58,7 @@ type coroDeliveryReceiverSnapshot struct {
 }
 
 func (recipe coroSourceDeliveryRecipe) requiresState() bool {
-	return recipe.snapshot != nil || recipe.archive != nil && recipe.archive.recipe.Record().RequiresState
+	return recipe.snapshot != nil || recipe.stateBind != nil || recipe.archive != nil && recipe.archive.recipe.Record().RequiresState
 }
 
 // A source projection plus its already frozen immutable context layout. A
@@ -261,10 +264,16 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 	if err := builder.freezeArchiveDeliveryProducers(ir); err != nil {
 		return err
 	}
+	if err := builder.freezeDeliveryStateAccesses(ir); err != nil {
+		return err
+	}
 	// Call-site contracts are complete here. Reuse their exact logical-call
 	// lifetime, rather than reparsing C declarations or trusting inert stubs.
 	borrow := coroBorrowedAllocationProofConfig(u)
-	borrow.BorrowedCallArgument = func(call *ssa.Call, _ int) bool {
+	borrow.BorrowedCallArgument = func(call *ssa.Call, index int) bool {
+		if ir.borrowedResultStateArgument(call, index) {
+			return true
+		}
 		frozen, present := ir.callPlans[call]
 		return present && frozen.failure == "" && frozen.plan.ArgumentsBorrowedUntilCompletion
 	}

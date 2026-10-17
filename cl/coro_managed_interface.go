@@ -85,10 +85,18 @@ func (p *context) emitCoroMethodValueDescriptor(
 	}
 	physicalEmission := entry.plan.Emission
 	if physicalEmission == coro.EmitExternal {
-		if entry.plan.Effect != coro.NoSuspend || entry.plan.Exec.Contains(coro.BlockForeign|coro.MayUnwind|coro.OpaqueExec) {
-			return llssa.Nil, fmt.Errorf("coroutine method value descriptor external target %q has no executor-safe plain capability", entry.plan.ID)
+		plain, structured := coroExternalManagedDescriptorEntry(entry.plan)
+		if !plain && !structured {
+			return llssa.Nil, fmt.Errorf("coroutine method value descriptor external target %q has no exact managed capability", entry.plan.ID)
 		}
-		physicalEmission = coro.EmitPlain
+		switch entry.plan.ManagedEntry {
+		case coro.ManagedEntryPlain:
+			physicalEmission = coro.EmitPlain
+		case coro.ManagedEntryOutcomePlain:
+			physicalEmission = coro.EmitOutcomePlain
+		case coro.ManagedEntryCoroutine:
+			physicalEmission = coro.EmitCoroutine
+		}
 	}
 	if physicalEmission != coro.EmitPlain && physicalEmission != coro.EmitOutcomePlain && physicalEmission != coro.EmitCoroutine {
 		return llssa.Nil, fmt.Errorf("coroutine method value descriptor target %q has unsupported emission %s", entry.plan.ID, entry.plan.Emission)
@@ -155,17 +163,22 @@ func (p *context) emitCoroMethodValueDescriptor(
 	if delivery != nil {
 		flags |= llssa.CoroDispatchFlagHasDelivery
 	}
+	prototype := p.coroMethodResultPrototype(logical)
+	if !prototype.IsNil() {
+		flags |= llssa.CoroDispatchFlagMethodResultPrototype
+	}
 	descriptor := p.pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
-		Version:      coroPlainDispatchVersion,
-		Flags:        flags,
-		ABIHash:      abi.hash,
-		Signature:    abi.signature,
-		PlainEntry:   plainEntry,
-		OutcomeEntry: outcomeEntry,
-		CoroEntry:    coroEntry,
-		CodeEntry:    physical.Expr,
-		Result:       p.prog.Type(abi.resultSlotType, llssa.InC),
-		Delivery:     delivery,
+		Version:               coroPlainDispatchVersion,
+		Flags:                 flags,
+		ABIHash:               abi.hash,
+		Signature:             abi.signature,
+		PlainEntry:            plainEntry,
+		OutcomeEntry:          outcomeEntry,
+		CoroEntry:             coroEntry,
+		CodeEntry:             physical.Expr,
+		Result:                p.prog.Type(abi.resultSlotType, llssa.InC),
+		Delivery:              delivery,
+		MethodResultPrototype: prototype,
 	})
 	if p.coroPlainDescriptors == nil {
 		p.coroPlainDescriptors = make(map[string]llssa.Expr)
@@ -833,7 +846,8 @@ func (p *context) resolveCoroRawMethodSymbol(
 	}
 	target := p.resolveInterfaceMethodSSA(method, signature)
 	entry := p.mustFunctionSymbol(target)
-	if entry.plan.Emission != coro.EmitCoroutine && entry.plan.Emission != coro.EmitOutcomePlain {
+	_, importedStructured := coroExternalManagedDescriptorEntry(entry.plan)
+	if entry.plan.Emission != coro.EmitCoroutine && entry.plan.Emission != coro.EmitOutcomePlain && !importedStructured {
 		return entry.name, true
 	}
 	if entry.plan.RawPlainEntry {
@@ -910,21 +924,32 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 	}
 	flags := uint32(0)
 	var plainEntry, outcomeEntry, coroEntry llssa.Expr
-	switch entry.plan.Emission {
+	physicalEmission := entry.plan.Emission
+	if physicalEmission == coro.EmitExternal {
+		switch entry.plan.ManagedEntry {
+		case coro.ManagedEntryPlain:
+			physicalEmission = coro.EmitPlain
+		case coro.ManagedEntryOutcomePlain:
+			physicalEmission = coro.EmitOutcomePlain
+		case coro.ManagedEntryCoroutine:
+			physicalEmission = coro.EmitCoroutine
+		}
+	}
+	switch physicalEmission {
 	case coro.EmitPlain:
 		flags |= llssa.CoroDispatchFlagHasPlain | llssa.CoroDispatchFlagPlainNoUnwind
 		plainEntry = p.newCoroDynamicDispatchEntryThunk(
-			coroPlainDispatchThunkPrefix+targetKey, physical.Expr, abi, entry.plan.Emission, receiver,
+			coroPlainDispatchThunkPrefix+targetKey, physical.Expr, abi, physicalEmission, receiver,
 		)
 	case coro.EmitCoroutine:
 		flags |= llssa.CoroDispatchFlagHasCoro
 		coroEntry = p.newCoroDynamicDispatchEntryThunk(
-			coroCoroDispatchThunkPrefix+targetKey, physical.Expr, abi, entry.plan.Emission, receiver,
+			coroCoroDispatchThunkPrefix+targetKey, physical.Expr, abi, physicalEmission, receiver,
 		)
 	case coro.EmitOutcomePlain:
 		flags |= llssa.CoroDispatchFlagHasOutcome
 		outcomeEntry = p.newCoroDynamicDispatchEntryThunk(
-			coroOutcomeDispatchThunkPrefix+targetKey, physical.Expr, abi, entry.plan.Emission, receiver,
+			coroOutcomeDispatchThunkPrefix+targetKey, physical.Expr, abi, physicalEmission, receiver,
 		)
 	default:
 		return llssa.Nil, fmt.Errorf("managed interface descriptor target %q has unsupported emission %s", entry.plan.ID, entry.plan.Emission)
@@ -972,10 +997,12 @@ func validateCoroManagedInterfaceDescriptorTarget(
 		}
 		return fmt.Errorf("managed interface descriptor target %q (%s): %s", name, functionPlan.ID, fmt.Sprintf(format, args...))
 	}
-	if target == nil || target.Signature == nil || target.Signature.Recv() == nil || len(target.Blocks) == 0 || len(target.FreeVars) != 0 {
+	plain, structured := coroExternalManagedDescriptorEntry(functionPlan)
+	imported := target != nil && len(target.Blocks) == 0 && (plain || structured)
+	if target == nil || target.Signature == nil || target.Signature.Recv() == nil || len(target.Blocks) == 0 && !imported || len(target.FreeVars) != 0 {
 		return fail("requires one defined non-capturing receiver body")
 	}
-	if functionPlan.External != coro.Defined || functionPlan.Demand == coro.NoDemand {
+	if functionPlan.External != coro.Defined && !imported || functionPlan.Demand == coro.NoDemand {
 		return fail("requires a demanded defined body, got external=%s representation=%s demand=%s",
 			functionPlan.External, functionPlan.FuncRep, functionPlan.Demand)
 	}
@@ -985,6 +1012,10 @@ func validateCoroManagedInterfaceDescriptorTarget(
 			functionPlan.Effect, functionPlan.Exec)
 	}
 	switch functionPlan.Emission {
+	case coro.EmitExternal:
+		if !imported {
+			return fail("external method requires its exact published managed entry")
+		}
 	case coro.EmitPlain:
 		// The receiver-aware method descriptor is an ABI-type use, not a
 		// receiver-free Go function value. A method which has no other dynamic

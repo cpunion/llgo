@@ -41,8 +41,11 @@ type funcData struct {
 	invokeCIF   *ffi.Signature
 	invokeEntry unsafe.Pointer
 
-	recoverFrom unsafe.Pointer
-	recoverTo   unsafe.Pointer
+	recoverFrom    unsafe.Pointer
+	recoverTo      unsafe.Pointer
+	method         Value
+	resultAlign    uintptr
+	methodDelivery bool
 }
 
 func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
@@ -50,6 +53,10 @@ func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
 }
 
 func makeFunc(typ Type, fn func(args []Value) (results []Value), recoverTo unsafe.Pointer) Value {
+	return makeFuncWithMethod(typ, fn, recoverTo, Value{}, nil)
+}
+
+func makeFuncWithMethod(typ Type, fn func(args []Value) (results []Value), recoverTo unsafe.Pointer, method Value, prototype unsafe.Pointer) Value {
 	if typ.Kind() != Func {
 		panic("reflect: call of MakeFunc with non-Func type")
 	}
@@ -73,6 +80,9 @@ func makeFunc(typ Type, fn func(args []Value) (results []Value), recoverTo unsaf
 		panic(err)
 	}
 	invoker := unpackEface(makeFuncInvokeValue)
+	if method.IsValid() {
+		invoker = unpackEface(boundMethodInvokeValue)
+	}
 	if invoker.Kind() != Func || invoker.ptr == nil {
 		panic("reflect: internal error: invalid MakeFunc invoker")
 	}
@@ -90,16 +100,28 @@ func makeFunc(typ Type, fn func(args []Value) (results []Value), recoverTo unsaf
 	}
 	outs := toRuntimeTypes(ftyp.Out)
 	resultSize, resultAlign := llgoResultLayout(outs)
+	if method.IsValid() && prototype == nil && resultSize != 0 {
+		panic("reflect: method lacks its typed bound-result prototype")
+	}
 	closure := ffi.NewClosure()
+	invokeEntry := unsafe.Pointer(nil)
+	if method.IsValid() {
+		invokeEntry = ffi.BorrowedResultCoroEntry(invokerWords.fn, unsafe.Sizeof(boundMethodResult{}), unsafe.Alignof(boundMethodResult{}))
+	} else {
+		invokeEntry = ffi.CoroEntry(invokerWords.fn)
+	}
 	userdata := &funcData{
-		ftyp:        ftyp,
-		tin:         ins,
-		fn:          fn,
-		nin:         len(ftyp.In),
-		tout:        outs,
-		invokeCIF:   invokeCIF,
-		invokeEntry: ffi.CoroEntry(invokerWords.fn),
-		recoverTo:   recoverTo,
+		ftyp:           ftyp,
+		tin:            ins,
+		fn:             fn,
+		nin:            len(ftyp.In),
+		tout:           outs,
+		invokeCIF:      invokeCIF,
+		invokeEntry:    invokeEntry,
+		recoverTo:      recoverTo,
+		method:         method,
+		resultAlign:    resultAlign,
+		methodDelivery: prototype != nil,
 	}
 	err = closure.Bind(entryCIF, bindMakeFuncCoro, unsafe.Pointer(userdata))
 	if err != nil {
@@ -108,6 +130,9 @@ func makeFunc(typ Type, fn func(args []Value) (results []Value), recoverTo unsaf
 	descriptor := ffi.NewRuntimeCoroDescriptor(
 		unsafe.Pointer(t), closure.Fn, resultSize, resultAlign,
 	)
+	if prototype != nil {
+		descriptor = ffi.NewBoundMethodDescriptor(prototype, closure.Fn, resultSize, resultAlign)
+	}
 	// A direct defer records the descriptor stored in the returned func value.
 	// makeFuncInvoke transparently remaps it to the physical identity of fn so
 	// that fn's recover activation can bind exactly as for an ordinary call.
@@ -162,6 +187,21 @@ func bindCoro(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, user
 	fdArg := userdata
 	outArg := out
 	valuesArg := values
+	if fd.method.IsValid() {
+		// Void and zero-sized public results have no resource prefix. The
+		// fixed invoker still uses its own ordinary nil-output fallback.
+		out = nil
+		if fd.methodDelivery && outArg != nil {
+			// The public result owns this separate fixed-signature result cell.
+			// Its State is filled by the real borrowed-result producer below.
+			storage := new(struct {
+				State unsafe.Pointer
+				Data  boundMethodResult
+			})
+			out = unsafe.Pointer(&storage.Data)
+			*(*unsafe.Pointer)(unsafe.Add(outArg, -int(ffi.ResultStateOffset(fd.resultAlign)))) = out
+		}
+	}
 	argv := [6]unsafe.Pointer{
 		unsafe.Pointer(&g),
 		unsafe.Pointer(&out),
@@ -212,9 +252,11 @@ func copyMakeFuncArgs(fd *funcData, args *unsafe.Pointer) unsafe.Pointer {
 // it from init avoids a Go initialization-dependency cycle now that method
 // values reuse MakeFunc.
 var makeFuncInvokeValue any
+var boundMethodInvokeValue any
 
 func init() {
 	makeFuncInvokeValue = makeFuncInvoke
+	boundMethodInvokeValue = boundMethodInvoke
 }
 
 func makeFuncInvoke(fd *funcData, ret, values unsafe.Pointer) {
@@ -387,20 +429,23 @@ func makeMethodValue(op string, v Value) Value {
 		panic("reflect: internal error: invalid use of makeMethodValue")
 	}
 
-	rcvr, method := methodExpressionValue(op, v, int(v.flag)>>flagMethodShift)
-	// A method value evaluates its receiver once. Boxing and unpacking it here
-	// copies value receivers while retaining pointer receiver identity.
-	rcvr = ValueOf(valueInterface(rcvr, false))
+	_, method, record := methodExpressionRecord(op, v, int(v.flag)>>flagMethodShift)
 	ftyp := v.Type()
+	// Method deliberately removes flagAddr from its result. Preserve the
+	// original receiver storage even when that flag cannot distinguish an
+	// immutable box from an addressable value or pointer variable.
 	variadic := ftyp.common().FuncType().Variadic()
+	if v.typ().Kind() == abi.Interface || ffi.HasResultDelivery((*closure)(method.ptr).fn) {
+		prototype := ffi.MethodResultPrototype(unsafe.Pointer(record.Tfn_))
+		bound := makeFuncWithMethod(ftyp, nil, method.UnsafePointer(), v, prototype)
+		bound.flag |= v.flag & flagRO
+		return bound
+	}
 	bound := makeFunc(ftyp, func(args []Value) []Value {
-		in := make([]Value, len(args)+1)
-		in[0] = rcvr
-		copy(in[1:], args)
 		if variadic {
-			return method.CallSlice(in)
+			return v.CallSlice(args)
 		}
-		return method.Call(in)
+		return v.Call(args)
 	}, method.UnsafePointer())
 	bound.flag |= v.flag & flagRO
 	return bound
@@ -413,6 +458,11 @@ func makeMethodValue(op string, v Value) Value {
 // word as a descriptor: Ifn_ may still be a raw one-word-receiver entry for
 // method families which have no managed interface invoke.
 func methodExpressionValue(op string, v Value, methodIndex int) (Value, Value) {
+	rcvr, method, _ := methodExpressionRecord(op, v, methodIndex)
+	return rcvr, method
+}
+
+func methodExpressionRecord(op string, v Value, methodIndex int) (Value, Value, *abi.Method) {
 	fl := v.flag & (flagRO | flagAddr | flagIndir)
 	fl |= flag(v.typ().Kind())
 	rcvr := Value{v.typ(), v.ptr, fl}
@@ -435,7 +485,8 @@ func methodExpressionValue(op string, v Value, methodIndex int) (Value, Value) {
 		if !ok {
 			panic("reflect: internal error: dynamic method is absent from concrete type")
 		}
-		return rcvr, method.Func
+		methods := rcvr.typ().ExportedMethods()
+		return rcvr, method.Func, &methods[method.Index]
 	}
 
 	methods := rcvr.typ().ExportedMethods()
@@ -443,7 +494,7 @@ func methodExpressionValue(op string, v Value, methodIndex int) (Value, Value) {
 		panic("reflect: internal error: invalid method index")
 	}
 	method := toRType(rcvr.typ()).Method(methodIndex)
-	return rcvr, method.Func
+	return rcvr, method.Func, &methods[methodIndex]
 }
 
 var unsafePointerType = rtypeOf(unsafe.Pointer(nil))

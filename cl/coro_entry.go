@@ -451,7 +451,9 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 				variant := e.coroPlan != nil && e.coroPlan.HasRawPlainVariant(e.function)
 				return validatePlannedRawPlainVariant(e.function, e.plan, variant)
 			}
-			if e.plan.Emission != coro.EmitCoroutine && e.plan.Emission != coro.EmitOutcomePlain {
+			plain, structured := coroExternalManagedDescriptorEntry(e.plan)
+			imported := e.importedLibrary && (plain || structured)
+			if e.plan.Emission != coro.EmitCoroutine && e.plan.Emission != coro.EmitOutcomePlain && !imported {
 				return fmt.Errorf("coroutine entry resolution: raw/interface target %q has unsupported emission %s", e.plan.ID, e.plan.Emission)
 			}
 		} else {

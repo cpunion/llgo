@@ -129,13 +129,11 @@ func TestCoroPublicOpenResourceAcceptance(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("public Open build: %v\n%s", err, output)
 	}
-	modes := 8
-	if runtime.GOOS == "darwin" {
-		// Darwin's File construction also stats an acquired descriptor. The
-		// extra modes stop inside that operation after raw-fd delivery.
-		modes = 11
-	}
-	for mode := 0; mode < modes; mode++ {
+	for mode := 0; mode <= 15; mode++ {
+		// Darwin's File construction also stats an acquired descriptor.
+		if runtime.GOOS != "darwin" && (mode >= 8 && mode <= 10 || mode >= 14) {
+			continue
+		}
 		for _, owners := range []string{"1", "2", "4"} {
 			for attempt := 0; attempt < 3; attempt++ {
 				runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)

@@ -28,6 +28,7 @@ jobs:
           - { llvm: 22, go: "1.27.0", lane: "fault-e2e", check: "test native fault landing E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "archive-e2e", timeout: 30, check: "test independent archive E2E (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "reflect-e2e", timeout: 30, check: "test reflected resource handoff E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "fleet-e2e", check: "test native fleet E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (LLVM 22, Go 1.27.0)" }
@@ -530,8 +531,28 @@ jobs:
           timeout 18m go test -p=1 ./internal/build \
             -run '^TestCoro(BorrowedResourceCleanup|ResourceDeliverySlot|ResourceDeliveryForward|PublicOpenResource)Acceptance$' -v -count=1 -timeout=17m
 
+      - name: Test reflected resource custody and independent archives
+        if: matrix.lane == 'reflect-e2e'
+        env:
+          LLGO_CORO_RESOURCE_ACCEPTANCE: "1"
+          LLGO_TEST_LLGO: /tmp/llgo-resource-cleanup
+          LLGO_CORO_RESOURCE_OUTPUT: /tmp/llgo-resource-artifacts
+          GOMAXPROCS: "2"
+          GOMEMLIMIT: 2GiB
+        run: |
+          ulimit -v 6291456
+          go build -p=1 -o "$LLGO_TEST_LLGO" ./cmd/llgo
+          tests=(
+            TestCoroReflectResourceAcceptance
+            TestCoroReflectPostNativeResourceAcceptance
+            TestCoroReflectArchiveResourceAcceptance
+          )
+          for test in "${tests[@]}"; do
+            timeout 12m go test -p=1 ./internal/build -run "^${test}$" -v -count=1 -timeout=11m
+          done
+
       - name: Record failed native resource environment
-        if: failure() && matrix.lane == 'native-e2e'
+        if: failure() && (matrix.lane == 'native-e2e' || matrix.lane == 'reflect-e2e')
         run: |
           mkdir -p /tmp/llgo-resource-artifacts
           {
@@ -544,10 +565,10 @@ jobs:
           } > /tmp/llgo-resource-artifacts/environment.txt 2>&1
 
       - name: Upload failed native resource images
-        if: failure() && matrix.lane == 'native-e2e'
+        if: failure() && (matrix.lane == 'native-e2e' || matrix.lane == 'reflect-e2e')
         uses: actions/upload-artifact@v7
         with:
-          name: failed-native-resource-llvm${{ matrix.llvm }}
+          name: failed-${{ matrix.lane }}-resource-llvm${{ matrix.llvm }}
           path: |
             /tmp/llgo-resource-cleanup
             /tmp/llgo-resource-artifacts

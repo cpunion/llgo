@@ -39,9 +39,10 @@ Exact-head CI run `39054986576` passes **19/19**. The first JS/WASM job stopped
 during dependency download with a TLS handshake timeout before compilation;
 the same-head single-job retry passes. Fresh paginated reviews, inline/issue
 comments and review threads are empty. PR #295 merged as
-`7bfe16c7256425cc63c2e09d0aeafb20e309dc07`. Full test/go continues on a separate
-copy of this same frozen version; it is not yet a completed compatibility
-receipt. Reflection second handoff and final unified compatibility, platform
+`7bfe16c7256425cc63c2e09d0aeafb20e309dc07`. Full test/go on a separate copy of
+this same frozen version has completed: **275/275**, no failures or skips,
+with matching source-after and compiler fingerprint. Reflection second handoff
+and final unified compatibility, platform
 and performance acceptance remain open. Artifacts are retained under
 `~/.cache/llgo-coro-acceptance/20261018/result-state/`.
 
