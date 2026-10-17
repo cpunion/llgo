@@ -367,11 +367,12 @@ complete:
 }
 
 func TestTypedResumeCleanupKeyedManualIsPNeutral(t *testing.T) {
-	t.Run("posted", func(t *testing.T) { testTypedResumeCleanupKeyedManual(t, false) })
-	t.Run("posted-before-producer-return", func(t *testing.T) { testTypedResumeCleanupKeyedManual(t, true) })
+	t.Run("posted", func(t *testing.T) { testTypedResumeCleanupKeyedManual(t, false, false) })
+	t.Run("posted-before-producer-return", func(t *testing.T) { testTypedResumeCleanupKeyedManual(t, true, false) })
+	t.Run("canceled-before-late-post", func(t *testing.T) { testTypedResumeCleanupKeyedManual(t, true, true) })
 }
 
-func testTypedResumeCleanupKeyedManual(t *testing.T, holdProducer bool) {
+func testTypedResumeCleanupKeyedManual(t *testing.T, holdProducer, canceled bool) {
 	t.Helper()
 	p := new(P)
 	driver, registry, manual, executor := bindTestExecutorDriverWithManual(t, p)
@@ -424,6 +425,7 @@ func testTypedResumeCleanupKeyedManual(t *testing.T, holdProducer bool) {
 		t.Fatal("resolve exact manual slot")
 	}
 	held := false
+	wantOutcome, wantCase := ParkOutcomeCompleted, uint32(1)
 	defer func() {
 		if held {
 			producerAdmissionRelease(&slot.inflight)
@@ -437,8 +439,15 @@ func testTypedResumeCleanupKeyedManual(t *testing.T, holdProducer bool) {
 			t.Fatal("admit producer before owner seal")
 		}
 		held = true
-		preemptStore(&slot.mailbox, uint32(manualOperationMailboxPosted))
-		preemptStore(&manual.pending, 1)
+		if canceled {
+			if !RequestParkCancel(&task.g.park, ticket, ParkCancelOperation) {
+				t.Fatal("cancel before admitted producer posts")
+			}
+			wantOutcome, wantCase = ParkOutcomeCanceled, 0
+		} else {
+			preemptStore(&slot.mailbox, uint32(manualOperationMailboxPosted))
+			preemptStore(&manual.pending, 1)
+		}
 	} else if manual.Post(operation) != ManualOperationPosted || registry.Request(executor) != ExecutorRequestPublished {
 		t.Fatal("publish joined keyed manual completion")
 	}
@@ -459,8 +468,18 @@ func testTypedResumeCleanupKeyedManual(t *testing.T, holdProducer bool) {
 					t.Fatalf("manual producer join must be a bounded retry: progress=%+v plan=%+v park=%+v inflight=%#x",
 						step.Poll, plan, task.g.park, preemptLoad(&slot.inflight))
 				}
+				if canceled {
+					// Finish the already admitted producer after the owner sealed
+					// it. Joining admission alone cannot substitute for draining
+					// this late mailbox in a subsequent publication epoch.
+					preemptStore(&slot.mailbox, uint32(manualOperationMailboxPosted))
+					preemptStore(&manual.pending, 1)
+				}
 				producerAdmissionRelease(&slot.inflight)
 				held = false
+				if canceled && manual.ApplyOne(p, operation, &slot.record) != OperationApplyRetryBudget {
+					t.Fatal("automatic cleanup detached before draining late mailbox")
+				}
 				if registry.Request(executor) != ExecutorRequestPublished {
 					t.Fatal("publish producer's final executor request")
 				}
@@ -473,8 +492,8 @@ func testTypedResumeCleanupKeyedManual(t *testing.T, holdProducer bool) {
 			if step.Cleanup.Kind != ResumeCleanupKeyedPark ||
 				step.Cleanup.Context != unsafe.Pointer(&token) ||
 				step.Cleanup.Index != 0 ||
-				step.Cleanup.WinnerCase != 1 ||
-				step.Cleanup.Outcome != ParkOutcomeCompleted ||
+				step.Cleanup.WinnerCase != wantCase ||
+				step.Cleanup.Outcome != wantOutcome ||
 				!CommitResumeCleanupStep(step.Cleanup, ResumeSmallInvalid) {
 				t.Fatalf("keyed manual materialization = %+v", step.Cleanup)
 			}
@@ -488,7 +507,7 @@ func testTypedResumeCleanupKeyedManual(t *testing.T, holdProducer bool) {
 complete:
 	if runtimeSteps != 1 || operation != (OperationID{}) ||
 		plan != (ResumeCleanupPlan{}) || packet.state != resumePacketMaterialized ||
-		packet.outcome != ParkOutcomeCompleted || packet.caseID != 1 ||
+		packet.outcome != wantOutcome || packet.caseID != wantCase ||
 		packet.result != ResumeResultNone || packet.small != ResumeSmallInvalid ||
 		!manualOperationSourceEmpty(manual, p) {
 		t.Fatalf("keyed manual materialization retained state: runtime=%d operation=%+v plan=%+v packet=%+v empty=%t",
@@ -507,7 +526,7 @@ complete:
 		&packet,
 		nil,
 	)
-	if !taken || outcome != ParkOutcomeCompleted || caseID != 1 ||
+	if !taken || outcome != wantOutcome || caseID != wantCase ||
 		cancel != TaskCancelNone || result != ResumeResultNone ||
 		small != ResumeSmallInvalid || packet != (ResumePacket{}) {
 		t.Fatalf("take keyed manual packet = (%d, %d, %d, %d, %d, %t), packet=%+v",
