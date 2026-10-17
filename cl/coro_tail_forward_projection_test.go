@@ -175,8 +175,8 @@ func Parent(value Outer, pointer *Outer) int {
 		len(projectedPlan.tailForward.args[1].fieldPath) != 1 || projectedPlan.tailForward.args[1].fieldPath[0] != 0 {
 		t.Fatalf("ordinary value fields did not reuse the frozen tail projection: %+v: %v", projectedPlan, err)
 	}
-	projectedName := universe.physicalNames[emissionFunctionOwnerKey{function: projected, owner: universe.ownerOf(projected)}]
-	projectedIR := module.NamedFunction(projectedName + "$coro").String()
+	projectedName := "foo.Projected"
+	projectedIR := requireCoroPhysicalFunction(t, module, projectedName).String()
 	if strings.Contains(projectedIR, "llvm.coro.") || strings.Contains(projectedIR, coroFrameAllocHookV1) ||
 		!strings.Contains(projectedIR, "extractvalue") || strings.Count(projectedIR, "call ptr") != 1 || strings.Contains(projectedIR, "alloca") {
 		t.Fatalf("ordinary value-field wrapper added a frame or redundant storage:\n%s", projectedIR)

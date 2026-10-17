@@ -63,6 +63,7 @@ type FieldAlias = FieldInputs
 func Projected(value FieldAlias, b int) (int,error) { return Acquire(value.Inner.Token,b) }
 func ProjectedChain(value FieldAlias, b int) (int,error) { return Projected(value,b) }
 var PublishedProjected = Projected
+var PublishedProjectedChain = ProjectedChain
 func Changed(a int) (int,error) { n,e:=Acquire(a,0); return n+1,e }
 func dropPath(out *Result, _ unsafe.Pointer, path string) { out.R0 = len(path) }
 //go:linkname borrowPath llgo.coroBorrowResult
@@ -97,7 +98,7 @@ func Root(pointer *PointerReceiver) {
  Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Changed(7); PublishedPermutation(8,9); PublishedIdentity(10,11); FixedPath(); PublishedPath()
  var fields FieldAlias
  fields.Inner.Token=17
- Projected(fields,3); ProjectedChain(fields,4); PublishedProjected(fields,5)
+ Projected(fields,3); ProjectedChain(fields,4); PublishedProjected(fields,5); PublishedProjectedChain(fields,6)
  receiver := Receiver{Token:37}
  receiver.Open(1,2)
  bound := receiver.Open
