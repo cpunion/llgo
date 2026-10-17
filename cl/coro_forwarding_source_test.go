@@ -6,10 +6,23 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"strings"
 	"testing"
 )
+
+func TestCoroForwardingProjectionRejectsUnevaluatedReceiver(t *testing.T) {
+	structure := types.NewStruct([]*types.Var{types.NewField(0, nil, "Value", types.Typ[types.Int], false)}, nil)
+	for _, source := range []types.Type{nil, types.NewPointer(structure)} {
+		if projected, ok := coroForwardingProjectedType(source, []int{0}); ok || projected != nil {
+			t.Fatalf("unevaluated receiver %v acquired a value projection: %v", source, projected)
+		}
+	}
+	if projected, ok := coroForwardingProjectedType(structure, []int{0}); !ok || !types.Identical(projected, types.Typ[types.Int]) {
+		t.Fatal("evaluated value lost its exact field type")
+	}
+}
 
 func TestCoroForwardingSourceShapeIsFrozenProgramIRInput(t *testing.T) {
 	const source = `package foo

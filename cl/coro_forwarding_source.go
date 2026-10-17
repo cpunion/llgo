@@ -50,6 +50,9 @@ type coroForwardingSourceArgument struct {
 }
 
 func coroForwardingProjectedType(source types.Type, fields []int) (types.Type, bool) {
+	if source == nil {
+		return nil, false // An unevaluated receiver has no value projection.
+	}
 	for _, field := range fields {
 		structure, ok := types.Unalias(source).Underlying().(*types.Struct)
 		if !ok || field < 0 || field >= structure.NumFields() {
