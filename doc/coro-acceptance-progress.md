@@ -316,7 +316,16 @@ drop steps. Source-after matches, peak1181.6MiB. Retained small/large image hash
 are `8c23c09f1057276a32727cd4f4ee07286ecacc349f0ba33b4180bae24a84dcd5`
 and `e3c143ded3d7e333506ac278d2891280a999baff24a2340a7e482731d811c893`.
 These are counter-based scheduler-island tests, not FD or full-runtime GC tests.
-The latest v167 FD rerun and whole test/go evaluation remain in progress.
+The final v167 compiler also passes the complete **1,292/1,292** native FD
+cohort described above, matching source-after, peak1227.0MiB. Its compiler hash
+is `86a0436778cc3375146798b298381de2a23afa15b7bdb3ec7b84c2d78eba18cb`;
+the retained forwarded image is
+`4703e3ce3238918f21f5da2eceb2d4226b6aa4341e968606e81289dde6b8e0df`.
+The independent full v163 archive refresh finishes **6/6** top-level tests,
+**14** retained images and **42** actual executions, source-after matching,
+peak1955.2MiB. This separate snapshot is not combined with the six new v167
+field executions into a falsely uniform same-source cohort.
+The whole test/go evaluation remains in progress.
 No feature PR or remote integration is claimed; public Open/File and
 reflect/FFI secondary custody remain incomplete.
 The exact v167 focused compiler cohort passes **27/27** top-level tests with
