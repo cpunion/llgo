@@ -1016,6 +1016,21 @@ captured descriptor、正常非资源路径消除及 spawn 不引入父级 deliv
 动态调用、循环 defer、discarded go entry、正常交付后的取消及 pending worker 期间的 GC。
 IR 通过不等于这些执行门已经通过，以验收账本和对应 immutable run 为准。
 
+range-over-func 的外部 defer 不另建资源机制：注册指令仍属于 synthetic yield 的 source
+SitePlan，但执行及其结果 guard 属于最近的非 yield defer-stack owner。所有权由共享的
+`SSADeferStackOwner` / `SSAResultDeliveryOwner` 从真实 RangeStmt、父子关系和 DeferStack
+确定；普通函数 literal 不继承外层 stack。初始化、drop 及大结果 allocator 的 managed edge
+在 ProgramIR 冻结时归入实际执行 owner，effect/cleanup、capability、物理 guard 和 lowering
+ledger 消费同一归属。注册时 AllocU 仍在 yield，外层继续复用唯一 heterogeneous drainer。
+嵌套/并列 yield 的条件 helper identity 包括 source function identity，plan digest **v45**
+同时保存条件 source FunctionID 和物理 owner，避免相同 block/instruction ordinal 混淆。
+archive summary 仍为 v18：没有新增 archive record 或运行时布局。
+
+defer 忽略返回值不等于取消窗口内可以放弃结果托管。外层 guard 仍在 child completion 被
+消费后才解除；取消/panic 继续使用同一 typed result、捕获环境和内部 drop scope。不能只因
+语言层面丢弃结果就无条件换成 nil-output fallback，否则 producer return 到 owner claim
+之间的资源交接会失去取消保护。整个修改不增加 runtime 字段、分配类别、注释或 drainer。
+
 ## 13. 代码迁移映射
 
 | 当前位置 | 迁移后职责 |

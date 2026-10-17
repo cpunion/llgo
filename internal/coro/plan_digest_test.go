@@ -366,8 +366,8 @@ import (
 }
 
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v44" {
-		t.Fatalf("plan digest schema = %q, want frozen publication-reference schema v44", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v45" {
+		t.Fatalf("plan digest schema = %q, want frozen source/execution-owner schema v45", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {

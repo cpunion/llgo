@@ -285,12 +285,13 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 	siteRole := coro.RolePrimary
 	contract := coro.ContractID("")
 	barrier := false
-	helperNames, err := u.coroProgramIR.plannedRuntimeHelpers(ctx, instruction)
+	sitePlan, err := u.coroProgramIR.sitePlan(ctx, instruction)
 	if err != nil {
 		return coro.LoweringFact{}, false, fmt.Errorf("load frozen site helper plan: %w", err)
 	}
+	helperNames := sitePlan.managedRuntimeHelperNames()
 	helpers := make([]coro.ManagedEdge, 0, len(helperNames))
-	for _, logicalName := range helperNames {
+	for helperIndex, logicalName := range helperNames {
 		if coroCompilerElidesImplicitFaultRuntimeHelper(instruction, logicalName) {
 			continue
 		}
@@ -302,6 +303,16 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 			continue
 		}
 		planned, ok := loweredCalls[logicalName]
+		if helper := sitePlan.managedRuntimeHelpers[helperIndex]; helper.loweredOwner != nil {
+			// Keep the semantic site at its source registration, while loading
+			// resource helper edges from their already frozen lowered-call owner.
+			deferred, external := instruction.(*ssa.Defer)
+			if !external || deferred.DeferStack == nil || helper.placement == coroRuntimeHelperAtSource ||
+				coro.SSAResultDeliveryOwner(deferred) != helper.loweredOwner {
+				return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q lost its exact external defer owner", logicalName)
+			}
+			planned, ok = plan.ResolveLoweredCallRecord(helper.loweredOwner, logicalName)
+		}
 		if !ok {
 			return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q is absent from the frozen plan", logicalName)
 		}

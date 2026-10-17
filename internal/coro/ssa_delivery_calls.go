@@ -8,24 +8,65 @@ package coro
 
 import (
 	"fmt"
+	"go/ast"
 
 	"golang.org/x/tools/go/ssa"
 )
 
+// SSADeferStackOwner follows only compiler-created range yield children. An
+// ordinary function literal owns its own defer stack, even inside a range.
+// Keep this projection shared by effect analysis and physical cleanup lowering.
+func SSADeferStackOwner(fn *ssa.Function) *ssa.Function {
+	for fn != nil && fn.Synthetic == "range-over-func yield" {
+		parent := fn.Parent()
+		statement, rangeSyntax := fn.Syntax().(*ast.RangeStmt)
+		if parent == nil || !rangeSyntax || statement.X == nil || statement.Body == nil ||
+			fn.Prog != parent.Prog || fn.Pkg != parent.Pkg {
+			return nil
+		}
+		children := 0
+		for _, child := range parent.AnonFuncs {
+			if child == fn {
+				children++
+			}
+		}
+		if children != 1 {
+			return nil
+		}
+		fn = parent
+	}
+	return fn
+}
+
+// SSAResultDeliveryOwner is the function that executes a call and owns its
+// temporary result. External range defers register in a yield but execute on
+// the source owner's existing cleanup drainer. A fabricated external stack on
+// an ordinary function is not an ownership certificate.
+func SSAResultDeliveryOwner(call ssa.CallInstruction) *ssa.Function {
+	if call == nil || call.Parent() == nil {
+		return nil
+	}
+	if deferred, ok := call.(*ssa.Defer); ok && deferred.DeferStack != nil {
+		owner := SSADeferStackOwner(call.Parent())
+		if owner == call.Parent() {
+			return nil
+		}
+		return owner
+	}
+	return call.Parent()
+}
+
 func validateSSADeliveryCallCondition(owner *ssa.Function, call ssa.CallInstruction) error {
-	if call == nil || call.Parent() != owner || call.Block() == nil || call.Common() == nil ||
+	if owner == nil || call == nil || SSAResultDeliveryOwner(call) != owner || call.Block() == nil || call.Common() == nil ||
 		call.Common().StaticCallee() != nil || call.Common().Signature() == nil || call.Common().Signature().Results().Len() == 0 {
 		return fmt.Errorf("coro: result-delivery helper requires an exact owner-local dynamic result call")
 	}
 	if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
 		return fmt.Errorf("coro: result-delivery helper cannot depend on a builtin")
 	}
-	switch call := call.(type) {
+	switch call.(type) {
 	case *ssa.Call:
 	case *ssa.Defer:
-		if call.DeferStack != nil {
-			return fmt.Errorf("coro: result-delivery helper requires a bound external defer owner")
-		}
 	default:
 		return fmt.Errorf("coro: result-delivery helper requires an ordinary or deferred invocation, not spawn")
 	}

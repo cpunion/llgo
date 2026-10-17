@@ -171,13 +171,7 @@ func coroCleanupCallPlanContains(plan coro.SSACallPlan, target coro.FunctionID) 
 // handle is captured through any nested yield closures, so ownership follows
 // the synthetic parent chain rather than the function that contains the Defer.
 func coroExplicitDeferStackOwner(fn *ssa.Function) *ssa.Function {
-	if fn == nil {
-		return nil
-	}
-	for fn != nil && fn.Synthetic == rangeOverFuncYieldSynthetic {
-		fn = fn.Parent()
-	}
-	return fn
+	return coro.SSADeferStackOwner(fn)
 }
 
 func coroFunctionHasExplicitDeferStack(fn *ssa.Function) bool {

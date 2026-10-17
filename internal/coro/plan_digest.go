@@ -32,7 +32,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v44"
+const PlanDigestSchema = "llgo.coro.plan-digest.v45"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -229,6 +229,7 @@ type planDigestLoweredCall struct {
 	UnwindOnly           bool       `json:"unwind_only"`
 	ExplicitStatusElided bool       `json:"explicit_status_elided"`
 	ManagedDispatch      bool       `json:"managed_dispatch,omitempty"`
+	DeliveryFunction     FunctionID `json:"delivery_function,omitempty"`
 	DeliveryBlock        *int       `json:"delivery_block,omitempty"`
 	DeliveryInstruction  *int       `json:"delivery_instruction,omitempty"`
 }
@@ -760,6 +761,11 @@ func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error)
 				if !present || !plan.ResultDelivery {
 					return nil, fmt.Errorf("coro: lowered call %q lost its active result-delivery condition", call.LogicalName)
 				}
+				sourceID, included := p.byFunction[source.Parent()]
+				if !included {
+					return nil, fmt.Errorf("coro: result-delivery helper lost its exact source function")
+				}
+				ret[len(ret)-1].DeliveryFunction = sourceID
 				block, instruction := source.Block().Index, 0
 				for _, candidate := range source.Block().Instrs {
 					if candidate == source {
@@ -1280,10 +1286,11 @@ func (p *SSAPlan) canonicalDigestCall(id FunctionID, block, instruction int, cal
 		return planDigestCall{}, err
 	}
 	if plan.ResultDelivery {
-		if err := validateSSADeliveryCallCondition(call.Parent(), call); err != nil {
+		cleanupOwner := SSAResultDeliveryOwner(call)
+		if err := validateSSADeliveryCallCondition(cleanupOwner, call); err != nil {
 			return planDigestCall{}, err
 		}
-		owner, present := p.plan.Lookup(p.byFunction[call.Parent()])
+		owner, present := p.plan.Lookup(p.byFunction[cleanupOwner])
 		if !present || !owner.Exec.Contains(NeedsCleanupFrame) || plan.Transport != ManagedTransport || plan.RawPlain ||
 			plan.Kind != CallDirect && plan.Kind != CallDefer {
 			return planDigestCall{}, fmt.Errorf("coro: result-delivery call lost its managed local-cleanup plan")
@@ -1298,7 +1305,7 @@ func (p *SSAPlan) canonicalDigestCall(id FunctionID, block, instruction int, cal
 			}
 		}
 		bound := false
-		for _, helper := range p.loweredCalls[call.Parent()] {
+		for _, helper := range p.loweredCalls[cleanupOwner] {
 			bound = bound || helper.ManagedDispatch && helper.WhenResultDeliveryOf == call
 		}
 		if !bound {

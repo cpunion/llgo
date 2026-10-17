@@ -79,14 +79,15 @@ func (builder coroProgramIRBuilder) freezeDynamicDeliveryConsumer(ir *coroProgra
 	if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
 		return nil, nil
 	}
-	switch call := call.(type) {
+	switch call.(type) {
 	case *ssa.Call:
 	case *ssa.Defer:
-		if call.DeferStack != nil {
-			return nil, nil // External owners remain rejected by physical preflight.
-		}
 	default:
 		return nil, nil // Spawn owns an independent discarded-result entry.
+	}
+	cleanupOwner := coro.SSAResultDeliveryOwner(call)
+	if cleanupOwner == nil {
+		return nil, fmt.Errorf("dynamic delivery call has no bound cleanup owner")
 	}
 	owner := u.ownerOf(call.Parent())
 	signature, ok := u.effectiveType(owner, call.Parent(), call.Common().Signature()).(*types.Signature)
@@ -117,12 +118,17 @@ func (builder coroProgramIRBuilder) freezeDynamicDeliveryConsumer(ir *coroProgra
 		return nil, err
 	}
 	identity := fmt.Sprintf(":dynamic:%d:%d", call.Block().Index, ordinal)
+	if cleanupOwner != call.Parent() {
+		// Sibling/nested yields may have the same block and instruction index
+		// while registering into the same outer drainer.
+		identity += ":" + emissionDigest(u.finalIdentity(call.Parent()))
+	}
 	recipe := &coroDynamicDeliveryRecipe{
 		signature: signature, result: result, initializer: initializer, drop: drop,
 		initialize: coroDeliveryInitializeCall + identity, release: coroDeliveryDropCall + identity,
 	}
 	for _, name := range []string{recipe.initialize, recipe.release} {
-		if err := builder.freezeDeliveryHelperCall(call.Parent(), name, call, nil); err != nil {
+		if err := builder.freezeDeliveryHelperCall(cleanupOwner, name, call, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -136,7 +142,7 @@ func (builder coroProgramIRBuilder) freezeDynamicDeliveryConsumer(ir *coroProgra
 			target := u.canonicalAlias(runtime.ssa.Func(coroRuntimeHelperTargetName(coroManagedFrameSlotAllocZCall)))
 			if _, included := u.required[target]; target != nil && included {
 				recipe.allocate = coroManagedFrameSlotAllocZCall + identity
-				if err := builder.freezeDeliveryHelperCall(call.Parent(), recipe.allocate, call, target); err != nil {
+				if err := builder.freezeDeliveryHelperCall(cleanupOwner, recipe.allocate, call, target); err != nil {
 					return nil, err
 				}
 				extra = append(extra, coroPlannedRuntimeHelper{name: recipe.allocate, placement: coroRuntimeHelperAtCleanup})
@@ -186,7 +192,7 @@ func (ir *coroProgramIR) deliveryHelperActive(plan *coro.SSAPlan, instruction ss
 func (builder coroProgramIRBuilder) freezeDeliveryHelperCall(owner *ssa.Function, name string, source ssa.CallInstruction, target *ssa.Function) error {
 	u := builder.canonical.universe
 	if u == nil || owner == nil || u.canonicalAlias(owner) != owner ||
-		source == nil || source.Parent() != owner || source.Block() == nil || source.Common() == nil ||
+		source == nil || coro.SSAResultDeliveryOwner(source) != owner || source.Block() == nil || source.Common() == nil ||
 		source.Common().StaticCallee() != nil || source.Common().IsInvoke() ||
 		source.Common().Signature() == nil || source.Common().Signature().Results().Len() == 0 ||
 		name == "" || !utf8.ValidString(name) || strings.IndexByte(name, 0) >= 0 {
@@ -198,12 +204,9 @@ func (builder coroProgramIRBuilder) freezeDeliveryHelperCall(owner *ssa.Function
 	if _, builtin := source.Common().Value.(*ssa.Builtin); builtin {
 		return fmt.Errorf("conditional delivery helper cannot own a builtin invocation")
 	}
-	switch call := source.(type) {
+	switch source.(type) {
 	case *ssa.Call:
 	case *ssa.Defer:
-		if call.DeferStack != nil {
-			return fmt.Errorf("conditional delivery helper requires a bound external defer owner")
-		}
 	default:
 		return fmt.Errorf("conditional delivery helper cannot own a spawned invocation")
 	}

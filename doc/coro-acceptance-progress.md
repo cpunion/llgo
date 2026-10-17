@@ -983,6 +983,51 @@ the full10-mode matrix passes **10,000/10,000** executions with exit0, unchanged
 binary hash and matching source-after. Diagnostic codes/printf are not present.
 Merging the predecessor history changes no source file relative to v110.
 
+The follow-up is now [PR #281](https://github.com/cpunion/llgo/pull/281), exact
+head `23737663b`, targeting `llvm-coro` only. Run `38965431697` is queued;
+review, inline/issue-comment and review-thread inventories are empty on the
+latest check, but no CI completion or merge is claimed.
+
+Immutable v107 completes another fresh, unfiltered **271/271 `test/go`** run,
+zero failures/skips, including nested compiler probes. Source-after matches at
+20:59:14 UTC; children join and private scratch is reclaimed. Its binary is
+`ffd3add2903d69ec1d05507dd711f3de44c5063db4e5b2a5e504d84769095ddf`
+(25931536bytes); separate build/run peaks are8460.7/6646.3MiB. This predates the
+worker-close correction and is not relabeled as final-head full acceptance.
+
+The next isolated range-owner resource-defer fixture adds static and captured
+dynamic cases10/11. With unchanged v110 compiler and frozen v112 fixture source
+the real build fails physical guard preflight at the external dynamic defer;
+that mixed-version negative is retained. The follow-up projects custody and
+helper edges onto the existing outer drainer, with source/execution ownership
+bound in digest v45. Native/wasm physical tests and actual linked fd execution
+must both pass before this gap is marked closed.
+
+The range-owner gap now passes on immutable v113 (`a36bcc9c2`): native/wasm32
+physical guard, frozen lowering ledger and CoroSplit tests cover static,
+open dynamic, sibling and nested yield sites; the owner retains custody and
+registration closures do not. The digest test swaps two valid conditions with
+identical block/instruction ordinals and distinguishes their source functions.
+Broad compiler129.745s/1258.5MiB, analysis race/shuffle17.557s/1504.3MiB,
+runtime-core race/shuffle4.486s/353.9MiB, production-plan/architecture6.280s/
+679.8MiB and all9 real archive executions77.090s/1660.2MiB pass. The initial
+combined-module core command is retained as an orchestration setup failure;
+both actual module-local suites then run separately and pass.
+
+All **120 fd executions**,6 opaque nonresource controls and3 reflection/GC
+routes pass49.556s+109.905s, peak2799.5MiB, source-after matching. A persistent
+production image additionally passes **2400/2400** executions across all12 modes,
+including the new external static/captured resource defers; exact completion
+count, unchanged binary hash and source-after are checked. Image SHA-256 is
+`d1ec9dbd8a2b42e58e4641afa9e6b32bc97baa750e04062973260b708f03f427`.
+Compiler SHA-256 is
+`f053441ec5ebc6697bc050d3e4d63406962a96f242a08a2d1dd693f272a4ed1a`;
+source manifest is
+`f501a4a4505e977fe22b261bb0f1d2507dcb52afeeb59508e4c9c5ff3bf582e3`.
+No runtime fields, allocation category, scheduler or second drainer are added.
+This closes external range defer custody, not the remaining large archive,
+receiver/reflect resource-adapter or public Open seed gates.
+
 Immutable v108 completes the four runtime packages with **68 passes and one
 helper-process skip**, zero failures: test41+1helper skip, cgo3, syncpool1 and
 llgoext23. Source-after20:47:34 matches, children join and private scratch is

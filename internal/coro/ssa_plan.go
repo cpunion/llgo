@@ -1927,10 +1927,14 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		if !needed {
 			continue
 		}
-		facts := localBodyFacts[call.Parent()]
+		owner := SSAResultDeliveryOwner(call)
+		facts, present := localBodyFacts[owner]
+		if !present {
+			return nil, fmt.Errorf("coro: result-delivery call has no frozen execution owner")
+		}
 		facts.Exec = facts.Exec.Join(NeedsCleanupFrame)
 		facts.OutcomePlainLeaf, facts.OutcomePlainDAG, facts.StaticOutcomeLocal = false, false, false
-		localBodyFacts[call.Parent()] = facts
+		localBodyFacts[owner] = facts
 	}
 	buildPolicies := func(exactNoUnwind map[*ssa.Function]bool) (map[*ssa.Function]SSAFunctionPolicy, error) {
 		policies := make(map[*ssa.Function]SSAFunctionPolicy, len(included))
@@ -3321,6 +3325,9 @@ func freezeSSAClassifiedLoweredCalls(
 				}
 				if err := validateSSADeliveryCallCondition(owner, source); err != nil {
 					return nil, err
+				}
+				if !included[source.Parent()] {
+					return nil, fmt.Errorf("coro: result-delivery helper source is outside the effective emission universe")
 				}
 			}
 			if call.ManagedDispatch {

@@ -197,6 +197,9 @@ func AllocU(size uintptr) unsafe.Pointer { return nil }
 func AllocZ(size uintptr) unsafe.Pointer { return nil }
 func FreeDeferNode(pointer unsafe.Pointer) {}
 func AssertNilDeref(value bool) {}
+func Panic(value any) {}
+func strequal(left, right string) bool { return false }
+func memequalptr(left, right *byte) bool { return false }
 `)
 			foo := source.addPackage(t, "foo", coroDeliverySourceFixture+`
 func Apply(f func(string) (int, error)) (int, error) { return f("open") }
@@ -213,6 +216,15 @@ func Factory(seed int) func(string) (int, error) {
 }
 func Captured() { f := Factory(7); Apply(f) }
 func SpawnCaptured() { go Factory(7)("spawn") }
+func Sequence(yield func(int) bool) { yield(0) }
+func RangeDynamic(f func(string) (int, error)) {
+ for range Sequence { defer f("first") }
+ for range Sequence { defer f("second") }
+}
+func NestedRangeDynamic(f func(string) (int, error)) {
+ for range Sequence { for range Sequence { defer f("nested") } }
+}
+func RangeStatic() { for range Sequence { defer Acquire("static") } }
 `)
 			source.ssa.Build()
 			pkg, files := foo.ssa, []*ast.File{foo.file}
@@ -237,11 +249,20 @@ func SpawnCaptured() { go Factory(7)("spawn") }
 				{Function: pkg.Func("Closed"), Demand: coro.AsyncDemand},
 				{Function: pkg.Func("Captured"), Demand: coro.AsyncDemand},
 				{Function: pkg.Func("SpawnCaptured"), Demand: coro.AsyncDemand},
+				{Function: pkg.Func("RangeDynamic"), Demand: coro.AsyncDemand},
+				{Function: pkg.Func("NestedRangeDynamic"), Demand: coro.AsyncDemand},
+				{Function: pkg.Func("RangeStatic"), Demand: coro.AsyncDemand},
+				{Function: runtimePkg.ssa.Func("Panic"), RawPlainDemand: true},
+				{Function: runtimePkg.ssa.Func("strequal"), RawPlainDemand: true},
+				{Function: runtimePkg.ssa.Func("memequalptr"), RawPlainDemand: true},
 			}, coro.SSAConfig{
 				EmissionUniverse: universe, FunctionIDs: ids, MaxPlainInstructions: 64,
 				OutcomeMode: coro.OutcomeExplicitStatus, ClassifyLocalBody: u.CoroLocalBodyFacts,
 				ClassifyLoweredCalls: u.CoroLoweredCalls,
 				ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+					if function == runtimePkg.ssa.Func("Panic") || function == runtimePkg.ssa.Func("strequal") || function == runtimePkg.ssa.Func("memequalptr") {
+						return coro.SSAFunctionPolicy{RawPlainEntry: true}, nil
+					}
 					// Match the production spawn planner's preemptible owner/target
 					// seed while keeping this focused fixture on the shared SSA API.
 					if function == pkg.Func("SpawnCaptured") || function == pkg.Func("Factory").AnonFuncs[0] {
@@ -262,6 +283,25 @@ func SpawnCaptured() { go Factory(7)("spawn") }
 			})
 			if err != nil {
 				t.Fatal(err)
+			}
+			for _, test := range []struct {
+				name  string
+				calls int
+			}{{"RangeDynamic", 2}, {"NestedRangeDynamic", 1}, {"RangeStatic", 1}} {
+				owner := pkg.Func(test.name)
+				delivery, err := prepareCoroDeliveryFunctionPlan(owner, plan, u.coroProgramIR, u)
+				if err != nil || delivery == nil || len(delivery.calls) != test.calls {
+					t.Fatalf("%s outer delivery custody=%+v, want %d sites: %v", test.name, delivery, test.calls, err)
+				}
+				for _, yield := range coroExplicitCleanupFamily(owner)[1:] {
+					local, err := prepareCoroDeliveryFunctionPlan(yield, plan, u.coroProgramIR, u)
+					if err != nil || local != nil {
+						t.Fatalf("%s registration closure retained outer result custody: %+v, %v", yield, local, err)
+					}
+				}
+			}
+			if _, err := u.BuildCoroLoweringFactsReport(plan); err != nil {
+				t.Fatalf("relocated cleanup lost its frozen lowering facts: %v", err)
 			}
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: u}
 			enableCoroPreemptCompilation(compilation)

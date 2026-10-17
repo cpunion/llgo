@@ -188,6 +188,99 @@ func TestAnalyzeSSADeliveryCallConditionRequiresExactInvocation(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSSARangeDeferDeliveryUsesExecutionOwner(t *testing.T) {
+	analyze := func(mode ssa.BuilderMode) (*SSAPlan, *ssa.Function, []ssa.CallInstruction) {
+		prog, pkg := buildCoroTestSSAWithMode(t, "range_delivery.go", `package coroid
+func sequence(yield func(int) bool) { yield(0) }
+func Owner(f func() int) {
+ for range sequence { defer f() }
+ for range sequence { for range sequence { defer f() } }
+}
+`, mode)
+		owner := packageFunction(t, pkg, "Owner")
+		var calls []ssa.CallInstruction
+		var collect func(*ssa.Function)
+		collect = func(fn *ssa.Function) {
+			for _, block := range fn.Blocks {
+				for _, instruction := range block.Instrs {
+					if call, ok := instruction.(*ssa.Defer); ok {
+						if SSAResultDeliveryOwner(call) != owner || call.DeferStack == nil {
+							t.Fatalf("range defer lost its structural stack owner: %s", call)
+						}
+						if err := validateSSADeliveryCallCondition(call.Parent(), call); err == nil {
+							t.Fatal("registration closure was accepted as external result owner")
+						}
+						calls = append(calls, call)
+					}
+				}
+			}
+			for _, child := range fn.AnonFuncs {
+				collect(child)
+			}
+		}
+		collect(owner)
+		if len(calls) != 2 || calls[0].Parent() == calls[1].Parent() {
+			t.Fatalf("fixture needs sibling/nested source sites, got %v", calls)
+		}
+		firstOrdinal, firstErr := SemanticInstructionOrdinal(calls[0])
+		secondOrdinal, secondErr := SemanticInstructionOrdinal(calls[1])
+		if firstErr != nil || secondErr != nil || calls[0].Block().Index != calls[1].Block().Index || firstOrdinal != secondOrdinal {
+			t.Fatalf("fixture must isolate equal block/instruction ordinals across source functions: %d/%d, %v/%v", firstOrdinal, secondOrdinal, firstErr, secondErr)
+		}
+		plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
+			FunctionIDs: planDigestSSAConfig().FunctionIDs, MaxPlainInstructions: -1,
+			OutcomeMode:         OutcomeExplicitStatus,
+			ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (UnknownTarget, error) { return UnknownManagedDispatch, nil },
+			ClassifyLoweredCalls: func(fn *ssa.Function) ([]SSALoweredCall, error) {
+				if fn != owner {
+					return nil, nil
+				}
+				var helpers []SSALoweredCall
+				for _, call := range calls {
+					helpers = append(helpers, SSALoweredCall{LogicalName: "drop:" + call.Parent().Name(), ManagedDispatch: true, WhenResultDeliveryOf: call})
+				}
+				return helpers, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fact := functionPlanFor(t, plan, owner); !fact.LocalExec.Contains(NeedsCleanupFrame) {
+			t.Fatalf("outer owner has no result cleanup: %+v", fact)
+		}
+		for _, call := range calls {
+			if fact, ok := plan.CallPlan(call); !ok || !fact.ResultDelivery {
+				t.Fatalf("external defer lost its conditional delivery: %+v", fact)
+			}
+			// The generic SSA scanner already marks source defer registration
+			// as cleanup-bearing. It must not acquire the result helper edges;
+			// physical guard absence is tested with the production ProgramIR.
+			if helpers := plan.LoweredCalls(call.Parent()); len(helpers) != 0 {
+				t.Fatalf("registration closure acquired result helpers: %+v", helpers)
+			}
+		}
+		return plan, owner, calls
+	}
+	plan, owner, calls := analyze(ssa.SanityCheckFunctions | ssa.InstantiateGenerics)
+	debug, _, _ := analyze(ssa.SanityCheckFunctions | ssa.InstantiateGenerics | ssa.GlobalDebug)
+	digest, err := plan.CoroPlanDigest(validPlanDigestMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	debugDigest, err := debug.CoroPlanDigest(validPlanDigestMetadata())
+	if err != nil || digest != debugDigest {
+		t.Fatalf("relocated defer digest is debug-dependent: %s / %s, %v", digest, debugDigest, err)
+	}
+	// Both source calls remain valid conditions for the same physical owner.
+	// The digest must nevertheless distinguish their exact source functions.
+	plan.loweredCalls[owner][0].WhenResultDeliveryOf = calls[1]
+	plan.loweredCalls[owner][1].WhenResultDeliveryOf = calls[0]
+	changed, err := plan.CoroPlanDigest(validPlanDigestMetadata())
+	if err != nil || changed == digest {
+		t.Fatalf("relocated condition lost its source-function identity: %s / %s, %v", digest, changed, err)
+	}
+}
+
 func TestAnalyzeSSAManagedLoweredCallHasNoSyntheticTarget(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "dynamic_helper.go", "package coroid; func owner() {}; func target() {}")
 	owner, target := packageFunction(t, pkg, "owner"), packageFunction(t, pkg, "target")
