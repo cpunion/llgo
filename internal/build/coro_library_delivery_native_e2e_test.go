@@ -218,9 +218,10 @@ func arrayequal(a,b unsafe.Pointer) bool { return true }
 			if boxed {
 				// Reuse the actual runtime iface type, including its typed itab
 				// field. Equal machine layouts alone cannot certify this helper.
-				abiTypes := types.NewPackage("llgo.test/runtimeabi", "runtimeabi")
+				abiSSA, abiFiles, abiTypes, _ := createCoroBootstrapV2SSAPackage(t, source.Prog, source.Prog.Fset, "llgo.test/runtimeabi", "package runtimeabi")
 				abiTypes.Scope().Insert(types.NewTypeName(token.NoPos, abiTypes, "Iface", runtimeTypes[prog].Scope().Lookup("iface").Type()))
-				abiTypes.MarkComplete()
+				abiSSA.Build()
+				inputs = append(inputs, cl.EmissionPackage{SSA: abiSSA, Files: abiFiles, Identity: abiTypes.Path()})
 				imports[abiTypes.Path()] = abiTypes
 			}
 			runtimeSSA, runtimeFiles, _, _ := createCoroBootstrapV2SSAPackage(t, source.Prog, source.Prog.Fset, llssa.PkgRuntime, runtimeSource, imports)
@@ -540,6 +541,21 @@ func main() {
 	})
 	checks := consumerProg.NewPackage("archive-delivery-checks", "archive-delivery-checks")
 	defer checks.Module().Dispose()
+	if boxed {
+		// The scheduler island does not pull in the standard-library iface
+		// helpers. Supply the exact plain implementations declared above;
+		// this fixture contains only indirect struct boxes and no interface
+		// equality operations. Resource producers/helpers remain in resource.a.
+		sig := runtimeTypes[consumerProg].Scope().Lookup("IfacePtrData").Type().(*types.Signature)
+		ifaceData := checks.NewFunc(llssa.PkgRuntime+".IfacePtrData", sig, llssa.InGo)
+		b := ifaceData.MakeBody(1)
+		b.Return(b.Field(ifaceData.Param(0), 1))
+		for _, name := range []string{"memequal32", "memequal64", "interequal", "nilinterequal", "memequal8", "structequal", "memequal0", "arrayequal"} {
+			equal := checks.NewFunc(llssa.PkgRuntime+"."+name,
+				newSignature([]types.Type{types.Typ[types.UnsafePointer], types.Typ[types.UnsafePointer]}, []types.Type{types.Typ[types.Bool]}), llssa.InGo)
+			equal.MakeBody(1).Return(consumerProg.BoolVal(true))
+		}
+	}
 	const setupSymbol, checkSymbol = "__llgo_archive_delivery_setup", "__llgo_archive_delivery_check"
 	checks.NewFunc(setupSymbol, newSignature(nil, nil), llssa.InGo).MakeBody(1).Return()
 	check := checks.NewFunc(checkSymbol, newSignature(nil, []types.Type{types.Typ[types.Int32]}), llssa.InGo)

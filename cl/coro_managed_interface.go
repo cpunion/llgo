@@ -294,6 +294,7 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	if universe == nil || universe.coroProgramIR == nil {
 		return nil, fmt.Errorf("managed interface descriptor requires a prepared ProgramIR")
 	}
+	managedFamilies := make(map[string]struct{})
 
 	// Method.Tfn_ is always a first-class Go function value. ABI type lowering
 	// records those compiler-created values explicitly, because there is no SSA
@@ -336,6 +337,29 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 				)
 			}
 			result.targets[targetPlan.ID] = target
+
+			// A library may publish a concrete value as an interface without
+			// invoking any of its methods locally. Its resource method must
+			// already carry the descriptor expected by a separately compiled
+			// consumer. Use the frozen publication references and ownership
+			// facts; local invoke sites cannot establish this ABI obligation.
+			facts, frozen := universe.coroProgramIR.localBodyFacts[target]
+			if !frozen || !facts.ResultDelivery {
+				continue
+			}
+			method, _ := source.Object().(*types.Func)
+			signature, _ := universe.effectiveType(
+				universe.ownerOf(source), source, source.Signature,
+			).(*types.Signature)
+			key := coroManagedInterfaceMethodKey(method, signature, universe.emissionTypeKeys.strictABI)
+			if key == "" {
+				return nil, fmt.Errorf("resource method publication %q has no exact method/signature key", source.Name())
+			}
+			if !enabled {
+				return nil, fmt.Errorf("resource method publication %q requires managed interface descriptor transport", source.Name())
+			}
+			managedFamilies[key] = struct{}{}
+			result.methods[key] = struct{}{}
 		}
 	}
 
@@ -344,7 +368,6 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	// every use of that Ifn_ family onto the universal descriptor. Conversely,
 	// an all-plain family can retain LLGo's ordinary itab call without paying a
 	// per-invocation descriptor capability/ABI validation cost.
-	managedFamilies := make(map[string]struct{})
 	for _, owner := range plan.Functions() {
 		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitOutcomePlain && owner.Plan.Emission != coro.EmitCoroutine) {
 			continue

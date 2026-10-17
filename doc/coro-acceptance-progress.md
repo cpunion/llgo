@@ -7,6 +7,67 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-17 (Asia/Shanghai)
 
+### Immutable concrete values published through interfaces (work in progress)
+
+A concrete non-pointer value placed in an interface already has an immutable
+Go value box. Resource value-method descriptors now keep that distinction from
+a mutable *T payload, load the exact physical T for the producer, and project
+cleanup arguments from the same retained box. Structs containing function fields
+use their already-lowered physical type. No extra snapshot allocation or generic
+resource container is added. Mutable *T invocation snapshots remain unsupported.
+
+An independently compiled producer can return this interface without invoking
+it locally. Frozen resource publication references must select descriptor Ifn_
+transport even in that case. The new archive gate exposed a real raw-trap Ifn_
+publication; both small and 128KiB-result variants pass after selecting that
+transport from frozen ownership facts. The failed linked image and IR remain
+under `~/.cache/llgo-coro-acceptance/20261017/boxed-receiver/`.
+
+The new native modes pass 96/96 executions at P=1/2/4 on the preceding boxed
+implementation, and the stable eb4781efc compiler rejects the same fixture's
+receiver binding. The final frozen full FD/archive/compiler/CI gates are pending;
+these subset results are not unified final acceptance.
+
+### Receiver requirements and Method.Func delivery identity
+
+Canonical pointer-to-value method expressions previously fell outside the
+forwarding-source observer, allowing exact return chains to lose a resource
+producer's evaluated-receiver requirement. ProgramIR now preserves that negative
+requirement. Unsupported actual call/go/defer sites and ordinary callable
+publication reject it. ABI-only method identities instead retain an explicit
+`DeliveryUnbound` bit (128), never invocation permission. Guarded, untrusted and
+FFI consumers reject that bit; trusted nonresource dispatch retains its compact
+path. Unused receiver projections and ordinary methods remain supported.
+
+Receiver-first `reflect.Method.Func` descriptors retain the exact producer's
+existing typed delivery tail. Typed Go calls remain protected, while reflection
+rejects before acquisition. Arbitrary MakeFunc callbacks with the same signature
+remain ordinary. Library summaries preserve negative requirements through
+`delivery_unbound`: schema/record/digest v20 and delivery guard ABI v4.
+Bodyless imports cannot downgrade them into ordinary results or cleanup helpers.
+
+The receiver regression fails against c769; Method.Func metadata regressions
+fail on native and wasm32 against c769, and the old linked image fails its
+unprotected-reflection assertion. Exact frozen head `eb4781efc` passes the full
+compiler/SSA `^TestCoro` cohort, complete internal/coro tests, runtime FFI tests,
+**1,298/1,298** FD/resource/boundary executions, and all seven independent archive
+tests (**16 images, 48 executions**). Source-after manifests match. CI run
+`39037234895` passes **19/19** and fresh paginated review inventories are empty.
+PR #292 merged into `llvm-coro` as
+`701883e5ff487b8b30dda2d46f64dc3ce030be6f`.
+
+The two earlier GOROOT failures, issue79186 and issue9604b, pass targeted retests
+on this same frozen source/compiler, with unchanged 25-minute build/one-minute
+execution limits. issue9604b still takes 23m41s to compile; no causal performance
+fix or full GOROOT pass is claimed. Fresh full test/go and 180-package stdlib
+runs continue on this frozen version. Artifacts and failed earlier cohorts remain
+in `~/.cache/llgo-coro-acceptance/20261017/receiver-boundary/`.
+
+Invocation-time receiver snapshots, reflection's second result handoff, public
+Open/File adoption and final compatibility/platform/performance acceptance remain
+incomplete. The separate immutable boxed-receiver experiment has not yet passed
+its independent-archive gate and is not part of this merged receipt.
+
 ### Native peer retirement after a final producer request (c769abd4a)
 
 The intermittent native entry SIGABRT is a peer-driver shutdown race. The
@@ -51,12 +112,17 @@ The single historical issue comment's merge hold is addressed by the causal
 regression and current native evidence. PR #291 is merged into `llvm-coro` as
 `210f81889603729b72ba028f3176fb83374835fa`.
 
-A fresh unfiltered `test/go` run uses this same c769 compiler/source with the
-bounded nested launcher; it remains in progress. The interrupted v120 standard
+A fresh unfiltered `test/go` run of this same c769 compiler/source passes
+**275/275**, with zero failures or skips, using the bounded nested launcher.
+Execution completed at 2026-10-17T13:03:30Z and source-after verification
+matches. This receipt belongs to c769, not the later receiver-boundary changes.
+The interrupted v120 standard
 library controller was recovered with its original runner/compiler/source and
-resource-limit fingerprints. Its old lock and scratch are preserved, 92/180
+resource-limit fingerprints. Its old lock and scratch are preserved, 117/180
 packages currently pass, and the remaining baseline evaluation continues.
-Neither queue is a completed same-version compatibility result.
+The v120 GOROOT shard-1 remainder also completes 120/120 with a matching
+source-after check. These old-baseline results do not establish compatibility
+of the later compiler; complete unified compatibility remains pending.
 
 This correction does not finish evaluated
 receiver snapshots, reflect/FFI secondary handoff, public Open/File ownership
