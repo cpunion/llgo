@@ -108,10 +108,10 @@ func (p Package) validateCoroDispatchDelivery(opts CoroDispatchDescriptorOptions
 			panic("ssa: coroutine delivery helper must not publish another delivery tail")
 		}
 		flags := uint32(base.Operand(1).ZExtValue())
-		validateCoroDispatchContract(uint32(base.Operand(0).ZExtValue()), flags)
-		if flags&CoroDispatchFlagNoCapture == 0 || flags&(CoroDispatchFlagRuntimeTyped|CoroDispatchFlagHasDelivery) != 0 {
+		if flags&CoroDispatchFlagNoCapture == 0 || flags&(CoroDispatchFlagRuntimeTyped|CoroDispatchFlagHasDelivery|CoroDispatchFlagDeliveryUnbound) != 0 {
 			panic("ssa: coroutine delivery helper must be compiler-owned and context-free")
 		}
+		validateCoroDispatchContract(uint32(base.Operand(0).ZExtValue()), flags)
 		code := coroPlainDispatchFunction(base.Operand(8))
 		if code.IsNil() || p.FuncOf(code.Name()) == nil || p.FuncOf(code.Name()).impl.C != code.C {
 			panic("ssa: coroutine delivery helper lost its physical code identity")

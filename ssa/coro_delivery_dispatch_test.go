@@ -297,6 +297,7 @@ func TestCoroDeliveryDispatchRejectsIncompleteTypedPublication(t *testing.T) {
 		},
 		"plain-resource":   func(o *CoroDispatchDescriptorOptions) { o.Flags |= CoroDispatchFlagHasPlain },
 		"runtime-resource": func(o *CoroDispatchDescriptorOptions) { o.Flags |= CoroDispatchFlagRuntimeTyped },
+		"unbound-resource": func(o *CoroDispatchDescriptorOptions) { o.Flags |= CoroDispatchFlagDeliveryUnbound },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newCoroDynamicDispatchTestFixture(t)
@@ -316,7 +317,10 @@ func TestCoroDeliveryDispatchRejectsUnboundHelperMetadata(t *testing.T) {
 			fields[1] = llvm.ConstInt(fields[1].Type(), flags, false)
 		},
 		"nonvoid-helper": func(fields []llvm.Value) { fields[6] = llvm.ConstInt(fields[6].Type(), 1, false) },
-		"missing-code":   func(fields []llvm.Value) { fields[8] = llvm.ConstNull(fields[8].Type()) },
+		"unbound-helper": func(fields []llvm.Value) {
+			fields[1] = llvm.ConstInt(fields[1].Type(), fields[1].ZExtValue()|uint64(CoroDispatchFlagDeliveryUnbound), false)
+		},
+		"missing-code": func(fields []llvm.Value) { fields[8] = llvm.ConstNull(fields[8].Type()) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newCoroDynamicDispatchTestFixture(t)

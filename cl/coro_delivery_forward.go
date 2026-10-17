@@ -52,6 +52,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		}
 		if receiver := ir.localBodyFacts[shape.target].deliveryReceiver; receiver != nil {
 			facts.deliveryReceiver = receiver
+			facts.ResultDelivery = true
 			ir.localBodyFacts[function] = facts
 			return nil
 		}
@@ -61,6 +62,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		}
 		if coroDeliveryNeedsReceiverSnapshot(shape, target) {
 			facts.deliveryReceiver = function
+			facts.ResultDelivery = true
 			ir.localBodyFacts[function] = facts
 			return nil
 		}

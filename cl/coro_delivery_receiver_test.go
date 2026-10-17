@@ -68,6 +68,9 @@ func Root(p *Receiver, outer *Outer) {
 	ir := u.coroProgramIR
 	for _, name := range []string{"Direct", "Chain", "NoInline", "Promoted"} {
 		function := foo.ssa.Func(name)
+		if !ir.localBodyFacts[function].ResultDelivery {
+			t.Fatalf("%s lost the result-delivery requirement needed to exclude unbound targets from trusted nonresource dispatch", name)
+		}
 		if _, present, err := ir.sourceDelivery(function); present || err == nil || !strings.Contains(err.Error(), "evaluated receiver snapshot") {
 			t.Fatalf("%s silently downgraded a receiver-dependent resource result: present=%t err=%v", name, present, err)
 		}

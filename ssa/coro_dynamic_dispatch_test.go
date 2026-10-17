@@ -303,6 +303,70 @@ func TestCoroDispatchTrustedDescriptorSkipsRepeatedContractValidation(t *testing
 	}
 }
 
+func TestCoroDispatchUnboundDeliveryRetainsIdentityButForbidsCalls(t *testing.T) {
+	for _, target := range []struct {
+		name string
+		arch *Target
+	}{{name: "native"}, {name: "wasm32", arch: &Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			f := newCoroDynamicDispatchTestFixture(t, target.arch)
+			opts := f.descriptorOptions(CoroDispatchFlagHasCoro | CoroDispatchFlagDeliveryUnbound)
+			descriptor := f.pkg.NewCoroDispatchDescriptor("unbound_identity", opts)
+			initializer := descriptor.impl.Initializer()
+			if initializer.OperandsCount() != 9 || coroPlainDispatchFunction(initializer.Operand(8)).C != f.coroEntry.impl.C {
+				t.Fatal("unbound identity lost its code identity or acquired a false delivery tail")
+			}
+			for _, test := range []struct {
+				name           string
+				guard, trusted bool
+			}{{"ordinary", false, false}, {"guarded", true, false}, {"guarded-trusted", true, true}} {
+				fn := f.pkg.NewFunc(test.name, coroPlainDispatchTestSignature([]types.Type{
+					f.signature, types.Typ[types.UnsafePointer], types.Typ[types.UnsafePointer], types.Typ[types.Uint32],
+				}, []types.Type{types.Typ[types.UnsafePointer]}), InGo)
+				b := fn.MakeBody(1)
+				b.Return(b.CallCoroDispatchCoro(fn.Param(0), fn.Param(1), fn.Param(2), []Expr{fn.Param(3)}, CoroDispatchCallOptions{
+					Version: CoroDispatchVersionV2, ABIHash: f.hash, Result: f.result,
+					DescriptorNonNil: true, DeliveryGuard: test.guard, TrustedDescriptor: test.trusted,
+				}))
+				b.EndBuild()
+				b.Dispose()
+				body := fn.impl.String()
+				if test.trusted {
+					if !strings.Contains(body, "coro.dispatch.delivery.unbound") || !strings.Contains(body, "@llvm.trap") {
+						t.Fatalf("trusted result guard silently grants an unbound receiver capability:\n%s", body)
+					}
+				} else {
+					mask := uint64(^uint32(CoroDispatchKnownFlagsV2 &^ CoroDispatchFlagDeliveryUnbound))
+					if !test.guard {
+						mask |= uint64(CoroDispatchFlagHasDelivery)
+					}
+					found := false
+					for _, block := range fn.impl.BasicBlocks() {
+						for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+							if instruction.InstructionOpcode() == llvm.And && !instruction.Operand(1).IsAConstantInt().IsNil() && instruction.Operand(1).ZExtValue() == mask {
+								found = true
+							}
+						}
+					}
+					if !found || !strings.Contains(body, "coro.dispatch.flags.unknown") || !strings.Contains(body, "@llvm.trap") {
+						t.Fatalf("consumer accepted an unbound receiver descriptor:\n%s", body)
+					}
+				}
+			}
+			for _, flags := range []uint32{
+				CoroDispatchFlagHasPlain | CoroDispatchFlagPlainNoUnwind | CoroDispatchFlagDeliveryUnbound,
+				CoroDispatchFlagHasCoro | CoroDispatchFlagHasDelivery | CoroDispatchFlagDeliveryUnbound,
+				CoroDispatchFlagHasCoro | CoroDispatchFlagRuntimeTyped | CoroDispatchFlagDeliveryUnbound,
+			} {
+				coroPlainDispatchMustPanicContains(t, "unbound delivery", func() { validateCoroDispatchContract(CoroDispatchVersionV2, flags) })
+			}
+			if err := llvm.VerifyModule(f.pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestCoroDispatchStructuredOnlySelectionLoadsOnlyRequiredWords(t *testing.T) {
 	fixture := newCoroDynamicDispatchTestFixture(t)
 	options := CoroDispatchCallOptions{

@@ -34,6 +34,10 @@ type PlainReceiver struct{}
 
 func (PlainReceiver) Acquire(value int) int { return value + 1 }
 
+type SnapshotReceiver struct{ Token int }
+
+func (r SnapshotReceiver) Acquire(int) int { return acquire(r.Token) }
+
 func method(receiver any) reflect.Value {
 	m, ok := reflect.TypeOf(receiver).MethodByName("Acquire")
 	if !ok {
@@ -71,6 +75,14 @@ func main() {
 	}
 	rejectReflection(value, Receiver{})
 	rejectReflection(pointer, (*PointerReceiver)(nil))
+	// PtrToThis metadata must retain an explicitly unavailable entry for
+	// this *T-to-T wrapper, rather than break unrelated value-method calls or
+	// silently publish an unguarded function. Identity queries remain valid.
+	snapshot := method((*SnapshotReceiver)(nil))
+	if snapshot.Pointer() == 0 {
+		panic("unbound method lost its code identity")
+	}
+	rejectReflection(snapshot, (*SnapshotReceiver)(nil))
 	plain := method(PlainReceiver{}).Call([]reflect.Value{reflect.ValueOf(PlainReceiver{}), reflect.ValueOf(20)})
 	if len(plain) != 1 || plain[0].Int() != 21 {
 		panic("ordinary Method.Func acquired false resource ownership")

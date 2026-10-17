@@ -48,9 +48,7 @@ func (p *context) emitCoroMethodValueDescriptor(
 	if err != nil {
 		return llssa.Nil, fmt.Errorf("coroutine method value descriptor: resolve managed target: %w", err)
 	}
-	if err := p.immutableEmissionUniverse().coroProgramIR.validateDeliveryReceiver(target); err != nil {
-		return llssa.Nil, err
-	}
+	deliveryUnbound := p.immutableEmissionUniverse().coroProgramIR.validateDeliveryReceiver(target) != nil
 	entry := p.mustFunctionSymbol(target)
 	if entry.function.Signature == nil || entry.function.Signature.Recv() == nil ||
 		len(entry.function.FreeVars) != 0 || entry.plan.Demand == coro.NoDemand {
@@ -143,7 +141,15 @@ func (p *context) emitCoroMethodValueDescriptor(
 	// same delivery contract as a source method expression; otherwise the
 	// reflection bridge cannot even detect that this boundary needs custody.
 	literals := physical.NewBuilder()
-	delivery := p.coroDeliveryDescriptorOptions(literals, entry, abi.signature)
+	var delivery *llssa.CoroDispatchDeliveryOptions
+	if deliveryUnbound {
+		// PtrToThis method tables can require this identity without calling
+		// it. Keep the exact source identity, but explicitly forbid dispatch;
+		// never publish an ordinary callable by dropping its known ownership.
+		flags |= llssa.CoroDispatchFlagDeliveryUnbound
+	} else {
+		delivery = p.coroDeliveryDescriptorOptions(literals, entry, abi.signature)
+	}
 	literals.Dispose()
 	if delivery != nil {
 		flags |= llssa.CoroDispatchFlagHasDelivery

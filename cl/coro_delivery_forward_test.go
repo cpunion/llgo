@@ -321,6 +321,10 @@ func Root(pointer *PointerReceiver) {
 							base = initializer.Operand(0)
 						}
 						_, resource := u.coroProgramIR.deliveryProducers[function]
+						unbound := u.coroProgramIR.localBodyFacts[function].deliveryReceiver != nil
+						if got := uint32(base.Operand(1).ZExtValue())&llssa.CoroDispatchFlagDeliveryUnbound != 0; got != unbound {
+							t.Fatalf("Method.Func for %s unbound=%t, want %t", function, got, unbound)
+						}
 						if hasDelivery := uint32(base.Operand(1).ZExtValue())&llssa.CoroDispatchFlagHasDelivery != 0; hasDelivery != resource {
 							t.Fatalf("Method.Func for %s delivery=%t, want %t", function, hasDelivery, resource)
 						}
