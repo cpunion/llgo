@@ -97,7 +97,11 @@ func Deferred() { defer Wrapped() }
 			if err := u.ValidateCoroPlan(plan); err != nil {
 				t.Fatal(err)
 			}
-			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: u, CoroLibraryEffectMetadata: metadata, CoroLibraryEffects: map[*ssa.Function]coro.LibraryEffectFunction{pkg.Func("Wrapped"): facts[0]}}
+			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: u, CoroLibraryEffectMetadata: metadata, CoroLibraryEffects: map[*ssa.Function]coro.LibraryEffectFunction{pkg.Func("Wrapped"): facts[0]},
+				CoroPlanMetadata: coro.PlanDigestMetadata{CoroABI: metadata.CoroABI, SchedulerABI: metadata.SchedulerABI, PanicABI: metadata.PanicABI, FuncRepABI: metadata.FuncRepABI,
+					TargetTriple: metadata.TargetTriple, TargetCPU: metadata.TargetCPU, TargetFeatures: metadata.TargetFeatures, TargetABI: metadata.TargetABI,
+					PointerBits: metadata.PointerBits, Endianness: metadata.Endianness, DataLayout: metadata.DataLayout},
+			}
 			enableCoroChildAwaitCompilation(compilation)
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
 			compiled, _, err := NewPackageExWithEmbedOptions(consumerProg, nil, nil, nil, pkg, files, goembed.VarMap{}, PackageOptions{Compilation: compilation})

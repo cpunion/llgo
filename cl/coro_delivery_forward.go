@@ -215,6 +215,9 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 		if entry.ftype != goFunc || len(entry.function.FreeVars) != 0 || entry.plan.RawPlainOnly || entry.plan.Demand == coro.NoDemand {
 			panic("delivery view requires its demanded real context-free helper")
 		}
+		if err := validateCoroManagedDescriptorPrimary(entry.function, entry.plan, p.immutableEmissionUniverse()); err != nil {
+			panic(fmt.Errorf("delivery view real helper primary: %w", err))
+		}
 		signature, err := p.emissionUniverse.coroPhysicalEntrySourceSignature(target)
 		if err != nil {
 			panic(err)
@@ -230,7 +233,9 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 	}
 	helper := recipe.archive.helpers[ordinal]
 	plan, found := p.immutablePlan().BasePlan().Lookup(helper.fact.ID)
-	if !found || plan.Demand == coro.NoDemand {
+	plain, structured := coroExternalManagedDescriptorEntry(plan)
+	bound, present := p.emissionUniverse.coroProgramIR.archiveDeliveryHelpers[helper.fact.ID]
+	if !found || plan.Demand == coro.NoDemand || !plain && !structured || !present || bound.fact != helper.fact {
 		panic("delivery view lost its imported helper plan")
 	}
 	signature := helper.signature
