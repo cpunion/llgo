@@ -27,7 +27,10 @@ func TestCoroDeliveryForwardingPreservesOneCustodySlotAndTypedViews(t *testing.T
 				source := newEmissionTestProgram()
 				source.ssa.CreatePackage(types.Unsafe, nil, nil, true)
 				runtimePkg := source.addPackage(t, llssa.PkgRuntime, `package runtime
+import "unsafe"
+func AllocU(size uintptr) unsafe.Pointer { return nil }
 func AssertNilDeref(value bool) {}
+func PanicWrapNilPointer(value bool, receiver, method string) {}
 `)
 				foo := source.addPackage(t, "foo", `package foo
 import "unsafe"
@@ -53,7 +56,18 @@ var Published = Chain
 var PublishedPermutation = Permuted
 var PublishedIdentity = Identity
 var PublishedPath = FixedPath
-func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Changed(7); PublishedPermutation(8,9); PublishedIdentity(10,11); FixedPath(); PublishedPath() }
+type Receiver struct { Token int }
+func (Receiver) Open(a,b int) (int,error) { return Acquire(a,b) }
+var PublishedMethod = Receiver.Open
+func Root() {
+ Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Changed(7); PublishedPermutation(8,9); PublishedIdentity(10,11); FixedPath(); PublishedPath()
+ receiver := Receiver{Token:37}
+ receiver.Open(1,2)
+ bound := receiver.Open
+ receiver.Token=99
+ bound(3,4)
+ PublishedMethod(receiver,5,6)
+}
 `)
 				source.ssa.Build()
 				prog := newLLSSAProgForTarget(t, target.arch)
@@ -76,6 +90,20 @@ func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Ch
 					chain.forwardArgs[0].constant == nil || chain.forwardArgs[0].constant.Value.ExactString() != "7" ||
 					chain.forwardArgs[1].sourceParameter != 0 {
 					t.Fatalf("multi-layer drop projection was not composed in ProgramIR: %+v", chain)
+				}
+				methods := 0
+				for _, function := range u.Functions() {
+					if function.Name() != "Open" && function.Name() != "Open$bound" && function.Name() != "Open$thunk" {
+						continue
+					}
+					recipe, present, err := u.coroProgramIR.sourceDelivery(function)
+					if err != nil || !present || recipe.forwardBase != foo.ssa.Func("Acquire") || len(recipe.forwardArgs) != 2 {
+						t.Fatalf("%s lost its normalized receiver custody: %+v: %v", function, recipe, err)
+					}
+					methods++
+				}
+				if methods < 4 {
+					t.Fatalf("only %d declared/bound/expression method recipes", methods)
 				}
 				if _, present, _ := u.coroProgramIR.sourceDelivery(foo.ssa.Func("Changed")); present {
 					t.Fatal("changed return acquired resource custody")
@@ -163,6 +191,9 @@ func Root() { Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Ch
 						calls++
 						if instruction.CalledValue().Name() != helperName {
 							t.Fatalf("%s helper view did not call the real helper directly: %s", name, instruction.String())
+						}
+						if !instruction.Operand(prefix + 1).IsNull() {
+							t.Fatalf("%s passed an unrelated forwarding env to its context-free base helper", name)
 						}
 						if name == "Chain" {
 							if !instruction.Operand(prefix+2).IsConstant() || instruction.Operand(prefix+2).ZExtValue() != 7 || instruction.Operand(prefix+3).C != view.Param(prefix+2).C {

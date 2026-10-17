@@ -151,6 +151,12 @@ func Parent(value Outer, pointer *Outer) int {
 	if pointerPhysical.tailForward != nil {
 		t.Fatalf("nullable pointer promoted wrapper escaped into frame-free projection: %+v", pointerPhysical.tailForward)
 	}
+	if pointerShape, err := universe.coroProgramIR.forwardingSourceShape(pointerWrapper); err != nil ||
+		pointerShape == nil || pointerShape.receiverEvaluation == nil {
+		var listing strings.Builder
+		pointerWrapper.WriteTo(&listing)
+		t.Fatalf("pointer wrapper lost its must-execute receiver evaluation: %+v: %v; validation=%v\n%s", pointerShape, err, validateCoroExactMethodWrapper(pointerWrapper), listing.String())
+	}
 	physicalName := universe.physicalNames[emissionFunctionOwnerKey{
 		function: valueWrapper,
 		owner:    universe.ownerOf(valueWrapper),

@@ -1155,7 +1155,7 @@ func planCoroPhysicalTailForward(
 	if err != nil {
 		return nil, err
 	}
-	if shape == nil {
+	if shape == nil || shape.receiverEvaluation != nil {
 		return nil, nil
 	}
 	for _, adapter := range shape.adapters {

@@ -26,6 +26,9 @@ type coroForwardingSourceShape struct {
 	adapters         []coroForwardingSourceAdapter
 	projections      []ssa.Instruction
 	methodProjection bool
+	// This canonical wrapper still has a receiver load/nil check to execute.
+	// Custody may ignore an unused receiver, but frame elision may not.
+	receiverEvaluation ssa.Value
 }
 
 type coroForwardingSourceAdapter struct {
@@ -99,10 +102,11 @@ scanAdapters:
 		call, _ = instructions[callIndex].(*ssa.Call)
 	}
 	methodProjection := false
-	if call == nil {
+	if call == nil || call.Common() == nil || call.Common().StaticCallee() == nil {
 		if validateCoroExactMethodWrapper(function) != nil {
 			return nil
 		}
+		call = nil // A leading wrapnilchk is not the forwarded method call.
 		for index, instruction := range instructions {
 			candidate, isCall := instruction.(*ssa.Call)
 			if !isCall || candidate.Common() == nil || candidate.Common().StaticCallee() == nil {
@@ -169,7 +173,7 @@ scanAdapters:
 	for index, value := range call.Common().Args {
 		parameter, direct := value.(*ssa.Parameter)
 		var fieldPath []int
-		if methodProjection {
+		if methodProjection && !direct {
 			var consumed map[ssa.Instruction]none
 			var projected bool
 			parameter, fieldPath, consumed, projected = deriveCoroForwardingValueProjection(function, value)
@@ -204,6 +208,8 @@ scanAdapters:
 				return nil
 			}
 			argument.capture, argument.projectedType, argument.direct = capture, capture.Type(), true
+		} else if methodProjection && index == 0 {
+			shape.receiverEvaluation = value
 		} else {
 			literal, exact := value.(*ssa.Const)
 			if !exact || literal.Type() == nil {
@@ -217,7 +223,10 @@ scanAdapters:
 		for index := 0; index < callIndex; index++ {
 			instruction := instructions[index]
 			if _, consumed := projections[instruction]; !consumed {
-				return nil
+				// ExactMethodWrapper already proved these instructions belong
+				// to receiver evaluation. Keep them in the physical body unless
+				// the value-only projection consumed every one of them.
+				shape.receiverEvaluation = call.Common().Args[0]
 			}
 			shape.projections = append(shape.projections, instruction)
 		}

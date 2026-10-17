@@ -31,8 +31,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		defer func() { delete(visiting, function); visited[function] = true }()
 		facts, present := ir.localBodyFacts[function]
 		shape := facts.forwarding
-		if !present || shape == nil || shape.methodProjection || len(function.FreeVars) != 0 ||
-			function.Signature.Recv() != nil || function.Signature.Variadic() {
+		if !present || shape == nil || function.Signature.Variadic() || len(shape.target.FreeVars) != 0 {
 			return nil
 		}
 		background, classified, err := u.FunctionBackground(function)
@@ -59,6 +58,11 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		if !composed {
 			return nil
 		}
+		if _, hasEnv, err := u.closureEnvironments.entryEnvironment(base); err != nil {
+			return err
+		} else if hasEnv {
+			return nil // This projection does not invent a callee environment.
+		}
 		signature, err := u.coroPhysicalSourceSignature(function)
 		if err != nil {
 			return err
@@ -71,6 +75,9 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		// to use equal-width words. Only the existing exact transport proof
 		// grants the zero-allocation retag used by helper ABI views.
 		for _, argument := range arguments {
+			if argument.capture != nil || argument.sourceParameter < 0 && argument.constant == nil {
+				return nil // A required capture still needs its frozen typed view.
+			}
 			if argument.sourceParameter >= 0 && coroPhysicalTransportTypeKey(u, argument.projectedType) != coroPhysicalTransportTypeKey(u, argument.valueType) {
 				return nil
 			}
@@ -157,14 +164,14 @@ func composeCoroDeliveryForwardingArguments(shape *coroForwardingSourceShape, ta
 }
 
 // Apply the frozen source mapping to the producer arguments of a drop call.
-// The result address and closure environment are carried unchanged; projections
-// are values, so no receiver dereference or additional lifetime is introduced.
+// The result address is unchanged. The terminal producer is context-free, so
+// its helper receives nil, never a forwarding wrapper's unrelated funcval env.
 func (p *context) coroForwardedDeliveryArguments(b llssa.Builder, recipe coroSourceDeliveryRecipe, args []llssa.Expr) (coroSourceDeliveryRecipe, []llssa.Expr) {
 	if recipe.forward != nil {
 		if len(args) != recipe.signature.Params().Len()+2 {
 			panic("forwarded delivery lost its typed arguments")
 		}
-		forwarded := append([]llssa.Expr(nil), args[:2]...)
+		forwarded := []llssa.Expr{args[0], p.prog.Nil(p.prog.VoidPtr())}
 		for _, argument := range recipe.forwardArgs {
 			var value llssa.Expr
 			if argument.sourceParameter >= 0 {
@@ -226,7 +233,7 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 		default:
 			panic("forwarded helper lost its managed primary")
 		}
-		arguments := []llssa.CoroHelperViewArgument{{Parameter: 0}, {Parameter: 1}}
+		arguments := []llssa.CoroHelperViewArgument{{Parameter: 0}, {Parameter: -1, Constant: p.prog.Nil(p.prog.VoidPtr())}}
 		literals := p.pkg.FuncOf(primary.physical.Name()).NewBuilder()
 		defer literals.Dispose()
 		for _, argument := range recipe.forwardArgs {
