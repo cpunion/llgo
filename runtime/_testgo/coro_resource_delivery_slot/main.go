@@ -222,7 +222,6 @@ func secondSiteOwner() {
 }
 
 func main() {
-	runtime.GOMAXPROCS(1)
 	install()
 	mode := fixtureMode()
 	capturedFixture = mode >= 6 && mode <= 9 || mode == 11 || mode == 15

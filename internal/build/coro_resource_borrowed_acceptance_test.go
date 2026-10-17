@@ -107,14 +107,16 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 		"typed resource delivery normal, discarded and canceled passed", // Large captured dynamic resource defer.
 	} {
 		t.Run(strconv.Itoa(mode), func(t *testing.T) {
-			for attempt := 0; attempt < 10; attempt++ {
-				runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
-				run := exec.CommandContext(runCtx, image)
-				run.Env = append(os.Environ(), "LLGO_DELIVERY_FIXTURE_MODE="+strconv.Itoa(mode))
-				output, err := run.CombinedOutput()
-				runCancel()
-				if err != nil || strings.TrimSpace(string(output)) != expected {
-					t.Fatalf("resource delivery run %d: %v\n%s", attempt, err, output)
+			for _, owners := range []string{"1", "2"} {
+				for attempt := 0; attempt < 10; attempt++ {
+					runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
+					run := exec.CommandContext(runCtx, image)
+					run.Env = append(os.Environ(), "GOMAXPROCS="+owners, "LLGO_DELIVERY_FIXTURE_MODE="+strconv.Itoa(mode))
+					output, err := run.CombinedOutput()
+					runCancel()
+					if err != nil || strings.TrimSpace(string(output)) != expected {
+						t.Fatalf("resource delivery P=%s run %d: %v\n%s", owners, attempt, err, output)
+					}
 				}
 			}
 		})
