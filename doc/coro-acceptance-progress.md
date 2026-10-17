@@ -5,7 +5,42 @@ notes in the design documents. Update a row only with a test of the relevant
 compiler and generated program. Host-Go unit tests do not establish LLGo
 source compatibility, and one platform's result does not establish another's.
 
-## Current checkpoint: 2026-10-17 (Asia/Shanghai)
+## Current checkpoint: 2026-10-18 (Asia/Shanghai)
+
+### Public POSIX Open and os.File custody (21f373c42)
+
+Public native syscall.Open now writes its descriptor directly into a guarded
+result before foreign completion. os.Open/OpenFile preserve raw-fd custody
+through File adoption and keep the File guarded through initialization and
+caller acceptance. Cancellation closes the unique descriptor once; normal
+OpenFile append behavior and PathError behavior remain covered. Darwin File
+fstat initialization uses the existing C-worker contract. No explicit worker
+annotation or scheduler-loop change is introduced.
+
+Exact frozen head `21f373c42fa043f82719636bacc76f53430eb6b2` passes the complete
+compiler/SSA coro cohort, all source-patch/directive inventory tests, **1533**
+native resource executions (**1434** existing and **99** public Open), and
+**9/9** negative controls that remove only File custody and observe one leaked
+FIFO descriptor. Replaying Linux's constant platform predicate on Darwin
+reproduces the old physical-preflight failure and passes **24** executions
+with the fix. Native Linux and other target acceptance remain their CI gates.
+Source-after manifests match. Manifest and compiler SHA-256 are respectively
+`648bf5d964ba9bec224013ff01822ab6d0c161e80a4b0b51c76e0a942e7220ad` and
+`1eebe4c0e7e7e5715d01a6cc4fa48c106cc820a9f2fb62188b724df7e9e72133`.
+CI run `39050141388` passes **19/19** on that exact head; fresh paginated
+review, inline/issue comment and thread inventories are empty. PR #294 merged
+as `eec4075b80e115ac5cf7d8ec68d1f702ca43f307`.
+
+The preceding R6 head `d1f31bbde2fa13c2dee8f7e4b9289bd5e3255ba2` separately
+passes full test/go **275/275**, zero failures or skips, with matching
+source-after at 2026-10-17T17:06:41Z. It is not an R7 compatibility receipt.
+The v21 full GOROOT campaign stopped before case 96 completed when its private
+cache reached the 2 GiB bound (source and corpus hashes still match); all
+workspaces and logs are retained. It is incomplete, not a semantic suite pass.
+Mutable receiver snapshots and reflection/FFI result handoff still require
+implementation; unified-version compatibility and final platform/performance
+acceptance remain open. Artifacts are retained under
+`~/.cache/llgo-coro-acceptance/20261017/public-open/`.
 
 ### Immutable concrete values published through interfaces (1555e9659)
 
