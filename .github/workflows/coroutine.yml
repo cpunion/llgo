@@ -495,6 +495,7 @@ jobs:
             TestCoroArchivePrivateCallableDeliveryNativeNoStdlibRuntimeE2E
             TestCoroArchiveLargeDeliveryNativeNoStdlibRuntimeE2E
             TestCoroArchiveForwardedDeliveryNativeNoStdlibRuntimeE2E
+            TestCoroArchiveCapturedDeliveryNativeNoStdlibRuntimeE2E
           )
           for test in "${tests[@]}"; do
             go test ./internal/build -run "^${test}$" -timeout=10m -count=1
