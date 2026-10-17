@@ -401,7 +401,8 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 	}
 	for index, entry := range imports {
 		helper := universe.coroProgramIR.archiveDeliveryHelpers[entry.Fact.ID]
-		if entry.Fact != frozenImports[index] || universe.libraryEffects.signatureABIHash(helper.signature, consumer) != entry.Fact.ABIHash {
+		if entry.Fact != frozenImports[index] || helper.fact != entry.Fact ||
+			universe.libraryEffects.signatureABIHash(helper.signature, consumer) != helper.callableABI() {
 			return fmt.Errorf("coroutine archive helper %q differs from frozen typed ABI input", entry.Fact.ID)
 		}
 	}
