@@ -528,7 +528,7 @@ jobs:
           ulimit -v 6291456
           go build -p=1 -o "$LLGO_TEST_LLGO" ./cmd/llgo
           timeout 18m go test -p=1 ./internal/build \
-            -run '^TestCoro(BorrowedResourceCleanup|ResourceDeliverySlot|ResourceDeliveryForward)Acceptance$' -v -count=1 -timeout=17m
+            -run '^TestCoro(BorrowedResourceCleanup|ResourceDeliverySlot|ResourceDeliveryForward|PublicOpenResource)Acceptance$' -v -count=1 -timeout=17m
 
       - name: Record failed native resource environment
         if: failure() && matrix.lane == 'native-e2e'

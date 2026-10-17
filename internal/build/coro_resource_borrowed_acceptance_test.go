@@ -101,6 +101,56 @@ func TestCoroResourceDeliveryForwardAcceptance(t *testing.T) {
 	})
 }
 
+func TestCoroPublicOpenResourceAcceptance(t *testing.T) {
+	if os.Getenv("LLGO_CORO_RESOURCE_ACCEPTANCE") != "1" {
+		t.Skip("set LLGO_CORO_RESOURCE_ACCEPTANCE=1 for public Open ownership acceptance")
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("public Open fixture requires POSIX descriptors")
+	}
+	compiler := os.Getenv("LLGO_TEST_LLGO")
+	if compiler == "" {
+		t.Fatal("LLGO_TEST_LLGO must identify the compiler being accepted")
+	}
+	compiler, err := filepath.Abs(compiler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := coroResourceAcceptanceImage(t, "coro_public_open")
+	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Minute)
+	defer cancel()
+	build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-o", image, "./_testgo/coro_public_open")
+	build.Dir = filepath.Join(root, "runtime")
+	build.Env = append(os.Environ(), "LLGO_ROOT="+root, "LLGO_BUILD_CACHE=off")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("public Open build: %v\n%s", err, output)
+	}
+	modes := 8
+	if runtime.GOOS == "darwin" {
+		// Darwin's File construction also stats an acquired descriptor. The
+		// extra modes stop inside that operation after raw-fd delivery.
+		modes = 11
+	}
+	for mode := 0; mode < modes; mode++ {
+		for _, owners := range []string{"1", "2", "4"} {
+			for attempt := 0; attempt < 3; attempt++ {
+				runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
+				run := exec.CommandContext(runCtx, image)
+				run.Env = append(os.Environ(), "GOMAXPROCS="+owners, "LLGO_PUBLIC_OPEN_MODE="+strconv.Itoa(mode))
+				output, err := run.CombinedOutput()
+				runCancel()
+				if err != nil || strings.TrimSpace(string(output)) != "public Open cancellation and unique fd cleanup passed" {
+					t.Fatalf("public Open mode=%d P=%s run=%d: %v, image: %s\n%s", mode, owners, attempt, err, image, output)
+				}
+			}
+		}
+	}
+}
+
 func testCoroDeliveryMetadataFixture(t *testing.T, fixture, expected string) {
 	t.Helper()
 	compiler, err := filepath.Abs(os.Getenv("LLGO_TEST_LLGO"))

@@ -102,6 +102,7 @@ var sourcePatchPkgs = map[string]struct{}{
 	"iter":                           {},
 	"math":                           {},
 	"net":                            {},
+	"os":                             {},
 	"runtime":                        {},
 	"runtime/metrics":                {},
 	"sync":                           {},
