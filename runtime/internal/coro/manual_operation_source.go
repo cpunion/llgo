@@ -663,6 +663,23 @@ func (source *ManualOperationSource) ApplyOne(p *P, id OperationID, record *Oper
 		return OperationApplyInvalid
 	}
 	park, ticket, wait := slot.record.link.park, slot.record.link.ticket, slot.record.link.wait
+	if wait != nil {
+		// A remote owner can observe Posted before Post releases its producer
+		// admission. Do not send a scheduler wait into typed cleanup/Confirm
+		// until that shim has joined and any late mailbox has been drained.
+		// Reuse the bounded retry epoch; standalone detach keeps its explicit
+		// backend-join contract and does not pass through this scheduler gate.
+		if !producerSourceSlotQuiesced(&slot.producerSourceSlot) {
+			return OperationApplyRetryBudget
+		}
+		switch manualOperationMailbox(preemptLoad(&slot.mailbox)) {
+		case manualOperationMailboxEmpty, manualOperationMailboxDelivered:
+		case manualOperationMailboxPosting, manualOperationMailboxPosted:
+			return OperationApplyRetryBudget
+		default:
+			return OperationApplyInvalid
+		}
+	}
 	detached := wait != nil && DetachParkWaitOperation(p, park, ticket, &slot.record, id) ||
 		wait == nil && DetachParkOperation(park, ticket, &slot.record, id)
 	if !detached {
