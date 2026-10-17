@@ -332,3 +332,28 @@ func TestCoroAwaitPointerResultRetirement(t *testing.T) {
 		}
 	}
 }
+
+func TestCoroAwaitBorrowedResultDoesNotRetireCallerPointers(t *testing.T) {
+	for _, target := range []*ssa.Target{nil, {GOOS: "wasip1", GOARCH: "wasm"}} {
+		prog := newLLSSAProgForTarget(t, target)
+		defer prog.Dispose()
+		pkg := prog.NewPackage("borrowed", "test/borrowed-result")
+		module := pkg.Module()
+		defer module.Dispose()
+		ctx := &context{prog: prog}
+		pointer := types.NewPointer(types.NewArray(types.Typ[types.Byte], 128))
+		fields := []*types.Var{types.NewField(0, nil, "R0", types.Typ[types.Int32], false), types.NewField(0, nil, "R1", types.NewArray(types.Typ[types.Byte], 131073), false), types.NewField(0, nil, "R2", pointer, false)}
+		results := types.NewTuple(types.NewVar(0, nil, "", fields[0].Type()), types.NewVar(0, nil, "", fields[1].Type()), types.NewVar(0, nil, "", fields[2].Type()))
+		fn := pkg.NewFunc("forward", ssa.NoArgsNoRet, ssa.InGo)
+		b := fn.MakeBody(1)
+		out := b.AllocaT(prog.Type(types.NewStruct(fields, nil), ssa.InGo))
+		ctx.loadCoroAwaitBorrowedResult(b, out, results)
+		b.Return()
+		b.EndBuild()
+		b.Dispose()
+		body := module.NamedFunction("forward").String()
+		if strings.Contains(body, "store volatile ptr null") {
+			t.Fatalf("shared caller output was retired by a forwarding load:\n%s", body)
+		}
+	}
+}
