@@ -687,6 +687,7 @@ func (p *context) compileCoroManagedInterfaceAwait(
 			descriptorNonNil:        true,
 			entry:                   instructionPlan.dispatchEntry,
 			nativeResult:            instructionPlan.directOutcomeNativeResult,
+			delivery:                p.coroDynamicDeliveryGuard(call),
 		},
 	)
 	reflectCheck := p.reflectTypeMethodCheck(call.Common(), call.Common().Method)
@@ -813,6 +814,9 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 	if err != nil {
 		return llssa.Nil, fmt.Errorf("managed interface descriptor: resolve managed target: %w", err)
 	}
+	if err := p.immutableEmissionUniverse().coroProgramIR.validateInterfaceDeliveryReceiver(target); err != nil {
+		return llssa.Nil, err
+	}
 	entry := p.mustFunctionSymbol(target)
 	logicalSignature := coroInterfaceDispatchCanonicalSignature(coroInterfaceDispatchCallableSignature(interfaceEntrySignature))
 	if err := validateCoroManagedInterfaceDescriptorTarget(
@@ -870,6 +874,10 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 	}
 	// The descriptor environment is the dynamic receiver supplied by
 	// IfacePtrData, so NoCapture must remain clear even for a top-level method.
+	delivery := p.coroInterfaceDeliveryDescriptorOptions(entry, logicalSignature, receiver)
+	if delivery != nil {
+		flags |= llssa.CoroDispatchFlagHasDelivery
+	}
 	descriptor := p.pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
 		Version:      coroPlainDispatchVersion,
 		Flags:        flags,
@@ -880,6 +888,7 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 		CoroEntry:    coroEntry,
 		CodeEntry:    physical.Expr,
 		Result:       p.prog.Type(abi.resultSlotType, llssa.InC),
+		Delivery:     delivery,
 	})
 	if p.coroPlainDescriptors == nil {
 		p.coroPlainDescriptors = make(map[string]llssa.Expr)

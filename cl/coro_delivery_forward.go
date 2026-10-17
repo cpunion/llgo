@@ -285,17 +285,6 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 		if err != nil {
 			panic(err)
 		}
-		prefix := 0
-		physicalSignature := signature
-		switch primary.plan.ManagedEntry {
-		case coro.ManagedEntryPlain:
-		case coro.ManagedEntryOutcomePlain:
-			prefix, physicalSignature = 3, newOutcomePlainPhysicalABI(signature).physicalSig
-		case coro.ManagedEntryCoroutine:
-			prefix, physicalSignature = 2, coroPhysicalEntrySignature(signature)
-		default:
-			panic("forwarded helper lost its managed primary")
-		}
 		arguments := []llssa.CoroHelperViewArgument{{Parameter: 0}, {Parameter: -1, Constant: p.prog.Nil(p.prog.VoidPtr())}}
 		literals := p.pkg.FuncOf(primary.physical.Name()).NewBuilder()
 		defer literals.Dispose()
@@ -317,8 +306,7 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 			arguments = append(arguments, mapped)
 		}
 		symbol := coroDeliveryViewSymbol(p.emissionUniverse.finalIdentity(recipe.producer))
-		physical := p.pkg.NewCoroHelperView(symbol, physicalSignature, primary.physical, prefix, arguments)
-		return coroDeliveryHelperPrimary{plan: primary.plan, signature: signature, physical: physical.Expr, view: symbol}
+		return p.coroDeliveryTypedHelperView(primary, signature, symbol, arguments)
 	}
 	target := recipe.initializer
 	if ordinal == 1 {
@@ -365,6 +353,21 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 	}
 	physical := p.pkg.NewFuncEx(helper.symbol(), physicalSignature, llssa.InGo, false, false)
 	return coroDeliveryHelperPrimary{plan: plan, signature: signature, physical: physical.Expr, view: helper.view.Symbol}
+}
+
+func (p *context) coroDeliveryTypedHelperView(primary coroDeliveryHelperPrimary, signature *types.Signature, symbol string, arguments []llssa.CoroHelperViewArgument) coroDeliveryHelperPrimary {
+	prefix, physicalSignature := 0, signature
+	switch primary.plan.ManagedEntry {
+	case coro.ManagedEntryPlain:
+	case coro.ManagedEntryOutcomePlain:
+		prefix, physicalSignature = 3, newOutcomePlainPhysicalABI(signature).physicalSig
+	case coro.ManagedEntryCoroutine:
+		prefix, physicalSignature = 2, coroPhysicalEntrySignature(signature)
+	default:
+		panic("delivery view lost its managed primary")
+	}
+	physical := p.pkg.NewCoroHelperView(symbol, physicalSignature, primary.physical, prefix, arguments)
+	return coroDeliveryHelperPrimary{plan: primary.plan, signature: signature, physical: physical.Expr, view: symbol}
 }
 
 func (p *context) emitCoroForwardedDeliveryHelper(b llssa.Builder, recipe coroSourceDeliveryRecipe, ordinal int, signature *types.Signature) coroManagedCallable {

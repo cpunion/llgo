@@ -314,7 +314,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
 				call, ok := instruction.(ssa.CallInstruction)
-				if !ok || call.Common() == nil || call.Common().IsInvoke() {
+				if !ok || call.Common() == nil {
 					continue
 				}
 				frozen, present := ir.callPlans[call]

@@ -2424,6 +2424,11 @@ func planCoroPhysicalControlInstruction(
 				result.controlFailure = "invalid exact interface call: " + err.Error()
 				return
 			}
+			if callPlanned && callPlan.ResultDelivery {
+				// Custody and the ordinary invocation must use the same immutable
+				// receiver context and descriptor capability transaction.
+				exact = false
+			}
 			if exact && coroExactInterfaceTargetDirectPlain(targetPlan) {
 				result.control = coroPhysicalControlExactInterfaceCall
 				result.controlTarget = target

@@ -31,6 +31,17 @@ import "unsafe"
 func AllocU(size uintptr) unsafe.Pointer { return nil }
 func AssertNilDeref(value bool) {}
 func PanicWrapNilPointer(value bool, receiver, method string) {}
+type iface struct { tab, data unsafe.Pointer }
+func IfacePtrData(value iface) unsafe.Pointer { return value.data }
+func memequal32(a, b unsafe.Pointer) bool { return true }
+func memequal64(a, b unsafe.Pointer) bool { return true }
+func memequalptr(a, b unsafe.Pointer) bool { return true }
+func interequal(a, b unsafe.Pointer) bool { return true }
+func nilinterequal(a, b unsafe.Pointer) bool { return true }
+func strequal(a, b unsafe.Pointer) bool { return true }
+func memequal8(a, b unsafe.Pointer) bool { return true }
+func structequal(a, b unsafe.Pointer) bool { return true }
+func memequal0(a, b unsafe.Pointer) bool { return true }
 `)
 				foo := source.addPackage(t, "foo", `package foo
 import "unsafe"
@@ -61,6 +72,10 @@ func (Receiver) Open(a,b int) (int,error) { return Acquire(a,b) }
 var PublishedMethod = Receiver.Open
 type Token int
 func (token Token) Bound(b int) (int,error) { return Acquire(int(token),b) }
+type Opener interface { Open(int,int) (int,error) }
+type PlainReceiver struct{}
+func (PlainReceiver) Open(a,b int) (int,error) { return a+b,nil }
+func InterfaceOwner(open Opener) { open.Open(11,12) }
 var PublishedCaptured = Token(17).Bound
 func Root() {
  Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Changed(7); PublishedPermutation(8,9); PublishedIdentity(10,11); FixedPath(); PublishedPath()
@@ -75,6 +90,10 @@ func Root() {
  token = 99
  captured(7)
  PublishedCaptured(8)
+ var open Opener = receiver
+ open.Open(9,10)
+ InterfaceOwner(open)
+ InterfaceOwner(PlainReceiver{})
 }
 `)
 				source.ssa.Build()
@@ -128,6 +147,20 @@ func Root() {
 				if captures != 1 {
 					t.Fatalf("bound captured receiver recipes=%d, want one", captures)
 				}
+				receiverSnapshotRejections := 0
+				for _, function := range u.Functions() {
+					if function.Name() != "Bound" || function.Signature.Recv() == nil ||
+						function.Signature.Recv().Type().String() != "*foo.Token" {
+						continue
+					}
+					receiverSnapshotRejections++
+					if u.coroProgramIR.validateInterfaceDeliveryReceiver(function) == nil {
+						t.Fatal("unevaluated pointer-to-value receiver acquired a false interface capability")
+					}
+				}
+				if receiverSnapshotRejections != 1 {
+					t.Fatalf("receiver snapshot negative gates=%d, want one real pointer wrapper", receiverSnapshotRejections)
+				}
 				if _, present, _ := u.coroProgramIR.sourceDelivery(foo.ssa.Func("Changed")); present {
 					t.Fatal("changed return acquired resource custody")
 				}
@@ -141,11 +174,15 @@ func Root() {
 					{Function: foo.ssa.Func("Root"), Demand: coro.AsyncDemand}, {Function: foo.ssa.Func("init"), Demand: coro.AsyncDemand},
 				}, coro.SSAConfig{
 					EmissionUniverse: inventory, FunctionIDs: ids, MaxPlainInstructions: -1, OutcomeMode: coro.OutcomeExplicitStatus,
+					DynamicResolution: coro.DynamicCHAClosed,
 					ResolveFunction: func(function *ssa.Function) (*ssa.Function, bool, error) {
 						canonical, present := u.Resolve(function)
 						return canonical, present, nil
 					},
 					ClassifyLocalBody: u.CoroLocalBodyFacts, ClassifyLoweredCalls: u.CoroLoweredCalls,
+					ClassifyDemandReferences:       u.CoroDemandReferences,
+					ClassifySyncDemandReferences:   u.CoroSyncDemandReferences,
+					ClassifyManagedValueReferences: u.CoroPlanningMetadata().ManagedValueReferences,
 					ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 						if fn == foo.ssa.Func("Acquire") || fn == foo.ssa.Func("AcquirePath") || asyncHelper && fn == foo.ssa.Func("drop") {
 							return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
@@ -159,12 +196,34 @@ func Root() {
 					ClassifyStaticFunctionReferenceCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, arg int) (bool, error) {
 						return u.CoroStaticFunctionReferenceCallArgument(call, arg)
 					},
-					ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (coro.UnknownTarget, error) {
+					ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (coro.UnknownTarget, error) {
+						if call.Common().IsInvoke() {
+							return coro.UnknownManagedInterfaceDispatch, nil
+						}
 						return coro.UnknownManagedDispatch, nil
 					},
 				})
 				if err != nil {
 					t.Fatal(err)
+				}
+				for _, owner := range []*ssa.Function{foo.ssa.Func("Root"), foo.ssa.Func("InterfaceOwner")} {
+					for _, block := range owner.Blocks {
+						for _, instruction := range block.Instrs {
+							call, ok := instruction.(*ssa.Call)
+							if !ok || !call.Common().IsInvoke() {
+								continue
+							}
+							fact, found := plan.CallPlan(call)
+							if !found || !fact.ResultDelivery || u.coroProgramIR.callPlans[call].dynamicDelivery == nil {
+								t.Fatalf("%s interface lost conditional receiver-free custody: %+v", owner, fact)
+							}
+							if box, ok := call.Common().Value.(*ssa.MakeInterface); ok {
+								if elided, err := coroProveExactInterfaceMakeElision(plan, box); err != nil || elided {
+									t.Fatalf("resource receiver context was elided: %t: %v", elided, err)
+								}
+							}
+						}
+					}
 				}
 				for _, owner := range []*ssa.Function{foo.ssa.Func("init"), foo.ssa.Func("Root")} {
 					for _, block := range owner.Blocks {
@@ -220,6 +279,21 @@ func Root() {
 					}
 				}
 				helperPlan, _ := plan.FunctionPlan(foo.ssa.Func("drop"))
+				interfaceViews := 0
+				for _, function := range u.Functions() {
+					if function.Name() != "Open" || function.Signature.Recv() == nil ||
+						function.Signature.Recv().Type().String() != "*foo.Receiver" {
+						continue
+					}
+					view := module.NamedFunction("__llgo_coro_delivery_interface_view." + emissionDigest(u.finalIdentity(function)) + ".drop")
+					if view.IsNil() || view.BasicBlocksCount() != 1 {
+						t.Fatal("interface receiver lost its frame-free typed helper view")
+					}
+					interfaceViews++
+				}
+				if interfaceViews != 1 {
+					t.Fatalf("interface typed receiver views=%d, want one", interfaceViews)
+				}
 				prefix := 0
 				helperName := "foo.drop"
 				switch helperPlan.ManagedEntry {

@@ -182,6 +182,22 @@ This is not an old-compiler/runtime-only rerun. The broader method/interface
 source gate still fails on its one unresolved interface-consumer requirement;
 no feature PR is open and no full resource/standard-library completion is claimed.
 
+Local interface follow-up now freezes conditional consumers for invokes and
+routes resource calls through the existing capability-aware descriptor/guard.
+Typed drop views compose directly to the real helper, dropping the normalized
+receiver argument when unused; pointer identity can be retained without reading
+its pointee. No runtime field, mode, directive or new cleanup protocol is added.
+The source-fact method gate passes. The expanded native/wasm32 physical and linked
+FD gates are **pending**, so this is not integrated or accepted interface support.
+Receiver-dependent value wrappers still need an evaluated snapshot; descriptor
+publication now rejects that boundary instead of silently omitting custody.
+
+The unchanged Go 1.27 `fixedbugs/issue79186.go` RWMutex input passes three runs
+each under Go, frozen v120 and v154 in a separate retained-image control matrix.
+Source-after matches both snapshots, with a 1201.0MiB guarded tree peak. The
+original shard4 process-exit -1 remains an independent unresolved failure; these
+nine controls do not erase or explain it.
+
 ### Latest executable refresh: v117/v118/v120
 
 The v117 complete `test/go` cohort passes **271/271**, with zero failures or

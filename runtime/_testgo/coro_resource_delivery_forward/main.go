@@ -111,6 +111,13 @@ type factory uint32
 
 func (token factory) acquire(mode uint32) int32 { return acquire(uint32(token), mode) }
 
+func (factory) fixedAcquire(mode uint32) int32 { return acquire(17, mode) }
+
+type resourceFactory interface{ fixedAcquire(uint32) int32 }
+
+func interfaceOwner(owner resourceFactory)         { owner.fixedAcquire(1); escaped() }
+func interfaceDeferredOwner(owner resourceFactory) { defer owner.fixedAcquire(1) }
+
 func boundOwner() {
 	token := factory(opened() + 15) // Runtime value 17, not a folded capture.
 	bound := token.acquire
@@ -302,6 +309,19 @@ func main() {
 			go dynamicDeferredOwner(bound)
 		}
 		bound = nil
+	case 21, 22:
+		token := factory(opened() + 15)
+		var owner resourceFactory = token
+		token = 99
+		if token != 99 {
+			escaped()
+		}
+		if mode == 21 {
+			go interfaceOwner(owner)
+		} else {
+			go interfaceDeferredOwner(owner)
+		}
+		owner = nil
 	default:
 		escaped()
 	}

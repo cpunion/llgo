@@ -373,6 +373,15 @@ receiver 来自运行时 C atomic 读取，绑定后修改原变量，再在 GC/
 跨 archive 的 captured-result 新增矩阵、reflect/FFI 二次交接和 public Open/File
 仍未完成，不得由这些 passing gates 推导为已具备完整标准库资源兼容性。
 
+接口 follow-up 复用已有 method descriptor 的可选 delivery tail、conditional
+helper edges 和 owner-local guard，源级 signature 保持 receiver-free，drop view
+直接投影到真实 helper。清理不需要的 normalized receiver 可以消去；需要的指针
+receiver 只保留指针 identity，不重新读取 pointee。资源调用暂不走 exact-interface
+装箱消除，以保证调用和 custody 使用同一 env/capability transaction。
+需要先求值再保存的 value-method pointer wrapper 仍是未完成项；缺少这项 binding
+时明确拒绝 descriptor publication，不能退化成没有资源能力的普通调用。
+新增接口 physical/FD 矩阵尚待验收，这不是完整接口资源兼容性的声明。
+
 ## 4. 方案比较
 
 | 方案 | 优点 | 主要问题 | 结论 |
