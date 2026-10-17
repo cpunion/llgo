@@ -88,7 +88,7 @@ func AllocU(size uintptr) unsafe.Pointer { return nil }
 			}
 			counts := 0
 			for call, frozen := range u.coroProgramIR.callPlans {
-				if !frozen.resultState.owned {
+				if !frozen.plan.ResultStateOutputBorrowed {
 					continue
 				}
 				counts++

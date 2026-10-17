@@ -1751,7 +1751,7 @@ func planCoroPhysicalInstruction(
 				switch {
 				case frozen.opcode == llgoCoroBorrowResult:
 					result.recipe = coroPhysicalInstructionBorrowedResult
-				case frozen.resultState.owned:
+				case frozen.plan.ResultStateOutputBorrowed:
 					result.recipe = coroPhysicalInstructionResultState
 				case frozen.opcode == llgoAlloca &&
 					frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineNoSuspend:

@@ -692,6 +692,10 @@ type CoroCallSitePlan struct {
 	// later than this logical call completes. Dynamic, deferred, spawned,
 	// cross-package, async-completion, and retained-memory calls keep this false.
 	ArgumentsBorrowedUntilCompletion bool
+	// ResultStateOutputBorrowed authorizes only operand zero of one admitted
+	// private result-State bind/load. The retained State operand is never
+	// borrowed, so its managed allocation cannot move into the producer frame.
+	ResultStateOutputBorrowed bool
 	// RawPlainSynchronousIntrinsic proves that this exact direct llgo.syscall
 	// occurrence has the uintptr word ABI accepted by ordinary synchronous
 	// intrinsic lowering. It authorizes only a separately proven raw/plain

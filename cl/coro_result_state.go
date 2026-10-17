@@ -13,14 +13,13 @@ import (
 type coroResultStateAccess struct {
 	result *types.Struct
 	bind   bool
-	owned  bool
 }
 
 func sameCoroResultStateAccess(a, b coroResultStateAccess) bool {
 	if a.result == nil || b.result == nil {
-		return a.result == b.result && a.bind == b.bind && a.owned == b.owned
+		return a.result == b.result && a.bind == b.bind
 	}
-	return a.bind == b.bind && a.owned == b.owned && types.Identical(a.result, b.result)
+	return a.bind == b.bind && types.Identical(a.result, b.result)
 }
 
 func coroResultStateAllocation(value ssa.Value) *ssa.Alloc {
@@ -155,7 +154,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryStateAccesses(ir *coroProgramI
 		if !valid {
 			return fmt.Errorf("result state access %q is outside its exact owned borrow or drop helper", call.String())
 		}
-		frozen.resultState.owned = true
+		frozen.plan.ResultStateOutputBorrowed = true
 		if err := builder.freezeDeliveryConsumerSite(ir, call, frozen); err != nil {
 			return err
 		}
@@ -183,12 +182,13 @@ func (ir *coroProgramIR) borrowedResultStateArgument(call *ssa.Call, index int) 
 	if ir == nil || index != 0 {
 		return false
 	}
-	return ir.callPlans[call].resultState.owned
+	return ir.callPlans[call].plan.ResultStateOutputBorrowed
 }
 
 func (p *context) compileCoroResultStateAccess(b llssa.Builder, call *ssa.Call) llssa.Expr {
-	access := p.emissionUniverse.coroProgramIR.callPlans[call].resultState
-	if !access.owned || access.result == nil {
+	frozen := p.emissionUniverse.coroProgramIR.callPlans[call]
+	access := frozen.resultState
+	if !frozen.plan.ResultStateOutputBorrowed || access.result == nil {
 		panic("result state access has no frozen ownership proof")
 	}
 	out := p.compileValue(b, call.Common().Args[0])

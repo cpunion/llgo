@@ -118,8 +118,10 @@ func coroBorrowedAllocationProofConfig(
 ) coro.SSABorrowedAllocationConfig {
 	return coro.SSABorrowedAllocationConfig{
 		BorrowedCallArgument: func(call *ssa.Call, index int) bool {
-			if owner, ok := universe.(*EmissionUniverse); ok && owner.coroProgramIR.borrowedResultStateArgument(call, index) {
-				return true
+			if index == 0 {
+				if site, present, err := universe.CoroCallSitePlan(call); err == nil && present && site.ResultStateOutputBorrowed {
+					return true
+				}
 			}
 			borrowed, err := coroCallArgumentsBorrowedUntilCompletion(universe, call)
 			return err == nil && borrowed
