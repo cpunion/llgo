@@ -56,8 +56,9 @@ The earlier local 220/220 passing cohort does not erase this failure or prove
 it unrelated to the result-slot change. The PR must not merge on that evidence.
 Native resource gates now support opt-in retention of their exact linked
 images, and CI records compiler/image hashes and library versions on failure.
-Assertions and execution deadlines are unchanged. Reproduction and root-cause
-analysis remain open; image retention is diagnostic infrastructure, not a fix.
+Assertions and execution deadlines are unchanged. Follow-up head `427e94da4`
+passes all 18 CI jobs in run `39010261089`; that alone is not a causal fix.
+The deterministic shutdown-order investigation below supplies separate evidence.
 
 A source call with no return values now uses a nil output address through
 direct coroutine, managed descriptor, synchronous outcome and original-init
@@ -88,6 +89,50 @@ The failed whole profiling cohort remains failed even though all subsequent
 resource/timer subsets pass; its peak is 7334.2MiB under a 16GiB guard. Neither
 the global no-elision experiment nor unproven early optimization passes were
 merged. Full-suite and quiet performance evaluation remain outstanding.
+
+### Broadcast shutdown before any domain drain (v149/v150)
+
+A fixed-topology extension of the forwarded-resource fixture establishes P1
+as the static main/worker route and P2 as the sentinel route. The sentinel
+shrinks GOMAXPROCS to one before publishing readiness, keeping existing routes
+alive but disabling later transfers. The main remains runnable while the peer
+is placed; no sleep or LockOSThread is used. Runtime route assertions and a
+pre-return marker distinguish topology setup from shutdown.
+
+The old runtime drains P1 before publishing P2 shutdown at target close. Its
+worker waits for P2's shutdown defer, so that ordering has a wait cycle. Frozen
+v149 (`2c29cbbbf`, manifest SHA-256
+`ae158aebfe63084688e6148fc8e6edfcc0fba3f6f60a3e6da4486b299ad3bfa7`)
+reaches the topology-ready marker and times out at the unchanged 30-second
+execution bound. Source-after matches. The failed executable SHA-256 is
+`3dc9dd7bb9976836cd24448de95fec28578771c5ab619ba0379f6d3a76bff74d`.
+
+The correction splits publication from strong join, using the existing atomic
+stop ingress and coordinator lifecycle. Both the normal FinishMain path and
+the pending-source runner reentry publish peer stop before local cleanup.
+All domains can then drain concurrently; joining owners, retiring sources and
+stopping workers remain in the existing final close. Peers do not consume a
+new non-atomic shutdown flag. Shutdown cleanup may resize the logical execution
+quota without starting another physical owner after the barrier is sealed.
+
+With the **same v147 compiler and byte-identical fixture**, frozen v150
+(`df4e42dff`, manifest SHA-256
+`bdbbd9484ced6c0ac3d38ebd4257d543af21ecb326740365d8da0f6f3cd7f8c8`)
+passes **16/16** fixed-topology executions and **96/96** original mode-3 runs
+(32 each at P=1/2/4). Source-after matches; executable SHA-256 is
+`cf92592abad3ed6e4600ffc020372d77a4ddde0534321c7f69fb4138916e639e`.
+The guarded build/run tree peaks at 1245.3MiB. The named-source program adapter
+passes all 41 tests with race/shuffle for ten repetitions; 53 selected core
+shutdown/cancellation/ingress/quota tests pass three race/shuffle repetitions,
+and four architecture/target-selection tests pass. An initial model launch
+before snapshot extraction completed is retained as an infrastructure failure,
+not a semantic test result; the corrected launch uses the completed snapshot.
+
+This establishes and fixes a shutdown-order defect in the same resource-defer
+path, not a proof that every historical timeout has this single cause. A second
+fixed-topology mode additionally exercises GOMAXPROCS in cancellation cleanup;
+its complete borrowed/original/forwarded resource refresh is still pending.
+Final-head CI, review and platform gates remain required before integration.
 
 ### Latest executable refresh: v117/v118/v120
 
