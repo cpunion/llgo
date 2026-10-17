@@ -54,7 +54,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		if !present {
 			return nil
 		}
-		arguments, base, composed := composeCoroDeliveryForwardingArguments(shape, target)
+		sourceArguments, base, composed := composeCoroDeliveryForwardingArguments(shape, target)
 		if !composed {
 			return nil
 		}
@@ -62,6 +62,12 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 			return err
 		} else if hasEnv {
 			return nil // This projection does not invent a callee environment.
+		}
+		arguments, projected, err := builder.freezeDeliveryForwardingArguments(function, sourceArguments)
+		if err != nil {
+			return err
+		} else if !projected {
+			return nil
 		}
 		signature, err := u.coroPhysicalSourceSignature(function)
 		if err != nil {
@@ -75,10 +81,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		// to use equal-width words. Only the existing exact transport proof
 		// grants the zero-allocation retag used by helper ABI views.
 		for _, argument := range arguments {
-			if argument.capture != nil || argument.sourceParameter < 0 && argument.constant == nil {
-				return nil // A required capture still needs its frozen typed view.
-			}
-			if argument.sourceParameter >= 0 && coroPhysicalTransportTypeKey(u, argument.projectedType) != coroPhysicalTransportTypeKey(u, argument.valueType) {
+			if (argument.sourceParameter >= 0 || argument.capture != nil) && coroPhysicalTransportTypeKey(u, argument.projectedType) != coroPhysicalTransportTypeKey(u, argument.valueType) {
 				return nil
 			}
 		}
@@ -138,7 +141,7 @@ func composeCoroDeliveryForwardingArguments(shape *coroForwardingSourceShape, ta
 	}
 	arguments := make([]coroForwardingSourceArgument, len(target.forwardArgs))
 	for index, projection := range target.forwardArgs {
-		argument := projection
+		argument := projection.coroForwardingSourceArgument
 		if projection.sourceParameter >= 0 {
 			if projection.sourceParameter >= len(shape.args) {
 				return nil, nil, false
@@ -163,6 +166,55 @@ func composeCoroDeliveryForwardingArguments(shape *coroForwardingSourceShape, ta
 	return arguments, target.forwardBase, true
 }
 
+func (builder coroProgramIRBuilder) freezeDeliveryForwardingArguments(function *ssa.Function, source []coroForwardingSourceArgument) ([]coroDeliveryForwardArgument, bool, error) {
+	u := builder.canonical.universe
+	arguments := make([]coroDeliveryForwardArgument, len(source))
+	for index, projection := range source {
+		argument := coroDeliveryForwardArgument{coroForwardingSourceArgument: projection}
+		switch {
+		case projection.sourceParameter >= 0, projection.constant != nil:
+		case projection.capture != nil:
+			environment, hasEnv, err := u.closureEnvironments.entryEnvironment(function)
+			if err != nil {
+				return nil, false, err
+			}
+			if !hasEnv {
+				if !u.closureEnvironments.elidesZeroSizedFreeVar(function, projection.capture) || u.prog == nil ||
+					u.prog.SizeOf(u.prog.Type(projection.capture.Type(), llssa.InGo)) != 0 {
+					return nil, false, nil // Never replace an elided pointer with nil.
+				}
+				break
+			}
+			pointer, ok := environment.Type().(*types.Pointer)
+			if !ok {
+				return nil, false, fmt.Errorf("captured delivery value has no typed environment")
+			}
+			structure, ok := pointer.Elem().Underlying().(*types.Struct)
+			if !ok || structure.NumFields() != len(function.FreeVars) {
+				return nil, false, fmt.Errorf("captured delivery value has a conflicting frozen environment")
+			}
+			found := false
+			for field, free := range function.FreeVars {
+				if free == projection.capture {
+					argument.environment, argument.environmentField, found = environment, field, true
+					break
+				}
+			}
+			if !found {
+				return nil, false, fmt.Errorf("captured delivery value belongs to a different function")
+			}
+			effective := u.effectiveType(u.ownerOf(function), function, projection.capture.Type())
+			if !types.Identical(structure.Field(argument.environmentField).Type(), effective) {
+				return nil, false, fmt.Errorf("captured delivery field does not match its frozen value type")
+			}
+		default:
+			return nil, false, nil // A required receiver evaluation needs a snapshot.
+		}
+		arguments[index] = argument
+	}
+	return arguments, true, nil
+}
+
 // Apply the frozen source mapping to the producer arguments of a drop call.
 // The result address is unchanged. The terminal producer is context-free, so
 // its helper receives nil, never a forwarding wrapper's unrelated funcval env.
@@ -179,11 +231,22 @@ func (p *context) coroForwardedDeliveryArguments(b llssa.Builder, recipe coroSou
 				for _, field := range argument.fieldPath {
 					value = b.Field(value, field)
 				}
-				if !types.Identical(value.RawType(), argument.valueType) {
-					value = b.ChangeType(p.prog.Type(argument.valueType, llssa.InGo), value)
+			} else if argument.capture != nil {
+				if argument.environment == nil {
+					value = p.prog.Zero(p.prog.Type(argument.valueType, llssa.InGo))
+				} else {
+					address := b.Convert(p.prog.Type(argument.environment.Type(), llssa.InGo), args[1])
+					address = b.FieldAddrKnownNonNil(address, argument.environmentField)
+					for _, field := range argument.fieldPath {
+						address = b.FieldAddrKnownNonNil(address, field)
+					}
+					value = b.LoadKnownNonNil(address)
 				}
 			} else {
 				value = p.compileValueAs(b, argument.constant, argument.valueType)
+			}
+			if !types.Identical(value.RawType(), argument.valueType) {
+				value = b.ChangeType(p.prog.Type(argument.valueType, llssa.InGo), value)
 			}
 			forwarded = append(forwarded, value)
 		}
@@ -241,6 +304,13 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 			if argument.sourceParameter >= 0 {
 				mapped.Parameter = argument.sourceParameter + 2
 				mapped.Fields = argument.fieldPath
+			} else if argument.capture != nil {
+				if argument.environment == nil {
+					mapped.Constant = p.prog.Zero(p.prog.Type(argument.valueType, llssa.InGo))
+				} else {
+					mapped.Parameter, mapped.Environment = 1, p.prog.Type(argument.environment.Type(), llssa.InGo)
+					mapped.Fields = append([]int{argument.environmentField}, argument.fieldPath...)
+				}
 			} else {
 				mapped.Constant = literals.Const(argument.constant.Value, p.prog.Type(argument.valueType, llssa.InGo))
 			}

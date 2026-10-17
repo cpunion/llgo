@@ -95,7 +95,7 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 }
 
 func TestCoroResourceDeliveryForwardAcceptance(t *testing.T) {
-	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15, 16, 17})
+	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20})
 }
 
 func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []int) {
@@ -146,6 +146,9 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 		"typed resource delivery normal, discarded and canceled passed", // Large captured dynamic resource defer.
 		"cross-P shutdown topology ready\ntyped resource delivery normal, discarded and canceled passed",
 		"cross-P shutdown topology ready\ntyped resource delivery normal, discarded and canceled passed", // Resize during shutdown cleanup.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Bound method: receiver value survives mutation.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Dynamic bound method with owned environment.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred dynamic bound method.
 	}
 	for _, mode := range modes {
 		expected := expectedByMode[mode]

@@ -43,6 +43,9 @@ func checkAlive(int32)
 //go:linkname blocked C.llgo_delivery_blocked
 func blocked() int32
 
+//go:linkname opened C.llgo_delivery_opened
+func opened() int32
+
 //go:linkname closing C.llgo_delivery_closing
 func closing() int32
 
@@ -65,7 +68,11 @@ func escaped()
 func currentRoute() coro.RouteID
 
 func initialize(out *result) { out.R0 = -1 }
-func drop(out *result, _ unsafe.Pointer, token, mode uint32) {
+func drop(out *result, env unsafe.Pointer, token, mode uint32) {
+	if env != nil {
+		println("context-free base drop received a forwarding environment")
+		escaped()
+	}
 	if token != 17 {
 		println("forwarded small drop token mismatch", token, mode)
 		escaped()
@@ -99,6 +106,21 @@ func noinline(mode uint32) int32 { return chained(mode) }
 
 var published = chained
 var publishedPermutation = permuted
+
+type factory uint32
+
+func (token factory) acquire(mode uint32) int32 { return acquire(uint32(token), mode) }
+
+func boundOwner() {
+	token := factory(opened() + 15) // Runtime value 17, not a folded capture.
+	bound := token.acquire
+	token = 99
+	if token != 99 {
+		escaped()
+	}
+	bound(1)
+	escaped()
+}
 
 func initializeLarge(out *largeResult) { out.R0 = -1 }
 func checkLarge(payload *[131073]byte, owner *[128]byte) {
@@ -265,6 +287,21 @@ func main() {
 		go largeDynamicDeferredOwner(publishedLarge)
 	case 16, 17:
 		go crossPDeferredOwner()
+	case 18:
+		go boundOwner()
+	case 19, 20:
+		token := factory(opened() + 15)
+		bound := token.acquire
+		token = 99
+		if token != 99 {
+			escaped()
+		}
+		if mode == 19 {
+			go dynamicOwner(bound)
+		} else {
+			go dynamicDeferredOwner(bound)
+		}
+		bound = nil
 	default:
 		escaped()
 	}

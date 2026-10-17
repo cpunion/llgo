@@ -59,6 +59,9 @@ var PublishedPath = FixedPath
 type Receiver struct { Token int }
 func (Receiver) Open(a,b int) (int,error) { return Acquire(a,b) }
 var PublishedMethod = Receiver.Open
+type Token int
+func (token Token) Bound(b int) (int,error) { return Acquire(int(token),b) }
+var PublishedCaptured = Token(17).Bound
 func Root() {
  Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Changed(7); PublishedPermutation(8,9); PublishedIdentity(10,11); FixedPath(); PublishedPath()
  receiver := Receiver{Token:37}
@@ -67,6 +70,11 @@ func Root() {
  receiver.Token=99
  bound(3,4)
  PublishedMethod(receiver,5,6)
+ token := Token(17)
+ captured := token.Bound
+ token = 99
+ captured(7)
+ PublishedCaptured(8)
 }
 `)
 				source.ssa.Build()
@@ -105,6 +113,21 @@ func Root() {
 				if methods < 4 {
 					t.Fatalf("only %d declared/bound/expression method recipes", methods)
 				}
+				captures := 0
+				for _, function := range u.Functions() {
+					if function.Name() != "Bound$bound" {
+						continue
+					}
+					recipe, present, err := u.coroProgramIR.sourceDelivery(function)
+					if err != nil || !present || len(recipe.forwardArgs) != 2 || recipe.forwardArgs[0].capture == nil ||
+						recipe.forwardArgs[0].environment == nil || recipe.forwardArgs[0].environmentField != 0 || recipe.forwardArgs[1].sourceParameter != 0 {
+						t.Fatalf("%s lost its frozen immutable receiver: %+v: %v", function, recipe, err)
+					}
+					captures++
+				}
+				if captures != 1 {
+					t.Fatalf("bound captured receiver recipes=%d, want one", captures)
+				}
 				if _, present, _ := u.coroProgramIR.sourceDelivery(foo.ssa.Func("Changed")); present {
 					t.Fatal("changed return acquired resource custody")
 				}
@@ -118,6 +141,10 @@ func Root() {
 					{Function: foo.ssa.Func("Root"), Demand: coro.AsyncDemand}, {Function: foo.ssa.Func("init"), Demand: coro.AsyncDemand},
 				}, coro.SSAConfig{
 					EmissionUniverse: inventory, FunctionIDs: ids, MaxPlainInstructions: -1, OutcomeMode: coro.OutcomeExplicitStatus,
+					ResolveFunction: func(function *ssa.Function) (*ssa.Function, bool, error) {
+						canonical, present := u.Resolve(function)
+						return canonical, present, nil
+					},
 					ClassifyLocalBody: u.CoroLocalBodyFacts, ClassifyLoweredCalls: u.CoroLoweredCalls,
 					ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 						if fn == foo.ssa.Func("Acquire") || fn == foo.ssa.Func("AcquirePath") || asyncHelper && fn == foo.ssa.Func("drop") {
@@ -139,13 +166,38 @@ func Root() {
 				if err != nil {
 					t.Fatal(err)
 				}
+				for _, owner := range []*ssa.Function{foo.ssa.Func("init"), foo.ssa.Func("Root")} {
+					for _, block := range owner.Blocks {
+						for _, instruction := range block.Instrs {
+							closure, ok := instruction.(*ssa.MakeClosure)
+							if !ok {
+								continue
+							}
+							raw := closure.Fn.(*ssa.Function)
+							canonical, _ := u.Resolve(raw)
+							id, _ := plan.FunctionID(canonical)
+							value, _ := plan.ValuePlan(closure)
+							present := false
+							for _, leaf := range value.Funcs {
+								for _, target := range leaf.Targets {
+									present = present || target == id
+								}
+							}
+							if !present {
+								t.Fatalf("closure %s canonical target %s (%s) absent from %+v", raw, canonical, id, value)
+							}
+						}
+					}
+				}
 				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline", "FixedPath"} {
 					guard, err := prepareCoroDeliveryFunctionPlan(foo.ssa.Func(name), plan, u.coroProgramIR, u)
 					if err != nil || guard == nil || guard.fallback == nil || len(guard.calls) != 1 || !guard.calls[0].forward {
 						t.Fatalf("%s guard lost single incoming/fallback owner: %+v: %v", name, guard, err)
 					}
 				}
-				compilation := &Compilation{CoroPlan: plan, EmissionUniverse: u}
+				// Captured globals use the real non-moving collector contract;
+				// unprofiled/moving stores remain rejected by their own gates.
+				compilation := &Compilation{CoroPlan: plan, EmissionUniverse: u, CoroFrameRetentionABI: CoroFrameRetentionParkABIV2}
 				enableCoroChildAwaitCompilation(compilation)
 				compilation.PanicABI = coro.PanicExplicitStatusABIV0
 				pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, foo.ssa, []*ast.File{foo.file}, goembed.VarMap{}, PackageOptions{Compilation: compilation})
@@ -177,6 +229,33 @@ func Root() {
 				case coro.ManagedEntryOutcomePlain:
 					prefix = 3
 					helperName += coroOutcomePlainPrimarySuffix
+				}
+				for _, function := range u.Functions() {
+					if function.Name() != "Bound$bound" {
+						continue
+					}
+					view := module.NamedFunction(coroDeliveryViewSymbol(u.finalIdentity(function)))
+					if view.IsNil() || view.BasicBlocksCount() != 1 {
+						t.Fatal("bound receiver lost its frame-free typed drop view")
+					}
+					loads, calls := 0, 0
+					for instruction := view.FirstBasicBlock().FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+						switch instruction.InstructionOpcode() {
+						case llvm.Load:
+							loads++
+						case llvm.Alloca, llvm.Store:
+							t.Fatal("bound receiver drop view added storage instead of reading its existing context")
+						case llvm.Call:
+							calls++
+							if instruction.CalledValue().Name() != helperName || !instruction.Operand(prefix+1).IsNull() ||
+								instruction.Operand(prefix+2).InstructionOpcode() != llvm.Load || instruction.Operand(prefix+3).C != view.Param(prefix+2).C {
+								t.Fatalf("bound receiver lost exact captured-value/parameter mapping: %s", instruction.String())
+							}
+						}
+					}
+					if loads != 1 || calls != 1 {
+						t.Fatalf("bound drop view loads=%d calls=%d, want one typed capture read and one real helper call", loads, calls)
+					}
 				}
 				for _, name := range []string{"Permuted", "Identity", "Chain"} {
 					view := module.NamedFunction(coroDeliveryViewSymbol(u.finalIdentity(foo.ssa.Func(name))))

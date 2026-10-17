@@ -44,7 +44,15 @@ type coroSourceDeliveryRecipe struct {
 	// Compose once in ProgramIR, directly to the real helper's producer.
 	// Emission never builds intermediate helper-view chains or replays SSA.
 	forwardBase *ssa.Function
-	forwardArgs []coroForwardingSourceArgument
+	forwardArgs []coroDeliveryForwardArgument
+}
+
+// A source projection plus its already frozen immutable context layout. A
+// captured value with no environment is allowed only after a zero-size proof.
+type coroDeliveryForwardArgument struct {
+	coroForwardingSourceArgument
+	environment      *types.Var
+	environmentField int
 }
 
 func (recipe coroSourceDeliveryRecipe) anchor() *ssa.Call {
