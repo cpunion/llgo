@@ -7,6 +7,85 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-18 (Asia/Shanghai)
 
+### Reflection second handoff and invocation-time receivers (3975a706c1)
+
+Reflected native resources now keep custody through result boxing and the outer
+caller's acceptance. Bound methods retain the original Value storage/index and
+read it at invocation, matching Go 1.27 receiver rebinding behavior. The receiver
+actually used for acquisition remains in the private cleanup State until the
+existing typed drainer joins. Cold typed method result prototypes and exact
+helper ABIs also cover opaque archives, large results containing function fields,
+zero-sized results, go/defer and recover. Arbitrary MakeFunc remains ordinary;
+a result signature alone grants no resource ownership. Summary/record/digest v23
+requires rebuilding older archives; guard v5 and delivery-tail v3 are unchanged.
+No scheduler or G/P layout change is introduced.
+
+Frozen production head `3975a706c1b01a3e8341b5b14c0d851728e992b0` has source
+manifest `0d3c6c5a9cc6ae32820bc3f3c50b2481a157a9cf7ecc042daa8b66ade2646916`
+and compiler SHA-256
+`318994c59324df94eedf8ab7134addf967bc9141698fdd3cddd11d5a514eea7a`.
+It passes the full compiler/SSA/protocol/FFI and source/architecture/runtime-host
+gates, **2,462** FD/Open executions, **315** reflected positive executions and
+**18** intentional negative executions, plus **9** independent archive tests
+(**20** images, **60** executions). A real retained v22 archive is rejected at
+import. The original native-exit program passes **10,000** consecutive P=2 runs;
+the addressable reflected-method case passes **1,000** consecutive P=2 runs.
+Full test/go is **276/276**, with no failures or skips; all 45 nested compiler
+process domains joined and source-after matches.
+
+Head `ef90700c5f7e53612bd73f671ae0ba8b1e6be807` adds only the missing `!llgo`
+constraint to a new host-only SSA regression. All other tracked files are byte
+identical to the production freeze. The original CI failure and both local
+red/green selections are retained; the R6 runtime receipts keep their own head
+and fingerprint rather than being relabeled as full-tree R7 executions.
+
+Exact follow-up CI run `39073066329` passes **20/20**. Fresh paginated reviews,
+inline/issue comments and review threads are empty. PR #296 merged as
+`d8597d49206cd5accf1fa77832376fef5614b8e5` into `cpunion/llgo:llvm-coro`.
+
+Demo, stdlib and GOROOT acceptance are still running on separate copies of the
+same frozen production inputs; these are not completed suite receipts. The
+selected GOROOT scope is **1,082** existing CI runtime cases. The other **1,316**
+discovered compilation/diagnostic/multifile cases remain a coverage boundary,
+as requested. Every main-matrix outcome is preserved, including raw failures:
+`noinit.go` requires gc's private `main..inittask` ABI; `rangegen.go` exceeds its
+10 GiB compile RSS ceiling, including a lower-heap-soft-target retry. One
+separate 24 GiB assessment is in progress because the retained older default
+optimization receipt needed 22,826.6 MiB. It does not replace the main failure.
+Runner PASS can include configured expected failures; the final receipt will
+list actual execution-check passes separately. Disk-floor interruptions and
+intentional joined package/batch-boundary repartitions remain explicit. No
+whole-project or full-tree follow-up all-suite pass is asserted.
+
+The same production freeze also completes **272/272** throughput/progress
+executions and **80/80** steady parked-memory executions against Go 1.27.0,
+using LLVM 22.1.8 on Darwin arm64. The shared host was heavily loaded, and raw
+ranges and every sample are retained. Serial spawn/WaitGroup takes **20.31x**
+Go time and public File **5.54x** in this sample; TCP's wide range prevents a
+performance-win claim. At 100,000 parked goroutines, current process RSS is
+**159.13 MiB** for LLGo versus **266.72 MiB** for Go, with a higher LLGo zero-G
+baseline. This includes allocator/runtime overhead and is not a frame-size
+measurement. Stripped core, I/O and parked images are respectively
+**3,941,280**, **6,377,792**, **3,993,936** bytes (Go: **1,365,954**,
+**1,780,690**, **1,382,594**). Dynamic-call throughput is outside this matrix.
+
+Six actual WASI/JS-WASM probes and the Cortex-M/QEMU standard-timer protocol
+pass on the same production freeze. WASIp1 os.File/os.Root positive probes do
+not prove cancellation custody; a started synchronous nonpollable host import
+can block other goroutines. WASIp1 networking, Preview 2 component lifecycle,
+JS command HostOp/reentry, RTOS and real-board IRQ/WFI remain separate boundaries.
+Freestanding dynamic reflect.Call/MakeFunc still reject explicitly without
+host/libffi support. These results do not establish all-platform Go runtime or
+full standard-library compatibility.
+
+Artifacts and complete fingerprints are retained under
+`~/.cache/llgo-coro-acceptance/20261018/result-state/`, including
+`evidence-s3r6.json`, `fulltestgo-receipt-s3r6.json`,
+`host-test-tag-followup-s3r7.json`, `perf-s3r6/final-performance-s3r6.md`, and
+`platform-s3r6/platform-acceptance-s3r6.md`. Completed owned scratch artifacts
+were losslessly archived with verified inventories; active acceptance inputs
+and raw failed outcomes were preserved.
+
 ### Evaluated receiver cleanup state (6965ad3e4)
 
 Canonical pointer-to-value method wrappers now retain the cleanup inputs from

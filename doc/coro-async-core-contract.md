@@ -263,8 +263,8 @@ drop/claim 信息**，不能称为已经完成的 resource-atomic handoff。
    用户负责 Close/自己的 defer；不继续追踪 fd 的任意 int 复制，不替用户猜测释放。
    标准库内部多 await wrapper 使用前述显式普通 Go 守卫，不靠无限向上推导 contract。
 
-物理 emission 的空间约束进一步明确如下，仍属于待实现的 public-delivery gate，
-不能用设计替代运行证据：
+物理 emission 已实现以下空间约束；public-delivery、接收者与反射交接的运行证据
+按冻结版本记录于 `coro-acceptance-progress.md`，不能用设计替代运行证据：
 
 - 一个 physical frame 同时至多等待一个直接 child，因此所有临时调用守卫共享一个
   active tag，而不是每个 call site 永久增加一个 bool 或分配一个 runtime guard 对象。
@@ -319,9 +319,10 @@ prefix 的完整 native 输出，再执行原来的 managed libffi 调用。nati
 撤销其记录，只为该调用恢复 native State，并经原有 cleanup shield/join 结束后清空。
 正常 caller 接受则清空外层 State；返回的 Value 可保留结果数据，不继续保留调用快照。
 
-已知绑定方法使用 compiler 发布的 exact Ifn descriptor 和真实 receiver context，
-普通 `MakeFunc` 继续使用原有 callback descriptor。函数类型相同或结果是 fd 都不
-产生资源能力。这里不新增 G/P 字段、source、scheduler 路径、地址反查或用户取消屏蔽。
+已知资源具体方法与接口绑定方法保留原 `Value.Method` 的 storage/index，在调用时
+解析真实 receiver 和 method，并借助 compiler 发布的 receiver-free result prototype
+建立第二次交接；不会在绑定时提前复制 receiver 或直接执行先前的 Ifn。普通
+`MakeFunc` 继续使用原有 callback descriptor。函数类型相同或结果是 fd 都不产生资源能力。这里不新增 G/P 字段、source、scheduler 路径、地址反查或用户取消屏蔽。
 无 libffi/host capability 的 target 仍在现有动态调用边界明确拒绝，不能以 native
 反射通过推断 WASM/baremetal 反射已经完成。
 
@@ -466,9 +467,10 @@ C 侧最终核对 18 次 open/18 次 close 和全部 barrier，再输出完成�
 进程退出隐式关闭 fd，不使用 optional capsule、新 intrinsic、resource effect 或
 额外的 G/packet 字段。对应 opt-in gate 为 `LLGO_CORO_RESOURCE_ACCEPTANCE=1`。
 
-这只闭合 physical operation → **同一个预先受保护 wrapper** 的窗口。不能在 helper
-返回 fd 之后才建立守卫，也不能据此宣称 `syscall.Open`/`os.Open` 的多层 child→parent
-公开结果交付已经完成；该部分仍须按前节独立证明。
+这段 private primitive 证据只闭合 physical operation → **同一个预先受保护 wrapper**
+的窗口，不能在 helper 返回 fd 后才建立守卫。Native 公共 POSIX `syscall.Open` 与
+`os.Open/OpenFile` 的 child→parent 交接另有独立正负运行 gate，结果见 acceptance
+ledger；不能从 private primitive 推断其他 target 的公共取消语义。
 
 Node 的私有 `llgoFSOpenInto` 也已实际验证相同边界：typed `*int32` 初值 -1，
 成功 callback 在 Post 前写入，Post 前取消由 host 先异步 close，Post 后取消
@@ -997,7 +999,7 @@ Linux共享`RawSyscall` carrier还要求与函数地址证书正交的trap证书
 - 泛型intrinsic已能从精确instance解析origin和SSA body，`llgo.index`在native/wasm32均按inline-no-suspend语义lower，不伪造可调用函数体；
 - Darwin已补齐`internal/cpu`两个sysctl bodyless声明的精确runtime bridge和C sync certificate；另外，一参数、不重定向的visibility-only `go:linkname`已冻结为独立证书，paired bodyless consumer只选择managed `$coro`入口，不生成raw plain body。
 
-这些是core-first证据，不是标准库兼容性证明。native compiler command entry仍是固定机器栈V2循环，但target start现已把program P/driver/source/registry作为route 1原位收养，同时创建固定7个pthread owner；program return会停止并join全部peer与共享worker pool，再按route、backend、driver顺序强关闭。Timer catalog、Poll V2 callback与Worker transport均使用exact route：Timer由各domain owner的单调时钟扫描；Poll和Worker的两字`OperationID`在route admission内完成source publication、exact executor request、duplicate/stale分类和关闭强汇合；Worker复用一个进程级固定物理池。零/单source、Channel/select、HostOp deadline和keyed/private-registry park的typed materialization、demand-driven global injection/work sharing、owner-assisted bounded half-batch、动态`runtime.GOMAXPROCS`、locked-M同P replacement、普通locked Yield/Park与compiler-poll preempt、三类clean owner succession、有界standby M和真实`runtime/debug.SetMaxThreads`均已接通；command main-return也不会等待不可取消的blocked M。尚未完成的是thread-affinity跨target/回调完整策略以及callback/reentry与非command shutdown矩阵；并发local deque仅保留为profiling驱动优化。target-neutral host-owned pull adapter已完成core/race与JS/WASM、WASIp1、baremetal、显式embedded交叉编译验证：`more`只发布later-turn action，idle只暴露POD executor/generation/epoch/deadline，alarm/notification取消后才可复用epoch，shutdown seal两个ingress并strong-join callback tail。compiler的host-target V2 entry也已完成：它只执行一次有界initial slice，保留`next_action/profile/next_deadline/publish_time/ack_cancel/continue/post_wait`等callback reference roots，仅接受canonical `Complete`或executor slot/generation/epoch/flags/deadline均精确的`Yielded`/`Suspended` tuple，后两者detached返回host，不在entry内继续调度或递归re-entry。仓库Node runner现已作为显式embedding真实消费这些action，并在`wasm-unknown`/`wasip2`运行file与TCP/UDP标准库fixture；命名`wasm` command也已内建同一pull pump并真实运行墙钟、时区和`time.Sleep`，Schedule/Alarm分别用microtask/timeout且没有Asyncify。该JS command目前对非空HostOp明确拒绝，不能把timer证据外推为JS文件/网络或FuncOf/reentry兼容。普通WASI Preview 1 command现也内建同一host-pull协议的单线程reactor：在managed slice返回后用一个`poll_oneoff`集合等待absolute alarm与fd read/write，并支持`syscall.Open/Read/Write/Seek/Close/Unlink`；并发timer+文件fixture已由Wasmtime运行。它不支持Preview 1网络，高层`os.File`仍被通用interface exact-effect候选缺口阻挡；`path_open`/unlink/metadata又没有Preview 1标准pollable形式，当前同步host import属于准确报告的Degraded compensation，慢host filesystem仍可能暂停整个single-thread command。Preview 2 component/pollable lifecycle也尚未接线。JS HostOp/HostReentry、WASI Full nonpoll compensation/Preview 2、RTOS HAL与baremetal IRQ/WFI glue、完整cleanup/defer/recover/Goexit lowering以及precise/moving GC仍是明确缺口。
+这些是core-first证据，不是标准库兼容性证明。native compiler command entry仍是固定机器栈V2循环，但target start现已把program P/driver/source/registry作为route 1原位收养，同时创建固定7个pthread owner；program return会停止并join全部peer与共享worker pool，再按route、backend、driver顺序强关闭。Timer catalog、Poll V2 callback与Worker transport均使用exact route：Timer由各domain owner的单调时钟扫描；Poll和Worker的两字`OperationID`在route admission内完成source publication、exact executor request、duplicate/stale分类和关闭强汇合；Worker复用一个进程级固定物理池。零/单source、Channel/select、HostOp deadline和keyed/private-registry park的typed materialization、demand-driven global injection/work sharing、owner-assisted bounded half-batch、动态`runtime.GOMAXPROCS`、locked-M同P replacement、普通locked Yield/Park与compiler-poll preempt、三类clean owner succession、有界standby M和真实`runtime/debug.SetMaxThreads`均已接通；command main-return也不会等待不可取消的blocked M。尚未完成的是thread-affinity跨target/回调完整策略以及callback/reentry与非command shutdown矩阵；并发local deque仅保留为profiling驱动优化。target-neutral host-owned pull adapter已完成core/race与JS/WASM、WASIp1、baremetal、显式embedded交叉编译验证：`more`只发布later-turn action，idle只暴露POD executor/generation/epoch/deadline，alarm/notification取消后才可复用epoch，shutdown seal两个ingress并strong-join callback tail。compiler的host-target V2 entry也已完成：它只执行一次有界initial slice，保留`next_action/profile/next_deadline/publish_time/ack_cancel/continue/post_wait`等callback reference roots，仅接受canonical `Complete`或executor slot/generation/epoch/flags/deadline均精确的`Yielded`/`Suspended` tuple，后两者detached返回host，不在entry内继续调度或递归re-entry。仓库Node runner现已作为显式embedding真实消费这些action，并在`wasm-unknown`/`wasip2`运行file与TCP/UDP标准库fixture；命名`wasm` command也已内建同一pull pump并真实运行墙钟、时区和`time.Sleep`，Schedule/Alarm分别用microtask/timeout且没有Asyncify。该JS command目前对非空HostOp明确拒绝，不能把timer证据外推为JS文件/网络或FuncOf/reentry兼容。普通WASI Preview 1 command现也内建同一host-pull协议的单线程reactor：在managed slice返回后用一个`poll_oneoff`集合等待absolute alarm与fd read/write，并支持`syscall.Open/Read/Write/Seek/Close/Unlink`；并发timer+文件fixture已由Wasmtime运行。它不支持Preview 1网络，高层`os.File`/`os.Root`已有独立正向运行探针，取消时的资源交接仍须另证；`path_open`/unlink/metadata又没有Preview 1标准pollable形式，当前同步host import属于准确报告的Degraded compensation，慢host filesystem仍可能暂停整个single-thread command。Preview 2 component/pollable lifecycle也尚未接线。JS HostOp/HostReentry、WASI Full nonpoll compensation/Preview 2、RTOS HAL与baremetal IRQ/WFI glue、完整cleanup/defer/recover/Goexit lowering以及precise/moving GC仍是明确缺口。
 
 执行器已收口到一套物理run-step reducer；fleet外层只保留exact domain owner、显式单调时钟和budget，不存在第二套resume/destroy/commit语义。空fleet P使用公共timer-aware idle事务完成standby admission；提交后先释放owner epoch，route-local固定poll set执行fault-containment有界物理pass，doorbell/fd/deadline唤醒后再取得新epoch并执行公共`WakeExecutorAt`，只完成idle→active并设置`sourceMore`，所有source解析和typed materialization继续由同一run-step reducer完成。idle prepare/commit中若request或事实源赢得竞争，也执行相同的“leave idle + sourceMore”转换，不再嵌套调用legacy全量poll。普通domain最后一个G销毁只完成该G并保持executor可接收未来routed work；command route的main-return语义仍由program coordinator独占。实际peer M循环、共享worker pool lifecycle、分布式shutdown和强关闭引用清理现均已接入并通过production-island、source/race及TCP E2E验证。
 
@@ -1127,7 +1129,7 @@ deadline 修改必须更新已 park operation，且 timeout 恢复后重新读�
 | --- | --- | --- |
 | Native Linux/Darwin | POSIX monotonic clock + 每route pipe doorbell/`poll` reactor + 共享bounded pthread worker | opt-in fleet profile已接入program target：启动固定8个M/P route，环境/online CPU初始化逻辑execution quota，标准`runtime.GOMAXPROCS`可运行期调整managed-resume并行上限；program start/stop、全部peer join、共享4-worker/1024-job MPMC ring、Timer/Poll/Worker/Channel exact route和强关闭均已闭环。双owner TCP stdlib probe及10,000次压力、execution quota race、真实1→4→1并发和同步stdlib入口通过。无指针demand和exact mailbox可通用转移P-neutral initial/yield/materialized-park runnable，并以Imported门防止首次运行前回弹；owner P现以一个Try transaction转移约一半、最多8个runnable，只发一次target request。locked-M同P replacement已覆盖foreign、普通Yield/channel/timer Park、compiler-poll preempt、socket poll和nested handoff，clean succession覆盖三类未解锁owner退出，command main-return blocked-M也已闭环。temporary M由8项standby cache复用，统一physical-thread ledger覆盖program/factory/worker/peer/replacement/standby，标准`runtime/debug.SetMaxThreads`已接通并通过stdlib与上限对抗E2E。跨target完整affinity、callback/reentry与非command shutdown、GC/语言/GOROOT矩阵仍未完成，因此不是完整Go runtime兼容 |
 | JS/WASM | 1P `RunSlice` 返回 host，Promise/timer/requestRun 投递 POD fact | host-owned pull ABI、generation/epoch和capability profile已完成；命名`wasm` command内建microtask/timeout pump，真实Go 1.26普通`syscall/js`值操作、墙钟/时区/`time.Sleep`已运行。显式Node embedding另对`wasm-unknown`和`wasip2`驱动file及TCP/UDP HostOp、动态deadline和取消；command pump尚未实现非空HostOp、FuncOf/HostReentry，不能外推为任意Promise/source兼容 |
-| WASI | 1P + pollable/poll_oneoff 或对应 preview API | Preview 1普通command已内建单线程、自有memory的bounded reactor：initial slice返回后消费公共action/operation POD，以一个`poll_oneoff`集合等待absolute alarm和fd read/write，并由Wasmtime运行并发timer及`syscall.Open/Read/Write/Seek/Close/Unlink`。Preview 1没有标准socket create/connect，网络明确`ENOSYS`；`path_open`/unlink/metadata没有标准pollable形式，当前同步host import只声明Degraded compensation，不能保证慢host filesystem期间其他G前进；高层`os.File`还受通用interface exact-effect缺口阻挡。Preview 2仍只是core-module/layout target，其pollable/component entry lifecycle需要外部reactor，不能把Preview 1证据外推为完整WASI或标准库E2E |
+| WASI | 1P + pollable/poll_oneoff 或对应 preview API | Preview 1普通command已内建单线程、自有memory的bounded reactor：initial slice返回后消费公共action/operation POD，以一个`poll_oneoff`集合等待absolute alarm和fd read/write，并由Wasmtime运行并发timer及`syscall.Open/Read/Write/Seek/Close/Unlink`。Preview 1没有标准socket create/connect，网络明确`ENOSYS`；`path_open`/unlink/metadata没有标准pollable形式，当前同步host import只声明Degraded compensation，不能保证慢host filesystem期间其他G前进；高层`os.File`/`os.Root`已有独立正向运行探针，不能由此推断取消时的资源交接。Preview 2仍只是core-module/layout target，其pollable/component entry lifecycle需要外部reactor，不能把Preview 1证据外推为完整WASI或标准库E2E |
 | RTOS/embedded | 静态 P/source catalog + notification/event queue + one-shot alarm + ISR POD ingress | compiler已选择仅一次initial slice且detached返回的host-target V2 entry，callback roots已保留；HAL notification/alarm、ISR source、持久reactor pump与capacity配置仍由embedding实现，不能称E2E |
 | baremetal | 1P main loop + IRQ ring + hardware alarm + WFI/WFE | host-target V2 initial entry、allocation-free notification/alarm profile、POD action与strong-join core可交叉编译，callback roots已保留；真实IRQ ring、hardware compare、WFI/WFE reactor/startup和GC集成未实现，不能称E2E |
 
@@ -1194,7 +1196,7 @@ full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblockin
 
 1. `StringCat`、泛型`llgo.index`、Darwin sysctl bridge、visibility-only `go:linkname`、`*ssa.MakeMap`及promoted managed wrapper唯一发射阻塞已经越过；真实`time`、`timer`、`syscall-file`、`syscall-pipe`、`file`与`tcp`探针已在同一native fleet acceptance全部fresh compile-link-run通过，TCP另有10,000次压力证据。下一步把该组固定为架构等价重构门，同时保持“只修generic core、不写package/function白名单”的门槛。
 2. `ExecutorFleet`的程序接入、固定8-route M/P owner/stop/join、动态逻辑execution quota、标准`runtime.GOMAXPROCS`、worker lifecycle、route-local reactor、Timer/Poll/Worker exact route，以及零/单source、Channel/select、HostOp deadline和keyed/private-registry park的typed `ResumePacket`物化已完成；通用P-neutral demand injection/work sharing、owner-assisted bounded half-batch、locked-M同P replacement、普通locked Yield/Park/compiler-preempt、三类owner succession、command main-return blocked-M终止、有界standby M缓存和标准`runtime/debug.SetMaxThreads`也已完成。下一并行核心是跨target完整affinity以及callback/reentry与非command shutdown矩阵；每个尚未证明P-neutral的park继续禁止迁移。并发local deque只保留为profiling驱动优化，不作为正确性gate。
-3. 以已完成的host-owned pull core、host-target V2 entry、JS/WASM command timer pump、WASI Preview 1 timer/file command reactor和显式Node file/network runner为边界，把同一operation协议接入JS command HostOp/HostReentry、WASI Preview 2 pollable/component lifecycle、RTOS HAL和baremetal IRQ/alarm/WFI loop；Preview 1低层文件证据不升格为network、高层`os.File`或完整WASI E2E。
+3. 以已完成的host-owned pull core、host-target V2 entry、JS/WASM command timer pump、WASI Preview 1 timer/file command reactor和显式Node file/network runner为边界，把同一operation协议接入JS command HostOp/HostReentry、WASI Preview 2 pollable/component lifecycle、RTOS HAL和baremetal IRQ/alarm/WFI loop；Preview 1低层文件与另行通过的标准`os.File`/`os.Root`正向探针不升格为network、非pollable host调用的硬进展或完整WASI E2E。
 4. 在已闭环的静态task-stop cleanup/`CompletionRecord`子集上，完成动态defer、完整panic/recover、`Goexit`、P-neutral result以及post-LLVM bounded-preemption/GC证明。
 5. 上述核心门稳定后，在已通过的六个冻结探针上继续扩展`test/*`、`net`/`os`/`time`与GOROOT语义矩阵，不反向把标准库特例写进compiler core。最终仓库门是`test/*`和Go 1.26 GOROOT全部适用测试通过、无unexpected failure和stale XPASS；六个探针只是快速定位门。
 
