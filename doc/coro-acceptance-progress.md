@@ -223,6 +223,41 @@ compiler, not a falsely claimed new compiler. Manifest SHA-256:
 retained image:
 `ce3054729aa4535818e4d45939aead08a990daf9ad84ceb53b01c819f220b72e`.
 No feature PR is open and this work is not integrated.
+
+The captured archive follow-up adds a factory returning a bound receiver whose
+value comes from a public function parameter, then changes the source local.
+Independent consumers have only exported declarations and opaque effect/ABI
+records: private producers and initialize/drop helpers have no consumer SSA
+bodies. Frozen v161 passes small and large captured cases, three actual native
+executions each; normal delivery, ordinary defer result discarding, cancellation
+and two suspending cleanup steps retain the original token17. This is actual
+AOT/link execution of counter-based ownership, not an OS-FD or GC stress claim.
+The complete frozen v161 archive matrix passes **6/6** discovered top-level
+tests, **14** retained linked images and **42** actual executions in fresh
+top-level processes, with zero skips/failures. Source-after matches manifest
+`97b8556f0d485b50bef7b7d7e347287699521baa98bc91d4862d29f3e3e67a74`;
+the guarded process-tree peak is 1879.2MiB. These use the frozen host compiler
+API/AOT pipeline and the production scheduler island, not a claim of full CLI
+or full-runtime GC acceptance.
+An earlier aggregate v159 process hit its 4GiB RSS limit after completing the
+original cases; its exit137 remains recorded and is not a full-matrix pass.
+
+Three new `test/go/interface_receiver_timing_test.go` cases pass both Go and
+the v155 LLGo compiler on frozen v160: interface method values read a mutable
+`*T` at invocation, direct value defers capture at registration, and typed-nil
+value methods panic at invocation rather than method-value creation. The
+cross-await case includes GC. Source-after matches; the linked image is
+`e8f4e02bad9c53c0cf9bf025aa733850934c8c560cb5cded4e0402c4f3b99ab1`;
+the guarded build/run tree peak is 5072.4MiB. A new unfiltered whole `test/go`
+refresh is now running on the same frozen v160 sources/compiler; no whole-suite
+receipt is claimed yet.
+
+Receiver snapshot experiments remain isolated on local branch
+`coro/boxed-interface-context-20261017` at `ed49106c7`. Source receiver metadata
+and seven SSA/helper-view gates pass, but the expanded resource IR gate is RED:
+materializing `T` also materializes method-bearing `*T` through `PtrToThis`.
+Preserving only the immutable boxed case is insufficient. That WIP is neither
+merged into this working branch nor accepted as snapshot support.
 Receiver-dependent value wrappers still need an evaluated snapshot; descriptor
 publication now rejects that boundary instead of silently omitting custody.
 

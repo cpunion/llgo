@@ -394,6 +394,21 @@ call/defer 验收。调用方把原 receiver 绑定给接口后改绑原变量�
 变化，使用同一 v155 编译器；源码前后校验一致，峰值1209.5MiB。值 receiver 的
 求值快照仍未完成，不能由 pointer identity 验收推导其正确性。
 
+独立 archive 捕获验收在 frozen v161 已覆盖 small/large bound callable，各运行
+三次：producer 使用函数参数构造 receiver、绑定后改写原变量；consumer 只有
+导出声明与 effect/ABI 元信息，没有私有 producer/helper SSA。实际 AOT/link
+执行验证 normal、defer discarded result、cancel 及两步可挂起 drop 仍使用
+原 token17。这是 counter-based custody 验收，不是 OS FD/GC stress 声明。
+完整 archive 矩阵按 CI 相同的顶层测试隔离方式运行，6 个顶层测试、14 个独立
+链接镜像、42 次实际执行全部通过，无失败/跳过；源码前后匹配，峰值1879.2MiB。
+
+receiver 的求值时点另有 Go/LLGo 共同通过的运行回归：`defer iface.M()` 在调用时
+读取 `*T` 的 value receiver，直接 `defer value.M()` 在注册时复制；接口 method
+value 在跨 await/GC 后仍在实际调用时读取，typed-nil 也在调用时才 panic。
+任何通用 context preparation 都必须保持这些区别，不能在创建 method value
+或注册所有 defer 时提前复制。仅保留装箱 `T` 类型信息的实验仍在独立 WIP 分支，
+完整资源 IR gate 因 `PtrToThis` 还需 `*T` 快照而失败，未集成。
+
 ## 4. 方案比较
 
 | 方案 | 优点 | 主要问题 | 结论 |

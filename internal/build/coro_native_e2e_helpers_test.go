@@ -144,6 +144,16 @@ func defineCoroNativeE2ENilDerefStubs(prog llssa.Program, pkg llssa.Package, abo
 	assertBody.Return()
 	assertBody.SetBlock(valid).Return()
 
+	// A bound value-method fixture may materialize the compiler's pointer
+	// wrapper in ABI type data. Its valid receiver path remains ordinary; this
+	// deliberately closed island is fail-stop for the invalid nil branch.
+	wrapNil := pkg.NewFunc(llssa.PkgRuntime+".PanicWrapNilPointer", newSignature(
+		[]types.Type{types.Typ[types.Bool], types.Typ[types.String], types.Typ[types.String]}, nil,
+	), llssa.InGo)
+	wrapBody := wrapNil.MakeBody(1)
+	wrapBody.Call(assertNil.Expr, wrapNil.Param(0))
+	wrapBody.Return()
+
 	assertPtr := pkg.NewFunc(llssa.PkgRuntime+".AssertNilDerefPtr", newSignature(
 		[]types.Type{pointer}, []types.Type{pointer},
 	), llssa.InGo)

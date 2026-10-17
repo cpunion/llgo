@@ -67,17 +67,30 @@ func TestCoroArchiveForwardedDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
 	}
 }
 
+func TestCoroArchiveCapturedDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
+	for _, size := range []struct {
+		name  string
+		large bool
+	}{{"small", false}, {"large", true}} {
+		t.Run(size.name, func(t *testing.T) {
+			testCoroArchiveDeliveryNativeRuntime(t, coroArchiveCapturedValueDelivery, size.large, true)
+		})
+	}
+}
+
 type coroArchiveDeliveryMode uint8
 
 const (
 	coroArchiveStaticDelivery coroArchiveDeliveryMode = iota
 	coroArchiveDirectValueDelivery
 	coroArchiveFactoryValueDelivery
+	coroArchiveCapturedValueDelivery
 )
 
 func testCoroArchiveDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode, large, forwarded bool) {
 	t.Helper()
-	dynamic, factory := mode != coroArchiveStaticDelivery, mode == coroArchiveFactoryValueDelivery
+	captured := mode == coroArchiveCapturedValueDelivery
+	dynamic, factory := mode != coroArchiveStaticDelivery, mode == coroArchiveFactoryValueDelivery || captured
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native archive delivery requires POSIX")
 	}
@@ -87,6 +100,13 @@ func testCoroArchiveDeliveryNativeRuntime(t *testing.T, mode coroArchiveDelivery
 	}
 	llssa.Initialize(llssa.InitAll)
 	temp := t.TempDir()
+	debugDir := os.Getenv("LLGO_CORO_ARCHIVE_DEBUG_DIR")
+	if debugDir != "" {
+		debugDir = filepath.Join(debugDir, strings.ReplaceAll(t.Name(), "/", "_"))
+		if err := os.MkdirAll(debugDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	const libraryPath = "example.com/coro-resource-library"
 	const librarySource = `package library
 import "unsafe"
@@ -141,7 +161,7 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 			t.Fatal(err)
 		}
 		inputs := []cl.EmissionPackage{{SSA: source, Files: files, Identity: source.Pkg.Path()}}
-		if large {
+		if large || captured {
 			// Model the same zero-initialized allocator that the linked runtime
 			// island actually provides. A large-result gate must supply its
 			// frozen frontend dependency, not invent a producer/helper body or
@@ -152,10 +172,12 @@ import "unsafe"
 //llgo:coro sync
 func zero(uintptr) unsafe.Pointer
 func AllocZ(size uintptr) unsafe.Pointer { return zero(size) }
+func AllocU(size uintptr) unsafe.Pointer { return zero(size) }
 //go:linkname abort C.abort
 //llgo:coro noblock
 func abort()
 func AssertNilDeref(value bool) { if value { abort() } }
+func PanicWrapNilPointer(value bool, receiver, method string) { if value { abort() } }
 `, coroPlanTestImporter{"unsafe": types.Unsafe})
 			runtimeSSA.Build()
 			inputs = append(inputs, cl.EmissionPackage{SSA: runtimeSSA, Files: runtimeFiles, Identity: llssa.PkgRuntime})
@@ -174,7 +196,7 @@ func AssertNilDeref(value bool) { if value { abort() } }
 			cl.ParsePkgSyntax(prog, source.Prog.Fset, input.SSA.Pkg, input.Files)
 		}
 		u, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, inputs, cl.EmissionUniverseOptions{
-			CompleteRuntimeABI: large,
+			CompleteRuntimeABI: large || captured,
 			CoroLibraryEffects: index, CoroTargetCapabilities: metadata.TargetCapabilities,
 			CoroProgramPredicates: coro.ProgramPredicateRequirements{Mask: coro.ProgramPredicateMask()},
 		})
@@ -251,6 +273,11 @@ func AssertNilDeref(value bool) { if value { abort() } }
 			CoroLoweringFacts: report.Facts, CoroLoweringFactsDigest: report.Digest,
 			CoroABI: metadata.CoroABI, SchedulerABI: metadata.SchedulerABI, PanicABI: metadata.PanicABI, FuncRepABI: metadata.FuncRepABI,
 			CoroTargetCapabilities: metadata.TargetCapabilities, CoroLibraryEffectMetadata: metadata, CoroLibraryEffects: imported}
+		if captured {
+			// The linked runtime island uses stable malloc/calloc allocations and
+			// the production frame-retention protocol, not a moving collector.
+			compilation.CoroFrameRetentionABI = cl.CoroFrameRetentionParkABIV2
+		}
 		capabilities := freezeCoroNativeE2EProgramCapabilities(t, compilation)
 		if err := compilation.ValidateCoroLibraryProgramPredicates(); err != nil {
 			t.Fatal(err)
@@ -264,8 +291,8 @@ func AssertNilDeref(value bool) { if value { abort() } }
 		if dynamic && !producer && !strings.Contains(module.String(), "coro.dispatch.delivery") {
 			t.Fatal("actual consumer omitted its dynamic delivery-capability branch")
 		}
-		if dir := os.Getenv("LLGO_CORO_ARCHIVE_DEBUG_DIR"); dir != "" {
-			if err := os.WriteFile(filepath.Join(dir, source.Pkg.Name()+"-presplit.ll"), []byte(module.String()), 0o600); err != nil {
+		if debugDir != "" {
+			if err := os.WriteFile(filepath.Join(debugDir, source.Pkg.Name()+"-presplit.ll"), []byte(module.String()), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -275,7 +302,9 @@ func AssertNilDeref(value bool) { if value { abort() } }
 		llabi.LowerLargeAggregates(prog.TargetData(), module)
 		if large && producer {
 			name := "Acquire"
-			if factory {
+			if forwarded {
+				name = "acquireIntoBorrowed"
+			} else if factory {
 				name = "acquire"
 			}
 			body := module.NamedFunction(libraryPath + "." + name + "$coro")
@@ -302,8 +331,8 @@ func AssertNilDeref(value bool) { if value { abort() } }
 				t.Fatalf("archive helper view DCE: %v", err)
 			}
 		}
-		if dir := os.Getenv("LLGO_CORO_ARCHIVE_DEBUG_DIR"); dir != "" {
-			if err := os.WriteFile(filepath.Join(dir, source.Pkg.Name()+"-postsplit.ll"), []byte(module.String()), 0o600); err != nil {
+		if debugDir != "" {
+			if err := os.WriteFile(filepath.Join(debugDir, source.Pkg.Name()+"-postsplit.ll"), []byte(module.String()), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -315,6 +344,15 @@ func AssertNilDeref(value bool) { if value { abort() } }
 			defer object.Dispose()
 			if err := ctx.createPackageArchiveFile(archive, &aPackage{ObjBuffers: []packageArchiveBuffer{{name: "resource.o", buffer: object}}, CoroLibraryEffectRecords: records}, false); err != nil {
 				t.Fatal(err)
+			}
+			if debugDir != "" {
+				data, err := os.ReadFile(archive)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(debugDir, "resource.a"), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			return "", "", capabilities
 		}
@@ -366,6 +404,17 @@ func AssertNilDeref(value bool) { if value { abort() } }
 		}
 		producerSource = strings.Replace(producerSource, "func Acquire(", "func acquire(", 1) + "\nfunc Callable() func(uint32) " + result + " { return acquire }\n"
 		declarationSource = strings.Replace(declarationSource, "func Acquire(uint32) "+result, "func Callable() func(uint32) "+result, 1)
+		if captured {
+			if !forwarded {
+				t.Fatal("captured archive fixture requires its real token-sensitive base helper")
+			}
+			producerSource = strings.Replace(producerSource,
+				"func Callable() func(uint32) "+result+" { return acquire }",
+				"type receiver uint32\n"+
+					"func (token receiver) captured(value uint32) "+result+" { return acquirePermuted(value,uint32(token)) }\n"+
+					"func Callable(token uint32) func(uint32) "+result+" { r:=receiver(token); bound:=r.captured; r=99; return bound }", 1)
+			declarationSource = strings.Replace(declarationSource, "func Callable()", "func Callable(uint32)", 1)
+		}
 	}
 	producer, files := buildCoroPlanTestPackage(t, libraryPath, producerSource, nil)
 	build(newProgram(), producer, files, true)
@@ -397,6 +446,9 @@ func main() {
 		consumerSource = strings.Replace(consumerSource, "go child()", "go child(acquire)", 1)
 		if factory {
 			consumerSource = strings.Replace(consumerSource, "acquire := lib.Acquire", "acquire := lib.Callable()", 1)
+			if captured {
+				consumerSource = strings.Replace(consumerSource, "lib.Callable()", "lib.Callable(17)", 1)
+			}
 		}
 		if large {
 			consumerSource = strings.ReplaceAll(consumerSource, "func(uint32) uint32", "func(uint32) lib.Payload")
@@ -509,12 +561,12 @@ void __llgo_archive_delivery_report(uint32_t stats, uint32_t drop) { fprintf(std
 	if output, err := exec.Command(clang, link...).CombinedOutput(); err != nil {
 		t.Fatalf("link real resource archive: %v\n%s", err, output)
 	}
-	if dir := os.Getenv("LLGO_CORO_ARCHIVE_DEBUG_DIR"); dir != "" {
+	if debugDir != "" {
 		image, err := os.ReadFile(executable)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "archive-delivery"), image, 0o700); err != nil {
+		if err := os.WriteFile(filepath.Join(debugDir, "archive-delivery"), image, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
