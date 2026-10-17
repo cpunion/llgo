@@ -7,6 +7,61 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-17 (Asia/Shanghai)
 
+### Native peer retirement after a final producer request (c769abd4a)
+
+The intermittent native entry SIGABRT is a peer-driver shutdown race. The
+physical owner can finish its final drain before an admitted producer publishes
+its advisory executor request. Route and backend strong join then succeed, but
+the remaining Requested bit rejects the driver's exact zero-to-Closed CAS.
+Isolated diagnostics capture an Invalid status with an all-zero result POD,
+locate the failure in peer-driver retirement, and confirm that all driver-close
+preconditions pass except that still-requested executor gate. The retained
+original image also fails under LLDB at repetition 2396; these failures remain
+separate from earlier passing cohorts.
+
+`coroNativeFleetRetireDriverAtV1` now requires a fully drained driver and an
+already-retired backend, then runs the existing A/ack/B source poll before the
+unchanged exact close and confirm operations. The native caller supplies a
+validated monotonic sample. Live tasks, source cleanup, invalid clocks, and
+premature backend retirement remain rejected. No scheduler state, callback,
+descriptor ABI, or relaxed shutdown check is introduced.
+
+The deterministic production-adapter regression publishes a request after
+owner exit and before route close. Before the correction its requested case
+fails while the no-request control passes; both pass with the correction.
+The complete runtime core passes race/shuffle, all six native fleet top-level
+tests pass race/shuffle, and runtime `^TestCoro` checks pass.
+
+One frozen source, byte-identical to `c769abd4a`, passes **10,000/10,000**
+original mode-27 P=2 executions, the full **1,292/1,292** physical-resource
+cohort, all three related native runtime-island tests, and all seven independent
+archive top-level tests (**16 retained images, 48 actual executions**). The compiler was
+rebuilt from that same source. Source-after manifests match; the manifest,
+compiler, and retained stress-image SHA-256 values are respectively
+`ef3243ce3ce7d2af4d59f4183a765aecb2d40057892b21ca0175a368cafcdfe2`,
+`80dc2ca34923991168e00b0414446a916598518c08c7286127ad5f17645d7376`, and
+`9cf1077d95bdb36d37c5da452cbe0e5bf470aee8e9b279291d0cad19aff08eb6`.
+Artifacts are retained under
+`~/.cache/llgo-coro-acceptance/20261017/native-exit/`.
+
+The archive/FD CI split retains exactly three native and seven independent
+archive top-level tests in 19 checks. Exact-head CI run `39030530660` passes
+**19/19**; fresh paginated reviews, inline comments and review threads are empty.
+The single historical issue comment's merge hold is addressed by the causal
+regression and current native evidence. PR #291 is merged into `llvm-coro` as
+`210f81889603729b72ba028f3176fb83374835fa`.
+
+A fresh unfiltered `test/go` run uses this same c769 compiler/source with the
+bounded nested launcher; it remains in progress. The interrupted v120 standard
+library controller was recovered with its original runner/compiler/source and
+resource-limit fingerprints. Its old lock and scratch are preserved, 92/180
+packages currently pass, and the remaining baseline evaluation continues.
+Neither queue is a completed same-version compatibility result.
+
+This correction does not finish evaluated
+receiver snapshots, reflect/FFI secondary handoff, public Open/File ownership
+adoption, unified compatibility, or final platform/performance acceptance.
+
 ### Manual completion admission and current integration blockers
 
 The complete v120 `test/go` cohort passes **272/272**, with zero failures or
