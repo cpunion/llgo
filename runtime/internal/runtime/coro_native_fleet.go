@@ -1094,13 +1094,23 @@ func coroNativeFleetRetireBackendV1(handle coro.ExecutorFleetHandle) bool {
 	return true
 }
 
-func coroNativeFleetRetireDriverV1(handle coro.ExecutorFleetHandle) bool {
+func coroNativeFleetRetireDriverAtV1(handle coro.ExecutorFleetHandle, now int64) bool {
 	domain, ok := coroNativeFleetDomainForHandleV1(
 		&coroNativeFleetV1State,
 		handle,
 		coroNativeFleetDomainBackendRetiredV1,
 	)
-	if !ok || !coro.BeginExecutorFleetDriverClose(&coroNativeFleetV1State.fleet, handle) ||
+	if !ok || now < 0 || !coro.ExecutorShutdownDrained(domain.driverOwnerV1()) {
+		return false
+	}
+	// An owner can finish draining before a producer publishes its advisory
+	// request tail. Route and backend retirement have now joined that producer,
+	// so complete one final A/ack/B source transaction before the exact close
+	// CAS. The drained preflight still rejects live tasks or source cleanup.
+	if _, promoted, polled := coro.PollExecutorAt(domain.driverOwnerV1(), now); !polled || promoted != 0 {
+		return false
+	}
+	if !coro.BeginExecutorFleetDriverClose(&coroNativeFleetV1State.fleet, handle) ||
 		!coro.ConfirmExecutorFleetClose(&coroNativeFleetV1State.fleet, handle) {
 		return false
 	}

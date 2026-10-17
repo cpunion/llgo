@@ -741,7 +741,7 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		!coroNativeFleetConfirmRouteCloseV1(firstHandle) {
 		t.Fatal("begin first fleet route close with admitted target callback")
 	}
-	if coroNativeFleetRetireDriverV1(firstHandle) {
+	if coroNativeFleetRetireDriverAtV1(firstHandle, 0) {
 		t.Fatal("fleet driver retired before target backend join")
 	}
 	backendDone := make(chan bool, 1)
@@ -783,7 +783,7 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		t.Fatal("retire second fleet backend")
 	}
 	for _, handle := range [2]coro.ExecutorFleetHandle{firstHandle, secondHandle} {
-		if !coroNativeFleetRetireDriverV1(handle) {
+		if !coroNativeFleetRetireDriverAtV1(handle, 0) {
 			t.Fatalf("retire fleet driver %+v", handle)
 		}
 	}
@@ -802,6 +802,44 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		_ = task.header
 		_ = task.descriptor
 		_ = task.memory
+	}
+}
+
+func TestCoroNativeFleetRetiresRequestAfterOwnerExitV1(t *testing.T) {
+	for _, requested := range []bool{false, true} {
+		t.Run(fmt.Sprintf("requested-%t", requested), func(t *testing.T) {
+			saved := coroNativeFleetV1State
+			coroNativeFleetV1State = coroNativeFleetStateV1{}
+			t.Cleanup(func() { coroNativeFleetV1State = saved })
+			if !coroNativeFleetStartStateV1(&coroNativeFleetV1State, 1) {
+				t.Fatal("start final-request fleet")
+			}
+			domain := &coroNativeFleetV1State.domains[0]
+			handle := domain.handle
+			epoch, ok := coroNativeFleetBeginOwnerEpochV1(handle)
+			if !ok || !coroNativeFleetEnterOwnerCompatibilityV1(handle, epoch) ||
+				!coro.ExecutorShutdownDrained(domain.driverOwnerV1()) ||
+				!coroNativeFleetFinishOwnerEpochV1(handle, epoch) {
+				t.Fatal("finish drained physical owner")
+			}
+			// A producer may publish its advisory wake after the owner's last
+			// drain and before route admission is sealed. No task or source is
+			// left to run, but the exact executor gate still records that wake.
+			if requested && coroNativeFleetV1State.fleet.RequestExecutor(handle) != coro.ExecutorRequestPublished {
+				t.Fatal("publish request after physical owner exit")
+			}
+			if !coroNativeFleetBeginRouteCloseV1(handle) ||
+				!coroNativeFleetConfirmRouteCloseV1(handle) ||
+				!coroNativeFleetRetireBackendV1(handle) {
+				t.Fatal("strong-join final-request route and backend")
+			}
+			if coroNativeFleetRetireDriverAtV1(handle, -1) {
+				t.Fatal("retire driver with invalid monotonic sample")
+			}
+			if !coroNativeFleetRetireDriverAtV1(handle, 0) || !coroNativeFleetAllRetiredV1() {
+				t.Fatal("retire drained driver after final producer request")
+			}
+		})
 	}
 }
 
