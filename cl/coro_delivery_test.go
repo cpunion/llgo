@@ -566,7 +566,8 @@ func testCoroDeliveryTypedHelperIdentities(t *testing.T, target *llssa.Target, p
 			}
 			base, tail := initializer.Operand(0), initializer.Operand(1)
 			if base.OperandsCount() != 9 || base.Operand(1).ZExtValue()&uint64(llssa.CoroDispatchFlagHasDelivery) == 0 ||
-				tail.OperandsCount() != 4 || tail.Operand(2).IsNull() || tail.Operand(3).IsNull() {
+				tail.OperandsCount() != 8 || tail.Operand(0).ZExtValue() != uint64(llssa.CoroDispatchDeliveryVersionV2) ||
+				tail.Operand(2).IsNull() || tail.Operand(3).IsNull() {
 				t.Fatalf("published producer lost its complete guarded tail: %s", global)
 			}
 			published++

@@ -1,6 +1,7 @@
 package ssa
 
 import (
+	"encoding/binary"
 	"go/types"
 	"regexp"
 	"strings"
@@ -30,8 +31,12 @@ func coroDeliveryDispatchTestOptions(t *testing.T, f *coroDynamicDispatchTestFix
 		}
 		b.EndBuild()
 		b.Dispose()
+		var abiHash [16]byte
+		for index := range abiHash {
+			abiHash[index] = hash + byte(index)
+		}
 		opts := CoroDispatchDescriptorOptions{
-			Version: CoroDispatchVersionV2, Flags: flags, ABIHash: [16]byte{hash},
+			Version: CoroDispatchVersionV2, Flags: flags, ABIHash: abiHash,
 			Signature: signature, Result: f.prog.Struct(), CodeEntry: entry.Expr,
 		}
 		if coroutine {
@@ -45,7 +50,7 @@ func coroDeliveryDispatchTestOptions(t *testing.T, f *coroDynamicDispatchTestFix
 	}
 	opts := f.descriptorOptions(CoroDispatchFlagHasCoro | CoroDispatchFlagHasDelivery)
 	opts.Delivery = &CoroDispatchDeliveryOptions{
-		Version:     CoroDispatchDeliveryVersionV1,
+		Version:     CoroDispatchDeliveryVersionV2,
 		Initializer: makeHelper("delivery_initializer", initializer, false, 1),
 		Drop:        makeHelper("delivery_drop", drop, true, 2),
 	}
@@ -64,15 +69,23 @@ func TestCoroDeliveryDispatchOptionalTailNativeAndWasm(t *testing.T) {
 			global := coroPlainDispatchGlobal(descriptor.impl)
 			initializer := global.Initializer()
 			if initializer.OperandsCount() != 2 || initializer.Operand(0).OperandsCount() != 9 ||
-				initializer.Operand(1).OperandsCount() != 4 {
+				initializer.Operand(1).OperandsCount() != 8 {
 				t.Fatalf("resource descriptor does not have an intact base and optional tail: %s", global)
 			}
 			base, extended := f.prog.coroDispatchDescriptorType(), f.prog.coroDeliveryDescriptorType()
 			if offset := f.prog.TargetData().ElementOffset(extended.ll, 1); uint64(offset) != f.prog.SizeOf(base) {
 				t.Fatalf("tail offset=%d, want padded base size %d", offset, f.prog.SizeOf(base))
 			}
-			if size := f.prog.SizeOf(extended) - f.prog.SizeOf(base); size != uint64(8+2*f.prog.PointerSize()) {
-				t.Fatalf("optional tail size=%d, want only two header words and two pointers", size)
+			if size := f.prog.SizeOf(extended) - f.prog.SizeOf(base); size != uint64(40+2*f.prog.PointerSize()) {
+				t.Fatalf("optional tail size=%d, want header, two pointers and two exact helper hashes", size)
+			}
+			tail := initializer.Operand(1)
+			for index, helper := range []CoroDispatchDeliveryHelper{opts.Delivery.Initializer, opts.Delivery.Drop} {
+				for word := 0; word < 2; word++ {
+					if got, want := tail.Operand(4+index*2+word).ZExtValue(), binary.BigEndian.Uint64(helper.ABIHash[word*8:word*8+8]); got != want {
+						t.Fatalf("helper %d hash word %d=%x, want %x", index, word, got, want)
+					}
+				}
 			}
 			if ordinary := f.coroOnly.impl.Initializer(); ordinary.OperandsCount() != 9 {
 				t.Fatal("ordinary descriptor acquired a delivery tail")
@@ -95,7 +108,8 @@ func TestCoroDeliveryDispatchOptionalTailNativeAndWasm(t *testing.T) {
 			present, done := probe.MakeBlock(), probe.MakeBlock()
 			b.If(selection.HasDelivery(), present, done)
 			b.SetBlock(present)
-			init, _ := b.PrepareCoroDispatchDelivery(selection, opts.Delivery.Initializer.Signature, opts.Delivery.Drop.Signature)
+			init, _ := b.PrepareCoroDispatchDelivery(selection, opts.Delivery.Initializer.Signature, opts.Delivery.Drop.Signature,
+				CoroDispatchDeliveryABI{Initializer: opts.Delivery.Initializer.ABIHash, Drop: opts.Delivery.Drop.ABIHash})
 			out := b.Alloc(f.result, false)
 			b.CallCoroDispatchPlain(init, []Expr{out}, CoroDispatchCallOptions{
 				Version: CoroDispatchVersionV2, ABIHash: opts.Delivery.Initializer.ABIHash, Result: f.prog.Struct(),
@@ -144,6 +158,36 @@ func TestCoroDeliveryDispatchOptionalTailNativeAndWasm(t *testing.T) {
 				!strings.Contains(body, "call void") {
 				t.Fatalf("missing optional-tail projection or ordinary typed helper dispatch:\n%s", body)
 			}
+			// The consumer's four expected words must participate in generated
+			// checks. Reading a helper's own hash and comparing it with itself
+			// would not certify the helper type advertised by the producer.
+			var checked [4]bool
+			for _, block := range probe.impl.BasicBlocks() {
+				for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+					if instruction.InstructionOpcode() != llvm.ICmp || instruction.IntPredicate() != llvm.IntNE {
+						continue
+					}
+					field, expected := instruction.Operand(0), instruction.Operand(1)
+					if field.IsAInstruction().IsNil() || field.InstructionOpcode() != llvm.ExtractValue ||
+						field.Operand(0).Type().C != f.prog.Field(extended, 1).ll.C || expected.IsAConstantInt().IsNil() {
+						continue
+					}
+					indices := field.Indices()
+					if len(indices) != 1 || indices[0] < 4 || indices[0] > 7 {
+						continue
+					}
+					index := int(indices[0]) - 4
+					hash := [][16]byte{opts.Delivery.Initializer.ABIHash, opts.Delivery.Drop.ABIHash}[index/2]
+					word := index % 2
+					if want := binary.BigEndian.Uint64(hash[word*8 : word*8+8]); expected.ZExtValue() != want {
+						t.Fatalf("tail field %d checked against %x, want %x", indices[0], expected.ZExtValue(), want)
+					}
+					checked[index] = true
+				}
+			}
+			if checked != [4]bool{true, true, true, true} {
+				t.Fatalf("typed tail omitted independent hash comparisons: %v\n%s", checked, body)
+			}
 			for _, name := range []string{"dynamic_coro_call", "dynamic_outcome_call", "dynamic_plain_call"} {
 				body := coroPlainDispatchIRFunction(f.pkg.String(), name)
 				if !regexp.MustCompile(`and i32 [^,]+, -64`).MatchString(body) ||
@@ -155,11 +199,48 @@ func TestCoroDeliveryDispatchOptionalTailNativeAndWasm(t *testing.T) {
 	}
 }
 
+func TestCoroDeliveryDispatchRejectsChangedColdContract(t *testing.T) {
+	for _, target := range []struct {
+		name string
+		arch *Target
+	}{{name: "native"}, {name: "wasm32", arch: &Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
+		t.Run(target.name, func(t *testing.T) {
+			for field, name := range []string{"version", "reserved", "initializer", "drop", "initializer-lo", "initializer-hi", "drop-lo", "drop-hi"} {
+				t.Run(name, func(t *testing.T) {
+					f := newCoroDynamicDispatchTestFixture(t, target.arch)
+					opts := coroDeliveryDispatchTestOptions(t, f)
+					descriptor := f.pkg.NewCoroDispatchDescriptor("cold_contract", opts)
+					global := coroPlainDispatchGlobal(descriptor.impl)
+					base, tail := global.Initializer().Operand(0), global.Initializer().Operand(1)
+					fields := make([]llvm.Value, tail.OperandsCount())
+					for index := range fields {
+						fields[index] = tail.Operand(index)
+					}
+					if field == 2 || field == 3 {
+						fields[field] = llvm.ConstNull(fields[field].Type())
+					} else {
+						fields[field] = llvm.ConstInt(fields[field].Type(), fields[field].ZExtValue()^1, false)
+					}
+					changed := f.prog.ctx.ConstStruct(fields, false)
+					if f.pkg.matchesCoroDispatchDelivery(changed, *opts.Delivery) {
+						t.Fatal("changed cold helper contract was accepted")
+					}
+					global.SetInitializer(f.prog.ctx.ConstStruct([]llvm.Value{base, changed}, false))
+					coroPlainDispatchMustPanicContains(t, "conflicts", func() {
+						f.pkg.NewCoroDispatchDescriptor("cold_contract", opts)
+					})
+				})
+			}
+		})
+	}
+}
+
 func TestCoroDeliveryDispatchRejectsIncompleteTypedPublication(t *testing.T) {
 	for name, change := range map[string]func(*CoroDispatchDescriptorOptions){
 		"missing-tail":           func(o *CoroDispatchDescriptorOptions) { o.Delivery = nil },
 		"missing-capability":     func(o *CoroDispatchDescriptorOptions) { o.Flags &^= CoroDispatchFlagHasDelivery },
 		"version":                func(o *CoroDispatchDescriptorOptions) { o.Delivery.Version++ },
+		"old-version":            func(o *CoroDispatchDescriptorOptions) { o.Delivery.Version = 1 },
 		"missing-initializer":    func(o *CoroDispatchDescriptorOptions) { o.Delivery.Initializer.Descriptor = Nil },
 		"initializer-hash":       func(o *CoroDispatchDescriptorOptions) { o.Delivery.Initializer.ABIHash[0]++ },
 		"drop-hash":              func(o *CoroDispatchDescriptorOptions) { o.Delivery.Drop.ABIHash[0]++ },

@@ -14,7 +14,16 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-const CoroDispatchDeliveryVersionV1 uint32 = 1
+const CoroDispatchDeliveryVersionV2 uint32 = 2
+
+// CoroDispatchDeliveryABI is the consumer's independently computed helper ABI.
+// The cold tail stores the producer's expected hashes, not hashes recovered
+// from the helper descriptors themselves. This also permits a dynamic ABI
+// consumer to validate those descriptors without reversing a code address.
+type CoroDispatchDeliveryABI struct {
+	Initializer [16]byte
+	Drop        [16]byte
+}
 
 // CoroDispatchDeliveryHelper binds a compiler-injected descriptor to its exact
 // logical type and ABI. No function address is reverse-mapped at runtime.
@@ -38,7 +47,8 @@ func (p Program) coroDeliveryDescriptorType() Type {
 	// Nest the complete base, including its target padding. On wasm32 its
 	// trailing padding must not become the first tail word.
 	return p.Struct(p.coroDispatchDescriptorType(),
-		p.Struct(p.Uint32(), p.Uint32(), p.VoidPtr(), p.VoidPtr()))
+		p.Struct(p.Uint32(), p.Uint32(), p.VoidPtr(), p.VoidPtr(),
+			p.Uint64(), p.Uint64(), p.Uint64(), p.Uint64()))
 }
 
 func validateCoroDeliveryHelperTypes(producer *types.Signature, result Type, initializer, drop *types.Signature) {
@@ -74,7 +84,7 @@ func (p Package) validateCoroDispatchDelivery(opts CoroDispatchDescriptorOptions
 	if opts.Flags&CoroDispatchFlagHasDelivery == 0 {
 		panic("ssa: coroutine delivery tail requires its capability")
 	}
-	if delivery.Version != CoroDispatchDeliveryVersionV1 {
+	if delivery.Version != CoroDispatchDeliveryVersionV2 {
 		panic("ssa: unsupported coroutine delivery tail version")
 	}
 	if p.Prog.SizeOf(opts.Result) == 0 {
@@ -127,20 +137,28 @@ func (p Package) validateCoroDispatchDelivery(opts CoroDispatchDescriptorOptions
 		p.Prog.IntVal(uint64(delivery.Version), p.Prog.Uint32()).impl,
 		p.Prog.IntVal(0, p.Prog.Uint32()).impl,
 		delivery.Initializer.Descriptor.impl, delivery.Drop.Descriptor.impl,
+		p.Prog.IntVal(binary.BigEndian.Uint64(delivery.Initializer.ABIHash[:8]), p.Prog.Uint64()).impl,
+		p.Prog.IntVal(binary.BigEndian.Uint64(delivery.Initializer.ABIHash[8:]), p.Prog.Uint64()).impl,
+		p.Prog.IntVal(binary.BigEndian.Uint64(delivery.Drop.ABIHash[:8]), p.Prog.Uint64()).impl,
+		p.Prog.IntVal(binary.BigEndian.Uint64(delivery.Drop.ABIHash[8:]), p.Prog.Uint64()).impl,
 	}
 }
 
 func (p Package) matchesCoroDispatchDelivery(tail llvm.Value, want CoroDispatchDeliveryOptions) bool {
-	return !tail.IsAConstantStruct().IsNil() && tail.OperandsCount() == 4 &&
+	return !tail.IsAConstantStruct().IsNil() && tail.OperandsCount() == 8 &&
 		tail.Operand(0).ZExtValue() == uint64(want.Version) && tail.Operand(1).ZExtValue() == 0 &&
-		tail.Operand(2).C == want.Initializer.Descriptor.impl.C && tail.Operand(3).C == want.Drop.Descriptor.impl.C
+		tail.Operand(2).C == want.Initializer.Descriptor.impl.C && tail.Operand(3).C == want.Drop.Descriptor.impl.C &&
+		tail.Operand(4).ZExtValue() == binary.BigEndian.Uint64(want.Initializer.ABIHash[:8]) &&
+		tail.Operand(5).ZExtValue() == binary.BigEndian.Uint64(want.Initializer.ABIHash[8:]) &&
+		tail.Operand(6).ZExtValue() == binary.BigEndian.Uint64(want.Drop.ABIHash[:8]) &&
+		tail.Operand(7).ZExtValue() == binary.BigEndian.Uint64(want.Drop.ABIHash[8:])
 }
 
 // PrepareCoroDispatchDelivery reads the optional tail only after a dominating
 // HasDelivery check. It returns ordinary nil-environment managed function
 // values, not raw callback pointers or a separate invocation protocol. The
 // caller invokes/awaits them through the existing typed dispatch operations.
-func (b Builder) PrepareCoroDispatchDelivery(selection CoroDispatchSelection, initializer, drop *types.Signature) (Expr, Expr) {
+func (b Builder) PrepareCoroDispatchDelivery(selection CoroDispatchSelection, initializer, drop *types.Signature, abi CoroDispatchDeliveryABI) (Expr, Expr) {
 	call := selection.prepared
 	if call.descriptor.IsNil() {
 		panic("ssa: coroutine delivery requires a prepared descriptor")
@@ -152,10 +170,16 @@ func (b Builder) PrepareCoroDispatchDelivery(selection CoroDispatchSelection, in
 	version, reserved := b.Field(tail, 0), b.Field(tail, 1)
 	initDescriptor, dropDescriptor := b.Field(tail, 2), b.Field(tail, 3)
 	invalid := b.BinOp(token.OR,
-		b.BinOp(token.NEQ, version, b.Prog.IntVal(uint64(CoroDispatchDeliveryVersionV1), b.Prog.Uint32())),
+		b.BinOp(token.NEQ, version, b.Prog.IntVal(uint64(CoroDispatchDeliveryVersionV2), b.Prog.Uint32())),
 		b.BinOp(token.NEQ, reserved, b.Prog.IntVal(0, b.Prog.Uint32())))
 	for _, descriptor := range []Expr{initDescriptor, dropDescriptor} {
 		invalid = b.BinOp(token.OR, invalid, b.BinOp(token.EQL, descriptor, b.Prog.Nil(b.Prog.VoidPtr())))
+	}
+	for index, hash := range [][16]byte{abi.Initializer, abi.Drop} {
+		for word := 0; word < 2; word++ {
+			want := b.Prog.IntVal(binary.BigEndian.Uint64(hash[word*8:word*8+8]), b.Prog.Uint64())
+			invalid = b.BinOp(token.OR, invalid, b.BinOp(token.NEQ, b.Field(tail, 4+index*2+word), want))
+		}
 	}
 	b.coroPlainDispatchTrapIf(invalid.impl)
 	makeValue := func(signature *types.Signature, descriptor Expr) Expr {

@@ -65,21 +65,29 @@ func main() {
 	refs := <-out
 	// Weak clearing only requests each timer owner's executor; neither GC
 	// nor a fixed number of local Gosched calls joins managers on another P.
-	// Wait for their actual retirement, still bounded far below the hour-long
-	// timer deadline. Sleep parks this G without creating a timer manager and
-	// gives remote owner notifications time to complete on a loaded host.
+	// Wait for BOTH weak clearing and manager retirement. A manager count is
+	// not a weak-clearing acknowledgement either. Stopping on the count alone
+	// can omit the collections still needed to clear the last weak pointer.
+	// The deadline is still far below the hour-long timer deadline. Sleep parks
+	// this G without creating a timer manager and lets remote owners complete.
 	deadline := time.Now().Add(5 * time.Second)
+	collections := 0
 	for {
 		runtime.GC()
+		collections++
 		for j := 0; j < 128; j++ {
 			runtime.Gosched()
 		}
-		if runtime.NumGoroutine() <= baseline || !time.Now().Before(deadline) {
+		if allCollected(refs) && runtime.NumGoroutine() <= baseline {
+			break
+		}
+		if !time.Now().Before(deadline) {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
 	if !allCollected(refs) {
+		println("timer collection attempts", collections, "goroutines", baseline, runtime.NumGoroutine())
 		panic("unreachable future Timer/Ticker or channel remained strongly alive")
 	}
 	if n := runtime.NumGoroutine(); n > baseline {

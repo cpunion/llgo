@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -193,6 +194,24 @@ func Deferred() { defer Acquire("discard") }
 				t.Fatal(err)
 			}
 			view := consumer.CoroLibraryEffects()
+			t.Run("old-delivery-abi-rejected", func(t *testing.T) {
+				signature, err := consumer.coroPhysicalEntrySourceSignature(pkg.Func("Acquire"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				legacy := facts[0]
+				legacy.ABIHash = emissionDigest(framedEmissionKey(
+					coroLibraryFunctionABIDigestDomain, metadata.CoroABI, metadata.SchedulerABI,
+					metadata.PanicABI, metadata.FuncRepABI, metadata.TargetTriple,
+					strconv.Itoa(metadata.PointerBits), metadata.Endianness, metadata.DataLayout,
+					"llgo.coro.borrowed-result-guards.v2", consumer.emissionTypeKeys.strictABI(signature),
+				))
+				legacy.Delivery.ProducerABI = legacy.ABIHash
+				if err := view.validateFunctionEntry(pkg.Func("Acquire"), metadata, legacy); err == nil ||
+					!strings.Contains(err.Error(), "ABI hash") {
+					t.Fatalf("old delivery tail contract did not fail the library ABI gate: %v", err)
+				}
+			})
 			makeIndex := func(entries []coro.LibraryEffectFunction) *coro.LibraryEffectIndex {
 				t.Helper()
 				index, err := coro.NewLibraryEffectIndex([]coro.LibraryEffectSummary{{Schema: coro.LibraryEffectSummarySchema,
