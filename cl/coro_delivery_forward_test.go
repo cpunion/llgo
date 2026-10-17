@@ -470,6 +470,13 @@ func Root(pointer *PointerReceiver) {
 				if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 					t.Fatalf("forwarded resource IR: %v\n%s", err, module.String())
 				}
+				// Ask the same Go-to-physical type converter for the exact
+				// result layout. A structural prefix can also match a source
+				// input aggregate and falsely count its ordinary local copy.
+				layout := types.NewSignatureType(nil, nil, nil, types.NewTuple(types.NewParam(0, nil, "result",
+					u.coroProgramIR.deliveryProducers[foo.ssa.Func("Acquire")].result)), nil, false)
+				probe := pkg.NewFunc("__test_delivery_result_layout", layout, llssa.InGo)
+				resultType := module.NamedFunction(probe.Name()).GlobalValueType().ParamTypes()[0]
 				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline", "Projected", "ProjectedChain"} {
 					body := requireCoroPhysicalFunction(t, module, "foo."+name)
 					results := 0
@@ -478,12 +485,7 @@ func Root(pointer *PointerReceiver) {
 							if instruction.InstructionOpcode() != llvm.Alloca {
 								continue
 							}
-							typ := instruction.AllocatedType()
-							if typ.TypeKind() != llvm.StructTypeKind {
-								continue
-							}
-							fields := typ.StructElementTypes()
-							if len(fields) == 2 && fields[0].TypeKind() == llvm.IntegerTypeKind && fields[0].IntTypeWidth() == prog.PointerSize()*8 && fields[1].TypeKind() == llvm.StructTypeKind && len(fields[1].StructElementTypes()) == 2 {
+							if instruction.AllocatedType().C == resultType.C {
 								results++
 							}
 						}
