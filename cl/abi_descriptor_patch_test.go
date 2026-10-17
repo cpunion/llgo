@@ -5,10 +5,90 @@ package cl
 import (
 	"go/token"
 	"go/types"
+	"runtime"
 	"testing"
 
 	llssa "github.com/xgo-dev/llgo/ssa"
+	"github.com/xgo-dev/llgo/ssa/abi"
+	"github.com/xgo-dev/llvm"
 )
+
+func TestPatchedMethodDescriptorsShareSignatureIdentity(t *testing.T) {
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	oldPkg := types.NewPackage("example.com/methodresult", "methodresult")
+	newPkg := types.NewPackage(oldPkg.Path(), oldPkg.Name())
+	result := func(pkg *types.Package) *types.Named {
+		// Replacement declarations come from a different source file. Their
+		// detached physical TypeNames must not accidentally share position zero.
+		position := token.Pos(101)
+		if pkg == newPkg {
+			position = 202
+		}
+		object := types.NewTypeName(position, pkg, "Result", nil)
+		typ := types.NewNamed(object, types.NewStruct([]*types.Var{
+			types.NewField(0, pkg, "Callback", types.NewSignatureType(nil, nil, nil, nil, nil, false), false),
+		}, nil), nil)
+		pkg.Scope().Insert(object)
+		return typ
+	}
+	original := result(oldPkg)
+	result(newPkg)
+	ctx := &context{prog: prog, patches: Patches{oldPkg.Path(): {Types: newPkg}}}
+	prog.SetPatch(ctx.patchPhysicalType)
+
+	typesPkg := types.NewPackage("example.com/methoddescriptor", "methoddescriptor")
+	object := types.NewTypeName(0, typesPkg, "Number", nil)
+	number := types.NewNamed(object, types.Typ[types.Int], nil)
+	typesPkg.Scope().Insert(object)
+	results := types.NewTuple(types.NewParam(0, nil, "", original))
+	number.AddMethod(types.NewFunc(0, typesPkg, "Generate", types.NewSignatureType(
+		types.NewVar(0, typesPkg, "self", number), nil, nil, nil, results, false)))
+	method := types.NewFunc(0, typesPkg, "Generate", types.NewSignatureType(nil, nil, nil, nil, results, false))
+	underlying := types.NewInterfaceType([]*types.Func{method}, nil).Complete()
+	interfaceObject := types.NewTypeName(0, typesPkg, "Generator", nil)
+	generator := types.NewNamed(interfaceObject, underlying, nil)
+	typesPkg.Scope().Insert(interfaceObject)
+
+	pkg := prog.NewPackage("methoddescriptor", typesPkg.Path())
+	defer pkg.Module().Dispose()
+	b := pkg.NewFunc("check", llssa.NoArgsNoRet, llssa.InC).MakeBody(1)
+	boxed := b.MakeInterface(prog.Type(types.NewInterfaceType(nil, nil).Complete(), llssa.InGo), prog.Zero(prog.Type(number, llssa.InGo)))
+	b.TypeAssert(boxed, prog.Type(generator, llssa.InGo), true)
+	b.TypeAssert(boxed, prog.Type(underlying, llssa.InGo), true)
+	b.Return()
+
+	concrete := pkg.Module().NamedGlobal("_llgo_example.com/methoddescriptor.Number")
+	if concrete.IsNil() {
+		t.Fatal("missing concrete descriptor")
+	}
+	want := concrete.Initializer().Operand(2).Operand(0).Operand(1)
+	signature := ctx.patchType(method.Type()).(*types.Signature)
+	canonical := prog.PhysicalFuncDecl(types.NewSignatureType(nil, nil, nil, signature.Params(), signature.Results(), signature.Variadic()), llssa.InGo)
+	canonicalName, _ := abi.New(8, types.SizesFor("gc", runtime.GOARCH)).TypeName(canonical)
+	if want.Name() != canonicalName {
+		t.Errorf("concrete method signature = %s, want canonical physical signature %s", want.Name(), canonicalName)
+	}
+	count := 0
+	for global := pkg.Module().FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+		init := global.Initializer()
+		if init.IsNil() || init.Type().TypeKind() != llvm.ArrayTypeKind || init.Type().ArrayLength() != 1 ||
+			init.Type().ElementType().TypeKind() != llvm.StructTypeKind ||
+			init.Type().ElementType().StructName() != "github.com/xgo-dev/llgo/runtime/abi.Imethod" {
+			continue
+		}
+		count++
+		if got := init.Operand(0).Operand(1); got != want {
+			t.Errorf("%s method signature = %s, concrete signature = %s", global.Name(), got.Name(), want.Name())
+		}
+	}
+	if count == 0 {
+		t.Fatal("missing interface method table")
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestPhysicalDescriptorPatchPreservesSourceAndRawSignatures(t *testing.T) {
 	prog := newLLSSAProg(t)

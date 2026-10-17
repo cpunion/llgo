@@ -714,7 +714,10 @@ func (b Builder) abiInterfaceMethods(mset *types.MethodSet) []*types.Selection {
 // closure func type
 func funcType(prog Program, typ types.Type) types.Type {
 	ftyp := prog.Type(typ, InGo)
-	return ftyp.raw.Type.(*types.Struct).Field(0).Type()
+	// Method sets retain their source signatures, while interface descriptors
+	// may already contain a patched physical signature. Canonicalize both before
+	// choosing the descriptor/cache key, not only its eventual initializer.
+	return prog.patch(ftyp.raw.Type.(*types.Struct).Field(0).Type())
 }
 
 func abiMethodName(obj types.Object) string {
