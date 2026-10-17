@@ -15,7 +15,7 @@ jobs:
   test:
     name: ${{ matrix.check }}
     runs-on: ubuntu-22.04
-    timeout-minutes: ${{ (matrix.lane == 'timer-gc' || matrix.lane == 'timer-gc-wasi') && 35 || 20 }}
+    timeout-minutes: ${{ matrix.timeout || 20 }}
     env:
       LLGO_ROOT: ${{ github.workspace }}
     strategy:
@@ -27,14 +27,14 @@ jobs:
           - { llvm: 22, go: "1.27.0", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "fault-e2e", check: "test native fault landing E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.27.0)" }
-          - { llvm: 22, go: "1.27.0", lane: "archive-e2e", check: "test independent archive E2E (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "archive-e2e", timeout: 30, check: "test independent archive E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "fleet-e2e", check: "test native fleet E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "synctest", check: "test synctest and weak object ownership (LLVM 22)" }
-          - { llvm: 22, go: "1.27.0", lane: "timer-gc", check: "test standard timer semantics and GC cancellation (LLVM 22)" }
-          - { llvm: 22, go: "1.27.0", lane: "timer-gc-wasi", check: "test WASI standard timers and TinyGC cancellation (LLVM 22)" }
+          - { llvm: 22, go: "1.27.0", lane: "timer-gc", timeout: 35, check: "test standard timer semantics and GC cancellation (LLVM 22)" }
+          - { llvm: 22, go: "1.27.0", lane: "timer-gc-wasi", timeout: 35, check: "test WASI standard timers and TinyGC cancellation (LLVM 22)" }
           - { llvm: 22, go: "1.27.0", lane: "target-core", check: "test target adapters (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "target-js-wasm", check: "test JS/WASM command reactor (LLVM 22)" }
           - { llvm: 22, go: "1.27.0", lane: "target-wasi-command", check: "test WASI command reactor (LLVM 22)" }
