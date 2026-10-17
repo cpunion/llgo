@@ -380,7 +380,14 @@ receiver 只保留指针 identity，不重新读取 pointee。资源调用暂不
 装箱消除，以保证调用和 custody 使用同一 env/capability transaction。
 需要先求值再保存的 value-method pointer wrapper 仍是未完成项；缺少这项 binding
 时明确拒绝 descriptor publication，不能退化成没有资源能力的普通调用。
-新增接口 physical/FD 矩阵尚待验收，这不是完整接口资源兼容性的声明。
+receiver-independent 接口 drop view 已通过 native/wasm32、plain/asynchronous
+helper 的 pre/post-CoroSplit 验证：只有一次真实 helper call，映射精确，没有
+load/alloca/store；混合 resource/nonresource 候选保留原条件推导。
+另有 direct pointer-method gate 验证 helper 接收到的就是原 receiver pointer
+identity，不解引用 pointee、不增加 storage；同样通过 native/wasm32 CoroSplit。
+冻结 v155 用新编译器通过 **576** 次完整 forwarded FD 验收及 **96** 次额外
+interface call/defer × P=1/2/4 ×16，源码前后校验一致，受限进程树峰值1235.0MiB。
+这些是 POSIX native 执行，不是 wasm 实际 runtime 或完整接口资源兼容性的声明。
 
 ## 4. 方案比较
 

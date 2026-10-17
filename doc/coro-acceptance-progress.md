@@ -187,8 +187,25 @@ routes resource calls through the existing capability-aware descriptor/guard.
 Typed drop views compose directly to the real helper, dropping the normalized
 receiver argument when unused; pointer identity can be retained without reading
 its pointee. No runtime field, mode, directive or new cleanup protocol is added.
-The source-fact method gate passes. The expanded native/wasm32 physical and linked
-FD gates are **pending**, so this is not integrated or accepted interface support.
+The source-fact method gate passes. The expanded native/wasm32 physical gate
+passes for receiver-independent cleanup, plain/asynchronous helpers and a mixed
+resource/nonresource interface family; it checks one real call, exact argument
+mapping and no load/alloca/store in the interface drop view. Linked frozen v155
+passes **576/576** complete forwarded FD executions plus **96/96** extra
+interface call/defer executions (P=1/2/4 ×16), source-after matched, peak1235.0MiB.
+The new compiler SHA-256 is
+`1c730956c5f02facb369467fd22d00c74d57b16e79acf8b6e8692190f0a85d09`,
+the source manifest is
+`c58fc7f52809da79019f158acbf809beb67acdec94cdfa70cfe53f0240407b3d`,
+and the retained linked image is
+`a39ea4075be2110db3507c7834aaa20c23e0ac7d6515126b194d3c4746fd7ea7`.
+These are native POSIX executions, not wasm actual-runtime acceptance.
+The typed-pointer identity gate also passes native/wasm32 pre/post-CoroSplit:
+the view forwards the exact receiver word, unchanged output and nil base env,
+with one helper call and no pointee read or storage. The expanded host IR run
+took 5.99s with a 160.4MiB peak; this is not a linked pointer-resource run.
+The broader resource cohort and new archive matrices are still pending;
+no feature PR is open and this work is not integrated.
 Receiver-dependent value wrappers still need an evaluated snapshot; descriptor
 publication now rejects that boundary instead of silently omitting custody.
 

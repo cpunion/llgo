@@ -5,6 +5,7 @@ package cl
 import (
 	"go/ast"
 	"go/types"
+	"strings"
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/coro"
@@ -76,8 +77,18 @@ type Opener interface { Open(int,int) (int,error) }
 type PlainReceiver struct{}
 func (PlainReceiver) Open(a,b int) (int,error) { return a+b,nil }
 func InterfaceOwner(open Opener) { open.Open(11,12) }
+type PointerReceiver struct { Value int }
+func dropPointer(out *Result, _ unsafe.Pointer, receiver *PointerReceiver, a int) { out.R0 = a }
+//go:linkname borrowPointer llgo.coroBorrowResult
+func borrowPointer(func(*Result), func(*Result,unsafe.Pointer,*PointerReceiver,int)) *Result
+func (receiver *PointerReceiver) PointerOpen(a int) (int,error) {
+ out := borrowPointer(initialize,dropPointer)
+ out.R0 = a
+ return out.R0,out.R1
+}
+type PointerOpener interface { PointerOpen(int) (int,error) }
 var PublishedCaptured = Token(17).Bound
-func Root() {
+func Root(pointer *PointerReceiver) {
  Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Changed(7); PublishedPermutation(8,9); PublishedIdentity(10,11); FixedPath(); PublishedPath()
  receiver := Receiver{Token:37}
  receiver.Open(1,2)
@@ -94,6 +105,8 @@ func Root() {
  open.Open(9,10)
  InterfaceOwner(open)
  InterfaceOwner(PlainReceiver{})
+ var pointerOpen PointerOpener = pointer
+ pointerOpen.PointerOpen(13)
 }
 `)
 				source.ssa.Build()
@@ -121,6 +134,12 @@ func Root() {
 				methods := 0
 				for _, function := range u.Functions() {
 					if function.Name() != "Open" && function.Name() != "Open$bound" && function.Name() != "Open$thunk" {
+						continue
+					}
+					if function.Signature.Recv() != nil && strings.Contains(function.Signature.Recv().Type().String(), "PlainReceiver") {
+						if _, present, err := u.coroProgramIR.sourceDelivery(function); err != nil || present {
+							t.Fatalf("ordinary interface candidate acquired false resource custody: %s: %v", function, err)
+						}
 						continue
 					}
 					recipe, present, err := u.coroProgramIR.sourceDelivery(function)
@@ -184,7 +203,7 @@ func Root() {
 					ClassifySyncDemandReferences:   u.CoroSyncDemandReferences,
 					ClassifyManagedValueReferences: u.CoroPlanningMetadata().ManagedValueReferences,
 					ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
-						if fn == foo.ssa.Func("Acquire") || fn == foo.ssa.Func("AcquirePath") || asyncHelper && fn == foo.ssa.Func("drop") {
+						if fn == foo.ssa.Func("Acquire") || fn == foo.ssa.Func("AcquirePath") || fn.Name() == "PointerOpen" || asyncHelper && fn == foo.ssa.Func("drop") {
 							return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
 						}
 						return coro.SSAFunctionPolicy{}, nil
@@ -279,6 +298,16 @@ func Root() {
 					}
 				}
 				helperPlan, _ := plan.FunctionPlan(foo.ssa.Func("drop"))
+				prefix := 0
+				helperName := "foo.drop"
+				switch helperPlan.ManagedEntry {
+				case coro.ManagedEntryCoroutine:
+					prefix = 2
+					helperName += coroPrimarySuffix
+				case coro.ManagedEntryOutcomePlain:
+					prefix = 3
+					helperName += coroOutcomePlainPrimarySuffix
+				}
 				interfaceViews := 0
 				for _, function := range u.Functions() {
 					if function.Name() != "Open" || function.Signature.Recv() == nil ||
@@ -289,20 +318,59 @@ func Root() {
 					if view.IsNil() || view.BasicBlocksCount() != 1 {
 						t.Fatal("interface receiver lost its frame-free typed helper view")
 					}
+					calls := 0
+					for instruction := view.FirstBasicBlock().FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+						switch instruction.InstructionOpcode() {
+						case llvm.Load, llvm.Alloca, llvm.Store:
+							t.Fatal("unused interface receiver introduced a context read or storage")
+						case llvm.Call:
+							calls++
+							if instruction.CalledValue().Name() != helperName ||
+								instruction.Operand(prefix).C != view.Param(prefix).C || !instruction.Operand(prefix+1).IsNull() ||
+								instruction.Operand(prefix+2).C != view.Param(prefix+2).C || instruction.Operand(prefix+3).C != view.Param(prefix+3).C {
+								t.Fatalf("interface helper lost its receiver-free mapping: %s", instruction.String())
+							}
+						}
+					}
+					if calls != 1 {
+						t.Fatalf("interface view calls=%d, want one real helper call", calls)
+					}
 					interfaceViews++
 				}
 				if interfaceViews != 1 {
 					t.Fatalf("interface typed receiver views=%d, want one", interfaceViews)
 				}
-				prefix := 0
-				helperName := "foo.drop"
-				switch helperPlan.ManagedEntry {
-				case coro.ManagedEntryCoroutine:
-					prefix = 2
-					helperName += coroPrimarySuffix
-				case coro.ManagedEntryOutcomePlain:
-					prefix = 3
-					helperName += coroOutcomePlainPrimarySuffix
+				pointerViews := 0
+				for _, function := range u.Functions() {
+					if function.Name() != "PointerOpen" {
+						continue
+					}
+					view := module.NamedFunction("__llgo_coro_delivery_interface_view." + emissionDigest(u.finalIdentity(function)) + ".drop")
+					if view.IsNil() || view.BasicBlocksCount() != 1 {
+						t.Fatal("pointer receiver lost its exact identity helper view")
+					}
+					calls := 0
+					for instruction := view.FirstBasicBlock().FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+						switch instruction.InstructionOpcode() {
+						case llvm.Load, llvm.Alloca, llvm.Store:
+							t.Fatal("pointer identity view reread the pointee or allocated storage")
+						case llvm.Call:
+							calls++
+							callee := instruction.CalledValue()
+							base := callee.ParamsCount() - 4
+							if instruction.Operand(base).C != view.Param(base).C || !instruction.Operand(base+1).IsNull() ||
+								instruction.Operand(base+2).C != view.Param(base+1).C || instruction.Operand(base+3).C != view.Param(base+2).C {
+								t.Fatalf("pointer identity view changed its evaluated receiver: %s", instruction.String())
+							}
+						}
+					}
+					if calls != 1 {
+						t.Fatalf("pointer identity helper calls=%d, want one", calls)
+					}
+					pointerViews++
+				}
+				if pointerViews != 1 {
+					t.Fatalf("pointer identity views=%d, want one", pointerViews)
 				}
 				for _, function := range u.Functions() {
 					if function.Name() != "Bound$bound" {
