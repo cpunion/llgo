@@ -399,6 +399,8 @@ call/defer 验收。调用方把原 receiver 绑定给接口后改绑原变量�
 导出声明与 effect/ABI 元信息，没有私有 producer/helper SSA。实际 AOT/link
 执行验证 normal、defer discarded result、cancel 及两步可挂起 drop 仍使用
 原 token17。这是 counter-based custody 验收，不是 OS FD/GC stress 声明。
+完整 archive 矩阵按 CI 相同的顶层测试隔离方式运行，6 个顶层测试、14 个独立
+链接镜像、42 次实际执行全部通过，无失败/跳过；源码前后匹配，峰值1879.2MiB。
 
 receiver 的求值时点另有 Go/LLGo 共同通过的运行回归：`defer iface.M()` 在调用时
 读取 `*T` 的 value receiver，直接 `defer value.M()` 在注册时复制；接口 method

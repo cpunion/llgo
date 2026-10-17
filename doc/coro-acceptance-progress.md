@@ -232,7 +232,13 @@ bodies. Frozen v161 passes small and large captured cases, three actual native
 executions each; normal delivery, ordinary defer result discarding, cancellation
 and two suspending cleanup steps retain the original token17. This is actual
 AOT/link execution of counter-based ownership, not an OS-FD or GC stress claim.
-The rest of the archive matrix is still running in isolated top-level processes.
+The complete frozen v161 archive matrix passes **6/6** discovered top-level
+tests, **14** retained linked images and **42** actual executions in fresh
+top-level processes, with zero skips/failures. Source-after matches manifest
+`97b8556f0d485b50bef7b7d7e347287699521baa98bc91d4862d29f3e3e67a74`;
+the guarded process-tree peak is 1879.2MiB. These use the frozen host compiler
+API/AOT pipeline and the production scheduler island, not a claim of full CLI
+or full-runtime GC acceptance.
 An earlier aggregate v159 process hit its 4GiB RSS limit after completing the
 original cases; its exit137 remains recorded and is not a full-matrix pass.
 
