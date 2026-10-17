@@ -75,6 +75,10 @@ func TestCoroArchiveCapturedFieldDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) 
 	testCoroArchiveCapturedDeliveryNativeRuntime(t, coroArchiveCapturedFieldDelivery)
 }
 
+func TestCoroArchiveBoxedReceiverDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
+	testCoroArchiveCapturedDeliveryNativeRuntime(t, coroArchiveBoxedReceiverDelivery)
+}
+
 func testCoroArchiveCapturedDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode) {
 	t.Helper()
 	for _, size := range []struct {
@@ -95,11 +99,13 @@ const (
 	coroArchiveFactoryValueDelivery
 	coroArchiveCapturedValueDelivery
 	coroArchiveCapturedFieldDelivery
+	coroArchiveBoxedReceiverDelivery
 )
 
 func testCoroArchiveDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode, large, forwarded bool) {
 	t.Helper()
-	captured := mode == coroArchiveCapturedValueDelivery || mode == coroArchiveCapturedFieldDelivery
+	boxed := mode == coroArchiveBoxedReceiverDelivery
+	captured := mode == coroArchiveCapturedValueDelivery || mode == coroArchiveCapturedFieldDelivery || boxed
 	dynamic, factory := mode != coroArchiveStaticDelivery, mode == coroArchiveFactoryValueDelivery || captured
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native archive delivery requires POSIX")
@@ -144,15 +150,15 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 	if err := os.WriteFile(importcfg, []byte("packagefile "+libraryPath+"="+archive+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	runtimeTypes := make(map[llssa.Program]*types.Package)
 	newProgram := func() llssa.Program {
 		prog := llssa.NewProgram(nil)
-		prog.SetRuntime(func() *types.Package {
-			pkg, err := goimporter.For("source", nil).Import(llssa.PkgRuntime)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return pkg
-		})
+		pkg, err := goimporter.For("source", nil).Import(llssa.PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prog.SetRuntime(pkg)
+		runtimeTypes[prog] = pkg
 		prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
 		t.Cleanup(prog.Dispose)
 		return prog
@@ -176,7 +182,7 @@ func DropInfo() uint32 { return attempts*1000 + lastDrop }
 			// island actually provides. A large-result gate must supply its
 			// frozen frontend dependency, not invent a producer/helper body or
 			// let code generation discover the allocator after analysis.
-			runtimeSSA, runtimeFiles, _, _ := createCoroBootstrapV2SSAPackage(t, source.Prog, source.Prog.Fset, llssa.PkgRuntime, `package runtime
+			runtimeSource := `package runtime
 import "unsafe"
 //go:linkname zero C.__llgo_archive_delivery_allocz
 //llgo:coro sync
@@ -188,7 +194,37 @@ func AllocU(size uintptr) unsafe.Pointer { return zero(size) }
 func abort()
 func AssertNilDeref(value bool) { if value { abort() } }
 func PanicWrapNilPointer(value bool, receiver, method string) { if value { abort() } }
-`, coroPlanTestImporter{"unsafe": types.Unsafe})
+`
+			if boxed {
+				// The interface payload is already an immutable Go box. The
+				// production method selector and typed helper views still run;
+				// this island supplies their ordinary runtime ABI dependencies.
+				runtimeSource = strings.Replace(runtimeSource, "import \"unsafe\"", "import \"unsafe\"\nimport runtimeabi \"llgo.test/runtimeabi\"", 1)
+				runtimeSource += `type iface = runtimeabi.Iface
+func IfacePtrData(value iface) unsafe.Pointer { return value.data }
+func memequal32(a,b unsafe.Pointer) bool { return true }
+func memequal64(a,b unsafe.Pointer) bool { return true }
+func memequalptr(a,b unsafe.Pointer) bool { return true }
+func interequal(a,b unsafe.Pointer) bool { return true }
+func nilinterequal(a,b unsafe.Pointer) bool { return true }
+func strequal(a,b unsafe.Pointer) bool { return true }
+func memequal8(a,b unsafe.Pointer) bool { return true }
+func structequal(a,b unsafe.Pointer) bool { return true }
+func memequal0(a,b unsafe.Pointer) bool { return true }
+func arrayequal(a,b unsafe.Pointer) bool { return true }
+`
+			}
+			imports := coroPlanTestImporter{"unsafe": types.Unsafe}
+			if boxed {
+				// Reuse the actual runtime iface type, including its typed itab
+				// field. Equal machine layouts alone cannot certify this helper.
+				abiSSA, abiFiles, abiTypes, _ := createCoroBootstrapV2SSAPackage(t, source.Prog, source.Prog.Fset, "llgo.test/runtimeabi", "package runtimeabi")
+				abiTypes.Scope().Insert(types.NewTypeName(token.NoPos, abiTypes, "Iface", runtimeTypes[prog].Scope().Lookup("iface").Type()))
+				abiSSA.Build()
+				inputs = append(inputs, cl.EmissionPackage{SSA: abiSSA, Files: abiFiles, Identity: abiTypes.Path()})
+				imports[abiTypes.Path()] = abiTypes
+			}
+			runtimeSSA, runtimeFiles, _, _ := createCoroBootstrapV2SSAPackage(t, source.Prog, source.Prog.Fset, llssa.PkgRuntime, runtimeSource, imports)
 			runtimeSSA.Build()
 			inputs = append(inputs, cl.EmissionPackage{SSA: runtimeSSA, Files: runtimeFiles, Identity: llssa.PkgRuntime})
 		}
@@ -250,6 +286,11 @@ func PanicWrapNilPointer(value bool, receiver, method string) { if value { abort
 			callSitePlan:     u.CoroCallSitePlan, loweredCalls: u.CoroLoweredCalls,
 			staticFunctionReferenceCallArgument: u.CoroStaticFunctionReferenceCallArgument,
 			importedLibraryEffects:              imported, importedFunctions: imports,
+		}
+		if boxed {
+			input.demandReferences = u.CoroDemandReferences
+			input.syncDemandReferences = u.CoroSyncDemandReferences
+			input.managedValueReferences = u.CoroPlanningMetadata().ManagedValueReferences
 		}
 		plan, err := input.Analyze(roots, coro.SSAConfig{FunctionIDs: ids, MaxPlainInstructions: -1, OutcomeMode: coro.OutcomeExplicitStatus})
 		if err != nil {
@@ -426,8 +467,18 @@ func PanicWrapNilPointer(value bool, receiver, method string) { if value { abort
 					"func (r receiver) captured(value uint32) " + result + " { return acquirePermuted(value,r.Inner.Token) }\n" +
 					"func Callable(token uint32) func(uint32) " + result + " { var r receiver; r.Inner.Token=token; bound:=r.captured; r.Inner.Token=99; return bound }"
 			}
+			if boxed {
+				receiver = "type receiver struct { Unused func(); Inner struct { Token uint32 } }\n" +
+					"type Opener interface { Open(uint32) " + result + " }\n" +
+					"func (r receiver) Open(value uint32) " + result + " { return acquirePermuted(value,r.Inner.Token) }\n" +
+					"func Callable(token uint32) Opener { var r receiver; r.Inner.Token=token; var boxed Opener=r; r.Inner.Token=99; return boxed }"
+			}
 			producerSource = strings.Replace(producerSource, "func Callable() func(uint32) "+result+" { return acquire }", receiver, 1)
 			declarationSource = strings.Replace(declarationSource, "func Callable()", "func Callable(uint32)", 1)
+			if boxed {
+				declarationSource = strings.Replace(declarationSource, "func Callable(uint32) func(uint32) "+result,
+					"type Opener interface { Open(uint32) "+result+" }\nfunc Callable(uint32) Opener", 1)
+			}
 		}
 	}
 	producer, files := buildCoroPlanTestPackage(t, libraryPath, producerSource, nil)
@@ -467,6 +518,11 @@ func main() {
 		if large {
 			consumerSource = strings.ReplaceAll(consumerSource, "func(uint32) uint32", "func(uint32) lib.Payload")
 		}
+		if boxed {
+			consumerSource = strings.ReplaceAll(consumerSource, "acquire(", "acquire.Open(")
+			consumerSource = strings.ReplaceAll(consumerSource, "func(uint32) uint32", "lib.Opener")
+			consumerSource = strings.ReplaceAll(consumerSource, "func(uint32) lib.Payload", "lib.Opener")
+		}
 	}
 	consumer, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, consumerSource, coroPlanTestImporter{libraryPath: declarations.Pkg, "unsafe": types.Unsafe})
 	consumerProg := newProgram()
@@ -485,6 +541,21 @@ func main() {
 	})
 	checks := consumerProg.NewPackage("archive-delivery-checks", "archive-delivery-checks")
 	defer checks.Module().Dispose()
+	if boxed {
+		// The scheduler island does not pull in the standard-library iface
+		// helpers. Supply the exact plain implementations declared above;
+		// this fixture contains only indirect struct boxes and no interface
+		// equality operations. Resource producers/helpers remain in resource.a.
+		sig := runtimeTypes[consumerProg].Scope().Lookup("IfacePtrData").Type().(*types.Signature)
+		ifaceData := checks.NewFunc(llssa.PkgRuntime+".IfacePtrData", sig, llssa.InGo)
+		b := ifaceData.MakeBody(1)
+		b.Return(b.Field(ifaceData.Param(0), 1))
+		for _, name := range []string{"memequal32", "memequal64", "interequal", "nilinterequal", "memequal8", "structequal", "memequal0", "arrayequal"} {
+			equal := checks.NewFunc(llssa.PkgRuntime+"."+name,
+				newSignature([]types.Type{types.Typ[types.UnsafePointer], types.Typ[types.UnsafePointer]}, []types.Type{types.Typ[types.Bool]}), llssa.InGo)
+			equal.MakeBody(1).Return(consumerProg.BoolVal(true))
+		}
+	}
 	const setupSymbol, checkSymbol = "__llgo_archive_delivery_setup", "__llgo_archive_delivery_check"
 	checks.NewFunc(setupSymbol, newSignature(nil, nil), llssa.InGo).MakeBody(1).Return()
 	check := checks.NewFunc(checkSymbol, newSignature(nil, []types.Type{types.Typ[types.Int32]}), llssa.InGo)

@@ -49,6 +49,15 @@ func TestLibraryUnboundDeliveryCannotBecomeAnOrdinaryResultContract(t *testing.T
 	if err := old.Verify(); err == nil {
 		t.Fatal("preceding schema could omit the unbound-delivery distinction")
 	}
+	old.Schema = "llgo.coro.library-effect-summary.v20"
+	if err := old.Verify(); err == nil {
+		t.Fatal("v20 could publish raw-trap resource Ifn_ words without a local invoke")
+	}
+	oldRecord := bytes.Clone(data)
+	oldRecord[len(libraryEffectSummaryRecordMagic)-1] = 20
+	if _, err := ParseLibraryEffectSummaryRecords(oldRecord); err == nil {
+		t.Fatal("accepted a v20 resource interface publication record")
+	}
 }
 
 func TestLibraryDeliveryViewStillRequiresOriginalHelperFact(t *testing.T) {

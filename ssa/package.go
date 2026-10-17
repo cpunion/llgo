@@ -981,7 +981,7 @@ type aPackage struct {
 	methodEntry func(string, *types.Func, *types.Signature) (Expr, bool)
 	// interfaceMethodDescriptor may replace one ABI Method.Ifn_ raw entry
 	// with a compiler-owned descriptor pointer.
-	interfaceMethodDescriptor func(string, *types.Func, *types.Signature) (Expr, bool)
+	interfaceMethodDescriptor func(string, *types.Func, *types.Signature, types.Type) (Expr, bool)
 	runtimeCall               RuntimeCallResolver
 	pythonCall                PythonCallResolver
 	runtimeFuncs              map[Type]string
@@ -1241,7 +1241,10 @@ func (p Package) SetResolveMethodEntry(fn func(string, *types.Func, *types.Signa
 // for ABI Method.Ifn_ words. A successful result replaces only the interface
 // call entry; Method.Tfn_ and explicit raw function addresses keep their
 // ordinary callable ABI. ok=false preserves the legacy Ifn_ word.
-func (p Package) SetResolveInterfaceMethodDescriptor(fn func(string, *types.Func, *types.Signature) (Expr, bool)) {
+// The final argument is the original concrete receiver type, before the
+// one-word Ifn_ adapter. T's immutable boxed value and a mutable *T interface
+// payload must remain distinct even when both raw Ifn_ signatures use *T.
+func (p Package) SetResolveInterfaceMethodDescriptor(fn func(string, *types.Func, *types.Signature, types.Type) (Expr, bool)) {
 	p.interfaceMethodDescriptor = fn
 }
 

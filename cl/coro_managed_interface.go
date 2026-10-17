@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"go/token"
 	"go/types"
 
 	"github.com/xgo-dev/llgo/internal/coro"
@@ -293,6 +294,7 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	if universe == nil || universe.coroProgramIR == nil {
 		return nil, fmt.Errorf("managed interface descriptor requires a prepared ProgramIR")
 	}
+	managedFamilies := make(map[string]struct{})
 
 	// Method.Tfn_ is always a first-class Go function value. ABI type lowering
 	// records those compiler-created values explicitly, because there is no SSA
@@ -335,6 +337,29 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 				)
 			}
 			result.targets[targetPlan.ID] = target
+
+			// A library may publish a concrete value as an interface without
+			// invoking any of its methods locally. Its resource method must
+			// already carry the descriptor expected by a separately compiled
+			// consumer. Use the frozen publication references and ownership
+			// facts; local invoke sites cannot establish this ABI obligation.
+			facts, frozen := universe.coroProgramIR.localBodyFacts[target]
+			if !frozen || !facts.ResultDelivery {
+				continue
+			}
+			method, _ := source.Object().(*types.Func)
+			signature, _ := universe.effectiveType(
+				universe.ownerOf(source), source, source.Signature,
+			).(*types.Signature)
+			key := coroManagedInterfaceMethodKey(method, signature, universe.emissionTypeKeys.strictABI)
+			if key == "" {
+				return nil, fmt.Errorf("resource method publication %q has no exact method/signature key", source.Name())
+			}
+			if !enabled {
+				return nil, fmt.Errorf("resource method publication %q requires managed interface descriptor transport", source.Name())
+			}
+			managedFamilies[key] = struct{}{}
+			result.methods[key] = struct{}{}
 		}
 	}
 
@@ -343,7 +368,6 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	// every use of that Ifn_ family onto the universal descriptor. Conversely,
 	// an all-plain family can retain LLGo's ordinary itab call without paying a
 	// per-invocation descriptor capability/ABI validation cost.
-	managedFamilies := make(map[string]struct{})
 	for _, owner := range plan.Functions() {
 		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitOutcomePlain && owner.Plan.Emission != coro.EmitCoroutine) {
 			continue
@@ -757,7 +781,7 @@ func (p *context) resolveInterfaceMethodSSA(method *types.Func, signature *types
 // family as universal descriptor transport. Returning false preserves the
 // legacy callable method word for every unrelated raw/foreign family.
 func (p *context) resolveInterfaceMethodDescriptor(
-	_ string, method *types.Func, signature *types.Signature,
+	_ string, method *types.Func, signature *types.Signature, sourceReceiver types.Type,
 ) (llssa.Expr, bool) {
 	if p.compilation == nil || p.compilation.coroManagedInterface == nil || signature == nil {
 		return llssa.Nil, false
@@ -767,6 +791,22 @@ func (p *context) resolveInterfaceMethodDescriptor(
 		return llssa.Nil, false
 	}
 	target := p.resolveInterfaceMethodSSA(method, signature)
+	if sourceReceiver != nil {
+		if _, pointer := types.Unalias(sourceReceiver).Underlying().(*types.Pointer); !pointer {
+			// A concrete value interface already owns its receiver snapshot.
+			// Keep the actual value method instead of losing that proof through
+			// the raw *T Ifn_ wrapper. Mutable *T payloads deliberately retain
+			// their separate wrapper/evaluated-snapshot requirement.
+			sourceSignature := types.NewSignatureType(types.NewVar(token.NoPos, nil, "", sourceReceiver),
+				nil, nil, signature.Params(), signature.Results(), signature.Variadic())
+			valueTarget := p.resolveInterfaceMethodSSA(method, sourceSignature)
+			if _, resource, err := p.immutableEmissionUniverse().coroProgramIR.sourceDelivery(valueTarget); err != nil {
+				panic(err)
+			} else if resource {
+				target = valueTarget
+			}
+		}
+	}
 	descriptor, err := p.emitCoroManagedInterfaceMethodDescriptor(target, patched)
 	if err != nil {
 		panic(err)
@@ -833,9 +873,7 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 	if err != nil {
 		return llssa.Nil, fmt.Errorf("managed interface descriptor: resolve managed target: %w", err)
 	}
-	if err := p.immutableEmissionUniverse().coroProgramIR.validateInterfaceDeliveryReceiver(target); err != nil {
-		return llssa.Nil, err
-	}
+	deliveryUnbound := p.immutableEmissionUniverse().coroProgramIR.validateInterfaceDeliveryReceiver(target) != nil
 	entry := p.mustFunctionSymbol(target)
 	logicalSignature := coroInterfaceDispatchCanonicalSignature(coroInterfaceDispatchCallableSignature(interfaceEntrySignature))
 	if err := validateCoroManagedInterfaceDescriptorTarget(
@@ -893,7 +931,12 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 	}
 	// The descriptor environment is the dynamic receiver supplied by
 	// IfacePtrData, so NoCapture must remain clear even for a top-level method.
-	delivery := p.coroInterfaceDeliveryDescriptorOptions(entry, logicalSignature, receiver)
+	var delivery *llssa.CoroDispatchDeliveryOptions
+	if deliveryUnbound {
+		flags |= llssa.CoroDispatchFlagDeliveryUnbound
+	} else {
+		delivery = p.coroInterfaceDeliveryDescriptorOptions(entry, logicalSignature, receiver)
+	}
 	if delivery != nil {
 		flags |= llssa.CoroDispatchFlagHasDelivery
 	}

@@ -314,6 +314,43 @@ func TestABIPointerReceiverInterfaceEntryDoesNotReuseMethodDescriptor(t *testing
 	}
 }
 
+func TestABIInterfaceDescriptorPreservesConcreteReceiver(t *testing.T) {
+	Initialize(InitAll)
+	for _, target := range []*Target{nil, {GOOS: "wasip1", GOARCH: "wasm"}} {
+		fixture := newCoroPlainDispatchTestFixture(t, target)
+		fixture.prog.SetRuntime(RuntimeTypesForTest(t))
+		pkg := types.NewPackage("example.com/coro/receiver", "receiver")
+		named := types.NewNamed(types.NewTypeName(token.NoPos, pkg, "Token", nil), types.Typ[types.Int], nil)
+		signature := types.NewSignatureType(types.NewVar(token.NoPos, pkg, "", named), nil, nil,
+			fixture.signature.Params(), fixture.signature.Results(), fixture.signature.Variadic())
+		method := types.NewFunc(token.NoPos, pkg, "Read", signature)
+		named.AddMethod(method)
+		for index, concrete := range []types.Type{named, types.NewPointer(named)} {
+			calls := 0
+			fixture.pkg.SetResolveInterfaceMethodDescriptor(func(_ string, actual *types.Func, entry *types.Signature, sourceReceiver types.Type) (Expr, bool) {
+				calls++
+				if actual != method || !types.Identical(sourceReceiver, concrete) ||
+					!types.Identical(entry.Recv().Type(), types.NewPointer(named)) {
+					t.Fatalf("lost value/pointer receiver distinction: source=%s entry=%s", sourceReceiver, entry)
+				}
+				return fixture.descriptor, true
+			})
+			selection := types.NewMethodSet(concrete).Lookup(pkg, method.Name())
+			if selection == nil {
+				t.Fatal("fixture method is absent")
+			}
+			builder := fixture.pkg.NewFunc(fmt.Sprintf("receiver_context_%d", index), NoArgsNoRet, InGo).MakeBody(1)
+			builder.abiUncommonMethods(concrete, []*types.Selection{selection})
+			builder.Return()
+			builder.EndBuild()
+			builder.Dispose()
+			if calls != 1 {
+				t.Fatalf("descriptor source receiver observations=%d, want one", calls)
+			}
+		}
+	}
+}
+
 func newCoroPlainDispatchTestFixture(t *testing.T, target *Target) *coroPlainDispatchTestFixture {
 	t.Helper()
 	prog := NewProgram(target)
