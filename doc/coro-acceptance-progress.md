@@ -154,7 +154,33 @@ source-after matches and peak build/run RSS is 1221.2MiB. The same v147 compiler
 is used throughout; its compiler production sources are unchanged. Final
 forwarded executable SHA-256 is
 `4fdb0d0fb7eec303b468ca4b0c44a496c94356192282da8c7e0548bea59fb2ff`.
-Final-head CI, review and platform gates remain required before integration.
+PR #290's exact final head `824e486d7` passes all 18 coroutine CI jobs in
+`39014762362`. Fresh paginated reviews, inline/issue comments and GraphQL review
+threads are empty; base `llvm-coro` is unchanged at `e6a2a9b93`. It is merged
+only into `cpunion/llgo:llvm-coro` at `f65a668d4` (08:26:25 UTC). The earlier
+failed runs remain retained and are not relabeled as passing.
+
+### Method/captured-context resource experiment (v154, not integrated)
+
+Separate local work composes drop-argument projections once in ProgramIR and
+adds typed reads of immutable bound-receiver values from the existing funcval
+context. No runtime state, annotation or new scheduler/cleanup protocol is
+added. Pointer-wrapper evaluation remains in its physical body; eliminating an
+unused helper argument does not authorize deleting a nil check. Native/wasm32
+pre/post-CoroSplit tests verify the exact capture mapping, one load/one real
+helper call, no view storage, and nil data-env for the context-free base helper.
+
+Frozen v154 is `106c40f6b4c1d0d459c56c97efaa01531207d1fe`, manifest SHA-256
+`5ad129baabc70c568e80623f42267467e8b2641556627c833a256c5538ae8038`, with new
+compiler SHA-256
+`e851f2ba59cc89ab35f27c2cdfb3293803e4859348c456e7dbcd833c71bd2dd3`.
+It passes **536/536** complete forwarded FD executions and **144/144** extra
+bound-method executions (static/dynamic/defer × P=1/2/4 ×16), with matching
+source-after and a 1201.4MiB guarded peak. The linked image SHA-256 is
+`fccecff94ee94a799bf754c6def769a6bc60609eb43f8f593ceb90b31f22b405`.
+This is not an old-compiler/runtime-only rerun. The broader method/interface
+source gate still fails on its one unresolved interface-consumer requirement;
+no feature PR is open and no full resource/standard-library completion is claimed.
 
 ### Latest executable refresh: v117/v118/v120
 
