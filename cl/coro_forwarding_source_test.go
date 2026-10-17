@@ -24,6 +24,11 @@ func ChangedResult(value int) int { return Child(value, 1) + 1 }
 func TwoCalls(value int) int { Child(value, 1); return Child(value, 2) }
 func Dynamic(call func(int, int) int, value int) int { return call(value, 1) }
 func SourceProjection(value struct { Number int }) int { return Child(value.Number, 1) }
+type Nested struct { Prefix int; Inner struct { Number int; Callback func() } }
+type NestedAlias = Nested
+func NestedProjection(value NestedAlias) int { return Child(value.Inner.Number, value.Prefix) }
+func PointerProjection(value *Nested) int { return Child(value.Inner.Number, 1) }
+func MutatedProjection(value Nested) int { value.Inner.Number++; return Child(value.Inner.Number, 1) }
 `
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
@@ -50,7 +55,31 @@ func SourceProjection(value struct { Number int }) int { return Child(value.Numb
 			t.Fatal("forwarding retag lost its source parameter and adapter")
 		}
 	}
-	for _, name := range []string{"ChangedResult", "TwoCalls", "Dynamic", "SourceProjection"} {
+	for _, name := range []string{"SourceProjection", "NestedProjection"} {
+		function := ssaPkg.Func(name)
+		shape, err := ir.forwardingSourceShape(function)
+		if err != nil || shape == nil || shape.target != ssaPkg.Func("Child") || shape.methodProjection || shape.receiverEvaluation != nil {
+			var listing strings.Builder
+			function.WriteTo(&listing)
+			t.Fatalf("%s value projection = %+v, error=%v\n%s", name, shape, err, listing.String())
+		}
+		wantFields := []int{0}
+		wantProjections := 1
+		if name == "NestedProjection" {
+			wantFields = []int{1, 0}
+			wantProjections = 3
+		}
+		argument := shape.args[0]
+		if argument.sourceParameter != 0 || len(argument.fieldPath) != len(wantFields) || len(shape.projections) != wantProjections {
+			t.Fatalf("%s lost its exact field path: %+v", name, shape)
+		}
+		for index, field := range wantFields {
+			if argument.fieldPath[index] != field {
+				t.Fatalf("%s field path = %v, want %v", name, argument.fieldPath, wantFields)
+			}
+		}
+	}
+	for _, name := range []string{"ChangedResult", "TwoCalls", "Dynamic", "PointerProjection", "MutatedProjection"} {
 		shape, err := ir.forwardingSourceShape(ssaPkg.Func(name))
 		if err != nil || shape != nil {
 			t.Fatalf("unsupported %s acquired a forwarding source shape: %+v, error=%v", name, shape, err)
