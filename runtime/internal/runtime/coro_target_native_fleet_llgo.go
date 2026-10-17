@@ -299,6 +299,12 @@ func coroTargetPostTaskControlV1(
 	return result
 }
 
+func coroTargetRequestProgramShutdownV1(handle coro.ExecutorHandle) bool {
+	state := &coroNativeFleetTargetV1State
+	return state.lifecycle == coroNativeFleetTargetActiveV1 && state.program.Executor == handle &&
+		coroNativeFleetPhysicalOwnersRequestStopV1()
+}
+
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	state := &coroNativeFleetTargetV1State
 	if state.lifecycle != coroNativeFleetTargetActiveV1 || state.program.Executor != handle ||

@@ -32,6 +32,7 @@ type coroProgramTestTargetStateV1 struct {
 	handle                         coro.ExecutorHandle
 	epoch                          uint32
 	started                        bool
+	shutdownRequests               uint32
 	closeCalls                     uint32
 	pollCalls                      uint32
 	joined                         bool
@@ -123,6 +124,15 @@ func coroTargetConsumeExecutorRunV2(handle coro.ExecutorHandle, epoch uint32) bo
 	}
 	state.runConsumeCalls++
 	state.runEpoch = 0
+	return true
+}
+
+func coroTargetRequestProgramShutdownV1(handle coro.ExecutorHandle) bool {
+	state := &coroProgramTestTargetV1State
+	if !state.started || state.handle != handle {
+		return false
+	}
+	state.shutdownRequests++
 	return true
 }
 

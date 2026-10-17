@@ -95,6 +95,10 @@ func coroTargetPollExecutorWakeV1(handle coro.ExecutorHandle, epoch uint32) coro
 	}
 }
 
+func coroTargetRequestProgramShutdownV1(handle coro.ExecutorHandle) bool {
+	return handle == coroProgramExecutorHandleV1State && handle.Slot != 0 && handle.Generation != 0
+}
+
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	if !coroHostOperationAdapterV1State.CanRelease() {
 		return coroTargetDispatchInvalidV1
