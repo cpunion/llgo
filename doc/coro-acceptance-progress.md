@@ -7,32 +7,51 @@ source compatibility, and one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-17 (Asia/Shanghai)
 
-### Immutable concrete values published through interfaces (work in progress)
+### Immutable concrete values published through interfaces (1555e9659)
 
 A concrete non-pointer value placed in an interface already has an immutable
-Go value box. Resource value-method descriptors now keep that distinction from
-a mutable *T payload, load the exact physical T for the producer, and project
-cleanup arguments from the same retained box. Structs containing function fields
-use their already-lowered physical type. No extra snapshot allocation or generic
-resource container is added. Mutable *T invocation snapshots remain unsupported.
+Go value box. Resource value-method descriptors now preserve that distinction
+from mutable *T payloads, invoke the real T method using its exact physical
+value, and project cleanup arguments from the same retained box. Function
+fields use their already-lowered physical type. No separate snapshot allocation,
+resource container, G/P field or registry is introduced.
 
-An independently compiled producer can return this interface without invoking
-it locally. Frozen resource publication references must select descriptor Ifn_
-transport even in that case. The new archive gate exposed a real raw-trap Ifn_
-publication; both small and 128KiB-result variants pass after selecting that
-transport from frozen ownership facts. The failed linked image and IR remain
-under `~/.cache/llgo-coro-acceptance/20261017/boxed-receiver/`.
+An independent producer can return this interface without invoking it locally.
+Frozen resource publication references now select descriptor Ifn_ transport at
+publication. The retained earlier archive image instead published a raw-trap
+Ifn_ and failed at the separately compiled consumer's descriptor check. Summary,
+record and digest v21 require the new publication guarantee. A real retained
+v20 resource.a is accepted by its old reader and rejected at import by v21;
+these incompatible archives are not silently mixed. ABI-only unsupported
+pointer wrappers retain DeliveryUnbound and no invocation authority.
 
-The new native modes pass 96/96 executions at P=1/2/4 on the preceding boxed
-implementation, and the stable eb4781efc compiler rejects the same fixture's
-receiver binding. The frozen 634d6bd19 compiler passes the full FD/resource cohort (1434/1434)
-and compiler/SSA coro gates, plus all eight independent archive tests
-(18 retained images, 54 executions), with matching source-after checks.
-Its CI run is retained separately.
-Review also identified an archive protocol change: v20 did not require resource
-Ifn_ descriptor publication without a local invoke. Summary/record/digest v21
-now rejects those older archives at import; final frozen gates must be rerun
-with that version. These receipts are not unified final acceptance.
+Exact frozen head `1555e9659` passes the full compiler/SSA coro cohort and ABI
+receiver test, Library protocol tests, **1434/1434** FD/resource executions,
+and all eight independent archive tests (**18 images, 54 executions**).
+Full canonical source-after digests and per-gate manifests match. Its manifest
+SHA-256 and compiler SHA-256 are respectively
+`03a038fd27212cf2e9eefe011afe9ee66b9948804bfd3acf15564da44e0ac9a4` and
+`3fd67db2bd02ee221c28bc8ad7f98c28b016ff6c84dc61846ec997007b4aa736`.
+Exact-head CI run `39041446140` passes **19/19**, and fresh paginated review,
+inline/issue comment and thread inventories are empty. PR #293 merged as
+`84095d1d1622faf6ac33fd0e3e19d07b0899857e`.
+
+The preceding 634d6bd19 source has a separately retained seven-pair Go 1.27 /
+LLVM 22.1.8 performance checkpoint on the loaded shared Darwin arm64 host.
+Serial spawn, file and TCP medians remain 15.28x, 4.42x and 1.84x Go time.
+At 5000 parked G, process peak RSS is 15,433,728 bytes for LLGo versus
+18,006,016 for Go, with a higher LLGo zero-G baseline. These are versioned
+checkpoint measurements, not final or quiet-host acceptance.
+
+The complete 1082-case GOROOT CI-mode corpus is running on the exact v21
+source/compiler, with its own retained source/tool/corpus hashes, workspaces
+and memory/disk limits. The short initial admission was stopped to extend
+only the whole-campaign time budget and is preserved separately. R2 full
+test/go and demo runs and the earlier eb4781efc stdlib run remain separate
+cohorts. Mutable *T invocation snapshots, reflection/FFI second handoff,
+public Open/File adoption, unified compatibility and final platform/performance
+acceptance remain incomplete. Artifacts are retained under
+`~/.cache/llgo-coro-acceptance/20261017/boxed-receiver/`.
 
 ### Receiver requirements and Method.Func delivery identity
 
@@ -125,7 +144,7 @@ Execution completed at 2026-10-17T13:03:30Z and source-after verification
 matches. This receipt belongs to c769, not the later receiver-boundary changes.
 The interrupted v120 standard
 library controller was recovered with its original runner/compiler/source and
-resource-limit fingerprints. Its old lock and scratch are preserved, 117/180
+resource-limit fingerprints. Its old lock and scratch are preserved, 121/180
 packages currently pass, and the remaining baseline evaluation continues.
 The v120 GOROOT shard-1 remainder also completes 120/120 with a matching
 source-after check. These old-baseline results do not establish compatibility
