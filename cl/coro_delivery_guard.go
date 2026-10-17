@@ -48,6 +48,9 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 	if ir == nil || source == nil {
 		return nil, nil
 	}
+	if err := ir.validateDeliveryReceiver(fn); err != nil {
+		return nil, err
+	}
 	plan := new(coroDeliveryFunctionPlan)
 	if recipe, present := ir.deliveryProducers[fn]; present {
 		fact, found := whole.FunctionPlan(fn)

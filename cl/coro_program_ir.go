@@ -68,6 +68,10 @@ type coroCallableClassification struct {
 type coroLocalFunctionFacts struct {
 	coro.SSAFunctionBodyFacts
 	forwarding *coroForwardingSourceShape
+	// An exact forwarding chain reaches this canonical receiver wrapper but
+	// cannot retain its evaluated value yet. Absence of a usable recipe must
+	// not turn that boundary into an ordinary, unguarded result transport.
+	deliveryReceiver *ssa.Function
 }
 
 // coroProgramIRBuilder is the sole mutable construction capability for hidden

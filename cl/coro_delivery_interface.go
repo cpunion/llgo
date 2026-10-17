@@ -7,7 +7,6 @@
 package cl
 
 import (
-	"fmt"
 	"go/types"
 
 	"github.com/xgo-dev/llgo/internal/coro"
@@ -20,16 +19,7 @@ import (
 // without the producer's capability would silently lose cancellation cleanup.
 // Reject this still-unsupported boundary, using only frozen source facts.
 func (ir *coroProgramIR) validateInterfaceDeliveryReceiver(target *ssa.Function) error {
-	if _, present := ir.deliveryProducers[target]; present {
-		return nil
-	}
-	shape := ir.localBodyFacts[target].forwarding
-	if shape != nil && shape.methodProjection {
-		if _, resource := ir.deliveryProducers[shape.target]; resource {
-			return fmt.Errorf("resource interface wrapper %q requires an evaluated receiver snapshot", target.String())
-		}
-	}
-	return nil
+	return ir.validateDeliveryReceiver(target)
 }
 
 // Interface helpers use the same receiver-free ABI as the source invoke. An

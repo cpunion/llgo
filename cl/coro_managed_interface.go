@@ -48,6 +48,9 @@ func (p *context) emitCoroMethodValueDescriptor(
 	if err != nil {
 		return llssa.Nil, fmt.Errorf("coroutine method value descriptor: resolve managed target: %w", err)
 	}
+	if err := p.immutableEmissionUniverse().coroProgramIR.validateDeliveryReceiver(target); err != nil {
+		return llssa.Nil, err
+	}
 	entry := p.mustFunctionSymbol(target)
 	if entry.function.Signature == nil || entry.function.Signature.Recv() == nil ||
 		len(entry.function.FreeVars) != 0 || entry.plan.Demand == coro.NoDemand {
@@ -136,6 +139,15 @@ func (p *context) emitCoroMethodValueDescriptor(
 		)
 	}
 
+	// Method.Func is an ordinary receiver-first function value. Publish the
+	// same delivery contract as a source method expression; otherwise the
+	// reflection bridge cannot even detect that this boundary needs custody.
+	literals := physical.NewBuilder()
+	delivery := p.coroDeliveryDescriptorOptions(literals, entry, abi.signature)
+	literals.Dispose()
+	if delivery != nil {
+		flags |= llssa.CoroDispatchFlagHasDelivery
+	}
 	descriptor := p.pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
 		Version:      coroPlainDispatchVersion,
 		Flags:        flags,
@@ -146,6 +158,7 @@ func (p *context) emitCoroMethodValueDescriptor(
 		CoroEntry:    coroEntry,
 		CodeEntry:    physical.Expr,
 		Result:       p.prog.Type(abi.resultSlotType, llssa.InC),
+		Delivery:     delivery,
 	})
 	if p.coroPlainDescriptors == nil {
 		p.coroPlainDescriptors = make(map[string]llssa.Expr)

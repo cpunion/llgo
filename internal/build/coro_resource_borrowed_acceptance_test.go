@@ -96,6 +96,42 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 
 func TestCoroResourceDeliveryForwardAcceptance(t *testing.T) {
 	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29})
+	t.Run("method-func", func(t *testing.T) {
+		testCoroDeliveryMetadataFixture(t, "coro_resource_method_func", "Method.Func delivery identity and reflection boundary ok")
+	})
+}
+
+func testCoroDeliveryMetadataFixture(t *testing.T, fixture, expected string) {
+	t.Helper()
+	compiler, err := filepath.Abs(os.Getenv("LLGO_TEST_LLGO"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := coroResourceAcceptanceImage(t, fixture)
+	ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Minute)
+	defer cancel()
+	build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-o", image, "./_testgo/"+fixture+"/main.go")
+	build.Dir = filepath.Join(root, "runtime")
+	build.Env = append(os.Environ(), "LLGO_ROOT="+root, "LLGO_BUILD_CACHE=off")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("delivery metadata build: %v\n%s", err, output)
+	}
+	for _, owners := range []string{"1", "2"} {
+		for attempt := 0; attempt < 3; attempt++ {
+			runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
+			run := exec.CommandContext(runCtx, image)
+			run.Env = append(os.Environ(), "GOMAXPROCS="+owners)
+			output, err := run.CombinedOutput()
+			runCancel()
+			if err != nil || strings.TrimSpace(string(output)) != expected {
+				t.Fatalf("delivery metadata P=%s run %d: %v, image: %s\n%s", owners, attempt, err, image, output)
+			}
+		}
+	}
 }
 
 func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []int) {
