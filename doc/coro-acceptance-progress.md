@@ -129,9 +129,31 @@ before snapshot extraction completed is retained as an infrastructure failure,
 not a semantic test result; the corrected launch uses the completed snapshot.
 
 This establishes and fixes a shutdown-order defect in the same resource-defer
-path, not a proof that every historical timeout has this single cause. A second
-fixed-topology mode additionally exercises GOMAXPROCS in cancellation cleanup;
-its complete borrowed/original/forwarded resource refresh is still pending.
+path, not a proof that every historical timeout has this single cause. Frozen
+v151 passes the complete borrowed cleanup, **320** original FD runs, six opaque
+controls and **476** forwarded runs, including an initial cleanup-quota mode;
+source-after matches and the guarded peak is 1257.0MiB. Frozen v152 strengthens
+that mode to verify logical quota **1 -> 8** during cancellation cleanup and
+passes **16/16** actual executions, with matching source-after.
+
+Final protocol review separates publication from succession join as well:
+`TargetIngress.Sealed` reads the existing phase bits even with a held lease;
+all peer-stop and ready-placement observers use it. `Quiesced` remains the
+strong-join prerequisite. Thus a peer cannot consume the stop wake while a
+succession lease is live and then sleep waiting for a publication it missed.
+The held-lease unit regression and architecture gates enforce this distinction;
+no separate physical succession interleaving reproduction is claimed.
+
+Frozen v153 (`fe9912101`, manifest SHA-256
+`bce8a0f15241e8fa3786c83697c31c65e6b0ec27dbbc8ffccdfccaa09dc17272`)
+passes all **571** core tests with race/shuffle for three repetitions, all 41
+program-adapter tests for ten race/shuffle repetitions, and seven architecture/
+target-selection gates, with no failures or skips. It independently passes all
+**476** forwarded executions, including the strengthened **1 -> 8** mode;
+source-after matches and peak build/run RSS is 1221.2MiB. The same v147 compiler
+is used throughout; its compiler production sources are unchanged. Final
+forwarded executable SHA-256 is
+`4fdb0d0fb7eec303b468ca4b0c44a496c94356192282da8c7e0548bea59fb2ff`.
 Final-head CI, review and platform gates remain required before integration.
 
 ### Latest executable refresh: v117/v118/v120
