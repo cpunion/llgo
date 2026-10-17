@@ -595,6 +595,61 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	}
 }
 
+func TestCoroVoidChildAwaitHasNoResultSink(t *testing.T) {
+	for _, target := range []struct {
+		name string
+		arch *llssa.Target
+	}{
+		{name: "native"}, {name: "wasm32", arch: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			for _, result := range []bool{false, true} {
+				source := "package foo\nvar Sink int\nfunc Child() {}\nfunc Parent() { Child(); Sink = 1 }\n"
+				if result {
+					// A zero-sized source result is still a value. Do not confuse
+					// its typed result transport with a function returning nothing.
+					source = "package foo\nvar Sink int\nfunc Child() struct{} { return struct{}{} }\nfunc Parent() { _ = Child(); Sink = 1 }\n"
+				}
+				prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABISource(t, target.arch, source)
+				compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+				enableCoroChildAwaitCompilation(compilation)
+				pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{Compilation: compilation})
+				if err != nil {
+					prog.Dispose()
+					t.Fatal(err)
+				}
+				module := pkg.Module()
+				parent := requireCoroPhysicalFunction(t, module, "foo.Parent")
+				calls := 0
+				for _, block := range parent.BasicBlocks() {
+					for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+						if instruction.InstructionOpcode() == llvm.Alloca && instruction.AllocatedType().TypeKind() == llvm.StructTypeKind &&
+							len(instruction.AllocatedType().StructElementTypes()) == 0 {
+							t.Errorf("void await retained an empty result alloca: %s", instruction.String())
+						}
+						if instruction.InstructionOpcode() == llvm.Call && instruction.CalledValue().Name() == "foo.Child$coro" {
+							calls++
+							null := !instruction.Operand(1).IsAConstantPointerNull().IsNil()
+							if null == result {
+								t.Errorf("source result=%t, child output must be null exactly for void: %s", result, instruction.String())
+							}
+						}
+					}
+				}
+				if calls != 1 {
+					t.Errorf("child calls=%d, want one non-tail await", calls)
+				}
+				runCoroABITestPipeline(t, prog, module)
+				if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+					t.Error(err)
+				}
+				module.Dispose()
+				prog.Dispose()
+			}
+		})
+	}
+}
+
 func TestCoroChildAwaitPhysicalABIGlobalDebug(t *testing.T) {
 	prog, pkg := compileCoroChildAwaitPhysicalABIWithProgramCapabilities(
 		t, nil, coro.NewProgramCapabilities(false, false), true,
