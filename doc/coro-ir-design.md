@@ -1034,7 +1034,7 @@ owner 尚不能由本项验证推定完成。
 `HasDelivery`，再把冷尾摘要与自身从冻结 signature 得到的摘要比较，最后继续通过唯一
 managed dispatch 调用 helper。不能把 helper 自己的摘要读出来当作预期类型。
 同名冷尾重用也逐字核对摘要，旧 delivery v1 不兼容；`coroDeliveryGuardABI` 同步升级为
-v3，既有函数身份和 library ABI 摘要自动拒绝旧契约，不增加第二套 archive 记录。
+v3，物理入口摘要和 library ABI 摘要自动拒绝旧契约，不增加第二套 archive 记录。
 这只给资源函数的冷元数据增加 32 字节；普通 descriptor base、funcval、G、frame 和
 operation 布局不变。它为未来 FFI 的类型校验提供依据，但不授予 reflection 二次交接
 权限；运行时无保护的反射调用仍拒绝资源 capability。
