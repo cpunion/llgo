@@ -35,6 +35,13 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 			function.Signature.Recv() != nil || function.Signature.Variadic() {
 			return nil
 		}
+		background, classified, err := u.FunctionBackground(function)
+		if err != nil {
+			return err
+		}
+		if !classified || background != llssa.InGo || coro.TypeContainsUnresolvedTypeParam(function.Signature, make(map[types.Type]bool)) {
+			return nil
+		}
 		frozen, present := ir.callPlans[shape.call]
 		if !present || frozen.failure != "" || frozen.plan.ElidesCall() || frozen.plan.RawPlain ||
 			frozen.plan.ManagedStaticTarget != nil && frozen.plan.ManagedStaticTarget != shape.target ||
@@ -183,13 +190,15 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 			panic("forwarded helper lost its managed primary")
 		}
 		arguments := []llssa.CoroHelperViewArgument{{Parameter: 0}, {Parameter: 1}}
+		literals := p.pkg.FuncOf(primary.physical.Name()).NewBuilder()
+		defer literals.Dispose()
 		for _, argument := range recipe.forward.args {
 			mapped := llssa.CoroHelperViewArgument{Parameter: -1}
 			if argument.sourceParameter >= 0 {
 				mapped.Parameter = argument.sourceParameter + 2
 				mapped.Fields = argument.fieldPath
 			} else {
-				mapped.Constant = p.compileValueAs(nil, argument.constant, argument.valueType)
+				mapped.Constant = literals.Const(argument.constant.Value, p.prog.Type(argument.valueType, llssa.InGo))
 			}
 			arguments = append(arguments, mapped)
 		}

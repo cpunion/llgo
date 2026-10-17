@@ -174,6 +174,9 @@ func (view CoroLibraryEffectView) bindArchiveDeliveryRecipe(
 	producer := coro.DeliveryCallable{ID: id, ABIHash: fact.ABIHash, Signature: signature,
 		ResultSize: u.prog.SizeOf(output), ResultAlign: u.prog.AlignOf(output)}
 	record := fact.Delivery
+	if !record.DropView.IsZero() && record.DropView.Symbol != coroDeliveryViewSymbol(u.finalIdentity(function)) {
+		return fail("drop view is not the producer-owned physical symbol")
+	}
 	var bound coroArchiveDeliveryRecipe
 	var callables [2]coro.DeliveryCallable
 	for ordinal, helperID := range [2]coro.FunctionID{record.Initializer, record.Drop} {
