@@ -263,31 +263,44 @@ func CallLLGo(
 	resultSize, resultAlign uintptr,
 	args ...unsafe.Pointer,
 ) {
-	if !ffi.DynamicCallsSupported {
-		panic("libffi is unsupported on this freestanding target")
-	}
+	callLLGoManaged(plainCIF, outcomeCIF, coroCIF, descriptor, env, runtimeType, ret,
+		resultSize, resultAlign, nil, args...)
+}
+
+func validateLLGoDescriptor(descriptor, env, runtimeType unsafe.Pointer, resultSize, resultAlign uintptr) *dispatchDescriptorV2 {
 	if descriptor == nil {
 		panic("reflect.Value.Call: call of nil function")
 	}
 	d := (*dispatchDescriptorV2)(descriptor)
 	flags := d.Flags
 	runtimeTyped := flags&dispatchRuntimeTyped != 0
-	if d.Version != dispatchVersionV2 ||
-		flags&^dispatchKnownFlags != 0 ||
-		!validDispatchPlainUnwindFlags(flags) ||
-		flags&dispatchCapabilityMask == 0 ||
-		!validDispatchEntries(d) ||
-		flags&dispatchNoCapture != 0 && env != nil ||
-		d.CodeEntry == nil ||
-		runtimeTyped && (runtimeType == nil ||
-			d.HashLo != uint64(bitcast.FromPointer(runtimeType)) ||
-			d.HashHi != dispatchRuntimeTypeMagicV2) ||
-		d.ResultSize != resultSize ||
-		d.ResultAlign != resultAlign {
+	if d.Version != dispatchVersionV2 || flags&^dispatchKnownFlags != 0 ||
+		!validDispatchPlainUnwindFlags(flags) || flags&dispatchCapabilityMask == 0 || !validDispatchEntries(d) ||
+		flags&dispatchNoCapture != 0 && env != nil || d.CodeEntry == nil ||
+		runtimeTyped && (runtimeType == nil || d.HashLo != uint64(bitcast.FromPointer(runtimeType)) || d.HashHi != dispatchRuntimeTypeMagicV2) ||
+		d.ResultSize != resultSize || d.ResultAlign != resultAlign {
 		panic("llgo: invalid managed function descriptor")
 	}
+	return d
+}
 
-	rejectUnboundResourceDelivery(flags)
+func callLLGoManaged(
+	plainCIF, outcomeCIF, coroCIF *Signature,
+	descriptor, env, runtimeType, ret unsafe.Pointer,
+	resultSize, resultAlign uintptr,
+	owned *ResultDelivery,
+	args ...unsafe.Pointer,
+) {
+	if !ffi.DynamicCallsSupported {
+		panic("libffi is unsupported on this freestanding target")
+	}
+	d := validateLLGoDescriptor(descriptor, env, runtimeType, resultSize, resultAlign)
+	flags := d.Flags
+	if flags&dispatchDeliveryUnbound != 0 || flags&dispatchHasDelivery != 0 &&
+		(owned == nil || owned.descriptor != descriptor || owned.env != env || owned.runtimeType != runtimeType ||
+			owned.ret != ret || owned.size != resultSize || owned.align != resultAlign || owned.drop == nil) {
+		rejectUnboundResourceDelivery(flags)
+	}
 
 	if flags&(dispatchHasOutcome|dispatchHasCoro) != 0 {
 		// Every structured entry receives a non-nil out pointer, including a

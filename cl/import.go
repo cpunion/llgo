@@ -1011,6 +1011,10 @@ const (
 	// Typed compiler-only resource recipe seed. Its operands are exact helper
 	// identities, never runtime function values or code-address lookups.
 	llgoCoroBorrowResult = llgoInstrBase + 0x62
+	// State access is restricted to the owning source borrow and its exact
+	// drop helper. Neither intrinsic exposes the private header address.
+	llgoCoroBindResultState = llgoInstrBase + 0x63
+	llgoCoroLoadResultState = llgoInstrBase + 0x64
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )

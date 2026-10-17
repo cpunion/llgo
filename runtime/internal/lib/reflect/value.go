@@ -2261,9 +2261,13 @@ func (v Value) NumField() int {
 // If v is a variadic function, Call creates the variadic slice parameter
 // itself, copying in the corresponding values.
 func (v Value) Call(in []Value) []Value {
+	out := borrowCallDelivery(initializeCallDelivery, dropCallDelivery)
+	state := new(callDeliveryState)
+	bindCallDelivery(out, unsafe.Pointer(state))
 	v.mustBe(Func)
 	v.mustBeExported()
-	return v.call("Call", in)
+	v.call("Call", in, state, out)
+	return out.R0
 }
 
 // CallSlice calls the variadic function v with the input arguments in,
@@ -2274,9 +2278,13 @@ func (v Value) Call(in []Value) []Value {
 // As in Go, each input argument must be assignable to the
 // type of the function's corresponding input parameter.
 func (v Value) CallSlice(in []Value) []Value {
+	out := borrowCallDelivery(initializeCallDelivery, dropCallDelivery)
+	state := new(callDeliveryState)
+	bindCallDelivery(out, unsafe.Pointer(state))
 	v.mustBe(Func)
 	v.mustBeExported()
-	return v.call("CallSlice", in)
+	v.call("CallSlice", in, state, out)
+	return out.R0
 }
 
 type closure struct {
@@ -2542,13 +2550,14 @@ func (v Value) closureFunc() *abi.FuncType {
 	return toFuncType(v.typ_.StructType())
 }
 
-func (v Value) call(op string, in []Value) (out []Value) {
+func (v Value) call(op string, in []Value, state *callDeliveryState, loan *callDeliveryResult) {
 	if v.flag&flagMethod != 0 {
 		rcvr, method := methodExpressionValue(op, v, int(v.flag)>>flagMethodShift)
 		args := make([]Value, len(in)+1)
 		args[0] = rcvr
 		copy(args[1:], in)
-		return method.call(op, args)
+		method.call(op, args, state, loan)
+		return
 	}
 
 	var (
@@ -2700,6 +2709,8 @@ func (v Value) call(op string, in []Value) (out []Value) {
 
 	tout := toRuntimeTypes(ft.Out)
 	resultSize, resultAlign := llgoResultLayout(tout)
+	resource := ffi.HasResultDelivery(fn)
+	var resultState *unsafe.Pointer
 	if len(tout) != 0 {
 		allocSize := resultSize
 		if ffiSize := plainSig.RType.Size; ffiSize > allocSize {
@@ -2711,23 +2722,49 @@ func (v Value) call(op string, in []Value) (out []Value) {
 		if allocSize == 0 {
 			allocSize = 1
 		}
-		ret = runtime.AllocZ(allocSize)
+		if resource {
+			offset := ffi.ResultStateOffset(resultAlign)
+			if allocSize > ^uintptr(0)-offset {
+				panic("reflect: resource result storage overflows")
+			}
+			storage := runtime.AllocZ(offset + allocSize)
+			resultState = (*unsafe.Pointer)(storage)
+			ret = unsafe.Add(storage, offset)
+		} else {
+			ret = runtime.AllocZ(allocSize)
+		}
 	}
 
-	ffi.CallLLGo(
-		plainSig, outcomeSig, coroSig,
-		fn, env, unsafe.Pointer(ft), ret,
-		resultSize, resultAlign,
-		args...,
-	)
+	if resource {
+		// Copy each physical argument once. Addressable Values may otherwise
+		// change while the managed producer is pending, before its drop runs.
+		owned := make([]unsafe.Pointer, len(args))
+		for i, argument := range args {
+			size := ffiArgs[i].Size
+			owned[i] = runtime.AllocZ(size)
+			copy(unsafe.Slice((*byte)(owned[i]), size), unsafe.Slice((*byte)(argument), size))
+		}
+		state.native = ffi.NewResultDelivery(fn, env, unsafe.Pointer(ft), ret, resultState, resultSize, resultAlign, ffiArgs, owned)
+		state.native.Initialize()
+		state.native.Invoke(plainSig, outcomeSig, coroSig)
+		state.native.FinishInvocation()
+	} else {
+		ffi.CallLLGo(
+			plainSig, outcomeSig, coroSig,
+			fn, env, unsafe.Pointer(ft), ret,
+			resultSize, resultAlign,
+			args...,
+		)
+	}
 	switch n := len(tout); n {
 	case 0:
 	case 1:
 		out := NewAt(toType(tout[0]), ret).Elem()
 		resolveIndirectValue(&out, tout[0])
-		return []Value{out}
+		loan.R0 = []Value{out}
+		return
 	default:
-		out = make([]Value, n)
+		out := make([]Value, n)
 		var off uintptr
 		for i, tout := range tout {
 			size, alignment := llgoABITypeLayout(tout)
@@ -2736,6 +2773,7 @@ func (v Value) call(op string, in []Value) (out []Value) {
 			resolveIndirectValue(&out[i], tout)
 			off += size
 		}
+		loan.R0 = out
 	}
 	return
 }

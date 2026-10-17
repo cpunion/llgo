@@ -46,20 +46,11 @@ func method(receiver any) reflect.Value {
 	return m.Func
 }
 
-func rejectReflection(fn reflect.Value, receiver any) {
+func verifyReflection(fn reflect.Value, receiver any) {
 	before := acquisitions
-	rejected := false
-	func() {
-		defer func() {
-			if got := recover(); got != "llgo: resource result delivery through reflection is not bound" {
-				panic("Method.Func lost its resource-delivery capability")
-			}
-			rejected = true
-		}()
-		fn.Call([]reflect.Value{reflect.ValueOf(receiver), reflect.ValueOf(17)})
-	}()
-	if !rejected || acquisitions != before {
-		panic("unprotected Method.Func reflection acquired a resource")
+	values := fn.Call([]reflect.Value{reflect.ValueOf(receiver), reflect.ValueOf(17)})
+	if len(values) != 1 || values[0].Int() != 17 || acquisitions != before+1 {
+		panic("Method.Func reflection lost its guarded resource result")
 	}
 }
 
@@ -73,16 +64,27 @@ func main() {
 	if got := pointer.Interface().(func(*PointerReceiver, int) int)(nil, 19); got != 19 || acquisitions != 2 {
 		panic("pointer receiver managed delivery result")
 	}
-	rejectReflection(value, Receiver{})
-	rejectReflection(pointer, (*PointerReceiver)(nil))
-	// PtrToThis metadata must retain an explicitly unavailable entry for
-	// this *T-to-T wrapper, rather than break unrelated value-method calls or
-	// silently publish an unguarded function. Identity queries remain valid.
+	verifyReflection(value, Receiver{})
+	verifyReflection(pointer, (*PointerReceiver)(nil))
+	// A nil pointer-to-value receiver panics before acquisition. Its still
+	// empty state must not be passed to a snapshot-dependent drop helper.
 	snapshot := method((*SnapshotReceiver)(nil))
 	if snapshot.Pointer() == 0 {
-		panic("unbound method lost its code identity")
+		panic("snapshot method lost its code identity")
 	}
-	rejectReflection(snapshot, (*SnapshotReceiver)(nil))
+	before := acquisitions
+	func() {
+		defer func() {
+			if recover() == nil {
+				panic("nil value receiver did not panic")
+			}
+		}()
+		snapshot.Call([]reflect.Value{reflect.ValueOf((*SnapshotReceiver)(nil)), reflect.ValueOf(17)})
+	}()
+	if acquisitions != before {
+		panic("nil receiver acquired a resource")
+	}
+	verifyReflection(snapshot, &SnapshotReceiver{Token: 17})
 	plain := method(PlainReceiver{}).Call([]reflect.Value{reflect.ValueOf(PlainReceiver{}), reflect.ValueOf(20)})
 	if len(plain) != 1 || plain[0].Int() != 21 {
 		panic("ordinary Method.Func acquired false resource ownership")
@@ -92,8 +94,9 @@ func main() {
 	callback := reflect.MakeFunc(value.Type(), func([]reflect.Value) []reflect.Value {
 		return []reflect.Value{reflect.ValueOf(23)}
 	})
+	before = acquisitions
 	values := callback.Call([]reflect.Value{reflect.ValueOf(Receiver{}), reflect.ValueOf(0)})
-	if len(values) != 1 || values[0].Int() != 23 || acquisitions != 2 {
+	if len(values) != 1 || values[0].Int() != 23 || acquisitions != before {
 		panic("ordinary MakeFunc result acquired false resource ownership")
 	}
 	println("Method.Func delivery identity and reflection boundary ok")

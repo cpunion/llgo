@@ -61,6 +61,7 @@ const (
 	coroPhysicalInstructionHeapCStr
 	coroPhysicalInstructionImmutableCaptureLoad
 	coroPhysicalInstructionBorrowedResult
+	coroPhysicalInstructionResultState
 )
 
 func (recipe coroPhysicalInstructionRecipe) String() string {
@@ -115,6 +116,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "immutable-capture-load"
 	case coroPhysicalInstructionBorrowedResult:
 		return "borrowed-result"
+	case coroPhysicalInstructionResultState:
+		return "result-state"
 	default:
 		return fmt.Sprintf("physical-recipe(%d)", uint8(recipe))
 	}
@@ -1748,6 +1751,8 @@ func planCoroPhysicalInstruction(
 				switch {
 				case frozen.opcode == llgoCoroBorrowResult:
 					result.recipe = coroPhysicalInstructionBorrowedResult
+				case frozen.resultState.owned:
+					result.recipe = coroPhysicalInstructionResultState
 				case frozen.opcode == llgoAlloca &&
 					frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineNoSuspend:
 					if len(instruction.Common().Args) != 1 {

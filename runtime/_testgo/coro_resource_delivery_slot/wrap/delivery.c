@@ -10,12 +10,23 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ready = PTHREAD_COND_INITIALIZER;
 static _Atomic int owned = -1;
 static _Atomic int opens, closes, waiting, close_waiting, released, fixture_mode;
+static _Atomic int expect_borrowed;
 
 static void check_finished(void) {
     int fd = atomic_load(&owned);
     int mode = atomic_load(&fixture_mode);
     int wanted = mode == 0 || mode == 5 || mode == 9 || mode >= 12 ? 3 : 2;
     int waited = atomic_load(&fixture_mode) == 1 ? atomic_load(&close_waiting) : atomic_load(&waiting);
+    if (atomic_load(&expect_borrowed)) {
+        /* Cancellation must leave an ordinary callback's borrowed fd alive.
+           Only this final checker owns its terminal cleanup. */
+        if (atomic_load(&opens) != 3 || atomic_load(&closes) != 2 || fd < 0 ||
+            fcntl(fd, F_GETFD) < 0 || !waited || !atomic_load(&released)) _Exit(93);
+        if (close(fd) != 0) _Exit(94);
+        atomic_store(&owned, -1);
+        atomic_fetch_add(&closes, 1);
+        fd = -1;
+    }
     if (atomic_load(&opens) != wanted || atomic_load(&closes) != wanted || fd != -1 ||
         !waited || !atomic_load(&released)) {
         /* Negative controls reclaim their own resource before reporting. */
@@ -70,6 +81,8 @@ void llgo_delivery_check_alive(int32_t fd) {
 int32_t llgo_delivery_opened(void) { return atomic_load(&opens); }
 int32_t llgo_delivery_owned(void) { return atomic_load(&owned); }
 int32_t llgo_delivery_blocked(void) { return atomic_load(&waiting); }
+void llgo_delivery_expect_borrowed(void) { atomic_store(&expect_borrowed, 1); }
+void llgo_delivery_mark_waiting(void) { atomic_store(&waiting, 1); }
 int32_t llgo_delivery_closing(void) { return atomic_load(&close_waiting); }
 int32_t llgo_delivery_fixture_mode(void) { return atomic_load(&fixture_mode); }
 

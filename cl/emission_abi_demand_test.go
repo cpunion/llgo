@@ -1505,6 +1505,7 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 		"closureEnv", "coroCurrentTask", "coroExecutionDomainEnabled", "coroGCObservationEnabled")
 	add(emissionIntrinsicRawAllValues, "syscall")
 	add(emissionIntrinsicCompileValues,
+		"coroBindResultState", "coroLoadResultState",
 		"boolToUint8", "atomicLoad", "atomicStore", "atomicCmpXchg",
 		"atomicCmpXchgOK", "atomicAddReturnNew", "atomicLoadUnsafe", "atomicStoreUnsafe",
 		"coroPark", "coroTimerSleep", "coroPollWait", "coroControlledTimerWait",

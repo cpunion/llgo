@@ -759,6 +759,7 @@ type coroFrozenCallSitePlan struct {
 	plan               CoroCallSitePlan
 	deliveryProducer   *ssa.Function
 	dynamicDelivery    *coroDynamicDeliveryRecipe
+	resultState        coroResultStateAccess
 	interfaceMethodKey string
 	failure            string
 	opcode             int
@@ -2243,6 +2244,9 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		return semantics, true, nil
 	}
 	switch opcode {
+	case llgoCoroBindResultState, llgoCoroLoadResultState:
+		_, err := parseCoroResultStateAccess(ctx, direct, opcode)
+		return CoroIntrinsicCallInlineNoSuspend, true, err
 	case llgoCoroBorrowResult:
 		recipe, err := planCoroDeliveryBorrow(u, ctx, direct)
 		if err != nil {
@@ -3355,6 +3359,8 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 	case llgoCoroCurrentTask:
 		// Typed-FFI adapters receive the active physical task directly. The
 		// intrinsic emits no call and is valid only in their managed owner.
+		return CoroIntrinsicCallInlineNoSuspend
+	case llgoCoroBindResultState, llgoCoroLoadResultState:
 		return CoroIntrinsicCallInlineNoSuspend
 	case llgoCoroBorrowResult:
 		return CoroIntrinsicCallInlineWithLoweredCalls

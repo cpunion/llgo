@@ -47,8 +47,8 @@ func (p *context) coroDeliveryDescriptorOptions(b llssa.Builder, entry plannedFu
 	// initializer/drop helpers themselves remain exact context-free entries.
 	if entry.plan.FuncRep != coro.Dispatch ||
 		entry.plan.ManagedEntry != coro.ManagedEntryCoroutine && entry.plan.ManagedEntry != coro.ManagedEntryOutcomePlain ||
-		p.immutablePlan().HasRawPlainVariant(entry.function) || !types.Identical(signature, canonicalCoroPlainDispatchSignature(recipe.signature)) {
-		panic("resource descriptor publication requires its exact guarded managed entry")
+		p.immutablePlan().HasRawPlainVariant(entry.function) || !types.Identical(coroPhysicalNormalizeSourceSignature(signature), canonicalCoroPlainDispatchSignature(recipe.signature)) {
+		panic(fmt.Errorf("resource descriptor publication %q requires its exact guarded managed entry: signature=%s recipe=%s", entry.function.String(), signature, recipe.signature))
 	}
 	_, initializer, drop, err := coro.DeliveryHelperSignatures(recipe.signature)
 	if err != nil {

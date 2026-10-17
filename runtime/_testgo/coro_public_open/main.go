@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"runtime"
 	"syscall"
 	_ "unsafe"
@@ -30,9 +31,14 @@ func writerDone()
 //go:linkname releaseFileStage C.llgo_public_open_release_file_stage
 func releaseFileStage()
 
+func atFileStage() bool {
+	mode := fixtureMode()
+	return mode >= 8 && mode <= 10 || mode == 14 || mode == 15
+}
+
 func sentinel(path string, ready chan<- struct{}) {
 	defer func() {
-		if fixtureMode() >= 8 {
+		if atFileStage() {
 			releaseFileStage()
 			return
 		}
@@ -78,6 +84,31 @@ func readFileWith(open func(string) (*os.File, error), path string) {
 func readFile(path string) { readFileWith(os.Open, path) }
 
 func deferredFile(path string) { defer os.Open(path) }
+
+func reflectedOpen(path string, mode uint32) {
+	if mode == 11 {
+		reflect.ValueOf(syscall.Open).Call([]reflect.Value{reflect.ValueOf(path), reflect.ValueOf(syscall.O_RDONLY), reflect.ValueOf(uint32(0))})
+	} else if mode == 13 || mode == 15 {
+		reflect.ValueOf(os.OpenFile).Call([]reflect.Value{reflect.ValueOf(path), reflect.ValueOf(os.O_RDONLY), reflect.ValueOf(os.FileMode(0))})
+	} else {
+		reflect.ValueOf(os.Open).Call([]reflect.Value{reflect.ValueOf(path)})
+	}
+	panic("canceled reflected Open executed normal continuation")
+}
+
+func checkReflectedNormal() {
+	values := reflect.ValueOf(syscall.Open).Call([]reflect.Value{reflect.ValueOf("/dev/null"), reflect.ValueOf(syscall.O_RDONLY), reflect.ValueOf(uint32(0))})
+	fd := int(values[0].Int())
+	if !values[1].IsNil() || fd < 0 || syscall.Close(fd) != nil {
+		panic("normal reflected syscall.Open failed")
+	}
+	values = reflect.ValueOf(os.Open).Call([]reflect.Value{reflect.ValueOf("/dev/null")})
+	file := values[0].Interface().(*os.File)
+	runtime.GC()
+	if !values[1].IsNil() || file.Name() != "/dev/null" || file.Close() != nil {
+		panic("normal reflected File delivery failed")
+	}
+}
 
 func earlyWriter(path string) {
 	for {
@@ -136,6 +167,7 @@ func main() {
 	}
 	path := string(bytes[:n])
 	checkNormalFile()
+	checkReflectedNormal()
 	fd, err := syscall.Open("/dev/null", syscall.O_RDONLY, 0)
 	if err != nil || fd < 0 {
 		panic("normal public Open failed")
@@ -196,13 +228,21 @@ func main() {
 		}
 		go readFileWith(os.Open, path)
 		go earlyWriter(path)
+	case 11, 12, 13:
+		go reflectedOpen(path, fixtureMode())
+	case 14, 15:
+		if runtime.GOOS != "darwin" {
+			panic("reflected File stat-stage fixture requires Darwin")
+		}
+		go reflectedOpen(path, fixtureMode())
+		go earlyWriter(path)
 	default:
 		panic("unknown public Open fixture mode")
 	}
 	// The libc shim signals physical entry before blocking on the real FIFO.
 	// Its writer exists only in cancellation cleanup, so completion cannot race
 	// ahead of the command's cancellation request.
-	for entered()&1 == 0 || fixtureMode() >= 8 && entered()&6 != 6 {
+	for entered()&1 == 0 || atFileStage() && entered()&6 != 6 {
 		runtime.Gosched()
 	}
 	runtime.GC()
