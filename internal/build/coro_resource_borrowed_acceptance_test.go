@@ -95,7 +95,7 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 }
 
 func TestCoroResourceDeliveryForwardAcceptance(t *testing.T) {
-	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15})
+	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15, 16, 17})
 }
 
 func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []int) {
@@ -144,6 +144,8 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 		"typed resource delivery normal, discarded and canceled passed", // Large independent fallback.
 		"typed resource delivery normal, discarded and canceled passed", // Large static resource defer.
 		"typed resource delivery normal, discarded and canceled passed", // Large captured dynamic resource defer.
+		"cross-P shutdown topology ready\ntyped resource delivery normal, discarded and canceled passed",
+		"cross-P shutdown topology ready\ntyped resource delivery normal, discarded and canceled passed", // Resize during shutdown cleanup.
 	}
 	for _, mode := range modes {
 		expected := expectedByMode[mode]
@@ -154,7 +156,11 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 				// on P=2 CI. Keep the same image, assertions and per-run deadline.
 				repetitions = 128
 			}
-			for _, owners := range []string{"1", "2"} {
+			ownerCounts := []string{"1", "2"}
+			if mode == 16 || mode == 17 {
+				ownerCounts = []string{"2"} // The fixture proves P1 -> worker -> P2 cleanup.
+			}
+			for _, owners := range ownerCounts {
 				for attempt := 0; attempt < repetitions; attempt++ {
 					runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
 					run := exec.CommandContext(runCtx, image)

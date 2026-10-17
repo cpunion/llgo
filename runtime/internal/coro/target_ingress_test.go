@@ -51,7 +51,7 @@ func TestTargetIngressStrongSealJoinsWholeShim(t *testing.T) {
 		<-entered
 	}
 
-	if !ingress.Seal() || ingress.Enter() || ingress.Quiesced() || ingress.Retire() {
+	if !ingress.Seal() || !ingress.Sealed() || ingress.Enter() || ingress.Quiesced() || ingress.Retire() {
 		t.Fatal("seal admitted a new producer or retired before join")
 	}
 	close(release)
@@ -65,6 +65,25 @@ func TestTargetIngressStrongSealJoinsWholeShim(t *testing.T) {
 	if !ingress.Quiesced() || ingress.Retired() || !ingress.Retire() || !ingress.Retired() ||
 		!ingress.CanReleaseResources() || ingress.Enter() || ingress.Start() {
 		t.Fatal("strongly joined ingress did not retire permanently")
+	}
+}
+
+func TestTargetIngressSealIsVisibleBeforeSuccessionLeaseJoins(t *testing.T) {
+	var ingress TargetIngress
+	if (*TargetIngress)(nil).Sealed() || ingress.Sealed() || !ingress.Start() ||
+		ingress.Sealed() || !ingress.Enter() || !ingress.Seal() {
+		t.Fatal("prepare held succession lease")
+	}
+	// A stop observer must begin cleanup now, not consume the wake and sleep
+	// again while the old owner is still publishing its clean successor.
+	if !ingress.Sealed() || ingress.Quiesced() || ingress.Enter() || ingress.Retire() {
+		t.Fatal("stop publication was confused with strong join")
+	}
+	if sealed, ok := ingress.Leave(); !sealed || !ok || !ingress.Sealed() || !ingress.Quiesced() {
+		t.Fatal("join succession lease")
+	}
+	if !ingress.Retire() || ingress.Sealed() || !ingress.Retired() {
+		t.Fatal("retire sealed generation")
 	}
 }
 

@@ -437,6 +437,13 @@ func coroProgramFinishMainV1() coroProgramDriveStatusV1 {
 			coroProgramLifecycleV1State = coroProgramCompleteV1
 			return coroProgramDriveCompleteV1
 		}
+		// Publish every peer's cancellation before draining this P: a local
+		// worker can depend on a peer's shutdown defer (and vice versa). This
+		// does not join peers or close their event sources.
+		if !coroProgramExecutorBoundV1State ||
+			!coroTargetRequestProgramShutdownV1(coroProgramExecutorHandleV1State) {
+			return coroProgramFailV1()
+		}
 		if needed, ok := coro.RequestCommandShutdownDrain(
 			&coroProgramPV1State,
 			&coroProgramGV1State,

@@ -52,7 +52,7 @@ type coroNativeFleetPhysicalOwnerV1 struct {
 
 // coroNativeFleetPhysicalOwnersV1 owns the complete bounded peer set and one
 // atomic broadcast stop word. TargetIngress has no callback entrants here:
-// Seal is the release publication observed by every peer through Quiesced, and
+// Seal is the release publication observed by every peer through Sealed, and
 // Retire leaves a permanent non-reusable process tombstone after all joins.
 type coroNativeFleetPhysicalOwnersV1 struct {
 	stop        coro.TargetIngress
@@ -225,7 +225,16 @@ func coroNativeFleetSetExecutionLimitV1(limit uint32) (
 	if limit == 0 || !coroNativeFleetPhysicalOwnersLockV1(state) {
 		return 0, false, false
 	}
-	if !coroNativeFleetPhysicalOwnersEnsureLockedV1(state, limit) {
+	ensure := false
+	switch state.lifecycle {
+	case coroNativeFleetPhysicalActiveV1:
+		ensure = coroNativeFleetPhysicalOwnersEnsureLockedV1(state, limit)
+	case coroNativeFleetPhysicalStoppingV1:
+		// Shutdown cleanup may still use the ordinary GOMAXPROCS API. Keep
+		// the live quota adjustable, but never start another peer after Seal.
+		ensure = state.count+1 == coroNativeFleetV1State.domainCount && state.started <= state.count
+	}
+	if !ensure {
 		coroNativeFleetPhysicalOwnersUnlockV1(state)
 		return 0, false, false
 	}
@@ -242,14 +251,30 @@ func coroNativeFleetSetExecutionLimitV1(limit uint32) (
 	return previous, wake, ok
 }
 
-func coroNativeFleetPhysicalOwnersStopV1() bool {
+// Publish stop without joining: any domain's cleanup can release a worker
+// owned by another domain. Joining one before the others have been notified
+// would put that dependency behind the very drain which is waiting for it.
+// Only the admitted program coordinator calls this repeatable publication;
+// peers continue to observe the existing atomic stop word, not lifecycle.
+func coroNativeFleetPhysicalOwnersRequestStopV1() bool {
 	state := &coroNativeFleetPhysicalOwnerV1State
 	if !coroNativeFleetPhysicalOwnersLockV1(state) {
 		return false
 	}
-	if state.lifecycle != coroNativeFleetPhysicalActiveV1 ||
-		state.count+1 != coroNativeFleetV1State.domainCount ||
-		state.started > state.count || !state.stop.Seal() {
+	if state.count+1 != coroNativeFleetV1State.domainCount || state.started > state.count {
+		coroNativeFleetPhysicalOwnersUnlockV1(state)
+		return false
+	}
+	switch state.lifecycle {
+	case coroNativeFleetPhysicalStoppingV1:
+		coroNativeFleetPhysicalOwnersUnlockV1(state)
+		return true
+	case coroNativeFleetPhysicalActiveV1:
+		if !state.stop.Seal() {
+			coroNativeFleetPhysicalOwnersUnlockV1(state)
+			return false
+		}
+	default:
 		coroNativeFleetPhysicalOwnersUnlockV1(state)
 		return false
 	}
@@ -280,6 +305,15 @@ func coroNativeFleetPhysicalOwnersStopV1() bool {
 			return false
 		}
 	}
+	return true
+}
+
+func coroNativeFleetPhysicalOwnersStopV1() bool {
+	if !coroNativeFleetPhysicalOwnersRequestStopV1() {
+		return false
+	}
+	state := &coroNativeFleetPhysicalOwnerV1State
+	started := state.started // Seal closed physical peer growth under guard.
 	// Seal may race a retirement transition which already admitted its
 	// succession lease. Wait until that transition has published the clean
 	// successor slot (or the old owner has remained the stable stop owner)
@@ -324,7 +358,7 @@ func coroNativeFleetPhysicalOwnerStoppingV1(handle coro.ExecutorFleetHandle) boo
 	// The atomic stop word is the only coordinator-to-peer shutdown fact.
 	// Aggregate lifecycle is coordinator-owned diagnostic state and must not
 	// become a second, non-atomic publication protocol.
-	return ok && peer.lifecycle == coroNativeFleetPhysicalActiveV1 && state.stop.Quiesced()
+	return ok && peer.lifecycle == coroNativeFleetPhysicalActiveV1 && state.stop.Sealed()
 }
 
 func coroNativeFleetPhysicalOwnerClockV1() (int64, bool) {

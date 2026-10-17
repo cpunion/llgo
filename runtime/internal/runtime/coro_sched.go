@@ -196,6 +196,12 @@ func coroFinishRunSliceCompatibility(
 		if _, valid := coro.BeginExecutorRunSlice(driver); !valid {
 			return coroRunResultV1{}
 		}
+		// This pending-source path re-enters the local runner before FinishMain.
+		// Publish peer shutdown here too, before a local cleanup can wait for a
+		// foreign result which only a peer's cancellation defer can release.
+		if !coroTargetRequestProgramShutdownV1(coroProgramExecutorHandleV1State) {
+			return coroRunResultV1{}
+		}
 		result.stop = coroRunAgainV1
 		result.g = nil
 		return result

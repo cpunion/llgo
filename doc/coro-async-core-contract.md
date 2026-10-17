@@ -25,6 +25,21 @@ LLGo 的异步能力必须先形成一套与 continuation backend 解耦的公�
 
 完成这套核心后，`time.Sleep`、文件、网络和绝大多数标准库同步风格 API 应只增加 source/adapter、固定布局的 typed park recipe 或薄 runtime wrapper。新增普通异步能力不得再次修改 effect 传播、静态 coroutine call lowering或发明新的调度模型；typed recipe只能组合统一的 ParkSet、source、result lease和取消契约。
 
+多 P 的 command shutdown 必须先向所有已启动 owner 发布同一个 sticky stop，
+再让各 P 并行执行既有取消清理；任何一个 P 的 worker 都可能依赖另一个 P 的
+shutdown defer。不得先排空或 join 单个 P，再通知其他 P。通知不等于关闭 source：
+worker、事件注册和 result custody 仍按各自协议 strong-join，最后才回收 owner、
+source 和物理 worker。正常 FinishMain 与 pending-source runner reentry 都必须满足
+这个顺序。复用现有 atomic stop ingress，不增加每 G 状态或第二套取消协议。
+peer stop 和 runnable placement 读取该 word 的 Sealed phase，即使旧 M 的
+succession lease 尚未退出也必须开始取消；Quiesced 只用于最终选择稳定 join target
+和回收，不能用它延迟 stop 生效、消耗一次唤醒后又重新入睡。
+
+关闭清理仍可调用 GOMAXPROCS；允许改变逻辑 quota，但 sealed stop 之后不得启动新 M。
+固定 P1 worker → P2 cleanup 的真实 linked fixture 必须在旧顺序下超时、在修复后通过，
+并覆盖清理中提高 quota。host adapter 的 pending-completion gate 还必须证明本地
+取消 continuation 不会在 peer stop publication 之前运行。
+
 ## 2. 不可协商的设计规则
 
 ### 2.1 一个 source function 只有一个 primary body

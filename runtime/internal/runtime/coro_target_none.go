@@ -38,6 +38,10 @@ func coroTargetConsumeExecutorRunV2(coro.ExecutorHandle, uint32) bool {
 	return false
 }
 
+func coroTargetRequestProgramShutdownV1(handle coro.ExecutorHandle) bool {
+	return handle == coroProgramExecutorHandleV1State && handle.Slot != 0 && handle.Generation != 0
+}
+
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	if handle != coroProgramExecutorHandleV1State || epoch == 0 {
 		return coroTargetDispatchInvalidV1

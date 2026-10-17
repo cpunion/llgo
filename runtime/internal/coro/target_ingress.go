@@ -98,6 +98,13 @@ func (ingress *TargetIngress) Seal() bool {
 	}
 }
 
+// Sealed observes the durable close request, including while existing leases
+// are still leaving. It grants no permission to reclaim protected resources:
+// that requires Quiesced. Retire ends this phase permanently.
+func (ingress *TargetIngress) Sealed() bool {
+	return ingress != nil && preemptLoad(&ingress.state)&^targetIngressCountMask == targetIngressSealed
+}
+
 func (ingress *TargetIngress) Quiesced() bool {
 	return ingress != nil && preemptLoad(&ingress.state) == targetIngressSealed
 }

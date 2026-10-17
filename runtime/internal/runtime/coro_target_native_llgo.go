@@ -174,6 +174,10 @@ func coroTargetPostTaskControlV1(id coro.OperationID, kind coro.TaskCancelKind, 
 	return result
 }
 
+func coroTargetRequestProgramShutdownV1(handle coro.ExecutorHandle) bool {
+	return handle == coroProgramExecutorHandleV1State && handle.Slot != 0 && handle.Generation != 0
+}
+
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	state := &coroNativeTargetV1State
 	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 ||
