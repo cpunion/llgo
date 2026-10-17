@@ -1161,15 +1161,16 @@ producer 函数值及私有工厂返回函数值；无 consumer producer/helper 
 捕获闭包/receiver resource adapter、reflection/FFI 二次 custody handoff 和外部 range defer
 owner 尚不能由本项验证推定完成。
 
-资源 descriptor 的可选冷尾采用 **delivery v2**：完整 padded base 之后是
-`{version:u32, reserved:u32, initializer*, drop*, initializerABI:[2]u64, dropABI:[2]u64}`。
+资源 descriptor 的可选冷尾采用 **delivery v3**：完整 padded base 之后是
+`{version:u32, flags:u32, initializer*, drop*, initializerABI:[2]u64, dropABI:[2]u64}`。
 两个预期的 128-bit helper ABI 摘要来自编译期已经绑定的精确 helper signature；发布时
 核对 helper descriptor 的实际摘要、物理入口和空结果布局。typed consumer 先检查
 `HasDelivery`，再把冷尾摘要与自身从冻结 signature 得到的摘要比较，最后继续通过唯一
 managed dispatch 调用 helper。不能把 helper 自己的摘要读出来当作预期类型。
-同名冷尾重用也逐字核对摘要，旧 delivery v1 不兼容；`coroDeliveryGuardABI` 同步升级为
-v3，物理入口摘要和 library ABI 摘要自动拒绝旧契约，不增加第二套 archive 记录。
-这只给资源函数的冷元数据增加 32 字节；普通 descriptor base、funcval、G、frame 和
+同名冷尾重用也逐字核对摘要与 flags。当前 flags 仅允许 `RequiresState=1`；未知位和旧
+delivery v1/v2 均拒绝。`coroDeliveryGuardABI` 为 v5，library summary/record/digest 为
+v22，物理入口摘要和 library ABI 摘要自动拒绝旧契约，不增加第二套 archive 记录。
+两个 helper hash 给资源函数冷元数据增加 32 字节；普通 descriptor base、funcval、G 和
 operation 布局不变。它为未来 FFI 的类型校验提供依据，但不授予 reflection 二次交接
 权限；运行时无保护的反射调用仍拒绝资源 capability。
 

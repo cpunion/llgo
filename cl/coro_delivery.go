@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	coroDeliveryGuardABI       = "llgo.coro.borrowed-result-guards.v4"
+	coroDeliveryGuardABI       = "llgo.coro.borrowed-result-guards.v5"
 	coroDeliveryInitializeCall = "coro.delivery.initialize"
 	coroDeliveryDropCall       = "coro.delivery.drop"
 )
@@ -45,6 +45,17 @@ type coroSourceDeliveryRecipe struct {
 	// Emission never builds intermediate helper-view chains or replays SSA.
 	forwardBase *ssa.Function
 	forwardArgs []coroDeliveryForwardArgument
+	snapshot    *coroDeliveryReceiverSnapshot
+}
+
+type coroDeliveryReceiverSnapshot struct {
+	owner *ssa.Function
+	value ssa.Value
+	box   *types.Struct
+}
+
+func (recipe coroSourceDeliveryRecipe) requiresState() bool {
+	return recipe.snapshot != nil || recipe.archive != nil && recipe.archive.recipe.Record().RequiresState
 }
 
 // A source projection plus its already frozen immutable context layout. A
@@ -288,7 +299,10 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 		ir.deliveryProducers[producer] = recipe
 		if recipe.archive == nil || recipe.forward != nil {
 			var extra []coroPlannedRuntimeHelper
-			if recipe.forward != nil && u.prog != nil && u.prog.LocalGoTypeExceedsNativeStack(recipe.result) {
+			if recipe.snapshot != nil && recipe.snapshot.owner == producer && u.loweredCalls[producer][coroDeliveryStateAllocZCall].target != nil {
+				extra = append(extra, coroPlannedRuntimeHelper{name: coroDeliveryStateAllocZCall, placement: coroRuntimeHelperAtSource})
+			}
+			if recipe.forward != nil && u.prog != nil && u.prog.LocalGoTypeExceedsNativeStack(llssa.CoroDeliveryStorageGoType(recipe.result)) {
 				extra = append(extra, coroPlannedRuntimeHelper{name: coroManagedFrameSlotAllocZCall, placement: coroRuntimeHelperAtSource})
 			}
 			if err := builder.freezeDeliveryHelperPlacements(ir, recipe.anchor(), coroDeliveryInitializeCall, coroDeliveryDropCall, extra...); err != nil {
@@ -393,7 +407,9 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 					}
 				}
 				var extra []coroPlannedRuntimeHelper
-				if _, deferred := call.(*ssa.Defer); deferred && u.prog != nil && u.prog.LocalGoTypeExceedsNativeStack(recipe.result) {
+				_, deferred := call.(*ssa.Defer)
+				if u.prog != nil && u.prog.LocalGoTypeExceedsNativeStack(llssa.CoroDeliveryStorageGoType(recipe.result)) &&
+					(deferred || !u.prog.LocalGoTypeExceedsNativeStack(recipe.result)) {
 					// The producer's nil-output fallback already materialized this
 					// helper for a source definition. An archive-only producer has
 					// no local fallback, so bind the same typed runtime dependency
@@ -410,7 +426,11 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 					if err := u.recordCoroLoweredCall(cleanupOwner, coroManagedFrameSlotAllocZCall, allocator); err != nil {
 						return err
 					}
-					extra = append(extra, coroPlannedRuntimeHelper{name: coroManagedFrameSlotAllocZCall, placement: coroRuntimeHelperAtCleanup})
+					placement := coroRuntimeHelperAtSource
+					if deferred {
+						placement = coroRuntimeHelperAtCleanup
+					}
+					extra = append(extra, coroPlannedRuntimeHelper{name: coroManagedFrameSlotAllocZCall, placement: placement})
 				}
 				if err := builder.freezeDeliveryHelperPlacements(ir, call, recipe.consumerInitialize, recipe.consumerDrop, extra...); err != nil {
 					return err

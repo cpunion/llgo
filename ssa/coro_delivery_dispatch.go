@@ -14,7 +14,9 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-const CoroDispatchDeliveryVersionV2 uint32 = 2
+const CoroDispatchDeliveryVersionV3 uint32 = 3
+
+const CoroDispatchDeliveryRequiresState uint32 = 1
 
 // CoroDispatchDeliveryABI is the consumer's independently computed helper ABI.
 // The cold tail stores the producer's expected hashes, not hashes recovered
@@ -38,9 +40,10 @@ type CoroDispatchDeliveryHelper struct {
 // child awaiting and internal cleanup shielding remain the only call engine.
 // The frontend must bind physical custody before publishing this capability.
 type CoroDispatchDeliveryOptions struct {
-	Version     uint32
-	Initializer CoroDispatchDeliveryHelper
-	Drop        CoroDispatchDeliveryHelper
+	Version       uint32
+	RequiresState bool
+	Initializer   CoroDispatchDeliveryHelper
+	Drop          CoroDispatchDeliveryHelper
 }
 
 func (p Program) coroDeliveryDescriptorType() Type {
@@ -91,7 +94,7 @@ func (p Package) validateCoroDispatchDelivery(opts CoroDispatchDescriptorOptions
 	if opts.Flags&CoroDispatchFlagHasDelivery == 0 {
 		panic("ssa: coroutine delivery tail requires its capability")
 	}
-	if delivery.Version != CoroDispatchDeliveryVersionV2 {
+	if delivery.Version != CoroDispatchDeliveryVersionV3 {
 		panic("ssa: unsupported coroutine delivery tail version")
 	}
 	if p.Prog.SizeOf(opts.Result) == 0 {
@@ -140,9 +143,13 @@ func (p Package) validateCoroDispatchDelivery(opts CoroDispatchDescriptorOptions
 			p.validateCoroDispatchEntry(p.FuncOf(function.Name()).Expr, entry.want, true, "delivery helper")
 		}
 	}
+	flags := uint32(0)
+	if delivery.RequiresState {
+		flags = CoroDispatchDeliveryRequiresState
+	}
 	return []llvm.Value{
 		p.Prog.IntVal(uint64(delivery.Version), p.Prog.Uint32()).impl,
-		p.Prog.IntVal(0, p.Prog.Uint32()).impl,
+		p.Prog.IntVal(uint64(flags), p.Prog.Uint32()).impl,
 		delivery.Initializer.Descriptor.impl, delivery.Drop.Descriptor.impl,
 		p.Prog.IntVal(binary.BigEndian.Uint64(delivery.Initializer.ABIHash[:8]), p.Prog.Uint64()).impl,
 		p.Prog.IntVal(binary.BigEndian.Uint64(delivery.Initializer.ABIHash[8:]), p.Prog.Uint64()).impl,
@@ -153,7 +160,7 @@ func (p Package) validateCoroDispatchDelivery(opts CoroDispatchDescriptorOptions
 
 func (p Package) matchesCoroDispatchDelivery(tail llvm.Value, want CoroDispatchDeliveryOptions) bool {
 	return !tail.IsAConstantStruct().IsNil() && tail.OperandsCount() == 8 &&
-		tail.Operand(0).ZExtValue() == uint64(want.Version) && tail.Operand(1).ZExtValue() == 0 &&
+		tail.Operand(0).ZExtValue() == uint64(want.Version) && tail.Operand(1).ZExtValue() == coroDeliveryFlags(want.RequiresState) &&
 		tail.Operand(2).C == want.Initializer.Descriptor.impl.C && tail.Operand(3).C == want.Drop.Descriptor.impl.C &&
 		tail.Operand(4).ZExtValue() == binary.BigEndian.Uint64(want.Initializer.ABIHash[:8]) &&
 		tail.Operand(5).ZExtValue() == binary.BigEndian.Uint64(want.Initializer.ABIHash[8:]) &&
@@ -165,7 +172,7 @@ func (p Package) matchesCoroDispatchDelivery(tail llvm.Value, want CoroDispatchD
 // HasDelivery check. It returns ordinary nil-environment managed function
 // values, not raw callback pointers or a separate invocation protocol. The
 // caller invokes/awaits them through the existing typed dispatch operations.
-func (b Builder) PrepareCoroDispatchDelivery(selection CoroDispatchSelection, initializer, drop *types.Signature, abi CoroDispatchDeliveryABI) (Expr, Expr) {
+func (b Builder) PrepareCoroDispatchDelivery(selection CoroDispatchSelection, initializer, drop *types.Signature, abi CoroDispatchDeliveryABI) (Expr, Expr, Expr) {
 	call := selection.prepared
 	if call.descriptor.IsNil() {
 		panic("ssa: coroutine delivery requires a prepared descriptor")
@@ -174,11 +181,11 @@ func (b Builder) PrepareCoroDispatchDelivery(selection CoroDispatchSelection, in
 	b.coroPlainDispatchTrapIf(b.UnOp(token.NOT, selection.HasDelivery()).impl)
 	pointer := Expr{call.descriptor.impl, b.Prog.Pointer(b.Prog.coroDeliveryDescriptorType())}
 	tail := b.LoadKnownNonNil(b.FieldAddrKnownNonNil(pointer, 1))
-	version, reserved := b.Field(tail, 0), b.Field(tail, 1)
+	version, flags := b.Field(tail, 0), b.Field(tail, 1)
 	initDescriptor, dropDescriptor := b.Field(tail, 2), b.Field(tail, 3)
 	invalid := b.BinOp(token.OR,
-		b.BinOp(token.NEQ, version, b.Prog.IntVal(uint64(CoroDispatchDeliveryVersionV2), b.Prog.Uint32())),
-		b.BinOp(token.NEQ, reserved, b.Prog.IntVal(0, b.Prog.Uint32())))
+		b.BinOp(token.NEQ, version, b.Prog.IntVal(uint64(CoroDispatchDeliveryVersionV3), b.Prog.Uint32())),
+		b.BinOp(token.NEQ, b.BinOp(token.AND, flags, b.Prog.IntVal(uint64(^CoroDispatchDeliveryRequiresState), b.Prog.Uint32())), b.Prog.IntVal(0, b.Prog.Uint32())))
 	for _, descriptor := range []Expr{initDescriptor, dropDescriptor} {
 		invalid = b.BinOp(token.OR, invalid, b.BinOp(token.EQL, descriptor, b.Prog.Nil(b.Prog.VoidPtr())))
 	}
@@ -192,5 +199,13 @@ func (b Builder) PrepareCoroDispatchDelivery(selection CoroDispatchSelection, in
 	makeValue := func(signature *types.Signature, descriptor Expr) Expr {
 		return b.aggregateValue(b.Prog.Closure(signature), descriptor.impl, b.Prog.Nil(b.Prog.VoidPtr()).impl)
 	}
-	return makeValue(initializer, initDescriptor), makeValue(drop, dropDescriptor)
+	required := b.BinOp(token.NEQ, b.BinOp(token.AND, flags, b.Prog.IntVal(uint64(CoroDispatchDeliveryRequiresState), b.Prog.Uint32())), b.Prog.IntVal(0, b.Prog.Uint32()))
+	return makeValue(initializer, initDescriptor), makeValue(drop, dropDescriptor), required
+}
+
+func coroDeliveryFlags(required bool) uint64 {
+	if required {
+		return uint64(CoroDispatchDeliveryRequiresState)
+	}
+	return 0
 }

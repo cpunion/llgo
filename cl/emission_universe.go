@@ -7082,6 +7082,19 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 	if err := u.coroProgramIR.freezeSiteOwner(u.prog, fn, owner); err != nil {
 		return fmt.Errorf("prepare emission universe: function %q: %w", fn.Name(), err)
 	}
+	if forwarding := u.coroProgramIR.localBodyFacts[fn].forwarding; forwarding != nil &&
+		forwarding.methodProjection && forwarding.receiverEvaluation != nil {
+		// Reserve the real allocator in the source inventory while the closure
+		// is open. Only a later proven custody recipe records a call edge; an
+		// ordinary method wrapper gains no allocation effect or demand here.
+		if runtime := u.byPath[llssa.PkgRuntime]; runtime != nil && !u.pathDup[llssa.PkgRuntime] {
+			if allocator := runtime.ssa.Func("AllocZ"); allocator != nil {
+				if _, err := u.addResolvedRequired(allocator, owner, fn, emissionState); err != nil {
+					return fmt.Errorf("prepare receiver snapshot allocation inventory: %w", err)
+				}
+			}
+		}
+	}
 	return u.materializeABITypeDemandsOfFunction(fn, owner, emissionState)
 }
 

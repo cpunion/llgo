@@ -272,6 +272,63 @@ func TestCoroHelperViewProjectsOnlyTypedBorrowedEnvironmentFields(t *testing.T) 
 	}
 }
 
+func TestCoroHelperViewProjectsOwnedResultState(t *testing.T) {
+	for _, target := range []*Target{nil, {GOOS: "wasip1", GOARCH: "wasm"}} {
+		for _, prefix := range []int{0, 2, 3} {
+			f := newCoroDynamicDispatchTestFixture(t, target)
+			word, pointer := types.Typ[types.Uint32], types.Typ[types.UnsafePointer]
+			tuple := types.NewStruct([]*types.Var{types.NewField(token.NoPos, nil, "R0", word, false)}, nil)
+			output := types.NewPointer(tuple)
+			record := types.NewStruct([]*types.Var{types.NewField(token.NoPos, nil, "Arg0", word, false)}, nil)
+			stateType := f.prog.Type(types.NewPointer(record), InGo)
+			parameters := make([]types.Type, prefix)
+			for i := range parameters {
+				parameters[i] = pointer
+			}
+			var results []types.Type
+			if prefix == 2 {
+				results = []types.Type{pointer}
+			}
+			signature := coroPlainDispatchTestSignature(append(append([]types.Type(nil), parameters...), output, pointer), results)
+			callee := f.pkg.NewFunc("state_target", coroPlainDispatchTestSignature(append(append([]types.Type(nil), parameters...), output, word), results), InGo)
+			argument := CoroHelperViewArgument{Parameter: 0, ResultState: stateType, Fields: []int{0}}
+			view := f.pkg.NewCoroHelperView("state_view", signature, callee.Expr, prefix, []CoroHelperViewArgument{{Parameter: 0}, argument})
+			loads, calls := 0, 0
+			for _, block := range view.impl.BasicBlocks() {
+				for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+					switch instruction.InstructionOpcode() {
+					case llvm.Alloca, llvm.Store:
+						t.Fatal("state view introduced owned storage:", instruction)
+					case llvm.Load:
+						loads++
+					case llvm.Call:
+						calls++
+						if instruction.CalledValue().C != callee.impl.C {
+							t.Fatal("state view introduced a runtime binder")
+						}
+					}
+				}
+			}
+			if loads != 2 || calls != 1 {
+				t.Fatalf("state view loads=%d calls=%d", loads, calls)
+			}
+			for _, invalid := range []CoroHelperViewArgument{
+				{Parameter: 1, ResultState: stateType, Fields: []int{0}},
+				{Parameter: 0, ResultState: f.prog.Pointer(f.prog.Uint32())},
+				{Parameter: 0, ResultState: stateType, Environment: stateType, Fields: []int{0}},
+				{Parameter: 0, ResultState: stateType, Fields: []int{1}},
+			} {
+				coroPlainDispatchMustPanicContains(t, "helper view", func() {
+					f.pkg.NewCoroHelperView("invalid_state_view", signature, callee.Expr, prefix, []CoroHelperViewArgument{{Parameter: 0}, invalid})
+				})
+			}
+			if err := llvm.VerifyModule(f.pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 // Exercise the raw ABI and shared output cell, not scheduler handles: the
 // prefix-2 target here is an ordinary test function with the entry signature.
 func TestCoroHelperViewNativeArgumentExecution(t *testing.T) {

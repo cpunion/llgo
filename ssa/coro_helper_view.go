@@ -30,6 +30,10 @@ type CoroHelperViewArgument struct {
 	// word may be read, along the checked value-field path. The frontend must
 	// prove the context immutable and borrowed through helper completion.
 	Environment Type
+	// ResultState is the exact immutable invocation record retained by the
+	// owned result guard. Its consumer has already checked RequiresState and
+	// a non-nil binding before invoking this view.
+	ResultState Type
 }
 
 const coroHelperViewAttribute = "llgo.coro.helper.view.v1"
@@ -80,7 +84,7 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 			fail("must preserve exact task, output and completion prefix words")
 		}
 	}
-	if len(arguments) == 0 || arguments[0].Parameter != 0 || !arguments[0].Constant.IsNil() || len(arguments[0].Fields) != 0 || arguments[0].Environment != nil ||
+	if len(arguments) == 0 || arguments[0].Parameter != 0 || !arguments[0].Constant.IsNil() || len(arguments[0].Fields) != 0 || arguments[0].Environment != nil || arguments[0].ResultState != nil ||
 		!types.Identical(signature.Params().At(prefix).Type(), targetSignature.Params().At(prefix).Type()) {
 		fail("must pass the same exact typed resource output cell")
 	}
@@ -92,7 +96,7 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 	fmt.Fprintf(&identity, "%s\x00%d", target.Name(), prefix)
 	for index, argument := range arguments {
 		parameter, literal := argument.Parameter >= 0, !argument.Constant.IsNil()
-		if parameter == literal || literal && (len(argument.Fields) != 0 || argument.Environment != nil) {
+		if parameter == literal || literal && (len(argument.Fields) != 0 || argument.Environment != nil || argument.ResultState != nil) {
 			fail("argument must select exactly one parameter or immutable literal")
 		}
 		var typ Type
@@ -106,6 +110,22 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 				fail("literal projection must not capture an instruction")
 			}
 			typ = argument.Constant.Type
+		}
+		if argument.ResultState != nil {
+			pointer, ok := types.Unalias(argument.ResultState.RawType()).(*types.Pointer)
+			output, outputOK := types.Unalias(typ.RawType()).(*types.Pointer)
+			if !ok || !outputOK || argument.Parameter != 0 || argument.Environment != nil ||
+				argument.ResultState.ll.Context().C != p.Prog.ctx.C {
+				fail("result state requires its exact owned output pointer and frozen record")
+			}
+			if _, tuple := types.Unalias(output.Elem()).Underlying().(*types.Struct); !tuple {
+				fail("result state requires an exact public result tuple")
+			}
+			if _, record := types.Unalias(pointer.Elem()).Underlying().(*types.Struct); !record {
+				fail("result state requires an immutable typed record")
+			}
+			typ = p.Prog.Type(pointer.Elem(), InGo)
+			fmt.Fprintf(&identity, "\x00state:%s", typ.ll.String())
 		}
 		if argument.Environment != nil {
 			pointer, ok := types.Unalias(argument.Environment.RawType()).(*types.Pointer)
@@ -167,7 +187,14 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 		if argument.Parameter >= 0 {
 			value = view.PhysicalParam(prefix + argument.Parameter)
 		}
-		if argument.Environment != nil {
+		if argument.ResultState != nil {
+			layout := p.Prog.NewCoroDeliveryStorage(p.Prog.Elem(value.Type))
+			value = b.Convert(argument.ResultState, b.LoadKnownNonNil(layout.StateAddress(b, value)))
+			for _, field := range argument.Fields {
+				value = b.FieldAddrKnownNonNil(value, field)
+			}
+			value = b.LoadKnownNonNil(value)
+		} else if argument.Environment != nil {
 			value = b.Convert(argument.Environment, value)
 			for _, field := range argument.Fields {
 				value = b.FieldAddrKnownNonNil(value, field)

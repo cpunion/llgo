@@ -6,6 +6,39 @@ import (
 	"testing"
 )
 
+func TestLibraryDeliveryStateRequirementSurvivesArchiveAndDigest(t *testing.T) {
+	summaries, record := deliveryLibrarySummaries()
+	before, err := summaries[0].Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries[0].Functions[0].Delivery.RequiresState = true
+	after, err := summaries[0].Digest()
+	if err != nil || before == after {
+		t.Fatalf("invocation state requirement did not change archive identity: %v", err)
+	}
+	var data []byte
+	for _, summary := range summaries {
+		encoded, err := summary.MarshalRecord()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = append(data, encoded...)
+	}
+	decoded, err := ParseLibraryEffectSummaryRecords(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := NewLibraryEffectIndex(decoded, testLibraryEffectMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found := index.LookupDelivery(record.Producer)
+	if !found || !got.RequiresState {
+		t.Fatalf("opaque producer lost its invocation state requirement: %+v", got)
+	}
+}
+
 func TestLibraryUnboundDeliveryCannotBecomeAnOrdinaryResultContract(t *testing.T) {
 	summaries, record := deliveryLibrarySummaries()
 	summary := summaries[0]

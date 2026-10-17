@@ -1634,14 +1634,14 @@ func emissionCallNeedsManagedCoroResultSlot(ctx *context, call *ssa.Call) bool {
 		// The declaration returns a pointer, but a discarded entry may own
 		// its pointee. Plan that conditional allocation before effect analysis.
 		if pointer, ok := types.Unalias(typ).(*types.Pointer); ok {
-			typ = pointer.Elem()
+			typ = llssa.CoroDeliveryStorageGoType(pointer.Elem())
 		}
 	}
 	return ctx.prog.LocalGoTypeExceedsNativeStack(typ)
 }
 
 func coroRuntimeHelperTargetName(logicalName string) string {
-	if logicalName == coroManagedFrameSlotAllocZCall || logicalName == llssa.ArrayEqualScratchAllocZ {
+	if logicalName == coroManagedFrameSlotAllocZCall || logicalName == coroDeliveryStateAllocZCall || logicalName == llssa.ArrayEqualScratchAllocZ {
 		return "AllocZ"
 	}
 	return logicalName

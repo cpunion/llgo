@@ -3,6 +3,7 @@
 package main
 
 import (
+	"reflect"
 	"runtime"
 	"unsafe"
 
@@ -141,6 +142,40 @@ type boxedResourceFactory interface{ fieldAcquire(uint32) int32 }
 func boxedInterfaceOwner(owner boxedResourceFactory)         { owner.fieldAcquire(1); escaped() }
 func boxedInterfaceDeferredOwner(owner boxedResourceFactory) { defer owner.fieldAcquire(1) }
 
+type promotedFactory struct{ *boxedFactory }
+
+func snapshotOwner(owner *boxedFactory)         { (*boxedFactory).fieldAcquire(owner, 1); escaped() }
+func snapshotDeferredOwner(owner *boxedFactory) { defer (*boxedFactory).fieldAcquire(owner, 1) }
+func snapshotDynamicOwner(f func(*boxedFactory, uint32) int32, owner *boxedFactory) {
+	f(owner, 1)
+	escaped()
+}
+func snapshotDynamicDeferredOwner(f func(*boxedFactory, uint32) int32, owner *boxedFactory) {
+	defer f(owner, 1)
+}
+func snapshotPromotedOwner(owner *promotedFactory) {
+	(*promotedFactory).fieldAcquire(owner, 1)
+	escaped()
+}
+func snapshotChain(owner *boxedFactory, mode uint32) int32 {
+	return (*boxedFactory).fieldAcquire(owner, mode)
+}
+
+//go:noinline
+func snapshotNoInline(owner *boxedFactory, mode uint32) int32 { return snapshotChain(owner, mode) }
+
+var publishedSnapshot = (*boxedFactory).fieldAcquire
+
+func verifyNilSnapshot() {
+	defer func() {
+		if recover() == nil {
+			panic("nil snapshot receiver did not panic")
+		}
+	}()
+	(*boxedFactory).fieldAcquire(nil, 0)
+	escaped()
+}
+
 type factory uint32
 
 func (token factory) acquire(mode uint32) int32 { return acquire(uint32(token), mode) }
@@ -227,6 +262,53 @@ func acquireLarge(token, mode uint32) (int32, [131073]byte, *[128]byte) {
 func largeLiteral(mode uint32) (int32, [131073]byte, *[128]byte) { return acquireLarge(17, mode) }
 func largeChain(mode uint32) (int32, [131073]byte, *[128]byte)   { return largeLiteral(mode) }
 
+type snapshotCallbackFactory struct{ Check func() uint32 }
+
+//go:linkname borrowCallbackLarge llgo.coroBorrowResult
+func borrowCallbackLarge(func(*largeResult), func(*largeResult, unsafe.Pointer, func() uint32, uint32)) *largeResult
+
+func dropCallbackLarge(out *largeResult, env unsafe.Pointer, check func() uint32, mode uint32) {
+	runtime.GC()
+	if check == nil || check() != 17 {
+		println("snapshot lost its original callback and captured owner")
+		escaped()
+	}
+	dropLarge(out, env, check(), mode)
+}
+
+func acquireCallbackLarge(check func() uint32, mode uint32) (int32, [131073]byte, *[128]byte) {
+	out := borrowCallbackLarge(initializeLarge, dropCallbackLarge)
+	if check == nil || check() != 17 {
+		escaped()
+	}
+	out.R1[0], out.R1[len(out.R1)-1] = 17, 91
+	out.R2 = new([128]byte)
+	out.R2[0] = 37
+	openLargeInto(&out.R0, mode)
+	return out.R0, out.R1, out.R2
+}
+
+func (value snapshotCallbackFactory) AcquireSnapshot(mode uint32) (int32, [131073]byte, *[128]byte) {
+	return acquireCallbackLarge(value.Check, mode)
+}
+
+type callbackFactory interface {
+	AcquireSnapshot(uint32) (int32, [131073]byte, *[128]byte)
+}
+
+func callbackDynamicDeferredOwner(f func(*snapshotCallbackFactory, uint32) (int32, [131073]byte, *[128]byte), owner *snapshotCallbackFactory) {
+	defer f(owner, 1)
+}
+func callbackInterfaceOwner(owner callbackFactory) { owner.AcquireSnapshot(1); escaped() }
+
+var publishedCallbackSnapshot = (*snapshotCallbackFactory).AcquireSnapshot
+
+func callbackReceiver() *snapshotCallbackFactory {
+	owner := new([128]byte)
+	owner[0] = 17
+	return &snapshotCallbackFactory{Check: func() uint32 { return uint32(owner[0]) }}
+}
+
 var publishedLarge = largeChain
 
 func sentinel(ready chan struct{}) {
@@ -282,6 +364,9 @@ func main() {
 	// GOMAXPROCS is selected by the runner: do not collapse the P=2 gate to P=1.
 	install()
 	mode := fixtureMode()
+	if mode >= 32 {
+		verifyNilSnapshot()
+	}
 	var fd int32
 	if mode == 30 || mode == 31 {
 		var value boxedFactory
@@ -307,7 +392,13 @@ func main() {
 		closeFD(fd)
 	}
 	if mode >= 12 {
-		fd, payload, owner := largeChain(0)
+		var payload [131073]byte
+		var owner *[128]byte
+		if mode >= 41 {
+			fd, payload, owner = (*snapshotCallbackFactory).AcquireSnapshot(callbackReceiver(), 0)
+		} else {
+			fd, payload, owner = largeChain(0)
+		}
 		runtime.Gosched()
 		runtime.GC()
 		checkLarge(&payload, owner)
@@ -343,6 +434,8 @@ func main() {
 		runtime.GC()
 		return
 	}
+	var snapshot *boxedFactory
+	var callbackSnapshot *snapshotCallbackFactory
 	switch mode {
 	case 2:
 		go chained(1)
@@ -441,11 +534,61 @@ func main() {
 			go boxedInterfaceDeferredOwner(owner)
 		}
 		owner, value = nil, boxedFactory{}
+	case 32, 33, 34, 35, 36, 37, 38, 39, 40:
+		snapshot = new(boxedFactory)
+		snapshot.inner.token = 17
+		switch mode {
+		case 32:
+			go snapshotOwner(snapshot)
+		case 33:
+			go (*boxedFactory).fieldAcquire(snapshot, 1)
+		case 34:
+			go snapshotDeferredOwner(snapshot)
+		case 35:
+			go snapshotDynamicOwner(publishedSnapshot, snapshot)
+		case 36:
+			go snapshotDynamicDeferredOwner(publishedSnapshot, snapshot)
+		case 37:
+			go boxedInterfaceOwner(snapshot)
+		case 38:
+			go boxedInterfaceDeferredOwner(snapshot)
+		case 39:
+			go snapshotPromotedOwner(&promotedFactory{snapshot})
+		case 40:
+			go snapshotNoInline(snapshot, 1)
+		}
+	case 41, 42, 43, 44:
+		callbackSnapshot = callbackReceiver()
+		switch mode {
+		case 41:
+			go (*snapshotCallbackFactory).AcquireSnapshot(callbackSnapshot, 1)
+		case 42:
+			go callbackDynamicDeferredOwner(publishedCallbackSnapshot, callbackSnapshot)
+		case 43:
+			go callbackInterfaceOwner(callbackSnapshot)
+		case 44:
+			method, found := reflect.TypeOf(callbackSnapshot).MethodByName("AcquireSnapshot")
+			if !found {
+				panic("missing snapshot Method.Func")
+			}
+			f := method.Func.Interface().(func(*snapshotCallbackFactory, uint32) (int32, [131073]byte, *[128]byte))
+			go callbackDynamicDeferredOwner(f, callbackSnapshot)
+		}
 	default:
 		escaped()
 	}
 	for blocked() == 0 {
 		runtime.Gosched()
+	}
+	if snapshot != nil {
+		// The real value-receiver load already ran. Cleanup must retain 17
+		// while both the pointer argument and its pointee now contain 99.
+		snapshot.inner.token = 99
+		snapshot = nil
+	}
+	if callbackSnapshot != nil {
+		callbackSnapshot.Check = nil
+		callbackSnapshot = nil
 	}
 	runtime.GC()
 	runtime.GC()

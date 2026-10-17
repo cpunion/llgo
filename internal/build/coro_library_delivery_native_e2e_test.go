@@ -79,6 +79,10 @@ func TestCoroArchiveBoxedReceiverDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) 
 	testCoroArchiveCapturedDeliveryNativeRuntime(t, coroArchiveBoxedReceiverDelivery)
 }
 
+func TestCoroArchiveSnapshotReceiverDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
+	testCoroArchiveCapturedDeliveryNativeRuntime(t, coroArchiveSnapshotReceiverDelivery)
+}
+
 func testCoroArchiveCapturedDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode) {
 	t.Helper()
 	for _, size := range []struct {
@@ -100,11 +104,13 @@ const (
 	coroArchiveCapturedValueDelivery
 	coroArchiveCapturedFieldDelivery
 	coroArchiveBoxedReceiverDelivery
+	coroArchiveSnapshotReceiverDelivery
 )
 
 func testCoroArchiveDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode, large, forwarded bool) {
 	t.Helper()
-	boxed := mode == coroArchiveBoxedReceiverDelivery
+	snapshot := mode == coroArchiveSnapshotReceiverDelivery
+	boxed := mode == coroArchiveBoxedReceiverDelivery || snapshot
 	captured := mode == coroArchiveCapturedValueDelivery || mode == coroArchiveCapturedFieldDelivery || boxed
 	dynamic, factory := mode != coroArchiveStaticDelivery, mode == coroArchiveFactoryValueDelivery || captured
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
@@ -278,6 +284,9 @@ func arrayequal(a,b unsafe.Pointer) bool { return true }
 				entry = "Callable"
 			}
 			roots = coro.Roots{{Function: source.Func(entry), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}, {Function: source.Func("Stats"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}, {Function: source.Func("DropInfo"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true}}
+			if snapshot {
+				roots = append(roots, coro.Root{Function: source.Func("Mutate"), ManagedDemand: coro.AsyncDemand, EmissionEntry: true})
+			}
 		}
 		input := CoroPlanInput{Program: source.Prog, EmissionUniverse: universe,
 			resolveFunction: u.Resolve, localBodyFacts: u.CoroLocalBodyFacts, functionBackground: u.FunctionBackground,
@@ -472,12 +481,23 @@ func arrayequal(a,b unsafe.Pointer) bool { return true }
 					"type Opener interface { Open(uint32) " + result + " }\n" +
 					"func (r receiver) Open(value uint32) " + result + " { return acquirePermuted(value,r.Inner.Token) }\n" +
 					"func Callable(token uint32) Opener { var r receiver; r.Inner.Token=token; var boxed Opener=r; r.Inner.Token=99; return boxed }"
+				if snapshot {
+					receiver = "type receiver struct { Unused func(); Inner struct { Token uint32 } }\n" +
+						"type Opener interface { Open(uint32) " + result + " }\n" +
+						"func (r receiver) Open(value uint32) " + result + " { return acquirePermuted(value,r.Inner.Token) }\n" +
+						"var receiverState receiver\n" +
+						"func Mutate() { receiverState.Inner.Token=99 }\n" +
+						"func Callable(token uint32) Opener { receiverState.Inner.Token=token; return &receiverState }"
+				}
 			}
 			producerSource = strings.Replace(producerSource, "func Callable() func(uint32) "+result+" { return acquire }", receiver, 1)
 			declarationSource = strings.Replace(declarationSource, "func Callable()", "func Callable(uint32)", 1)
 			if boxed {
 				declarationSource = strings.Replace(declarationSource, "func Callable(uint32) func(uint32) "+result,
 					"type Opener interface { Open(uint32) "+result+" }\nfunc Callable(uint32) Opener", 1)
+				if snapshot {
+					declarationSource += "\nfunc Mutate()\n"
+				}
 			}
 		}
 	}
@@ -575,6 +595,10 @@ func main() {
 	maybe := maybeCancel.MakeBody(6)
 	maybe.If(maybe.BinOp(token.EQL, maybe.Load(issued.Expr), consumerProg.IntVal(0, consumerProg.Uint32())), maybeCancel.Block(1), maybeCancel.Block(5))
 	maybe.SetBlock(maybeCancel.Block(1)).If(maybe.BinOp(token.GEQ, maybe.Call(stats.Expr), consumerProg.IntVal(200, consumerProg.Uint32())), maybeCancel.Block(2), maybeCancel.Block(5))
+	if snapshot {
+		mutate := checks.NewFunc(libraryPath+".Mutate", newSignature(nil, nil), llssa.InGo)
+		maybe.SetBlock(maybeCancel.Block(2)).Call(mutate.Expr)
+	}
 	programP := checks.NewVar("command-line-arguments.coroProgramPV1State", types.NewPointer(pointer), llssa.InGo)
 	request := checks.NewFunc("github.com/xgo-dev/llgo/runtime/internal/coro.RequestTaskCancellation", newSignature([]types.Type{pointer, pointer, types.Typ[types.Uint8]}, []types.Type{types.Typ[types.Bool]}), llssa.InGo)
 	accepted := maybe.SetBlock(maybeCancel.Block(2)).Call(request.Expr, maybe.Convert(consumerProg.VoidPtr(), programP.Expr), maybe.Load(observed.Expr), consumerProg.IntVal(1, consumerProg.Byte()))

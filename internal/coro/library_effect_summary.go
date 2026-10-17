@@ -29,10 +29,10 @@ import (
 )
 
 const (
-	// v21 requires resource method families to publish descriptor Ifn_ words
-	// even when the producing library contains no local interface invocation.
-	// Older records cannot certify that independently consumed boundary.
-	LibraryEffectSummaryVersion = "v21"
+	// v22 binds evaluated receiver state through compiler-owned result storage.
+	// Older consumers cannot provide that private allocation or interpret the
+	// state-required cleanup contract.
+	LibraryEffectSummaryVersion = "v22"
 
 	// LibraryEffectExportIngressABIV1 identifies the compiler-generated exact
 	// C-to-managed adapter published by LibraryEffectExportIngress. It is
@@ -64,7 +64,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 21,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 22,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size

@@ -89,7 +89,7 @@ func coroDeliveryDispatchTestOptions(t *testing.T, f *coroDynamicDispatchTestFix
 	}
 	opts := f.descriptorOptions(CoroDispatchFlagHasCoro | CoroDispatchFlagHasDelivery)
 	opts.Delivery = &CoroDispatchDeliveryOptions{
-		Version:     CoroDispatchDeliveryVersionV2,
+		Version:     CoroDispatchDeliveryVersionV3,
 		Initializer: makeHelper("delivery_initializer", initializer, false, 1),
 		Drop:        makeHelper("delivery_drop", drop, true, 2),
 	}
@@ -119,6 +119,13 @@ func TestCoroDeliveryDispatchOptionalTailNativeAndWasm(t *testing.T) {
 				t.Fatalf("optional tail size=%d, want header, two pointers and two exact helper hashes", size)
 			}
 			tail := initializer.Operand(1)
+			stateOpts, stateTail := opts, *opts.Delivery
+			stateTail.RequiresState = true
+			stateOpts.Delivery = &stateTail
+			stateDescriptor := f.pkg.NewCoroDispatchDescriptor("state_resource_descriptor", stateOpts)
+			if got := coroPlainDispatchGlobal(stateDescriptor.impl).Initializer().Operand(1).Operand(1).ZExtValue(); got != uint64(CoroDispatchDeliveryRequiresState) {
+				t.Fatalf("snapshot descriptor lost its state requirement: flags=%d", got)
+			}
 			for index, helper := range []CoroDispatchDeliveryHelper{opts.Delivery.Initializer, opts.Delivery.Drop} {
 				for word := 0; word < 2; word++ {
 					if got, want := tail.Operand(4+index*2+word).ZExtValue(), binary.BigEndian.Uint64(helper.ABIHash[word*8:word*8+8]); got != want {
@@ -147,7 +154,7 @@ func TestCoroDeliveryDispatchOptionalTailNativeAndWasm(t *testing.T) {
 			present, done := probe.MakeBlock(), probe.MakeBlock()
 			b.If(selection.HasDelivery(), present, done)
 			b.SetBlock(present)
-			init, _ := b.PrepareCoroDispatchDelivery(selection, opts.Delivery.Initializer.Signature, opts.Delivery.Drop.Signature,
+			init, _, _ := b.PrepareCoroDispatchDelivery(selection, opts.Delivery.Initializer.Signature, opts.Delivery.Drop.Signature,
 				CoroDispatchDeliveryABI{Initializer: opts.Delivery.Initializer.ABIHash, Drop: opts.Delivery.Drop.ABIHash})
 			out := b.Alloc(f.result, false)
 			b.CallCoroDispatchPlain(init, []Expr{out}, CoroDispatchCallOptions{
@@ -244,7 +251,7 @@ func TestCoroDeliveryDispatchRejectsChangedColdContract(t *testing.T) {
 		arch *Target
 	}{{name: "native"}, {name: "wasm32", arch: &Target{GOOS: "wasip1", GOARCH: "wasm"}}} {
 		t.Run(target.name, func(t *testing.T) {
-			for field, name := range []string{"version", "reserved", "initializer", "drop", "initializer-lo", "initializer-hi", "drop-lo", "drop-hi"} {
+			for field, name := range []string{"version", "flags", "initializer", "drop", "initializer-lo", "initializer-hi", "drop-lo", "drop-hi"} {
 				t.Run(name, func(t *testing.T) {
 					f := newCoroDynamicDispatchTestFixture(t, target.arch)
 					opts := coroDeliveryDispatchTestOptions(t, f)
@@ -279,7 +286,7 @@ func TestCoroDeliveryDispatchRejectsIncompleteTypedPublication(t *testing.T) {
 		"missing-tail":           func(o *CoroDispatchDescriptorOptions) { o.Delivery = nil },
 		"missing-capability":     func(o *CoroDispatchDescriptorOptions) { o.Flags &^= CoroDispatchFlagHasDelivery },
 		"version":                func(o *CoroDispatchDescriptorOptions) { o.Delivery.Version++ },
-		"old-version":            func(o *CoroDispatchDescriptorOptions) { o.Delivery.Version = 1 },
+		"old-version":            func(o *CoroDispatchDescriptorOptions) { o.Delivery.Version = 2 },
 		"missing-initializer":    func(o *CoroDispatchDescriptorOptions) { o.Delivery.Initializer.Descriptor = Nil },
 		"initializer-hash":       func(o *CoroDispatchDescriptorOptions) { o.Delivery.Initializer.ABIHash[0]++ },
 		"drop-hash":              func(o *CoroDispatchDescriptorOptions) { o.Delivery.Drop.ABIHash[0]++ },
