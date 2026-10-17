@@ -63,11 +63,21 @@ func main() {
 	out := make(chan timerReferences)
 	go discardedTimers(out)
 	refs := <-out
-	for i := 0; i < 12; i++ {
+	// Weak clearing only requests each timer owner's executor; neither GC
+	// nor a fixed number of local Gosched calls joins managers on another P.
+	// Wait for their actual retirement, still bounded far below the hour-long
+	// timer deadline. Sleep parks this G without creating a timer manager and
+	// gives remote owner notifications time to complete on a loaded host.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
 		runtime.GC()
 		for j := 0; j < 128; j++ {
 			runtime.Gosched()
 		}
+		if runtime.NumGoroutine() <= baseline || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if !allCollected(refs) {
 		panic("unreachable future Timer/Ticker or channel remained strongly alive")
