@@ -294,6 +294,9 @@ func (builder coroProgramIRBuilder) freezeArchiveDeliveryProducers(ir *coroProgr
 			ir.archiveDeliveryHelpers[helper.fact.ID] = helper
 		}
 		ir.deliveryProducers[function] = recipe
+		facts := ir.localBodyFacts[function]
+		facts.ResultDelivery = true
+		ir.localBodyFacts[function] = facts
 	}
 	return nil
 }
@@ -342,9 +345,13 @@ func (p *context) emitCoroArchiveDeliveryHelper(b llssa.Builder, helper coroArch
 	default:
 		panic("archive helper has no exact managed primary")
 	}
+	// NewFuncEx lowers Go func fields to their physical closure carriers.
+	// Compare that same exact physical signature, including large result
+	// aggregates, rather than comparing a lowered declaration to source types.
+	signature = p.prog.PhysicalFuncDecl(signature, llssa.InGo)
 	physical := p.pkg.NewFuncEx(helper.symbol(), signature, llssa.InGo, false, false)
 	if !types.Identical(physical.RawType(), signature) {
-		panic("archive helper conflicts with an existing physical declaration")
+		panic(fmt.Errorf("archive helper %q conflicts with an existing physical declaration: have %s, want %s", helper.symbol(), physical.RawType(), signature))
 	}
 	return p.emitCoroManagedPrimaryDescriptorBinding(b, plan, abi, physical.Expr, physical.Expr, llssa.Nil, nil, false, llssa.Nil, nil, helper.view.Symbol)
 }

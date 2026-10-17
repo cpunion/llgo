@@ -590,7 +590,7 @@ load、nil check 和求值顺序照常执行，之后在实际 acquisition 前�
 从 state 读取冻结参数；独立 archive consumer 不需要知道 producer 私有 state 布局。初始化
 空槽或 receiver nil panic 期间尚无 state，`RequiresState` consumer 跳过 drop；完成 caller
 acceptance 时清 state，取消路径则持有到原 cleanup drainer 的 helper join 完成后清除。
-library v22、guard v5 与 delivery cold-tail v3 一起绑定这项保证，旧 archive/descriptor
+library v23、guard v5 与 delivery cold-tail v3 一起绑定这项保证，旧 archive/descriptor
 不能被默认为已绑定。无 snapshot 要求的 producer 不分配 invocation record。
 
 `reflect.ValueOf(syscall.Open).Call` 必须保留实际 target 的 recipe。只保护 ffi invocation
@@ -599,6 +599,21 @@ library v22、guard v5 与 delivery cold-tail v3 一起绑定这项保证，旧 
 发布 Value result carriers，让它们指向同一 raw result cells；receiver 的准确 descriptor
 recipe 负责解释/释放。inner/outer guard 清同一 custody cell，再 close，不能双重释放。
 Call/CallSlice、method expression 和内部 `makeMethodValue` 的已知转发需全部保留该事实。
+
+反射绑定方法保留原 `Value.Method` 的 receiver storage 与 method index，在实际调用时
+求值，不能在 `Interface()` 时提前复制 addressable value、指针变量或 interface 的动态
+接收者。求值后，实际 producer 的原生参数副本与资源结果由同一个 `ResultDelivery`
+保留到最终 caller acceptance；之后修改 receiver storage 不影响取消清理使用的快照。
+`go`/`defer` 通过相同的源函数入口执行这一步，nil output 使用已有 borrowed-result fallback。
+
+编译器在 Method.Tfn_ descriptor 的完整 padded base/tail 之后，以独立 capability bit
+发布可选的 receiver-free result prototype：准确 ABI hash、size/alignment 和独立校验的
+typed initializer/drop view。真实 reflect 源码 helper 经已有 managed helper view 读取
+public result 私有 State 所保留的固定 custody record，不新增调用引擎或地址反查表。
+runtime 只为已知的资源方法或动态 interface 方法绑定该 contract；普通具体非资源方法
+与任意公开 MakeFunc 不获得推断的资源所有权。interface 动态目标可以从资源 producer
+切换到普通借用结果，实际调用没有 delivery recipe 时，取消不得关闭那个普通整数/fd。
+library v23 将这项冷元信息纳入版本边界；旧 v22 archive 必须拒绝并重新编译。
 
 公开任意 `reflect.MakeFunc(type, callback)` 不能仅从 type 或 callback 返回的 `[]Value`
 推导资源所有权，其 descriptor 默认无 recipe。callback 若自行调用 Open，其结果已交给

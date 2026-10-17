@@ -1787,7 +1787,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		return nil, err
 	}
 	managedValueReferences, managedValues, err := classifySSAManagedValueReferences(
-		bodyFunctions, includedSet, ids, canonicalizer, config,
+		bodyFunctions, includedSet, ids, trustedPolicies, canonicalizer, config,
 	)
 	if err != nil {
 		return nil, err
@@ -3502,6 +3502,7 @@ func classifySSAManagedValueReferences(
 	functions []*ssa.Function,
 	included map[*ssa.Function]bool,
 	ids map[*ssa.Function]FunctionID,
+	policies map[*ssa.Function]SSAFunctionPolicy,
 	canonicalizer *ssaFunctionCanonicalizer,
 	config SSAConfig,
 ) (map[*ssa.Function][]*ssa.Function, []*ssa.Function, error) {
@@ -3559,9 +3560,12 @@ func classifySSAManagedValueReferences(
 					target.Name(), owner.Name(),
 				)
 			}
-			if target.Signature == nil || len(target.FreeVars) != 0 || len(target.Blocks) == 0 {
+			policy := policies[target]
+			imported := policy.IgnoreBody && policy.OverrideExternal && policy.External == ExternalKnown &&
+				(policy.ManagedEntry == ManagedEntryPlain || policy.ManagedEntry == ManagedEntryOutcomePlain || policy.ManagedEntry == ManagedEntryCoroutine)
+			if target.Signature == nil || len(target.FreeVars) != 0 || len(target.Blocks) == 0 && !imported {
 				return nil, nil, fmt.Errorf(
-					"coro: managed function-value target %q in %q is not one bodyful noncapturing Go function or method",
+					"coro: managed function-value target %q in %q requires one bodyful noncapturing Go function or exact imported managed entry",
 					target.Name(), owner.Name(),
 				)
 			}

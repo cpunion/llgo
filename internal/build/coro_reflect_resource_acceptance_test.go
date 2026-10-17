@@ -41,7 +41,7 @@ func TestCoroReflectResourceAcceptance(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("reflected resource build: %v\n%s", err, output)
 	}
-	for _, mode := range []int{12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27, 28, 29, 31, 32, 33} {
+	for _, mode := range []int{12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42} {
 		testCoroReflectResourceRuns(t, image, mode, false)
 	}
 }
@@ -240,6 +240,8 @@ func Large() func(*Receiver, uint32) (int32, Payload) { return (*Receiver).Acqui
 const LLGoPackage = "decl"
 func Small() func(*Receiver, uint32) int32
 func Large() func(*Receiver, uint32) (int32, Payload)
+func (Receiver) Acquire(uint32) int32
+func (Receiver) AcquireLarge(uint32) (int32, Payload)
 `)
 	// An assembly declaration unit makes bodyless public Go declarations
 	// valid to cmd/go too. PkgDeclOnly emits neither Go bodies nor assembly.
@@ -258,8 +260,20 @@ func Large() func(*Receiver, uint32) (int32, Payload)
 		t.Fatal(err)
 	}
 	write(filepath.Join(source, "delivery.c"), string(fdSource))
-	for _, entry := range []string{"Small", "Large"} {
+	for _, entry := range []string{"Small", "Large", "BoundSmall", "BoundLarge"} {
 		t.Run(entry, func(t *testing.T) {
+			factory := strings.TrimPrefix(entry, "Bound")
+			invocation := "values := function.Call([]reflect.Value{reflect.ValueOf(receiver), reflect.ValueOf(mode)})"
+			if strings.HasPrefix(entry, "Bound") {
+				method := "Acquire"
+				if factory == "Large" {
+					method = "AcquireLarge"
+				}
+				invocation = fmt.Sprintf(`receiver = &library.Receiver{Token: 99}
+ bound := reflect.ValueOf(&receiver).Elem().MethodByName(%q).Interface()
+ receiver = &library.Receiver{Token: 17}
+ values := reflect.ValueOf(bound).Call([]reflect.Value{reflect.ValueOf(mode)})`, method)
+			}
 			write(filepath.Join(consumerDir, "main.go"), fmt.Sprintf(`package main
 import (
  "reflect"
@@ -285,7 +299,7 @@ var _ unsafe.Pointer
 var receiver = &library.Receiver{Token: 17}
 var function = reflect.ValueOf(library.%s())
 func invoke(mode uint32) int32 {
- values := function.Call([]reflect.Value{reflect.ValueOf(receiver), reflect.ValueOf(mode)})
+ %s
  if len(values) == 2 {
   data := values[1].Interface().(library.Payload); runtime.GC()
   if data.Keep == nil || *data.Keep != 37 || data.Check() != 41 || data.Bytes[131072] != 43 { escaped() }
@@ -301,7 +315,7 @@ func main() {
  go owner(); for blocked() == 0 { runtime.Gosched() }
  receiver.Token = 99; function = reflect.Value{}; runtime.GC(); runtime.GC()
 }
-`, libraryPath, "github.com/xgo-dev/llgo/runtime/"+filepath.Base(source)+"/native", entry))
+`, libraryPath, "github.com/xgo-dev/llgo/runtime/"+filepath.Base(source)+"/native", factory, invocation))
 			image := coroResourceAcceptanceImage(t, "coro_reflect_archive_"+strings.ToLower(entry))
 			if os.Getenv("LLGO_CORO_RESOURCE_OUTPUT") != "" {
 				for name, path := range map[string]string{"libresource.a": archive, "consumer.go": filepath.Join(consumerDir, "main.go"), "declarations.go": filepath.Join(libraryDir, "library.go"), "importcfg": importcfg} {

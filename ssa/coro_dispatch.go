@@ -58,10 +58,14 @@ const (
 	// required receiver snapshot is unavailable. It has no delivery tail and
 	// grants no invocation capability, even to a guarded consumer.
 	CoroDispatchFlagDeliveryUnbound
+	// CoroDispatchFlagMethodResultPrototype publishes a cold, compiler-typed
+	// receiver-free result contract for reflect's known method bridge. It
+	// grants no resource ownership to this method descriptor itself.
+	CoroDispatchFlagMethodResultPrototype
 
 	CoroDispatchCapabilityMaskV2 = CoroDispatchFlagHasPlain | CoroDispatchFlagHasOutcome | CoroDispatchFlagHasCoro
 	CoroDispatchKnownFlagsV2     = CoroDispatchCapabilityMaskV2 | CoroDispatchFlagNoCapture |
-		CoroDispatchFlagRuntimeTyped | CoroDispatchFlagPlainNoUnwind | CoroDispatchFlagHasDelivery | CoroDispatchFlagDeliveryUnbound
+		CoroDispatchFlagRuntimeTyped | CoroDispatchFlagPlainNoUnwind | CoroDispatchFlagHasDelivery | CoroDispatchFlagDeliveryUnbound | CoroDispatchFlagMethodResultPrototype
 	CoroPlainDispatchFlagsV2 = CoroDispatchFlagHasPlain | CoroDispatchFlagNoCapture |
 		CoroDispatchFlagPlainNoUnwind
 )
@@ -183,7 +187,7 @@ func (p Package) NewCoroPlainDispatchDescriptor(
 	thunk := p.newCoroPlainDispatchThunk(opts.ThunkName, opts.PlainTarget, physicalSig)
 	return p.newCoroDispatchDescriptorGlobal(
 		name, opts.Version, opts.Flags, opts.ABIHash,
-		thunk.impl, llvm.Value{}, target, opts.Result,
+		thunk.impl, llvm.Value{}, target, opts.Result, Nil,
 	)
 }
 
@@ -381,7 +385,9 @@ func (p Package) isCoroDispatchDescriptor(descriptor Expr) bool {
 	}
 	want := p.Prog.Pointer(p.Prog.coroDispatchDescriptorType())
 	return types.Identical(descriptor.RawType(), want.RawType()) ||
-		types.Identical(descriptor.RawType(), p.Prog.Pointer(p.Prog.coroDeliveryDescriptorType()).RawType())
+		types.Identical(descriptor.RawType(), p.Prog.Pointer(p.Prog.coroDeliveryDescriptorType()).RawType()) ||
+		types.Identical(descriptor.RawType(), p.Prog.Pointer(p.Prog.coroMethodDescriptorType(false)).RawType()) ||
+		types.Identical(descriptor.RawType(), p.Prog.Pointer(p.Prog.coroMethodDescriptorType(true)).RawType())
 }
 
 func (p Package) matchesCoroPlainDispatchDescriptor(

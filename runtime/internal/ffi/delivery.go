@@ -27,7 +27,7 @@ func validateDeliveryHelper(pointer unsafe.Pointer, lo, hi uint64) {
 	d := (*dispatchDescriptorV2)(pointer)
 	if d.Version != dispatchVersionV2 || d.Flags&^dispatchKnownFlags != 0 ||
 		!validDispatchPlainUnwindFlags(d.Flags) || !validDispatchEntries(d) ||
-		d.Flags&dispatchNoCapture == 0 || d.Flags&(dispatchRuntimeTyped|dispatchHasDelivery|dispatchDeliveryUnbound) != 0 ||
+		d.Flags&dispatchNoCapture == 0 || d.Flags&(dispatchRuntimeTyped|dispatchHasDelivery|dispatchDeliveryUnbound|dispatchMethodResultPrototype) != 0 ||
 		d.CodeEntry == nil || d.ResultSize != 0 || d.ResultAlign != 1 || d.HashLo != lo || d.HashHi != hi {
 		panic("llgo: invalid typed resource delivery helper")
 	}

@@ -564,6 +564,31 @@ func TestCoroRawABIPlainTargetAcceptsExternalMethodAddressOnly(t *testing.T) {
 	}
 }
 
+func TestCoroImportedStructuredMethodTokenGrantsNoRawCall(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, coroClosedInterfacePlainSource)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	_, plan, _, method, _ := prepareCoroClosedInterfacePlainPlan(t, prog, ssaPkg, files, coro.DynamicCHAClosed)
+	methodPlan, ok := plan.FunctionPlan(method)
+	if !ok {
+		t.Fatal("concrete.Value has no function plan")
+	}
+	declaration := ssaPkg.Prog.NewFunction(method.Name(), method.Signature, "checked archive declaration")
+	methodPlan.External, methodPlan.Emission, methodPlan.Primary = coro.ExternalKnown, coro.EmitExternal, coro.PrimaryExternal
+	methodPlan.FuncRep, methodPlan.ManagedEntry, methodPlan.Effect = coro.Dispatch, coro.ManagedEntryCoroutine, coro.AwaitStructured
+	methodPlan.Demand, methodPlan.ManagedDemand, methodPlan.Exec = coro.AsyncDemand, coro.AsyncDemand, 0
+	if err := validateCoroRawABIMethodTokenTarget(declaration, methodPlan); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCoroRawABIEntryTarget(declaration, methodPlan); err == nil {
+		t.Fatal("identity token granted a raw invocation of an imported coroutine")
+	}
+	methodPlan.ManagedEntry = coro.ManagedEntryNone
+	if err := validateCoroRawABIMethodTokenTarget(declaration, methodPlan); err == nil {
+		t.Fatal("missing archive entry granted a structured method token")
+	}
+}
+
 func TestCoroClosedInterfacePlainCandidateRejectsMethodMismatch(t *testing.T) {
 	const source = `package foo
 var gate chan uint32

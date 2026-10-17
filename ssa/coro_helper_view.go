@@ -30,10 +30,14 @@ type CoroHelperViewArgument struct {
 	// word may be read, along the checked value-field path. The frontend must
 	// prove the context immutable and borrowed through helper completion.
 	Environment Type
-	// ResultState is the exact immutable invocation record retained by the
-	// owned result guard. Its consumer has already checked RequiresState and
-	// a non-nil binding before invoking this view.
+	// ResultState is the exact invocation record retained by the owned result
+	// guard. A drop consumer checks RequiresState and a non-nil binding;
+	// StatePointer also permits a source initializer to receive the empty nil.
 	ResultState Type
+	// StatePointer passes the retained record itself to a real source helper,
+	// instead of loading one of its value fields. An initializer may receive
+	// nil; a drop is invoked only after the guard's non-nil State check.
+	StatePointer bool
 }
 
 const coroHelperViewAttribute = "llgo.coro.helper.view.v1"
@@ -84,9 +88,16 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 			fail("must preserve exact task, output and completion prefix words")
 		}
 	}
-	if len(arguments) == 0 || arguments[0].Parameter != 0 || !arguments[0].Constant.IsNil() || len(arguments[0].Fields) != 0 || arguments[0].Environment != nil || arguments[0].ResultState != nil ||
-		!types.Identical(signature.Params().At(prefix).Type(), targetSignature.Params().At(prefix).Type()) {
+	if len(arguments) == 0 || arguments[0].Parameter != 0 || !arguments[0].Constant.IsNil() || len(arguments[0].Fields) != 0 || arguments[0].Environment != nil {
 		fail("must pass the same exact typed resource output cell")
+	}
+	first := arguments[0]
+	if first.ResultState == nil {
+		if first.StatePointer || !types.Identical(signature.Params().At(prefix).Type(), targetSignature.Params().At(prefix).Type()) {
+			fail("must pass the same exact typed resource output cell")
+		}
+	} else if !first.StatePointer || !types.Identical(first.ResultState.RawType(), targetSignature.Params().At(prefix).Type()) {
+		fail("must pass the exact typed retained result record")
 	}
 	if _, pointer := signature.Params().At(prefix).Type().(*types.Pointer); !pointer {
 		fail("requires a typed resource output pointer")
@@ -126,6 +137,14 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 			}
 			typ = p.Prog.Type(pointer.Elem(), InGo)
 			fmt.Fprintf(&identity, "\x00state:%s", typ.ll.String())
+			if argument.StatePointer {
+				if len(argument.Fields) != 0 {
+					fail("retained record pointer must not project value fields")
+				}
+				typ = argument.ResultState
+			}
+		} else if argument.StatePointer {
+			fail("retained record pointer requires a result state binding")
 		}
 		if argument.Environment != nil {
 			pointer, ok := types.Unalias(argument.Environment.RawType()).(*types.Pointer)
@@ -151,7 +170,7 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 		if !coroHelperViewRetagCompatible(typ.ll, want.ll) {
 			fail("argument conversion changes its physical representation")
 		}
-		fmt.Fprintf(&identity, "\x00%d:%v", argument.Parameter, argument.Fields)
+		fmt.Fprintf(&identity, "\x00%d:%v:%t", argument.Parameter, argument.Fields, argument.StatePointer)
 		if literal {
 			fmt.Fprintf(&identity, ":%s", argument.Constant.impl.String())
 		}
@@ -193,7 +212,9 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 			for _, field := range argument.Fields {
 				value = b.FieldAddrKnownNonNil(value, field)
 			}
-			value = b.LoadKnownNonNil(value)
+			if !argument.StatePointer {
+				value = b.LoadKnownNonNil(value)
+			}
 		} else if argument.Environment != nil {
 			value = b.Convert(argument.Environment, value)
 			for _, field := range argument.Fields {

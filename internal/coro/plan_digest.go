@@ -1259,8 +1259,11 @@ func (p *SSAPlan) validateDigestManagedValueReference(owner FunctionID, index in
 	if !planned {
 		return fmt.Errorf("coro: %s targets a function outside the plan", formatDigestValueSite(site))
 	}
-	if target.Signature == nil || len(target.FreeVars) != 0 || len(target.Blocks) == 0 {
-		return fmt.Errorf("coro: %s no longer targets one bodyful noncapturing Go function or method", formatDigestValueSite(site))
+	entry, present := p.plan.Lookup(targetID)
+	imported := present && p.IgnoresBody(target) && entry.External == ExternalKnown && entry.Primary == PrimaryExternal &&
+		(entry.ManagedEntry == ManagedEntryPlain || entry.ManagedEntry == ManagedEntryOutcomePlain || entry.ManagedEntry == ManagedEntryCoroutine)
+	if target.Signature == nil || len(target.FreeVars) != 0 || len(target.Blocks) == 0 && !imported {
+		return fmt.Errorf("coro: %s no longer targets one bodyful noncapturing Go function or exact imported managed entry", formatDigestValueSite(site))
 	}
 	plan, valuePlanned := p.valuePlans[target]
 	if !valuePlanned || plan.Value != target || len(plan.Funcs) != 1 ||

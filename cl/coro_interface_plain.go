@@ -124,8 +124,9 @@ func analyzeCoroClosedInterfacePlainPlan(
 				return nil, fmt.Errorf("raw ABI method target %q has no compilation plan", target)
 			}
 			_, rawSyncTarget := syncTargets[target]
+			_, importedStructured := coroExternalManagedDescriptorEntry(targetPlan)
 			structuredMethodToken := !rawSyncTarget && target.Signature != nil && target.Signature.Recv() != nil &&
-				(targetPlan.Emission == coro.EmitCoroutine || targetPlan.Emission == coro.EmitOutcomePlain)
+				(targetPlan.Emission == coro.EmitCoroutine || targetPlan.Emission == coro.EmitOutcomePlain || importedStructured)
 			if rawSyncTarget {
 				if err := validateCoroRawABIEntryTarget(target, targetPlan); err != nil {
 					return nil, err
@@ -545,12 +546,14 @@ func validateCoroRawABIMethodTokenTarget(target *ssa.Function, plan coro.Functio
 		}
 		return fmt.Errorf("raw ABI coroutine method token %q (%s): %s", name, plan.ID, fmt.Sprintf(format, args...))
 	}
+	_, importedStructured := coroExternalManagedDescriptorEntry(plan)
+	imported := target != nil && len(target.Blocks) == 0 && importedStructured
 	if target == nil || target.Signature == nil || target.Signature.Recv() == nil ||
-		len(target.Blocks) == 0 || len(target.FreeVars) != 0 {
+		len(target.Blocks) == 0 && !imported || len(target.FreeVars) != 0 {
 		return fail("requires one defined non-capturing receiver body")
 	}
 	structuredEmission := plan.Emission == coro.EmitCoroutine || plan.Emission == coro.EmitOutcomePlain
-	if plan.External != coro.Defined || !structuredEmission || plan.Primary != coro.PrimaryCoroutine ||
+	if (!imported && (plan.External != coro.Defined || !structuredEmission || plan.Primary != coro.PrimaryCoroutine)) ||
 		plan.Demand == coro.NoDemand || !plan.Effect.MaySuspend() || plan.Effect.IsOpaque() ||
 		(plan.FuncRep != coro.DirectCoro && plan.FuncRep != coro.Dispatch) {
 		return fail(
@@ -560,6 +563,11 @@ func validateCoroRawABIMethodTokenTarget(target *ssa.Function, plan coro.Functio
 	}
 	if plan.Exec&(coro.BlockForeign|coro.ThreadAffine) != 0 || plan.Exec.IsOpaque() {
 		return fail("execution constraints %s have no closed coroutine method adapter", plan.Exec)
+	}
+	if imported {
+		// The checked archive signature owns this identity. There is no SSA
+		// parameter body to inspect, and codegen publishes a typed raw trap.
+		return nil
 	}
 	receiver := target.Signature.Recv()
 	if len(target.Params) != target.Signature.Params().Len()+1 ||

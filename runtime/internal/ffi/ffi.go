@@ -92,17 +92,18 @@ const (
 
 	// These are compiler/runtime ABI bits. Keep the values explicit: placing
 	// them after dispatchVersionV2 in this block must not shift their positions.
-	dispatchHasPlain        uint32 = 1 << 0
-	dispatchHasOutcome      uint32 = 1 << 1
-	dispatchHasCoro         uint32 = 1 << 2
-	dispatchNoCapture       uint32 = 1 << 3
-	dispatchRuntimeTyped    uint32 = 1 << 4
-	dispatchPlainNoUnwind   uint32 = 1 << 5
-	dispatchHasDelivery     uint32 = 1 << 6
-	dispatchDeliveryUnbound uint32 = 1 << 7
+	dispatchHasPlain              uint32 = 1 << 0
+	dispatchHasOutcome            uint32 = 1 << 1
+	dispatchHasCoro               uint32 = 1 << 2
+	dispatchNoCapture             uint32 = 1 << 3
+	dispatchRuntimeTyped          uint32 = 1 << 4
+	dispatchPlainNoUnwind         uint32 = 1 << 5
+	dispatchHasDelivery           uint32 = 1 << 6
+	dispatchDeliveryUnbound       uint32 = 1 << 7
+	dispatchMethodResultPrototype uint32 = 1 << 8
 
 	dispatchCapabilityMask = dispatchHasPlain | dispatchHasOutcome | dispatchHasCoro
-	dispatchKnownFlags     = dispatchCapabilityMask | dispatchNoCapture | dispatchRuntimeTyped | dispatchPlainNoUnwind | dispatchHasDelivery | dispatchDeliveryUnbound
+	dispatchKnownFlags     = dispatchCapabilityMask | dispatchNoCapture | dispatchRuntimeTyped | dispatchPlainNoUnwind | dispatchHasDelivery | dispatchDeliveryUnbound | dispatchMethodResultPrototype
 )
 
 const dispatchRuntimeTypeMagicV2 uint64 = 0x4c4c474f52545932 // "LLGORTY2"

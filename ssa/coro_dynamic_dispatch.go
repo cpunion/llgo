@@ -50,7 +50,8 @@ type CoroDispatchDescriptorOptions struct {
 	Result    Type
 	// Delivery is cold, optional metadata for a producer whose existing typed
 	// output must be protected until its caller consumes completion and results.
-	Delivery *CoroDispatchDeliveryOptions
+	Delivery              *CoroDispatchDeliveryOptions
+	MethodResultPrototype Expr
 }
 
 // CoroDispatchCallOptions is the caller's exact v2 ABI contract. Capability is
@@ -152,6 +153,16 @@ func (p Package) NewCoroDispatchDescriptor(
 	}
 	validateCoroDispatchResult(p.Prog, opts.Result, "descriptor")
 	delivery := p.validateCoroDispatchDelivery(opts)
+	if (opts.Flags&CoroDispatchFlagMethodResultPrototype != 0) != !opts.MethodResultPrototype.IsNil() {
+		panic("ssa: coroutine method result prototype requires its capability and typed metadata")
+	}
+	if !opts.MethodResultPrototype.IsNil() {
+		global := coroPlainDispatchGlobal(opts.MethodResultPrototype.impl)
+		if global.IsNil() || global.GlobalParent().C != p.mod.C || !global.IsGlobalConstant() ||
+			!types.Identical(opts.MethodResultPrototype.RawType(), p.Prog.Pointer(p.Prog.coroMethodResultPrototypeType()).RawType()) {
+			panic("ssa: coroutine method result prototype requires compiler-owned typed metadata")
+		}
+	}
 
 	plain := p.validateCoroDispatchEntry(
 		opts.PlainEntry,
@@ -187,7 +198,7 @@ func (p Package) NewCoroDispatchDescriptor(
 		panic(fmt.Sprintf("ssa: coroutine dispatch symbol %q already exists", name))
 	}
 	return p.newCoroDispatchDescriptorGlobal(
-		name, opts.Version, opts.Flags, opts.ABIHash, plain, structured, code, opts.Result, delivery...,
+		name, opts.Version, opts.Flags, opts.ABIHash, plain, structured, code, opts.Result, opts.MethodResultPrototype, delivery...,
 	)
 }
 
@@ -892,12 +903,15 @@ func (p Package) validateCoroDispatchCodeEntry(entry Expr) llvm.Value {
 
 func (p Package) newCoroDispatchDescriptorGlobal(
 	name string, version, flags uint32, hash [16]byte,
-	plain, structured, code llvm.Value, result Type,
+	plain, structured, code llvm.Value, result Type, prototype Expr,
 	delivery ...llvm.Value,
 ) Expr {
 	descriptorType := p.Prog.coroDispatchDescriptorType()
 	if len(delivery) != 0 {
 		descriptorType = p.Prog.coroDeliveryDescriptorType()
+	}
+	if !prototype.IsNil() {
+		descriptorType = p.Prog.coroMethodDescriptorType(len(delivery) != 0)
 	}
 	descriptor := p.NewVarEx(name, p.Prog.Pointer(descriptorType))
 	if plain.IsNil() {
@@ -922,6 +936,9 @@ func (p Package) newCoroDispatchDescriptorGlobal(
 		initializer = p.Prog.ctx.ConstStruct([]llvm.Value{initializer,
 			p.Prog.ctx.ConstStruct(delivery, false)}, false)
 	}
+	if !prototype.IsNil() {
+		initializer = p.Prog.ctx.ConstStruct([]llvm.Value{initializer, prototype.impl}, false)
+	}
 	descriptor.impl.SetInitializer(initializer)
 	descriptor.impl.SetGlobalConstant(true)
 	descriptor.impl.SetLinkage(llvm.LinkOnceODRLinkage)
@@ -936,6 +953,13 @@ func (p Package) matchesCoroDispatchDescriptor(
 		return false
 	}
 	initializer := descriptor.impl.Initializer()
+	if !opts.MethodResultPrototype.IsNil() {
+		if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 2 ||
+			initializer.Operand(1).C != opts.MethodResultPrototype.impl.C {
+			return false
+		}
+		initializer = initializer.Operand(0)
+	}
 	if opts.Delivery != nil {
 		if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 2 ||
 			!p.matchesCoroDispatchDelivery(initializer.Operand(1), *opts.Delivery) {

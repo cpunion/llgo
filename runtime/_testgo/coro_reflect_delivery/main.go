@@ -74,6 +74,15 @@ func acquire(token, mode uint32) int32 {
 
 type receiver struct{ Token uint32 }
 type promotedValue struct{ reflect.Value }
+type otherReceiver struct{ Token uint32 }
+type ordinaryReceiver struct{}
+type borrowedReceiver struct{}
+
+var borrowedFD int32
+
+func (r otherReceiver) Acquire(mode uint32) int32 { return acquire(r.Token, mode) }
+func (ordinaryReceiver) Acquire(uint32) int32     { return -1 }
+func (borrowedReceiver) Acquire(uint32) int32     { waitBorrowed(); return borrowedFD }
 
 func (r receiver) Acquire(mode uint32) int32 { return acquire(r.Token, mode) }
 
@@ -136,6 +145,23 @@ func acquireVariadic(token uint32, modes ...uint32) int32 {
 }
 
 var token uint32 = 17
+
+//go:linkname borrowMethodVariadic llgo.coroBorrowResult
+func borrowMethodVariadic(func(*result), func(*result, unsafe.Pointer, receiver, []uint32)) *result
+
+func dropMethodVariadic(out *result, env unsafe.Pointer, r receiver, modes []uint32) {
+	drop(out, env, r.Token, modes[0])
+}
+
+func (r receiver) AcquireVariadic(modes ...uint32) int32 {
+	out := borrowMethodVariadic(initialize, dropMethodVariadic)
+	if r.Token != 17 || len(modes) != 1 {
+		escaped()
+	}
+	openInto(out, modes[0])
+	return out.R0
+}
+
 var pointer = &receiver{Token: 17}
 var reflected = reflect.ValueOf(acquire)
 
@@ -199,6 +225,40 @@ func invoke(mode uint32) int32 {
 	case 33:
 		value := &promotedValue{reflect.ValueOf(acquireVariadic)}
 		values = value.CallSlice([]reflect.Value{reflect.ValueOf(&token).Elem(), reflect.ValueOf([]uint32{mode})})
+	case 34:
+		r := receiver{Token: 99}
+		bound := reflect.ValueOf(&r).Elem().MethodByName("Acquire").Interface().(func(uint32) int32)
+		r.Token = 17
+		return bound(mode)
+	case 35, 39, 40:
+		pointer = &receiver{Token: 99}
+		bound := reflect.ValueOf(&pointer).Elem().MethodByName("Acquire").Interface().(func(uint32) int32)
+		pointer = &receiver{Token: 17}
+		return bound(mode)
+	case 36, 37:
+		var r interface{ Acquire(uint32) int32 } = receiver{Token: 99}
+		if fixtureMode() == 37 {
+			r = ordinaryReceiver{}
+		}
+		bound := reflect.ValueOf(&r).Elem().MethodByName("Acquire").Interface().(func(uint32) int32)
+		r = otherReceiver{Token: 17}
+		return bound(mode)
+	case 38:
+		pointer = &receiver{Token: 99}
+		bound := reflect.ValueOf(&pointer).Elem().MethodByName("AcquireLarge").Interface()
+		pointer = &receiver{Token: 17}
+		values = reflect.ValueOf(bound).Call([]reflect.Value{reflect.ValueOf(mode)})
+	case 41:
+		borrowedFD = acquire(17, 0)
+		var r interface{ Acquire(uint32) int32 } = receiver{Token: 17}
+		bound := reflect.ValueOf(&r).Elem().MethodByName("Acquire").Interface().(func(uint32) int32)
+		r = borrowedReceiver{}
+		return bound(mode)
+	case 42:
+		pointer = &receiver{Token: 99}
+		bound := reflect.ValueOf(&pointer).Elem().MethodByName("AcquireVariadic").Interface().(func(...uint32) int32)
+		pointer = &receiver{Token: 17}
+		values = reflect.ValueOf(bound).CallSlice([]reflect.Value{reflect.ValueOf([]uint32{mode})})
 	default:
 		values = reflect.ValueOf(acquire).Call([]reflect.Value{reflect.ValueOf(&token).Elem(), reflect.ValueOf(mode)})
 	}
@@ -214,13 +274,26 @@ func invoke(mode uint32) int32 {
 
 func postNativeMode() bool {
 	mode := fixtureMode()
-	return mode == 24 || mode == 25 || mode == 30 || mode == 31
+	return mode == 24 || mode == 25 || mode == 30 || mode == 31 || mode == 41
 }
 
 func reflectedOwner() {
 	mode := uint32(1)
 	if postNativeMode() {
 		mode = 0
+	}
+	if fixtureMode() == 39 || fixtureMode() == 40 {
+		pointer = &receiver{Token: 99}
+		bound := reflect.ValueOf(&pointer).Elem().MethodByName("Acquire").Interface().(func(uint32) int32)
+		pointer = &receiver{Token: 17}
+		if fixtureMode() == 39 {
+			go bound(mode)
+			var never chan struct{}
+			<-never
+		} else {
+			defer bound(mode)
+			return
+		}
 	}
 	invoke(mode)
 	escaped()
@@ -237,7 +310,7 @@ func sentinel(ready chan struct{}) {
 
 func main() {
 	install()
-	if fixtureMode() == 31 {
+	if fixtureMode() == 31 || fixtureMode() == 41 {
 		expectBorrowed()
 	}
 	ordinary := reflect.ValueOf(func(n int) int { return n + 1 })

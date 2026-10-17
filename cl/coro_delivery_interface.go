@@ -46,7 +46,11 @@ func (p *context) coroInterfaceDeliveryDescriptorOptions(entry plannedFunctionSy
 			panic("interface delivery lost its exact source argument types")
 		}
 	}
-	_, initialize, drop, err := coro.DeliveryHelperSignatures(signature)
+	helperSource := signature
+	if signature.Variadic() {
+		helperSource = types.NewSignatureType(nil, nil, nil, signature.Params(), signature.Results(), false)
+	}
+	_, initialize, drop, err := coro.DeliveryHelperSignatures(helperSource)
 	if err != nil {
 		panic(err)
 	}

@@ -402,23 +402,34 @@ func (p *context) coroDeliveryRecipeHelperPrimary(recipe coroSourceDeliveryRecip
 		target = recipe.drop
 	}
 	if target != nil {
-		entry := p.mustFunctionSymbol(target)
-		if entry.ftype != goFunc || len(entry.function.FreeVars) != 0 || entry.plan.RawPlainOnly || entry.plan.Demand == coro.NoDemand {
-			panic("delivery view requires its demanded real context-free helper")
-		}
-		if err := validateCoroManagedDescriptorPrimary(entry.function, entry.plan, p.immutableEmissionUniverse()); err != nil {
-			panic(fmt.Errorf("delivery view real helper primary: %w", err))
-		}
-		signature, err := p.emissionUniverse.coroPhysicalEntrySourceSignature(target)
-		if err != nil {
-			panic(err)
-		}
-		physical, _, kind := p.compileFunctionEntry(entry)
-		if kind != goFunc || physical == nil {
-			panic("delivery view lost its real typed helper primary")
-		}
-		return coroDeliveryHelperPrimary{plan: entry.plan, signature: signature, physical: physical.Expr}
+		return p.coroDeliverySourceHelperPrimary(target)
 	}
+	return p.coroDeliveryArchiveHelperPrimary(recipe, ordinal)
+}
+
+func (p *context) coroDeliverySourceHelperPrimary(target *ssa.Function) coroDeliveryHelperPrimary {
+	entry := p.mustFunctionSymbol(target)
+	if entry.ftype != goFunc || len(entry.function.FreeVars) != 0 || entry.plan.RawPlainOnly || entry.plan.Demand == coro.NoDemand {
+		panic("delivery view requires its demanded real context-free helper")
+	}
+	if err := validateCoroManagedDescriptorPrimary(entry.function, entry.plan, p.immutableEmissionUniverse()); err != nil {
+		panic(fmt.Errorf("delivery view real helper primary: %w", err))
+	}
+	signature, err := p.emissionUniverse.coroPhysicalEntrySourceSignature(target)
+	if err != nil {
+		panic(err)
+	}
+	// RTTI may request this helper while a raw libffi callback is being
+	// emitted. Its immutable managed plan selects the primary independently
+	// of the requesting body's native-stack variant.
+	physical, _, kind := p.compileManagedFunction(entry.function)
+	if kind != goFunc || physical == nil {
+		panic("delivery view lost its real typed helper primary")
+	}
+	return coroDeliveryHelperPrimary{plan: entry.plan, signature: signature, physical: physical.Expr}
+}
+
+func (p *context) coroDeliveryArchiveHelperPrimary(recipe coroSourceDeliveryRecipe, ordinal int) coroDeliveryHelperPrimary {
 	if recipe.archive == nil {
 		panic("delivery view has no source/archive helper")
 	}

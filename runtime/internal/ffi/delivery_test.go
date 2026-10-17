@@ -77,3 +77,39 @@ func TestResultStateOffsetRejectsInvalidAlignment(t *testing.T) {
 		}()
 	}
 }
+
+func TestBoundMethodPrototypeRetainsIndependentContract(t *testing.T) {
+	for _, resource := range []bool{false, true} {
+		d := testDeliveryDescriptor()
+		prototype := &methodResultPrototype{HashLo: 31, HashHi: 32, Size: d.Base.ResultSize, Align: d.Base.ResultAlign, Tail: d.Tail}
+		d.Base.Flags |= dispatchMethodResultPrototype
+		var source unsafe.Pointer
+		if resource {
+			source = unsafe.Pointer(&struct {
+				Base      deliveryDescriptorV3
+				Prototype unsafe.Pointer
+			}{*d, unsafe.Pointer(prototype)})
+		} else {
+			d.Base.Flags &^= dispatchHasDelivery
+			source = unsafe.Pointer(&struct {
+				Base      dispatchDescriptorV2
+				Prototype unsafe.Pointer
+			}{d.Base, unsafe.Pointer(prototype)})
+		}
+		p := MethodResultPrototype(source)
+		bound := NewBoundMethodDescriptor(p, d.Base.StructuredEntry, 8, 8)
+		base := (*dispatchDescriptorV2)(bound)
+		if base.HashLo != 31 || base.HashHi != 32 || base.Flags != dispatchHasCoro|dispatchHasDelivery || checkedDeliveryTail(bound) != d.Tail {
+			t.Fatal("bound method lost its compiler-published result or helper ABI")
+		}
+		prototype.Tail.DropLo++
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("bound method accepted a mismatched helper expectation")
+				}
+			}()
+			NewBoundMethodDescriptor(p, d.Base.StructuredEntry, 8, 8)
+		}()
+	}
+}

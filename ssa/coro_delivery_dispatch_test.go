@@ -2,6 +2,7 @@ package ssa
 
 import (
 	"encoding/binary"
+	"fmt"
 	"go/token"
 	"go/types"
 	"regexp"
@@ -126,6 +127,30 @@ func TestCoroDeliveryDispatchOptionalTailNativeAndWasm(t *testing.T) {
 			if got := coroPlainDispatchGlobal(stateDescriptor.impl).Initializer().Operand(1).Operand(1).ZExtValue(); got != uint64(CoroDispatchDeliveryRequiresState) {
 				t.Fatalf("snapshot descriptor lost its state requirement: flags=%d", got)
 			}
+			prototype := f.pkg.NewCoroMethodResultPrototype("method_result", opts.Signature, opts.ABIHash, opts.Result, stateTail)
+			for _, withDelivery := range []bool{false, true} {
+				methodOpts := stateOpts
+				methodOpts.Flags |= CoroDispatchFlagMethodResultPrototype
+				methodOpts.MethodResultPrototype = prototype
+				if !withDelivery {
+					methodOpts.Flags &^= CoroDispatchFlagHasDelivery
+					methodOpts.Delivery = nil
+				}
+				name := fmt.Sprintf("method_prototype_%t", withDelivery)
+				method := f.pkg.NewCoroDispatchDescriptor(name, methodOpts)
+				allocation := coroPlainDispatchGlobal(method.impl).Initializer()
+				if allocation.OperandsCount() != 2 || allocation.Operand(1).C != prototype.impl.C {
+					t.Fatal("method result prototype lost its cold reference")
+				}
+				layout := f.prog.coroMethodDescriptorType(withDelivery)
+				padded := f.prog.Field(layout, 0)
+				if got := f.prog.TargetData().ElementOffset(layout.ll, 1); uint64(got) != f.prog.SizeOf(padded) {
+					t.Fatalf("method prototype offset=%d, want padded descriptor %d", got, f.prog.SizeOf(padded))
+				}
+				if f.pkg.NewCoroDispatchDescriptor(name, methodOpts).impl.C != method.impl.C {
+					t.Fatal("method prototype publication did not reuse its exact global")
+				}
+			}
 			for index, helper := range []CoroDispatchDeliveryHelper{opts.Delivery.Initializer, opts.Delivery.Drop} {
 				for word := 0; word < 2; word++ {
 					if got, want := tail.Operand(4+index*2+word).ZExtValue(), binary.BigEndian.Uint64(helper.ABIHash[word*8:word*8+8]); got != want {
@@ -236,7 +261,8 @@ func TestCoroDeliveryDispatchOptionalTailNativeAndWasm(t *testing.T) {
 			}
 			for _, name := range []string{"dynamic_coro_call", "dynamic_outcome_call", "dynamic_plain_call"} {
 				body := coroPlainDispatchIRFunction(f.pkg.String(), name)
-				if !regexp.MustCompile(`and i32 [^,]+, -64`).MatchString(body) ||
+				forbidden := ^uint32(CoroDispatchKnownFlagsV2 &^ (CoroDispatchFlagHasDelivery | CoroDispatchFlagDeliveryUnbound))
+				if !regexp.MustCompile(fmt.Sprintf(`and i32 [^,]+, %d`, int32(forbidden))).MatchString(body) ||
 					!strings.Contains(body, "coro.dispatch.flags.unknown") || strings.Contains(body, "coro.dispatch.delivery") {
 					t.Fatalf("unguarded call %s silently accepts a delivery descriptor:\n%s", name, body)
 				}
