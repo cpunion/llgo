@@ -85,6 +85,18 @@ func Independent() int { return 1 }
 					if (child.Emission != coro.EmitNone) != enabled {
 						t.Fatalf("spawn demand disagrees with predicate: %+v", child)
 					}
+					if !enabled {
+						if err := validateCoroPhysicalConsumersCapabilities(plan, universe, true, true, true); err != nil {
+							t.Fatalf("physical consumers revived an unevaluated spawn: %v", err)
+						}
+					}
+					err := validateCoroPhysicalConsumersCapabilities(plan, universe, true, false, true)
+					if !enabled && err != nil {
+						t.Fatalf("unevaluated spawn required scheduler capability: %v", err)
+					}
+					if enabled && err == nil {
+						t.Fatal("live spawn lost its scheduler capability gate")
+					}
 				}
 				masks := universe.coroProgramIR.coroLocalProgramPredicateMasks()
 				if _, err := deriveCoroFunctionProgramCapabilities(plan, nil, nil, masks); err != nil {
