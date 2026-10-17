@@ -18,7 +18,6 @@ import (
 // potentially blocking native operation has finished. Use the worker protocol
 // here too, so shutdown confirms the stat operation before dropping the File.
 //
-//llgo:coro worker
 //go:linkname llgoFileStatInto C.__llgo_runtime_posix_fstat_into_v1
 func llgoFileStatInto(int32, unsafe.Pointer) uintptr
 
