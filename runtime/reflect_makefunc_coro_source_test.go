@@ -31,6 +31,10 @@ func TestReflectMakeFuncRawCallbackRemainsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(source)
+	// Keep the exact declarations and assignments, independent of gofmt's
+	// alignment when funcData gains another field.
+	compact := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	compactText := compact(text)
 	for _, required := range []string{
 		"tin         []*abi.Type",
 		"tin:         ins,",
@@ -41,7 +45,7 @@ func TestReflectMakeFuncRawCallbackRemainsBounded(t *testing.T) {
 		"descriptor := ffi.NewRuntimeCoroDescriptor(",
 		"func ffiToOwnedValue(ptr unsafe.Pointer, typ, storageType *abi.Type)",
 	} {
-		if !strings.Contains(text, required) {
+		if !strings.Contains(compactText, compact(required)) {
 			t.Errorf("%s lacks bounded MakeFunc bridge marker %q", sourcePath, required)
 		}
 	}
