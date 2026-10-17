@@ -148,8 +148,14 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 	for _, mode := range modes {
 		expected := expectedByMode[mode]
 		t.Run(strconv.Itoa(mode), func(t *testing.T) {
+			repetitions := 10
+			if fixture == "coro_resource_delivery_forward" && mode == 3 {
+				// This source-defer shutdown route has timed out intermittently
+				// on P=2 CI. Keep the same image, assertions and per-run deadline.
+				repetitions = 128
+			}
 			for _, owners := range []string{"1", "2"} {
-				for attempt := 0; attempt < 10; attempt++ {
+				for attempt := 0; attempt < repetitions; attempt++ {
 					runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
 					run := exec.CommandContext(runCtx, image)
 					run.Env = append(os.Environ(), "GOMAXPROCS="+owners, "LLGO_DELIVERY_FIXTURE_MODE="+strconv.Itoa(mode))
