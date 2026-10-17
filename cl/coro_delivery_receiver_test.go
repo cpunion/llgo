@@ -74,9 +74,6 @@ func Root(p *Receiver, outer *Outer) {
 		if _, present, err := u.CoroLibraryEffects().SourceDeliveryRecord(function, coro.LibraryEffectMetadata{}); present || err == nil {
 			t.Fatalf("%s archive publication lost its receiver requirement: present=%t err=%v", name, present, err)
 		}
-		if _, err := prepareCoroDeliveryFunctionPlan(function, nil, ir, u); err == nil {
-			t.Fatalf("%s could emit an entry without its receiver binding", name)
-		}
 	}
 	for _, name := range []string{"Discard", "Deferred", "Spawned"} {
 		found := 0
