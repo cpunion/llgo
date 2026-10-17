@@ -25,8 +25,14 @@ under `~/.cache/llgo-coro-acceptance/20261017/boxed-receiver/`.
 
 The new native modes pass 96/96 executions at P=1/2/4 on the preceding boxed
 implementation, and the stable eb4781efc compiler rejects the same fixture's
-receiver binding. The final frozen full FD/archive/compiler/CI gates are pending;
-these subset results are not unified final acceptance.
+receiver binding. The frozen 634d6bd19 compiler passes the full FD/resource cohort (1434/1434)
+and compiler/SSA coro gates, plus all eight independent archive tests
+(18 retained images, 54 executions), with matching source-after checks.
+Its CI run is retained separately.
+Review also identified an archive protocol change: v20 did not require resource
+Ifn_ descriptor publication without a local invoke. Summary/record/digest v21
+now rejects those older archives at import; final frozen gates must be rerun
+with that version. These receipts are not unified final acceptance.
 
 ### Receiver requirements and Method.Func delivery identity
 
@@ -59,8 +65,9 @@ PR #292 merged into `llvm-coro` as
 The two earlier GOROOT failures, issue79186 and issue9604b, pass targeted retests
 on this same frozen source/compiler, with unchanged 25-minute build/one-minute
 execution limits. issue9604b still takes 23m41s to compile; no causal performance
-fix or full GOROOT pass is claimed. Fresh full test/go and 180-package stdlib
-runs continue on this frozen version. Artifacts and failed earlier cohorts remain
+fix or full GOROOT pass is claimed. Fresh full test/go on this frozen version passes **275/275**, zero failures
+or skips, with source-after matching at 2026-10-17T14:27:12Z. The 180-package
+stdlib run continues. Artifacts and failed earlier cohorts remain
 in `~/.cache/llgo-coro-acceptance/20261017/receiver-boundary/`.
 
 Invocation-time receiver snapshots, reflection's second result handoff, public
