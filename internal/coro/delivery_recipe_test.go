@@ -79,6 +79,25 @@ func TestDeliveryRecipeBindsTypedProducerAndHelpers(t *testing.T) {
 	}
 }
 
+func TestDeliveryRecipePhysicalViewDoesNotReplaceLogicalHelperABI(t *testing.T) {
+	record, producer, initializer, drop := deliveryTestInputs()
+	record.DropView = DeliveryHelperViewRecord{Symbol: "__llgo_coro_delivery_view.wrapper.drop", ABIHash: strings.Repeat("4", 64)}
+	drop.ABIHash = record.DropView.ABIHash
+	if _, err := FreezeDeliveryRecipe(record, producer, initializer, drop); err != nil {
+		t.Fatal(err)
+	}
+	drop.ABIHash = record.DropABI
+	if _, err := FreezeDeliveryRecipe(record, producer, initializer, drop); err == nil {
+		t.Fatal("logical helper hash was accepted as the adapted public callable ABI")
+	}
+	for _, view := range []DeliveryHelperViewRecord{{Symbol: "missing-hash"}, {ABIHash: strings.Repeat("4", 64)}, {Symbol: "bad symbol", ABIHash: strings.Repeat("4", 64)}} {
+		record.DropView = view
+		if record.Validate() == nil {
+			t.Fatalf("incomplete physical helper view accepted: %+v", view)
+		}
+	}
+}
+
 func TestDeliveryRecipeRejectsIncompleteRecord(t *testing.T) {
 	for name, change := range map[string]func(*DeliveryRecipeRecord){
 		"absent":        func(r *DeliveryRecipeRecord) { *r = DeliveryRecipeRecord{} },

@@ -401,7 +401,8 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 	}
 	for index, entry := range imports {
 		helper := universe.coroProgramIR.archiveDeliveryHelpers[entry.Fact.ID]
-		if entry.Fact != frozenImports[index] || universe.libraryEffects.signatureABIHash(helper.signature, consumer) != entry.Fact.ABIHash {
+		if entry.Fact != frozenImports[index] || helper.fact != entry.Fact ||
+			universe.libraryEffects.signatureABIHash(helper.signature, consumer) != helper.callableABI() {
 			return fmt.Errorf("coroutine archive helper %q differs from frozen typed ABI input", entry.Fact.ID)
 		}
 	}
@@ -804,6 +805,13 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			return fmt.Errorf("coroutine library summary: delivery recipe for %q: %w", functionPlan.ID, err)
 		} else if present {
 			fact.Delivery = delivery
+			if !delivery.DropView.IsZero() {
+				recipe := universe.coroProgramIR.deliveryProducers[function]
+				primary := p.coroDeliveryRecipeHelperPrimary(recipe, 1)
+				if primary.physical.Name() != delivery.DropView.Symbol {
+					return fmt.Errorf("delivery archive view differs from its published physical symbol")
+				}
+			}
 		}
 		if err := universe.CoroLibraryEffects().ValidateFunction(function, metadata, fact); err != nil {
 			return fmt.Errorf("coroutine library summary: preflight %q: %w", functionPlan.ID, err)

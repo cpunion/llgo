@@ -38,6 +38,16 @@ type coroSourceDeliveryRecipe struct {
 	archive            *coroArchiveDeliveryRecipe
 	loan               coro.SSABorrowedValueProof
 	helperLoans        [2]coro.SSABorrowedParameterProof
+	// forward is a frozen, value-only exact-return call, never a fabricated
+	// borrow site. Its target's real helpers remain the logical callees.
+	forward *coroForwardingSourceShape
+}
+
+func (recipe coroSourceDeliveryRecipe) anchor() *ssa.Call {
+	if recipe.forward != nil {
+		return recipe.forward.call
+	}
+	return recipe.borrow
 }
 
 type coroDeliverySourceUniverse interface {
@@ -243,6 +253,9 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 		}
 		ir.deliveryProducers[producer] = recipe
 	}
+	if err := builder.freezeDeliveryForwarders(ir); err != nil {
+		return err
+	}
 	if len(ir.deliveryProducers) == 0 && !u.libraryImports.HasDelivery() {
 		return nil
 	}
@@ -251,8 +264,12 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 		recipe.consumerInitialize = coroDeliveryInitializeCall + ":" + identity
 		recipe.consumerDrop = coroDeliveryDropCall + ":" + identity
 		ir.deliveryProducers[producer] = recipe
-		if recipe.archive == nil {
-			if err := builder.freezeDeliveryHelperPlacements(ir, recipe.borrow, coroDeliveryInitializeCall, coroDeliveryDropCall); err != nil {
+		if recipe.archive == nil || recipe.forward != nil {
+			var extra []coroPlannedRuntimeHelper
+			if recipe.forward != nil && u.prog != nil && u.prog.LocalGoTypeExceedsNativeStack(recipe.result) {
+				extra = append(extra, coroPlannedRuntimeHelper{name: coroManagedFrameSlotAllocZCall, placement: coroRuntimeHelperAtSource})
+			}
+			if err := builder.freezeDeliveryHelperPlacements(ir, recipe.anchor(), coroDeliveryInitializeCall, coroDeliveryDropCall, extra...); err != nil {
 				return err
 			}
 		}
@@ -277,7 +294,7 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 		if function == nil {
 			continue
 		}
-		if recipe, producer := ir.deliveryProducers[function]; producer && recipe.archive == nil {
+		if recipe, producer := ir.deliveryProducers[function]; producer && (recipe.archive == nil || recipe.forward != nil) {
 			if err := requireCleanup(function, true); err != nil {
 				return err
 			}
@@ -313,6 +330,9 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 				frozen.deliveryProducer = recipe.producer
 				if err := builder.freezeDeliveryConsumerSite(ir, call, frozen); err != nil {
 					return err
+				}
+				if own, present := ir.deliveryProducers[function]; present && own.forward != nil && own.anchor() == call {
+					continue // One incoming/fallback owner, not a second child guard.
 				}
 				if _, spawned := call.(*ssa.Go); spawned {
 					// A go statement does not execute the child's initializer/drop
@@ -442,14 +462,14 @@ func (ir *coroProgramIR) deliverySiteHelpers(instruction ssa.Instruction) (initi
 		return "", "", false
 	}
 	frozen := ir.callPlans[call]
+	if recipe, found := ir.deliveryProducers[call.Parent()]; found && recipe.anchor() == instruction {
+		return coroDeliveryInitializeCall, coroDeliveryDropCall, true
+	}
 	if recipe := frozen.dynamicDelivery; recipe != nil {
 		return recipe.initialize, recipe.release, true
 	}
 	if recipe, found := ir.deliveryProducers[frozen.deliveryProducer]; found {
 		return recipe.consumerInitialize, recipe.consumerDrop, true
-	}
-	if recipe, found := ir.deliveryProducers[call.Parent()]; found && recipe.borrow == instruction {
-		return coroDeliveryInitializeCall, coroDeliveryDropCall, true
 	}
 	return "", "", false
 }

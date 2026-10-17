@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	LibraryEffectSummaryVersion = "v18"
+	LibraryEffectSummaryVersion = "v19"
 
 	// LibraryEffectExportIngressABIV1 identifies the compiler-generated exact
 	// C-to-managed adapter published by LibraryEffectExportIngress. It is
@@ -61,7 +61,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 18,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 19,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size

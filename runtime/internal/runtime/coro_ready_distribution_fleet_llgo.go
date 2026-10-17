@@ -127,6 +127,12 @@ func coroTargetReadyDistributionV1(target coroRunTargetCapabilityV1) (distribute
 // unrelated explicit yield with an unchanged epoch keeps the current slice.
 func coroTargetRefreshRunSliceV1(target coroRunTargetCapabilityV1) (distribute, restart, ok bool) {
 	stop := coroNativeFleetPhysicalOwnerV1State.stop.Quiesced()
+	if stop {
+		// BeginRunSlice intentionally omits distribution's policy epoch after
+		// this one-way barrier. Shielded shutdown cleanup may still Yield:
+		// keep it local and return to the owner, not reject its valid action.
+		return false, true, true
+	}
 	epoch := coroKeyedAtomicLoadUint32(&coroNativeFleetPhysicalOwnerV1State.policyEpoch)
 	enabled, valid := coroTargetReadyDistributionEnabledV1(&coroNativeFleetV1State)
 	if !valid || target.policyEpoch == 0 || epoch == 0 {

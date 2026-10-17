@@ -292,6 +292,47 @@ retag、managed linkname、recover 与一调用/零 frame IR 验证。后续资�
 应消费同一 source shape 并另外冻结 delivery 权限；本次结构迁移不放宽现有
 receiver/interface 资源发布拒绝条件，也不启用尚未闭环的 public Open seed。
 
+### 3.10 typed resource helper views（context-free cohort，2026-10-17）
+
+透明资源返回包装不能只复用同签名 drop：`F(a,b) -> Acquire(b,a)` 的 Go
+签名可能不变，但取消时必须按重排后的参数调用原 drop。现有 ProgramIR source
+shape 是结构输入；只有其目标已有独立验证的 borrowed-result recipe、返回元组
+完全相同、投影为值且 retag 满足现有 transport proof 时，才能导出 custody。
+不为 wrapper 伪造 borrow SSA、借用证明或私有库函数 body。
+
+结果路径只把 wrapper 的 incoming-or-fallback 输出地址交给唯一的 child。
+该转发 site 不分配普通 child-result/capture/tag，不在 child consumption 时清除
+wrapper fallback；取消和异常仍使用原 cleanup drainer。NoInline、recover/debug
+及递归的 frame-elision 权限与此独立；实验暂不以 custody 证明删除 wrapper frame。
+
+helper 的逻辑 FunctionID/effect/demand 仍属于真实源 helper。参数适配仅生成纯
+物理 ABI view：原样传递 managed prefix、同一 typed output 和 env，进行已冻结
+的参数选择、常量和值字段投影，再调用原 helper；没有新 coro、await 或 owner。
+descriptor 缓存另外绑定 view identity，不能把等类型参数的不同排列合并。
+
+库 summary 硬切到 v19。可选 DropView 发布 producer-owned symbol 和完整 public
+helper ABI；原 Drop/DropABI 继续指向同一 graph 中的真实 helper fact。消费端
+分别验证逻辑 fact、public signature、producer-owned symbol 与目标 profile，
+按 public view 声明物理调用，绝不把 private helper 反向伪装成该签名。现有
+delivery-v2 冷尾保留独立的 public helper hash，无新运行时字段或反向地址查型。
+
+view 即使没有本地 caller/descriptor，也可能被独立 consumer 从 archive metadata
+中的 symbol 引用。因此定义通过现有 `llvm.compiler.used` 保留到 object emission；
+不加入 `llvm.used`，不阻止最终 native linker 回收未使用的 view。真实 archive gate
+在 producer 导出前先执行 GlobalDCE，再由只含 public 声明的 consumer 独立链接执行。
+
+发布 gate：source 和独立 archive 均需覆盖参数重排/常量/链式包装、plain/outcome/
+coro helper、native64/wasm32、小/大结果、incoming/nil-output、go/defer、P=1/2
+取消/GC/精确 close 及生成代码检查。源码路径的同源码因果 FD gate 已通过 66/66（P=1/2），
+并修复共享 output 在转发 child 消费时被误清 pointer handle 的问题。普通最终消费
+仍保留原 pointer retirement。独立 archive 的 GlobalDCE 缺符号已真实复现；修复后
+小/大结果 × static/dynamic/private-factory × 三次执行的 18 条新增用例及原有 18 条
+用例均通过。最终源码还通过全量 model/SSA、native/wasm32 定向 ABI、原始 FD 320 次、
+转发 FD 220 次及 opaque non-resource callable 6 次；转发 FD 与 archive gate 均已接入 CI。
+这些是本地 context-free cohort 验收，不是完整资源/语言兼容性结论，集成仍须通过 CI。
+receiver/bound/interface、动态 target 选择所需的 initializer context、
+reflect/FFI 第二次交接及 public Open/File seed 的限制均不因本实验解除。
+
 ## 4. 方案比较
 
 | 方案 | 优点 | 主要问题 | 结论 |

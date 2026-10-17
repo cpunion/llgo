@@ -751,9 +751,18 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	if invocation.discardResult {
 		results = types.NewTuple()
 	}
-	value := p.awaitCoroChildWithRecoveryAndConsume(
-		b, child, resultSlot, results, invocation, keepaliveSlots, afterConsume,
-	)
+	var value llssa.Expr
+	if guard != nil && guard.plan.forward {
+		// This is the caller's live resource cell, not a consumed temporary.
+		// The wrapper's unchanged Return does not copy these fields back, so
+		// retiring a pointer here would erase the still-owned public result.
+		p.awaitCoroChildCompletionWithRecovery(b, child, invocation, keepaliveSlots, afterConsume)
+		value = p.loadCoroAwaitBorrowedResult(b, resultSlot, results)
+	} else {
+		value = p.awaitCoroChildWithRecoveryAndConsume(
+			b, child, resultSlot, results, invocation, keepaliveSlots, afterConsume,
+		)
+	}
 	if guard != nil {
 		body.cleanup.delivery.claim(b, guard)
 	}
@@ -1640,7 +1649,8 @@ func (p *context) loadCoroAwaitResult(b llssa.Builder, resultSlot llssa.Expr, re
 	// the pointee alive for the rest of the parent's frame lifetime. Aggregate
 	// storage (including headers) remains untouched: later lowering may address
 	// it directly. All tuple fields are loaded before any slot is cleared.
-	defer func() {
+	value := p.loadCoroAwaitBorrowedResult(b, resultSlot, results)
+	func() {
 		if results == nil {
 			return
 		}
@@ -1658,6 +1668,12 @@ func (p *context) loadCoroAwaitResult(b llssa.Builder, resultSlot llssa.Expr, re
 			b.StoreVolatile(field, p.prog.Zero(p.prog.Elem(field.Type)))
 		}
 	}()
+	return value
+}
+
+// Shared output remains owned by the incoming/fallback custody guard. Only
+// the eventual non-forwarding consumer may retire its copied pointer handles.
+func (p *context) loadCoroAwaitBorrowedResult(b llssa.Builder, resultSlot llssa.Expr, results *types.Tuple) llssa.Expr {
 	count := 0
 	if results != nil {
 		count = results.Len()

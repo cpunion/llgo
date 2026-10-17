@@ -31,14 +31,14 @@ func (view CoroLibraryEffectView) SourceDeliveryRecord(
 	if err != nil || !present {
 		return coro.DeliveryRecipeRecord{}, present, err
 	}
-	if recipe.archive != nil {
+	if recipe.archive != nil && recipe.forward == nil {
 		record := recipe.archive.recipe.Record()
 		hash, err := view.FunctionABIHash(function, metadata)
 		if err != nil || hash != record.ProducerABI {
 			return coro.DeliveryRecipeRecord{}, true, fmt.Errorf("archive delivery producer ABI changed: %v", err)
 		}
 		for _, helper := range recipe.archive.helpers {
-			if view.signatureABIHash(helper.signature, metadata) != helper.fact.ABIHash {
+			if view.signatureABIHash(helper.signature, metadata) != helper.callableABI() {
 				return coro.DeliveryRecipeRecord{}, true, fmt.Errorf("archive delivery helper ABI changed")
 			}
 		}
@@ -47,8 +47,17 @@ func (view CoroLibraryEffectView) SourceDeliveryRecord(
 	ids := u.FunctionIDConfig()
 	ids.CoroABI, ids.SchedulerABI, ids.ArchiveReady = metadata.CoroABI, metadata.SchedulerABI, true
 	functions := [3]*ssa.Function{recipe.producer, recipe.initializer, recipe.drop}
+	base := recipe
+	for base.forward != nil {
+		base = u.coroProgramIR.deliveryProducers[base.forward.target]
+	}
 	var callables [3]coro.DeliveryCallable
 	for index, target := range functions {
+		if index != 0 && target == nil && base.archive != nil {
+			helper := base.archive.helpers[index-1]
+			callables[index] = coro.DeliveryCallable{ID: helper.fact.ID, ABIHash: helper.callableABI(), Signature: helper.signature}
+			continue
+		}
 		id, err := coro.StableFunctionID(target, ids)
 		if err != nil {
 			return coro.DeliveryRecipeRecord{}, true, err
@@ -72,6 +81,18 @@ func (view CoroLibraryEffectView) SourceDeliveryRecord(
 		Drop: callables[2].ID, DropABI: callables[2].ABIHash,
 		ResultSize: callables[0].ResultSize, ResultAlign: callables[0].ResultAlign,
 	}
+	if base.archive != nil {
+		record.InitializerABI = base.archive.helpers[0].fact.ABIHash
+		record.DropABI = base.archive.helpers[1].fact.ABIHash
+	}
+	if recipe.forward != nil {
+		_, _, signature, err := coro.DeliveryHelperSignatures(recipe.signature)
+		if err != nil {
+			return coro.DeliveryRecipeRecord{}, true, err
+		}
+		record.DropView = coro.DeliveryHelperViewRecord{Symbol: coroDeliveryViewSymbol(u.finalIdentity(function)), ABIHash: view.signatureABIHash(signature, metadata)}
+		callables[2].Signature, callables[2].ABIHash = signature, record.DropView.ABIHash
+	}
 	if _, err := coro.FreezeDeliveryRecipe(record, callables[0], callables[1], callables[2]); err != nil {
 		return coro.DeliveryRecipeRecord{}, true, err
 	}
@@ -84,6 +105,22 @@ func (view CoroLibraryEffectView) SourceDeliveryRecord(
 type coroArchiveDeliveryHelper struct {
 	fact      coro.LibraryEffectFunction
 	signature *types.Signature
+	view      coro.DeliveryHelperViewRecord
+	source    *ssa.Function
+}
+
+func (helper coroArchiveDeliveryHelper) callableABI() string {
+	if !helper.view.IsZero() {
+		return helper.view.ABIHash
+	}
+	return helper.fact.ABIHash
+}
+
+func (helper coroArchiveDeliveryHelper) symbol() string {
+	if !helper.view.IsZero() {
+		return helper.view.Symbol
+	}
+	return helper.fact.PrimarySymbol
 }
 
 type coroArchiveDeliveryRecipe struct {
@@ -137,6 +174,9 @@ func (view CoroLibraryEffectView) bindArchiveDeliveryRecipe(
 	producer := coro.DeliveryCallable{ID: id, ABIHash: fact.ABIHash, Signature: signature,
 		ResultSize: u.prog.SizeOf(output), ResultAlign: u.prog.AlignOf(output)}
 	record := fact.Delivery
+	if !record.DropView.IsZero() && record.DropView.Symbol != coroDeliveryViewSymbol(u.finalIdentity(function)) {
+		return fail("drop view is not the producer-owned physical symbol")
+	}
 	var bound coroArchiveDeliveryRecipe
 	var callables [2]coro.DeliveryCallable
 	for ordinal, helperID := range [2]coro.FunctionID{record.Initializer, record.Drop} {
@@ -151,10 +191,18 @@ func (view CoroLibraryEffectView) bindArchiveDeliveryRecipe(
 		// This exact structural hash also proves the absence of a hidden
 		// closure environment: the expected helper signature has none.
 		hash := view.signatureABIHash(helperSignature, metadata)
-		if hash != helper.ABIHash {
+		physicalView := coro.DeliveryHelperViewRecord{}
+		if ordinal == 1 {
+			physicalView = record.DropView
+		}
+		wantHash := helper.ABIHash
+		if !physicalView.IsZero() {
+			wantHash = physicalView.ABIHash
+		}
+		if hash != wantHash {
 			return fail("helper %q ABI does not match its complete typed no-capture signature", helperID)
 		}
-		bound.helpers[ordinal] = coroArchiveDeliveryHelper{fact: helper, signature: helperSignature}
+		bound.helpers[ordinal] = coroArchiveDeliveryHelper{fact: helper, signature: helperSignature, view: physicalView}
 		callables[ordinal] = coro.DeliveryCallable{ID: helperID, ABIHash: hash, Signature: helperSignature}
 	}
 	bound.recipe, err = coro.FreezeDeliveryRecipe(record, producer, callables[0], callables[1])
@@ -219,15 +267,18 @@ func (builder coroProgramIRBuilder) freezeArchiveDeliveryProducers(ir *coroProgr
 				if err := u.libraryEffects.validateFunctionEntry(source, metadata, helper.fact); err != nil {
 					return err
 				}
-				if ordinal == 0 {
-					recipe.initializer = source
-				} else {
-					recipe.drop = source
+				if helper.view.IsZero() {
+					if ordinal == 0 {
+						recipe.initializer = source
+					} else {
+						recipe.drop = source
+					}
+					continue
 				}
-				continue
+				helper.source = source
+				bound.helpers[ordinal] = helper
 			}
-			if previous, found := ir.archiveDeliveryHelpers[helper.fact.ID]; found &&
-				(previous.fact != helper.fact || !types.Identical(previous.signature, helper.signature)) {
+			if previous, found := ir.archiveDeliveryHelpers[helper.fact.ID]; found && previous.fact != helper.fact {
 				return fmt.Errorf("archive helper %q has conflicting typed bindings", helper.fact.ID)
 			}
 			ir.archiveDeliveryHelpers[helper.fact.ID] = helper
@@ -246,6 +297,9 @@ func (view CoroPlanningMetadataView) ImportedFunctions() ([]coro.LibraryEffectFu
 	}
 	ret := make([]coro.LibraryEffectFunction, 0, len(u.coroProgramIR.archiveDeliveryHelpers))
 	for _, helper := range u.coroProgramIR.archiveDeliveryHelpers {
+		if helper.source != nil {
+			continue
+		} // The real declaration already owns its graph node.
 		ret = append(ret, helper.fact)
 	}
 	sort.Slice(ret, func(i, j int) bool { return ret[i].ID < ret[j].ID })
@@ -260,7 +314,7 @@ func (p *context) emitCoroArchiveDeliveryHelper(b llssa.Builder, helper coroArch
 	plan, found := whole.BasePlan().Lookup(helper.fact.ID)
 	bound, present := p.emissionUniverse.coroProgramIR.archiveDeliveryHelpers[helper.fact.ID]
 	plain, structured := coroExternalManagedDescriptorEntry(plan)
-	if !found || !present || bound.fact != helper.fact || !types.Identical(bound.signature, helper.signature) ||
+	if !found || !present || bound.fact != helper.fact ||
 		!plain && !structured || plan.Demand == coro.NoDemand {
 		panic("archive helper lost its typed binding or exact managed demand")
 	}
@@ -278,14 +332,17 @@ func (p *context) emitCoroArchiveDeliveryHelper(b llssa.Builder, helper coroArch
 	default:
 		panic("archive helper has no exact managed primary")
 	}
-	physical := p.pkg.NewFuncEx(helper.fact.PrimarySymbol, signature, llssa.InGo, false, false)
+	physical := p.pkg.NewFuncEx(helper.symbol(), signature, llssa.InGo, false, false)
 	if !types.Identical(physical.RawType(), signature) {
 		panic("archive helper conflicts with an existing physical declaration")
 	}
-	return p.emitCoroManagedPrimaryDescriptor(b, plan, abi, physical.Expr, physical.Expr, llssa.Nil, nil, false, llssa.Nil, nil)
+	return p.emitCoroManagedPrimaryDescriptorBinding(b, plan, abi, physical.Expr, physical.Expr, llssa.Nil, nil, false, llssa.Nil, nil, helper.view.Symbol)
 }
 
 func (p *context) emitCoroRecipeDeliveryHelper(b llssa.Builder, recipe coroSourceDeliveryRecipe, ordinal int, signature *types.Signature) coroManagedCallable {
+	if recipe.forward != nil {
+		return p.emitCoroForwardedDeliveryHelper(b, recipe, ordinal, signature)
+	}
 	target := recipe.initializer
 	if ordinal == 1 {
 		target = recipe.drop
@@ -300,6 +357,15 @@ func (p *context) emitCoroRecipeDeliveryHelper(b llssa.Builder, recipe coroSourc
 }
 
 func (p *context) compileCoroRecipeDeliveryHelper(b llssa.Builder, name string, recipe coroSourceDeliveryRecipe, ordinal int, args []llssa.Expr) {
+	if recipe.forward != nil {
+		if ordinal == 1 {
+			recipe, args = p.coroForwardedDeliveryArguments(b, recipe, args)
+		} else {
+			for recipe.forward != nil {
+				recipe = p.emissionUniverse.coroProgramIR.deliveryProducers[recipe.forward.target]
+			}
+		}
+	}
 	target := recipe.initializer
 	if ordinal == 1 {
 		target = recipe.drop

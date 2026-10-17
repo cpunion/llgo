@@ -6,6 +6,26 @@ import (
 	"testing"
 )
 
+func TestLibraryDeliveryViewStillRequiresOriginalHelperFact(t *testing.T) {
+	summaries, record := deliveryLibrarySummaries()
+	record.DropView = DeliveryHelperViewRecord{Symbol: "__llgo_coro_delivery_view.wrapper.drop", ABIHash: strings.Repeat("4", 64)}
+	summaries[0].Functions[0].Delivery = record
+	if _, err := NewLibraryEffectIndex(summaries, summaries[0].Metadata); err != nil {
+		t.Fatal(err)
+	}
+	for packageIndex := range summaries {
+		for functionIndex := range summaries[packageIndex].Functions {
+			fact := &summaries[packageIndex].Functions[functionIndex]
+			if fact.ID == record.Drop {
+				fact.ABIHash = record.DropView.ABIHash
+			}
+		}
+	}
+	if _, err := NewLibraryEffectIndex(summaries, summaries[0].Metadata); err == nil {
+		t.Fatal("physical view ABI replaced the real helper's graph fact")
+	}
+}
+
 func deliveryLibrarySummaries() ([]LibraryEffectSummary, DeliveryRecipeRecord) {
 	record, _, _, _ := deliveryTestInputs()
 	producer := LibraryEffectFunction{
