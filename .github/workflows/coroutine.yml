@@ -606,9 +606,34 @@ jobs:
         env:
           LLGO_CORO_TIMER_GC_ACCEPTANCE: "1"
           LLGO_TEST_LLGO: /tmp/llgo-timer-gc
+          LLGO_CORO_TIMER_GC_OUTPUT: /tmp/llgo-timer-gc-artifacts
         run: |
           go build -o "$LLGO_TEST_LLGO" ./cmd/llgo
           GOMAXPROCS=2 GOMEMLIMIT=2GiB go test ./internal/build -run '^TestCoro(TimerGC|GCObservationLink|ReflectHeaderGC)Acceptance$' -v -count=1 -timeout=25m
+
+      - name: Record failed native timer environment
+        if: failure() && matrix.lane == 'timer-gc'
+        run: |
+          mkdir -p /tmp/llgo-timer-gc-artifacts
+          {
+            go version
+            llvm-config-${{ matrix.llvm }} --version
+            dpkg-query -W libgc1 libgc-dev libc6
+            sha256sum /tmp/llgo-timer-gc
+            find /tmp/llgo-timer-gc-artifacts -type f -name timer -exec sha256sum {} \;
+            find /tmp/llgo-timer-gc-artifacts -type f -name timer -exec ldd {} \;
+          } > /tmp/llgo-timer-gc-artifacts/environment.txt 2>&1
+
+      - name: Upload failed native timer images
+        if: failure() && matrix.lane == 'timer-gc'
+        uses: actions/upload-artifact@v7
+        with:
+          name: failed-native-timer-gc-llvm${{ matrix.llvm }}
+          path: |
+            /tmp/llgo-timer-gc
+            /tmp/llgo-timer-gc-artifacts
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Test real WASI timers and TinyGC cancellation
         if: matrix.lane == 'timer-gc-wasi' && github.repository == 'cpunion/llgo' && github.event.pull_request.base.ref == 'llvm-coro'
