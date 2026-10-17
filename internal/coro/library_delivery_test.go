@@ -6,6 +6,51 @@ import (
 	"testing"
 )
 
+func TestLibraryUnboundDeliveryCannotBecomeAnOrdinaryResultContract(t *testing.T) {
+	summaries, record := deliveryLibrarySummaries()
+	summary := summaries[0]
+	function := &summary.Functions[0]
+	function.Delivery, function.DeliveryUnbound = DeliveryRecipeRecord{}, true
+	data, err := summary.MarshalRecord()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := ParseLibraryEffectSummaryRecords(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := NewLibraryEffectIndex(decoded, summary.Metadata)
+	if err != nil || !index.HasDelivery() {
+		t.Fatalf("unbound requirement disappeared without a usable recipe: %v", err)
+	}
+	got, found := index.Lookup(record.Producer)
+	if !found || !got.DeliveryUnbound || !got.Delivery.IsZero() {
+		t.Fatalf("negative archive requirement changed: %+v", got)
+	}
+	if _, bound := index.LookupDelivery(record.Producer); bound {
+		t.Fatal("unbound entry acquired a usable delivery recipe")
+	}
+	if policy, err := got.ImportedPolicy(); err != nil || !policy.ResultDelivery {
+		t.Fatalf("unbound import could enter trusted nonresource dispatch: %+v %v", policy, err)
+	}
+	for _, change := range []func(*LibraryEffectFunction){
+		func(f *LibraryEffectFunction) { f.Delivery = record },
+		func(f *LibraryEffectFunction) { f.RawPlainSymbol = "unsafe_raw" },
+		func(f *LibraryEffectFunction) { f.ManagedEntry = ManagedEntryPlain },
+	} {
+		bad := got
+		change(&bad)
+		if _, err := bad.ImportedPolicy(); err == nil {
+			t.Fatalf("invalid unbound archive requirement accepted: %+v", bad)
+		}
+	}
+	old := summary
+	old.Schema = "llgo.coro.library-effect-summary.v19"
+	if err := old.Verify(); err == nil {
+		t.Fatal("preceding schema could omit the unbound-delivery distinction")
+	}
+}
+
 func TestLibraryDeliveryViewStillRequiresOriginalHelperFact(t *testing.T) {
 	summaries, record := deliveryLibrarySummaries()
 	record.DropView = DeliveryHelperViewRecord{Symbol: "__llgo_coro_delivery_view.wrapper.drop", ABIHash: strings.Repeat("4", 64)}

@@ -10,11 +10,11 @@ import (
 
 func TestDispatchDescriptorABIBits(t *testing.T) {
 	if dispatchVersionV2 != 2 || dispatchHasPlain != 1 || dispatchHasOutcome != 2 || dispatchHasCoro != 4 ||
-		dispatchNoCapture != 8 || dispatchRuntimeTyped != 16 || dispatchPlainNoUnwind != 32 || dispatchHasDelivery != 64 {
+		dispatchNoCapture != 8 || dispatchRuntimeTyped != 16 || dispatchPlainNoUnwind != 32 || dispatchHasDelivery != 64 || dispatchDeliveryUnbound != 128 {
 		t.Fatalf(
-			"dispatch descriptor v%d flags = plain:%d outcome:%d coro:%d no-capture:%d runtime-typed:%d plain-no-unwind:%d delivery:%d, want v2 1/2/4/8/16/32/64",
+			"dispatch descriptor v%d flags = plain:%d outcome:%d coro:%d no-capture:%d runtime-typed:%d plain-no-unwind:%d delivery:%d unbound:%d, want v2 1/2/4/8/16/32/64/128",
 			dispatchVersionV2, dispatchHasPlain, dispatchHasOutcome, dispatchHasCoro,
-			dispatchNoCapture, dispatchRuntimeTyped, dispatchPlainNoUnwind, dispatchHasDelivery,
+			dispatchNoCapture, dispatchRuntimeTyped, dispatchPlainNoUnwind, dispatchHasDelivery, dispatchDeliveryUnbound,
 		)
 	}
 }
@@ -37,6 +37,11 @@ func TestDispatchDescriptorPlainUnwindFlags(t *testing.T) {
 		{"resource outcome", dispatchHasOutcome | dispatchHasDelivery, true},
 		{"resource plain", dispatchHasPlain | dispatchPlainNoUnwind | dispatchHasDelivery, false},
 		{"resource runtime", dispatchHasCoro | dispatchRuntimeTyped | dispatchHasDelivery, false},
+		{"unbound coro", dispatchHasCoro | dispatchDeliveryUnbound, true},
+		{"unbound outcome", dispatchHasOutcome | dispatchDeliveryUnbound, true},
+		{"unbound plain", dispatchHasPlain | dispatchPlainNoUnwind | dispatchDeliveryUnbound, false},
+		{"unbound runtime", dispatchHasCoro | dispatchRuntimeTyped | dispatchDeliveryUnbound, false},
+		{"unbound bound", dispatchHasCoro | dispatchHasDelivery | dispatchDeliveryUnbound, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := validDispatchPlainUnwindFlags(test.flags); got != test.want {
@@ -89,9 +94,15 @@ func TestRuntimeCoroDescriptorUsesV2StructuredEntry(t *testing.T) {
 }
 
 func TestResourceDescriptorIdentityDoesNotAuthorizeUnboundReflection(t *testing.T) {
+	for _, flag := range []uint32{dispatchHasDelivery, dispatchDeliveryUnbound} {
+		t.Run(fmt.Sprint(flag), func(t *testing.T) { testResourceDescriptorIdentityDoesNotAuthorizeUnboundReflection(t, flag) })
+	}
+}
+
+func testResourceDescriptorIdentityDoesNotAuthorizeUnboundReflection(t *testing.T, flag uint32) {
 	entry := unsafe.Pointer(new(byte))
 	d := dispatchDescriptorV2{
-		Version: dispatchVersionV2, Flags: dispatchHasCoro | dispatchHasDelivery,
+		Version: dispatchVersionV2, Flags: dispatchHasCoro | flag,
 		StructuredEntry: entry, CodeEntry: entry, ResultSize: 8, ResultAlign: 8,
 	}
 	descriptor := unsafe.Pointer(&d)

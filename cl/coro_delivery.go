@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	coroDeliveryGuardABI       = "llgo.coro.borrowed-result-guards.v3"
+	coroDeliveryGuardABI       = "llgo.coro.borrowed-result-guards.v4"
 	coroDeliveryInitializeCall = "coro.delivery.initialize"
 	coroDeliveryDropCall       = "coro.delivery.drop"
 )
@@ -224,8 +224,18 @@ func (ir *coroProgramIR) sourceDelivery(producer *ssa.Function) (coroSourceDeliv
 	}
 	// Call/FunctionPlan consumers already name canonical SSA functions. This
 	// read-only projection does not acquire another canonicalization authority.
+	if err := ir.validateDeliveryReceiver(producer); err != nil {
+		return coroSourceDeliveryRecipe{}, false, err
+	}
 	recipe, present := ir.deliveryProducers[producer]
 	return recipe, present, nil
+}
+
+func (ir *coroProgramIR) validateDeliveryReceiver(function *ssa.Function) error {
+	if receiver := ir.localBodyFacts[function].deliveryReceiver; receiver != nil {
+		return fmt.Errorf("resource result forwarding %q requires an evaluated receiver snapshot for %q", function.String(), receiver.String())
+	}
+	return nil
 }
 
 // freezeDeliveryConsumers binds consumers only after every
@@ -324,6 +334,13 @@ func (builder coroProgramIRBuilder) freezeDeliveryConsumers(ir *coroProgramIR) e
 				target := u.canonicalAlias(call.Common().StaticCallee())
 				if frozen.plan.ManagedStaticTarget != nil {
 					target = frozen.plan.ManagedStaticTarget
+				}
+				if err := ir.validateDeliveryReceiver(target); err != nil {
+					frozen.failure = err.Error()
+					if err := builder.freezeDeliveryConsumerSite(ir, call, frozen); err != nil {
+						return err
+					}
+					continue
 				}
 				recipe, producer := ir.deliveryProducers[target]
 				if !producer {

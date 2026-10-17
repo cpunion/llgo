@@ -50,8 +50,20 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		if err := visit(shape.target); err != nil {
 			return err
 		}
+		if receiver := ir.localBodyFacts[shape.target].deliveryReceiver; receiver != nil {
+			facts.deliveryReceiver = receiver
+			facts.ResultDelivery = true
+			ir.localBodyFacts[function] = facts
+			return nil
+		}
 		target, present := ir.deliveryProducers[shape.target]
 		if !present {
+			return nil
+		}
+		if coroDeliveryNeedsReceiverSnapshot(shape, target) {
+			facts.deliveryReceiver = function
+			facts.ResultDelivery = true
+			ir.localBodyFacts[function] = facts
 			return nil
 		}
 		sourceArguments, base, composed := composeCoroDeliveryForwardingArguments(shape, target)
@@ -130,6 +142,29 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		}
 	}
 	return nil
+}
+
+// This is a projection of the same frozen forwarding proof, not a body walk
+// or an ownership effect propagated through arbitrary calls. An unused
+// receiver remains eligible; only a helper input that needs the evaluated
+// receiver makes its custody binding necessary.
+func coroDeliveryNeedsReceiverSnapshot(shape *coroForwardingSourceShape, target coroSourceDeliveryRecipe) bool {
+	if !shape.methodProjection || shape.receiverEvaluation == nil || len(shape.args) == 0 {
+		return false
+	}
+	receiver := shape.args[0]
+	if receiver.sourceParameter >= 0 || receiver.capture != nil || receiver.constant != nil {
+		return false
+	}
+	if target.forward == nil {
+		return true
+	}
+	for _, argument := range target.forwardArgs {
+		if argument.sourceParameter == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func composeCoroDeliveryForwardingArguments(shape *coroForwardingSourceShape, target coroSourceDeliveryRecipe) ([]coroForwardingSourceArgument, *ssa.Function, bool) {

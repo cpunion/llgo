@@ -92,16 +92,17 @@ const (
 
 	// These are compiler/runtime ABI bits. Keep the values explicit: placing
 	// them after dispatchVersionV2 in this block must not shift their positions.
-	dispatchHasPlain      uint32 = 1 << 0
-	dispatchHasOutcome    uint32 = 1 << 1
-	dispatchHasCoro       uint32 = 1 << 2
-	dispatchNoCapture     uint32 = 1 << 3
-	dispatchRuntimeTyped  uint32 = 1 << 4
-	dispatchPlainNoUnwind uint32 = 1 << 5
-	dispatchHasDelivery   uint32 = 1 << 6
+	dispatchHasPlain        uint32 = 1 << 0
+	dispatchHasOutcome      uint32 = 1 << 1
+	dispatchHasCoro         uint32 = 1 << 2
+	dispatchNoCapture       uint32 = 1 << 3
+	dispatchRuntimeTyped    uint32 = 1 << 4
+	dispatchPlainNoUnwind   uint32 = 1 << 5
+	dispatchHasDelivery     uint32 = 1 << 6
+	dispatchDeliveryUnbound uint32 = 1 << 7
 
 	dispatchCapabilityMask = dispatchHasPlain | dispatchHasOutcome | dispatchHasCoro
-	dispatchKnownFlags     = dispatchCapabilityMask | dispatchNoCapture | dispatchRuntimeTyped | dispatchPlainNoUnwind | dispatchHasDelivery
+	dispatchKnownFlags     = dispatchCapabilityMask | dispatchNoCapture | dispatchRuntimeTyped | dispatchPlainNoUnwind | dispatchHasDelivery | dispatchDeliveryUnbound
 )
 
 const dispatchRuntimeTypeMagicV2 uint64 = 0x4c4c474f52545932 // "LLGORTY2"
@@ -113,6 +114,7 @@ func validDispatchPlainUnwindFlags(flags uint32) bool {
 	plainNoUnwind := flags&dispatchPlainNoUnwind != 0
 	return !(hasOutcome && hasCoro) &&
 		(flags&dispatchHasDelivery == 0 || !hasPlain && flags&dispatchRuntimeTyped == 0) &&
+		(flags&dispatchDeliveryUnbound == 0 || !hasPlain && flags&(dispatchRuntimeTyped|dispatchHasDelivery) == 0) &&
 		(!plainNoUnwind || hasPlain) &&
 		(!hasPlain || hasOutcome || hasCoro || plainNoUnwind)
 }
@@ -190,7 +192,7 @@ func CoroEntry(descriptor unsafe.Pointer) unsafe.Pointer {
 func rejectUnboundResourceDelivery(flags uint32) {
 	// Reflection must own the second handoff into []reflect.Value before it
 	// may consume this capability. Identity queries do not invoke a producer.
-	if flags&dispatchHasDelivery != 0 {
+	if flags&(dispatchHasDelivery|dispatchDeliveryUnbound) != 0 {
 		panic("llgo: resource result delivery through reflection is not bound")
 	}
 }

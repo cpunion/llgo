@@ -68,7 +68,8 @@ type CoroDispatchCallOptions struct {
 	// TrustedDescriptor records that the frontend's frozen whole-program plan
 	// (or an already validated library/runtime publication boundary) proves the
 	// descriptor schema, ABI hash, result layout, environment contract, and
-	// advertised entries. The call still performs the language-level nil check
+	// callable entries (excluding DeliveryUnbound). The call still performs the
+	// language-level nil check
 	// unless DescriptorNonNil is also set, but it does not repeat those invariant
 	// checks on every invocation. Without DeliveryGuard the proof must also
 	// establish a closed nonresource target family; producer publication remains
@@ -652,6 +653,17 @@ func (b Builder) prepareCoroDispatchCall(
 	for i := range fields {
 		fields[i] = b.Field(descriptor, i)
 	}
+	if opts.DeliveryGuard && opts.TrustedDescriptor {
+		// A trusted resource family can include ABI-only method identities
+		// whose receiver binding is unavailable. A result guard cannot supply
+		// that missing value. Closed nonresource families exclude this state
+		// through the same frozen ResultDelivery fact, retaining their compact
+		// structured-only dispatch path.
+		unbound := b.BinOp(token.AND, fields[1], b.Prog.IntVal(uint64(CoroDispatchFlagDeliveryUnbound), b.Prog.Uint32()))
+		invalid := b.BinOp(token.NEQ, unbound, b.Prog.IntVal(0, b.Prog.Uint32()))
+		invalid.impl.SetName("coro.dispatch.delivery.unbound")
+		b.coroPlainDispatchTrapIf(invalid.impl)
+	}
 	if opts.TrustedDescriptor {
 		prepared := coroDispatchPreparedCall{
 			plain:      fields[4],
@@ -685,7 +697,7 @@ func (b Builder) prepareCoroDispatchCall(
 	)
 	flags := fields[1].impl
 	zeroFlags := b.Prog.IntVal(0, b.Prog.Uint32()).impl
-	allowedFlags := CoroDispatchKnownFlagsV2
+	allowedFlags := CoroDispatchKnownFlagsV2 &^ CoroDispatchFlagDeliveryUnbound
 	if !opts.DeliveryGuard {
 		// Reuse the existing unknown-capability check. Ordinary consumers keep
 		// precisely their old mask and do not pay for another branch/probe.
@@ -991,6 +1003,10 @@ func validateCoroDispatchContract(version, flags uint32) {
 	}
 	if flags&CoroDispatchFlagHasDelivery != 0 && (hasPlain || flags&CoroDispatchFlagRuntimeTyped != 0) {
 		panic("ssa: coroutine delivery requires a compiler-owned structured-only descriptor")
+	}
+	if flags&CoroDispatchFlagDeliveryUnbound != 0 &&
+		(hasPlain || flags&(CoroDispatchFlagRuntimeTyped|CoroDispatchFlagHasDelivery) != 0) {
+		panic("ssa: unbound delivery requires a compiler-owned structured-only identity without a delivery tail")
 	}
 }
 

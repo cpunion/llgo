@@ -54,10 +54,14 @@ const (
 	// CoroDispatchFlagHasDelivery advertises the optional typed result-custody
 	// tail. Ordinary descriptors retain exactly the nine-field base layout.
 	CoroDispatchFlagHasDelivery
+	// CoroDispatchFlagDeliveryUnbound retains method-table identity when a
+	// required receiver snapshot is unavailable. It has no delivery tail and
+	// grants no invocation capability, even to a guarded consumer.
+	CoroDispatchFlagDeliveryUnbound
 
 	CoroDispatchCapabilityMaskV2 = CoroDispatchFlagHasPlain | CoroDispatchFlagHasOutcome | CoroDispatchFlagHasCoro
 	CoroDispatchKnownFlagsV2     = CoroDispatchCapabilityMaskV2 | CoroDispatchFlagNoCapture |
-		CoroDispatchFlagRuntimeTyped | CoroDispatchFlagPlainNoUnwind | CoroDispatchFlagHasDelivery
+		CoroDispatchFlagRuntimeTyped | CoroDispatchFlagPlainNoUnwind | CoroDispatchFlagHasDelivery | CoroDispatchFlagDeliveryUnbound
 	CoroPlainDispatchFlagsV2 = CoroDispatchFlagHasPlain | CoroDispatchFlagNoCapture |
 		CoroDispatchFlagPlainNoUnwind
 )

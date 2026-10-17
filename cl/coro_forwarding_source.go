@@ -120,8 +120,8 @@ scanAdapters:
 	}
 	methodProjection := false
 	if call == nil || call.Common() == nil || call.Common().StaticCallee() == nil ||
-		len(valueProjections) != 0 && function.Synthetic != "" && function.Signature.Recv() != nil {
-		if validateCoroExactMethodWrapper(function) != nil {
+		len(valueProjections) != 0 && function.Synthetic != "" {
+		if validateCoroExactMethodWrapper(function) != nil && validateCoroExactMethodExpressionThunk(function) != nil {
 			return nil
 		}
 		call = nil // A leading wrapnilchk is not the forwarded method call.

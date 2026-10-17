@@ -3,6 +3,8 @@
 package cl
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"go/ast"
 	"go/types"
 	"strings"
@@ -301,6 +303,42 @@ func Root(pointer *PointerReceiver) {
 				}
 				module := pkg.Module()
 				defer module.Dispose()
+				methodValues := 0
+				for _, function := range u.Functions() {
+					if function.Signature.Recv() == nil {
+						continue
+					}
+					functionPlan, _ := plan.FunctionPlan(function)
+					hash := sha256.Sum256([]byte(functionPlan.ID))
+					prefix := coroPlainDispatchDescriptorPrefix + "method-value." + hex.EncodeToString(hash[:8]) + "."
+					for global := module.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+						if !strings.HasPrefix(global.Name(), prefix) {
+							continue
+						}
+						initializer := global.Initializer()
+						base := initializer
+						if initializer.OperandsCount() == 2 {
+							base = initializer.Operand(0)
+						}
+						_, resource := u.coroProgramIR.deliveryProducers[function]
+						unbound := u.coroProgramIR.localBodyFacts[function].deliveryReceiver != nil
+						if got := uint32(base.Operand(1).ZExtValue())&llssa.CoroDispatchFlagDeliveryUnbound != 0; got != unbound {
+							t.Fatalf("Method.Func for %s unbound=%t, want %t", function, got, unbound)
+						}
+						if hasDelivery := uint32(base.Operand(1).ZExtValue())&llssa.CoroDispatchFlagHasDelivery != 0; hasDelivery != resource {
+							t.Fatalf("Method.Func for %s delivery=%t, want %t", function, hasDelivery, resource)
+						}
+						if resource {
+							if initializer.OperandsCount() != 2 || initializer.Operand(1).OperandsCount() != 8 {
+								t.Fatalf("Method.Func for %s lost its exact typed delivery tail", function)
+							}
+							methodValues++
+						}
+					}
+				}
+				if methodValues < 2 {
+					t.Fatalf("resource Method.Func descriptors=%d, want value and pointer receiver methods", methodValues)
+				}
 				metadata := coro.LibraryEffectMetadata{FunctionIDSchema: coro.FunctionIDSchema, CoroABI: compilation.CoroABI,
 					SchedulerABI: compilation.SchedulerABI, PanicABI: compilation.PanicABI, FuncRepABI: compilation.FuncRepABI,
 					TargetTriple: prog.TargetSpec().Triple, PointerBits: prog.PointerSize() * 8, Endianness: "little", DataLayout: prog.DataLayout()}
