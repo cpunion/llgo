@@ -58,6 +58,11 @@ func Literal(a int) (int,error) { return Permuted(a,7) }
 func Chain(a int) (int,error) { return Literal(a) }
 //go:noinline
 func NoInline(a int) (int,error) { return Literal(a) }
+type FieldInputs struct { Prefix int; Inner struct { Token int; Callback func() } }
+type FieldAlias = FieldInputs
+func Projected(value FieldAlias, b int) (int,error) { return Acquire(value.Inner.Token,b) }
+func ProjectedChain(value FieldAlias, b int) (int,error) { return Projected(value,b) }
+var PublishedProjected = Projected
 func Changed(a int) (int,error) { n,e:=Acquire(a,0); return n+1,e }
 func dropPath(out *Result, _ unsafe.Pointer, path string) { out.R0 = len(path) }
 //go:linkname borrowPath llgo.coroBorrowResult
@@ -90,6 +95,9 @@ type PointerOpener interface { PointerOpen(int) (int,error) }
 var PublishedCaptured = Token(17).Bound
 func Root(pointer *PointerReceiver) {
  Permuted(1,2); Literal(3); Chain(4); NoInline(5); Published(6); Changed(7); PublishedPermutation(8,9); PublishedIdentity(10,11); FixedPath(); PublishedPath()
+ var fields FieldAlias
+ fields.Inner.Token=17
+ Projected(fields,3); ProjectedChain(fields,4); PublishedProjected(fields,5)
  receiver := Receiver{Token:37}
  receiver.Open(1,2)
  bound := receiver.Open
@@ -119,7 +127,7 @@ func Root(pointer *PointerReceiver) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline", "FixedPath"} {
+				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline", "FixedPath", "Projected", "ProjectedChain"} {
 					recipe, present, err := u.coroProgramIR.sourceDelivery(foo.ssa.Func(name))
 					if err != nil || !present || recipe.forward == nil || recipe.borrow != nil || recipe.anchor() != recipe.forward.call {
 						t.Fatalf("%s did not retain its exact real forwarding call: %+v: %v", name, recipe, err)
@@ -130,6 +138,14 @@ func Root(pointer *PointerReceiver) {
 					chain.forwardArgs[0].constant == nil || chain.forwardArgs[0].constant.Value.ExactString() != "7" ||
 					chain.forwardArgs[1].sourceParameter != 0 {
 					t.Fatalf("multi-layer drop projection was not composed in ProgramIR: %+v", chain)
+				}
+				for _, name := range []string{"Projected", "ProjectedChain"} {
+					recipe := u.coroProgramIR.deliveryProducers[foo.ssa.Func(name)]
+					if recipe.forwardBase != foo.ssa.Func("Acquire") || len(recipe.forwardArgs) != 2 ||
+						recipe.forwardArgs[0].sourceParameter != 0 || len(recipe.forwardArgs[0].fieldPath) != 2 ||
+						recipe.forwardArgs[0].fieldPath[0] != 1 || recipe.forwardArgs[0].fieldPath[1] != 0 || recipe.forwardArgs[1].sourceParameter != 1 {
+						t.Fatalf("%s lost its composed source field path: %+v", name, recipe)
+					}
 				}
 				methods := 0
 				for _, function := range u.Functions() {
@@ -267,7 +283,7 @@ func Root(pointer *PointerReceiver) {
 						}
 					}
 				}
-				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline", "FixedPath"} {
+				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline", "FixedPath", "Projected", "ProjectedChain"} {
 					guard, err := prepareCoroDeliveryFunctionPlan(foo.ssa.Func(name), plan, u.coroProgramIR, u)
 					if err != nil || guard == nil || guard.fallback == nil || len(guard.calls) != 1 || !guard.calls[0].forward {
 						t.Fatalf("%s guard lost single incoming/fallback owner: %+v: %v", name, guard, err)
@@ -291,7 +307,7 @@ func Root(pointer *PointerReceiver) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, name := range []string{"Permuted", "Identity", "Literal", "Chain", "NoInline"} {
+				for _, name := range []string{"Permuted", "Identity", "Literal", "Chain", "NoInline", "Projected", "ProjectedChain"} {
 					record, present, err := u.CoroLibraryEffects().SourceDeliveryRecord(foo.ssa.Func(name), metadata)
 					if err != nil || !present || record.Drop != base.Drop || record.DropABI != base.DropABI || record.DropView.IsZero() || record.DropView.Symbol != coroDeliveryViewSymbol(u.finalIdentity(foo.ssa.Func(name))) {
 						t.Fatalf("%s changed its real helper identity or lost the physical view: %+v: %v", name, record, err)
@@ -399,13 +415,16 @@ func Root(pointer *PointerReceiver) {
 						t.Fatalf("bound drop view loads=%d calls=%d, want one typed capture read and one real helper call", loads, calls)
 					}
 				}
-				for _, name := range []string{"Permuted", "Identity", "Chain"} {
+				for _, name := range []string{"Permuted", "Identity", "Chain", "Projected", "ProjectedChain"} {
 					view := module.NamedFunction(coroDeliveryViewSymbol(u.finalIdentity(foo.ssa.Func(name))))
 					if view.IsNil() || view.BasicBlocksCount() != 1 {
 						t.Fatalf("%s has no pure typed helper view", name)
 					}
 					calls := 0
 					for instruction := view.FirstBasicBlock().FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+						if instruction.InstructionOpcode() == llvm.Load || instruction.InstructionOpcode() == llvm.Alloca || instruction.InstructionOpcode() == llvm.Store {
+							t.Fatalf("%s pure value view added a memory operation: %s", name, instruction.String())
+						}
 						if instruction.InstructionOpcode() != llvm.Call {
 							continue
 						}
@@ -419,6 +438,19 @@ func Root(pointer *PointerReceiver) {
 						if name == "Chain" {
 							if !instruction.Operand(prefix+2).IsConstant() || instruction.Operand(prefix+2).ZExtValue() != 7 || instruction.Operand(prefix+3).C != view.Param(prefix+2).C {
 								t.Fatalf("composed Chain lost literal/parameter order: %s", instruction.String())
+							}
+							continue
+						}
+						if name == "Projected" || name == "ProjectedChain" {
+							value := instruction.Operand(prefix + 2)
+							for _, field := range []uint32{0, 1} {
+								if value.InstructionOpcode() != llvm.ExtractValue || len(value.Indices()) != 1 || value.Indices()[0] != field {
+									t.Fatalf("%s lost its exact aggregate extraction: %s", name, instruction.String())
+								}
+								value = value.Operand(0)
+							}
+							if value.C != view.Param(prefix+2).C || instruction.Operand(prefix+3).C != view.Param(prefix+3).C {
+								t.Fatalf("%s changed its source parameter mapping: %s", name, instruction.String())
 							}
 							continue
 						}
@@ -437,7 +469,7 @@ func Root(pointer *PointerReceiver) {
 				if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 					t.Fatalf("forwarded resource IR: %v\n%s", err, module.String())
 				}
-				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline"} {
+				for _, name := range []string{"Permuted", "Literal", "Chain", "NoInline", "Projected", "ProjectedChain"} {
 					body := requireCoroPhysicalFunction(t, module, "foo."+name)
 					results := 0
 					for _, block := range body.BasicBlocks() {

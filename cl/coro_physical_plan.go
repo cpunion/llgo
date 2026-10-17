@@ -1238,7 +1238,7 @@ func planCoroPhysicalTailForward(
 				}
 			}
 			if !types.Identical(source.valueType, targetType) ||
-				(!shape.methodProjection && ((source.direct && retag) || (!source.direct && !retag))) ||
+				(!shape.methodProjection && ((source.direct && retag) || (!source.direct && !retag && len(source.fieldPath) == 0))) ||
 				(retag && transportKey == "") {
 				return nil, nil
 			}

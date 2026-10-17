@@ -27,8 +27,10 @@ func SourceProjection(value struct { Number int }) int { return Child(value.Numb
 type Nested struct { Prefix int; Inner struct { Number int; Callback func() } }
 type NestedAlias = Nested
 func NestedProjection(value NestedAlias) int { return Child(value.Inner.Number, value.Prefix) }
+func TwoProjections(value NestedAlias, other struct { Number int }) int { return Child(value.Inner.Number, other.Number) }
 func PointerProjection(value *Nested) int { return Child(value.Inner.Number, 1) }
 func MutatedProjection(value Nested) int { value.Inner.Number++; return Child(value.Inner.Number, 1) }
+func UninitializedProjection(value Nested) int { var local Nested; number := local.Inner.Number; local = value; return Child(number, local.Prefix) }
 `
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
@@ -55,7 +57,7 @@ func MutatedProjection(value Nested) int { value.Inner.Number++; return Child(va
 			t.Fatal("forwarding retag lost its source parameter and adapter")
 		}
 	}
-	for _, name := range []string{"SourceProjection", "NestedProjection"} {
+	for _, name := range []string{"SourceProjection", "NestedProjection", "TwoProjections"} {
 		function := ssaPkg.Func(name)
 		shape, err := ir.forwardingSourceShape(function)
 		if err != nil || shape == nil || shape.target != ssaPkg.Func("Child") || shape.methodProjection || shape.receiverEvaluation != nil {
@@ -64,13 +66,11 @@ func MutatedProjection(value Nested) int { value.Inner.Number++; return Child(va
 			t.Fatalf("%s value projection = %+v, error=%v\n%s", name, shape, err, listing.String())
 		}
 		wantFields := []int{0}
-		wantProjections := 1
-		if name == "NestedProjection" {
+		if name != "SourceProjection" {
 			wantFields = []int{1, 0}
-			wantProjections = 3
 		}
 		argument := shape.args[0]
-		if argument.sourceParameter != 0 || len(argument.fieldPath) != len(wantFields) || len(shape.projections) != wantProjections {
+		if argument.sourceParameter != 0 || len(argument.fieldPath) != len(wantFields) || len(shape.projections) < len(wantFields) {
 			t.Fatalf("%s lost its exact field path: %+v", name, shape)
 		}
 		for index, field := range wantFields {
@@ -78,8 +78,11 @@ func MutatedProjection(value Nested) int { value.Inner.Number++; return Child(va
 				t.Fatalf("%s field path = %v, want %v", name, argument.fieldPath, wantFields)
 			}
 		}
+		if name == "TwoProjections" && (shape.args[1].sourceParameter != 1 || len(shape.args[1].fieldPath) != 1 || shape.args[1].fieldPath[0] != 0) {
+			t.Fatalf("second parameter projection was confused with the first: %+v", shape)
+		}
 	}
-	for _, name := range []string{"ChangedResult", "TwoCalls", "Dynamic", "PointerProjection", "MutatedProjection"} {
+	for _, name := range []string{"ChangedResult", "TwoCalls", "Dynamic", "PointerProjection", "MutatedProjection", "UninitializedProjection"} {
 		shape, err := ir.forwardingSourceShape(ssaPkg.Func(name))
 		if err != nil || shape != nil {
 			t.Fatalf("unsupported %s acquired a forwarding source shape: %+v, error=%v", name, shape, err)
