@@ -149,6 +149,12 @@ func sentinel(ready chan struct{}) {
 	<-never
 }
 
+func resizeShutdownQuota() {
+	if old := runtime.GOMAXPROCS(8); old != 1 || runtime.GOMAXPROCS(0) != 8 {
+		panic("shutdown cleanup could not resize logical execution quota")
+	}
+}
+
 func peerSentinel(ready chan struct{}, resizeOnShutdown bool) {
 	for currentRoute() != 2 {
 		runtime.Gosched()
@@ -164,7 +170,7 @@ func peerSentinel(ready chan struct{}, resizeOnShutdown bool) {
 	if resizeOnShutdown {
 		// Cancellation cleanup still has the full Go API. Growing the logical
 		// quota here must not try to start another M behind the sealed barrier.
-		defer runtime.GOMAXPROCS(2)
+		defer resizeShutdownQuota()
 	}
 	sentinel(ready)
 }
