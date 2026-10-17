@@ -209,9 +209,20 @@ isolated processes, including the former interface failure, with no exclusions.
 Source-after matches manifest
 `41e297a58965a49074106e42598d63db300b33cc358150923ad4f4311d031b03`,
 and the guarded tree peak is 183.8MiB. This includes existing opaque-archive IR
-gates, not the new captured/archive actual-runtime matrix. New linked pointer
-identity modes 23/24 are staged but not yet accepted. No feature PR is open and
-this work is not integrated.
+gates, not the new captured/archive actual-runtime matrix.
+
+Frozen v157 adds linked pointer identity modes 23/24: the original receiver is
+bound into an interface, the source variable is rebound and cleared, and actual
+GC/cancellation cleanup must still read token17 from the original object. Both
+ordinary and source-defer paths pass. The **616/616** complete forwarded FD runs
+and **96/96** extra pointer-interface runs (P=1/2/4 ×16) pass, source-after
+matches, with a 1209.5MiB guarded tree peak. Compiler/runtime production sources
+are unchanged from v155 (checked exact diff), so this uses the same v155
+compiler, not a falsely claimed new compiler. Manifest SHA-256:
+`317e596aed21880a256ab876699ac98566bd7cacee87ea16e08836debea50cb0`;
+retained image:
+`ce3054729aa4535818e4d45939aead08a990daf9ad84ceb53b01c819f220b72e`.
+No feature PR is open and this work is not integrated.
 Receiver-dependent value wrappers still need an evaluated snapshot; descriptor
 publication now rejects that boundary instead of silently omitting custody.
 

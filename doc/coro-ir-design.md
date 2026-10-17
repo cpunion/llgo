@@ -388,6 +388,11 @@ identity，不解引用 pointee、不增加 storage；同样通过 native/wasm32
 冻结 v155 用新编译器通过 **576** 次完整 forwarded FD 验收及 **96** 次额外
 interface call/defer × P=1/2/4 ×16，源码前后校验一致，受限进程树峰值1235.0MiB。
 这些是 POSIX native 执行，不是 wasm 实际 runtime 或完整接口资源兼容性的声明。
+随后 frozen v157 通过 **616** 次完整 FD 矩阵及 **96** 次额外 pointer-interface
+call/defer 验收。调用方把原 receiver 绑定给接口后改绑原变量，再清空两者；GC 和
+取消后 drop 仍须读到原对象的 token17，并精确 close。生产编译器/runtime 没有
+变化，使用同一 v155 编译器；源码前后校验一致，峰值1209.5MiB。值 receiver 的
+求值快照仍未完成，不能由 pointer identity 验收推导其正确性。
 
 ## 4. 方案比较
 
