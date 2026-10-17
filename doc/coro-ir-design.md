@@ -369,9 +369,9 @@ profile/global-pointer-store 的负向 gate 保持有效。
 动态/defer bound call × P=1/2/4 ×16，共 **680** 次实际执行全部通过。
 receiver 来自运行时 C atomic 读取，绑定后修改原变量，再在 GC/取消和异步 cleanup
 中核对原 token 与精确 close 次数；源码前后 manifest 匹配。此结果仅证明该 cohort。
-接口调用的 conditional consumer、需要求值快照的 receiver、一般结构字段表达式、
-跨 archive 的 captured-result 新增矩阵、reflect/FFI 二次交接和 public Open/File
-仍未完成，不得由这些 passing gates 推导为已具备完整标准库资源兼容性。
+当时接口 conditional consumer、receiver 求值快照、一般结构字段表达式和新增
+captured/archive 矩阵尚未完成；后续进展见下文。reflect/FFI 二次交接和 public
+Open/File 也仍未完成，不得由这些 passing gates 推导为完整标准库资源兼容性。
 
 接口 follow-up 复用已有 method descriptor 的可选 delivery tail、conditional
 helper edges 和 owner-local guard，源级 signature 保持 receiver-free，drop view
@@ -408,6 +408,23 @@ value 在跨 await/GC 后仍在实际调用时读取，typed-nil 也在调用时
 任何通用 context preparation 都必须保持这些区别，不能在创建 method value
 或注册所有 defer 时提前复制。仅保留装箱 `T` 类型信息的实验仍在独立 WIP 分支，
 完整资源 IR gate 因 `PtrToThis` 还需 `*T` 快照而失败，未集成。
+
+普通按值参数的嵌套字段现在复用同一个 source projection，而非另加一套 resource
+识别器。允许纯 `Field`，以及本函数内由一个参数初始化且先初始化、后读取的非逃逸
+local copy；必须证明 call 前每个 alloc/store/field/load 都属于消费到的值路径。
+多个参数可以各有自己的 local copy。原指针的 pointee 读取、字段修改、初始化前
+读取和未消费的 source 操作仍不能授权转发。source fact 也不自动授权 frame
+elision，physical consumer 继续逐指令检查既有 effect/outcome/cleanup 条件。
+
+drop 的静态参数、动态 typed view 和 archive facts 使用同一个组合字段路径；
+含 func 字段的结构必须先经过相同 Go-to-physical 类型转换再比较确切类型，不能
+只比较 LLVM size/layout。不同命名类型仍拒绝互换。未求值 receiver 的缺失类型
+必须返回无法投影，不能进入字段读取或默认为零值。该实验没有新增 runtime
+状态、注释、descriptor ABI 或第二套调度/cleanup 机制。独立 archive 的嵌套
+capture 已在 v167 通过 small/large 共 6 次实际 native AOT/link 运行：private
+receiver 含 func 字段和嵌套 token，绑定后修改源变量，opaque consumer 在取消
+及两步可挂起 drop 中仍必须使用原 token17。该 counter-based runtime island
+验收不是 wasm 执行、OS FD 或完整 runtime GC 的替代证明。
 
 ## 4. 方案比较
 

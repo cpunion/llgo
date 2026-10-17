@@ -107,6 +107,27 @@ func noinline(mode uint32) int32 { return chained(mode) }
 var published = chained
 var publishedPermutation = permuted
 
+type fieldInputs struct {
+	unused func()
+	inner  struct{ token uint32 }
+}
+type fieldAlias = fieldInputs
+
+func projected(value fieldAlias, mode uint32) int32      { return acquire(value.inner.token, mode) }
+func projectedChain(value fieldAlias, mode uint32) int32 { return projected(value, mode) }
+
+var publishedProjected = projectedChain
+
+func projectedOwner(value fieldAlias)         { projectedChain(value, 1); escaped() }
+func projectedDeferredOwner(value fieldAlias) { defer projectedChain(value, 1) }
+func projectedDynamicOwner(f func(fieldAlias, uint32) int32, value fieldAlias) {
+	f(value, 1)
+	escaped()
+}
+func projectedDynamicDeferredOwner(f func(fieldAlias, uint32) int32, value fieldAlias) {
+	defer f(value, 1)
+}
+
 type factory uint32
 
 func (token factory) acquire(mode uint32) int32 { return acquire(uint32(token), mode) }
@@ -248,7 +269,14 @@ func main() {
 	// GOMAXPROCS is selected by the runner: do not collapse the P=2 gate to P=1.
 	install()
 	mode := fixtureMode()
-	fd := chained(0)
+	var fd int32
+	if mode >= 25 {
+		var value fieldAlias
+		value.inner.token = 17
+		fd = projectedChain(value, 0)
+	} else {
+		fd = chained(0)
+	}
 	runtime.Gosched()
 	runtime.GC()
 	checkAlive(fd)
@@ -359,6 +387,26 @@ func main() {
 			go pointerInterfaceDeferredOwner(owner)
 		}
 		owner, receiver = nil, nil
+	case 25, 26, 27, 28, 29:
+		var value fieldAlias
+		value.inner.token = uint32(opened() + 15)
+		switch mode {
+		case 25:
+			go projectedOwner(value)
+		case 26:
+			go projectedDeferredOwner(value)
+		case 27:
+			go projectedDynamicOwner(publishedProjected, value)
+		case 28:
+			go projectedDynamicDeferredOwner(publishedProjected, value)
+		case 29:
+			go projectedChain(value, 1)
+		}
+		value.inner.token = 99
+		if value.inner.token != 99 {
+			escaped()
+		}
+		value = fieldAlias{}
 	default:
 		escaped()
 	}

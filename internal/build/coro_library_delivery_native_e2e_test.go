@@ -68,12 +68,21 @@ func TestCoroArchiveForwardedDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
 }
 
 func TestCoroArchiveCapturedDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
+	testCoroArchiveCapturedDeliveryNativeRuntime(t, coroArchiveCapturedValueDelivery)
+}
+
+func TestCoroArchiveCapturedFieldDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
+	testCoroArchiveCapturedDeliveryNativeRuntime(t, coroArchiveCapturedFieldDelivery)
+}
+
+func testCoroArchiveCapturedDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode) {
+	t.Helper()
 	for _, size := range []struct {
 		name  string
 		large bool
 	}{{"small", false}, {"large", true}} {
 		t.Run(size.name, func(t *testing.T) {
-			testCoroArchiveDeliveryNativeRuntime(t, coroArchiveCapturedValueDelivery, size.large, true)
+			testCoroArchiveDeliveryNativeRuntime(t, mode, size.large, true)
 		})
 	}
 }
@@ -85,11 +94,12 @@ const (
 	coroArchiveDirectValueDelivery
 	coroArchiveFactoryValueDelivery
 	coroArchiveCapturedValueDelivery
+	coroArchiveCapturedFieldDelivery
 )
 
 func testCoroArchiveDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode, large, forwarded bool) {
 	t.Helper()
-	captured := mode == coroArchiveCapturedValueDelivery
+	captured := mode == coroArchiveCapturedValueDelivery || mode == coroArchiveCapturedFieldDelivery
 	dynamic, factory := mode != coroArchiveStaticDelivery, mode == coroArchiveFactoryValueDelivery || captured
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native archive delivery requires POSIX")
@@ -408,11 +418,15 @@ func PanicWrapNilPointer(value bool, receiver, method string) { if value { abort
 			if !forwarded {
 				t.Fatal("captured archive fixture requires its real token-sensitive base helper")
 			}
-			producerSource = strings.Replace(producerSource,
-				"func Callable() func(uint32) "+result+" { return acquire }",
-				"type receiver uint32\n"+
-					"func (token receiver) captured(value uint32) "+result+" { return acquirePermuted(value,uint32(token)) }\n"+
-					"func Callable(token uint32) func(uint32) "+result+" { r:=receiver(token); bound:=r.captured; r=99; return bound }", 1)
+			receiver := "type receiver uint32\n" +
+				"func (token receiver) captured(value uint32) " + result + " { return acquirePermuted(value,uint32(token)) }\n" +
+				"func Callable(token uint32) func(uint32) " + result + " { r:=receiver(token); bound:=r.captured; r=99; return bound }"
+			if mode == coroArchiveCapturedFieldDelivery {
+				receiver = "type receiver struct { Unused func(); Inner struct { Token uint32 } }\n" +
+					"func (r receiver) captured(value uint32) " + result + " { return acquirePermuted(value,r.Inner.Token) }\n" +
+					"func Callable(token uint32) func(uint32) " + result + " { var r receiver; r.Inner.Token=token; bound:=r.captured; r.Inner.Token=99; return bound }"
+			}
+			producerSource = strings.Replace(producerSource, "func Callable() func(uint32) "+result+" { return acquire }", receiver, 1)
 			declarationSource = strings.Replace(declarationSource, "func Callable()", "func Callable(uint32)", 1)
 		}
 	}

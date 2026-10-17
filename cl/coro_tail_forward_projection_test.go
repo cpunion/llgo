@@ -51,6 +51,7 @@ type Outer struct {
 	*Inner
 }
 type Child interface { Child(int) int }
+func Projected(value Outer) int { return value.Inner.Child(value.Prefix) }
 func Parent(value Outer, pointer *Outer) int {
 	var first Child = value
 	var second Child = pointer
@@ -97,6 +98,7 @@ func Parent(value Outer, pointer *Outer) int {
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: ssaPkg.Func("Parent"), Demand: coro.AsyncDemand},
+		{Function: ssaPkg.Func("Projected"), Demand: coro.AsyncDemand},
 	}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
@@ -166,10 +168,26 @@ func Parent(value Outer, pointer *Outer) int {
 		!strings.Contains(valueIR, "extractvalue") || strings.Count(valueIR, "call ptr") != 1 {
 		t.Fatalf("value promoted wrapper was not reduced to one projected tail-forward ramp:\n%s", valueIR)
 	}
+	projected := ssaPkg.Func("Projected")
+	projectedPlan, err := universe.coroProgramIR.physicalFunctionPlan(projected, universe.ownerOf(projected))
+	if err != nil || projectedPlan.tailForward == nil || len(projectedPlan.tailForward.args) != 2 ||
+		len(projectedPlan.tailForward.args[0].fieldPath) != 1 || projectedPlan.tailForward.args[0].fieldPath[0] != 1 ||
+		len(projectedPlan.tailForward.args[1].fieldPath) != 1 || projectedPlan.tailForward.args[1].fieldPath[0] != 0 {
+		t.Fatalf("ordinary value fields did not reuse the frozen tail projection: %+v: %v", projectedPlan, err)
+	}
+	projectedName := "foo.Projected"
+	projectedIR := requireCoroPhysicalFunction(t, module, projectedName).String()
+	if strings.Contains(projectedIR, "llvm.coro.") || strings.Contains(projectedIR, coroFrameAllocHookV1) ||
+		!strings.Contains(projectedIR, "extractvalue") || strings.Count(projectedIR, "call ptr") != 1 || strings.Contains(projectedIR, "alloca") {
+		t.Fatalf("ordinary value-field wrapper added a frame or redundant storage:\n%s", projectedIR)
+	}
 	runCoroABITestPipeline(t, prog, module)
 	for _, suffix := range []string{".resume", ".destroy"} {
 		if !module.NamedFunction(physicalName + "$coro" + suffix).IsNil() {
 			t.Fatalf("frame-free promoted wrapper acquired split %s entry:\n%s", suffix, module.String())
+		}
+		if !module.NamedFunction(projectedName + "$coro" + suffix).IsNil() {
+			t.Fatalf("ordinary value-field wrapper acquired split %s entry:\n%s", suffix, module.String())
 		}
 	}
 }

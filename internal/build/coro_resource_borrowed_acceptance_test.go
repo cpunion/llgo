@@ -95,7 +95,7 @@ func TestCoroResourceDeliverySlotAcceptance(t *testing.T) {
 }
 
 func TestCoroResourceDeliveryForwardAcceptance(t *testing.T) {
-	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24})
+	testCoroResourceDeliveryAcceptance(t, "coro_resource_delivery_forward", []int{1, 2, 3, 4, 6, 7, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29})
 }
 
 func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []int) {
@@ -153,6 +153,11 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred interface method with receiver-independent cleanup.
 		"typed resource delivery normal, discarded and canceled passed",                                  // Exact receiver pointer survives rebinding and GC.
 		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred exact receiver pointer.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Nested value fields through a static wrapper.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred nested value fields.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Dynamic nested value fields.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred dynamic nested value fields.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Discarded-entry nested value fields.
 	}
 	for _, mode := range modes {
 		expected := expectedByMode[mode]
