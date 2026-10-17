@@ -74,15 +74,29 @@ func testCoroTimerGCAcceptance(t *testing.T, wasi bool) {
 			if output, err := build.CombinedOutput(); err != nil {
 				t.Fatalf("LLGo Timer/GC build: %v\n%s", err, output)
 			}
-			runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
-			defer runCancel()
-			run := exec.CommandContext(runCtx, image)
-			if wasi {
-				run = exec.CommandContext(runCtx, wasmtime, "run", image)
+			topologies, repetitions := []string{""}, 1
+			if !wasi && fixture.name == "coro_timer_gc_go127" {
+				// Collection and physical manager exit are separate owner turns.
+				// Exercise both local and cross-P retirement using the same image.
+				topologies, repetitions = []string{"1", "2"}, 8
 			}
-			output, err := run.CombinedOutput()
-			if err != nil || strings.TrimSpace(string(output)) != fixture.output {
-				t.Fatalf("LLGo Timer/GC run: %v, deadline: %v\n%s", err, runCtx.Err(), output)
+			for _, procs := range topologies {
+				for iteration := 0; iteration < repetitions; iteration++ {
+					runCtx, runCancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
+					run := exec.CommandContext(runCtx, image)
+					if wasi {
+						run = exec.CommandContext(runCtx, wasmtime, "run", image)
+					}
+					if procs != "" {
+						run.Env = append(os.Environ(), "GOMAXPROCS="+procs)
+					}
+					output, err := run.CombinedOutput()
+					deadline := runCtx.Err()
+					runCancel()
+					if err != nil || strings.TrimSpace(string(output)) != fixture.output {
+						t.Fatalf("LLGo Timer/GC run (P=%s, iteration=%d): %v, deadline: %v\n%s", procs, iteration, err, deadline, output)
+					}
+				}
 			}
 		})
 	}
