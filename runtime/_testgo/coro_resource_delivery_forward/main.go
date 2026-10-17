@@ -59,6 +59,7 @@ func escaped()
 func initialize(out *result) { out.R0 = -1 }
 func drop(out *result, _ unsafe.Pointer, token, mode uint32) {
 	if token != 17 {
+		println("forwarded small drop token mismatch", token, mode)
 		escaped()
 	}
 	fd := out.R0
@@ -93,12 +94,22 @@ var publishedPermutation = permuted
 
 func initializeLarge(out *largeResult) { out.R0 = -1 }
 func checkLarge(payload *[131073]byte, owner *[128]byte) {
-	if payload[0] != 17 || payload[len(payload)-1] != 91 || owner == nil || owner[0] != 37 {
+	if payload[0] != 17 || payload[len(payload)-1] != 91 {
+		println("forwarded large payload mismatch", payload[0], payload[len(payload)-1])
+		escaped()
+	}
+	if owner == nil {
+		println("forwarded large owner is nil")
+		escaped()
+	}
+	if owner[0] != 37 {
+		println("forwarded large owner value mismatch", owner[0])
 		escaped()
 	}
 }
 func dropLarge(out *largeResult, _ unsafe.Pointer, token, mode uint32) {
 	if token != 17 {
+		println("forwarded large drop token mismatch", token, mode)
 		escaped()
 	}
 	runtime.Gosched()
@@ -135,7 +146,7 @@ func deferredOwner()                                                            
 func dynamicOwner(f func(uint32) int32)                                          { f(1); escaped() }
 func dynamicDeferredOwner(f func(uint32) int32)                                  { defer f(1) }
 func permutationOwner(f func(uint32, uint32) int32)                              { f(1, 17); escaped() }
-func largeOwner()                                                                { largeChain(1); escaped() }
+func largeOwner()                                                                { largeChain(1); println("forwarded large owner continuation ran"); escaped() }
 func largeDeferredOwner()                                                        { defer largeChain(1) }
 func largeDynamicDeferredOwner(f func(uint32) (int32, [131073]byte, *[128]byte)) { defer f(1) }
 
