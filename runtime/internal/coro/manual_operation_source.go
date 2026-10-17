@@ -634,7 +634,9 @@ func (source *ManualOperationSource) BeginClose(p *P, id OperationID) ManualOper
 // source-owned record identity. It is the production SourceSet path: unrelated
 // live slots are neither inspected nor changed. Closing producer admission is
 // independent of physical quiescence, so the ParkLink may detach immediately
-// after the source has acknowledged winner/loser/canceled disposition.
+// after the source has acknowledged winner/loser/canceled disposition, unless
+// an automatic packet consumer must enter cleanup/Confirm in the same epoch.
+// Those consumers first join admitted posts and drain their final mailbox.
 func (source *ManualOperationSource) ApplyOne(p *P, id OperationID, record *OperationRecord) OperationApplyResult {
 	slot, ok := manualOperationSlotFor(source, id)
 	if !ok || !validManualOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
@@ -663,6 +665,24 @@ func (source *ManualOperationSource) ApplyOne(p *P, id OperationID, record *Oper
 		return OperationApplyInvalid
 	}
 	park, ticket, wait := slot.record.link.park, slot.record.link.ticket, slot.record.link.wait
+	if wait != nil && (wait.resumeKind == resumeBindingCleanup || wait.resumeKind == resumeBindingSingle) {
+		// A remote owner can observe Posted before Post releases its producer
+		// admission. Do not send a scheduler wait into typed cleanup/Confirm
+		// until that shim has joined and any late mailbox has been drained.
+		// Reuse the bounded retry epoch for automatic packet consumers. A bare
+		// wait/standalone detach keeps its explicit backend-join contract; in
+		// particular, B may still drain its late mailbox after A detached it.
+		if !producerSourceSlotQuiesced(&slot.producerSourceSlot) {
+			return OperationApplyRetryBudget
+		}
+		switch manualOperationMailbox(preemptLoad(&slot.mailbox)) {
+		case manualOperationMailboxEmpty, manualOperationMailboxDelivered:
+		case manualOperationMailboxPosting, manualOperationMailboxPosted:
+			return OperationApplyRetryBudget
+		default:
+			return OperationApplyInvalid
+		}
+	}
 	detached := wait != nil && DetachParkWaitOperation(p, park, ticket, &slot.record, id) ||
 		wait == nil && DetachParkOperation(park, ticket, &slot.record, id)
 	if !detached {
