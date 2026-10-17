@@ -246,6 +246,19 @@ func testCoroResourceDeliveryAcceptance(t *testing.T, fixture string, modes []in
 		"typed resource delivery normal, discarded and canceled passed",                                  // Discarded-entry nested value fields.
 		"typed resource delivery normal, discarded and canceled passed",                                  // Immutable boxed value receiver fields.
 		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred immutable boxed value receiver fields.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Evaluated pointer-to-value receiver, static owner.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Evaluated receiver, discarded go entry.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Evaluated receiver, static defer.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Evaluated receiver, dynamic owner.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Evaluated receiver, dynamic defer.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Mutable pointer interface payload.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Mutable pointer interface deferred call.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Promoted pointer-to-value receiver.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Noinline forwarding shares the deepest binding.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Large result with a retained function field.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Deferred dynamic large result and callback.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Opaque interface large result and callback.
+		"typed resource delivery normal, discarded and canceled passed",                                  // Typed Method.Func snapshot and large result.
 	}
 	for _, mode := range modes {
 		expected := expectedByMode[mode]
