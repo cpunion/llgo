@@ -31,6 +31,9 @@ shutdown defer。不得先排空或 join 单个 P，再通知其他 P。通知�
 worker、事件注册和 result custody 仍按各自协议 strong-join，最后才回收 owner、
 source 和物理 worker。正常 FinishMain 与 pending-source runner reentry 都必须满足
 这个顺序。复用现有 atomic stop ingress，不增加每 G 状态或第二套取消协议。
+peer stop 和 runnable placement 读取该 word 的 Sealed phase，即使旧 M 的
+succession lease 尚未退出也必须开始取消；Quiesced 只用于最终选择稳定 join target
+和回收，不能用它延迟 stop 生效、消耗一次唤醒后又重新入睡。
 
 关闭清理仍可调用 GOMAXPROCS；允许改变逻辑 quota，但 sealed stop 之后不得启动新 M。
 固定 P1 worker → P2 cleanup 的真实 linked fixture 必须在旧顺序下超时、在修复后通过，

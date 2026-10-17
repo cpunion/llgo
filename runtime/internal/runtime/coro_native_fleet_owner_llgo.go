@@ -52,7 +52,7 @@ type coroNativeFleetPhysicalOwnerV1 struct {
 
 // coroNativeFleetPhysicalOwnersV1 owns the complete bounded peer set and one
 // atomic broadcast stop word. TargetIngress has no callback entrants here:
-// Seal is the release publication observed by every peer through Quiesced, and
+// Seal is the release publication observed by every peer through Sealed, and
 // Retire leaves a permanent non-reusable process tombstone after all joins.
 type coroNativeFleetPhysicalOwnersV1 struct {
 	stop        coro.TargetIngress
@@ -358,7 +358,7 @@ func coroNativeFleetPhysicalOwnerStoppingV1(handle coro.ExecutorFleetHandle) boo
 	// The atomic stop word is the only coordinator-to-peer shutdown fact.
 	// Aggregate lifecycle is coordinator-owned diagnostic state and must not
 	// become a second, non-atomic publication protocol.
-	return ok && peer.lifecycle == coroNativeFleetPhysicalActiveV1 && state.stop.Quiesced()
+	return ok && peer.lifecycle == coroNativeFleetPhysicalActiveV1 && state.stop.Sealed()
 }
 
 func coroNativeFleetPhysicalOwnerClockV1() (int64, bool) {
