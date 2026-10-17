@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
+	"strings"
 )
 
 const DeliveryRecipeVersionV1 = 1
@@ -42,8 +43,37 @@ type DeliveryRecipeRecord struct {
 	InitializerABI string     `json:"initializer_abi"`
 	Drop           FunctionID `json:"drop"`
 	DropABI        string     `json:"drop_abi"`
-	ResultSize     uint64     `json:"result_size"`
-	ResultAlign    uint64     `json:"result_align"`
+	// DropView is an optional, producer-owned physical ABI adapter. Drop and
+	// DropABI still name the actual logical helper in the one effect graph.
+	// A transparent wrapper may reorder or fix arguments without inventing a
+	// new helper SSA body or changing that helper's logical identity.
+	DropView    DeliveryHelperViewRecord `json:"drop_view,omitzero"`
+	ResultSize  uint64                   `json:"result_size"`
+	ResultAlign uint64                   `json:"result_align"`
+}
+
+type DeliveryHelperViewRecord struct {
+	Symbol  string `json:"symbol"`
+	ABIHash string `json:"abi"`
+}
+
+func (view DeliveryHelperViewRecord) IsZero() bool { return view == (DeliveryHelperViewRecord{}) }
+
+func (view DeliveryHelperViewRecord) Validate() error {
+	if view.IsZero() {
+		return nil
+	}
+	if view.Symbol == "" || strings.ContainsAny(view.Symbol, "\x00\r\n\t ") {
+		return fmt.Errorf("coro: delivery helper view requires one exact physical symbol")
+	}
+	return validateSHA256Hex("delivery helper view ABI", view.ABIHash)
+}
+
+func (record DeliveryRecipeRecord) DropCallableABI() string {
+	if !record.DropView.IsZero() {
+		return record.DropView.ABIHash
+	}
+	return record.DropABI
 }
 
 func (record DeliveryRecipeRecord) IsZero() bool {
@@ -75,6 +105,9 @@ func (record DeliveryRecipeRecord) Validate() error {
 	}
 	if record.Producer == record.Initializer || record.Producer == record.Drop || record.Initializer == record.Drop {
 		return fmt.Errorf("coro: delivery producer, initializer, and drop must have distinct exact identities")
+	}
+	if err := record.DropView.Validate(); err != nil {
+		return err
 	}
 	if record.ResultSize == 0 || record.ResultAlign == 0 ||
 		record.ResultAlign&(record.ResultAlign-1) != 0 || record.ResultSize%record.ResultAlign != 0 {
@@ -132,7 +165,7 @@ func FreezeDeliveryRecipe(
 	}{
 		{"producer", record.Producer, record.ProducerABI, producer},
 		{"initializer", record.Initializer, record.InitializerABI, initializer},
-		{"drop", record.Drop, record.DropABI, drop},
+		{"drop", record.Drop, record.DropCallableABI(), drop},
 	} {
 		if item.got.ID != item.want || item.got.ABIHash != item.hash {
 			return DeliveryRecipe{}, fmt.Errorf("coro: delivery %s does not match its exact identity and ABI", item.role)

@@ -804,6 +804,13 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			return fmt.Errorf("coroutine library summary: delivery recipe for %q: %w", functionPlan.ID, err)
 		} else if present {
 			fact.Delivery = delivery
+			if !delivery.DropView.IsZero() {
+				recipe := universe.coroProgramIR.deliveryProducers[function]
+				primary := p.coroDeliveryRecipeHelperPrimary(recipe, 1)
+				if primary.physical.Name() != delivery.DropView.Symbol {
+					return fmt.Errorf("delivery archive view differs from its published physical symbol")
+				}
+			}
 		}
 		if err := universe.CoroLibraryEffects().ValidateFunction(function, metadata, fact); err != nil {
 			return fmt.Errorf("coroutine library summary: preflight %q: %w", functionPlan.ID, err)

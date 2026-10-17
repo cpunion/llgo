@@ -1,0 +1,196 @@
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may obtain a copy at http://www.apache.org/licenses/LICENSE-2.0.
+ */
+
+package ssa
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"go/types"
+	"strings"
+
+	"github.com/xgo-dev/llvm"
+)
+
+// CoroHelperViewArgument is one already typed, compiler-owned ABI projection.
+// Exactly one of Parameter (nonnegative) and Constant is present. Fields only
+// projects struct values; it never dereferences a receiver or borrows storage.
+// The final conversion may retag an identical LLVM representation, not perform
+// a numeric conversion, allocation, source call, or runtime type lookup.
+type CoroHelperViewArgument struct {
+	Parameter int
+	Constant  Expr
+	Fields    []int
+}
+
+const coroHelperViewAttribute = "llgo.coro.helper.view.v1"
+
+// NewCoroHelperView creates a pure physical ABI view of an existing helper.
+// Prefix is 0 for plain, 2 for (g,out)->handle, or 3 for the outcome prefix.
+// Those words are forwarded unchanged. The remaining target arguments are
+// selected from the view's source parameters by the supplied typed mapping.
+//
+// This operation does not grant a resource capability or infer an effect. Its
+// frontend must bind the real helper's frozen plan and lifetime proof. A view
+// owns no coroutine frame, await, result storage, cancellation state or hidden
+// closure environment; the real helper remains the sole logical activation.
+func (p Package) NewCoroHelperView(name string, signature *types.Signature, target Expr, prefix int, arguments []CoroHelperViewArgument) Function {
+	fail := func(reason string) { panic("ssa: coroutine helper view " + reason) }
+	if name == "" || signature == nil || target.IsNil() || name == target.Name() ||
+		validateCoroDispatchSignature(signature) != nil || signature.Variadic() {
+		fail("requires an exact name, signature and target")
+	}
+	callee := p.FuncOf(target.Name())
+	if target.kind != vkFuncDecl || callee == nil || callee.impl.C != target.impl.C ||
+		callee.NeedsEnv() || target.impl.GlobalParent().C != p.mod.C {
+		fail("requires a context-free target declaration in the same module")
+	}
+	signature = p.Prog.PhysicalFuncDecl(signature, InGo)
+	targetSignature, ok := target.RawType().(*types.Signature)
+	if !ok || validateCoroDispatchSignature(targetSignature) != nil || targetSignature.Variadic() || signature.Params().Len() <= prefix ||
+		targetSignature.Params().Len() != prefix+len(arguments) ||
+		!types.Identical(signature.Results(), targetSignature.Results()) {
+		fail("has incompatible physical signatures")
+	}
+	switch prefix {
+	case 0, 3:
+		if signature.Results().Len() != 0 {
+			fail("plain and outcome views must return void")
+		}
+	case 2:
+		if signature.Results().Len() != 1 ||
+			!types.Identical(signature.Results().At(0).Type(), types.Typ[types.UnsafePointer]) {
+			fail("coroutine view must return the target handle")
+		}
+	default:
+		fail("has an unsupported managed prefix")
+	}
+	for index := 0; index < prefix; index++ {
+		if !types.Identical(signature.Params().At(index).Type(), types.Typ[types.UnsafePointer]) ||
+			!types.Identical(targetSignature.Params().At(index).Type(), types.Typ[types.UnsafePointer]) {
+			fail("must preserve exact task, output and completion prefix words")
+		}
+	}
+	if len(arguments) == 0 || arguments[0].Parameter != 0 || !arguments[0].Constant.IsNil() || len(arguments[0].Fields) != 0 ||
+		!types.Identical(signature.Params().At(prefix).Type(), targetSignature.Params().At(prefix).Type()) {
+		fail("must pass the same exact typed resource output cell")
+	}
+	if _, pointer := signature.Params().At(prefix).Type().(*types.Pointer); !pointer {
+		fail("requires a typed resource output pointer")
+	}
+	var identity strings.Builder
+	fmt.Fprintf(&identity, "%s\x00%d", target.Name(), prefix)
+	for index, argument := range arguments {
+		parameter, literal := argument.Parameter >= 0, !argument.Constant.IsNil()
+		if parameter == literal || literal && len(argument.Fields) != 0 {
+			fail("argument must select exactly one parameter or immutable literal")
+		}
+		var typ Type
+		if parameter {
+			if argument.Parameter >= signature.Params().Len()-prefix {
+				fail("parameter projection is outside the source signature")
+			}
+			typ = p.Prog.Type(signature.Params().At(prefix+argument.Parameter).Type(), InGo)
+		} else {
+			if argument.Constant.Type == nil || !coroHelperViewConstantOwned(p, argument.Constant.impl) {
+				fail("literal projection must not capture an instruction")
+			}
+			typ = argument.Constant.Type
+		}
+		for _, field := range argument.Fields {
+			structure, ok := types.Unalias(typ.RawType()).Underlying().(*types.Struct)
+			if !ok || field < 0 || field >= structure.NumFields() {
+				fail("only supports in-range struct-value field projections")
+			}
+			typ = p.Prog.Type(structure.Field(field).Type(), InGo)
+		}
+		want := p.Prog.Type(targetSignature.Params().At(prefix+index).Type(), InGo)
+		if !coroHelperViewRetagCompatible(typ.ll, want.ll) {
+			fail("argument conversion changes its physical representation")
+		}
+		fmt.Fprintf(&identity, "\x00%d:%v", argument.Parameter, argument.Fields)
+		if literal {
+			fmt.Fprintf(&identity, ":%s", argument.Constant.impl.String())
+		}
+	}
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(identity.String())))
+	view := p.NewFuncEx(name, signature, InGo, false, true)
+	if !types.Identical(view.RawType(), signature) || view.NeedsEnv() {
+		fail("symbol conflicts with another physical signature")
+	}
+	if view.HasBody() {
+		attribute := view.impl.GetStringAttributeAtIndex(-1, coroHelperViewAttribute)
+		if attribute.IsNil() || attribute.GetStringValue() != fingerprint {
+			fail("symbol conflicts with another forwarding recipe")
+		}
+		return view
+	}
+	view.impl.AddFunctionAttr(p.mod.Context().CreateStringAttribute(coroHelperViewAttribute, fingerprint))
+	view.impl.SetLinkage(llvm.LinkOnceODRLinkage)
+	view.impl.SetUnnamedAddr(true)
+	view.Inline(AlwaysInline)
+	b := view.MakeBody(1)
+	args := make([]Expr, 0, prefix+len(arguments))
+	for index := 0; index < prefix; index++ {
+		args = append(args, view.PhysicalParam(index))
+	}
+	for index, argument := range arguments {
+		value := argument.Constant
+		if argument.Parameter >= 0 {
+			value = view.PhysicalParam(prefix + argument.Parameter)
+		}
+		for _, field := range argument.Fields {
+			value = b.Field(value, field)
+		}
+		want := p.Prog.Type(targetSignature.Params().At(prefix+index).Type(), InGo)
+		if !types.Identical(value.RawType(), want.RawType()) {
+			value = b.ChangeType(want, value)
+		}
+		args = append(args, value)
+	}
+	result := b.Call(target, args...)
+	// Do not mark this call coro-elide-safe: the target child outlives this
+	// ordinary native activation. Its existing managed caller owns that proof.
+	coroPlainDispatchReturn(b, signature, result)
+	b.EndBuild()
+	b.Dispose()
+	return view
+}
+
+func coroHelperViewRetagCompatible(source, target llvm.Type) bool {
+	if source.C == target.C {
+		return true
+	}
+	if source.TypeKind() != llvm.StructTypeKind || target.TypeKind() != llvm.StructTypeKind ||
+		source.IsStructPacked() != target.IsStructPacked() {
+		return false
+	}
+	left, right := source.StructElementTypes(), target.StructElementTypes()
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].C != right[index].C {
+			return false
+		}
+	}
+	return true
+}
+
+func coroHelperViewConstantOwned(p Package, value llvm.Value) bool {
+	if !value.IsConstant() {
+		return false
+	}
+	if !value.IsAGlobalValue().IsNil() {
+		return value.GlobalParent().C == p.mod.C
+	}
+	for index := 0; index < value.OperandsCount(); index++ {
+		if !coroHelperViewConstantOwned(p, value.Operand(index)) {
+			return false
+		}
+	}
+	return true
+}

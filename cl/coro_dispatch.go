@@ -1333,7 +1333,21 @@ func (p *context) emitCoroManagedPrimaryDescriptor(
 	physical, plainTarget, rawPlainTarget llssa.Expr, closureCtx types.Type, captured bool, env llssa.Expr,
 	delivery *llssa.CoroDispatchDeliveryOptions,
 ) coroManagedCallable {
-	targetHash := sha256.Sum256([]byte(plan.ID))
+	return p.emitCoroManagedPrimaryDescriptorBinding(b, plan, abi, physical, plainTarget, rawPlainTarget, closureCtx, captured, env, delivery, "")
+}
+
+// Physical helper views retain the real helper's logical plan, but different
+// value mappings must not alias a descriptor just because their Go types match.
+func (p *context) emitCoroManagedPrimaryDescriptorBinding(
+	b llssa.Builder, plan coro.FunctionPlan, abi coroPlainDispatchABI,
+	physical, plainTarget, rawPlainTarget llssa.Expr, closureCtx types.Type, captured bool, env llssa.Expr,
+	delivery *llssa.CoroDispatchDeliveryOptions, binding string,
+) coroManagedCallable {
+	identity := string(plan.ID)
+	if binding != "" {
+		identity += "\x00" + binding
+	}
+	targetHash := sha256.Sum256([]byte(identity))
 	targetKey := hex.EncodeToString(targetHash[:8]) + "." + hex.EncodeToString(abi.hash[:])
 	result := p.prog.Type(abi.resultSlotType, llssa.InC)
 	physicalEmission := plan.Emission

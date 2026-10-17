@@ -22,6 +22,7 @@ type coroDeliveryGuardPlan struct {
 	dynamic *coroDynamicDeliveryRecipe
 	tag     uint32
 	hasEnv  bool
+	forward bool
 }
 
 func (plan coroDeliveryGuardPlan) signature() *types.Signature {
@@ -55,11 +56,14 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 			fact.ManagedEntry != coro.ManagedEntryCoroutine && fact.ManagedEntry != coro.ManagedEntryOutcomePlain) {
 			return nil, fmt.Errorf("llgo.coroBorrowResult requires a bound physical resource-delivery guard for descriptor publication")
 		}
-		if recipe.archive == nil {
-			if recipe.loan.Value != recipe.borrow || recipe.loan.FunctionsVisited == 0 {
+		if recipe.archive == nil || recipe.forward != nil {
+			if recipe.forward == nil && (recipe.loan.Value != recipe.borrow || recipe.loan.FunctionsVisited == 0) {
 				return nil, fmt.Errorf("llgo.coroBorrowResult requires its frozen borrowed output lifetime proof")
 			}
 			for ordinal, helper := range []*ssa.Function{recipe.initializer, recipe.drop} {
+				if recipe.forward != nil {
+					break
+				} // The target retains its own lifetime proof.
 				proof := recipe.helperLoans[ordinal]
 				if proof.Function != helper || proof.Index != 0 || proof.FunctionsVisited == 0 {
 					return nil, fmt.Errorf("llgo.coroBorrowResult requires its exact helper output lifetime proof")
@@ -135,7 +139,8 @@ func prepareCoroDeliveryFunctionPlan(fn *ssa.Function, whole *coro.SSAPlan, ir *
 				}
 				plan.calls = append(plan.calls, coroDeliveryGuardPlan{
 					call: call, recipe: recipe, tag: uint32(len(plan.calls)) + 1,
-					hasEnv: entry.Params().Len() != recipe.signature.Params().Len(),
+					hasEnv:  entry.Params().Len() != recipe.signature.Params().Len(),
+					forward: plan.fallback != nil && plan.fallback.forward != nil && plan.fallback.anchor() == call,
 				})
 			}
 		}
@@ -174,11 +179,15 @@ func (s *coroStaticCleanupState) bindDelivery(p *context, plan *coroDeliveryFunc
 		panic("resource delivery storage requires one owner-local cleanup drainer")
 	}
 	delivery := &coroDeliveryFunctionState{plan: plan, calls: make(map[ssa.CallInstruction]*coroDeliveryGuardState, len(plan.calls))}
-	if len(plan.calls) != 0 {
-		delivery.active = p.coroFrameAlloc(p.prog.Uint32())
-	}
 	for _, site := range plan.calls {
 		guard := &coroDeliveryGuardState{plan: site}
+		if site.forward {
+			delivery.calls[site.call] = guard
+			continue
+		}
+		if delivery.active.IsNil() {
+			delivery.active = p.coroFrameAlloc(p.prog.Uint32())
+		}
 		if site.hasEnv {
 			guard.env = p.coroFrameAlloc(p.prog.VoidPtr())
 		}
@@ -224,6 +233,10 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 	if guard == nil || guard.plan.recipe.producer != target {
 		return nil // An initializer/drop at the same source site is not the producer.
 	}
+	if guard.plan.forward {
+		guard.result = p.compileCoroBorrowedResult(b)
+		return guard
+	}
 	if guard.plan.dynamic != nil {
 		// A closed singleton may use an exact ramp without materializing the
 		// producer's public descriptor. Its conditional helper edges still
@@ -266,6 +279,9 @@ func (p *context) beginCoroDeliveryCall(b llssa.Builder, target *ssa.Function, e
 }
 
 func (s *coroDeliveryFunctionState) claim(b llssa.Builder, guard *coroDeliveryGuardState) {
+	if guard.plan.forward {
+		return
+	} // Incoming/fallback custody survives child consumption.
 	b.StoreKnownNonNil(s.active, b.Prog.IntVal(0, b.Prog.Uint32()))
 	guard.clearCaptures(b)
 }
@@ -289,7 +305,7 @@ func (guard *coroDeliveryGuardState) clearCaptures(b llssa.Builder) {
 // before calling a possibly suspending/panicking drop so re-entry cannot
 // execute the same ownership record twice.
 func (s *coroStaticCleanupState) emitDeliveryPrefix(p *context, b llssa.Builder, next llssa.BasicBlock) llssa.BasicBlock {
-	if s.delivery == nil || len(s.delivery.plan.calls) == 0 {
+	if s.delivery == nil || s.delivery.active.IsNil() {
 		return next
 	}
 	delivery := s.delivery
@@ -298,6 +314,9 @@ func (s *coroStaticCleanupState) emitDeliveryPrefix(p *context, b llssa.Builder,
 	dispatch := b.Switch(b.LoadKnownNonNil(delivery.active), invalid)
 	dispatch.Case(p.prog.IntVal(0, p.prog.Uint32()), next)
 	for _, site := range delivery.plan.calls {
+		if site.forward {
+			continue
+		}
 		guard := delivery.calls[site.call]
 		call := p.fn.MakeBlock()
 		dispatch.Case(p.prog.IntVal(uint64(site.tag), p.prog.Uint32()), call)
@@ -357,7 +376,7 @@ func (p *context) compileCoroBorrowedResult(b llssa.Builder) llssa.Expr {
 		b.StoreKnownNonNil(storage, p.prog.Zero(p.prog.Elem(storage.Type)))
 	}
 	recipe := delivery.plan.fallback
-	p.compileCoroDeliveryHelper(b, coroDeliveryInitializeCall, recipe.initializer, []llssa.Expr{storage})
+	p.compileCoroRecipeDeliveryHelper(b, coroDeliveryInitializeCall, *recipe, 0, []llssa.Expr{storage})
 	b.Jump(initialized)
 	b.SetBlockEx(initialized, llssa.AtEnd, false)
 	b.StoreKnownNonNil(delivery.fallbackActive, p.prog.BoolVal(true))
@@ -418,8 +437,8 @@ func (s *coroStaticCleanupState) emitDeliveryFallback(p *context, b llssa.Builde
 	for index := 0; index < recipe.signature.Params().Len(); index++ {
 		args = append(args, p.fn.PhysicalParam(base+index))
 	}
-	finish := s.beginRelocatedSiteEmission(p, recipe.borrow, coroRuntimeHelperAtResultDrop)
-	p.compileCoroDeliveryHelper(b, coroDeliveryDropCall, recipe.drop, args)
+	finish := s.beginRelocatedSiteEmission(p, recipe.anchor(), coroRuntimeHelperAtResultDrop)
+	p.compileCoroRecipeDeliveryHelper(b, coroDeliveryDropCall, *recipe, 1, args)
 	finish()
 	b.Jump(done)
 	b.SetBlockContinuation(done)
