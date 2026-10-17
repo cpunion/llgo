@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"go/token"
 	"go/types"
 
 	"github.com/xgo-dev/llgo/internal/coro"
@@ -757,7 +758,7 @@ func (p *context) resolveInterfaceMethodSSA(method *types.Func, signature *types
 // family as universal descriptor transport. Returning false preserves the
 // legacy callable method word for every unrelated raw/foreign family.
 func (p *context) resolveInterfaceMethodDescriptor(
-	_ string, method *types.Func, signature *types.Signature,
+	_ string, method *types.Func, signature *types.Signature, sourceReceiver types.Type,
 ) (llssa.Expr, bool) {
 	if p.compilation == nil || p.compilation.coroManagedInterface == nil || signature == nil {
 		return llssa.Nil, false
@@ -767,6 +768,22 @@ func (p *context) resolveInterfaceMethodDescriptor(
 		return llssa.Nil, false
 	}
 	target := p.resolveInterfaceMethodSSA(method, signature)
+	if sourceReceiver != nil {
+		if _, pointer := types.Unalias(sourceReceiver).Underlying().(*types.Pointer); !pointer {
+			// A concrete value interface already owns its receiver snapshot.
+			// Keep the actual value method instead of losing that proof through
+			// the raw *T Ifn_ wrapper. Mutable *T payloads deliberately retain
+			// their separate wrapper/evaluated-snapshot requirement.
+			sourceSignature := types.NewSignatureType(types.NewVar(token.NoPos, nil, "", sourceReceiver),
+				nil, nil, signature.Params(), signature.Results(), signature.Variadic())
+			valueTarget := p.resolveInterfaceMethodSSA(method, sourceSignature)
+			if _, resource, err := p.immutableEmissionUniverse().coroProgramIR.sourceDelivery(valueTarget); err != nil {
+				panic(err)
+			} else if resource {
+				target = valueTarget
+			}
+		}
+	}
 	descriptor, err := p.emitCoroManagedInterfaceMethodDescriptor(target, patched)
 	if err != nil {
 		panic(err)
@@ -833,9 +850,7 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 	if err != nil {
 		return llssa.Nil, fmt.Errorf("managed interface descriptor: resolve managed target: %w", err)
 	}
-	if err := p.immutableEmissionUniverse().coroProgramIR.validateInterfaceDeliveryReceiver(target); err != nil {
-		return llssa.Nil, err
-	}
+	deliveryUnbound := p.immutableEmissionUniverse().coroProgramIR.validateInterfaceDeliveryReceiver(target) != nil
 	entry := p.mustFunctionSymbol(target)
 	logicalSignature := coroInterfaceDispatchCanonicalSignature(coroInterfaceDispatchCallableSignature(interfaceEntrySignature))
 	if err := validateCoroManagedInterfaceDescriptorTarget(
@@ -893,7 +908,12 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 	}
 	// The descriptor environment is the dynamic receiver supplied by
 	// IfacePtrData, so NoCapture must remain clear even for a top-level method.
-	delivery := p.coroInterfaceDeliveryDescriptorOptions(entry, logicalSignature, receiver)
+	var delivery *llssa.CoroDispatchDeliveryOptions
+	if deliveryUnbound {
+		flags |= llssa.CoroDispatchFlagDeliveryUnbound
+	} else {
+		delivery = p.coroInterfaceDeliveryDescriptorOptions(entry, logicalSignature, receiver)
+	}
 	if delivery != nil {
 		flags |= llssa.CoroDispatchFlagHasDelivery
 	}

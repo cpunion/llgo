@@ -625,7 +625,7 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		)
 		ifn = ifnExpr.impl
 		if b.Pkg.interfaceMethodDescriptor != nil {
-			if descriptor, ok := b.Pkg.interfaceMethodDescriptor(ifnName, obj, ifnSig); ok {
+			if descriptor, ok := b.Pkg.interfaceMethodDescriptor(ifnName, obj, ifnSig, t); ok {
 				if descriptor.IsNil() || descriptor.impl.IsAConstant().IsNil() ||
 					descriptor.impl.Type().TypeKind() != llvm.PointerTypeKind ||
 					descriptor.impl.GlobalParent().C != b.Pkg.mod.C {

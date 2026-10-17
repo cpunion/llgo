@@ -81,6 +81,10 @@ func (Receiver) Open(a,b int) (int,error) { return Acquire(a,b) }
 var PublishedMethod = Receiver.Open
 type Token int
 func (token Token) Bound(b int) (int,error) { return Acquire(int(token),b) }
+type TokenOpener interface { Bound(int) (int,error) }
+type FieldReceiver FieldInputs
+func (value FieldReceiver) Bound(b int) (int,error) { return Acquire(value.Inner.Token,b) }
+type FieldOpener interface { Bound(int) (int,error) }
 type Opener interface { Open(int,int) (int,error) }
 type PlainReceiver struct{}
 func (PlainReceiver) Open(a,b int) (int,error) { return a+b,nil }
@@ -112,6 +116,12 @@ func Root(pointer *PointerReceiver) {
  token = 99
  captured(7)
  PublishedCaptured(8)
+ var tokenOpen TokenOpener = token
+ token = 101
+ tokenOpen.Bound(14)
+ var fieldOpen FieldOpener = FieldReceiver(fields)
+ fields.Inner.Token = 99
+ fieldOpen.Bound(15)
  var open Opener = receiver
  open.Open(9,10)
  InterfaceOwner(open)

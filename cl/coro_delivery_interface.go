@@ -63,7 +63,16 @@ func (p *context) coroInterfaceDeliveryDescriptorOptions(entry plannedFunctionSy
 			return llssa.CoroHelperViewArgument{Parameter: index + 1, Fields: fields}
 		}
 		argument := llssa.CoroHelperViewArgument{Parameter: 1, Fields: fields}
-		if _, pointer := types.Unalias(receiver).Underlying().(*types.Pointer); !pointer || len(fields) != 0 {
+		if _, pointer := types.Unalias(receiver).Underlying().(*types.Pointer); !pointer {
+			if p.prog.SizeOf(p.prog.Type(receiver, llssa.InGo)) == 0 {
+				projected, valid := coroForwardingProjectedType(receiver, fields)
+				if !valid {
+					panic("interface delivery lost its zero-size receiver projection")
+				}
+				return llssa.CoroHelperViewArgument{Parameter: -1, Constant: p.prog.Zero(p.prog.Type(projected, llssa.InGo))}
+			}
+			argument.Environment = p.prog.Type(types.NewPointer(receiver), llssa.InGo)
+		} else if len(fields) != 0 {
 			panic("interface delivery requires its evaluated receiver binding")
 		}
 		return argument

@@ -1571,7 +1571,24 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 		} else if emission == coro.EmitOutcomePlain {
 			envIndex = 3
 		}
-		physicalArgs = append(physicalArgs, b.Convert(p.prog.Type(closureCtx, llssa.InC), thunk.PhysicalParam(envIndex)))
+		// closureCtx is already the target declaration's exact physical type.
+		contextType := p.prog.Type(closureCtx, llssa.InC)
+		var context llssa.Expr
+		if _, pointer := types.Unalias(closureCtx).Underlying().(*types.Pointer); !pointer &&
+			!types.Identical(closureCtx, types.Typ[types.UnsafePointer]) {
+			// Resource value-method descriptors borrow the immutable concrete
+			// interface box. Closure environments and pointer receivers still
+			// forward their original pointer identity without a pointee load.
+			if p.prog.SizeOf(contextType) == 0 {
+				context = p.prog.Zero(contextType)
+			} else {
+				address := b.Convert(p.prog.Pointer(contextType), thunk.PhysicalParam(envIndex))
+				context = b.LoadKnownNonNil(address)
+			}
+		} else {
+			context = b.Convert(contextType, thunk.PhysicalParam(envIndex))
+		}
+		physicalArgs = append(physicalArgs, context)
 	}
 	for i := 0; i < targetSourceParams; i++ {
 		argument := thunk.PhysicalParam(thunkSourceBase + i)

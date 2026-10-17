@@ -89,6 +89,10 @@ func drop(out *result, env unsafe.Pointer, token, mode uint32) {
 
 func acquire(token, mode uint32) int32 {
 	out := borrow(initialize, drop)
+	if token != 17 {
+		println("forwarded producer token mismatch", token, mode)
+		escaped()
+	}
 	openInto(out, mode)
 	if mode == 2 {
 		panic("failed after acquiring forwarded resource")
@@ -127,6 +131,15 @@ func projectedDynamicOwner(f func(fieldAlias, uint32) int32, value fieldAlias) {
 func projectedDynamicDeferredOwner(f func(fieldAlias, uint32) int32, value fieldAlias) {
 	defer f(value, 1)
 }
+
+type boxedFactory fieldInputs
+
+func (value boxedFactory) fieldAcquire(mode uint32) int32 { return acquire(value.inner.token, mode) }
+
+type boxedResourceFactory interface{ fieldAcquire(uint32) int32 }
+
+func boxedInterfaceOwner(owner boxedResourceFactory)         { owner.fieldAcquire(1); escaped() }
+func boxedInterfaceDeferredOwner(owner boxedResourceFactory) { defer owner.fieldAcquire(1) }
 
 type factory uint32
 
@@ -270,7 +283,14 @@ func main() {
 	install()
 	mode := fixtureMode()
 	var fd int32
-	if mode >= 25 {
+	if mode == 30 || mode == 31 {
+		var value boxedFactory
+		value.inner.token = 17
+		var owner boxedResourceFactory = value
+		value.inner.token = 99
+		fd = owner.fieldAcquire(0)
+		owner, value = nil, boxedFactory{}
+	} else if mode >= 25 {
 		var value fieldAlias
 		value.inner.token = 17
 		fd = projectedChain(value, 0)
@@ -407,6 +427,20 @@ func main() {
 			escaped()
 		}
 		value = fieldAlias{}
+	case 30, 31:
+		var value boxedFactory
+		value.inner.token = uint32(opened() + 15)
+		var owner boxedResourceFactory = value
+		value.inner.token = 99
+		if value.inner.token != 99 {
+			escaped()
+		}
+		if mode == 30 {
+			go boxedInterfaceOwner(owner)
+		} else {
+			go boxedInterfaceDeferredOwner(owner)
+		}
+		owner, value = nil, boxedFactory{}
 	default:
 		escaped()
 	}
