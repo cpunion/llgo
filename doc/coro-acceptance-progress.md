@@ -35,12 +35,48 @@ executable SHA-256 is
 the guarded process-tree peak is 2777.0MiB. This affected rerun does not relabel
 the original whole-demo cohort as an all-passing single-snapshot run.
 
-PR #287 still has a real Linux CI failure in timer/ticker weak collection at
-P=2, despite passing the other 17 jobs. It is not merged or reclassified. PR
-#288 contains the separately validated context-free resource helper-view
-cohort and remains draft pending its complete CI and the remaining integration
-blockers. No instruction goldens, collection deadline or semantic assertions
-were relaxed to obtain these results.
+PRs #288 (helper views), #289 (manual producer join), and #287 (shutdown fix
+and failed-image retention) are now merged into `llvm-coro` as `520e3958c`,
+`0720fddd7`, and `e6a2a9b93`. Their exact final heads each passed all 18 CI jobs
+in runs `39003055947`, `39004800766`, and `39004983371`, respectively; fresh
+paginated review, inline-comment, issue-comment and thread inventories were
+empty before each merge. PR #287's earlier 17/18 run still contains the real
+P=2 timer/ticker weak-collection failure. Subsequent green runs do not establish
+its cause or reclassify it. Failed native timer images and their exact compiler,
+hashes, library paths and environment are now retained by CI for investigation.
+No instruction goldens, collection deadline or semantic assertions were relaxed.
+
+### Void call result transport (v147)
+
+A source call with no return values now uses a nil output address through
+direct coroutine, managed descriptor, synchronous outcome and original-init
+bridge calls. Completion, panic and cancellation still use their existing
+separate completion protocol. Interface invocation already used this rule.
+A source return value of type `struct{}` is **not** void and retains its typed
+output cell; no result-layout, callable ABI or runtime state is added.
+
+The test-only precursor fails on native/wasm32 empty allocas and non-nil void
+outputs. Corrected direct/descriptor regressions pass, as do **538** existing
+top-level coro/physical-ABI/generic-patch/emission-contract compiler tests.
+Frozen v147 (`0e63ced6e6d87cc661c4f26c4ec5b41d433ca900`, manifest SHA-256
+`f6d92ab6baa2610c1500b6c5c638206273f7fdd51bff37fbf223492c92faca42`)
+uses compiler SHA-256
+`1edc7097f3c2feb641e06736bb144671a14aab9e2df8bc24277153e4e46c002a`.
+It passes **64/64** original sync-demo executions (16 each at P=1/2/4/8),
+the original **320** and forwarded **220** FD delivery executions, six opaque
+nonresource controls and borrowed-result cleanup, plus all three native and
+all three WASI Timer/GC acceptance fixtures. Source-after matches.
+
+This does not solve the separate large-function compile-time outlier:
+`fixedbugs/issue9604b.go`'s generated arithmetic program still hits the explicit
+eight-minute profiling bound, after the earlier original 25-minute evaluation
+timeout. Native samples locate the hotspot in LLVM 22's
+`CoroCleanup -> SimplifyCFG`, not Go effect analysis. Its retained presplit
+module has 7,106 slice argument cells and, before v147, 7,106 empty result cells.
+The failed whole profiling cohort remains failed even though all subsequent
+resource/timer subsets pass; its peak is 7334.2MiB under a 16GiB guard. Neither
+the global no-elision experiment nor unproven early optimization passes were
+merged. Full-suite and quiet performance evaluation remain outstanding.
 
 ### Latest executable refresh: v117/v118/v120
 
