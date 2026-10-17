@@ -31,15 +31,15 @@ import (
 // The consumer's imported type package has only exported declarations: neither
 // private helper gets an invented SSA function or a substitute runtime body.
 func TestCoroArchiveDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
-	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveStaticDelivery, false)
+	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveStaticDelivery, false, false)
 }
 
 func TestCoroArchiveDynamicDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
-	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveDirectValueDelivery, false)
+	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveDirectValueDelivery, false, false)
 }
 
 func TestCoroArchivePrivateCallableDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
-	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveFactoryValueDelivery, false)
+	testCoroArchiveDeliveryNativeRuntime(t, coroArchiveFactoryValueDelivery, false, false)
 }
 
 func TestCoroArchiveLargeDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
@@ -47,7 +47,23 @@ func TestCoroArchiveLargeDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
 		name string
 		mode coroArchiveDeliveryMode
 	}{{"static", coroArchiveStaticDelivery}, {"dynamic", coroArchiveDirectValueDelivery}, {"private-factory", coroArchiveFactoryValueDelivery}} {
-		t.Run(mode.name, func(t *testing.T) { testCoroArchiveDeliveryNativeRuntime(t, mode.mode, true) })
+		t.Run(mode.name, func(t *testing.T) { testCoroArchiveDeliveryNativeRuntime(t, mode.mode, true, false) })
+	}
+}
+
+func TestCoroArchiveForwardedDeliveryNativeNoStdlibRuntimeE2E(t *testing.T) {
+	for _, size := range []struct {
+		name  string
+		large bool
+	}{{"small", false}, {"large", true}} {
+		for _, mode := range []struct {
+			name string
+			mode coroArchiveDeliveryMode
+		}{{"static", coroArchiveStaticDelivery}, {"dynamic", coroArchiveDirectValueDelivery}, {"private-factory", coroArchiveFactoryValueDelivery}} {
+			t.Run(size.name+"/"+mode.name, func(t *testing.T) {
+				testCoroArchiveDeliveryNativeRuntime(t, mode.mode, size.large, true)
+			})
+		}
 	}
 }
 
@@ -59,7 +75,7 @@ const (
 	coroArchiveFactoryValueDelivery
 )
 
-func testCoroArchiveDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode, large bool) {
+func testCoroArchiveDeliveryNativeRuntime(t *testing.T, mode coroArchiveDeliveryMode, large, forwarded bool) {
 	t.Helper()
 	dynamic, factory := mode != coroArchiveStaticDelivery, mode == coroArchiveFactoryValueDelivery
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
@@ -316,6 +332,21 @@ func AssertNilDeref(value bool) { if value { abort() } }
 		producerSource = strings.Replace(producerSource, "return out.R0.Value", "return out.R0", 1)
 		declarationSource = strings.Replace(declarationSource, "package library\n", "package library\n"+payload, 1)
 		declarationSource = strings.Replace(declarationSource, "func Acquire(uint32) uint32", "func Acquire(uint32) Payload", 1)
+	}
+	if forwarded {
+		result := "uint32"
+		if large {
+			result = "Payload"
+		}
+		// Only the producer knows these bodies. Two real source wrappers
+		// supply a literal and permute same-typed parameters; the public
+		// drop view must carry that mapping across the archive boundary.
+		producerSource = strings.Replace(producerSource, "func Acquire(value uint32)", "func acquireIntoBorrowed(token, value uint32)", 1)
+		producerSource = strings.Replace(producerSource, "func drop(out *Result, _ unsafe.Pointer, _ uint32)", "func drop(out *Result, _ unsafe.Pointer, token, _ uint32)", 1)
+		producerSource = strings.Replace(producerSource, "attempts++", "attempts++; if token != 17 { attempts += 1000 }", 1)
+		producerSource = strings.Replace(producerSource, "func(*Result, unsafe.Pointer, uint32)", "func(*Result, unsafe.Pointer, uint32, uint32)", 1)
+		producerSource += "\nfunc acquirePermuted(value, token uint32) " + result + " { return acquireIntoBorrowed(token, value) }\n" +
+			"func Acquire(value uint32) " + result + " { return acquirePermuted(value, 17) }\n"
 	}
 	if factory {
 		result := "uint32"
