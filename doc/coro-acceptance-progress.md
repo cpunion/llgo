@@ -43,19 +43,39 @@ Exact follow-up CI run `39073066329` passes **20/20**. Fresh paginated reviews,
 inline/issue comments and review threads are empty. PR #296 merged as
 `d8597d49206cd5accf1fa77832376fef5614b8e5` into `cpunion/llgo:llvm-coro`.
 
-Demo, stdlib and GOROOT acceptance are still running on separate copies of the
-same frozen production inputs; these are not completed suite receipts. The
-selected GOROOT scope is **1,082** existing CI runtime cases. The other **1,316**
-discovered compilation/diagnostic/multifile cases remain a coverage boundary,
-as requested. Every main-matrix outcome is preserved, including raw failures:
-`noinit.go` requires gc's private `main..inittask` ABI; `rangegen.go` exceeds its
-10 GiB compile RSS ceiling, including a lower-heap-soft-target retry. One
-separate 24 GiB assessment is in progress because the retained older default
-optimization receipt needed 22,826.6 MiB. It does not replace the main failure.
-Runner PASS can include configured expected failures; the final receipt will
-list actual execution-check passes separately. Disk-floor interruptions and
-intentional joined package/batch-boundary repartitions remain explicit. No
-whole-project or full-tree follow-up all-suite pass is asserted.
+The same frozen production inputs have now completed executable Go demos
+**73/73**, with no failures or skips and matching source-after. Stdlib acceptance
+has **49/180** complete successful packages; **131** remain unaccepted. Five
+compilation attempts across four packages were stopped by the disk floor before
+semantic execution. Their raw results remain retained separately from later
+attempts; they are not converted to passes.
+
+The selected GOROOT scope is **1,082** existing CI runtime cases. The other
+**1,316** discovered compilation/diagnostic/multifile cases remain a coverage
+boundary, as requested. **436** cases have complete joined batch receipts:
+runner **434 PASS / 2 FAIL**. Of those runner passes, **430** actually passed the
+execution/output checks and **4** match existing expected-failure classifications.
+The remaining **646** cases are still unfinished; interrupted batches are rerun
+in full rather than reusing partial outcomes.
+
+The two original raw failures remain visible: `noinit.go` requires gc's private
+`main..inittask` ABI, and `rangegen.go` exceeds the 10 GiB generated-compilation
+RSS ceiling, including a lower-heap-soft-target retry. A separate 24 GiB
+assessment stopped with monitor exit 125 before a generated-program semantic
+result; it does not establish a 24 GiB RSS failure or replace the original
+main-matrix failure. The retained older default-optimization receipt needed
+22,826.6 MiB, which is separate historical evidence.
+
+At the 2026-10-18 checkpoint, disk space has fallen below the unchanged **10 GiB**
+protection floor and the long campaigns have stopped. All guarded controllers
+and child process domains have joined; both complete frozen source manifests
+and the compiler hash still match. Runtime sampling was adapted for Darwin
+process-inspection timeouts, exited zombies and protected platform subprocesses;
+actual subprocess and GOROOT adapter probes are retained. This changes only
+acceptance instrumentation. Complete successes, raw failures and every
+infrastructure interruption retain their original records. `resume-plan-s3r6.json`
+records exact remaining partitions and requires restored storage before new
+admission. No whole-project or full-tree follow-up all-suite pass is asserted.
 
 The same production freeze also completes **272/272** throughput/progress
 executions and **80/80** steady parked-memory executions against Go 1.27.0,
