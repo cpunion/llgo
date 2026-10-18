@@ -1,10 +1,15 @@
 """Native LLGo source-debug acceptance for faults and Go/host frames."""
 
 import os
+import time
 from pathlib import Path
 from typing import Iterable, List
 
 import lldb
+
+
+def progress(message):
+    print(f"NATIVE_DIAG {time.monotonic():.3f} {message}", flush=True)
 
 
 class AcceptanceError(RuntimeError):
@@ -80,7 +85,9 @@ def find_frame(
 def create_session(executable: str) -> tuple[lldb.SBDebugger, lldb.SBTarget]:
     debugger = lldb.SBDebugger.Create()
     debugger.SetAsync(False)
+    progress(f"CreateTarget begin {executable}")
     target = debugger.CreateTarget(executable)
+    progress("CreateTarget end")
     if not target.IsValid():
         lldb.SBDebugger.Destroy(debugger)
         raise AcceptanceError(f"could not create target for {executable}")
@@ -88,7 +95,9 @@ def create_session(executable: str) -> tuple[lldb.SBDebugger, lldb.SBTarget]:
 
 
 def launch(target: lldb.SBTarget, scenario: str, cwd: str) -> lldb.SBProcess:
+    progress(f"LaunchSimple begin {scenario}")
     process = target.LaunchSimple([scenario], None, cwd)
+    progress(f"LaunchSimple end {scenario}: {describe_process(process)}")
     require_stopped(process, scenario)
     return process
 
@@ -98,8 +107,12 @@ def destroy_session(debugger: lldb.SBDebugger, process: lldb.SBProcess) -> None:
         lldb.eStateExited,
         lldb.eStateDetached,
     ):
+        progress("Kill begin")
         process.Kill()
+        progress("Kill end")
+    progress("Destroy begin")
     lldb.SBDebugger.Destroy(debugger)
+    progress("Destroy end")
 
 
 def set_panic_breakpoint(target: lldb.SBTarget) -> lldb.SBBreakpoint:
@@ -184,7 +197,9 @@ def check_optimized_inline(executable: str, cwd: str, root: Path) -> None:
 
         after_line = marker_line(root / "inline.go", "LLDB_STOP: inline_after_call")
         for _ in range(8):
+            progress(f"StepOver begin {_}: {describe_process(process)}")
             process.GetSelectedThread().StepOver()
+            progress(f"StepOver end {_}: {describe_process(process)}")
             require_stopped(process, "optimized inline step-over")
             top = process.GetSelectedThread().GetFrameAtIndex(0)
             source, line = frame_location(top)
@@ -232,6 +247,7 @@ def run_all(executable: str, optimized_executable: str, source_root: str) -> Non
         ("invalid-memory", "main.invalidMemory", "LLDB_STOP: invalid_memory"),
     )
     for scenario, function, marker in panic_cases:
+        progress(f"scenario {scenario}")
         check_go_panic(
             executable,
             cwd,
@@ -239,7 +255,9 @@ def run_all(executable: str, optimized_executable: str, source_root: str) -> Non
             function,
             marker_line(root / "main.go", marker),
         )
+    progress("scenario inline")
     check_optimized_inline(optimized_executable, cwd, root)
+    progress("scenario aggregate")
     check_optimized_aggregate(optimized_executable, cwd, root)
     print("NATIVE_DEBUG_ACCEPTANCE_OK")
 
