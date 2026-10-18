@@ -792,49 +792,51 @@ jobs:
           go build -o "$LLGO_TEST_LLGO" ./cmd/llgo
           go test ./internal/build -run '^TestCoroBaremetalTimerAcceptance$' -count=1 -v -timeout=12m
 
-  retained-timer-diagnostic:
+  timer-candidate-validation:
     if: github.event_name == 'workflow_dispatch' && github.repository == 'cpunion/llgo'
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     permissions:
       contents: read
       actions: read
+    env:
+      LLGO_ROOT: ${{ github.workspace }}
+      LLGO_BUILD_CACHE: off
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 2GiB
     steps:
       - uses: actions/checkout@v7
-      - name: Install debugger and exact collector ABI
+      - name: Install LLVM22 and collector headers
         run: |
+          echo 'deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
           sudo apt-get update
-          sudo apt-get install --no-install-recommends libgc1 libffi8 libatomic1 gdb
-      - name: Download the original failed CI image
+          sudo apt-get install --no-install-recommends llvm-22-dev clang-22 lld-22 libgc-dev libffi-dev pkg-config
+          echo '/usr/lib/llvm-22/bin' >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: '1.27.0'
+      - name: Download unchanged retained compiler
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p /tmp/timer-evidence /tmp/timer-diag /tmp/llgo-timer-gc-artifacts/coro_timer_gc_go127
+          mkdir -p /tmp/timer-evidence /tmp/timer-candidate
           gh api repos/cpunion/llgo/actions/artifacts/12128509760/zip > /tmp/original-timer.zip
           unzip -q /tmp/original-timer.zip -d /tmp/timer-evidence
-          cp /tmp/timer-evidence/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer /tmp/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer
-          chmod +x /tmp/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer
-          dpkg-query -W libc6 libgc1 libffi8 libatomic1 > /tmp/timer-diag/environment.txt
-          uname -a >> /tmp/timer-diag/environment.txt
-          sha256sum /tmp/timer-evidence/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer >> /tmp/timer-diag/environment.txt
-      - name: Repeat unchanged image without debugger
-        if: false
-        env:
-          DIAG_IMAGE: /tmp/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer
-          DIAG_OUT: /tmp/timer-diag
-        run: timeout 6m python3 .github/scripts/coro-timer-retained-native.py
-      - name: Capture first failure without calls into the inferior
-        if: always()
-        env:
-          DIAG_IMAGE: /tmp/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer
-          DIAG_OUT: /tmp/timer-diag
+          chmod +x /tmp/timer-evidence/llgo-timer-gc
+          sha256sum /tmp/timer-evidence/llgo-timer-gc > /tmp/timer-candidate/compiler.sha256
+          dpkg-query -W libc6 libgc1 libffi8 libatomic1 > /tmp/timer-candidate/environment.txt
+      - name: Compile candidate fixture with unchanged compiler and runtime
         run: |
-          timeout 10m gdb -batch -ex 'source .github/scripts/coro-timer-gdb-capture.py' > /tmp/timer-diag/gdb.log 2>&1
-      - name: Preserve diagnostic evidence
+          cd runtime
+          timeout 10m /tmp/timer-evidence/llgo-timer-gc build -p=1 -o /tmp/timer-candidate/timer ../.github/scripts/coro-timer-candidate.go > /tmp/timer-candidate/build.log 2>&1
+          sha256sum ../.github/scripts/coro-timer-candidate.go /tmp/timer-candidate/timer > /tmp/timer-candidate/inputs.sha256
+      - name: Repeat strict positive fixture and test both negative assertions
+        run: timeout 5m python3 .github/scripts/coro-timer-validate-candidate.py
+      - uses: actions/upload-artifact@v7
         if: always()
-        uses: actions/upload-artifact@v7
         with:
-          name: retained-timer-gc-native-diagnostic
-          path: /tmp/timer-diag
+          name: timer-gc-boundary-candidate
+          path: /tmp/timer-candidate
           if-no-files-found: error
           retention-days: 7
