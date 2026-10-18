@@ -30,7 +30,36 @@ func TestConcurrentOperations(t *testing.T) {
 }
 
 func TestConcurrentCAS(t *testing.T) {
-	t.Skip("Concurrent CAS test skipped due to potential infinite loop")
+	const workers, iterations = 8, 1000
+	var counter int64
+	done := make(chan bool, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			for j := 0; j < iterations; j++ {
+				updated := false
+				for attempt := 0; attempt < 1<<20; attempt++ {
+					old := atomic.LoadInt64(&counter)
+					if atomic.CompareAndSwapInt64(&counter, old, old+1) {
+						updated = true
+						break
+					}
+				}
+				if !updated {
+					done <- false
+					return
+				}
+			}
+			done <- true
+		}()
+	}
+	for i := 0; i < workers; i++ {
+		if !<-done {
+			t.Error("CAS failed to make progress")
+		}
+	}
+	if got := atomic.LoadInt64(&counter); got != workers*iterations {
+		t.Fatalf("CAS counter = %d, want %d", got, workers*iterations)
+	}
 }
 
 // Benchmark functions

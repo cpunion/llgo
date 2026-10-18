@@ -487,6 +487,23 @@ jobs:
             exit 1
           fi
 
+      - name: Test native build information and released main package metadata
+        if: matrix.lane == 'fault-e2e'
+        run: |
+          go test ./internal/build \
+            -run '^Test(GenMainModule|LinkedBuildInfo|BuildInfoSurvivesNativeLink|RuntimeCompilerSourcePatchTypeChecks)' \
+            -timeout=3m -count=1
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            timeout 5m /tmp/llgo-coro-fault build -p=1 -trimpath \
+            -o /tmp/llgo-buildinfo-gate ./test/go/testdata/coro_buildinfo
+          timeout 30s /tmp/llgo-buildinfo-gate
+          go version -m /tmp/llgo-buildinfo-gate
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            go test ./test/goroot -run '^TestGoRootRunCases$' -count=1 -v -timeout=5m \
+            -goroot="$(go env GOROOT)" -llgo=/tmp/llgo-coro-fault \
+            -directive-mode=ci -case='^noinit\.go$' \
+            -build-timeout=3m -run-timeout=1m
+
       - name: Test native linked coroutine islands
         if: matrix.lane == 'native-e2e'
         # Each fixture builds and optimizes its own LLVM runtime island. Keep

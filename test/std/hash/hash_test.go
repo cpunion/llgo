@@ -360,12 +360,6 @@ func TestImplementationEdgeCases(t *testing.T) {
 	})
 }
 
-func TestSkippedInterfaces(t *testing.T) {
-	// Test that Cloner and XOF interfaces are not exported
-	// These interfaces exist internally but are not available for import
-	t.Skip("hash.Cloner and hash.XOF are not exported interfaces in hash package")
-}
-
 // Benchmark tests for hash operations
 func BenchmarkHashWrite(b *testing.B) {
 	h := newMockHash(32, 8)

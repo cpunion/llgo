@@ -174,5 +174,7 @@ func TestBuildInfoParsingAndReading(t *testing.T) {
 		if info.String() == "" {
 			t.Fatal("BuildInfo.String returned an empty string")
 		}
+	} else {
+		t.Fatal("ReadBuildInfo failed")
 	}
 }
