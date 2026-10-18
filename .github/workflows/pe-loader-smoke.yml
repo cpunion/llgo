@@ -1,0 +1,25 @@
+name: PE loader smoke
+
+on:
+  push:
+    branches: [codex/pe-loader-smoke-20261018]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-loader:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go
+        with:
+          cache: "false"
+      - name: Exercise PE readers and the native Windows image loader
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\Program Files\LLVM\bin;" + $env:PATH
+          clang --version
+          lld-link --version
+          go test -count=1 -v ./internal/dwarfcompress
