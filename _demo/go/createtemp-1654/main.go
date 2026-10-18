@@ -17,6 +17,9 @@ const (
 
 func worker(dir string, errs chan<- error) {
 	for i := 0; i < iterations; i++ {
+		if i%1000 == 0 {
+			println("worker progress", i)
+		}
 		f, err := os.CreateTemp(dir, "tmpfile-*.tmp")
 		if err != nil {
 			errs <- fmt.Errorf("CreateTemp: %w", err)

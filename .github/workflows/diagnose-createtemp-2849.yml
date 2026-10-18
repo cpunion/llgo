@@ -1,0 +1,66 @@
+name: Diagnose Windows createtemp hang
+on:
+  push:
+    branches: [codex/debug-createtemp-2849-20261018]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [baseline, candidate]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Select baseline compiler
+        if: matrix.compiler == 'baseline'
+        run: git restore --source=c41bc55d918b2d728201ea45b4ba8000611a7ab8 -- cl/instr.go
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: mingw
+          windows-arch: arm64
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: arm64
+      - name: Build host compiler
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/llgo-bin"
+          go build -o "$RUNNER_TEMP/llgo-bin/llgo.exe" ./cmd/llgo
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: mingw
+          windows-arch: arm64
+      - name: Build failing demo
+        shell: bash
+        run: |
+          cd _demo/go/createtemp-1654
+          llgo build -p=1 -o "$RUNNER_TEMP/createtemp.exe" .
+      - name: Execute with bounded wait
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'createtemp-stdout.log'
+          $err = Join-Path $env:RUNNER_TEMP 'createtemp-stderr.log'
+          $process = Start-Process (Join-Path $env:RUNNER_TEMP 'createtemp.exe') -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          $finished = $process.WaitForExit(600000)
+          Get-Content $out
+          Get-Content $err
+          if (-not $finished) {
+            Get-Process -Id $process.Id | Format-List Id,CPU,WorkingSet,Threads
+            Stop-Process -Id $process.Id -Force
+            throw 'createtemp did not finish in 10 minutes'
+          }
+          if ($process.ExitCode -ne 0) { throw "Exit code $($process.ExitCode)" }
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: createtemp-${{ matrix.compiler }}
+          path: ${{ runner.temp }}/createtemp-*.log
