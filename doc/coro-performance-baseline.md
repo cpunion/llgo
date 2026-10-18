@@ -1,10 +1,86 @@
 # LLVM coroutine performance baseline
 
-This document records a reproducible local comparison between the current
+## Current frozen checkpoint: 2026-10-18
+
+Production source manifest: `fdd0207f012878b4a0bdda9a362b8520a569e87c91441143e08b76c0b43a4fc2`; LLGo compiler SHA-256: `6b7d52bc7ece1fe1d92913747c26bbf2290e15a5dfaa0dfd202b5c4da49830ac`. The later host/CI/timer-fixture follow-ups do not change this production compiler/runtime. This report is a shared-host checkpoint with raw ranges, not a general regression budget.
+
+go version go1.27.0 darwin/arm64; LLVM 22.1.8; Apple M4 Max (Mac16,5), 16 logical CPUs, 128 GiB RAM. ProductName:		macOS; ProductVersion:		27.0.1; BuildVersion:		26A434.
+
+Both compilers build the same ordinary Go sources with `-p=1 -trimpath -ldflags='-s -w'`. Each case has one prior warmup pair and seven alternating Go/LLGo pairs. P=1 is set at process start except the explicit P=4 row. Time is the common program's elapsed field; all checksums and exact completion records pass. No timed sample is discarded.
+
+BDWGC 8.2.12 and libffi 3.8.0 are the hashed external dependencies; builds explicitly use the installed macOS 26.5 SDK.
+
+Observed one-minute load ranges: throughput 3.98–4.24; parked-memory 3.98–13.03. Per-run loads and process/power snapshots are retained.
+
+| Workload | Go ms median [min, max] | LLGo ms median [min, max] | LLGo / Go |
+|---|---:|---:|---:|
+| static-compute | 78.094 [77.102, 79.381] | 74.151 [72.869, 74.444] | 0.950x |
+| parallel-P1 | 62.925 [61.486, 63.369] | 61.572 [60.187, 62.844] | 0.978x |
+| parallel-P4 | 16.438 [16.318, 16.590] | 15.751 [15.284, 15.942] | 0.958x |
+| buffered | 80.277 [79.359, 84.761] | 77.621 [76.728, 79.184] | 0.967x |
+| select-ready | 104.345 [103.450, 106.776] | 73.346 [71.625, 74.508] | 0.703x |
+| spawn-batch | 8.082 [8.022, 8.419] | 21.209 [20.935, 21.422] | 2.624x |
+| spawn-serial | 16.680 [16.467, 16.946] | 145.393 [144.004, 145.929] | 8.716x |
+| handoff | 15.266 [14.690, 15.695] | 20.796 [20.389, 21.351] | 1.362x |
+| timers | 128.508 [126.831, 129.097] | 142.518 [141.003, 143.235] | 1.109x |
+| file | 9.519 [9.295, 9.681] | 46.883 [46.187, 48.434] | 4.925x |
+| file-syscall | 10.997 [9.460, 11.953] | 14.012 [13.955, 16.144] | 1.274x |
+| tcp | 93.195 [90.709, 94.529] | 197.866 [194.677, 227.057] | 2.123x |
+
+A ratio above 1 means LLGo took longer in this run. The timer case includes deliberate 1 ms waits. Pipe-block verifies progress and is not a throughput result; idle/park elapsed fields are excluded. Dynamic-call throughput is outside this matrix. TCP/file measurements use local cache/loopback behavior, not durability or remote-network latency.
+
+### Stripped executable file sizes
+
+| Sample | Go bytes | LLGo bytes | LLGo / Go |
+|---|---:|---:|---:|
+| core | 1,365,954 | 3,941,360 | 2.885x |
+| io | 1,780,690 | 6,377,888 | 3.582x |
+| parked | 1,382,594 | 3,994,032 | 2.889x |
+
+Produced stripped executable file bytes. Shared dependency libraries are outside these file sizes; dependency lists are retained separately. `toolchain-and-dependencies.log` records each image's linked dependencies. These bytes are not compressed packages or complete deployment closure sizes.
+
+### Steady parked-goroutine memory
+
+The same source parks N goroutines, waits for a readiness barrier, yields and runs GC, and holds them until an external stdin release. Each measured process has seven current OS RSS reads while held; each table cell is the median and range across seven measured processes. Full-lifecycle OS peak RSS is recorded separately. This measures process memory, including runtime/allocator costs; it is not an exact frame size.
+
+| Parked G | Go steady MiB [min, max] | LLGo steady MiB [min, max] |
+|---|---:|---:|
+| 0 | 4.078 [4.062, 4.141] | 7.453 [7.438, 7.453] |
+| 1,000 | 6.922 [6.812, 6.938] | 9.031 [9.016, 9.047] |
+| 10,000 | 30.641 [30.578, 30.656] | 22.531 [22.531, 22.562] |
+| 50,000 | 137.266 [136.484, 137.344] | 83.359 [83.344, 83.594] |
+| 100,000 | 267.812 [267.250, 268.219] | 159.141 [159.141, 159.156] |
+
+go: zero-G steady baseline 4.078 MiB; baseline-adjusted 100,000-G slope 2765.46 bytes/G.
+llgo: zero-G steady baseline 7.453 MiB; baseline-adjusted 100,000-G slope 1590.56 bytes/G.
+
+Full-lifecycle peak RSS is a separate measurement:
+
+| Parked G | Go peak MiB median [min, max] | LLGo peak MiB median [min, max] |
+|---|---:|---:|
+| 0 | 4.078 [4.062, 4.141] | 7.531 [7.516, 7.547] |
+| 1,000 | 6.922 [6.812, 6.938] | 9.125 [9.094, 9.141] |
+| 10,000 | 30.641 [30.578, 30.656] | 22.625 [22.609, 22.641] |
+| 50,000 | 137.281 [136.500, 137.359] | 83.453 [83.422, 83.672] |
+| 100,000 | 267.844 [267.281, 268.250] | 159.234 [159.234, 159.234] |
+
+### Evidence and limits
+
+All 272 throughput/progress/peak runs and all 80 separate steady-memory runs must complete before this report is generated. Each image, source, compiler and measurement script is hashed. Program runs keep the existing 2 GiB / 90 s guard; throughput and parked campaigns keep their 20/30-minute start budgets.
+
+Raw samples are in `measurement-7pairs/samples.jsonl`, `samples.csv`, and `parked-measurement-7pairs/samples.jsonl`; summaries, logs, exact image hashes and source-after build proof remain beside this report. Performance tradeoffs and shared-host variance remain visible. No platform-wide, all-workload, or quiet-host performance claim follows from this checkpoint.
+
+The complete selected acceptance scope and exceptions are recorded in [the acceptance checkpoint](coro-acceptance-20261018.md). Raw artifacts named above are under `~/.cache/llgo-coro-acceptance/20261018/result-state/perf-s3r8/`.
+
+## Historical baselines
+
+The following sections retain their own revisions, flags, toolchains and measurement methods. Their results and former limitations are historical, and do not replace the current checkpoint above.
+
+This document records a reproducible local comparison between the historical
 stackless coroutine prototype and LLGo `main`. It is a directional engineering
 baseline, not a cross-machine performance claim.
 
-## Compared revisions and environment
+### Compared revisions and environment
 
 - original LLGo `main` baseline: `ab2fe9c81523`
 - original coroutine baseline: `15feb5690677`, plus exact-interface devirtualization,
@@ -20,8 +96,8 @@ footprints use Mach-O section sizes. A benchmark loop is itself a coroutine
 preemption boundary, so the single-call and 16-call batch results are reported
 separately.
 
-The runtime currently ignores the requested argument to `GOMAXPROCS`; this is
-tracked independently as
+At the original checkpoint, the runtime ignored the requested argument to
+`GOMAXPROCS`; the historical report is
 [xgo-dev/llgo#2261](https://github.com/xgo-dev/llgo/issues/2261) with a minimal
 reproducer. Therefore the original throughput table is a 16-P directional
 comparison, not a strict single-P scheduler measurement. Emission size and
@@ -32,7 +108,7 @@ empty `GOCACHE`. The development compiler identity is revision-based, so `-a`
 alone can still reuse package artifacts produced by a different dirty-tree
 variant and invalidate a code-size comparison.
 
-## Same-source Go gc checkpoint
+### Same-source Go gc checkpoint
 
 The first direct Go comparison uses coroutine base `56154d44a` and the exact
 fixtures committed as `6edd888bc`. Go gc and LLGo compile the same ordinary Go
@@ -50,7 +126,7 @@ single-executor rows, and the elapsed time is measured inside the common
 fixture after argument parsing. A quiet paired runner must reproduce the
 ratios before they become regression budgets.
 
-### Single-executor throughput
+#### Single-executor throughput
 
 | Same-source workload | Go gc median [range] | LLGo coroutine median [range] | LLGo / Go |
 | --- | ---: | ---: | ---: |
@@ -77,7 +153,7 @@ transition. Sequential compute also exposes the current backedge
 safepoint/requeue tax. These are runtime-core or whole-program emission targets,
 not reasons to add library-specific lowering.
 
-### Parallel execution
+#### Parallel execution
 
 The parallel fixture runs four goroutines, each performing 1,000,000 instances
 of the same arithmetic kernel and producing the same checksum on both
@@ -95,7 +171,7 @@ show that the native fleet performs real parallel progress, while identifying
 single-P task switching as a separate large overhead that a pure arithmetic
 speedup cannot explain.
 
-### Parked-goroutine RSS
+#### Parked-goroutine RSS
 
 Peak RSS is the median of five AB/BA-interleaved `/usr/bin/time -l` process
 runs. Ranges are bytes, and the fixed process cost is deliberately shown rather
@@ -117,7 +193,7 @@ backend, while fixed-stack independence and target portability remain separate
 architectural benefits. Frame-size census, allocation reuse, and parked wait
 state are required before making a memory-efficiency claim against Go.
 
-### Native artifact footprint
+#### Native artifact footprint
 
 Both executables are stripped through their compiler's `-s -w` path. Mach-O
 `__TEXT` below includes all allocated text/constant/pclntab sections; data and
@@ -149,7 +225,7 @@ order, but it does not yet demonstrate a general performance win over Go:
    artifact and linear-memory measurements rather than projecting native RSS
    onto those targets.
 
-## Exact same-source checkpoint before the main sync
+### Exact same-source checkpoint before the main sync
 
 The current comparison uses the bounded standard-Go fixtures under
 `benchmark/coro_core`, exact upstream `xgo-dev/llgo` main `60c30f2ff`, and
@@ -159,7 +235,7 @@ on an Apple M4 Max with Go 1.26.5 and LLVM 19.1.7. Both native binaries compile
 and run the same source. Compiler RSS is deliberately not a decision metric in
 this checkpoint.
 
-### Native artifact cost
+#### Native artifact cost
 
 | Metric | exact `main` | coroutine | Ratio |
 | --- | ---: | ---: | ---: |
@@ -174,7 +250,7 @@ contains 32 bytes of `__thread_bss`. The coroutine binary's 11.27 MB
 the executable and is not a stackless frame cost, but it is a real native
 process and embedded-profile deficit.
 
-### Fixed-iteration native behavior
+#### Fixed-iteration native behavior
 
 All runs started with `GOMAXPROCS=1`. Each cell below is the median of five
 complete process runs, using the workload's internal elapsed time.
@@ -192,7 +268,7 @@ registration and wakeup are already within the same order of magnitude; the
 batch contains concurrent 1 ms lower bounds, so dividing the total into a
 synthetic per-timer latency would be misleading.
 
-### Parked-frame memory slope
+#### Parked-frame memory slope
 
 Peak RSS is the median of three `/usr/bin/time -l` process runs. Bytes are
 reported directly so the fixed-cost subtraction is reproducible.
@@ -211,7 +287,7 @@ puts the observed crossover near 1,027 live G. These two facts must remain
 separate: stackless storage is working, while the default native fleet is too
 large for low-concurrency and embedded deployments.
 
-### WASI portability and current limits
+#### WASI portability and current limits
 
 The fixed portable fixture builds and exits successfully under Wasmtime using
 the coroutine compiler without libuv or BDWGC. Its artifact has:
@@ -238,7 +314,7 @@ Its `os.Args` closure reaches an exact managed-interface rejection around
 `(*io.OffsetWriter).WriteAt` and `(*os.fileWithoutReadFrom).WriteAt`. This is a
 general interface/effect transport gap, not a dependency on libuv or BDWGC.
 
-### Promoted-wrapper emission audit
+#### Promoted-wrapper emission audit
 
 The native coroutine artifact links 440 compiler-generated promoted-method
 resume entries, 29.4% of its 1,498 total resume entries. A temporary whole-plan
@@ -263,7 +339,7 @@ Goexit outcomes, and cross-package consumers. Until those gates close, these
 440 ramps remain a quantified next architecture optimization rather than an
 unsafe partial change.
 
-### Checkpoint conclusion
+#### Checkpoint conclusion
 
 The stackless design now has concrete value in two places: 5.59x lower parked-G
 incremental RSS and 10.74x faster bounded goroutine creation than exact main.
@@ -275,7 +351,7 @@ WASI reserves 64 MiB by default. The next runtime optimization target is
 channel handoff; the next compiler emission target is descriptor-aware managed
 entry selection, not another local SSA pattern.
 
-## Post-main-sync verification
+### Post-main-sync verification
 
 The coroutine branch was subsequently synchronized with exact upstream main
 `2310ff87f` and merged as `cpunion/llgo:llvm-coro` `48c3119ea`. The coroutine
@@ -327,7 +403,7 @@ artifact has 13 imports, 3,173 functions, a 1,193,025-byte code section, a
 emits an arm64 Mach-O executable for `-target=wasip1`, so xgo-dev/llgo#2263
 remains reproducible.
 
-## Demand-paged native operation catalogs
+### Demand-paged native operation catalogs
 
 The next fixed-cost checkpoint is based on `cpunion/llgo:llvm-coro`
 `d4e96df25` plus the demand-page change. It uses the same
@@ -389,7 +465,7 @@ fixtures also pass. At that checkpoint the remaining fixed-memory target was
 the unchanged 1.12 MB native M directory; it is independent of
 operation-catalog paging and is measured separately below.
 
-## Demand-paged native M ownership
+### Demand-paged native M ownership
 
 The paired checkpoint uses the same standard-library `sync` acceptance source,
 Go 1.26.5 and LLVM 19.1.7 on Darwin arm64. Both artifacts include the managed
@@ -432,7 +508,7 @@ Native replacement, nested replacement, timer, poll and retirement E2E,
 plus repeated C factory lifecycle tests, cover the allocation and reclamation
 paths.
 
-## Compiler analysis and emission
+### Compiler analysis and emission
 
 The final native `syncbench` executable has:
 
@@ -462,7 +538,7 @@ three coroutine bodies, reduced text by 8,356 bytes, and reduced the file by
 768 bytes. That result did not justify roughly 470 lines of additional
 cross-layer machinery.
 
-## Core operation throughput
+### Core operation throughput
 
 | Benchmark | `main` | coroutine | Coroutine / `main` |
 | --- | ---: | ---: | ---: |
@@ -489,7 +565,7 @@ material:
 - the CFG safepoint plan reduced direct and exact-interface single-call loops
   from about 70 ns/op to about 35 ns/op in the initial 16-P measurement.
 
-## Stackless concurrency and target portability
+### Stackless concurrency and target portability
 
 For 10,000 joined goroutines, the stackless binary measured
 6.35–6.99 µs/op with 65.1 MiB peak RSS. The `main` backend measured
@@ -525,7 +601,7 @@ those native libraries; it is not yet evidence of bare-metal completion.
 RP2040 still lacks board hooks plus required atomic/compiler-rt/libc support in
 both compared configurations.
 
-## Outcome-plain V0 emission result
+### Outcome-plain V0 emission result
 
 The full-program plan exposed a higher-leverage opportunity than more local
 no-unwind pattern matching. After the narrow index experiment, 571 emitted
@@ -602,7 +678,7 @@ terminal payload/control-flow paths; it does not yet claim traceback-frame
 fidelity for the removed leaf. Native and wasm structural tests verify that
 CoroSplit cannot manufacture `$outcome.resume` or `$outcome.destroy`.
 
-### Direct-call DAG cohort
+#### Direct-call DAG cohort
 
 The next cohort extends the same ProgramIR, SSA call plan, fixed point,
 physical-emission session, completion ABI and archive metadata; it does not add
@@ -637,7 +713,7 @@ and wasm32 verify before and after CoroSplit; the middle outcome body directly
 calls the leaf outcome body, contains no coroutine intrinsic or scheduler
 await hook, and republishes Panic/Goexit statuses to its parent.
 
-### Path and post-LLVM certificate cohort
+#### Path and post-LLVM certificate cohort
 
 ProgramIR now freezes one minimal block projection per defined function:
 canonical block/successor indexes, non-debug semantic work per block, and each
@@ -675,7 +751,7 @@ instruction latency, target-specific library calls/assembly, final machine
 stack bytes, interrupts, and scheduler overhead still require the target cost
 model and final-code certificate described in the runtime design.
 
-### Scalar and memory recipe cohort
+#### Scalar and memory recipe cohort
 
 The next incremental cohort broadens the same frozen semantic recipe and
 outcome-plain physical transaction; it does not introduce another SSA scan or
@@ -735,7 +811,7 @@ The next useful cohort should therefore freeze target-dependent direct-interface
 representation and bounded native-stack allocation facts in ProgramIR. It
 should not speculate a larger completion ABI or add a second lowering path.
 
-### Synchronous completion cost: `ken/modconst.go`
+#### Synchronous completion cost: `ken/modconst.go`
 
 Go 1.26.5 `GOROOT/test/ken/modconst.go` is a useful whole-program stress case
 for managed calls that almost always complete synchronously. Its integer
@@ -785,7 +861,7 @@ evidence that mandatory initial suspend no longer imposes a scheduler round
 trip on the common synchronous path, but it is not a full GOROOT or platform
 acceptance result.
 
-### Compact emission type-graph cohort
+#### Compact emission type-graph cohort
 
 Whole-program `go:linkname` pairing previously expanded named/private-mirror
 types as recursive strings. A type DAG with one shared child used twice per
@@ -812,7 +888,7 @@ previously blocked `mapzero` and `abimethod` package builds now reach FileCheck
 in about 54 seconds; their remaining golden-IR differences belong to the
 separate coroutine LIT compatibility audit rather than emission analysis.
 
-### Remaining outcome-plain expansion
+#### Remaining outcome-plain expansion
 
 The original 574-body opportunity is not yet claimed. The current cohorts do
 not accept defer/recover bodies, a Goexit producer, function values/interfaces,
@@ -828,7 +904,7 @@ or recursive/open-world paths. The next cohorts are:
    channel throughput, and parked-frame memory baselines before broadening the
    default cohort.
 
-### Causal channel return-route checkpoint
+#### Causal channel return-route checkpoint
 
 The next native scheduling checkpoint uses the tree shared by
 `cpunion/llgo:llvm-coro` `f32f1195d` and its parent `be1b2daec` as the exact
@@ -876,7 +952,7 @@ module (3,225 functions, 13 imports, 1,304,987-byte code section and
 validate the route-zero portable fallback and the native optimization; they do
 not replace the final full repository and GOROOT acceptance matrix.
 
-### Bounded preemption checkpoint cohort
+#### Bounded preemption checkpoint cohort
 
 The next core optimization separates a compiler safepoint from a full runtime
 poll. Previously every selected loop feedback edge called the runtime, checked
@@ -951,7 +1027,7 @@ accepts sender stage 4 or 5 after an unbuffered rendezvous: the send orders all
 work through stage 4, while Go does not require the sender's post-send
 continuation to run again before a receiving `main` returns.
 
-### Constant-time spawn-owner checkpoint
+#### Constant-time spawn-owner checkpoint
 
 The next checkpoint uses `19712185a` as its exact parent. The spawn transaction
 gate previously ran the complete ready-queue and scheduler-wait audits from
@@ -979,7 +1055,7 @@ the removed complexity and absence of a storage regression, not a stable
 throughput promise. The remaining large-G cost is linear channel close/wakeup,
 task/frame allocation and runtime-context initialization.
 
-### Lazy panic-snapshot checkpoint
+#### Lazy panic-snapshot checkpoint
 
 The next memory checkpoint uses `c773ea52e` as its exact parent. Every runtime
 G previously embedded a 544-byte `panicPCStore`, including its 64-PC array,
@@ -1019,7 +1095,7 @@ completed. The legacy PCLN signal integration command remains blocked before
 its fault subtest by the same unrelated `pclntab_external.go` uintptr-retention
 audit on both this candidate and the exact parent.
 
-### Bounded hot-queue audit checkpoint
+#### Bounded hot-queue audit checkpoint
 
 The next scheduler checkpoint uses `a3e1a09e2` as its exact parent. Three
 ordinary paths still revisited an entire owner queue: every completed unlocked
@@ -1086,7 +1162,7 @@ cost is now dominated by channel registration/cleanup, fixed source and fleet
 dispatch, frame allocation/free, and BDWGC marking/locking. Those are the next
 performance gates before broadening capability coverage.
 
-### Fused task envelope and physical M/P checkpoint
+#### Fused task envelope and physical M/P checkpoint
 
 The next allocation checkpoint uses merge `2a3eb6884` as its exact parent. A
 spawned logical G previously owned three independently released native ranges:
@@ -1154,7 +1230,7 @@ logical G storage may not regain permanent M/P fields, and task/frame pooling
 must demonstrate a benefit beyond this allocation fusion without retaining an
 unbounded embedded-target cache.
 
-### Constant-time source-owner gates checkpoint
+#### Constant-time source-owner gates checkpoint
 
 The next scheduler checkpoint uses merge `d2eff9bcc` as its exact parent. A
 single bounded source reduction previously re-entered the complete driver
@@ -1213,7 +1289,7 @@ both endpoints and runs the durable A/ack/B plus typed-cleanup transaction.
 Avoiding that suspension on the exact local ready path is the next performance
 gate.
 
-### Closed-program worker demand and pure static checkpoint
+#### Closed-program worker demand and pure static checkpoint
 
 The 2026-08-13 local candidate based on `914379fbd` separates target support
 from closed-program demand. After the final physical ProgramIR transaction is
@@ -1278,7 +1354,7 @@ RSS is about 0.83 MiB below Go. Default-GC lazy initialization/linkage is
 therefore the primary fixed-cost target; scheduler bootstrap is a smaller,
 separately measurable remainder.
 
-### Compact structural emission type graph checkpoint
+#### Compact structural emission type graph checkpoint
 
 The same 2026-08-13 candidate removes a compiler-side exponential path that
 was exposed by the complete cmd/cgo fixture. The previous structural emission
@@ -1323,7 +1399,7 @@ its IR-only and full paths entered the existing LLVM emission peak above the
 post-graph 616-second pass remains the correctness result; no claim is made
 from incomplete, heavily host-contended wall-clock samples.
 
-### Closed direct-channel transaction checkpoint
+#### Closed direct-channel transaction checkpoint
 
 The next 2026-08-13 local candidate, still based on `914379fbd`, isolates the
 remaining unbuffered handoff cost with `testdata/pure_handoff`. The fixture has
@@ -1404,7 +1480,7 @@ park/resolve/materialize metadata transitions under the same closed capability
 or avoid suspending the immediately matched endpoint. General select and
 cross-owner machinery should not be cloned into another fast runtime.
 
-#### Closed inline state transaction follow-up
+##### Closed inline state transaction follow-up
 
 The retained follow-up executes that first next gate without introducing a
 second channel state machine. The exact same-P, uncanceled, one-case capability
@@ -1461,7 +1537,7 @@ park preparation, and the still-general producer-side transaction. An
 immediately matched endpoint may avoid more work, but only if its no-suspend
 hchan critical section can retain the same close/claim lifetime proof.
 
-#### Fused direct park preparation follow-up
+##### Fused direct park preparation follow-up
 
 The next retained checkpoint applies the same closed-transaction rule to the
 ordinary compiler-generated park half. `PrepareCurrentChannelParkCleanup`
@@ -1511,7 +1587,7 @@ stack no longer describes the emitted transaction, so further optimization
 must target measured hchan, scheduler, or suspend/resume cost rather than
 guessing at another metadata layer.
 
-#### Hchan direct-shape certificate follow-up
+##### Hchan direct-shape certificate follow-up
 
 The typed hchan matcher already validates the dequeued coroutine operation,
 waiter back-pointers, source route, payload size, direction, and terminal
@@ -1542,7 +1618,7 @@ gave 1,586,785,281 versus 312,146,532 median retired instructions (5.08x) and
 gates, native/WASM typed-hchan gates, and LLVM 22 native/WASM32 lowering gate
 remain passing.
 
-#### Issued-action scheduler and scalar-resume checkpoint
+##### Issued-action scheduler and scalar-resume checkpoint
 
 The final 2026-08-14 optimization pass follows one exact same-owner channel
 handoff from hchan commit through coroutine resume. The root cause was no
@@ -1612,7 +1688,7 @@ profile today, not merely a benchmark decoration. Making equivalent
 optimization available without full LTO is future build-pipeline work; it is
 not evidence of a missing scheduler mechanism.
 
-#### Stable-boundary scheduler review follow-up
+##### Stable-boundary scheduler review follow-up
 
 A final commit review found that the remaining retired-instruction gap was not
 the LLVM coroutine operation itself. Four already-linearized facts were being
@@ -1685,7 +1761,7 @@ LockOSThread suspension, native/WASM lowering and timer gates pass. The complete
 `cursor` case; no full-suite pass is claimed. A full `ssa` run likewise has no
 result beyond its previously reported explicit timeout.
 
-### Static interface and bounded worker-completion checkpoint
+#### Static interface and bounded worker-completion checkpoint
 
 The 2026-08-14 LLVM 22-only candidate removes allocation and handoff work from
 the standard-library file/network path without changing its blocking policy.
@@ -1736,7 +1812,7 @@ file/TCP execution gates pass. The full `internal/cabi` suite was deliberately
 stopped after an unrelated fixture reached about 5 GiB RSS; the exact changed
 CABI tests pass, so no full-suite result is claimed here.
 
-### Demand-gated native syscall compensation checkpoint
+#### Demand-gated native syscall compensation checkpoint
 
 The next 2026-08-14 LLVM 22-only checkpoint separates a compiler-certified
 `llgo.syscall` boundary from the general C/worker path. The generated native
@@ -1806,7 +1882,7 @@ tests also pass. The next file-performance target is the remaining coroutine
 frame chain through `io.ReadFull`, `os.File` and `internal/poll`, not another
 file-specific runtime path.
 
-### Request-driven deferred replacement checkpoint
+#### Request-driven deferred replacement checkpoint
 
 The follow-up on 2026-08-14 closes the direct-only cross-route liveness gap
 without restoring eager compensation. A blocking native syscall now reserves
@@ -1849,7 +1925,7 @@ candidate reproduced a similar rate. It does not exercise the deferred syscall
 path, so this checkpoint does not claim to fix or regress that independent
 native-fleet race.
 
-### Fused synchronous child-transaction checkpoint
+#### Fused synchronous child-transaction checkpoint
 
 The 2026-08-15 LLVM 22-only candidate starts at merge
 `6d3d11fd6feda125382d57780d03a57571454370` and reduces the dominant
@@ -1889,7 +1965,7 @@ on a real timer, and loopback TCP. Runtime-core tests cover allocation-elided
 and dynamic destruction, panic/recover compatibility, slow yield, nesting, and
 the depth-bound scheduler fallback.
 
-### Escape-free scalar synchronous native-call checkpoint
+#### Escape-free scalar synchronous native-call checkpoint
 
 The 2026-08-15 follow-up starts at merge
 `b48265391044cf8e20f160e550f1abfcf4fa8b98`; the measured implementation is
@@ -1964,7 +2040,7 @@ blocking-pipe/timer, and loopback-TCP execution gates pass with
 `GOMAXPROCS=1`, as do separately linked same-M callback, locked-thread
 compensation, deferred replacement, and worker-capability E2Es.
 
-### Demand-lazy replacement and compiler-task route checkpoint
+#### Demand-lazy replacement and compiler-task route checkpoint
 
 The 2026-08-15 follow-up starts at merge
 `95acde8e415516d07f2caea74578d91125a0997f`; the measured implementation is
@@ -2022,7 +2098,7 @@ allocation, frame publication, inline-await completion, and destroy/consume
 transactions through `syscall`, `internal/poll`, `os.File`, and `io`, rather
 than in replacement-slot or full driver-route recovery.
 
-### Certified native static-outcome chain checkpoint
+#### Certified native static-outcome chain checkpoint
 
 The 2026-08-15 follow-up starts at merge `db6a6eb2e`; the measured
 implementation is `3fa2cfc44`. It completes the compiler-owned static outcome
@@ -2113,7 +2189,7 @@ this focused change, synchronize the branch with current upstream main, run all
 repository and selected GOROOT tests, and repeat the performance measurements
 on the synchronized tree.
 
-### Synchronous-return receipt checkpoint
+#### Synchronous-return receipt checkpoint
 
 The 2026-08-24 follow-up profiles the remaining exact-static await path after
 the static-outcome and tail-forward work above. LLVM 22 optimization remarks
@@ -2199,7 +2275,7 @@ compensation gate, and 500 loopback TCP round trips. The full runtime module
 has only the two already-recorded timer source-string gate mismatches; no new
 runtime semantic failure was introduced by this checkpoint.
 
-### Rejected eager-initial-suspend experiment
+#### Rejected eager-initial-suspend experiment
 
 The first implementation attempt after the receipt checkpoint made a proven
 exact-static callee enter its source body directly from the LLVM coroutine ramp
@@ -2247,7 +2323,7 @@ AB/BA serial-spawn runs had medians of 900.976 ms for the clean rebuild and
 workload mode completed successfully. Thus the cleanup restores throughput and
 improves rather than regresses the size gate.
 
-### Function-local native fault landing checkpoint
+#### Function-local native fault landing checkpoint
 
 The native fault capability previously joined two different facts into one
 program-wide bit. A reachable `runtime/debug.SetPanicOnFault` really is dynamic:
@@ -2328,7 +2404,7 @@ shared traceback cost above minus those 36 bytes. This closes the accounting:
 there is no unexplained per-channel adapter, descriptor, or code-size growth,
 while every live handoff goroutine keeps a materially smaller stackless frame.
 
-### FuncRep v2 outcome-dispatch and caller-token checkpoint
+#### FuncRep v2 outcome-dispatch and caller-token checkpoint
 
 This 2026-08-30 checkpoint uses the working tree after `ca8088050`, LLVM 22,
 Go 1.26.0 for LLGo's toolchain, and Go 1.27.0 for the same-source gc
@@ -2414,7 +2490,7 @@ LTO rebuild keeps `__TEXT` unchanged and reduces `__text` by another 628 bytes;
 its 16-byte file growth is outside mapped segments in Mach-O alignment/signing
 data, not generated program code.
 
-## Closed-executable method-slot DCE (2026-10-16)
+### Closed-executable method-slot DCE (2026-10-16)
 
 The v38 core executable retained `time.parse`, `Time.appendFormat`, and most
 `internal/poll.FD` methods through runtime type descriptors, not actual calls

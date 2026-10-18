@@ -1,11 +1,138 @@
 # LLVM coroutine acceptance status
 
-This ledger records current acceptance, separately from the historical phase
-notes in the design documents. Update a row only with a test of the relevant
-compiler and generated program. Host-Go unit tests do not establish LLGo
-source compatibility, and one platform's result does not establish another's.
+This ledger records current acceptance, separately from the historical phase notes in
+the design documents. Update a row only with a test of the relevant compiler and
+generated program. Host-Go unit tests do not establish LLGo source compatibility, and
+one platform's result does not establish another's.
 
 ## Current checkpoint: 2026-10-18 (Asia/Shanghai)
+
+### Retained native poll coalescing (828bfe06c; integrated as 603c781dd)
+
+The frozen R6 stdlib run exposed another real native entry abort in `net/http/httptest`.
+Its unmodified retained rebuild reproduces SIGABRT on run 45. Failure-only debugger
+stops capture `PollOperationPostDuplicate(2)` being rejected by the retained poll
+adapter, then `Failed(7)` and `Invalid(0)` with a zero result tuple at the strict native
+entry validator. A producer may publish Ready/Closing after the poll snapshot and before
+readiness import.
+
+Head `828bfe06cb19879e2c8188a7fb41ba249077aa74` accepts this existing coalesced result
+and returns to the reducer, preserving the first mailbox result. Invalid/stale/retired
+operation IDs remain rejected; the core protocol, native entry validator and G/P/ABI
+layouts are unchanged. Deterministic regressions use real POSIX poll revents, force
+Ready-first and Closing-first publication, verify one delivery and recycling, and reject
+invalid/stale/retired imports. Restoring only the old comparison fails both orderings.
+Ten shuffled race-enabled fixed runs pass.
+
+PR #297 merged into `cpunion/llgo:llvm-coro` as
+`603c781ddcbda072d1b2812b53831d1e443ae93e` after exact-head CI `39111825084` passes
+**20/20** at `6fcca2681`, local native and WASI timer gates pass, and fresh
+reviews/inline comments/issue comments/ review threads are empty. The merged file tree
+matches the tested head. The complete coroutine compiler/SSA selection (`^TestCoro`),
+full `internal/coro` and `runtime/internal/ffi` suites, 73 source/fleet checks
+(including 26 linked fleet cases), runtime core/doorbell race checks, 2,462 FD/Open
+executions, 315 reflected positive and 18 intentional negative executions, plus 9
+archive tests (20 images, 60 executions) pass on the production freeze. The retained
+rebuilt httptest image passes 2,000 consecutive P=2 runs with its hash unchanged.
+Follow-up `1613848ff` changes only two host source-layout assertions; its frozen full
+runtime host tests pass, with identical production bytes.
+
+The first CI reflection/archive attempt exhausted compiler address space in BoundLarge
+before its image was emitted. Follow-up `1020ee074` runs all four exact archive subcases
+in separate processes under the unchanged 6 GiB cap, 2 GiB Go soft target and
+per-selection timeouts; all four pass. However, exact CI run `39105987770` finishes **19
+passing jobs and one real Timer/GC failure**: `coro_timer_gc_go127`, P=2 iteration7,
+reaches 2,519 collections with one G beyond baseline and a discarded Timer/Ticker or
+channel still strongly alive. The original failed Linux image and logs are retained.
+This failure blocked merging until the causal diagnosis and strict fixture revision
+below. Local emulated repeats, including 200 passes with matching Ubuntu 22
+collector/libc versions, are diagnostic evidence rather than a fix. Failure-only native
+Linux captures in runs `39109506209` and `39109875174` retain the original image at its
+original five-second failure. A collector mark watch in `39110286256` observes
+`GC_mark_from` marking the Timer from libgc's own `GC_unix_mmap_get_mem::last_addr`
+static mapping hint. The matching Ubuntu22 collector Build ID and debug symbols bind
+that source to offset `0x74a18`. Causal experiment `39110884289` leaves the hint
+unchanged in five matched runs (all fail at five seconds) and clears only that hint in
+five others (all pass in about 90ms). Both arms use the same executable image, source and breakpoint. The treatment writes
+only the collector hint; Timer/channel references, manager state and program assertions
+remain unchanged. The exact untraced Linux image also fails
+locally on repetition 4,203. This establishes a conservative collector false root; it
+does not establish a runtime fix or prompt native weak collection.
+
+The test-only fixture retains all 32 Timer/Ticker pairs, all 128 selected weak
+references, the five-second deadline and full manager retirement checks. It selects
+objects away from the demonstrated native page-boundary false root, stops rejected guard
+pairs, and adds explicit retained-Timer and extra-G negative controls. Native candidate
+validation `39111438498` passes P=1x100 and P=2x1000, and both negative controls trigger
+their exact expected assertion at five seconds. Follow-up `6fcca2681` commits only the
+fixture and host driver. Local native and WASI suites pass all three fixtures each, with
+source-after matching; complete follow-up CI passes 20/20. This corrects the fixture
+assumption while retaining the conservative collector boundary. The diagnostic branch
+contains no production source changes and is not an integration candidate.
+
+The fresh compatibility campaign uses one production freeze. It has completed
+**test/go 276/276** without failures or skips, all **73/73** selected executable Go
+demos, and all **1,082** selected GOROOT runtime cases. All 45 nested test/go compiler
+process domains and all four GOROOT controllers joined; source and Go corpus after-checks
+match. The GOROOT runner reports **1,078 PASS / 4 FAIL**: **1,066 actual passing
+executions** and **12 existing expected-failure outcomes**. The latter are not semantic
+passes. A same-freeze diagnostic with only the external xfail disabled confirms the
+`heapsampling.go` allocation-stack profile gap: expected 45,000--55,000 sampled objects,
+actual zero. The other 11 expected failures retain their existing precise-GC or
+gc-specific stack behavior classifications.
+
+The four raw GOROOT failures remain recorded. `noinit.go` requires the gc-private
+`main..inittask` ABI. `rangegen.go` exceeds the unchanged 10 GiB compilation RSS cap.
+`fixedbugs/issue9604b.go` reaches the unchanged 25-minute generated-compilation limit;
+its 669,627-byte generated input remains retained and is not executed.
+`fixedbugs/issue78081.go` exceeds the unchanged one-minute runtime limit, including an
+unmodified retry. Two samples show recursive coroutine frame allocation, resume and
+release with ongoing CPU use. A separate bounded two-minute diagnostic of the identical
+image exits normally in **84.877 seconds**; it does not rewrite the matrix failure.
+These are explicit ABI/resource/execution-cost limits, not four semantic passes.
+
+The **180/180 selected stdlib fixture-package commands pass**. Top-level test events
+are **2,108 PASS / 22 SKIP**; including nested subtests, **2,386 PASS / 22 SKIP**.
+Every skip retains its actual reason and reviewed classification. These include
+pre-existing disabled fixtures, three explicit LLGo fixture gaps, and five localhost
+DNS-record-dependent skips. Some skip messages are stale: Go 1.27 exports hash.Cloner
+and hash.XOF, and the dedicated Pool/Cond tests pass despite two old skip placeholders.
+These skipped assertions are not converted into passing executions.
+
+The initial four-worker stdlib attempt reached the unchanged **40 GiB aggregate RSS**
+ceiling at 40,962.1 MiB and exited 137. Its 125 complete successful package receipts
+were accepted only after an external retirement audit proved all owned processes
+absent and source/compiler/image/journal hashes unchanged. Original journals, crash
+locks and four interrupted compilation workspaces remain retained. The **54 missing
+or interrupted packages** then completed in two workers under the same aggregate and
+per-package limits. The same-freeze retained httptest image contributes the 180th
+package; its other 1,999 repetitions are stability evidence, not additional packages.
+
+All compatibility compiler domains have joined. The fresh same-source comparison
+also completes **272/272 throughput/progress/peak runs** and **80/80 separate steady
+parked-memory runs** against Go 1.27.0, with input/source/compiler/library hashes
+matching before and after measurement. Serial spawn/WaitGroup, public File and TCP
+take **8.716x**, **4.925x** and **2.123x** Go time in this sample. At 100,000 parked
+goroutines, LLGo steady RSS is **159.141 MiB** versus Go **267.812 MiB**; the zero-G
+baseline is higher (7.453 versus 4.078 MiB). Baseline-adjusted growth is 1,590.56
+versus 2,765.46 bytes/G, including allocator/runtime costs. Stripped core/I/O/parked
+file sizes are **2.885x / 3.582x / 2.889x** Go, excluding shared libraries. Seven-pair
+ranges, P=1/P=4 rows and actual host load remain visible in the
+[performance checkpoint](coro-performance-baseline.md).
+
+The selected checkpoint is now closed with exceptions, as detailed in the
+[final acceptance report](coro-acceptance-20261018.md). The additional 1,316 GOROOT
+compilation/diagnostic/multifile cases remain outside the user-selected runtime scope.
+Previous R6 outcomes are not relabeled as R8 results; this does not establish full
+Go or every platform's compatibility.
+
+R8 source manifest is
+`fdd0207f012878b4a0bdda9a362b8520a569e87c91441143e08b76c0b43a4fc2`, and compiler SHA-256
+is `6b7d52bc7ece1fe1d92913747c26bbf2290e15a5dfaa0dfd202b5c4da49830ac`.
+
+## Earlier checkpoints and historical evidence
+
+The following entries retain their original versions, successes, failures and then-open work. Current scope and boundaries are stated above and in the final acceptance report.
 
 ### Reflection second handoff and invocation-time receivers (3975a706c1)
 
@@ -43,34 +170,39 @@ Exact follow-up CI run `39073066329` passes **20/20**. Fresh paginated reviews,
 inline/issue comments and review threads are empty. PR #296 merged as
 `d8597d49206cd5accf1fa77832376fef5614b8e5` into `cpunion/llgo:llvm-coro`.
 
-The same frozen production inputs have completed executable Go demos
-**73/73**, with no failures or skips and matching source-after. At
-**2026-10-18T03:16:47.354768+00:00**, stdlib acceptance has **61/180** complete successful
-fixture packages; **119** remain. The completed packages contain
-**720** passing test/subtest events and **2** explicit skips in
-`debug/buildinfo`, whose fixture still requires Go build information in LLGo
-images. A successful package exit does not count a skipped test as a semantic
-pass. Five prior compilation attempts across four packages stopped at the disk
-floor before semantic execution; all remain retained separately. The resumed
-`debug/gosym`, `debug/macho` and `debug/pe` package executions pass.
+The same frozen production inputs completed executable Go demos **73/73**,
+with no failures or skips and matching source-after. The R6 stdlib campaign is
+now retired with all worker processes joined, **165 passing packages**, one
+actual `net/http/httptest` failure, and **14 unexecuted packages** out of the
+selected **180**. After the abort, the worker's fail-closed `lsof` cleanup check
+stopped that shard; the other three shards continued to closure. This is an
+incomplete campaign, not 180 completed packages. Its complete receipts, original
+runtime failure, cleanup interruption and explicit missing list are retained in
+`stdlib-r6-retired-partial-s3r6.json`. All 14 missing packages are in the R8
+180-package selection. A successful package exit does not count skipped tests
+as semantic passes. Earlier disk-floor interruptions remain separately retained.
 
 The selected GOROOT scope is **1,082** existing CI runtime cases. The other
 **1,316** discovered compilation/diagnostic/multifile cases remain a coverage
-boundary, as requested. **616** cases have complete joined batch receipts:
-runner **614 PASS / 2 FAIL**. Of those runner passes, **604** actually passed the
-execution/output checks and **10** match existing expected-failure classifications.
-The remaining **466** cases are unfinished; interrupted batches are rerun
-in full rather than reusing partial outcomes. The receipt checks unique accepted
-paths against the selected inventories for GOROOT, stdlib fixtures and demos.
+boundary, as requested. All **1,082** cases now have complete joined batch
+receipts: runner **1,079 PASS / 3 FAIL**. Of those runner passes, **1,067**
+actually passed execution/output checks (including four preclassified flaky
+and four preclassified not-applicable passes); **12** match existing expected
+failure classifications. Exact selected paths, source/corpus-after and joined
+controllers are checked in `goroot-final-receipt-s3r6.json`.
 
-The two original raw failures remain visible. `noinit.go` requires gc's private
-`main..inittask` ABI. `rangegen.go` exceeds the main matrix's **10 GiB**
+The three original raw failures remain visible. `noinit.go` requires gc's
+private `main..inittask` ABI. `rangegen.go` exceeds the main matrix's **10 GiB**
 generated-compilation RSS ceiling, including a lower-heap-soft-target retry.
 The first separate **24 GiB** assessment stopped with monitor exit 125 before
-a semantic result. Its retry with the repaired monitor now passes generated
+a semantic result. Its retry with the repaired monitor passes generated
 execution/output checks using the same compiler, input and default optimization:
 **20,833.0 MiB** whole-tree peak RSS, **20m44.132s** LLGo compilation. This
 supplemental pass does not rewrite the original 10 GiB matrix failure.
+`fixedbugs/issue9604b.go` reaches the unchanged **25-minute** compilation limit
+in both its original execution and one retry; its generated program is not
+executed. Native samples show LLVM MachineSinking/clearKillFlags activity.
+This remains a compilation-time limit failure, not a semantic pass.
 
 The existing expected failure `heapsampling.go` has also been run diagnostically
 with an empty external xfail file. It fails with expected sampled object counts
@@ -80,11 +212,11 @@ group samples by source line. This remains a runtime profiling compatibility gap
 not an actual pass or a new not-applicable classification.
 
 The user restored storage and acceptance resumed with **52.73 GiB** free at
-admission. Four GOROOT and four stdlib workers continue on the same frozen
+admission. The completed GOROOT campaign and retired partial stdlib campaign use the same frozen
 production inputs, with the unchanged **10 GiB** disk floor and per-program
-RSS/time limits. One GOROOT controller stopped when `du` exceeded its five-second
-sampling deadline. Its eight complete cases remain accepted; its interrupted
-batch is rerun. The instrumentation now permits at most three five-second
+RSS/time limits. Two GOROOT controllers stopped when `du` exceeded its five-second
+sampling deadline. Their complete cases remain accepted; interrupted batches
+were rerun in full. The instrumentation now permits at most three five-second
 scan attempts within a twenty-second whole-sample deadline, retaining complete
 total validation and fail-closed handling of exhausted retries and other errors.
 Real scans and simulated transient timeout/ENOENT recovery and rejection
@@ -687,7 +819,7 @@ also finishes **135/135** under its existing classification, source-after
 matching, peak3676.0MiB. These results do not erase shard4's original failure
 or complete the still-running whole standard-library/GOROOT evaluation.
 
-### Latest executable refresh: v117/v118/v120
+### Historical executable refresh: v117/v118/v120
 
 The v117 complete `test/go` cohort passes **271/271**, with zero failures or
 skips, matching source-after, joined children and reclaimed scratch at
@@ -2680,7 +2812,9 @@ matches after execution; compiler SHA-256 is
 These focused passes do not complete full stdlib/GOROOT or public resource
 delivery/performance acceptance.
 
-| Gate | Latest observed result | Scope |
+The following matrix is historical; its pending items and counts are superseded only by explicitly versioned later evidence.
+
+| Gate | Historical observed result | Scope |
 | --- | --- | --- |
 | `test` | 41 passed, 1 helper skipped | Fixed v108 compiler/source, fresh compile and execution; four-package source-after matches20:47:34 UTC |
 | `test/cgo` | 3 passed | Same v108 four-package cohort, fresh compile and execution |
@@ -2847,89 +2981,59 @@ to the existing encoded source capacity. Capacity failure is now diagnosed
 separately from invalid owner/clock/deadline state; the underlying finite ID
 bound is still explicit.
 
-## Remaining work, in order
+## Closed selected scope and continuing boundaries
 
-1. Finish current executable acceptance on immutable compiler/source pairs.
-   The immutable v117 complete `test/go` cohort passes271/271, zero failures or
-   skips; its runtime/cgo/syncpool/llgoext cohort passes68+1original helper skip.
-   Both have matching source-after, joined children and reclaimed scratch.
-   The v117 native Go demo refresh remains active; the earlier v103 cohort
-   passed73/73. The single-snapshot v70 180-package stdlib evaluation completes
-   with179 passes and one retained `testing/quick` failure. That original
-   package now passes3/3 tests on v120 after the canonical method-signature
-   descriptor fix above, but a new complete stdlib cohort is still required. The older
-   fixed v65-source/v64-compiler eight-shard GOROOT evaluation has completed
-   all8 shards with1073 passes/9 retained failures out of1082 selected cases.
-   Preserve every older failure/resource stop;
-   focused passes on later snapshots do not rewrite those journals or establish
-   a final-snapshot whole-suite pass. Keep unchanged inputs, private scratch
-   reclamation and child joins. Do not update instruction goldens or xfails
-   to hide runtime failures.
-2. Preserve the closed stale-GC-root regression while finishing the final
-   GOROOT evaluation. The production correction passes the GC-only fixed cohort:
-   placement is frozen, safepoint/critical cost and exact helper observation
-   remain checked, and live-root retention/cancellation gates pass. Combining
-   it with the raw-helper optimization exposed a separate static-outcome
-   channel-close admission mismatch in v43. v44 fixes that mismatch and passes
-   the permanent consumed-pointer regression 10/10 and unchanged `chans` 5/5;
-   extended native GC/resource/timer integration gates also pass. No general prompt-finalizer
-   guarantee follows. Of the original GOROOT cohort's 23 failures, 21 now have
-   subsequent focused passing
-   executions; four need extended compiler budgets and two remaining tests
-   depend on private gc binary/trace behavior. Final integrated evaluation is
-   still required, without silently adding xfails. The newly observed original
-   reflection/GC case `issue27695b.go` passes on v82 after correcting the
-   source-only closed-callable-domain assumption; retain its universal dispatch
-   and unaffected exact/static-family gates through final integration.
-3. Finish public resource-result cancellation handoff. Typed borrowed output
-   plus pre-registered ordinary defer is already verified on native and Node;
-   public `syscall.Open`/`os.Open` child-to-parent result delivery and platform
-   wrapper adoption are not covered by that primitive. Reuse existing
-   completion/cleanup ownership, without a second resource-capsule framework.
-   Closed-static physical guards now pass all six actual native routes and
-   60/60 executions on v81, including source defer, range-yield and nil-output
-   roots; PR #267 is merged after all 18 CI jobs pass. Large fallbacks avoid a duplicate allocation,
-   and resource-only cleanup avoids another result spill/copy. The shared
-   result tuple has a source-expressible anonymous alias; retain exact types
-   and use existing compiler-inserted helper demand where needed.
-   Do not add a generic representation-cast or synthetic-SSA framework for
-   helper field names. Typed recipe/model tests are passing, but no public
-   seed may be enabled until static, dynamic and library consumption are wired.
-4. Complete or explicitly delimit platform gaps. Native/WASI ordinary and
-   fake-time timer collection, weak objects, standard WASI file operations and
-   Node asynchronous filesystem paths have real execution gates. Remaining
-   work includes explicit native-host signal admission, JS public callback
-   handles and dynamic reflection on freestanding targets, and real-board
-   clock/alarm/WFI wiring beyond the Cortex-M3 emulator gate. WASI Preview 1
-   regular-file imports are synchronous: readiness alone cannot guarantee
-   the host will never stall. A hard guarantee needs asynchronous host ABI or
-   host offload. Do not silently restore the legacy libuv loop to fill gaps.
-5. Close remaining measured performance gaps and remeasure on a quiet host.
-   Static compute/channel fast paths are competitive; serial spawn/WaitGroup,
-   file wrappers and TCP still lag Go. A shared raw-helper capability fix removes
-   redundant synchronous-helper coroutine frames; its v43 channel-close
-   integration failure is corrected and tested in v44. Same-work diagnostic
-   persistent-worker comparisons identify the WaitGroup await/completion path,
-   not per-G creation, as the remaining serial hot path. Actual counters show
-   four child-frame allocations and five inline awaits per round, versus none
-   in the channel control. The same-P keyed fast path is already being used;
-   removing one wrapper barrier or forcing LLVM's global elision heuristic
-   has not established a stable large speedup. These background diagnostics
-   do not replace the quiet formal baseline or justify removing checks.
-   Preserve atomic/preemption proofs;
-   do not add stdlib-specific coloring labels or remove lifecycle checks.
-   Keep size, parked-G memory slope and generated-code checks in the final
-   comparison. Completed native/WASI timer progress gates do not prove every
-   external source or physical instruction has a universal latency bound.
-6. Review and commit the integration, open/update a PR to `llvm-coro`, inspect
-   current CI and review comments, and merge only after the applicable gates
-   pass. Final validation includes the full workflow set, with explicitly
-   documented platform incompatibilities. Do not modify `cpunion/main` or
-   push this development to upstream.
+Public `syscall.Open`/`os.Open`/`os.OpenFile` custody, evaluated receiver snapshots,
+reflection/FFI second handoff and independent archive consumption are integrated.
+PR #297 integrates the retained native poll coalescing correction after exact-head
+CI 20/20 and fresh empty reviews/comments/threads. The selected R8 test/go, executable
+Go demos, 180 stdlib fixtures and 1,082 GOROOT runtime cases have complete receipts;
+the fresh performance and parked-memory campaigns have also finished. Original
+failures, expected outcomes, skipped tests and infrastructure stops remain recorded.
+
+The remaining boundaries are explicit:
+
+- GOROOT: the gc-private init-task ABI, 10 GiB generated-compilation RSS ceiling,
+  25-minute generated-compilation limit and one-minute recursive-coroutine execution
+  limit retain four raw failures. Twelve existing expected failures and 22 stdlib
+  skips do not count as semantic passes. The additional 1,316 GOROOT compile,
+  diagnostic and multifile cases are outside the selected runtime scope.
+- WASI Preview1 nonpollable synchronous host imports can stall outside guest
+  cancellation. WASI2 component-host lifecycle, Node/browser service embedding
+  beyond command-reactor profiles, dynamic reflection without libffi/host support,
+  Windows native coroutine acceptance and real-board/RTOS clock/alarm/IRQ/WFI
+  integration remain outside this checkpoint. Native fault landing does not prove
+  every async-signal or foreign embedding profile.
+- Conservative BDWGC roots can delay weak clearing and finalization. The collector
+  mmap-hint diagnosis and strict timer fixture correction do not introduce a general
+  prompt-collection guarantee. All 128 selected weak checks, manager retirement,
+  five-second deadline and retained-Timer/extra-G negative controls remain enforced;
+  no collector-private offset workaround ships.
+- The performance report preserves remaining spawn/WaitGroup, file/TCP and executable
+  size gaps. Shared-host seven-pair samples do not establish a universal regression
+  budget or all-workload speedup. Memory comparisons include the higher LLGo baseline
+  and exclude any claim of exact frame size or complete deployment closure size.
+
+Only `cpunion/llgo:llvm-coro` receives this work. The default checkout/main, upstream
+state and six original untracked `.new` files are preserved.
 
 ## Local result provenance
 
-Current persistent logs are under `~/.cache/llgo-coro-acceptance/20261015/`:
+Current R8 and follow-up receipts are under
+`~/.cache/llgo-coro-acceptance/20261018/result-state/`:
+
+- `evidence-s3r8.json` and `fulltestgo-final-receipt-s3r8.json`
+- `compatibility-final-receipt-s3r8.json` and `goroot-final-receipt-s3r8.json`
+- `final-acceptance-audit-s3r8.json`, `final-acceptance-report-s3r8.md` and `stdlib-skip-classifications-s3r8.json`
+- `stdlib-r8-retired-partial-s3r8.json` and `stdlib-parallel-s3r8-r2/result.json` (original aggregate stop and fresh missing-package completion)
+- `pr297-integration-receipt-s3r11.json` and `pr297-ci-final-s3r11.json`
+- `native-httptest-abort-s3r6/incident.json` (retained original failure and R8 fix proof)
+- `timer-gc-incident-s3r8/incident.json` and `timer-gates-s3r11/result.json`
+- `stdlib-r6-retired-partial-s3r6.json` (166 attempted, 14 unexecuted; not R8 results)
+- `perf-s3r8/final-report.md`, `final-report.json`, `measurement-preflight.json`, `measurement-after.json` and all 352 raw execution records
+
+Older persistent logs below remain under
+`~/.cache/llgo-coro-acceptance/20261015/` as historical evidence:
 
 - `root/compiler-build.log`
 - `root/compiler-v20-build.log`
