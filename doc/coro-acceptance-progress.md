@@ -43,41 +43,57 @@ Exact follow-up CI run `39073066329` passes **20/20**. Fresh paginated reviews,
 inline/issue comments and review threads are empty. PR #296 merged as
 `d8597d49206cd5accf1fa77832376fef5614b8e5` into `cpunion/llgo:llvm-coro`.
 
-The same frozen production inputs have now completed executable Go demos
-**73/73**, with no failures or skips and matching source-after. Stdlib acceptance
-has **49/180** complete successful packages; **131** remain unaccepted. Five
-compilation attempts across four packages were stopped by the disk floor before
-semantic execution. Their raw results remain retained separately from later
-attempts; they are not converted to passes.
+The same frozen production inputs have completed executable Go demos
+**73/73**, with no failures or skips and matching source-after. At
+**2026-10-18T03:16:47.354768+00:00**, stdlib acceptance has **61/180** complete successful
+fixture packages; **119** remain. The completed packages contain
+**720** passing test/subtest events and **2** explicit skips in
+`debug/buildinfo`, whose fixture still requires Go build information in LLGo
+images. A successful package exit does not count a skipped test as a semantic
+pass. Five prior compilation attempts across four packages stopped at the disk
+floor before semantic execution; all remain retained separately. The resumed
+`debug/gosym`, `debug/macho` and `debug/pe` package executions pass.
 
 The selected GOROOT scope is **1,082** existing CI runtime cases. The other
 **1,316** discovered compilation/diagnostic/multifile cases remain a coverage
-boundary, as requested. **540** cases have complete joined batch receipts:
-runner **538 PASS / 2 FAIL**. Of those runner passes, **529** actually passed the
-execution/output checks and **9** match existing expected-failure classifications.
-The remaining **542** cases are still unfinished; interrupted batches are rerun
-in full rather than reusing partial outcomes.
+boundary, as requested. **616** cases have complete joined batch receipts:
+runner **614 PASS / 2 FAIL**. Of those runner passes, **604** actually passed the
+execution/output checks and **10** match existing expected-failure classifications.
+The remaining **466** cases are unfinished; interrupted batches are rerun
+in full rather than reusing partial outcomes. The receipt checks unique accepted
+paths against the selected inventories for GOROOT, stdlib fixtures and demos.
 
-The two original raw failures remain visible: `noinit.go` requires gc's private
-`main..inittask` ABI, and `rangegen.go` exceeds the 10 GiB generated-compilation
-RSS ceiling, including a lower-heap-soft-target retry. A separate 24 GiB
-assessment stopped with monitor exit 125 before a generated-program semantic
-result; it does not establish a 24 GiB RSS failure or replace the original
-main-matrix failure. The retained older default-optimization receipt needed
-22,826.6 MiB, which is separate historical evidence.
+The two original raw failures remain visible. `noinit.go` requires gc's private
+`main..inittask` ABI. `rangegen.go` exceeds the main matrix's **10 GiB**
+generated-compilation RSS ceiling, including a lower-heap-soft-target retry.
+The first separate **24 GiB** assessment stopped with monitor exit 125 before
+a semantic result. Its retry with the repaired monitor now passes generated
+execution/output checks using the same compiler, input and default optimization:
+**20,833.0 MiB** whole-tree peak RSS, **20m44.132s** LLGo compilation. This
+supplemental pass does not rewrite the original 10 GiB matrix failure.
 
-At the 2026-10-18 checkpoint, disk space has fallen below the unchanged **10 GiB**
-protection floor and the long campaigns have stopped. Single- and two-worker
-continuations also reached that floor; new admission requires restored capacity
-of at least 30 GiB or suitable alternate storage. All guarded controllers
-and child process domains have joined; both complete frozen source manifests
-and the compiler hash still match. Runtime sampling was adapted for Darwin
-process-inspection timeouts, exited zombies and protected platform subprocesses;
-actual subprocess and GOROOT adapter probes are retained. This changes only
-acceptance instrumentation. Complete successes, raw failures and every
-infrastructure interruption retain their original records. `resume-plan-s3r6.json`
-records exact remaining partitions and requires restored storage before new
-admission. No whole-project or full-tree follow-up all-suite pass is asserted.
+The existing expected failure `heapsampling.go` has also been run diagnostically
+with an empty external xfail file. It fails with expected sampled object counts
+of 45,000--55,000 versus actual zero counts. Frozen MemProfile records aggregate
+by size class and do not populate allocation stacks, which this test uses to
+group samples by source line. This remains a runtime profiling compatibility gap,
+not an actual pass or a new not-applicable classification.
+
+The user restored storage and acceptance resumed with **52.73 GiB** free at
+admission. Four GOROOT and four stdlib workers continue on the same frozen
+production inputs, with the unchanged **10 GiB** disk floor and per-program
+RSS/time limits. One GOROOT controller stopped when `du` exceeded its five-second
+sampling deadline. Its eight complete cases remain accepted; its interrupted
+batch is rerun. The instrumentation now permits at most three five-second
+scan attempts within a twenty-second whole-sample deadline, retaining complete
+total validation and fail-closed handling of exhausted retries and other errors.
+Real scans and simulated transient timeout/ENOENT recovery and rejection
+controls pass.
+Runtime sampling also retains the earlier Darwin process-inspection fixes.
+These changes affect acceptance instrumentation, not production code. Retired
+controllers are joined and retain source/corpus-after receipts. Complete
+successes, raw failures and infrastructure interruptions retain original records.
+No whole-project or latest-full-tree all-suite pass is asserted.
 
 The same production freeze also completes **272/272** throughput/progress
 executions and **80/80** steady parked-memory executions against Go 1.27.0,
@@ -102,7 +118,10 @@ full standard-library compatibility.
 
 Artifacts and complete fingerprints are retained under
 `~/.cache/llgo-coro-acceptance/20261018/result-state/`, including
-`evidence-s3r6.json`, `fulltestgo-receipt-s3r6.json`,
+`evidence-s3r6.json`, `compatibility-checkpoint-resumed-s3r6.json`,
+`goroot-rangegen-rss-classification-s3r6.json`,
+`goroot-heapsampling-classification-s3r6.json`,
+`du-retry-r11-verification.json`, `fulltestgo-receipt-s3r6.json`,
 `host-test-tag-followup-s3r7.json`, `perf-s3r6/final-performance-s3r6.md`, and
 `platform-s3r6/platform-acceptance-s3r6.md`. Completed owned scratch artifacts
 were losslessly archived with verified inventories; active acceptance inputs
