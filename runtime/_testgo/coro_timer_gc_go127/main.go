@@ -19,18 +19,47 @@ type timerReferences struct {
 	channels []weak.Pointer[byte]
 }
 
-func channelReference(c <-chan time.Time) weak.Pointer[byte] {
+func channelPointer(c <-chan time.Time) unsafe.Pointer {
 	var boxed any = c
-	return weak.Make((*byte)((*emptyInterface)(unsafe.Pointer(&boxed)).data))
+	return (*emptyInterface)(unsafe.Pointer(&boxed)).data
 }
 
-// The publishing G ends before collection, so no conservative native stack or
-// suspended producer frame can accidentally keep its last temporary alive.
+func channelReference(c <-chan time.Time) weak.Pointer[byte] {
+	return weak.Make((*byte)(channelPointer(c)))
+}
+
+var nativePageSize uintptr
+var gcControl string
+var retainedTimer *time.Timer
+
+// A conservative collector may scan its mmap endpoint hint as a pointer to
+// the first object in an adjacent page. The linked collector's own metadata
+// then owns that object, independently of the timer manager under test. Select
+// all 32 Timer/Ticker pairs away from native page starts; every selected weak
+// pointer must still clear and every manager must retire within the same limit.
+func collectorPageStart(p unsafe.Pointer) bool {
+	return nativePageSize != 0 && uintptr(p)&(nativePageSize-1) == 0
+}
+
+// Producer temporaries are confined to this G, which can retire while main
+// collects. The final manager count also requires this producer to have ended.
 func discardedTimers(out chan timerReferences) {
 	var refs timerReferences
-	for i := 0; i < 32; i++ {
+	for attempt := 0; len(refs.timers) < 32; attempt++ {
+		if attempt >= 128 {
+			panic("could not select 32 timer pairs away from collector page boundaries")
+		}
 		timer := time.NewTimer(time.Hour)
 		ticker := time.NewTicker(time.Hour)
+		if collectorPageStart(unsafe.Pointer(timer)) || collectorPageStart(unsafe.Pointer(ticker)) ||
+			collectorPageStart(channelPointer(timer.C)) || collectorPageStart(channelPointer(ticker.C)) {
+			timer.Stop()
+			ticker.Stop()
+			continue
+		}
+		if gcControl == "keep-timer" && len(refs.timers) == 0 {
+			retainedTimer = timer
+		}
 		refs.timers = append(refs.timers, weak.Make(timer))
 		refs.tickers = append(refs.tickers, weak.Make(ticker))
 		refs.channels = append(refs.channels, channelReference(timer.C), channelReference(ticker.C))
@@ -58,8 +87,18 @@ func allCollected(refs timerReferences) bool {
 }
 
 func main() {
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		nativePageSize = uintptr(syscall.Getpagesize())
+	}
+	gcControl, _ = syscall.Getenv("LLGO_TIMER_GC_CONTROL")
+	if gcControl != "" && gcControl != "keep-timer" && gcControl != "extra-g" {
+		panic("unknown timer GC negative control")
+	}
 	runtime.GC()
 	baseline := runtime.NumGoroutine()
+	if gcControl == "extra-g" {
+		go func() { select {} }()
+	}
 	out := make(chan timerReferences)
 	go discardedTimers(out)
 	refs := <-out
