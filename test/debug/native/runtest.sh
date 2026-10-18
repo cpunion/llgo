@@ -23,7 +23,7 @@ export LLGO_NATIVE_DEBUG_SOURCE="$script_dir"
 export LLGO_NATIVE_DEBUG_ARTIFACT="$artifact"
 export LLGO_NATIVE_DEBUG_OPTIMIZED_ARTIFACT="$optimized_artifact"
 lldb_log="$test_tmp_dir/lldb.log"
-"$LLDB_PATH" --batch "$artifact" \
+"$LLDB_PATH" --batch -O "settings set symbols.enable-external-lookup false" "$artifact" \
     -o 'script import os, runpy; _ = runpy.run_path(os.path.join(os.environ["LLGO_NATIVE_DEBUG_SOURCE"], "acceptance.py")); _["main"]()' 2>&1 | tee "$lldb_log"
 if grep -q 'Traceback (most recent call last)' "$lldb_log" || ! grep -q NATIVE_DEBUG_ACCEPTANCE_OK "$lldb_log"; then
     exit 1

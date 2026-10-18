@@ -85,6 +85,7 @@ def find_frame(
 def create_session(executable: str) -> tuple[lldb.SBDebugger, lldb.SBTarget]:
     debugger = lldb.SBDebugger.Create()
     debugger.SetAsync(False)
+    debugger.HandleCommand("settings set symbols.enable-external-lookup false")
     progress(f"CreateTarget begin {executable}")
     target = debugger.CreateTarget(executable)
     progress("CreateTarget end")
