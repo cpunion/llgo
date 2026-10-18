@@ -7,7 +7,7 @@ assert hashlib.sha256(pathlib.Path(image).read_bytes()).hexdigest() == 'e6f276e8
 for cmd in ['set pagination off', 'set confirm off', 'set startup-with-shell off', 'set disable-randomization off', 'set print thread-events off', 'handle SIGPWR nostop noprint pass', 'handle SIGXCPU nostop noprint pass', 'handle SIGSEGV nostop noprint pass', 'handle SIGBUS nostop noprint pass', 'set environment GOMAXPROCS 2', 'set environment GOMEMLIMIT 2GiB']:
     gdb.execute(cmd)
 gdb.execute('file ' + image)
-bp = gdb.Breakpoint('*0x39154f', internal=True)
+bp = gdb.Breakpoint('*0x3899a1', internal=True)
 physical_panic_bp = gdb.Breakpoint('*0x3aa6f4', internal=True)
 last_event = None
 def stopped(event):
