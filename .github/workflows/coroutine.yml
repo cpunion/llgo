@@ -118,6 +118,11 @@ jobs:
             ./internal/runtime/coro_target_test_adapter.go \
             ./internal/runtime/coro_program_test.go \
             -run '^TestCoroProgram' -count=1
+          go test -race -shuffle=on -tags=coro_poll_owner_test \
+            ./internal/runtime/coro_poll_owner_llgo.go \
+            ./internal/runtime/coro_operation_capacity.go \
+            ./internal/runtime/coro_target_poll_import.go \
+            ./internal/runtime/coro_poll_owner_test.go -count=1
           # The native fleet is a deliberately isolated production adapter:
           # select only its real source plus its host test so LLGo runtime
           # symbols do not collide with the host Go runtime.
@@ -542,13 +547,19 @@ jobs:
         run: |
           ulimit -v 6291456
           go build -p=1 -o "$LLGO_TEST_LLGO" ./cmd/llgo
+          # Run each archive consumer in a fresh compiler process. The four
+          # consumers otherwise retain earlier build state under one 6 GiB
+          # address-space cap. Preserve every case and the existing limits.
           tests=(
-            TestCoroReflectResourceAcceptance
-            TestCoroReflectPostNativeResourceAcceptance
-            TestCoroReflectArchiveResourceAcceptance
+            '^TestCoroReflectResourceAcceptance$'
+            '^TestCoroReflectPostNativeResourceAcceptance$'
+            '^TestCoroReflectArchiveResourceAcceptance$/^Small$'
+            '^TestCoroReflectArchiveResourceAcceptance$/^Large$'
+            '^TestCoroReflectArchiveResourceAcceptance$/^BoundSmall$'
+            '^TestCoroReflectArchiveResourceAcceptance$/^BoundLarge$'
           )
           for test in "${tests[@]}"; do
-            timeout 12m go test -p=1 ./internal/build -run "^${test}$" -v -count=1 -timeout=11m
+            timeout 12m go test -p=1 ./internal/build -run "$test" -v -count=1 -timeout=11m
           done
 
       - name: Record failed native resource environment

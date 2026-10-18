@@ -37,8 +37,7 @@ func TestCoroNativePollReactorSharesExecutorWait(t *testing.T) {
 		"coro.SnapshotExecutorPollOperation(",
 		"corodoorbell.WaitPollSet(",
 		"coroNativePollIDsV2",
-		"coro.PostExecutorPollEvent(",
-		"coro.PollOperationReady",
+		"coroTargetPostPollEventsV1(count)",
 		"pipe.ConsumeRetainedWake()",
 		"corodoorbell.DeadlinePollTimeout(",
 	} {
@@ -46,6 +45,17 @@ func TestCoroNativePollReactorSharesExecutorWait(t *testing.T) {
 			t.Errorf("%s lacks shared-reactor marker %q", source, required)
 		}
 	}
+	const importer = "internal/runtime/coro_target_poll_import.go"
+	data, err = os.ReadFile(importer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"coro.PostExecutorPollEvent(", "coro.PollOperationReady", "coroNativePollIDsV2[entry-1]"} {
+		if !strings.Contains(string(data), required) {
+			t.Errorf("%s lacks retained-import marker %q", importer, required)
+		}
+	}
+	body += string(data)
 	for _, forbidden := range []string{
 		"coroworker",
 		"pthread",

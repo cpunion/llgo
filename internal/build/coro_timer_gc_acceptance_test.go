@@ -97,8 +97,9 @@ func testCoroTimerGCAcceptance(t *testing.T, wasi bool) {
 					if wasi {
 						run = exec.CommandContext(runCtx, wasmtime, "run", image)
 					}
+					run.Env = append(os.Environ(), "LLGO_TIMER_GC_CONTROL=")
 					if procs != "" {
-						run.Env = append(os.Environ(), "GOMAXPROCS="+procs)
+						run.Env = append(run.Env, "GOMAXPROCS="+procs)
 					}
 					output, err := run.CombinedOutput()
 					deadline := runCtx.Err()
@@ -106,6 +107,26 @@ func testCoroTimerGCAcceptance(t *testing.T, wasi bool) {
 					if err != nil || strings.TrimSpace(string(output)) != fixture.output {
 						t.Fatalf("LLGo Timer/GC run (P=%s, iteration=%d): %v, deadline: %v\n%s", procs, iteration, err, deadline, output)
 					}
+				}
+			}
+			if !wasi && fixture.name == "coro_timer_gc_go127" {
+				// The fixture must reject an actual strong Timer owner and an
+				// extra parked G independently. Reuse the accepted image, limits
+				// and assertions; neither control may pass through a timeout.
+				for _, control := range []struct{ mode, failure string }{
+					{"keep-timer", "unreachable future Timer/Ticker or channel remained strongly alive"},
+					{"extra-g", "collected future timer retained parked manager until deadline"},
+				} {
+					t.Run("negative/"+control.mode, func(t *testing.T) {
+						ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 30*time.Second)
+						defer cancel()
+						run := exec.CommandContext(ctx, image)
+						run.Env = append(os.Environ(), "GOMAXPROCS=2", "LLGO_TIMER_GC_CONTROL="+control.mode)
+						output, err := run.CombinedOutput()
+						if ctx.Err() != nil || err == nil || !strings.Contains(string(output), control.failure) {
+							t.Fatalf("Timer/GC negative control %s: %v, deadline: %v\n%s", control.mode, err, ctx.Err(), output)
+						}
+					})
 				}
 			}
 		})

@@ -140,19 +140,9 @@ func coroTargetWaitExecutorV1(pipe *corodoorbell.Pipe, deadline int64, hasDeadli
 			}
 			woke = true
 		}
-		posted := false
-		for entry := uint32(1); entry < count; entry++ {
-			if entries[entry].Revents == 0 {
-				continue
-			}
-			if result := coro.PostExecutorPollEvent(
-				&coroProgramExecutorDriverV1State,
-				operations[entry-1],
-				coro.PollOperationReady,
-			); result != coro.PollOperationPosted {
-				return false
-			}
-			posted = true
+		posted, postOK := coroTargetPostPollEventsV1(count)
+		if !postOK {
+			return false
 		}
 		if woke || posted {
 			return true
