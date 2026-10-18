@@ -818,6 +818,7 @@ jobs:
           uname -a >> /tmp/timer-diag/environment.txt
           sha256sum /tmp/timer-evidence/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer >> /tmp/timer-diag/environment.txt
       - name: Repeat unchanged image without debugger
+        if: false
         env:
           DIAG_IMAGE: /tmp/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer
           DIAG_OUT: /tmp/timer-diag
