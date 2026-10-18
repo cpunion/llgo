@@ -1,6 +1,7 @@
 package adler32_test
 
 import (
+	"encoding"
 	"hash"
 	"hash/adler32"
 	"io"
@@ -148,11 +149,28 @@ func TestIncremental(t *testing.T) {
 }
 
 func TestBinaryMarshaling(t *testing.T) {
-	// TODO: Adler-32 binary unmarshaling currently resets hash to initial state
-	// The hash/adler32 package implements the binary marshaling interfaces but
-	// the unmarshaling behavior appears to reset the hash to its initial state
-	// rather than restoring the saved state. This needs further investigation.
-	t.Skip("TODO: Adler-32 binary unmarshaling currently resets hash to initial state")
+	original := adler32.New()
+	io.WriteString(original, "saved prefix")
+	state, err := original.(encoding.BinaryMarshaler).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := adler32.New()
+	io.WriteString(restored, "discard this state")
+	if err := restored.(encoding.BinaryUnmarshaler).UnmarshalBinary(state); err != nil {
+		t.Fatal(err)
+	}
+	if got := restored.Sum32(); got != original.Sum32() {
+		t.Fatalf("restored digest = %x, want %x", got, original.Sum32())
+	}
+	io.WriteString(original, " and suffix")
+	io.WriteString(restored, " and suffix")
+	if got := restored.Sum32(); got != adler32.Checksum([]byte("saved prefix and suffix")) || got != original.Sum32() {
+		t.Fatalf("continued digest = %x, want %x", got, original.Sum32())
+	}
+	if err := restored.(encoding.BinaryUnmarshaler).UnmarshalBinary(state[:len(state)-1]); err == nil {
+		t.Fatal("UnmarshalBinary accepted a truncated state")
+	}
 }
 
 func TestHash32Interface(t *testing.T) {

@@ -51,6 +51,7 @@ type genConfig struct {
 	funcInfo         []funcInfoRecord
 	pcLineInfo       []pcLineRecord
 	cExports         []cExport
+	buildInfo        string
 }
 
 type cExport struct {
@@ -80,6 +81,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	prog := ctx.prog
 	mainPkg := prog.NewPackage("", pkg.ID+".main")
 	defer mainPkg.MaterializePreserveSyms()
+	emitBuildInfo(ctx, mainPkg, cfg.buildInfo, cfg.rtInit)
 
 	argcVar := mainPkg.NewVarEx("__llgo_argc", prog.Pointer(prog.Int32()))
 	argcVar.Init(prog.Zero(prog.Int32()))
@@ -146,7 +148,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 
 	pkgPath := pkg.PkgPath
-	if pkg.Types != nil && pkg.Types.Name() == "main" {
+	if pkg.Name == "main" || pkg.Types != nil && pkg.Types.Name() == "main" {
 		pkgPath = "main"
 	}
 

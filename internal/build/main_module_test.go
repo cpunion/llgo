@@ -118,6 +118,26 @@ func TestGenMainModuleExecutable(t *testing.T) {
 	)
 }
 
+func TestGenMainModuleMainNameAfterFrontendRelease(t *testing.T) {
+	ctx := &context{
+		prog:      llssa.NewProgram(nil),
+		buildConf: &Config{BuildMode: BuildModeCArchive, Goos: "linux", Goarch: "amd64"},
+	}
+	defer ctx.prog.Dispose()
+	// Staged native emission has released Types, but keeps the loader's name.
+	pkg := &packages.Package{PkgPath: "command-line-arguments", Name: "main"}
+	// A library without runtime dependencies still gets its file record, and
+	// must not require runtime String layouts merely to generate the entry.
+	framed := linkedBuildInfo(ctx.buildConf, pkg, nil)
+	module := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{buildInfo: framed})
+	if module.LPkg.Module().NamedGlobal("main..inittask").IsNil() {
+		t.Fatalf("main init-task symbol lost after frontend release:\n%s", module.LPkg.String())
+	}
+	if module.LPkg.Module().NamedGlobal(buildInfoSymbol).IsNil() {
+		t.Fatal("missing native build information for runtime-free library")
+	}
+}
+
 func TestGenMainModuleWindowsExitsAfterMain(t *testing.T) {
 	llvm.InitializeAllTargets()
 	ctx := &context{

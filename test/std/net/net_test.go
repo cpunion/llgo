@@ -1179,35 +1179,49 @@ func TestLookupPort(t *testing.T) {
 }
 
 func TestLookupTXT(t *testing.T) {
-	records, err := net.LookupTXT("localhost")
+	useLocalDNS(t)
+	records, err := net.LookupTXT(dnsFixtureHost)
 	if err != nil {
-		t.Skip("LookupTXT failed")
+		t.Fatal(err)
 	}
-	_ = records
+	if len(records) != 1 || records[0] != "testrecord" {
+		t.Fatalf("LookupTXT = %v", records)
+	}
 }
 
 func TestLookupMX(t *testing.T) {
-	records, err := net.LookupMX("localhost")
+	useLocalDNS(t)
+	records, err := net.LookupMX(dnsFixtureHost)
 	if err != nil {
-		t.Skip("LookupMX failed")
+		t.Fatal(err)
 	}
-	_ = records
+	if len(records) != 1 || records[0].Host != "mail.fixture.invalid." || records[0].Pref != 10 {
+		t.Fatalf("LookupMX = %v", records)
+	}
 }
 
 func TestLookupNS(t *testing.T) {
-	records, err := net.LookupNS("localhost")
+	useLocalDNS(t)
+	records, err := net.LookupNS(dnsFixtureHost)
 	if err != nil {
-		t.Skip("LookupNS failed")
+		t.Fatal(err)
 	}
-	_ = records
+	if len(records) != 1 || records[0].Host != "ns.fixture.invalid." {
+		t.Fatalf("LookupNS = %v", records)
+	}
 }
 
 func TestLookupSRV(t *testing.T) {
-	cname, records, err := net.LookupSRV("xmpp-server", "tcp", "localhost")
+	useLocalDNS(t)
+	cname, records, err := net.LookupSRV("xmpp-server", "tcp", dnsFixtureHost)
 	if err != nil {
-		t.Skip("LookupSRV failed")
+		t.Fatal(err)
 	}
-	_, _ = cname, records
+	if cname != "_xmpp-server._tcp.fixture.invalid." || len(records) != 1 ||
+		records[0].Target != "service.fixture.invalid." || records[0].Port != 4242 ||
+		records[0].Priority != 10 || records[0].Weight != 20 {
+		t.Fatalf("LookupSRV = %q, %v", cname, records)
+	}
 }
 
 func TestIPMaskSize(t *testing.T) {
@@ -1427,17 +1441,24 @@ func TestSRVType(t *testing.T) {
 }
 
 func TestResolverLookupMethods(t *testing.T) {
-	r := net.DefaultResolver
-	ctx := context.Background()
+	r := localDNSResolver(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	_, err := r.LookupIPAddr(ctx, "localhost")
+	addrs, err := r.LookupIPAddr(ctx, dnsFixtureHost)
 	if err != nil {
 		t.Errorf("LookupIPAddr error: %v", err)
 	}
+	if len(addrs) != 2 {
+		t.Errorf("LookupIPAddr = %v, want IPv4 and IPv6 records", addrs)
+	}
 
-	_, err = r.LookupNetIP(ctx, "ip", "localhost")
+	ips, err := r.LookupNetIP(ctx, "ip", dnsFixtureHost)
 	if err != nil {
 		t.Errorf("LookupNetIP error: %v", err)
+	}
+	if len(ips) != 2 {
+		t.Errorf("LookupNetIP = %v, want IPv4 and IPv6 records", ips)
 	}
 
 	_, err = r.LookupPort(ctx, "tcp", "http")
@@ -1445,29 +1466,44 @@ func TestResolverLookupMethods(t *testing.T) {
 		t.Errorf("LookupPort error: %v", err)
 	}
 
-	_, err = r.LookupMX(ctx, "localhost")
+	mx, err := r.LookupMX(ctx, dnsFixtureHost)
 	if err != nil {
-		t.Skip("LookupMX failed")
+		t.Fatal(err)
+	}
+	if len(mx) != 1 || mx[0].Host != "mail.fixture.invalid." || mx[0].Pref != 10 {
+		t.Fatalf("Resolver.LookupMX = %v", mx)
 	}
 
-	_, err = r.LookupNS(ctx, "localhost")
+	ns, err := r.LookupNS(ctx, dnsFixtureHost)
 	if err != nil {
-		t.Skip("LookupNS failed")
+		t.Fatal(err)
+	}
+	if len(ns) != 1 || ns[0].Host != "ns.fixture.invalid." {
+		t.Fatalf("Resolver.LookupNS = %v", ns)
 	}
 
-	_, err = r.LookupTXT(ctx, "localhost")
+	txt, err := r.LookupTXT(ctx, dnsFixtureHost)
 	if err != nil {
-		t.Skip("LookupTXT failed")
+		t.Fatal(err)
+	}
+	if len(txt) != 1 || txt[0] != "testrecord" {
+		t.Fatalf("Resolver.LookupTXT = %v", txt)
 	}
 
-	_, _, err = r.LookupSRV(ctx, "xmpp-server", "tcp", "localhost")
+	cname, srv, err := r.LookupSRV(ctx, "xmpp-server", "tcp", dnsFixtureHost)
 	if err != nil {
-		t.Skip("LookupSRV failed")
+		t.Fatal(err)
+	}
+	if cname != "_xmpp-server._tcp.fixture.invalid." || len(srv) != 1 || srv[0].Target != "service.fixture.invalid." || srv[0].Port != 4242 || srv[0].Priority != 10 || srv[0].Weight != 20 {
+		t.Fatalf("Resolver.LookupSRV = %q, %v", cname, srv)
 	}
 
-	_, err = r.LookupIP(ctx, "ip4", "localhost")
+	v4, err := r.LookupIP(ctx, "ip4", dnsFixtureHost)
 	if err != nil {
 		t.Errorf("LookupIP error: %v", err)
+	}
+	if len(v4) != 1 || !v4[0].Equal(net.IPv4(192, 0, 2, 10)) {
+		t.Errorf("LookupIP = %v", v4)
 	}
 }
 

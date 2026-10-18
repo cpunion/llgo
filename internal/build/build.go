@@ -8349,6 +8349,7 @@ func generateMainEntryPackage(ctx *context, pkg *packages.Package, linkedOrder [
 		funcInfo:         funcInfo,
 		pcLineInfo:       pcLineInfo,
 		cExports:         cExports,
+		buildInfo:        linkedBuildInfo(ctx.buildConf, pkg, linkedOrder),
 	})
 	if len(cExports) != 0 {
 		llabi.LowerLargeAggregates(ctx.prog.TargetData(), entryPkg.LPkg.Module())

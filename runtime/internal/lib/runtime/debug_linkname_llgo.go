@@ -85,5 +85,10 @@ func setMemoryLimit(in int64) (out int64) {
 //go:linkname runtime_debug_WriteHeapDump runtime/debug.WriteHeapDump
 func runtime_debug_WriteHeapDump(uintptr) {}
 
+// The generated entry module defines this immutable linked-program value.
+//
+//go:linkname llgoBuildInfo __llgo_buildinfo.modinfo
+var llgoBuildInfo string
+
 //go:linkname debug_modinfo runtime/debug.modinfo
-func debug_modinfo() string { return "" }
+func debug_modinfo() string { return llgoBuildInfo }

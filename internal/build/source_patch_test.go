@@ -3,6 +3,7 @@ package build
 import (
 	"bytes"
 	"go/ast"
+	"go/constant"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -18,6 +19,43 @@ import (
 	"github.com/xgo-dev/llgo/internal/packages"
 	llruntime "github.com/xgo-dev/llgo/runtime"
 )
+
+func TestRuntimeCompilerSourcePatchTypeChecks(t *testing.T) {
+	goroot, goversion, err := env.GOROOTAndGOVERSIONWithEnv(os.Environ())
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlay, _, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot,
+		sourcePatchBuildContext{goos: runtime.GOOS, goarch: runtime.GOARCH, goversion: goversion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the runtime constant patch without asking the host Go exporter
+	// to compile LLGo's replacement assembly bodies in unrelated packages.
+	runtimeOverlay := make(map[string][]byte)
+	for name, data := range overlay {
+		if filepath.Dir(name) == filepath.Join(goroot, "src", "runtime") {
+			runtimeOverlay[name] = data
+		}
+	}
+	pkgs, err := packages.LoadEx(nil, func(types.Sizes, string, string) types.Sizes {
+		return types.SizesFor("gc", runtime.GOARCH)
+	}, &packages.Config{Mode: loadSyntax | packages.NeedDeps | packages.NeedModule | packages.NeedExportFile,
+		Env: os.Environ(), Fset: token.NewFileSet(), Overlay: runtimeOverlay}, "runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkgs) != 1 || pkgs[0].IllTyped {
+		if len(pkgs) == 1 {
+			logPackageErrors(t, pkgs[0], make(map[string]bool))
+		}
+		t.Fatal("runtime did not type-check")
+	}
+	compiler := pkgs[0].Types.Scope().Lookup("Compiler").(*types.Const)
+	if got := constant.StringVal(compiler.Val()); got != "llgo" {
+		t.Fatalf("frontend runtime.Compiler = %q, want llgo before constant folding", got)
+	}
+}
 
 func TestWasmRuntimeSourcePatchTypeChecks(t *testing.T) {
 	for _, goos := range []string{"js", "wasip1"} {

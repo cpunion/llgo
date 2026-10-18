@@ -1068,6 +1068,17 @@ func (p Package) markLLVMRetained(v llvm.Value) {
 	p.llvmRetainedValues = append(p.llvmRetainedValues, llvm.ConstBitCast(v, elemTyp))
 }
 
+// RetainGlobal preserves a defined global discovered by an external consumer
+// through optimization and final-link section garbage collection.
+func (p Package) RetainGlobal(name string) error {
+	global := p.mod.NamedGlobal(name)
+	if global.IsNil() || global.IsDeclaration() {
+		return fmt.Errorf("ssa: cannot retain undefined global %q", name)
+	}
+	p.markLLVMRetained(global)
+	return nil
+}
+
 // AddCompilerMetadataBlob adds an immutable, byte-exact object-section record
 // which survives LLVM optimization but may be discarded by the final native
 // linker. This is intended for compiler/importer metadata consumed from
