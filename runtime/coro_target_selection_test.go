@@ -73,6 +73,7 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 				slices.Contains(pkg.GoFiles, "coro_target_native_fleet_llgo.go")
 			timer := slices.Contains(pkg.GoFiles, "coro_executor_driver_timer_llgo.go") &&
 				slices.Contains(pkg.GoFiles, "coro_target_wait_timer_llgo.go") &&
+				slices.Contains(pkg.GoFiles, "coro_target_poll_import.go") &&
 				slices.Contains(pkg.GoFiles, "coro_timer_owner_llgo.go")
 			foreignFleet := slices.Contains(pkg.GoFiles, "coro_os_thread_foreign_llgo.go")
 			foreignPipe := slices.Contains(pkg.GoFiles, "coro_os_thread_foreign_pipe_llgo.go")
