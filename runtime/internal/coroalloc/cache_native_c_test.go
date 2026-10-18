@@ -47,6 +47,8 @@ enum {
 	bounded_capacity = 512,
 	compact_size = 576,
 	large_compact_size = 1152,
+	recursive_size = 1280,
+	recursive_depth = 65,
     thread_count = 8,
     thread_iterations = 10000,
     concurrent_size = 512,
@@ -163,6 +165,35 @@ int main(void) {
         }
     }
     free(large_compact);
+
+    /* A chain of 1 KiB local arrays needs more than a dozen medium frames.
+       Retiring one bounded chain must leave a reusable, fully cleared chain. */
+    for (int index = 0; index < recursive_depth; ++index) {
+        unsigned char *pointer = malloc(recursive_size);
+        if (pointer == NULL) {
+            return 29;
+        }
+        memset(pointer, 0xa5, recursive_size);
+        if (!__llgo_coro_alloc_cache_put_v1(pointer, recursive_size)) {
+            return 30;
+        }
+    }
+    for (int index = 0; index < recursive_depth; ++index) {
+        unsigned char *pointer =
+            __llgo_coro_alloc_cache_take_v1(recursive_size);
+        if (pointer == NULL) {
+            return 31;
+        }
+        for (int byte = 0; byte < recursive_size; ++byte) {
+            if (pointer[byte] != 0) {
+                return 32;
+            }
+        }
+        free(pointer);
+    }
+    if (__llgo_coro_alloc_cache_take_v1(recursive_size) != NULL) {
+        return 33;
+    }
 
     pthread_t threads[thread_count];
     for (int index = 0; index < thread_count; ++index) {

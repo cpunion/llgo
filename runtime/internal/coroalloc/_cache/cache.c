@@ -44,12 +44,12 @@ enum {
         llgo_coro_alloc_cache_small_count +
         llgo_coro_alloc_cache_large_count +
         llgo_coro_alloc_cache_power_count,
-    /* Small frames dominate high-rate spawn/retire loops, so preserve their
-       prior reuse depth. The larger compact classes get a small budget: their
-       main benefit is low live slack, not retaining a deep free list. Across
-       all 53 bins the theoretical retention bound is below 3.6 MiB. */
-    llgo_coro_alloc_cache_small_bytes_per_bin = 128 * 1024,
-    llgo_coro_alloc_cache_large_bytes_per_bin = 16 * 1024,
+    /* Reuse a bounded recursive working set for medium frames as well as
+       the small spawn/retire frames. A 16 KiB medium bin retains only twelve
+       1280-byte frames, so even a single 65-frame chain repeatedly falls back
+       to the collector. Across all 53 bins this budget retains less than
+       6.625 MiB, independent of the number of scheduler workers. */
+    llgo_coro_alloc_cache_bytes_per_bin = 128 * 1024,
 };
 
 struct llgo_coro_alloc_cache_bin_v1 {
@@ -137,9 +137,7 @@ bool __llgo_coro_alloc_cache_put_v1(void *pointer, uintptr_t size) {
     llgo_coro_alloc_cache_lock_v1(bin);
     uint32_t capacity = bin->capacity;
     if (capacity == 0) {
-        uintptr_t budget = size <= llgo_coro_alloc_cache_small_max
-            ? llgo_coro_alloc_cache_small_bytes_per_bin
-            : llgo_coro_alloc_cache_large_bytes_per_bin;
+        uintptr_t budget = llgo_coro_alloc_cache_bytes_per_bin;
         uintptr_t computed = budget / size;
         capacity = computed == 0 ? UINT32_MAX : (uint32_t)computed;
         bin->capacity = capacity;
