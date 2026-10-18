@@ -4,7 +4,7 @@ out = pathlib.Path(os.environ['DIAG_OUT'])
 out.mkdir(exist_ok=True, parents=True)
 image = os.environ['DIAG_IMAGE']
 assert hashlib.sha256(pathlib.Path(image).read_bytes()).hexdigest() == 'e6f276e8309521c8b5b56c94979bc39702e4f74bf9ebac10fdd6189a52561e6e'
-for cmd in ['set pagination off', 'set confirm off', 'set startup-with-shell off', 'set disable-randomization off', 'set print thread-events off', 'handle SIGPWR nostop noprint pass', 'handle SIGXCPU nostop noprint pass', 'set environment GOMAXPROCS 2', 'set environment GOMEMLIMIT 2GiB']:
+for cmd in ['set pagination off', 'set confirm off', 'set startup-with-shell off', 'set disable-randomization off', 'set print thread-events off', 'handle SIGPWR nostop noprint pass', 'handle SIGXCPU nostop noprint pass', 'handle SIGSEGV nostop noprint pass', 'handle SIGBUS nostop noprint pass', 'set environment GOMAXPROCS 2', 'set environment GOMEMLIMIT 2GiB']:
     gdb.execute(cmd)
 gdb.execute('file ' + image)
 bp = gdb.Breakpoint('*0x39154f', internal=True)
@@ -19,7 +19,7 @@ def exited(event):
 gdb.events.stop.connect(stopped)
 gdb.events.exited.connect(exited)
 rows = []
-for iteration in range(1, 501):
+for iteration in range(1, 2001):
     last_event = None
     started = time.monotonic()
     transcript = gdb.execute('run', to_string=True)
