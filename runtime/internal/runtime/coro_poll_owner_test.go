@@ -19,11 +19,13 @@
 package runtime
 
 import (
+	"os"
 	"runtime"
 	"testing"
 	"unsafe"
 
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/corodoorbell"
 )
 
 // This test is run as a named production-source island with
@@ -39,6 +41,11 @@ var (
 )
 
 const coroPollOwnerTestDescriptorContext uintptr = 1
+
+var (
+	coroNativePollEntriesV1 [corodoorbell.PollSetCapacity]corodoorbell.PollFD
+	coroNativePollIDsV2     [corodoorbell.PollSetCapacity - 1]coro.OperationID
+)
 
 var coroPollOwnerTestDescriptorState struct {
 	operation coro.OperationID
@@ -283,6 +290,31 @@ func finishCoroPollOwnerTestRun(t *testing.T, frame *coroPollOwnerTestFrame, act
 }
 
 func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
+	testCoroPollOwnerV2ParkEventResumeAndRecycle(t, coro.PollOperationResultInvalid)
+}
+
+func TestCoroPollRetainedReadinessAfterConcurrentPublication(t *testing.T) {
+	for _, first := range []coro.PollOperationResult{coro.PollOperationReady, coro.PollOperationClosing} {
+		t.Run(map[coro.PollOperationResult]string{coro.PollOperationReady: "ready", coro.PollOperationClosing: "closing"}[first], func(t *testing.T) {
+			testCoroPollOwnerV2ParkEventResumeAndRecycle(t, first)
+		})
+	}
+}
+
+func testCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T, first coro.PollOperationResult) {
+	t.Helper()
+	fd := int32(17)
+	var reader, writer *os.File
+	if first != coro.PollOperationResultInvalid {
+		var err error
+		reader, writer, err = os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reader.Close()
+		defer writer.Close()
+		fd = int32(reader.Fd())
+	}
 	if coroProgramExecutorBoundV1State || coroProgramExecutorHandleV1State != (coro.ExecutorHandle{}) ||
 		coroProgramExecutorDriverV1State != (coro.ExecutorDriver{}) ||
 		!coroProgramExecutorRegistryV1State.CanRelease() ||
@@ -316,7 +348,7 @@ func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
 		unsafe.Pointer(frame.header),
 		unsafe.Pointer(&state),
 		coroPollOwnerTestDescriptorContext,
-		17,
+		fd,
 		uint32(coro.PollInterestRead),
 		0,
 	)
@@ -338,13 +370,67 @@ func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
 	)); result == coro.PollOperationPosted {
 		t.Fatal("Poll V2 owner-return import accepted stale generation")
 	}
-	__llgo_coro_poll_post_closing_or_abort_v1(
-		coroPollOwnerTestDescriptorContext,
-		uint32(coro.PollInterestRead),
-	)
+	want := coroPollResumeClosingV2
+	if first == coro.PollOperationResultInvalid {
+		__llgo_coro_poll_post_closing_or_abort_v1(
+			coroPollOwnerTestDescriptorContext,
+			uint32(coro.PollInterestRead),
+		)
+	} else {
+		// Preserve the real owner snapshot and real poll revents, then publish
+		// the competing fact before importing that retained readiness event.
+		// This fixes the race ordering without a timing-dependent sleep or a
+		// production callback hook.
+		snapshot, active, ok := coro.SnapshotExecutorPollOperation(&coroProgramExecutorDriverV1State, operation.LocalSlot()-1)
+		if !ok || !active || snapshot.ID != operation || snapshot.FD != fd {
+			t.Fatalf("snapshot poll owner = (%+v, %t, %t)", snapshot, active, ok)
+		}
+		coroNativePollEntriesV1[0] = corodoorbell.PollFD{FD: -1}
+		coroNativePollEntriesV1[1] = corodoorbell.PollFD{FD: snapshot.FD, Events: corodoorbell.PollRead}
+		coroNativePollIDsV2[0] = snapshot.ID
+		if _, err := writer.Write([]byte{1}); err != nil {
+			t.Fatal(err)
+		}
+		if ready, errno := corodoorbell.WaitPollSet(&coroNativePollEntriesV1[0], 2, 0); ready != 1 || errno != 0 || coroNativePollEntriesV1[1].Revents&corodoorbell.PollRead == 0 {
+			t.Fatalf("physical retained readiness = (%d, %d, %+v)", ready, errno, coroNativePollEntriesV1[1])
+		}
+		for _, count := range []uint32{0, corodoorbell.PollSetCapacity + 1} {
+			if posted, ok := coroTargetPostPollEventsV1(count); ok || posted {
+				t.Fatalf("retained import accepted invalid count %d", count)
+			}
+		}
+		coroNativePollIDsV2[0].Generation++
+		if posted, ok := coroTargetPostPollEventsV1(2); ok || posted {
+			t.Fatal("retained import accepted stale operation")
+		}
+		coroNativePollIDsV2[0] = coro.OperationID{}
+		if posted, ok := coroTargetPostPollEventsV1(2); ok || posted {
+			t.Fatal("retained import accepted invalid operation")
+		}
+		coroNativePollIDsV2[0] = snapshot.ID
+		if result := coro.PollOperationPostResult(__llgo_coro_poll_post_event_v2(operation.SourceSlot, operation.Generation, uint32(first))); result != coro.PollOperationPosted {
+			t.Fatalf("publish competing poll fact = %d", result)
+		}
+		if posted, ok := coroTargetPostPollEventsV1(2); !ok || !posted {
+			t.Fatalf("import retained readiness after competing publication = (%t, %t)", posted, ok)
+		}
+		// A second notification must remain harmless and must not create a
+		// second delivery or overwrite Closing with Ready.
+		if posted, ok := coroTargetPostPollEventsV1(2); !ok || !posted {
+			t.Fatalf("repeat retained readiness = (%t, %t)", posted, ok)
+		}
+		if first == coro.PollOperationReady {
+			want = coroPollResumeReadyV2
+		}
+	}
 	if timers, promoted, ok := coro.PollExecutorAt(&coroProgramExecutorDriverV1State, 0); !ok ||
 		timers != 0 || promoted != 1 {
 		t.Fatalf("scan Poll V2 ABI readiness = (%d, %d, %t)", timers, promoted, ok)
+	}
+	if first != coro.PollOperationResultInvalid {
+		if timers, promoted, ok := coro.PollExecutorAt(&coroProgramExecutorDriverV1State, 0); !ok || timers != 0 || promoted != 0 {
+			t.Fatalf("duplicate poll fact promoted again = (%d, %d, %t)", timers, promoted, ok)
+		}
 	}
 	if next, ok := coro.NextRunnableAt(&coroProgramPV1State, 0); !ok || next != frame.g {
 		t.Fatalf("dequeue Poll V2 resumed G = (%p, %t)", next, ok)
@@ -359,11 +445,16 @@ func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
 	}
 	frame.header.SuspendReason = uint16(coro.SuspendPark)
 	frame.header.Lifecycle = uint16(coro.FrameSuspended)
-	if status := __llgo_coro_poll_resume_v2(unsafe.Pointer(frame.g), unsafe.Pointer(&state)); status != coroPollResumeClosingV2 || state != (CoroPollParkV2{}) {
+	if status := __llgo_coro_poll_resume_v2(unsafe.Pointer(frame.g), unsafe.Pointer(&state)); status != want || state != (CoroPollParkV2{}) {
 		t.Fatalf("resume Poll V2 ABI = (%d, %+v)", status, state)
 	}
 	if coroPollOwnerTestDescriptorState.operation.Valid() {
 		t.Fatalf("Poll V2 resume retained descriptor operation: %+v", coroPollOwnerTestDescriptorState)
+	}
+	if first != coro.PollOperationResultInvalid {
+		if posted, ok := coroTargetPostPollEventsV1(2); ok || posted {
+			t.Fatal("retained import accepted retired operation")
+		}
 	}
 	frame.header.SuspendReason = uint16(coro.SuspendNone)
 	frame.header.Lifecycle = uint16(coro.FrameActive)
