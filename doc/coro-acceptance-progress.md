@@ -52,10 +52,10 @@ attempts; they are not converted to passes.
 
 The selected GOROOT scope is **1,082** existing CI runtime cases. The other
 **1,316** discovered compilation/diagnostic/multifile cases remain a coverage
-boundary, as requested. **436** cases have complete joined batch receipts:
-runner **434 PASS / 2 FAIL**. Of those runner passes, **430** actually passed the
-execution/output checks and **4** match existing expected-failure classifications.
-The remaining **646** cases are still unfinished; interrupted batches are rerun
+boundary, as requested. **540** cases have complete joined batch receipts:
+runner **538 PASS / 2 FAIL**. Of those runner passes, **529** actually passed the
+execution/output checks and **9** match existing expected-failure classifications.
+The remaining **542** cases are still unfinished; interrupted batches are rerun
 in full rather than reusing partial outcomes.
 
 The two original raw failures remain visible: `noinit.go` requires gc's private
@@ -67,7 +67,9 @@ main-matrix failure. The retained older default-optimization receipt needed
 22,826.6 MiB, which is separate historical evidence.
 
 At the 2026-10-18 checkpoint, disk space has fallen below the unchanged **10 GiB**
-protection floor and the long campaigns have stopped. All guarded controllers
+protection floor and the long campaigns have stopped. Single- and two-worker
+continuations also reached that floor; new admission requires restored capacity
+of at least 30 GiB or suitable alternate storage. All guarded controllers
 and child process domains have joined; both complete frozen source manifests
 and the compiler hash still match. Runtime sampling was adapted for Darwin
 process-inspection timeouts, exited zombies and protected platform subprocesses;
