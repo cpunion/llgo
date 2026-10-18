@@ -1,6 +1,7 @@
 name: Coroutine
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - main
@@ -13,6 +14,7 @@ concurrency:
 
 jobs:
   test:
+    if: github.event_name != 'workflow_dispatch'
     name: ${{ matrix.check }}
     runs-on: ubuntu-22.04
     timeout-minutes: ${{ matrix.timeout || 20 }}
@@ -789,3 +791,48 @@ jobs:
         run: |
           go build -o "$LLGO_TEST_LLGO" ./cmd/llgo
           go test ./internal/build -run '^TestCoroBaremetalTimerAcceptance$' -count=1 -v -timeout=12m
+
+  retained-timer-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'cpunion/llgo'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install debugger and exact collector ABI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends libgc1 libffi8 libatomic1 gdb
+      - name: Download the original failed CI image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/timer-evidence /tmp/timer-diag
+          gh api repos/cpunion/llgo/actions/artifacts/12128509760/zip > /tmp/original-timer.zip
+          unzip -q /tmp/original-timer.zip -d /tmp/timer-evidence
+          chmod +x /tmp/timer-evidence/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer
+          dpkg-query -W libc6 libgc1 libffi8 libatomic1 > /tmp/timer-diag/environment.txt
+          uname -a >> /tmp/timer-diag/environment.txt
+          sha256sum /tmp/timer-evidence/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer >> /tmp/timer-diag/environment.txt
+      - name: Repeat unchanged image without debugger
+        env:
+          DIAG_IMAGE: /tmp/timer-evidence/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer
+          DIAG_OUT: /tmp/timer-diag
+        run: timeout 6m python3 .github/scripts/coro-timer-retained-native.py
+      - name: Capture first failure without calls into the inferior
+        if: always()
+        env:
+          DIAG_IMAGE: /tmp/timer-evidence/llgo-timer-gc-artifacts/coro_timer_gc_go127/timer
+          DIAG_OUT: /tmp/timer-diag
+        run: |
+          timeout 10m gdb -batch -ex 'source .github/scripts/coro-timer-gdb-capture.py' > /tmp/timer-diag/gdb.log 2>&1
+      - name: Preserve diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: retained-timer-gc-native-diagnostic
+          path: /tmp/timer-diag
+          if-no-files-found: error
+          retention-days: 7
