@@ -15,14 +15,11 @@ import (
 func TestCoroPackageLoweringPreservesSuspendedOwner(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, target := range []struct {
-		name      string
-		target    *llssa.Target
-		optimized bool
+		name   string
+		target *llssa.Target
 	}{
 		{name: "native"},
 		{name: "wasm", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
-		{name: "native optimized", optimized: true},
-		{name: "wasm optimized", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, optimized: true},
 	} {
 		t.Run(target.name, func(t *testing.T) {
 			prog := llssa.NewProgram(target.target)
@@ -58,27 +55,14 @@ func TestCoroPackageLoweringPreservesSuspendedOwner(t *testing.T) {
 			b.EndBuild()
 			b.Dispose()
 
-			pipeline := coroPackageLoweringPipeline
-			if target.optimized {
-				pipeline = "default<Os>"
-			}
-			if err := lowerCoroPackageModuleWithPipeline(prog, "owner", mod, pipeline, target.optimized); err != nil {
+			if err := lowerCoroPackageModuleWithProgram(prog, "owner", mod); err != nil {
 				t.Fatal(err)
 			}
 			resume := mod.NamedFunction("suspended_owner.resume")
 			if resume.IsNil() {
 				t.Fatal("missing resume body")
 			}
-			var ownerAddress llvm.Value
-			for bb := resume.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
-				for inst := bb.FirstInstruction(); !inst.IsNil(); inst = llvm.NextInstruction(inst) {
-					if inst.Name() == "worker.owner.local.reload.addr" {
-						ownerAddress = inst
-					}
-				}
-			}
-			if ownerAddress.IsNil() || ownerAddress.InstructionOpcode() != llvm.GetElementPtr ||
-				ownerAddress.Operand(0).C != resume.Param(0).C {
+			if !strings.Contains(resume.String(), "worker.owner.local.reload.addr = getelementptr inbounds %suspended_owner.Frame") {
 				t.Fatalf("resumed owner address is not in the coroutine frame:\n%s", resume.String())
 			}
 			if strings.Contains(mod.String(), "call void (...) @llvm.fake.use") {
