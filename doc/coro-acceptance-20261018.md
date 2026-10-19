@@ -19,6 +19,13 @@ The initial four-worker stdlib controller reached the unchanged 40 GiB aggregate
 
 ## GOROOT assessment and retained failures
 
+The [2026-10-19 follow-up](coro-acceptance-20261019.md) supersedes the noinit cause
+in this historical table: LLGo already emitted a compatibility init-task header, but
+staged emission lost main's package name. The corrected entry passes the original
+case under unchanged limits. It also replaces the 22 skipped stdlib fixtures with
+18 executable tests and removal of four obsolete placeholders. These newer outcomes
+do not rewrite the raw R8 failures/skips or combine different freezes.
+
 Actual passing executions: 1066. Assessment categories: `{"actual-pass": 1058, "actual-pass-preclassified-flaky": 4, "actual-pass-preclassified-not-applicable": 4, "expected-failure": 1, "expected-not-applicable-failure": 11, "raw-fail": 4}`. Existing expected-failure/not-applicable outcomes are reported separately from actual passes; no new xfail or golden update was introduced.
 
 | Raw failed case | Classification | Evidence and limit |

@@ -5,7 +5,38 @@ the design documents. Update a row only with a test of the relevant compiler and
 generated program. Host-Go unit tests do not establish LLGo source compatibility, and
 one platform's result does not establish another's.
 
-## Current checkpoint: 2026-10-18 (Asia/Shanghai)
+## Current follow-up: 2026-10-19 (Asia/Shanghai)
+
+[PR #298](https://github.com/cpunion/llgo/pull/298) is integrated as `be66eadef`,
+and [PR #299](https://github.com/cpunion/llgo/pull/299) as `5432ae604`. Each exact-head
+CI passes 20/20, fresh paginated reviews/comments/threads are checked, and each merged
+file tree equals its tested head. The native build-info/main-identity changes and
+bounded medium-frame cache are described in the [follow-up report](coro-acceptance-20261019.md).
+
+| Follow-up scope | Frozen source | Recorded result |
+|---|---|---|
+| Affected native stdlib fixtures | S6 / `d0d8386e` | 12 package commands; 293 top-level / 342 including subtests PASS; zero FAIL/SKIP |
+| Full native test/go | Cache SDK / `6d8a5ba8`; S6 compiler | 276/276 PASS; 45 nested compiler domains joined; zero FAIL/SKIP |
+| Go performance comparison | Cache SDK / `6d8a5ba8`; S6 compiler | 272 throughput/progress/peak and 80 parked-memory runs complete |
+
+All 22 former skipped stdlib fixtures are addressed: 18 now execute assertions,
+four obsolete placeholders are removed, and a new batched directory test is added.
+The native public build-info readers must succeed and agree with runtime metadata;
+DNS records use a private UDP responder. `runtime.Compiler` is patched before constant
+folding, while companion gc metadata remains the format for go/build/go/importer.
+The original noinit.go now passes under its original limits: its undefined symbol
+came from losing main's package name after Types release, not an absent compatibility ABI.
+
+The prior full 180-package, 73-demo and 1,082-GOROOT campaign remains the R8 checkpoint
+below; it is not relabeled as a current-version full pass. Its raw failures remain
+retained. The unchanged retained R8 issue78081 image also passes after own compiler
+domains join, so the bounded cache benefit does not prove that historical timeout fixed.
+Generated rangegen memory and issue9604b default-optimization costs remain unresolved;
+explicit -O0/no-MachineSink diagnostics are not production fixes. Allocation-stack
+profiling, precise-GC/gc-stack and platform boundaries remain explicit. The additional
+1,316 diagnostic/multifile cases remain outside the selected runtime scope.
+
+## Previous checkpoint: 2026-10-18 (Asia/Shanghai)
 
 ### Retained native poll coalescing (828bfe06c; integrated as 603c781dd)
 
@@ -81,8 +112,9 @@ passes. A same-freeze diagnostic with only the external xfail disabled confirms 
 actual zero. The other 11 expected failures retain their existing precise-GC or
 gc-specific stack behavior classifications.
 
-The four raw GOROOT failures remain recorded. `noinit.go` requires the gc-private
-`main..inittask` ABI. `rangegen.go` exceeds the unchanged 10 GiB compilation RSS cap.
+The four raw GOROOT failures remain recorded. R8 `noinit.go` has an undefined
+`main..inittask` symbol; its old unsupported-ABI diagnosis is superseded by the
+main-name fix and original-limit pass in the follow-up above. `rangegen.go` exceeds the unchanged 10 GiB compilation RSS cap.
 `fixedbugs/issue9604b.go` reaches the unchanged 25-minute generated-compilation limit;
 its 669,627-byte generated input remains retained and is not executed.
 `fixedbugs/issue78081.go` exceeds the unchanged one-minute runtime limit, including an

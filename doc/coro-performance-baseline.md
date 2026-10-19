@@ -1,6 +1,18 @@
 # LLVM coroutine performance baseline
 
-## Current frozen checkpoint: 2026-10-18
+## Current measured checkpoint: 2026-10-19
+
+The [fresh native comparison](coro-performance-20261019.md) uses cache SDK head
+`f6d0f4348`, source manifest `6d8a5ba89d39859caffd83f810ce36a15d19955ad865b21f421eadd56d6ae0f4`,
+and S6 compiler SHA-256 `3782471afe3378bb173e3fc79e9483a73c2744104d84a6599f8e1e80d437a7f8`.
+All 272 throughput/progress/peak runs and 80 parked-memory runs complete with
+matching source/compiler/image/library identities. Serial spawn/WaitGroup, File and
+TCP take 8.221x / 4.849x / 2.476x Go time in this sample; 100,000 parked goroutines
+use 159.172 MiB versus Go 267.469 MiB steady RSS. Stripped core/I/O/parked files are
+2.885x / 3.582x / 2.889x Go, excluding shared libraries. Full ranges and loaded-host
+conditions remain visible; different campaigns do not establish a causal improvement.
+
+## Previous frozen checkpoint: 2026-10-18
 
 Production source manifest: `fdd0207f012878b4a0bdda9a362b8520a569e87c91441143e08b76c0b43a4fc2`; LLGo compiler SHA-256: `6b7d52bc7ece1fe1d92913747c26bbf2290e15a5dfaa0dfd202b5c4da49830ac`. The later host/CI/timer-fixture follow-ups do not change this production compiler/runtime. This report is a shared-host checkpoint with raw ranges, not a general regression budget.
 
