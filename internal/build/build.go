@@ -9369,9 +9369,11 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 // Simplify each original/clone while CoroSplit visits its SCC, rather than
 // retaining every expanded CFG until the module-wide CoroCleanup pass. Large
 // generated packages otherwise accumulate all resume/destroy/cleanup bodies
-// before any of their branch scaffolding is folded. Keep mandatory coroutine
-// cleanup and the complete requested optimization pipeline after this step.
-const coroPackageLoweringPipeline = "coro-early,cgscc(coro-split,function(simplifycfg)),coro-cleanup"
+// before any of their branch scaffolding is folded. Only compact the CFG here:
+// rewriting conditions and speculating blocks repeats expensive work on giant
+// functions. Keep mandatory coroutine cleanup and the complete requested
+// optimization pipeline after this step.
+const coroPackageLoweringPipeline = "coro-early,cgscc(coro-split,function(simplifycfg<no-simplify-cond-branch;no-speculate-blocks>)),coro-cleanup"
 
 // shouldDeferCoroLoweringToFullLTO preserves presplit coroutine bodies and
 // exact static call edges until LLVM owns the complete program. Package-level
