@@ -369,7 +369,7 @@ func TestLinkedExecutionPhaseOrderIsMandatory(t *testing.T) {
 	}
 	block := text[start : start+end]
 	ordered := []string{
-		"linkMainPkg(ctx, pkg, allPkgs, outFmts.Out, verbose)",
+		"prepareInitialPackage(ctx, pkg, allPkgs, conf, verbose",
 		"executions = append(executions",
 		"prog.Dispose()",
 		"prog = nil",
@@ -396,6 +396,24 @@ func TestLinkedExecutionPhaseOrderIsMandatory(t *testing.T) {
 	for _, forbidden := range []string{"runNative(ctx", "runInEmulator(", "flash.FlashDevice(", "monitor.Monitor("} {
 		if strings.Contains(beforeRelease, forbidden) {
 			t.Fatalf("execution operation %q remains interleaved with linking", forbidden)
+		}
+	}
+	// Linking now lives in the prepare helper. Its returned execution record
+	// must still follow the link, and the helper may not execute the output.
+	prepareStart := strings.Index(text, "func prepareInitialPackage(")
+	prepareEnd := strings.Index(text, "\nfunc removeOutFmts(")
+	if prepareStart < 0 || prepareEnd <= prepareStart {
+		t.Fatal("cannot locate output preparation helper")
+	}
+	prepare := text[prepareStart:prepareEnd]
+	link := strings.Index(prepare, "linkMainPkg(ctx, pkg, allPkgs, outFmts.Out, verbose)")
+	handoff := strings.Index(prepare, "return &linkedOutputExecution")
+	if link < 0 || handoff <= link {
+		t.Fatal("output preparation does not link before publishing execution")
+	}
+	for _, forbidden := range []string{"runNative(ctx", "runInEmulator(", "flash.FlashDevice(", "monitor.Monitor("} {
+		if strings.Contains(prepare, forbidden) {
+			t.Fatalf("preparation helper executes output with %q", forbidden)
 		}
 	}
 }
