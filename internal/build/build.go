@@ -9392,6 +9392,10 @@ func lowerCoroPackageModule(ctx *context, pkgPath string, mod gllvm.Module) erro
 }
 
 func lowerCoroPackageModuleWithProgram(prog llssa.Program, pkgPath string, mod gllvm.Module) error {
+	return lowerCoroPackageModuleWithPipeline(prog, pkgPath, mod, coroPackageLoweringPipeline, false)
+}
+
+func lowerCoroPackageModuleWithPipeline(prog llssa.Program, pkgPath string, mod gllvm.Module, pipeline string, optimized bool) error {
 	if prog == nil || mod.IsNil() {
 		return fmt.Errorf("lower package coroutine IR for %s: missing program or module", pkgPath)
 	}
@@ -9406,19 +9410,23 @@ func lowerCoroPackageModuleWithProgram(prog llssa.Program, pkgPath string, mod g
 	}
 	options := gllvm.NewPassBuilderOptions()
 	defer options.Dispose()
-	if err := mod.RunPasses(coroPackageLoweringPipeline, prog.TargetMachine(), options); err != nil {
+	if err := mod.RunPasses(pipeline, prog.TargetMachine(), options); err != nil {
 		return fmt.Errorf("lower package coroutine IR for %s: %w", pkgPath, err)
 	}
 	llssa.RemoveKeepAliveCallsAfterCoroSplit(mod)
 	if err := gllvm.VerifyModule(mod, gllvm.ReturnStatusAction); err != nil {
 		return fmt.Errorf("verify package %s after coroutine lowering: %w", pkgPath, err)
 	}
-	if _, err := llssa.VerifyCoroAtomicCostModule(mod); err != nil {
+	verifyAtomicCost := llssa.VerifyCoroAtomicCostModule
+	if optimized {
+		verifyAtomicCost = llssa.VerifyOptimizedCoroAtomicCostModule
+	}
+	if _, err := verifyAtomicCost(mod); err != nil {
 		return fmt.Errorf("verify package %s atomic-cost certificates after coroutine lowering: %w", pkgPath, err)
 	}
 	for function := mod.FirstFunction(); !function.IsNil(); function = gllvm.NextFunction(function) {
 		if strings.HasPrefix(function.Name(), "llvm.coro.") && !function.FirstUse().IsNil() {
-			return fmt.Errorf("lower package coroutine IR for %s: intrinsic %q still has live uses after %s", pkgPath, function.Name(), coroPackageLoweringPipeline)
+			return fmt.Errorf("lower package coroutine IR for %s: intrinsic %q still has live uses after %s", pkgPath, function.Name(), pipeline)
 		}
 	}
 	return nil
@@ -9551,15 +9559,15 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse staged bitcode for %s: %w", pkg.PkgPath, err)
 	}
-	if err := lowerCoroPackageModuleWithProgram(backend, pkg.PkgPath, mod); err != nil {
-		return "", err
-	}
+	pipeline := coroPackageLoweringPipeline
 	if ctx.passOpt {
-		options := gllvm.NewPassBuilderOptions()
-		defer options.Dispose()
-		if err := mod.RunPasses(llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode()), backend.TargetMachine(), options); err != nil {
-			return "", fmt.Errorf("run detached LLVM passes for %s: %w", pkg.PkgPath, err)
-		}
+		// The standard pipeline simplifies presplit IR and interleaves function
+		// optimization with splitting. Splitting every unoptimized body first
+		// materializes the largest frames and all their clones simultaneously.
+		pipeline = llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode())
+	}
+	if err := lowerCoroPackageModuleWithPipeline(backend, pkg.PkgPath, mod, pipeline, ctx.passOpt); err != nil {
+		return "", err
 	}
 	if ctx.stagedFuncInfoSites && ctx.stagedFuncInfoMeta {
 		emitFuncInfoEntrySitesForModule(

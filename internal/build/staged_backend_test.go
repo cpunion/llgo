@@ -271,7 +271,7 @@ func TestStagedBackendPhaseOrderIsMandatory(t *testing.T) {
 		previous = index
 	}
 	if !strings.Contains(text, "backend.ParseBitcodeFile(pkg.StagedBitcode)") ||
-		!strings.Contains(text, "lowerCoroPackageModuleWithProgram(backend, pkg.PkgPath, mod)") {
+		!strings.Contains(text, "lowerCoroPackageModuleWithPipeline(backend, pkg.PkgPath, mod,") {
 		t.Fatal("detached backend no longer owns bitcode parsing and coroutine lowering")
 	}
 }
