@@ -1,0 +1,113 @@
+name: Priority Windows qualification
+on:
+  push:
+    branches: [codex/priority-qualification-20261019]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  runtime:
+    name: Runtime (${{ matrix.abi }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2022, abi: msvc, arch: amd64, host: x64}
+          - {os: windows-2022, abi: mingw, arch: '386', host: x64}
+          - {os: windows-11-arm, abi: msvc, arch: arm64, host: arm64}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 6ee9933722f7679fb0f6f6a5df9853b59ded0d08
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: ${{ matrix.arch }}
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: ${{ matrix.host }}
+      - name: Build the runtime contribution compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:RUNNER_TEMP 'llgo-runtime'
+          New-Item -ItemType Directory -Force $bin | Out-Null
+          go build -tags=dev -o "$bin/llgo.exe" ./cmd/llgo
+          if ($LASTEXITCODE -ne 0) { throw 'Compiler build failed' }
+          Add-Content $env:GITHUB_PATH $bin
+          Add-Content $env:GITHUB_ENV "LLGO_TEST_LLGO=$bin/llgo.exe"
+          Add-Content $env:GITHUB_ENV "LLGO_ROOT=$env:GITHUB_WORKSPACE"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: ${{ matrix.arch }}
+      - name: Execute runtime, synchronization, timers and bubbles
+        shell: pwsh
+        run: |
+          llgo test -timeout=5m -v ./test/std/runtime ./test/std/sync ./test/std/time ./test/std/testing/synctest
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime qualification failed' }
+  compiler-x86:
+    name: Native PE32 LLGo compiler
+    runs-on: windows-2022
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 4a6373cd88cd7abf7ecf36167b428d29deed4ff0
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: msvc
+          windows-arch: '386'
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: x64
+      - name: Retrieve the verified source-built x86 SDK
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 39189170937 --repo cpunion/espressif-llvm-project-prebuilt --name llvm-windows-x86-sdk --dir .windows-x86-toolchains
+          if ($LASTEXITCODE -ne 0) { throw 'SDK artifact download failed' }
+      - name: Build and execute the static x86 compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./.github/windows/release-lib.ps1
+          $parent = Join-Path $env:RUNNER_TEMP 'native-x86-sdk'
+          Expand-ReleaseLocalXz -Archive .windows-x86-toolchains/llvm-sdk-22.1.8-i686-w64-mingw32.tar.xz -Destination $parent
+          $sdk = Join-Path $parent 'llvm-sdk'
+          $config = Join-Path $sdk 'bin/llvm-config.exe'
+          $bootstrap = Get-ReleaseX86Bootstrap
+          $env:GOOS = 'windows'
+          $env:GOARCH = '386'
+          $env:CGO_ENABLED = '1'
+          $env:CC = '"' + (Join-Path $bootstrap 'bin/i686-w64-mingw32-clang.exe').Replace('\', '/') + '"'
+          $env:CXX = '"' + (Join-Path $bootstrap 'bin/i686-w64-mingw32-clang++.exe').Replace('\', '/') + '"'
+          $env:CGO_CPPFLAGS = (Invoke-ReleaseCapture $config @('--cflags')).Trim().Replace('\', '/').Replace("`n", ' ')
+          $env:CGO_CXXFLAGS = '-std=c++17'
+          $flags = (Invoke-ReleaseCapture $config @('--link-static', '--ldflags', '--libs', 'all', '--system-libs')).Trim()
+          $env:CGO_LDFLAGS = $flags.Replace('\', '/').Replace("`n", ' ') + ' -static -lc++ -lunwind'
+          $bin = Join-Path $env:RUNNER_TEMP 'native-x86-llgo'
+          New-Item -ItemType Directory -Force $bin | Out-Null
+          go build -tags=byollvm -o "$bin/llgo.exe" ./cmd/llgo
+          if ($LASTEXITCODE -ne 0) { throw 'Native PE32 compiler build failed' }
+          $readObj = (Get-Command llvm-readobj.exe).Source
+          Copy-ReleaseDLLs -ReadObj $readObj -Executable "$bin/llgo.exe" -GoArch '386' -Profile msvc -SourceDirectories @("$sdk/bin")
+          & "$bin/llgo.exe" version
+          if ($LASTEXITCODE -ne 0) { throw 'Native PE32 compiler execution failed' }
+          Add-Content $env:GITHUB_PATH $bin
+          Add-Content $env:GITHUB_ENV "LLGO_TEST_LLGO=$bin/llgo.exe"
+          Add-Content $env:GITHUB_ENV "LLGO_ROOT=$env:GITHUB_WORKSPACE"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: msvc
+          windows-arch: '386'
+      - name: Execute fmtprintf through the native PE32 compiler
+        shell: pwsh
+        run: |
+          llgo run ./_demo/go/fmtprintf
+          if ($LASTEXITCODE -ne 0) { throw 'The native PE32 compiler failed to compile/run fmtprintf' }
