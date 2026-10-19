@@ -47,8 +47,10 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 	if p == nil || main == nil || driver == nil || budget == 0 {
 		return coroRunResultV1{}
 	}
-	if !coroTargetBeforeProgramRunSliceV1(p, driver) {
+	if retry, ok := coroTargetBeforeProgramRunSliceV1(p, driver); !ok {
 		return coroRunResultV1{}
+	} else if retry {
+		return coroRunResultV1{stop: coroRunAgainV1}
 	}
 	runtimeContext := coroCaptureRuntimeContextV1()
 	if runtimeContext == nil {

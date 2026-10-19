@@ -25,9 +25,14 @@ package coro
 // A prepared destroy continuation contains no user code and is allowed to
 // finish without inserting a cancellation request in front of the physical
 // destroy. All other runnable and waiting tasks receive sticky Shutdown.
+// A remote channel producer may publish after the compatibility check. Its
+// inbox is asynchronous, so it need not stay empty while these owner-only
+// queues are scanned. Publish the task stop before the runner materializes
+// that result, so the compiler gate discards it instead of resuming user code.
 func RequestExecutorShutdownDrain(driver *ExecutorDriver) (needed, ok bool) {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
-		driver.poll.phase != executorPollIdle || !emptyExecutorRunCursor(driver) ||
+		driver.poll.phase != executorPollIdle || driver.run != (executorRunCursor{}) ||
+		!emptyOwnerLocalCompletion(&driver.local) ||
 		!idleExecutorScheduler(driver.p) || !validReadyQueue(driver.p) ||
 		!validSchedulerWaitQueues(driver.p) {
 		return false, false

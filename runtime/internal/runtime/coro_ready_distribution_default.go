@@ -58,9 +58,9 @@ func coroTargetRequestProgramRunnableV1(*coro.P, *coro.ExecutorDriver) bool {
 	return true
 }
 
-func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) bool {
-	_, ok := coroTargetDrainProgramTransfersV1(p, driver)
-	return ok
+func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) (retry, ok bool) {
+	_, ok = coroTargetDrainProgramTransfersV1(p, driver)
+	return false, ok
 }
 
 // Single-owner and host-return targets do not have a second physical M to

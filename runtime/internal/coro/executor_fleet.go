@@ -772,6 +772,27 @@ func (fleet *ExecutorFleet) TryDrainPNeutralRunnables(
 	return TryDrainPNeutralRunnables(&slot.mailbox, owner, budget)
 }
 
+// TryWithdrawPNeutralRunnables withdraws this owner's runnable demand before
+// draining its mailbox. A completed empty drain then proves that no claimed
+// demand can publish a late runnable, until the owner requests work again.
+// A producer still holding a claim is ordinary contention, not an empty
+// mailbox or permission for the physical owner to return.
+func (fleet *ExecutorFleet) TryWithdrawPNeutralRunnables(
+	handle ExecutorFleetHandle,
+	owner *P,
+	budget uint32,
+) (uint32, bool, RunnableTransferDrainStatus) {
+	if budget == 0 || budget > RunnableTransferMailboxCapacity {
+		return 0, false, RunnableTransferDrainInvalid
+	}
+	if inflight, ok := fleet.CancelPNeutralRunnableRequest(handle, owner); !ok {
+		return 0, false, RunnableTransferDrainInvalid
+	} else if inflight {
+		return 0, false, RunnableTransferDrainContended
+	}
+	return fleet.TryDrainPNeutralRunnables(handle, owner, budget)
+}
+
 func (fleet *ExecutorFleet) PostManualAndRequest(id OperationID) OperationRouteIngressResult {
 	if fleet == nil || fleet.magic != executorFleetMagic {
 		return OperationRouteIngressResult{Route: OperationRoutePostInvalid, Executor: ExecutorRequestInvalid}

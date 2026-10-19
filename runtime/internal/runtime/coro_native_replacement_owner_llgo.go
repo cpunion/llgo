@@ -42,13 +42,7 @@ func coroNativeReplacementDrainRouteV1(
 		return false, false, false
 	}
 	if domain.adopted {
-		if _, canceled := coroNativeFleetV1State.fleet.CancelPNeutralRunnableRequest(
-			owner.handle,
-			p,
-		); !canceled {
-			return false, false, false
-		}
-		moved, pending, status := coroNativeFleetV1State.fleet.TryDrainPNeutralRunnables(
+		moved, pending, status := coroNativeFleetV1State.fleet.TryWithdrawPNeutralRunnables(
 			owner.handle,
 			p,
 			coro.RunnableTransferMailboxCapacity,
@@ -71,13 +65,7 @@ func coroNativeReplacementDrainRouteV1(
 	if domain.ownerEpoch != owner.ownerEpoch {
 		return false, false, false
 	}
-	if _, canceled := coroNativeFleetCancelOwnerRunnableDemandV1(
-		owner.handle,
-		owner.ownerEpoch,
-	); !canceled {
-		return false, false, false
-	}
-	moved, pending, status := coroNativeFleetTryDrainOwnerEpochV1(
+	moved, pending, status := coroNativeFleetTryWithdrawOwnerEpochV1(
 		owner.handle,
 		owner.ownerEpoch,
 		coro.RunnableTransferMailboxCapacity,
