@@ -1,216 +1,51 @@
-name: Priority native x86 release qualification
-'on':
+name: Priority runtime review qualification
+on:
   push:
-    branches:
-    - codex/priority-qualification-20261019
+    branches: [codex/priority-qualification-20261019]
 permissions:
   contents: read
   actions: read
 jobs:
-  build-shared-x86:
-    timeout-minutes: 90
+  runtime:
+    name: Runtime (${{ matrix.abi }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        goarch:
-        - '386'
         include:
-        - goarch: '386'
-          os: windows-2022
-    runs-on: ${{ matrix.os }}
+          - {os: windows-2022, abi: msvc, arch: amd64, host: x64}
+          - {os: windows-2022, abi: mingw, arch: '386', host: x64}
+          - {os: windows-11-arm, abi: msvc, arch: arm64, host: arm64}
     steps:
-    - uses: actions/checkout@v7
-      with:
-        ref: 1e6c3f1616b43df3f870f944249c9c40d070b2c3
-    - name: Install build dependencies
-      uses: ./.github/actions/setup-deps
-      with:
-        windows-abi: msvc
-        windows-arch: ${{ matrix.goarch }}
-    - name: Set up Go
-      uses: ./.github/actions/setup-go
-      with:
-        architecture: ${{ matrix.os == 'windows-11-arm' && 'arm64' || 'x64' }}
-    - name: Cache ARM64 MSVC release SDK archive
-      if: matrix.goarch == 'arm64'
-      uses: actions/cache@v6
-      with:
-        path: ${{ runner.tool_cache }}/llgo-release-downloads/llvm-arm64
-        key: llgo-release-llvm-archive-v1-de718c58ebbc5f61d58c17b90457fcf42983bc2c4a4aba3e010d108713bfd7f1
-    - uses: actions/setup-python@v7
-      with:
-        python-version: '3.13'
-    - name: Test Windows packaging checks
-      shell: pwsh
-      run: |
-        python .github/windows/test_release_zip.py
-        if ($LASTEXITCODE -ne 0) { throw 'ZIP regression tests failed' }
-        python .github/windows/test_prepare_winget.py
-        if ($LASTEXITCODE -ne 0) { throw 'WinGet manifest tests failed' }
-        ./.github/windows/release-lib_test.ps1
-        ./.github/windows/release-build_test.ps1
-    - name: Download native x86 toolchains
-      if: matrix.goarch == '386'
-      uses: actions/download-artifact@v8
-      with:
-        name: windows-x86-native-toolchains
-        path: .windows-x86-toolchains
-        repository: xgo-dev/llgo
-        run-id: 39194298272
-        github-token: ${{ github.token }}
-    - name: Set qualification metadata
-      shell: pwsh
-      run: |-
-        New-Item -ItemType Directory -Force .windows-dist | Out-Null
-        @{version='0.0.0-qualification';commit='1e6c3f1616b43df3f870f944249c9c40d070b2c3';date='2026-10-19T04:00:00Z'} | ConvertTo-Json | Set-Content -Encoding utf8 .windows-dist/metadata.json
-    - name: Build the shared host compiler
-      shell: pwsh
-      run: ./.github/windows/build-compiler.ps1 -GoArch '${{ matrix.goarch }}' -X86ToolchainDirectory '${{ github.workspace }}/.windows-x86-toolchains' -OutputDirectory '${{ runner.temp }}/llgo-windows-compiler'
-    - name: Upload shared host compiler
-      uses: actions/upload-artifact@v7
-      with:
-        name: windows-host-compiler-${{ matrix.goarch }}
-        path: ${{ runner.temp }}/llgo-windows-compiler
-        if-no-files-found: error
-        include-hidden-files: true
-        compression-level: 0
-        retention-days: 3
-    - name: Package both ABI ZIPs from one native x86 compiler
-      shell: pwsh
-      run: |-
-        foreach ($abi in @('msvc','mingw')) {
-          ./.github/windows/build-release.ps1 -Profile $abi -GoArch '386' -HostCompilerDirectory '${{ runner.temp }}/llgo-windows-compiler' -X86ToolchainDirectory '${{ github.workspace }}/.windows-x86-toolchains'
-          if ($LASTEXITCODE -ne 0) { throw "Packaging $abi failed" }
-        }
-    - uses: actions/upload-artifact@v7
-      with:
-        name: llgo-windows-386-msvc
-        path: .windows-dist/*.windows-386-msvc.zip*
-        if-no-files-found: error
-        include-hidden-files: true
-        compression-level: 0
-        retention-days: 3
-    - uses: actions/upload-artifact@v7
-      with:
-        name: llgo-windows-386-mingw
-        path: .windows-dist/*.windows-386-mingw.zip*
-        if-no-files-found: error
-        include-hidden-files: true
-        compression-level: 0
-        retention-days: 3
-    name: Native x86 shared compiler and both ABI ZIPs
-  fresh-x86-archives:
-    needs:
-    - build-shared-x86
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        abi:
-        - msvc
-        - mingw
-        goarch:
-        - '386'
-        include:
-        - goarch: '386'
-          os: windows-2022
-    runs-on: ${{ matrix.os }}
-    steps:
-    - uses: actions/checkout@v7
-      with:
-        ref: 1e6c3f1616b43df3f870f944249c9c40d070b2c3
-    - name: Set up Go
-      uses: ./.github/actions/setup-go
-    - name: Download Windows archive
-      uses: actions/download-artifact@v8
-      with:
-        name: llgo-windows-${{ matrix.goarch }}-${{ matrix.abi }}
-        path: .windows-dist
-    - name: Test release installer with the built archive
-      shell: pwsh
-      run: |
-        $archive = Get-ChildItem ".windows-dist/llgo*.windows-${{ matrix.goarch }}-${{ matrix.abi }}.zip" |
-          Select-Object -First 1
-        if (-not $archive -or $archive.Name -notmatch '^llgo(.+)\.windows-[^.]+-[^.]+\.zip$') {
-          throw 'Could not determine the LLGo version from the Windows archive'
-        }
-        $env:LLGO_VERSION = $Matches[1]
-        $env:LLGO_ARCH = '${{ matrix.goarch }}'
-        $env:LLGO_ABI = '${{ matrix.abi }}'
-        $env:LLGO_ARCHIVE_PATH = $archive.FullName
-        $env:LLGO_INSTALL_ROOT = Join-Path $env:RUNNER_TEMP 'llgo-release-install'
-        $env:LLGO_INSTALL_DEPS = '0'
-        $env:LLGO_UPDATE_PATH = '0'
-        if ('${{ matrix.abi }}' -eq 'mingw') {
-          $msystem = if ('${{ matrix.goarch }}' -eq 'arm64') { 'CLANGARM64' } else { 'CLANG64' }
-          & bash.exe -c "MSYSTEM=$msystem ./install.sh"
-          if ($LASTEXITCODE -ne 0) { throw 'The MSYS2 installer failed' }
-        } else {
-          ./install.ps1
-        }
-        $current = Get-Item -Force -LiteralPath (Join-Path $env:LLGO_INSTALL_ROOT 'current')
-        $bin = Get-Item -Force -LiteralPath (Join-Path $env:LLGO_INSTALL_ROOT 'bin')
-        if (-not ($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-            -not ($bin.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-          throw 'The installer did not create the current and bin junctions'
-        }
-    - uses: actions/setup-python@v7
-      with:
-        python-version: '3.13'
-    - name: Verify standalone compiler and archive
-      shell: pwsh
-      run: ./.github/windows/test-release.ps1 -CheckOnly -Profile '${{ matrix.abi }}' -GoArch '${{ matrix.goarch }}'
-    - name: Install native target dependencies
-      uses: ./.github/actions/setup-deps
-      with:
-        windows-abi: ${{ matrix.abi }}
-        windows-arch: ${{ matrix.goarch }}
-    - name: Activate native Windows target
-      uses: ./.github/actions/activate-windows-target
-      with:
-        windows-abi: ${{ matrix.abi }}
-        windows-arch: ${{ matrix.goarch }}
-    - name: Test installed command in fresh MSYS2 shells
-      if: matrix.abi == 'mingw'
-      shell: msys2 {0}
-      run: bash test/installer/install_msys_path_test.sh .windows-dist/*.windows-${{ matrix.goarch }}-mingw.zip "$RUNNER_TEMP/llgo-release-install"
-    - name: Test extracted native and embedded compiler
-      shell: pwsh
-      run: ./.github/windows/test-release.ps1 -Profile '${{ matrix.abi }}' -GoArch '${{ matrix.goarch }}'
-    name: Fresh native x86 ZIP (${{ matrix.abi }})
-  six-zip-winget:
-    name: Validate WinGet candidates against all six real ZIPs
-    needs:
-    - fresh-x86-archives
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-    - uses: actions/checkout@v7
-      with:
-        ref: 1e6c3f1616b43df3f870f944249c9c40d070b2c3
-    - uses: actions/setup-python@v7
-      with:
-        python-version: '3.13'
-    - uses: actions/download-artifact@v8
-      with:
-        pattern: llgo-windows-386-*
-        merge-multiple: true
-        path: .windows-dist
-    - name: Retrieve the four independently qualified 64-bit ZIPs
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |-
-        test "$(gh api repos/cpunion/llgo/actions/runs/39201188127 --jq .conclusion)" = success
-        for arch in amd64 arm64; do
-          for abi in msvc mingw; do
-            gh run download 39201188127 --repo cpunion/llgo --name "llgo-windows-$arch-$abi" --dir .windows-dist
-          done
-        done
-        python .github/windows/prepare-winget.py --artifacts .windows-dist --version 0.0.0-qualification --output .winget
-    - uses: actions/upload-artifact@v7
-      with:
-        name: qualified-six-zip-winget-candidates
-        path: .winget/manifests
-        if-no-files-found: error
-        include-hidden-files: true
-        retention-days: 7
+      - uses: actions/checkout@v7
+        with:
+          ref: a80e0280f909938c9015f779541abe565d414b9e
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: ${{ matrix.arch }}
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: ${{ matrix.host }}
+      - name: Build the runtime contribution compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:RUNNER_TEMP 'llgo-runtime'
+          New-Item -ItemType Directory -Force $bin | Out-Null
+          go build -tags=dev -o "$bin/llgo.exe" ./cmd/llgo
+          if ($LASTEXITCODE -ne 0) { throw 'Compiler build failed' }
+          Add-Content $env:GITHUB_PATH $bin
+          Add-Content $env:GITHUB_ENV "LLGO_TEST_LLGO=$bin/llgo.exe"
+          Add-Content $env:GITHUB_ENV "LLGO_ROOT=$env:GITHUB_WORKSPACE"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: ${{ matrix.arch }}
+      - name: Execute runtime, synchronization, timers and bubbles
+        shell: pwsh
+        run: |
+          llgo test -timeout=5m -v ./test/std/runtime ./test/std/sync ./test/std/time ./test/std/testing/synctest
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime qualification failed' }
