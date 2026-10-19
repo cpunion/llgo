@@ -57,5 +57,5 @@ jobs:
       - name: Execute fmtprintf through the native PE32 compiler
         shell: pwsh
         run: |
-          llgo run ./_demo/go/fmtprintf
+          llgo run ./benchmark/binary_size/fmtprintf
           if ($LASTEXITCODE -ne 0) { throw 'The native PE32 compiler failed to compile/run fmtprintf' }
