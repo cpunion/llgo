@@ -4,58 +4,40 @@ on:
     branches: [codex/priority-qualification-20261019]
 permissions:
   contents: read
-  actions: read
 jobs:
-  compiler-x86:
-    name: Native PE32 LLGo compiler
-    runs-on: windows-2022
+  runtime-arm64:
+    name: Runtime (msvc, arm64, UTC assertions)
+    runs-on: windows-11-arm
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 1e6c3f1616b43df3f870f944249c9c40d070b2c3
+          ref: 83547334d046b901d57397448e1611a9e3a410f6
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
           windows-abi: msvc
-          windows-arch: '386'
+          windows-arch: arm64
       - uses: ./.github/actions/setup-go
         with:
-          architecture: x64
-      - name: Retrieve the verified source-built x86 SDK
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh run download 39189170937 --repo cpunion/espressif-llvm-project-prebuilt --name llvm-windows-x86-sdk --dir .windows-x86-toolchains
-          if ($LASTEXITCODE -ne 0) { throw 'SDK artifact download failed' }
-      - name: Build and execute the static x86 compiler
+          architecture: arm64
+      - name: Build the runtime contribution compiler
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          . ./.github/windows/release-lib.ps1
-          $metadata = @{
-            version = 'qualification-' + ((& git rev-parse --short HEAD).Trim())
-            commit = (& git rev-parse HEAD).Trim()
-            date = [DateTimeOffset]::UtcNow.ToString('o')
-          }
-          New-Item -ItemType Directory -Force .windows-dist | Out-Null
-          $metadata | ConvertTo-Json | Set-Content -Encoding utf8 .windows-dist/metadata.json
-          $hostRoot = Join-Path $env:RUNNER_TEMP 'native-x86-host'
-          ./.github/windows/build-compiler.ps1 -GoArch '386' -X86ToolchainDirectory "$PWD/.windows-x86-toolchains" -OutputDirectory $hostRoot
-          Assert-ReleaseCompilerArtifact -Root $hostRoot -Metadata $metadata -GoArch '386' -LLVMVersion '22.1.8'
-          $bin = Join-Path $hostRoot 'bin'
-          & "$bin/llgo.exe" version
-          if ($LASTEXITCODE -ne 0) { throw 'Native PE32 compiler execution failed' }
+          $bin = Join-Path $env:RUNNER_TEMP 'llgo-runtime'
+          New-Item -ItemType Directory -Force $bin | Out-Null
+          go build -tags=dev -o "$bin/llgo.exe" ./cmd/llgo
+          if ($LASTEXITCODE -ne 0) { throw 'Compiler build failed' }
           Add-Content $env:GITHUB_PATH $bin
           Add-Content $env:GITHUB_ENV "LLGO_TEST_LLGO=$bin/llgo.exe"
           Add-Content $env:GITHUB_ENV "LLGO_ROOT=$env:GITHUB_WORKSPACE"
       - uses: ./.github/actions/activate-windows-target
         with:
           windows-abi: msvc
-          windows-arch: '386'
-      - name: Execute fmtprintf through the native PE32 compiler
+          windows-arch: arm64
+      - name: Execute runtime, synchronization, timers and bubbles
         shell: pwsh
         run: |
-          llgo run ./benchmark/binary_size/fmtprintf
-          if ($LASTEXITCODE -ne 0) { throw 'The native PE32 compiler failed to compile/run fmtprintf' }
+          llgo test -timeout=5m -v ./test/std/runtime ./test/std/sync ./test/std/time ./test/std/testing/synctest
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime qualification failed' }
