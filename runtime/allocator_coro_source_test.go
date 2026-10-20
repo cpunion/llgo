@@ -59,7 +59,7 @@ func TestCoroRuntimeAllocatorUsesPrivateSynchronousBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	bdwgcText := string(bdwgcSource)
-	if !strings.Contains(bdwgcText, `LLGoFiles = "$(pkg-config --cflags bdw-gc): _wrap/coro_allocator.c; _wrap/coro_gc_notify.c"`) {
+	if !strings.Contains(bdwgcText, `LLGoFiles = "$(pkg-config --cflags bdw-gc): _wrap/coro_allocator.c; _wrap/coro_gc_notify.c; _wrap/coro_init.c"`) {
 		t.Error("bdwgc package does not own the private allocator wrapper source")
 	}
 	mallocDeclaration := "//go:linkname Malloc C.GC_malloc\nfunc Malloc(size uintptr) c.Pointer"
@@ -87,7 +87,7 @@ func TestCoroRuntimeAllocatorUsesPrivateSynchronousBoundary(t *testing.T) {
 		}
 	}
 	for _, declaration := range []string{
-		"//llgo:coro noblock\n//go:linkname Init C.GC_init",
+		"//llgo:coro noblock\n//go:linkname Init C.__llgo_coro_gc_init_v1",
 		"//llgo:coro noblock\n//go:linkname MallocUncollectable C.GC_malloc_uncollectable",
 		"//llgo:coro noblock\n//go:linkname Free C.GC_free",
 		"//llgo:coro noblock\n//go:linkname AddRoots C.GC_add_roots",

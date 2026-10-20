@@ -22,7 +22,7 @@ import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
-const LLGoFiles = "$(pkg-config --cflags bdw-gc): _wrap/coro_allocator.c; _wrap/coro_gc_notify.c"
+const LLGoFiles = "$(pkg-config --cflags bdw-gc): _wrap/coro_allocator.c; _wrap/coro_gc_notify.c; _wrap/coro_init.c"
 
 const (
 	Success = iota
@@ -38,12 +38,15 @@ type StackBase struct {
 
 // -----------------------------------------------------------------------------
 
-// Init completes collector initialization on the calling thread. It may take
+// Init completes collector initialization on the calling thread. On native
+// pthread targets the initial Go execution quota bounds the default marker
+// count, while explicit collector settings and prior initialization win.
+// It may take
 // collector/libc locks, but it neither waits for application I/O nor retains
 // caller-frame arguments after return. Its only live runtime occurrence is
 // part of the compiler-verified startup raw-host closure.
 //
-//go:linkname Init C.GC_init
+//go:linkname Init C.__llgo_coro_gc_init_v1
 func Init()
 
 //go:linkname AllowRegisterThreads C.GC_allow_register_threads
