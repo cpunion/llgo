@@ -152,6 +152,7 @@ int main(int argc, char **argv)
     worker masked = {.masked = 1};
     thread = start(&masked, 8, 1);
     c = call(SYS_setresuid);
+    fprintf(stderr, "allthreads: masked result=%zu\n", (size_t)c.error);
     assert(c.error == EAGAIN);
     atomic_store(&masked.unblock, 1);
     while (atomic_load(&masked.unblock)) sched_yield();
