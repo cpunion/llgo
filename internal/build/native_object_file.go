@@ -28,6 +28,7 @@ typedef enum { LLVMAssemblyFile, LLVMObjectFile } LLVMCodeGenFileType;
 extern int LLVMTargetMachineEmitToFile(LLVMTargetMachineRef, LLVMModuleRef,
     const char *, LLVMCodeGenFileType, char **);
 extern void LLVMDisposeMessage(char *);
+extern void LLVMSetTargetMachineMachineOutliner(LLVMTargetMachineRef, int);
 */
 import "C"
 
@@ -60,4 +61,14 @@ func emitNativeObjectFile(machine llvm.TargetMachine, mod llvm.Module, name stri
 		return errors.New(detail)
 	}
 	return nil
+}
+
+// Keep the policy on this TargetMachine; other packages, targets and callers
+// retain their own defaults.
+func setNativeMachineOutliner(machine llvm.TargetMachine, enabled bool) {
+	var flag C.int
+	if enabled {
+		flag = 1
+	}
+	C.LLVMSetTargetMachineMachineOutliner(C.LLVMTargetMachineRef(unsafe.Pointer(machine.C)), flag)
 }

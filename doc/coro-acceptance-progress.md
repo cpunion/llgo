@@ -5,7 +5,17 @@ the design documents. Update a row only with a test of the relevant compiler and
 generated program. Host-Go unit tests do not establish LLGo source compatibility, and
 one platform's result does not establish another's.
 
-## Current PR #300: 2026-10-20 (Asia/Shanghai)
+## Current rangegen follow-up: 2026-10-20 (Asia/Shanghai)
+
+PR #300 merged at `95699feec`; its S28 receipts below remain historical. The
+follow-up addresses the retained rangegen compilation-resource failure. The
+combined diagnostic prototype passes rangegen and the original large-function
+control at unchanged limits, with deterministic cleanup/root/lifetime regressions.
+The trace-free committed compiler, exact-head CI/review audit and a new complete
+acceptance/performance freeze are still pending. This follow-up is not ready to
+merge. See [the follow-up record](coro-rangegen-memory-20261020.md).
+
+## Historical PR #300 / S28: 2026-10-20 (Asia/Shanghai)
 
 [PR #300](https://github.com/cpunion/llgo/pull/300) completes unified S28 local
 acceptance. Its compilation cost changes and five native shutdown corrections
