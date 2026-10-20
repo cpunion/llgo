@@ -12,6 +12,7 @@
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 int __llgo_allthreads_executable = 1;
@@ -70,6 +71,26 @@ static llgo_allthreads_call call(uintptr_t trap)
     llgo_traceback_all_threads_syscall(&c);
     assert(errno == EDOM);
     return c;
+}
+
+static void retry_pause(void)
+{
+    const struct timespec pause = {0, 1000000};
+    nanosleep(&pause, 0);
+}
+
+static llgo_allthreads_call await_result(uintptr_t expected)
+{
+    struct timespec start, now;
+    assert(!clock_gettime(CLOCK_MONOTONIC, &start));
+    for (;;) {
+        llgo_allthreads_call c = call(SYS_setresuid);
+        if (c.error == expected) return c;
+        assert(c.error == EAGAIN || c.error == ENOTSUP);
+        assert(!clock_gettime(CLOCK_MONOTONIC, &now));
+        assert(now.tv_sec-start.tv_sec < 5);
+        retry_pause();
+    }
 }
 
 static void *foreign(void *raw)
@@ -137,7 +158,7 @@ int main(int argc, char **argv)
     atomic_int foreign_stop = 0;
     pthread_t thread;
     assert(!pthread_create(&thread, 0, foreign, &foreign_stop));
-    do { c = call(SYS_setresuid); } while (c.error == EAGAIN);
+    c = await_result(ENOTSUP);
     assert(c.error == ENOTSUP);
     atomic_store(&foreign_stop, 1);
     assert(!pthread_join(thread, 0));
@@ -148,6 +169,10 @@ int main(int argc, char **argv)
     assert(c.error == ENOTSUP);
     stop(&adopted, thread);
 
+    /* pthread_join's clear-child-TID wake can precede removal from procfs.
+     * Establish the complete owned cohort before isolating signal masking. */
+    assert(await_result(0).r1 == 0);
+
     fputs("allthreads: masked signal and cancellation\n", stderr);
     worker masked = {.masked = 1};
     thread = start(&masked, 8, 1);
@@ -156,7 +181,7 @@ int main(int argc, char **argv)
     assert(c.error == EAGAIN);
     atomic_store(&masked.unblock, 1);
     while (atomic_load(&masked.unblock)) sched_yield();
-    do { c = call(SYS_setresuid); } while (c.error == EAGAIN);
+    c = await_result(0);
     assert(!c.error);
     stop(&masked, thread);
 
@@ -165,12 +190,18 @@ int main(int argc, char **argv)
     creator.node = llgo_traceback_register(10, 1, 0);
     assert(!pthread_create(&thread, 0, creation, &creator));
     while (!atomic_load(&creator.ready)) sched_yield();
+    unsigned attempts = 0;
     while (!atomic_load(&creator.stop)) {
         c = call(SYS_setresuid);
         assert(!c.error || c.error == EAGAIN || c.error == ENOTSUP);
-        sched_yield();
+        attempts++;
+        /* Do not starve attachment/unregister waiters by repeatedly taking
+         * their registry lock while they try to finish a pthread lifetime. */
+        retry_pause();
     }
     assert(!pthread_join(thread, 0));
+    assert(attempts);
+    assert(await_result(0).r1 == 0);
     fputs("allthreads: final teardown\n", stderr);
     for (unsigned i = 0; i < 3; i++) stop(&children[i], threads[i]);
     llgo_traceback_unregister(main_node);
