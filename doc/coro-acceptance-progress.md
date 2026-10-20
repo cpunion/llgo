@@ -5,22 +5,48 @@ the design documents. Update a row only with a test of the relevant compiler and
 generated program. Host-Go unit tests do not establish LLGo source compatibility, and
 one platform's result does not establish another's.
 
-## Current rangegen follow-up: 2026-10-20 (Asia/Shanghai)
+## Current rangegen follow-up: 2026-10-21 (Asia/Shanghai)
 
-PR #300 merged at `95699feec`; its S28 receipts below remain historical. The
-follow-up addresses the retained rangegen compilation-resource failure. The
-combined diagnostic prototype passes rangegen and the original large-function
-control at unchanged limits, with deterministic cleanup/root/lifetime regressions.
-The trace-free committed compiler, exact-head CI/review audit and a new complete
-acceptance/performance freeze are still pending. This follow-up is not ready to
-merge. See [the follow-up record](coro-rangegen-memory-20261020.md).
+PR #300 merged at `95699feec`; its S28 receipts below remain historical.
+[PR #301](https://github.com/cpunion/llgo/pull/301) resolves the retained rangegen
+compilation-resource failure. Its trace-free production commit `cf54d9f6d`
+passes exact-head CI 20/20 and a new unified S29 local acceptance:
+
+| Gate | Same-freeze S29 result |
+|---|---|
+| Complete native test/go | 276 top-level / 614 including subtests PASS; zero FAIL/SKIP; all 45 nested compiler domains joined |
+| Selected GOROOT runtime cases | 1,082 complete: 1,070 actual passes and twelve existing expected failures; all domains joined |
+| Standard-library fixtures | 180 PASS; 2,127 top-level / 2,405 including subtests; zero FAIL/SKIP |
+| Runnable Go demos | 73 fresh images PASS; original limits; all domains joined |
+| Fresh performance, size and parked-memory comparison | 272 throughput/progress/peak plus 80 steady-memory runs complete; no sleep during measurement |
+| Existing raw diagnostic boundaries | Twelve failures reviewed with external labels disabled: nine explicit assertion panics, two run deadlines, one output mismatch |
+
+All four original controls pass both native preflight and separate corpus
+executions at unchanged limits. Rangegen's worst sampled inner headroom remains
+only 47.5 MiB. The stdlib selection spans two scheduling windows: the first 93
+successes were preserved at a clean fixture boundary with zero compiler/test
+interruption, and the remaining 87 completed in four disjoint cohorts. All
+source/compiler/corpus/image identities match after owned domains retire.
+
+At 100,000 parked goroutines, median steady RSS is LLGo 159.016 MiB versus Go
+267.828 MiB. Spawn, some I/O workloads and stripped file sizes retain explicit
+costs in the [fresh comparison](coro-performance-20261020-pr301.md). Shared-host
+load, Darwin/arm64 scope and existing precise-GC/profiling/gc-stack-hook limits
+remain explicit. The extra 1,316 diagnostic/multifile cases are outside selection.
+
+The [final report](coro-acceptance-20261020-pr301.md) records the exact production
+freeze and sealed receipts; [the compilation record](coro-rangegen-memory-20261020.md)
+retains causal diagnostics. Integration requires a documentation-only equivalence
+proof, exact final-head 20-job CI, fresh paginated review/comment/thread audit and
+verification that the merged tree equals the accepted head. Runtime receipts
+continue to identify the archived production commit.
 
 ## Historical PR #300 / S28: 2026-10-20 (Asia/Shanghai)
 
 [PR #300](https://github.com/cpunion/llgo/pull/300) completes unified S28 local
 acceptance. Its compilation cost changes and five native shutdown corrections
-are committed at `3728ce895`; final integration requires the documentation-only
-head's 20-job CI and fresh paginated review/comment/thread audit.
+are committed at `3728ce895`. Documentation head `f65e639a6` passed 20-job CI and
+the fresh paginated review/comment/thread audit before merge `95699feec`.
 The remaining native SIGABRT conditions have been traced to cancellation during
 winner detach and a late runnable-transfer claim crossing physical-owner return;
 both have deterministic red/green regressions. The complete core race suite and
