@@ -1,0 +1,24 @@
+name: PR2865 protocol qualification
+on:
+  push:
+    branches: [codex/qualify-pr2865-ci-20261020]
+permissions:
+  contents: read
+jobs:
+  protocol:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compile and stress native AMD64 protocol
+        run: |
+          set -euo pipefail
+          cc -g -Wall -Wextra -Werror -O2 -pthread -o /tmp/protocol-ci \
+            internal/build/testdata/allthreads/protocol.c \
+            runtime/internal/stacktrace/_wrap/traceback_unix.c
+          python3 dev/qa_pr2865_protocol.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: protocol-diagnostics
+          path: protocol-diagnostics

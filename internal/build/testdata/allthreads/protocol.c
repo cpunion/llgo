@@ -88,6 +88,7 @@ static void *creation(void *raw)
         worker child = {0};
         pthread_t thread = start(&child, 100+i, 10);
         stop(&child, thread);
+        if ((i+1)%25 == 0) fprintf(stderr, "allthreads: created/joined %u threads\n", i+1);
     }
     atomic_store(&w->stop, 1);
     llgo_traceback_unregister(w->node);
@@ -105,6 +106,7 @@ int main(int argc, char **argv)
     worker children[3] = {0};
     pthread_t threads[3];
     for (unsigned i = 0; i < 3; i++) threads[i] = start(&children[i], i+2, 1);
+    fputs("allthreads: owned-cohort calls\n", stderr);
     for (unsigned i = 0; i < 200; i++) {
         llgo_allthreads_call c = call(SYS_setresuid);
         assert(!c.error && c.r1 == 0);
@@ -130,6 +132,8 @@ int main(int argc, char **argv)
     assert(c.error == ENOTSUP);
     __llgo_allthreads_executable = 1;
 
+    fputs("allthreads: foreign/adopted rejection\n", stderr);
+
     atomic_int foreign_stop = 0;
     pthread_t thread;
     assert(!pthread_create(&thread, 0, foreign, &foreign_stop));
@@ -144,6 +148,7 @@ int main(int argc, char **argv)
     assert(c.error == ENOTSUP);
     stop(&adopted, thread);
 
+    fputs("allthreads: masked signal and cancellation\n", stderr);
     worker masked = {.masked = 1};
     thread = start(&masked, 8, 1);
     c = call(SYS_setresuid);
@@ -154,6 +159,7 @@ int main(int argc, char **argv)
     assert(!c.error);
     stop(&masked, thread);
 
+    fputs("allthreads: concurrent creation/exit\n", stderr);
     worker creator = {0};
     creator.node = llgo_traceback_register(10, 1, 0);
     assert(!pthread_create(&thread, 0, creation, &creator));
@@ -164,6 +170,7 @@ int main(int argc, char **argv)
         sched_yield();
     }
     assert(!pthread_join(thread, 0));
+    fputs("allthreads: final teardown\n", stderr);
     for (unsigned i = 0; i < 3; i++) stop(&children[i], threads[i]);
     llgo_traceback_unregister(main_node);
     puts("allthreads-ok");
