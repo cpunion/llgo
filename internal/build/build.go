@@ -9426,6 +9426,21 @@ func lowerCoroPackageModuleWithProgram(prog llssa.Program, pkgPath string, mod g
 	return nil
 }
 
+// CoroCleanup resolves allocation conditions after the SCC-local cleanup.
+// Fold these conditions before GlobalDCE so unreachable cleanup/noalloc clones
+// do not enter default<O2>'s module-wide IPSCCP analysis. LLVM reachability
+// preserves resume/destroy bodies and metadata roots. Full LTO retains its
+// separate presplit coro.id/noalloc elision protocol.
+func prepareLoweredCoroPackageForOptimization(prog llssa.Program, pkgPath string, mod gllvm.Module) error {
+	options := gllvm.NewPassBuilderOptions()
+	defer options.Dispose()
+	const pipeline = "function<eager-inv>(early-cse,simplifycfg<no-simplify-cond-branch;no-speculate-blocks>),globaldce"
+	if err := mod.RunPasses(pipeline, prog.TargetMachine(), options); err != nil {
+		return fmt.Errorf("prepare lowered coroutine package %s for optimization: %w", pkgPath, err)
+	}
+	return nil
+}
+
 // CoroSplit cannot lower a variable-sized alloca that lives in a presplit
 // coroutine. Diagnose the exact producer before entering LLVM: the pass treats
 // this as a fatal backend error and would otherwise abort the entire compiler
@@ -9547,8 +9562,16 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 	if ctx == nil || pkg == nil || pkg.StagedBitcode == "" {
 		return "", fmt.Errorf("emit staged package: missing build context or bitcode")
 	}
+	input, err := os.Stat(pkg.StagedBitcode)
+	if err != nil {
+		return "", fmt.Errorf("stat staged bitcode for %s: %w", pkg.PkgPath, err)
+	}
 	backend := llssa.NewProgram(newLLSSATarget(ctx.buildConf, ctx.crossCompile))
-	defer backend.Dispose()
+	defer func() { backend.Dispose() }()
+	discardLocalNames := ctx.passOpt && ctx.buildConf.OptLevel != optlevel.O0 && !ctx.buildConf.CheckLLFiles
+	if discardLocalNames {
+		backend.DiscardLocalValueNames()
+	}
 	mod, err := backend.ParseBitcodeFile(pkg.StagedBitcode)
 	if err != nil {
 		return "", fmt.Errorf("parse staged bitcode for %s: %w", pkg.PkgPath, err)
@@ -9557,6 +9580,19 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 		return "", err
 	}
 	if ctx.passOpt {
+		if ctx.buildConf.OptLevel != optlevel.O0 {
+			if err := prepareLoweredCoroPackageForOptimization(backend, pkg.PkgPath, mod); err != nil {
+				return "", err
+			}
+			if input.Size() >= largeStagedPackageBitcodeSize {
+				backend, mod, err = compactLoweredCoroPackage(backend, mod, pkg.PkgPath, discardLocalNames)
+				if err != nil {
+					return "", err
+				}
+			}
+			// The preparation pass has disposed its analyses and dead clones.
+			releaseNativeHeap()
+		}
 		options := gllvm.NewPassBuilderOptions()
 		defer options.Dispose()
 		if err := mod.RunPasses(llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode()), backend.TargetMachine(), options); err != nil {
@@ -9595,6 +9631,14 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 	}
 	if ctx.shouldPrintCommands(false) {
 		fmt.Fprintf(os.Stderr, "# detached LLVM object emission %s for pkg: %s\n", name, pkg.PkgPath)
+	}
+	// MachineOutliner is a module pass between selection and assembly output.
+	// It otherwise keeps every expanded machine function resident. Large
+	// AArch64 modules use one function pipeline through printing and freeing;
+	// small modules keep the target's default outlining policy.
+	triple := backend.TargetSpec().Triple
+	if input.Size() >= largeStagedPackageBitcodeSize && (strings.HasPrefix(triple, "aarch64-") || strings.HasPrefix(triple, "arm64-")) {
+		setNativeMachineOutliner(backend.TargetMachine(), false)
 	}
 	if err := emitNativeObjectFile(backend.TargetMachine(), mod, name); err != nil {
 		_ = os.Remove(name)
