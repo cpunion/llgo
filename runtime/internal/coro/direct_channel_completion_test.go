@@ -135,6 +135,89 @@ func TestDirectChannelCompletionPublishesToSleepingOwner(t *testing.T) {
 	}
 }
 
+func TestDirectChannelCanceledWaiterAfterOwnerTakesCompletion(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	completion := &DirectChannelCompletion{
+		owner: driver,
+		route: driver.route,
+		state: uint32(directChannelCompletionBound),
+	}
+	if !requestDirectChannelCancellation(completion) {
+		t.Fatal("publish canceled channel completion")
+	}
+	if got := BeginDirectChannelCompletion(completion); got != DirectChannelCompletionBeginCanceled {
+		t.Fatalf("published canceled waiter = %d", got)
+	}
+	node, ok := takeExecutorDirectChannelCompletion(driver)
+	if !ok || node != completion {
+		t.Fatal("take canceled channel completion before unlinking typed waiter")
+	}
+	// The owner next takes the hchan lock to remove the typed waiter. A
+	// producer already holding that lock can still dequeue it in this gap.
+	if got := BeginDirectChannelCompletion(completion); got != DirectChannelCompletionBeginCanceled {
+		t.Fatalf("taken canceled waiter = %d, want canceled", got)
+	}
+	preemptStore(&completion.small, 3)
+	if got := BeginDirectChannelCompletion(completion); got != DirectChannelCompletionBeginInvalid {
+		t.Fatalf("taken matched waiter = %d, want invalid", got)
+	}
+	preemptStore(&completion.small, uint32(ResumeSmallInvalid))
+	preemptStore(&completion.state, uint32(directChannelCompletionMaterialized))
+	if got := BeginDirectChannelCompletion(completion); got != DirectChannelCompletionBeginInvalid {
+		t.Fatalf("already materialized waiter = %d, want invalid", got)
+	}
+	closeTestExecutorDriver(t, driver)
+}
+
+func TestDirectChannelCompletionValidationAcrossProducerPublication(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithManual(t, p)
+	task := newYieldingTestG(t, "direct-producer-snapshot")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue direct channel task")
+	}
+	if next, ok := NextRunnable(p); !ok || next != task.g {
+		t.Fatal("select direct channel task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	storage := new(DirectChannelParkStorageV1)
+	if owner, route := PrepareCurrentDirectChannelPark(task.g, task.handle, task.frame.header, storage); owner != driver || route != driver.route {
+		t.Fatal("prepare direct channel park")
+	}
+	if parked, ok := Resumed(p, task.g, action); !ok || parked.Kind != ActionPark {
+		t.Fatal("activate direct channel park")
+	}
+	completion := &storage.Completion
+	observed := directChannelCompletionState(preemptLoad(&completion.state))
+	// Reproduce the native observation exactly: the owner reads Bound, then
+	// the remote producer publishes its result before the owner reads small.
+	if BeginDirectChannelCompletion(completion) != DirectChannelCompletionBeginAcquired {
+		t.Fatal("claim the producer effect")
+	}
+	if owner, route, ok := FinishDirectChannelCompletion(completion, 4, 0); !ok || owner != driver || route != driver.route {
+		t.Fatal("publish the producer result between owner reads")
+	}
+	small := preemptLoad(&completion.small)
+	if !validDirectChannelCompletionSnapshot(completion, observed, small) {
+		t.Fatalf("legal producer transition rejected: observed=%d small=%d current=%d", observed, small, preemptLoad(&completion.state))
+	}
+	for _, state := range []directChannelCompletionState{
+		directChannelCompletionUnused, directChannelCompletionBound,
+		directChannelCompletionCanceled, directChannelCompletionMaterialized,
+	} {
+		invalid := &DirectChannelCompletion{state: uint32(state), small: 4}
+		if validDirectChannelCompletionSnapshot(invalid, state, 4) {
+			t.Fatalf("invalid nonzero result accepted in state %d", state)
+		}
+	}
+	if validDirectChannelCompletionSnapshot(completion, directChannelCompletionMatched, 256) {
+		t.Fatal("out-of-range result accepted")
+	}
+}
+
 func TestDirectChannelParkPreservesCleanupCancellation(t *testing.T) {
 	for _, phase := range []string{"ordinary", "shielded", "pending-shield", "claimed-cleanup"} {
 		for _, issued := range []bool{false, true} {

@@ -241,6 +241,87 @@ func TestLateTaskCancellationSuppressesReadyWinnerAndKeepsLease(t *testing.T) {
 	finishTaskCancelFixture(t, p, g, TaskCancelAbort)
 }
 
+func TestTaskCancellationWhileWinnerWaitsForDetach(t *testing.T) {
+	for _, boundary := range []string{"winner-attached", "loser-attached", "ready"} {
+		t.Run(boundary, func(t *testing.T) {
+			p := new(P)
+			g := new(G)
+			if !InitG(g) {
+				t.Fatal("initialize waiting G")
+			}
+			ticket, ok := BeginParkSet(&g.park, 2, 37)
+			winnerID, winnerOK := MakeOperationID(OperationSourceManual, 1, 1)
+			loserID, loserOK := MakeOperationID(OperationSourceManual, 2, 1)
+			var winner, loser OperationRecord
+			if !ok || !winnerOK || !loserOK ||
+				!InitOperation(&winner, winnerID) || !InitOperation(&loser, loserID) ||
+				!AttachParkOperation(&g.park, ticket, &winner, 41) ||
+				!AttachParkOperation(&g.park, ticket, &loser, 42) ||
+				!SealParkSet(&g.park, ticket) || !CommitParkSet(&g.park, ticket) ||
+				PublishOperationCompletion(&winner, winnerID) != OperationCompletionPublished {
+				t.Fatal("prepare completed wait with a loser")
+			}
+			attachWaitingTaskCancelFixture(p, g)
+			if resolution, resolved := ResolveParkSnapshot(&g.park, ticket); !resolved ||
+				resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1, Losers: 1}) {
+				t.Fatalf("resolve winner = (%+v, %t)", resolution, resolved)
+			}
+			detach := func(record *OperationRecord, id OperationID, disposition OperationDisposition) {
+				t.Helper()
+				if !AcknowledgeOperationResolution(record, id, disposition) ||
+					!DetachParkOperation(&g.park, ticket, record, id) {
+					t.Fatal("detach settled operation")
+				}
+				p.externalWaitCount = g.park.attached
+			}
+			if boundary != "winner-attached" {
+				detach(&winner, winnerID, OperationDispositionWinner)
+			}
+			if boundary == "ready" {
+				detach(&loser, loserID, OperationDispositionLost)
+			}
+			// A selected result retains its lease while another source completes
+			// unregister. Main return can request shutdown at either detach
+			// boundary, before the waiting G has become runnable.
+			if !RequestTaskCancellation(p, g, TaskCancelShutdown) ||
+				!RequestTaskCancellation(p, g, TaskCancelAbort) {
+				t.Fatal("request shutdown while the winner awaits promotion")
+			}
+			if g.park.taskCancelKind != TaskCancelShutdown || g.park.taskCancelPhase != taskCancelRequested ||
+				g.park.outcome != ParkOutcomeCompleted || g.park.cancelKind != ParkCancelNone ||
+				g.park.winnerRecord != &winner {
+				t.Fatal("late shutdown changed the selected result or lost the sticky stop")
+			}
+			if boundary == "winner-attached" {
+				detach(&winner, winnerID, OperationDispositionWinner)
+			}
+			if boundary != "ready" {
+				detach(&loser, loserID, OperationDispositionLost)
+			}
+			if !ParkReady(&g.park, ticket) {
+				t.Fatal("wait did not reach the detach barrier")
+			}
+			resumeTaskCancelFixture(t, p, g)
+			outcome, caseID, lease, task, consumed := ConsumeTaskParkSet(p, g, ticket)
+			if !consumed || outcome != ParkOutcomeCanceled || caseID != 0 || !lease.Valid() || task != TaskCancelShutdown {
+				t.Fatalf("consume canceled winner = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, task, consumed)
+			}
+			if id, valid := lease.ID(); !valid || id != winnerID {
+				t.Fatal("cleanup did not receive the selected result lease")
+			}
+			if !ConfirmOperationQuiesced(&winner, winnerID) || OperationCanRecycle(&winner, winnerID) ||
+				!DiscardOperationResult(&winner, lease) || DiscardOperationResult(&winner, lease) ||
+				!RecycleOperation(&winner, winnerID) {
+				t.Fatal("winner result was not discarded exactly once before recycling")
+			}
+			if !ConfirmOperationQuiesced(&loser, loserID) || !RecycleOperation(&loser, loserID) {
+				t.Fatal("recycle detached loser")
+			}
+			finishTaskCancelFixture(t, p, g, TaskCancelShutdown)
+		})
+	}
+}
+
 func TestTaskCancellationCleanupDoesNotReenterOrCancelCleanupPark(t *testing.T) {
 	p, g := newReadyTaskCancelFixture(t)
 	if !RequestTaskCancellation(p, g, TaskCancelAbort) {

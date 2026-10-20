@@ -303,6 +303,11 @@ func (p Program) Dispose() {
 	p.tm.Dispose()
 	p.td.Dispose()
 	p.ctx.Dispose()
+	// A staged coordinator can retain this Program's identity after native
+	// disposal. Release Go type caches and callbacks too: compileMethods and
+	// patchType can close over the complete frontend/SSA graph, otherwise
+	// overlapping that graph with the detached backend's working set.
+	*p = aProgram{disposed: true}
 }
 
 // NewProgram creates a new program.

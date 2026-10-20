@@ -299,19 +299,26 @@ func coroTargetRequestProgramRunnableV1(p *coro.P, driver *coro.ExecutorDriver) 
 		coroNativeFleetV1State.fleet.RequestPNeutralRunnable(domain.handle, p)
 }
 
-func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) bool {
+func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) (retry, ok bool) {
 	domain, valid := coroTargetReadyDistributionDomainV1(p, driver)
 	if !valid || !domain.adopted {
-		return false
+		return false, false
 	}
-	if _, ok := coroNativeFleetV1State.fleet.CancelPNeutralRunnableRequest(
+	_, _, status := coroNativeFleetV1State.fleet.TryWithdrawPNeutralRunnables(
 		domain.handle,
 		p,
-	); !ok {
-		return false
+		coro.RunnableTransferMailboxCapacity,
+	)
+	switch status {
+	case coro.RunnableTransferDrainComplete, coro.RunnableTransferDrainOwnerUnstable:
+		// A selected physical action must advance before its mailbox can drain.
+		return false, true
+	case coro.RunnableTransferDrainContended:
+		// A late claim must finish before the runner can commit terminal close.
+		return true, true
+	default:
+		return false, false
 	}
-	_, ok := coroTargetDrainProgramTransfersV1(p, driver)
-	return ok
 }
 
 // coroTargetPrepareOSThreadSuspendV1 is called after one complete physical

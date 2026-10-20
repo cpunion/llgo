@@ -368,7 +368,11 @@ func requestTaskCancellationOwned(p *P, g *G, kind TaskCancelKind, proof taskCan
 	var direct *DirectChannelCompletion
 	if g.state == GWaiting && g.active != nil && g.active.parkWait != nil {
 		wait = g.active.parkWait
-		if g.park.resolving || g.park.winnerRecord != nil ||
+		// A parked winner is an outstanding TryCommit handshake and cannot
+		// admit cancellation yet. Detaching/ready winners instead retain an
+		// already-selected result for cleanup; keep that lease and publish the
+		// sticky stop so the resume gate discards it after every source detaches.
+		if g.park.resolving || g.park.phase == parkParked && g.park.winnerRecord != nil ||
 			proof == taskCancellationProofRegistered && !validRegisteredActiveParkHeader(&g.park) {
 			return false
 		}

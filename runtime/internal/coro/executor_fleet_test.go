@@ -1085,6 +1085,80 @@ func TestExecutorFleetConcurrentSourcesClaimOneRunnableDemand(t *testing.T) {
 	}
 }
 
+func TestExecutorFleetWithdrawJoinsClaimBeforeFinalDrain(t *testing.T) {
+	for _, published := range []bool{false, true} {
+		name := "before-publication"
+		if published {
+			name = "after-publication"
+		}
+		t.Run(name, func(t *testing.T) {
+			fleet := new(ExecutorFleet)
+			source := bindExecutorFleetManualFixture(t, fleet)
+			target := bindExecutorFleetManualFixture(t, fleet)
+			task := newYieldingTestG(t, "late-shutdown-transfer")
+			if !Enqueue(source.p, task.g) || !fleet.RequestPNeutralRunnable(target.handle, target.p) {
+				t.Fatal("prepare a demanded transfer")
+			}
+			slot := &fleet.slots[target.handle.Route-1]
+			// Pause the distributor after its exact claim, on either side of
+			// mailbox publication. Its stop check may have preceded main return.
+			if !preemptCompareAndSwap(&slot.runnableDemand,
+				uint32(runnableDemandRequested), uint32(runnableDemandClaimed)) {
+				t.Fatal("claim target demand")
+			}
+			publish := func() {
+				t.Helper()
+				var candidates [RunnableTransferMailboxCapacity]*G
+				candidates[0] = task.g
+				id, count, request, ok := fleet.publishPreparedPNeutralRunnableBatchAndRequest(
+					target.handle, source.p, &candidates, 1,
+				)
+				if !ok || !id.Valid() || count != 1 || request != ExecutorRequestPublished {
+					t.Fatalf("publish claimed transfer = (%+v,%d,%d,%t)", id, count, request, ok)
+				}
+			}
+			if published {
+				publish()
+			}
+			if moved, more, status := fleet.TryWithdrawPNeutralRunnables(
+				target.handle, target.p, RunnableTransferMailboxCapacity,
+			); status != RunnableTransferDrainContended || moved != 0 || more || target.p.readyHead != nil {
+				t.Fatalf("withdraw crossed a live claim = (%d,%t,%d)", moved, more, status)
+			}
+			if !published {
+				publish()
+			}
+			if !preemptCompareAndSwap(&slot.runnableDemand,
+				uint32(runnableDemandClaimed), uint32(runnableDemandIdle)) {
+				t.Fatal("finish transfer claim")
+			}
+			if moved, more, status := fleet.TryWithdrawPNeutralRunnables(
+				target.handle, target.p, RunnableTransferMailboxCapacity,
+			); status != RunnableTransferDrainComplete || moved != 1 || more || target.p.readyHead != task.g {
+				t.Fatalf("withdraw lost late transfer = (%d,%t,%d)", moved, more, status)
+			}
+			if moved, more, status := fleet.TryWithdrawPNeutralRunnables(
+				target.handle, target.p, RunnableTransferMailboxCapacity,
+			); status != RunnableTransferDrainComplete || moved != 0 || more || target.p.readyCount != 1 {
+				t.Fatalf("withdraw imported a duplicate = (%d,%t,%d)", moved, more, status)
+			}
+			if next, ok := NextRunnable(target.p); !ok || next != task.g {
+				t.Fatal("select transferred task")
+			}
+			action := beginWaitTestResume(t, target.p, task)
+			finishExecutorFleetTask(t, target, task, action)
+			if _, _, ok := PollExecutor(target.driver); !ok {
+				t.Fatal("acknowledge transfer request tail")
+			}
+			closeExecutorFleetFixture(t, fleet, source)
+			closeExecutorFleetFixture(t, fleet, target)
+			if !fleet.AllRetired() {
+				t.Fatal("late transfer prevented final fleet retirement")
+			}
+		})
+	}
+}
+
 func TestExecutorFleetCloseCancelsDemandAndJoinsClaim(t *testing.T) {
 	t.Run("requested", func(t *testing.T) {
 		fleet := new(ExecutorFleet)

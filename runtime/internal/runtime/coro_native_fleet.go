@@ -742,6 +742,21 @@ func coroNativeFleetTryDrainOwnerEpochV1(
 	handle coro.ExecutorFleetHandle,
 	epoch, budget uint32,
 ) (moved uint32, more bool, status coro.RunnableTransferDrainStatus) {
+	return coroNativeFleetTryDrainOwnerRunnablesV1(handle, epoch, budget, false)
+}
+
+func coroNativeFleetTryWithdrawOwnerEpochV1(
+	handle coro.ExecutorFleetHandle,
+	epoch, budget uint32,
+) (moved uint32, more bool, status coro.RunnableTransferDrainStatus) {
+	return coroNativeFleetTryDrainOwnerRunnablesV1(handle, epoch, budget, true)
+}
+
+func coroNativeFleetTryDrainOwnerRunnablesV1(
+	handle coro.ExecutorFleetHandle,
+	epoch, budget uint32,
+	withdraw bool,
+) (moved uint32, more bool, status coro.RunnableTransferDrainStatus) {
 	domain, valid := coroNativeFleetDomainForHandleV1(
 		&coroNativeFleetV1State,
 		handle,
@@ -754,6 +769,9 @@ func coroNativeFleetTryDrainOwnerEpochV1(
 	p := domain.pOwnerV1()
 	if p == nil {
 		return 0, false, coro.RunnableTransferDrainInvalid
+	}
+	if withdraw {
+		return coroNativeFleetV1State.fleet.TryWithdrawPNeutralRunnables(handle, p, budget)
 	}
 	return coroNativeFleetV1State.fleet.TryDrainPNeutralRunnables(handle, p, budget)
 }

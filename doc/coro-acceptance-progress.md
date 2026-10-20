@@ -5,7 +5,45 @@ the design documents. Update a row only with a test of the relevant compiler and
 generated program. Host-Go unit tests do not establish LLGo source compatibility, and
 one platform's result does not establish another's.
 
-## Current follow-up: 2026-10-19 (Asia/Shanghai)
+## Current PR #300: 2026-10-20 (Asia/Shanghai)
+
+[PR #300](https://github.com/cpunion/llgo/pull/300) completes unified S28 local
+acceptance. Its compilation cost changes and five native shutdown corrections
+are committed at `3728ce895`; final integration requires the documentation-only
+head's 20-job CI and fresh paginated review/comment/thread audit.
+The remaining native SIGABRT conditions have been traced to cancellation during
+winner detach and a late runnable-transfer claim crossing physical-owner return;
+both have deterministic red/green regressions. The complete core race suite and
+172,000 pre-freeze native stability executions pass.
+
+Unified S28 acceptance uses a freshly built compiler and an exact archive of that
+commit. Its exact-head CI passes 20/20, and full native `test/go` passes 276
+top-level / 614 including subtests, with all 45 nested compiler domains joined
+and reclaimed. All 1,082 selected GOROOT cases are complete: 1,069 actual passes,
+12 existing expected failures and one `rangegen.go` compilation-resource FAIL.
+All four GOROOT controllers joined with matching SDK/compiler/corpus identities.
+The large `issue9604b.go` passes at 273.680s compilation and 9,998.0 MiB sampled
+peak RSS; the original 10 GiB limit leaves only 242 MiB sampled headroom.
+All 180 stdlib fixtures pass: 2,127 top-level / 2,405 including subtests, zero
+FAIL/SKIP. Its original eight-hour aggregate stopped after 168 passes; both
+unfinished builds and ten unstarted fixtures then completed under the same
+source/compiler fingerprints and unchanged limits, with the interruption retained.
+All 73 demos pass, including an awake original-limit gotoken build/run recheck
+in 79s/1s after retaining its suspended primary attempt. All 352 performance/
+memory runs complete without host sleep. At 100,000 parked goroutines, median
+steady RSS is LLGo 159.016 MiB versus Go 267.812 MiB; stripped size and spawn/I/O
+costs remain explicit in the [fresh comparison](coro-performance-20261020-pr300.md).
+The fresh httptest fixture passes 2,000 repetitions with all seventeen tests
+per run passing. All twelve expected GOROOT failures are also observed with
+external labels disabled and individually reviewed: nine explicit assertion
+panics, two execution deadlines and one output mismatch. No new expectation rule
+is added. All campaign domains retire and source/compiler/corpus/image checks
+match; aggregate interruptions and disk-floor stops remain classified and
+retained. Prior S11 results remain historical. See the
+[PR #300 report](coro-acceptance-20261019-pr300.md) for identities, diagnoses,
+limits, receipts and the final integration protocol.
+
+## Previous follow-up: 2026-10-19 (Asia/Shanghai)
 
 [PR #298](https://github.com/cpunion/llgo/pull/298) is integrated as `be66eadef`,
 and [PR #299](https://github.com/cpunion/llgo/pull/299) as `5432ae604`. Each exact-head

@@ -101,6 +101,26 @@ func directChannelCompletionLiveState(state directChannelCompletionState) bool {
 	return state >= directChannelCompletionBound && state <= directChannelCompletionTaken
 }
 
+func validDirectChannelCompletionSnapshot(completion *DirectChannelCompletion, state directChannelCompletionState, small uint32) bool {
+	if completion == nil || !directChannelCompletionLiveState(state) || small > uint32(^uint8(0)) {
+		return false
+	}
+	if state == directChannelCompletionBound && small != uint32(ResumeSmallInvalid) {
+		// State and result are separate atomic words. A producer can claim
+		// Effect and write its result between the owner's two loads. Recheck
+		// this ambiguous Bound snapshot; a nonzero result while still Bound
+		// or Canceled remains invalid. No owner-local state advances here.
+		switch directChannelCompletionState(preemptLoad(&completion.state)) {
+		case directChannelCompletionEffect, directChannelCompletionMatched,
+			directChannelCompletionPublished, directChannelCompletionTaken:
+			return true
+		default:
+			return false
+		}
+	}
+	return state != directChannelCompletionBound && state != directChannelCompletionCanceled || small == uint32(ResumeSmallInvalid)
+}
+
 func validBoundDirectChannelCompletion(record *WaitSetRecord, completion *DirectChannelCompletion) bool {
 	if record == nil || completion == nil || !record.directChannel ||
 		record.resumeKind != resumeBindingDirectChannel || record.resume != unsafe.Pointer(completion) ||
@@ -119,17 +139,7 @@ func validBoundDirectChannelCompletion(record *WaitSetRecord, completion *Direct
 	if preferred != 0 && !preferred.Valid() {
 		return false
 	}
-	switch state {
-	case directChannelCompletionBound, directChannelCompletionCanceled:
-		return small == uint32(ResumeSmallInvalid)
-	case directChannelCompletionEffect, directChannelCompletionMatched, directChannelCompletionPublished,
-		directChannelCompletionTaken:
-		// Published/Taken can represent cancellation; the task token and zero
-		// result distinguish it at the owner materialization boundary.
-		return small <= uint32(^uint8(0))
-	default:
-		return false
-	}
+	return validDirectChannelCompletionSnapshot(completion, state, small)
 }
 
 // ValidDirectChannelCompletion is the typed runtime's frame-binding check.
@@ -156,9 +166,7 @@ func validCommittedCompactDirectChannelPark(g *G, frame *Frame, wait *WaitSetRec
 	}
 	completionState := directChannelCompletionState(preemptLoad(&completion.state))
 	small := preemptLoad(&completion.small)
-	if !directChannelCompletionLiveState(completionState) ||
-		(completionState == directChannelCompletionBound || completionState == directChannelCompletionCanceled) &&
-			small != uint32(ResumeSmallInvalid) {
+	if !validDirectChannelCompletionSnapshot(completion, completionState, small) {
 		return false
 	}
 	// PrepareCurrentDirectChannelPark is the sole producer of pendingParkSet's
@@ -392,7 +400,11 @@ func BeginDirectChannelCompletion(completion *DirectChannelCompletion) DirectCha
 			}
 		case directChannelCompletionCanceled:
 			return DirectChannelCompletionBeginCanceled
-		case directChannelCompletionPublished:
+		case directChannelCompletionPublished, directChannelCompletionTaken:
+			// The owner takes the inbox node before locking hchan to unlink
+			// its typed waiter. A producer already holding that lock may still
+			// dequeue a canceled waiter during this interval. No typed effect
+			// is allowed; the cancellation remains an ordinary stale waiter.
 			if preemptLoad(&completion.small) == uint32(ResumeSmallInvalid) {
 				return DirectChannelCompletionBeginCanceled
 			}

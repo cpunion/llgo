@@ -9366,7 +9366,14 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	return nil
 }
 
-const coroPackageLoweringPipeline = "coro-early,cgscc(coro-split),coro-cleanup"
+// Simplify each original/clone while CoroSplit visits its SCC, rather than
+// retaining every expanded CFG until the module-wide CoroCleanup pass. Large
+// generated packages otherwise accumulate all resume/destroy/cleanup bodies
+// before any of their branch scaffolding is folded. Only compact the CFG here:
+// rewriting conditions and speculating blocks repeats expensive work on giant
+// functions. Keep mandatory coroutine cleanup and the complete requested
+// optimization pipeline after this step.
+const coroPackageLoweringPipeline = "coro-early,cgscc(coro-split,function(simplifycfg<no-simplify-cond-branch;no-speculate-blocks>)),coro-cleanup"
 
 // shouldDeferCoroLoweringToFullLTO preserves presplit coroutine bodies and
 // exact static call edges until LLVM owns the complete program. Package-level
@@ -9573,11 +9580,6 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 			return "", err
 		}
 	}
-	object, err := backend.TargetMachine().EmitToMemoryBuffer(mod, gllvm.ObjectFile)
-	if err != nil {
-		return "", err
-	}
-	defer object.Dispose()
 	base := filepath.Base(pkg.ExportFile)
 	if base == "." || base == string(filepath.Separator) || base == "" {
 		base = "pkg"
@@ -9587,15 +9589,14 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 		return "", err
 	}
 	name := file.Name()
-	if ctx.shouldPrintCommands(false) {
-		fmt.Fprintf(os.Stderr, "# detached LLVM object emission %s for pkg: %s\n", name, pkg.PkgPath)
-	}
-	if _, err := file.Write(object.Bytes()); err != nil {
-		file.Close()
+	if err := file.Close(); err != nil {
 		_ = os.Remove(name)
 		return "", err
 	}
-	if err := file.Close(); err != nil {
+	if ctx.shouldPrintCommands(false) {
+		fmt.Fprintf(os.Stderr, "# detached LLVM object emission %s for pkg: %s\n", name, pkg.PkgPath)
+	}
+	if err := emitNativeObjectFile(backend.TargetMachine(), mod, name); err != nil {
 		_ = os.Remove(name)
 		return "", err
 	}

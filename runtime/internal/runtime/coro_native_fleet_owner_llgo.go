@@ -509,8 +509,10 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 		// slice may acknowledge that request after its entry-time mailbox drain
 		// and then report idle. Recheck the mailbox before ArmIdle so the
 		// request-to-sleep window is closed by either this import, the driver's
-		// final request scan, or a later IdleWake doorbell.
-		moved, more, finalDrainStatus := coroNativeFleetTryDrainOwnerEpochV1(
+		// final request scan, or a later IdleWake doorbell. Withdraw demand and
+		// join any existing claim first: an empty mailbox alone cannot authorize
+		// shutdown while a descheduled donor still owes its publication.
+		moved, more, finalDrainStatus := coroNativeFleetTryWithdrawOwnerEpochV1(
 			handle,
 			*epoch,
 			coro.RunnableTransferMailboxCapacity,
