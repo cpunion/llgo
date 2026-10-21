@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 4b09e4c45cad0c3d16ba1ffeb8b4347dcf24d260
+          ref: 03129d21a8a4ae2f9a2b3baa86d7ffa688fd7e08
       - uses: ./.github/actions/setup-deps
         with:
           llvm-version: 22
@@ -24,5 +24,14 @@ jobs:
         run: |
           go test -v -count=1 -timeout=10m \
             '-ldflags=-linkmode=external -extldflags=-lsynchronization' \
-            -run '^(TestRuntimeAudit|TestRuntimeOwnership|TestAuditCommand)' \
-            ./internal/build ./dev/runtimeaudit
+            -run '^(TestRuntimeAudit|TestRuntimeOwnership|TestAuditCommand|TestBounds|TestStringSlice)' \
+            ./ssa ./internal/build ./dev/runtimeaudit
+      - name: Verify native slicing, UTF-8 and compatibility hooks
+        shell: bash
+        env:
+          LLGO_ROOT: ${{ github.workspace }}
+        run: |
+          go build '-ldflags=-linkmode=external -extldflags=-lsynchronization' -o llgo.exe ./cmd/llgo
+          ./llgo.exe test -v -count=1 -timeout=5m \
+            -run '^(TestStringSliceIndices|TestRuntimeUTF8MatchesUnicode|TestAuxvHook|TestNanotimeHook|TestLegacyFastrand64Hook)$' \
+            ./test/std/runtime
