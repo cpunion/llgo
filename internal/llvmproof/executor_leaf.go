@@ -116,7 +116,7 @@ func ProveExecutorLeaf(module llvm.Module, symbol string) (ExecutorLeafProof, er
 				opcode := instruction.InstructionOpcode()
 				switch opcode {
 				case llvm.Load, llvm.Store, llvmOpcodeAtomicCmpXchg, llvmOpcodeAtomicRMW:
-					mayFault = mayFault || executorLeafMemoryMayFault(instruction)
+					mayFault = mayFault || executorLeafMemoryMayFault(module, function, instruction)
 				case llvm.UDiv, llvm.SDiv, llvm.URem, llvm.SRem:
 					mayFault = true
 				}
@@ -137,7 +137,7 @@ func ProveExecutorLeaf(module llvm.Module, symbol string) (ExecutorLeafProof, er
 					)
 				}
 				if callee.IntrinsicID() != 0 {
-					mayFault = mayFault || !executorLeafTLSAddressIntrinsic(callee)
+					mayFault = mayFault || !(executorLeafTLSAddressIntrinsic(callee) || executorLeafCurrentFrameAddress(instruction))
 					if err := validateExecutorLeafIntrinsic(callee); err != nil {
 						return fmt.Errorf(
 							"function %q calls intrinsic %q: %w",
@@ -183,9 +183,12 @@ func ProveExecutorLeaf(module llvm.Module, symbol string) (ExecutorLeafProof, er
 // (including TLS). Do not charge current-G TLS reads and unoptimized argument
 // spills for a signal landing. Derived addresses and unknown pointees remain
 // conservative; progress/non-retention alone cannot establish their safety.
-func executorLeafMemoryMayFault(instruction llvm.Value) bool {
+func executorLeafMemoryMayFault(module llvm.Module, function, instruction llvm.Value) bool {
 	address := instruction.Operand(0)
 	valueType := instruction.Type()
+	if executorLeafNativeFrameWordRead(module, function, instruction) {
+		return false
+	}
 	switch instruction.InstructionOpcode() {
 	case llvm.Store:
 		address = instruction.Operand(1)
@@ -208,6 +211,43 @@ func executorLeafMemoryMayFault(instruction llvm.Value) bool {
 		}
 	}
 	return true
+}
+
+// A level-zero frameaddress reads the current frame register, never an older
+// frame link. Other depths and other intrinsics retain their fault demand.
+func executorLeafCurrentFrameAddress(instruction llvm.Value) bool {
+	if instruction.IsACallInst().IsNil() || instruction.OperandsCount() != 2 {
+		return false
+	}
+	callee := instruction.CalledValue().IsAFunction()
+	if callee.IsNil() || callee.Name() != "llvm.frameaddress.p0" || callee.IntrinsicID() != llvm.LookupIntrinsicID("llvm.frameaddress") {
+		return false
+	}
+	depth := instruction.Operand(0)
+	return !depth.IsAConstantInt().IsNil() && depth.Type().IntTypeWidth() == 32 && depth.ZExtValue() == 0
+}
+
+// LLVM 22 materializes the current FP record when frameaddress(0) is used on
+// native AArch64 and x86-64. Its first word is readable for this activation;
+// reading that scalar does not dereference the saved caller pointer. This
+// certificate admits only the exact i64 read at FP itself. Older frame walks,
+// GEPs, writes, oversized/overaligned loads, naked functions and other target
+// ABIs remain conservative. No source symbol name grants this capability.
+func executorLeafNativeFrameWordRead(module llvm.Module, function, instruction llvm.Value) bool {
+	if instruction.InstructionOpcode() != llvm.Load ||
+		instruction.Type().TypeKind() != llvm.IntegerTypeKind || instruction.Type().IntTypeWidth() != 64 ||
+		instruction.Alignment() > 8 || !executorLeafCurrentFrameAddress(instruction.Operand(0)) ||
+		!function.GetEnumFunctionAttribute(llvm.AttributeKindID("naked")).IsNil() {
+		return false
+	}
+	triple := strings.ToLower(module.Target())
+	if !(strings.HasPrefix(triple, "aarch64-") || strings.HasPrefix(triple, "arm64-") || strings.HasPrefix(triple, "x86_64-")) ||
+		!(strings.Contains(triple, "-apple-") || strings.Contains(triple, "-linux-")) {
+		return false
+	}
+	layout := llvm.NewTargetData(module.DataLayout())
+	defer layout.Dispose()
+	return layout.PointerSize() == 8
 }
 
 func executorLeafTLSAddressIntrinsic(function llvm.Value) bool {

@@ -221,6 +221,7 @@ func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
 	sources := []string{
 		"../../runtime/internal/runtime/_wrap/coro_g_tls.c",
 		"../../runtime/internal/lib/runtime/_wrap/poll.c",
+		"../../runtime/internal/lib/runtime/_wrap/runtime.c",
 		"../../runtime/internal/lib/runtime/_wrap/signal.c",
 		"../../runtime/internal/lib/runtime/_wrap/debugtrap.c",
 		"../../runtime/internal/clite/debug/_wrap/debug.c",
@@ -229,6 +230,7 @@ func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
 	}
 	positive := []string{
 		"__llgo_coro_current_g_load_v1",
+		"llgo_caller_frame_mark",
 		"__llgo_runtime_poll_desc_state_v1",
 		"__llgo_runtime_poll_desc_deadline_v1",
 		"__llgo_runtime_poll_desc_set_deadline_v1",
@@ -248,6 +250,7 @@ func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
 		// bottom contract is owned by g_pthread.go; structural inference must
 		// continue to reject it rather than learning that lifetime by name.
 		"__llgo_coro_current_g_store_v1",
+		"llgo_frame_chain_contains",
 		"__llgo_runtime_poll_fd_stream_v1",
 		"__llgo_runtime_poll_read_attempt_v1",
 		"__llgo_runtime_signal_receive_v1",
@@ -293,6 +296,9 @@ func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
 						"current-G executor-leaf layout = %q, frontend = %q",
 						proof.LLVMDataLayout, prog.DataLayout(),
 					)
+				}
+				if symbol == "llgo_caller_frame_mark" && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64") && proof.MayFault {
+					t.Error("exact current native frame scalar must not retain native fault landing")
 				}
 				if symbol == "__llgo_coro_current_g_load_v1" && proof.MayFault {
 					t.Error("exact current-G TLS slot must not retain native fault landing")
