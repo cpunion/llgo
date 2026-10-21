@@ -66,12 +66,13 @@ jobs:
         \ -extldflags=-lsynchronization' -timeout 20m -coverprofile=coverage-main.txt\
         \ -covermode=set -coverpkg=./... -bench '^BenchmarkGo126' -benchtime=1x\n\
         printf 'Main batch returned successfully\\n'\n\"\"\"\nstarted = time.monotonic()\n\
-        process = subprocess.Popen(['bash', '-c', command])\ntry:\n    status = process.wait(timeout=1500)\n\
-        except subprocess.TimeoutExpired:\n    print('Main batch timeout after 25\
-        \ minutes; capturing remaining processes', flush=True)\n    subprocess.run(['powershell',\
-        \ '-NoProfile', '-Command', 'Get-CimInstance Win32_Process | Where-Object\
-        \ {$_.Name -match \"go|python|bash|tee|clang|link|test|debug|chrome\"} | Select-Object\
-        \ ProcessId,ParentProcessId,Name,CommandLine | Format-List'], timeout=30)\n\
-        \    subprocess.run(['taskkill', '/F', '/T', '/PID', str(process.pid)], timeout=30)\n\
-        \    raise SystemExit(1)\nprint(f'Main batch elapsed {time.monotonic()-started:.1f}s,\
+        bash = pathlib.Path(os.environ['ProgramFiles']) / 'Git' / 'bin' / 'bash.exe'\n\
+        process = subprocess.Popen([str(bash), '-c', command])\ntry:\n    status =\
+        \ process.wait(timeout=1500)\nexcept subprocess.TimeoutExpired:\n    print('Main\
+        \ batch timeout after 25 minutes; capturing remaining processes', flush=True)\n\
+        \    subprocess.run(['powershell', '-NoProfile', '-Command', 'Get-CimInstance\
+        \ Win32_Process | Where-Object {$_.Name -match \"go|python|bash|tee|clang|link|test|debug|chrome\"\
+        } | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-List'],\
+        \ timeout=30)\n    subprocess.run(['taskkill', '/F', '/T', '/PID', str(process.pid)],\
+        \ timeout=30)\n    raise SystemExit(1)\nprint(f'Main batch elapsed {time.monotonic()-started:.1f}s,\
         \ exit {status}', flush=True)\nraise SystemExit(status)\n"
