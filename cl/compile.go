@@ -2665,7 +2665,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			operation, operationPlanned := p.plannedCoroPhysicalOperation(v)
 			if operationPlanned && operation.operation == coroPhysicalOperationChannelReceive {
 				p.observeCoroPhysicalOperation(v, coroPhysicalOperationChannelReceive)
-				ret = p.compileCoroChanRecv(b, v, x)
+				ret = p.compileCoroChanRecv(b, v, x, p.plannedCoroLocalChannel(v, v.X))
 			} else if !operationPlanned || operation.operation == coroPhysicalOperationNone {
 				ret = b.Recv(x, v.CommaOk)
 			} else {
@@ -3704,7 +3704,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		operation, operationPlanned := p.plannedCoroPhysicalOperation(v)
 		if operationPlanned && operation.operation == coroPhysicalOperationChannelSend {
 			p.observeCoroPhysicalOperation(v, coroPhysicalOperationChannelSend)
-			p.compileCoroChanSend(b, ch, x)
+			p.compileCoroChanSend(b, ch, x, p.plannedCoroLocalChannel(v, v.Chan))
 		} else if !operationPlanned || operation.operation == coroPhysicalOperationNone {
 			b.Send(ch, x)
 		} else {

@@ -616,6 +616,20 @@ func (p Program) RuntimeType(name string) Type {
 	return p.rtType(name)
 }
 
+// LookupRuntimeSourceType exposes optional runtime layout metadata without
+// converting its recursive type graph or creating LLVM types.
+func (p Program) LookupRuntimeSourceType(name string) types.Type {
+	if p.rt == nil && p.rtget == nil {
+		return nil
+	}
+	if runtime := p.runtime(); runtime != nil {
+		if object := runtime.Scope().Lookup(name); object != nil {
+			return object.Type()
+		}
+	}
+	return nil
+}
+
 func (p Program) rtEface() llvm.Type {
 	if p.rtEfaceTy.IsNil() {
 		p.rtEfaceTy = p.rtType("Eface").ll

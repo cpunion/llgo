@@ -528,6 +528,7 @@ type coroPhysicalFunctionPlan struct {
 	atomicCostProof   coro.AtomicCostProof
 	atomicCertificate string
 	staticOutcome     bool
+	localChannels     map[ssa.Instruction]*coroLocalChannelProof
 	reachableBlocks   map[*ssa.BasicBlock]bool
 	instructions      map[ssa.Instruction]coroPhysicalInstructionPlan
 	captureSnapshots  []coroPhysicalCaptureSnapshot
@@ -852,6 +853,9 @@ func prepareCoroPhysicalFunctionPlan(
 		return nil, fmt.Errorf("immutable capture snapshots: %w", err)
 	}
 	plan.captureSnapshots = captureSnapshots
+	localChannels := coroLocalSingleSlotChannels(audit.fn)
+	var localChannelFields map[string]int
+	localChannelLayoutChecked := false
 	preempt, err := planCoroPhysicalPreemption(
 		audit, critical, plan.needsPreempt,
 	)
@@ -884,6 +888,31 @@ func prepareCoroPhysicalFunctionPlan(
 					instructionPlan.recipe = coroPhysicalInstructionImmutableCaptureLoad
 					instructionPlan.nilGuard = false
 					instructionPlan.captureSnapshot = captureIndex
+				}
+			}
+			var channel ssa.Value
+			switch instructionPlan.operation {
+			case coroPhysicalOperationChannelSend:
+				channel = instruction.(*ssa.Send).Chan
+			case coroPhysicalOperationChannelReceive:
+				channel = instruction.(*ssa.UnOp).X
+			}
+			if allocation := localChannels[channel]; allocation != nil && audit.ctx != nil && audit.ctx.prog != nil {
+				element := audit.typeOf(allocation.Type()).Underlying().(*types.Chan).Elem()
+				size := audit.ctx.prog.PhysicalSizeOfGoType(element)
+				if size == 4 || size == 8 {
+					if !localChannelLayoutChecked {
+						localChannelFields = planCoroLocalChannelLayout(audit.ctx.prog)
+						localChannelLayoutChecked = true
+					}
+					if localChannelFields != nil {
+						if plan.localChannels == nil {
+							plan.localChannels = make(map[ssa.Instruction]*coroLocalChannelProof)
+						}
+						plan.localChannels[instruction] = &coroLocalChannelProof{
+							allocation: allocation, channel: channel, elementSize: size, fields: localChannelFields,
+						}
+					}
 				}
 			}
 			plan.instructions[instruction] = instructionPlan
@@ -1306,6 +1335,9 @@ func (stage *coroPhysicalPlanStage) freezePhysicalFunctionPlan(plan *coroPhysica
 	}
 	if err := plan.validateCaptureSnapshots(); err != nil {
 		return fmt.Errorf("physical plan immutable captures: %w", err)
+	}
+	if err := plan.validateLocalChannels(); err != nil {
+		return fmt.Errorf("physical plan local channels: %w", err)
 	}
 	key := emissionFunctionOwnerKey{function: plan.function, owner: plan.owner}
 	if _, exists := stage.plans[key]; exists {
