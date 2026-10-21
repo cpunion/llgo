@@ -92,7 +92,7 @@ jobs:
             ./internal/runtime/coro_run_decision.go \
             ./internal/runtime/coro_run_decision_test.go \
             -run '^Test(CoroRunDecisionOutputModeV1|NormalCoroRunDecisionWordsV1|CoroRunDecisionWrapperRejectsMalformedNormalOnlyMode)$' -count=1
-          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerV2SourceABI|TestNativeTimerCapacity|TestTimeSleep|TestCoroGCNotification|TestCallerPCRegistryProductionRace)' -count=1
+          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerV2SourceABI|TestNativeTimerCapacity|TestTimeSleep|TestCoroGCNotification|TestCallerPCRegistryProductionRace|TestBDWGCInitialMarkerQuota)' -count=1
           go test -race ./internal/lib/runtime/time_coro_gc_llgo.go \
             ./internal/lib/runtime/time_coro_gc_test.go -count=1 -timeout=60s
           # The complete LLGo runtime package intentionally owns symbols that
@@ -490,6 +490,14 @@ jobs:
             cat /tmp/llgo-coro-fault-reject.log
             exit 1
           fi
+
+      - name: Test concurrent first use of native fallback symbol caches
+        if: matrix.lane == 'fault-e2e'
+        run: |
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            LLGO_TEST_LLGO=/tmp/llgo-coro-fault \
+            go test ./test/go -run '^TestRuntimeFallbackSymbolCacheConcurrentFirstUse$' \
+              -timeout=5m -count=1 -v
 
       - name: Test native build information and released main package metadata
         if: matrix.lane == 'fault-e2e'

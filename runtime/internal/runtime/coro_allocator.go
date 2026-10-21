@@ -20,10 +20,13 @@ import "github.com/xgo-dev/llgo/runtime/internal/coroalloc"
 
 //export __llgo_coro_frame_allocator_bootstrap_v1
 func __llgo_coro_frame_allocator_bootstrap_v1() {
-	if !coroRuntimeContextBootstrap() {
-		coroRuntimeAbort("coroutine runtime context bootstrap failed")
-	}
+	// Creating the pthread key allocates collector-managed storage. Configure
+	// and initialize the allocator first, before that implicit GC initialization
+	// can freeze the marker count using the host CPU count.
 	if !coroalloc.Bootstrap() {
 		coroRuntimeAbort("coroutine frame allocator bootstrap failed")
+	}
+	if !coroRuntimeContextBootstrap() {
+		coroRuntimeAbort("coroutine runtime context bootstrap failed")
 	}
 }
