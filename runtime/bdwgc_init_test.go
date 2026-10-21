@@ -36,6 +36,7 @@ func TestBDWGCInitialMarkerQuota(t *testing.T) {
 #include <stdlib.h>
 #include <unistd.h>
 extern void __llgo_coro_gc_init_v1(void);
+#if GC_VERSION_MAJOR > 8 || (GC_VERSION_MAJOR == 8 && GC_VERSION_MINOR >= 2)
 int main(int argc, char **argv) {
     if (argc > 1) {
         GC_set_markers_count(3);
@@ -50,6 +51,14 @@ int main(int argc, char **argv) {
     printf("%u %u %ld\n", before, after, sysconf(_SC_NPROCESSORS_ONLN));
     return before == after ? 0 : 1;
 }
+
+#else
+int main(void) {
+    __llgo_coro_gc_init_v1();
+    puts("marker quota unavailable");
+    return 0;
+}
+#endif
 `
 	if err := os.WriteFile(source, []byte(program), 0600); err != nil {
 		t.Fatal(err)
@@ -80,6 +89,9 @@ int main(int argc, char **argv) {
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("collector startup %v: %v\n%s", settings, err, out)
+		}
+		if strings.TrimSpace(string(out)) == "marker quota unavailable" {
+			t.Skip("BDWGC before 8.2 has no public marker-count setter; bootstrap succeeded")
 		}
 		var after int
 		if n, err := fmt.Sscan(string(out), &count, &after, &online); n != 3 || err != nil || count != after || count < 1 || online < 1 {
@@ -124,5 +136,45 @@ int main(int argc, char **argv) {
 	}
 	if got, online := run(t, []string{"GOMAXPROCS=99999999999999999999999999999999999999999"}, false); got > online {
 		t.Fatalf("overflowing quota exceeded CPU count: %d > %d", got, online)
+	}
+}
+
+func TestBDWGCInitialMarkerQuotaLegacyHeaders(t *testing.T) {
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("C compiler unavailable")
+	}
+	dir := t.TempDir()
+	include := filepath.Join(dir, "gc")
+	if err := os.Mkdir(include, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// The legacy ABI intentionally offers only GC_init. Any accidental use of
+	// the new marker setter (or another tuning API) must fail compilation.
+	header := "#define GC_VERSION_MAJOR 8\n#define GC_VERSION_MINOR 0\nvoid GC_init(void);\n"
+	if err := os.WriteFile(filepath.Join(include, "gc.h"), []byte(header), 0600); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(dir, "legacy.c")
+	program := `
+static int initialized;
+void GC_init(void) { initialized++; }
+extern void __llgo_coro_gc_init_v1(void);
+int main(void) {
+    __llgo_coro_gc_init_v1();
+    return initialized != 1;
+}
+`
+	if err := os.WriteFile(source, []byte(program), 0600); err != nil {
+		t.Fatal(err)
+	}
+	image := filepath.Join(dir, "legacy")
+	cmd := exec.Command(cc, "-std=c11", "-Werror=implicit-function-declaration",
+		"-I"+dir, source, "internal/clite/bdwgc/_wrap/coro_init.c", "-o", image)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("compile legacy collector ABI: %v\n%s", err, out)
+	}
+	if out, err := exec.Command(image).CombinedOutput(); err != nil {
+		t.Fatalf("initialize legacy collector: %v\n%s", err, out)
 	}
 }

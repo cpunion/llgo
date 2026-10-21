@@ -25,10 +25,12 @@
  * Otherwise a valid initial Go execution quota also bounds parallel marking:
  * GOMAXPROCS=1 should not create one marker thread per host CPU. Later changes
  * to GOMAXPROCS still resize managed execution; this collector API is startup
- * only, so they do not resize an already initialized marker team.
+ * only, so they do not resize an already initialized marker team. Older
+ * collectors without the public marker-count setter keep their own policy.
  */
 void __llgo_coro_gc_init_v1(void) {
-#if defined(GC_THREADS) && (defined(__APPLE__) || defined(__linux__))
+#if defined(GC_THREADS) && (defined(__APPLE__) || defined(__linux__)) && \
+    (GC_VERSION_MAJOR > 8 || (GC_VERSION_MAJOR == 8 && GC_VERSION_MINOR >= 2))
     const char *text = getenv("GOMAXPROCS");
     if (!GC_is_init_called() && getenv("GC_MARKERS") == NULL &&
         getenv("GC_NPROCS") == NULL && text != NULL && *text != '\0') {

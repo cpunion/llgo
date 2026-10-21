@@ -13,10 +13,16 @@ import (
 //go:linkname getBDWGCParallel C.GC_get_parallel
 func getBDWGCParallel() int32
 
+//go:linkname getBDWGCVersion C.GC_get_version
+func getBDWGCVersion() uint32
+
 // Check the collector initialized by the actual compiler entry, rather than
 // calling the init wrapper in isolation. Creating the runtime TLS key used to
 // allocate through GC before the allocator bootstrap could set its policy.
 func TestRuntimeGCInitialMarkerQuota(t *testing.T) {
+	if getBDWGCVersion() < 8<<16|2<<8 {
+		t.Skip("BDWGC before 8.2 has no public marker-count setter")
+	}
 	if _, set := os.LookupEnv("GC_MARKERS"); set {
 		t.Skip("explicit collector marker count")
 	}
