@@ -1,8 +1,8 @@
-name: QA PR2896 Windows
+name: QA PR2896 Windows 2025
 'on':
   push:
     branches:
-    - codex/qa-pr2896-main-20261021
+    - codex/qa-pr2896-main-win2025-20261021
 permissions:
   contents: read
 jobs:
@@ -10,19 +10,26 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
         os:
-        - windows-2022
+        - windows-2025
         llvm:
         - 22
         windows_abi:
         - mingw
     steps:
     - uses: actions/checkout@v7
+    - name: Check native pipe with large binary output and failure propagation
+      shell: python {0}
+      run: 'import os,subprocess,sys
+
+        subprocess.run([sys.executable,''-m'',''unittest'',''test_run_go_tests.GoTestReportTests.test_native_log_pipe_preserves_large_output_stderr_and_exit_status''],cwd=''.github/scripts'',check=True,timeout=30)
+
+        '
     - name: Install dependencies
       uses: ./.github/actions/setup-deps
       with:
@@ -53,13 +60,6 @@ jobs:
       run: 'import runpy
 
         runpy.run_path(''dev/prepare_windows_go_test_runtime.py'', run_name=''__main__'')
-
-        '
-    - name: Check native pipe with large binary output and failure propagation
-      shell: python {0}
-      run: 'import os,subprocess,sys
-
-        subprocess.run([sys.executable,''-m'',''unittest'',''test_run_go_tests.GoTestReportTests.test_native_log_pipe_preserves_large_output_stderr_and_exit_status''],cwd=''.github/scripts'',check=True,timeout=30)
 
         '
     - name: Run main batch with a process snapshot on timeout
