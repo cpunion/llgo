@@ -183,19 +183,24 @@ func prepareCoroChanAfterBufferTry(
 	return result.Expr
 }
 
-func (p *context) compileCoroChanSend(b llssa.Builder, channel, value llssa.Expr) {
+func (p *context) compileCoroChanSend(b llssa.Builder, channel, value llssa.Expr, local *coroLocalChannelProof) {
 	body := p.requireCoroChannelBody(b)
 	elem, state := p.newCoroChannelStorage(b, value.Type)
 	b.Store(elem, value)
 	body.emitCoroParkOperation(p, b, coroParkOperation{
 		prepare: func(active llssa.Builder, stateID, sourceLine uint32) llssa.Expr {
-			fast := p.pkg.NewFunc(coroChanSendBufferTryHookV1, coroChanBufferTrySignatureV1(), llssa.InC)
-			fastStatus := active.Call(
-				fast.Expr,
-				active.Convert(active.Prog.VoidPtr(), channel),
-				active.Convert(active.Prog.VoidPtr(), elem),
-				active.Prog.IntVal(active.Prog.SizeOf(value.Type), active.Prog.Uintptr()),
-			)
+			var fastStatus llssa.Expr
+			if local != nil {
+				fastStatus = p.emitCoroLocalChannelBufferTry(active, channel, elem, true, local)
+			} else {
+				fast := p.pkg.NewFunc(coroChanSendBufferTryHookV1, coroChanBufferTrySignatureV1(), llssa.InC)
+				fastStatus = active.Call(
+					fast.Expr,
+					active.Convert(active.Prog.VoidPtr(), channel),
+					active.Convert(active.Prog.VoidPtr(), elem),
+					active.Prog.IntVal(active.Prog.SizeOf(value.Type), active.Prog.Uintptr()),
+				)
+			}
 			return prepareCoroChanAfterBufferTry(
 				active,
 				fastStatus,
@@ -231,7 +236,7 @@ func (p *context) compileCoroChanSend(b llssa.Builder, channel, value llssa.Expr
 	})
 }
 
-func (p *context) compileCoroChanRecv(b llssa.Builder, instruction *ssa.UnOp, channel llssa.Expr) llssa.Expr {
+func (p *context) compileCoroChanRecv(b llssa.Builder, instruction *ssa.UnOp, channel llssa.Expr, local *coroLocalChannelProof) llssa.Expr {
 	if instruction == nil || instruction.Op != token.ARROW {
 		panic(fmt.Errorf("coroutine channel receive requires one SSA receive instruction"))
 	}
@@ -241,13 +246,18 @@ func (p *context) compileCoroChanRecv(b llssa.Builder, instruction *ssa.UnOp, ch
 	recvOKSlot := p.coroFrameAlloca(p.prog.Bool())
 	body.emitCoroParkOperation(p, b, coroParkOperation{
 		prepare: func(active llssa.Builder, stateID, sourceLine uint32) llssa.Expr {
-			fast := p.pkg.NewFunc(coroChanRecvBufferTryHookV1, coroChanBufferTrySignatureV1(), llssa.InC)
-			fastStatus := active.Call(
-				fast.Expr,
-				active.Convert(active.Prog.VoidPtr(), channel),
-				active.Convert(active.Prog.VoidPtr(), elem),
-				active.Prog.IntVal(active.Prog.SizeOf(elemType), active.Prog.Uintptr()),
-			)
+			var fastStatus llssa.Expr
+			if local != nil {
+				fastStatus = p.emitCoroLocalChannelBufferTry(active, channel, elem, false, local)
+			} else {
+				fast := p.pkg.NewFunc(coroChanRecvBufferTryHookV1, coroChanBufferTrySignatureV1(), llssa.InC)
+				fastStatus = active.Call(
+					fast.Expr,
+					active.Convert(active.Prog.VoidPtr(), channel),
+					active.Convert(active.Prog.VoidPtr(), elem),
+					active.Prog.IntVal(active.Prog.SizeOf(elemType), active.Prog.Uintptr()),
+				)
+			}
 			return prepareCoroChanAfterBufferTry(
 				active,
 				fastStatus,

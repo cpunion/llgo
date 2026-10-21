@@ -1503,6 +1503,9 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	if err != nil {
 		panic(fmt.Errorf("load frozen coroutine physical plan: %w", err))
 	}
+	if err := physicalPlan.validateLocalChannels(); err != nil {
+		panic(fmt.Errorf("validate frozen coroutine local channels: %w", err))
+	}
 	if physicalPlan.tailForward != nil {
 		p.compileCoroTailForwardPhysicalBody(b, fn, physicalPlan, sourceParamBase)
 		return
