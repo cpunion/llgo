@@ -694,6 +694,19 @@ func shouldEmitRuntimeSites(ctx *context) bool {
 	return runtimeSiteObjectFormat(ctx) != siteObjectUnsupported
 }
 
+// runtimeSitesForLink consumes the site-emission fact saved before the staged
+// backend releases its frontend Program. Linking must not mistake that normal
+// release for a request to disable metadata which is already in the objects.
+func runtimeSitesForLink(ctx *context) bool {
+	if ctx == nil || ctx.buildConf == nil {
+		return false
+	}
+	if ctx.stagedBackendDetached {
+		return ctx.stagedFuncInfoSites
+	}
+	return shouldEmitRuntimeSites(ctx)
+}
+
 func shouldEmitRuntimeEntrySites(ctx *context) bool {
 	return shouldEmitRuntimeSites(ctx)
 }

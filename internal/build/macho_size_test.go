@@ -49,7 +49,7 @@ func TestPlanDarwinSizeSymbols(t *testing.T) {
 		"nil-config":  {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if plan := planDarwinSizeSymbolsFor(ctx, nil, nil, true); len(plan.linkerArgs) != 0 || plan.stripLTOLocals {
+			if plan := planDarwinSizeSymbolsFor(ctx, nil, nil, true); len(plan.linkerArgs) != 0 || plan.stripLocals {
 				t.Fatalf("plan = %+v, want no automatic symbol compaction", plan)
 			}
 		})
@@ -67,6 +67,10 @@ func TestPlanDarwinSizeSymbols(t *testing.T) {
 		{name: "thin-lto", conf: withLTO(base, lto.Thin), native: true, wantStrip: true},
 		{name: "oz", conf: withOptLevel(base, optlevel.Oz), native: true, wantArgs: []string{"-Wl,-no_exported_symbols"}},
 		{name: "o2", conf: withOptLevel(base, optlevel.O2), native: true},
+		{name: "o2-s", conf: withSymbolOmission(withOptLevel(base, optlevel.O2)), native: true, wantArgs: []string{"-Wl,-no_exported_symbols"}, wantStrip: true},
+		{name: "o2-s-preserve-dwarf", conf: withDWARF(withSymbolOmission(withOptLevel(base, optlevel.O2)), DWARFPreserve), native: true},
+		{name: "o2-s-explicit-export", conf: withSymbolOmission(withOptLevel(base, optlevel.O2)), native: true, linkArgs: []string{"-Wl,-exported_symbol,_entry"}},
+		{name: "o2-s-embedded-without-sites", conf: withPCLN(withSymbolOmission(withOptLevel(base, optlevel.O2)), PCLNEmbedded), native: true},
 		{name: "cross-host", conf: base},
 		{name: "named-target", conf: withTarget(base, "wasi"), native: true},
 		{name: "c-shared", conf: withBuildMode(base, BuildModeCShared), native: true},
@@ -79,7 +83,7 @@ func TestPlanDarwinSizeSymbols(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := &context{buildConf: &tt.conf}
 			plan := planDarwinSizeSymbolsFor(ctx, nil, tt.linkArgs, tt.native)
-			if !reflect.DeepEqual(plan.linkerArgs, tt.wantArgs) || plan.stripLTOLocals != tt.wantStrip {
+			if !reflect.DeepEqual(plan.linkerArgs, tt.wantArgs) || plan.stripLocals != tt.wantStrip {
 				t.Fatalf("plan = %+v, want args=%v strip=%v", plan, tt.wantArgs, tt.wantStrip)
 			}
 		})
@@ -104,6 +108,25 @@ func TestHasDarwinExportControl(t *testing.T) {
 	}
 }
 
+func TestPlanDarwinSizeSymbolsAfterFrontendRelease(t *testing.T) {
+	t.Setenv("LDFLAGS", "")
+	conf := Config{
+		Goos: "darwin", BuildMode: BuildModeExe, OptLevel: optlevel.O2,
+		LinkOptions: LinkOptions{OmitSymbolTable: true}, PCLNMode: PCLNEmbedded,
+	}
+	for _, emitted := range []bool{false, true} {
+		ctx := &context{buildConf: &conf, stagedBackendDetached: true, stagedFuncInfoSites: emitted}
+		plan := planDarwinSizeSymbolsFor(ctx, nil, nil, true)
+		if emitted {
+			if !reflect.DeepEqual(plan.linkerArgs, []string{"-Wl,-no_exported_symbols"}) || !plan.stripLocals {
+				t.Fatalf("released frontend lost its emitted site capability: %+v", plan)
+			}
+		} else if len(plan.linkerArgs) != 0 || plan.stripLocals {
+			t.Fatalf("disabled site snapshot allowed symbol compaction: %+v", plan)
+		}
+	}
+}
+
 func TestPlanDarwinSizeSymbolsHonorsEnvironmentExportControl(t *testing.T) {
 	t.Setenv("LDFLAGS", "-Wl,-exported_symbol,_entry")
 	conf := Config{
@@ -114,7 +137,7 @@ func TestPlanDarwinSizeSymbolsHonorsEnvironmentExportControl(t *testing.T) {
 		PCLNMode:           PCLNNone,
 	}
 	ctx := &context{buildConf: &conf}
-	if plan := planDarwinSizeSymbolsFor(ctx, nil, nil, true); len(plan.linkerArgs) != 0 || plan.stripLTOLocals {
+	if plan := planDarwinSizeSymbolsFor(ctx, nil, nil, true); len(plan.linkerArgs) != 0 || plan.stripLocals {
 		t.Fatalf("plan with explicit environment export = %+v, want no automatic symbol compaction", plan)
 	}
 }
@@ -145,8 +168,97 @@ func TestMainPackageHasExports(t *testing.T) {
 		OmitDWARFByDefault: true,
 		PCLNMode:           PCLNNone,
 	}
-	if plan := planDarwinSizeSymbolsFor(&context{buildConf: &conf}, pkgs, nil, true); len(plan.linkerArgs) != 0 || plan.stripLTOLocals {
-		t.Fatalf("plan with main package export = %+v, want no automatic symbol compaction", plan)
+	for _, config := range []Config{conf, withSymbolOmission(withOptLevel(conf, optlevel.O2))} {
+		if plan := planDarwinSizeSymbolsFor(&context{buildConf: &config}, pkgs, nil, true); len(plan.linkerArgs) != 0 || plan.stripLocals {
+			t.Fatalf("plan with main package export = %+v, want no automatic symbol compaction", plan)
+		}
+	}
+}
+
+func TestMainPackageHasExportsAfterFrontendRelease(t *testing.T) {
+	t.Setenv("LDFLAGS", "")
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	lpkg := prog.NewPackage("main", "main")
+	lpkg.SetExport("Entry", "retained_main_export")
+	pkg := &aPackage{Package: &packages.Package{Name: "main", PkgPath: "main"}, LPkg: lpkg}
+	freezePackageLinkSnapshot(pkg)
+	pkg.LPkg = nil
+	if !mainPackageHasExports([]*aPackage{pkg}) {
+		t.Fatal("released frontend lost its local C export capability")
+	}
+	base := Config{
+		Goos: "darwin", BuildMode: BuildModeExe, OptLevel: optlevel.Os,
+		OmitDWARFByDefault: true, PCLNMode: PCLNEmbedded,
+	}
+	for _, conf := range []Config{base, withSymbolOmission(withOptLevel(base, optlevel.O2))} {
+		ctx := &context{buildConf: &conf, stagedBackendDetached: true, stagedFuncInfoSites: true}
+		if plan := planDarwinSizeSymbolsFor(ctx, []*aPackage{pkg}, nil, true); len(plan.linkerArgs) != 0 || plan.stripLocals {
+			t.Fatalf("released main C export allowed symbol compaction: %+v", plan)
+		}
+	}
+	imported := prog.NewPackage("imported.main", "main")
+	imported.SetExport("runtime.callback", "callback")
+	importedPkg := &aPackage{Package: &packages.Package{Name: "main", PkgPath: "imported.main"}, LPkg: imported}
+	freezePackageLinkSnapshot(importedPkg)
+	importedPkg.LPkg = nil
+	if mainPackageHasExports([]*aPackage{importedPkg}) {
+		t.Fatal("released frontend mistook an imported C export for a local export")
+	}
+}
+
+func TestDarwinSizeSymbolsPreservesMainCExportIntegration(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Mach-O dynamic export integration test")
+	}
+	t.Setenv("LDFLAGS", "")
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module exportprobe\n\ngo 1.27\n",
+		"main.go": `package main
+import _ "unsafe"
+const LLGoFiles = "wrap/probe.c"
+//export retained_main_export
+func retained_main_export() int32 { return 42 }
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=caller-thread reentry=managed-ingress memory=by-value
+//go:linkname exportProbe C.export_probe
+func exportProbe() int32
+func main() {
+    if exportProbe() != 42 { panic("main C export unavailable through dlsym") }
+    println("EXPORT_OK")
+}
+`,
+		"wrap/probe.c": `#include <dlfcn.h>
+#include <stdint.h>
+int32_t export_probe(void) {
+    void *symbol = dlsym(RTLD_DEFAULT, "retained_main_export");
+    return symbol ? ((int32_t (*)(void))symbol)() : -1;
+}
+`,
+	}
+	for name, contents := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin := filepath.Join(dir, "export-probe")
+	cfg := &Config{
+		Mode: ModeBuild, OutFile: bin, OptLevel: optlevel.O2,
+		OmitDWARFByDefault: true, LinkOptions: LinkOptions{OmitSymbolTable: true},
+		PCLNMode: PCLNEmbedded, PCLNModeSet: true,
+	}
+	if _, err := Do([]string{filepath.Join(dir, "main.go")}, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(bin).CombinedOutput(); err != nil || !strings.Contains(string(output), "EXPORT_OK") {
+		t.Fatalf("main C export probe: %v\n%s", err, output)
+	}
+	if output, err := exec.Command("codesign", "--verify", "--verbose=4", bin).CombinedOutput(); err != nil {
+		t.Fatalf("codesign verification: %v\n%s", err, output)
 	}
 }
 
@@ -158,8 +270,8 @@ func TestFinalizeDarwinSizeExecutable(t *testing.T) {
 		t.Fatalf("disabled compaction: %v", err)
 	}
 	missing := filepath.Join(t.TempDir(), "missing")
-	err := finalizeDarwinSizeExecutable(&context{stripDarwinLTOLocals: true}, missing, false)
-	if err == nil || !strings.Contains(err.Error(), "compact Darwin LTO symbols") {
+	err := finalizeDarwinSizeExecutable(&context{stripDarwinLocals: true}, missing, false)
+	if err == nil || !strings.Contains(err.Error(), "compact Darwin symbols") {
 		t.Fatalf("missing executable error = %v", err)
 	}
 }
@@ -385,12 +497,15 @@ func TestDarwinSizeSymbolsIntegration(t *testing.T) {
 	t.Setenv("LDFLAGS", "")
 	t.Setenv(llgoFuncInfo, "1")
 	tests := []struct {
-		name      string
-		lto       lto.Mode
-		pcln      PCLNMode
-		wantLocal bool
+		name        string
+		lto         lto.Mode
+		pcln        PCLNMode
+		wantLocal   bool
+		omitSymbols bool
 	}{
 		{name: "non-lto", pcln: PCLNEmbedded, wantLocal: true},
+		{name: "non-lto-s", pcln: PCLNEmbedded, omitSymbols: true},
+		{name: "external-non-lto-s", pcln: PCLNExternal, omitSymbols: true},
 		{name: "full-lto", lto: lto.Full, pcln: PCLNEmbedded},
 		{name: "external-full-lto", lto: lto.Full, pcln: PCLNExternal},
 	}
@@ -398,7 +513,7 @@ func TestDarwinSizeSymbolsIntegration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			binaryPath := filepath.Join(t.TempDir(), "size-symbols")
 			level := optlevel.Os
-			if tt.lto.Enabled() {
+			if tt.lto.Enabled() || tt.omitSymbols {
 				// LTO compaction ordering is independent of the optimizer
 				// pipeline. Link at lld's numeric O2 level here, then exercise
 				// the planned post-PCLN compaction below. The policy tests above
@@ -413,12 +528,13 @@ func TestDarwinSizeSymbolsIntegration(t *testing.T) {
 				OmitDWARFByDefault: true,
 				PCLNMode:           tt.pcln,
 				PCLNModeSet:        true,
+				LinkOptions:        LinkOptions{OmitSymbolTable: tt.omitSymbols},
 			}
 			if _, err := Do([]string{"./testdata/ldflagsstrip"}, cfg); err != nil {
 				t.Fatal(err)
 			}
 			if tt.lto.Enabled() {
-				ctx := &context{stripDarwinLTOLocals: true}
+				ctx := &context{stripDarwinLocals: true}
 				if err := finalizeDarwinSizeExecutable(ctx, binaryPath, false); err != nil {
 					t.Fatal(err)
 				}
@@ -466,8 +582,8 @@ func TestDarwinSizeSymbolsIntegration(t *testing.T) {
 				if localDefined == 0 || externalDefined != 0 {
 					t.Fatalf("non-LTO defined symbols: local=%d external=%d", localDefined, externalDefined)
 				}
-			} else if localDefined != 0 {
-				t.Fatalf("LTO retained %d local defined symbols", localDefined)
+			} else if localDefined != 0 || tt.omitSymbols && externalDefined != 0 {
+				t.Fatalf("compacted image retained defined symbols: local=%d external=%d", localDefined, externalDefined)
 			}
 		})
 	}
@@ -480,6 +596,11 @@ func withLTO(conf Config, mode lto.Mode) Config {
 
 func withOptLevel(conf Config, level optlevel.Level) Config {
 	conf.OptLevel = level
+	return conf
+}
+
+func withSymbolOmission(conf Config) Config {
+	conf.LinkOptions.OmitSymbolTable = true
 	return conf
 }
 

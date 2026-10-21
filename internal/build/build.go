@@ -7635,10 +7635,10 @@ type context struct {
 	nativeObjects      nativeObjectWorkspace
 	nativeObjectsOwner *nativeObjectWorkspace
 
-	// stripDarwinLTOLocals is set by the final executable link plan. LTO has
-	// already internalized ordinary Go symbols, but pclnpost still needs them
-	// until the runtime tables have been rewritten.
-	stripDarwinLTOLocals bool
+	// stripDarwinLocals is set by the final executable link plan for LTO size
+	// builds or explicit -s. Keep the private symbols until pclnpost has
+	// rewritten the runtime PC tables, then remove them and re-sign the image.
+	stripDarwinLocals bool
 
 	buildTrace *buildTracer
 }
@@ -8238,7 +8238,7 @@ func compileExtraFiles(ctx *context, verbose bool) ([]string, error) {
 // internal/pclnpost and doc/design/pclntab-linkphase.md). Any failure leaves
 // the binary fully functional on the first-use construction fallback.
 func rewritePrebuiltFuncTab(ctx *context, out string, verbose bool) {
-	if ctx == nil || ctx.prog == nil || !ctx.prog.FuncInfoSitesEnabled() || !shouldEmitRuntimeSites(ctx) {
+	if !runtimeSitesForLink(ctx) {
 		return
 	}
 	if ctx.buildConf.BuildMode != BuildModeExe {
@@ -8407,7 +8407,7 @@ func stageMainEntryBitcodes(ctx *context, roots []*packages.Package, pkgs []*aPa
 
 func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPath string, verbose bool) error {
 	ctx.pclnExternal = nil
-	ctx.stripDarwinLTOLocals = false
+	ctx.stripDarwinLocals = false
 	linkedOrder := linkedPackagesForMain(ctx, pkg, pkgs)
 	req, err := collectMainEntryRequirements(ctx, linkedOrder)
 	if err != nil {
@@ -8481,7 +8481,7 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	linkArgs = append(linkArgs, cSharedExportArgs(ctx, linkedOrder)...)
 	darwinSymbols := planDarwinSizeSymbols(ctx, linkedOrder, linkArgs)
 	linkArgs = append(linkArgs, darwinSymbols.linkerArgs...)
-	ctx.stripDarwinLTOLocals = darwinSymbols.stripLTOLocals
+	ctx.stripDarwinLocals = darwinSymbols.stripLocals
 
 	err = linkObjFiles(ctx, outputPath, linkInputs, linkArgs, verbose)
 	if err != nil {
@@ -9567,7 +9567,13 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 		return "", fmt.Errorf("stat staged bitcode for %s: %w", pkg.PkgPath, err)
 	}
 	backend := llssa.NewProgram(newLLSSATarget(ctx.buildConf, ctx.crossCompile))
-	defer func() { backend.Dispose() }()
+	defer func() {
+		backend.Dispose()
+		// Return this package's unused native pages before the next context
+		// parses and expands its IR. Relieving pressure only after that work
+		// overlaps retired allocations with the next package's working set.
+		releaseNativeHeap()
+	}()
 	discardLocalNames := ctx.passOpt && ctx.buildConf.OptLevel != optlevel.O0 && !ctx.buildConf.CheckLLFiles
 	if discardLocalNames {
 		backend.DiscardLocalValueNames()

@@ -30,8 +30,8 @@ import (
 )
 
 type darwinSizeSymbolPlan struct {
-	linkerArgs     []string
-	stripLTOLocals bool
+	linkerArgs  []string
+	stripLocals bool
 }
 
 type darwinSizeCommand func(name string, args ...string) ([]byte, error)
@@ -66,14 +66,14 @@ func planDarwinSizeSymbolsFor(ctx *context, pkgs []*aPackage, linkArgs []string,
 	}
 	conf := ctx.buildConf
 	if !nativeDarwin || conf.Goos != "darwin" || conf.Target != "" ||
-		conf.BuildMode != BuildModeExe || !isSizeOptLevel(conf.OptLevel) ||
+		conf.BuildMode != BuildModeExe || (!isSizeOptLevel(conf.OptLevel) && !conf.LinkOptions.OmitSymbolTable) ||
 		shouldEmitDebugInfo(conf, &ctx.crossCompile) {
 		return darwinSizeSymbolPlan{}
 	}
 	// Without either the prebuilt table or site records, Darwin symbolization
 	// falls back to dlsym. Keep the exports available in that escape-hatch
 	// configuration.
-	if conf.PCLNMode != PCLNNone && (ctx.prog == nil || !ctx.prog.FuncInfoSitesEnabled()) {
+	if conf.PCLNMode != PCLNNone && !runtimeSitesForLink(ctx) {
 		return darwinSizeSymbolPlan{}
 	}
 	if mainPackageHasExports(pkgs) {
@@ -88,12 +88,18 @@ func planDarwinSizeSymbolsFor(ctx *context, pkgs []*aPackage, linkArgs []string,
 	if conf.ltoEnabled() {
 		// LTO internalizes ordinary Go definitions. Keep those local symbols
 		// through pclnpost, then remove them from the final signed executable.
-		return darwinSizeSymbolPlan{stripLTOLocals: true}
+		return darwinSizeSymbolPlan{stripLocals: true}
 	}
 	// A main executable does not need to publish every package definition to
 	// dyld. Keeping them as private externs preserves the Mach-O symbol table
 	// for pclnpost and offline tools while eliminating the large export trie.
-	return darwinSizeSymbolPlan{linkerArgs: []string{"-Wl,-no_exported_symbols"}}
+	// Explicit -s also removes the private symbols, after pclnpost has consumed
+	// their addresses. This keeps ordinary O2 executables from retaining a
+	// large export trie and symbol table despite the requested omission.
+	return darwinSizeSymbolPlan{
+		linkerArgs:  []string{"-Wl,-no_exported_symbols"},
+		stripLocals: conf.LinkOptions.OmitSymbolTable,
+	}
 }
 
 func isSizeOptLevel(level optlevel.Level) bool {
@@ -106,7 +112,7 @@ func mainPackageHasExports(pkgs []*aPackage) bool {
 		// package. Runtime and standard-library //export callbacks are static
 		// implementation links and must not turn every Go symbol into a dyld
 		// export.
-		if pkg != nil && pkg.Package != nil && pkg.Name == "main" && hasLocalCExports(pkg.LPkg) {
+		if pkg != nil && pkg.Package != nil && pkg.Name == "main" && packageHasLocalCExports(pkg) {
 			return true
 		}
 	}
@@ -126,11 +132,11 @@ func hasDarwinExportControl(args []string) bool {
 }
 
 func finalizeDarwinSizeExecutable(ctx *context, path string, verbose bool) error {
-	if ctx == nil || !ctx.stripDarwinLTOLocals {
+	if ctx == nil || !ctx.stripDarwinLocals {
 		return nil
 	}
 	if err := stripAndSignDarwinLocals(path, verbose); err != nil {
-		return fmt.Errorf("compact Darwin LTO symbols: %w", err)
+		return fmt.Errorf("compact Darwin symbols: %w", err)
 	}
 	return nil
 }

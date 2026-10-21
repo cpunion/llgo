@@ -1415,77 +1415,14 @@ func prebuiltFuncPCTablePresent() bool {
 	return m == runtimePrebuiltMagic
 }
 
-// runtimeFuncInfoWarmSink keeps the warm-up loads observable.
-var runtimeFuncInfoWarmSink byte
-
-// init pre-warms the prebuilt function table, mirroring Go: Go's pclntab
-// pages are touched by the runtime itself (traceback, GC) long before user
-// code queries it, so its "first" FuncForPC never pays page-in. Touching the
-// pages the lookup path reads — adopted blob, funcinfo records, string
-// offsets, strings — moves first-touch page-in (plus, on darwin,
-// code-signature validation) from the first user lookup to process startup
-// (tens of µs once, on binaries that carry funcinfo tables). Without a
-// prebuilt table everything stays lazy: first-use construction allocates,
-// which has no place in init, and programs that never introspect pay
-// nothing.
+// Adopt the linked table without paging in every name or allocating lookup
+// caches during startup. Caller/CallersFrames and FuncForPC initialize their
+// line tables and caches on the first actual query through the guarded paths
+// below. Programs which never inspect a stack keep those pages untouched.
 func init() {
-	if !prebuiltFuncPCTablePresent() {
-		return
+	if prebuiltFuncPCTablePresent() {
+		initRuntimeFuncPCFrames()
 	}
-	initRuntimeFuncPCFrames() // zero-copy adoption, sub-µs
-	if !runtimeFuncPCFramesPrebuilt {
-		return
-	}
-	touch := func(base unsafe.Pointer, n uintptr) {
-		if base == nil || n == 0 {
-			return
-		}
-		const pageStep = 4096
-		sink := runtimeFuncInfoWarmSink
-		for off := uintptr(0); off < n; off += pageStep {
-			sink += *(*byte)(unsafe.Add(base, off))
-		}
-		sink += *(*byte)(unsafe.Add(base, n-1))
-		runtimeFuncInfoWarmSink = sink
-	}
-	// Derive the adopted blob's range from its zero-copy views.
-	prebuiltFtab := runtimePrebuiltFtab
-	if n := len(prebuiltFtab); n > 0 {
-		touch(unsafe.Pointer(&prebuiltFtab[0]), uintptr(n)*8)
-	}
-	buckets := runtimeFuncPCIndex.buckets
-	if n := len(buckets); n > 0 {
-		touch(unsafe.Pointer(&buckets[0]),
-			uintptr(n)*unsafe.Sizeof(runtimePCFindBucket{}))
-	}
-	touch(unsafe.Pointer(runtimeFuncInfoTable),
-		runtimeFuncInfoCount*unsafe.Sizeof(runtimeFuncInfoRecord{}))
-	touch(unsafe.Pointer(runtimeFuncInfoStringOffsets),
-		runtimeFuncInfoStringCount*unsafe.Sizeof(uint32(0)))
-	if runtimeFuncInfoStrings != nil && runtimeFuncInfoStringCount > 0 {
-		last := uintptr(*(*uint32)(unsafe.Add(unsafe.Pointer(runtimeFuncInfoStringOffsets),
-			(runtimeFuncInfoStringCount-1)*unsafe.Sizeof(uint32(0)))))
-		lastStr := funcInfoCString(uint32(runtimeFuncInfoStringCount - 1))
-		touch(unsafe.Pointer(runtimeFuncInfoStrings), last+uintptr(cStringLen(lastStr))+1)
-	}
-	// The pcline table is on the Caller/CallersFrames path; building it
-	// here keeps the first user lookup at steady-state cost (the build cost
-	// scales with call-site count and showed up as a 200µs first Caller).
-	initRuntimePCLineFrames()
-	// One synthetic lookup warms the code paths themselves (allocator size
-	// classes, lookup caches), not just the data pages.
-	if prebuiltFrameCount() > 0 {
-		frame := prebuiltFrame(0)
-		if sym, ok := pcSymbolForFuncInfoIndex(frame.entry, frame.entry, frame.funcIndex); ok {
-			runtimeFuncInfoWarmSink += byte(len(sym.function))
-		}
-	}
-	// Write-warm the FuncForPC cache: its first stores otherwise take
-	// zero-fill write faults, one per page, on the first few lookups.
-	for i := 0; i < funcForPCCacheSets; i += 4096 / int(unsafe.Sizeof(funcForPCCache[0])) {
-		latomic.StorePointer(&funcForPCCache[i][0], nil)
-	}
-	latomic.StorePointer(&funcForPCCache[funcForPCCacheSets-1][0], nil)
 }
 
 func coldFuncInfoEntryLookup(pc uintptr) (pcSymbol, bool) {

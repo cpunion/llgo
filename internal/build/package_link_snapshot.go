@@ -38,6 +38,7 @@ type packageLinkSnapshot struct {
 	pcLineInfo             []pcLineRecord
 	definedGlobals         []string
 	exportFunctionNames    []string
+	hasLocalCExports       bool
 }
 
 func freezePackageLinkSnapshot(pkg *aPackage) {
@@ -47,9 +48,10 @@ func freezePackageLinkSnapshot(pkg *aPackage) {
 	lpkg := pkg.LPkg
 	mod := lpkg.Module()
 	snapshot := &packageLinkSnapshot{
-		needAbiInit: lpkg.NeedAbiInit,
-		funcInfo:    readFuncInfo(mod),
-		pcLineInfo:  readPCLineInfo(mod),
+		needAbiInit:      lpkg.NeedAbiInit,
+		funcInfo:         readFuncInfo(mod),
+		pcLineInfo:       readPCLineInfo(mod),
+		hasLocalCExports: hasLocalCExports(lpkg),
 	}
 	for _, dependency := range effectiveDependencies(pkg) {
 		snapshot.effectiveDependencyIDs = append(snapshot.effectiveDependencyIDs, dependency.ID)
@@ -154,4 +156,14 @@ func packageExportFunctionNames(pkg *aPackage) []string {
 		return snapshot.exportFunctionNames
 	}
 	return nil
+}
+
+func packageHasLocalCExports(pkg *aPackage) bool {
+	if pkg == nil {
+		return false
+	}
+	if pkg.LPkg != nil {
+		return hasLocalCExports(pkg.LPkg)
+	}
+	return pkg.LinkSnapshot != nil && pkg.LinkSnapshot.hasLocalCExports
 }
