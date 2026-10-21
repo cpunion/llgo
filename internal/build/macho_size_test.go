@@ -175,6 +175,92 @@ func TestMainPackageHasExports(t *testing.T) {
 	}
 }
 
+func TestMainPackageHasExportsAfterFrontendRelease(t *testing.T) {
+	t.Setenv("LDFLAGS", "")
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	lpkg := prog.NewPackage("main", "main")
+	lpkg.SetExport("Entry", "retained_main_export")
+	pkg := &aPackage{Package: &packages.Package{Name: "main", PkgPath: "main"}, LPkg: lpkg}
+	freezePackageLinkSnapshot(pkg)
+	pkg.LPkg = nil
+	if !mainPackageHasExports([]*aPackage{pkg}) {
+		t.Fatal("released frontend lost its local C export capability")
+	}
+	base := Config{
+		Goos: "darwin", BuildMode: BuildModeExe, OptLevel: optlevel.Os,
+		OmitDWARFByDefault: true, PCLNMode: PCLNEmbedded,
+	}
+	for _, conf := range []Config{base, withSymbolOmission(withOptLevel(base, optlevel.O2))} {
+		ctx := &context{buildConf: &conf, stagedBackendDetached: true, stagedFuncInfoSites: true}
+		if plan := planDarwinSizeSymbolsFor(ctx, []*aPackage{pkg}, nil, true); len(plan.linkerArgs) != 0 || plan.stripLocals {
+			t.Fatalf("released main C export allowed symbol compaction: %+v", plan)
+		}
+	}
+	imported := prog.NewPackage("imported.main", "main")
+	imported.SetExport("runtime.callback", "callback")
+	importedPkg := &aPackage{Package: &packages.Package{Name: "main", PkgPath: "imported.main"}, LPkg: imported}
+	freezePackageLinkSnapshot(importedPkg)
+	importedPkg.LPkg = nil
+	if mainPackageHasExports([]*aPackage{importedPkg}) {
+		t.Fatal("released frontend mistook an imported C export for a local export")
+	}
+}
+
+func TestDarwinSizeSymbolsPreservesMainCExportIntegration(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Mach-O dynamic export integration test")
+	}
+	t.Setenv("LDFLAGS", "")
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module exportprobe\n\ngo 1.27\n",
+		"main.go": `package main
+import _ "unsafe"
+const LLGoFiles = "wrap/probe.c"
+//export retained_main_export
+func retained_main_export() int32 { return 42 }
+//go:linkname exportProbe C.export_probe
+func exportProbe() int32
+func main() {
+    if exportProbe() != 42 { panic("main C export unavailable through dlsym") }
+    println("EXPORT_OK")
+}
+`,
+		"wrap/probe.c": `#include <dlfcn.h>
+#include <stdint.h>
+int32_t export_probe(void) {
+    void *symbol = dlsym(RTLD_DEFAULT, "retained_main_export");
+    return symbol ? ((int32_t (*)(void))symbol)() : -1;
+}
+`,
+	}
+	for name, contents := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin := filepath.Join(dir, "export-probe")
+	cfg := &Config{
+		Mode: ModeBuild, OutFile: bin, OptLevel: optlevel.O2,
+		OmitDWARFByDefault: true, LinkOptions: LinkOptions{OmitSymbolTable: true},
+		PCLNMode: PCLNEmbedded, PCLNModeSet: true,
+	}
+	if _, err := Do([]string{filepath.Join(dir, "main.go")}, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(bin).CombinedOutput(); err != nil || !strings.Contains(string(output), "EXPORT_OK") {
+		t.Fatalf("main C export probe: %v\n%s", err, output)
+	}
+	if output, err := exec.Command("codesign", "--verify", "--verbose=4", bin).CombinedOutput(); err != nil {
+		t.Fatalf("codesign verification: %v\n%s", err, output)
+	}
+}
+
 func TestFinalizeDarwinSizeExecutable(t *testing.T) {
 	if err := finalizeDarwinSizeExecutable(nil, "", false); err != nil {
 		t.Fatalf("nil context: %v", err)

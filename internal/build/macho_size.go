@@ -112,7 +112,7 @@ func mainPackageHasExports(pkgs []*aPackage) bool {
 		// package. Runtime and standard-library //export callbacks are static
 		// implementation links and must not turn every Go symbol into a dyld
 		// export.
-		if pkg != nil && pkg.Package != nil && pkg.Name == "main" && hasLocalCExports(pkg.LPkg) {
+		if pkg != nil && pkg.Package != nil && pkg.Name == "main" && packageHasLocalCExports(pkg) {
 			return true
 		}
 	}
