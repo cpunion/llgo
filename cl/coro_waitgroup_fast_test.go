@@ -155,6 +155,7 @@ func TestCoroWaitGroupFastPlanRequiresExactSourceAndBindings(t *testing.T) {
 		name, opcode, query, shadow             string
 		noinline, changed, domain, race, layout bool
 		reboundRace                             bool
+		reboundReceiver, reboundDelta           bool
 		want                                    bool
 	}{
 		{name: "verified", opcode: "atomicAddReturnNew", query: "return false", want: true},
@@ -167,6 +168,8 @@ func TestCoroWaitGroupFastPlanRequiresExactSourceAndBindings(t *testing.T) {
 		{name: "domain", opcode: "atomicAddReturnNew", query: "return false", domain: true},
 		{name: "race", opcode: "atomicAddReturnNew", query: "return false", race: true},
 		{name: "rebound-race-import", opcode: "atomicAddReturnNew", query: "return false", reboundRace: true},
+		{name: "rebound-receiver", opcode: "atomicAddReturnNew", query: "return false", reboundReceiver: true},
+		{name: "rebound-delta", opcode: "atomicAddReturnNew", query: "return false", reboundDelta: true},
 		{name: "layout", opcode: "atomicAddReturnNew", query: "return false", layout: true},
 		{name: "shadow-counter-type", opcode: "atomicAddReturnNew", query: "return false", shadow: "type int32=uint8"},
 		{name: "shadow-waiter-type", opcode: "atomicAddReturnNew", query: "return false", shadow: "type uint32=uint64"},
@@ -222,6 +225,12 @@ func Associate[T any](*T)Association{return Unbubbled}
 func Disassociate[T any](*T){}
 `)
 			impl := string(body)
+			if test.reboundReceiver {
+				impl = strings.Replace(impl, "(wg *WaitGroup)", "(receiver *WaitGroup)", 1) + "\nvar wg *WaitGroup\n"
+			}
+			if test.reboundDelta {
+				impl = strings.Replace(impl, "Add(delta int)", "Add(value int)", 1) + "\nvar delta int\n"
+			}
 			if test.noinline {
 				impl = strings.Replace(impl, "func (wg *WaitGroup) Add", "//go:noinline\nfunc (wg *WaitGroup) Add", 1)
 			}

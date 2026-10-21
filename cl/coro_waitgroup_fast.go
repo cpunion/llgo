@@ -57,6 +57,7 @@ func planCoroWaitGroupAddFast(p *context, fn *ssa.Function) *coroWaitGroupAddFas
 	if p == nil || p.prog == nil || p.emissionUniverse == nil || p.emissionUniverse.coroProgramIR == nil ||
 		fn == nil || fn.Pkg == nil || fn.Pkg.Pkg.Path() != "sync" || fn.Name() != "Add" || hasNoInlineDirective(fn) ||
 		fn.Signature.Recv() == nil || fn.Signature.Results().Len() != 0 || fn.Signature.Params().Len() != 1 ||
+		fn.Signature.Recv().Name() != "wg" || fn.Signature.Params().At(0).Name() != "delta" ||
 		!types.Identical(fn.Signature.Params().At(0).Type(), types.Typ[types.Int]) || p.prog.PointerSize() != 8 {
 		return nil
 	}
