@@ -9,6 +9,7 @@
 #include <gc/gc.h>
 #include <windows.h>
 #include <process.h>
+#include <signal.h>
 #include <stdio.h>
 
 static HANDLE lock_start, locked, collector_ready, collect_start, release_heap;
@@ -49,14 +50,25 @@ static int check_client_handler(void)
 
 static unsigned __stdcall hold_heap(void *unused)
 {
+    DWORD deadline;
     (void)unused;
     WaitForSingleObject(lock_start, INFINITE);
     if (!HeapLock(GetProcessHeap()))
         TerminateProcess(GetCurrentProcess(), 3);
     SetEvent(locked);
-    WaitForSingleObject(release_heap, INFINITE);
+    /* A real Windows heap operation eventually releases the lock while
+     * runnable. Suspension during this bounded interval must not deadlock GC. */
+    deadline = GetTickCount() + 1000;
+    while ((LONG)(GetTickCount() - deadline) < 0
+           && WaitForSingleObject(release_heap, 0) != WAIT_OBJECT_0)
+        SwitchToThread();
     HeapUnlock(GetProcessHeap());
     return 0;
+}
+
+static void client_signal_handler(int signal_number)
+{
+    (void)signal_number;
 }
 
 static unsigned __stdcall collect(void *unused)
@@ -66,6 +78,12 @@ static unsigned __stdcall collect(void *unused)
     WaitForSingleObject(collect_start, INFINITE);
     GC_gcollect();
     SetEvent(release_heap);
+    /* Preparation and scanning must both restore the caller's CRT handler. */
+    if (signal(SIGSEGV, client_signal_handler) == SIG_ERR)
+        TerminateProcess(GetCurrentProcess(), 8);
+    GC_gcollect();
+    if (signal(SIGSEGV, SIG_DFL) != client_signal_handler)
+        TerminateProcess(GetCurrentProcess(), 9);
     return 0;
 }
 

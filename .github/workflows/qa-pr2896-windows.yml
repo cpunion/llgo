@@ -72,7 +72,7 @@ jobs:
         \ HEAP PROBE RESULT',result.returncode,flush=True)\nexcept subprocess.TimeoutExpired:\n\
         \    print('BASELINE HEAP PROBE RESULT timed out as expected for signal-based\
         \ scanning',flush=True)\n"
-    - name: Build and validate vectored-read-guard BDWGC
+    - name: Prepare collector CRT fault state before stopping Windows threads
       shell: python {0}
       run: "import hashlib,os,pathlib,shutil,subprocess,tarfile,urllib.request\nroot=pathlib.Path(os.environ['RUNNER_TEMP'])\n\
         archive=root/'bdwgc-8.2.12.tar.gz'\nwith urllib.request.urlopen('https://github.com/bdwgc/bdwgc/archive/refs/tags/v8.2.12.tar.gz',timeout=60)\
