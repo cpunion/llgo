@@ -30,7 +30,7 @@ import (
 // and env have native activation lifetime and must not survive a suspension.
 func coroPanicBoundaryPush(task *coro.G, handle unsafe.Pointer, boundary *Defer, env unsafe.Pointer) bool {
 	if task == nil || handle == nil || boundary == nil || env == nil ||
-		*boundary != (Defer{}) || !coro.ResumePanicBoundaryActive(task, handle) {
+		*boundary != (Defer{}) || !coro.ResumePanicBoundaryActiveCompiler(task, handle) {
 		return false
 	}
 	gp := getg()
@@ -75,7 +75,7 @@ func coroPanicBoundaryPopStatus(task *coro.G, handle unsafe.Pointer, boundary *D
 	if !validCoroPanicBoundary(task, handle, boundary, gp) {
 		return coroPanicBoundaryPopInvalidRecord
 	}
-	if !coro.ResumePanicBoundaryReturning(task, handle) {
+	if !coro.ResumePanicBoundaryReturningCompiler(task, handle) {
 		return coroPanicBoundaryPopInvalidResume
 	}
 	if ptr := gp.panic_; ptr != nil && (*panicNode)(ptr).defer_ == boundary {

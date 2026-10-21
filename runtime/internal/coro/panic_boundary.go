@@ -89,3 +89,55 @@ func ResumePanicBoundaryMayLand(g *G, handle unsafe.Pointer) bool {
 		g.pending == (pendingTransition{}) && g.destroyTarget == nil && !g.destroyRoot &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && !g.waiting
 }
+
+// ResumePanicBoundaryActiveCompiler consumes the private pendingInlineStart
+// receipt immediately after PrepareInlineAwaitCompiler and before the child
+// prologue. That transaction already proved the older ancestry; no scheduler,
+// producer, callback or managed child can enter before this boundary is pushed.
+// Keep the exact current edge and episode checks, and retain the complete
+// validator for every other entry shape. Signal landing always uses the full
+// ResumePanicBoundaryMayLand proof.
+func ResumePanicBoundaryActiveCompiler(g *G, handle unsafe.Pointer) bool {
+	if ValidG(g) && handle != nil && g.runP != nil {
+		p := g.runP
+		pending := g.pending
+		child, parent := pending.target, pending.from
+		if pending.kind == pendingInlineStart && child != nil && parent != nil &&
+			g.active == child && child.handle == handle && child.owner == g && parent.owner == g &&
+			child.state == FrameActive && p.inlineAwaitDepth > 0 && p.inlineAwaitDepth <= maxInlineAwaitDepth &&
+			resumeGateStructurallyTaken(g) && validInlineAwaitEdge(parent, child) &&
+			compilerInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth-1) {
+			return true
+		}
+	}
+	return ResumePanicBoundaryActive(g, handle)
+}
+
+// ResumePanicBoundaryReturningCompiler consumes the ordinary pendingComplete
+// receipt before FinishInlineAwaitReturnCompiler. The generated final suspend
+// cannot invoke Go code or change an older edge after completion publication.
+// A real suspension, exceptional completion or ancestor unwind keeps the full
+// returning-ancestry proof below.
+func ResumePanicBoundaryReturningCompiler(g *G, handle unsafe.Pointer) bool {
+	if ValidG(g) && handle != nil && g.runP != nil {
+		p := g.runP
+		pending := g.pending
+		child := pending.from
+		if pending.kind == pendingComplete && !pending.directChannel && pending.target == nil &&
+			child != nil && g.active == child && child.handle == handle && child.owner == g &&
+			child.state == FrameActive && child.header != nil &&
+			child.header.SuspendReason == uint16(SuspendFrameComplete) &&
+			child.header.Lifecycle == uint16(FrameFinalSuspended) &&
+			p.inlineAwaitDepth > 0 && p.inlineAwaitDepth <= maxInlineAwaitDepth &&
+			resumeGateStructurallyTaken(g) {
+			parent := child.parent
+			if parent != nil && parent.owner == g && validInlineAwaitEdgeShape(parent, child) &&
+				parent.completion.status == CompletionReturn &&
+				parent.completion.typeWord == nil && parent.completion.dataWord == nil &&
+				compilerInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth-1) {
+				return true
+			}
+		}
+	}
+	return ResumePanicBoundaryReturning(g, handle)
+}
