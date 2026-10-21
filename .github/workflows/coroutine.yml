@@ -25,7 +25,7 @@ jobs:
           - { llvm: 22, go: "1.27.0", lane: "compat", check: "test (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "integration", check: "test integration (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.27.0)" }
-          - { llvm: 22, go: "1.27.0", lane: "fault-e2e", check: "test native fault landing E2E (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "fault-e2e", timeout: 25, check: "test native fault landing E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "archive-e2e", timeout: 30, check: "test independent archive E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "reflect-e2e", timeout: 30, check: "test reflected resource handoff E2E (LLVM 22, Go 1.27.0)" }
@@ -502,6 +502,26 @@ jobs:
             LLGO_TEST_LLGO=/tmp/llgo-coro-fault \
             go test ./test/go -run '^TestRuntimeFallbackSymbolCacheConcurrentFirstUse$' \
               -timeout=5m -count=1 -v
+
+      - name: Test guarded WaitGroup updates without execution domains
+        if: matrix.lane == 'fault-e2e'
+        run: |
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            /tmp/llgo-coro-fault test -c -p=1 -trimpath \
+              -o /tmp/llgo-waitgroup-fast-gate test/go/waitgroup_fast_add_test.go
+          python3 - <<'PYCODE'
+          import subprocess
+          image = '/tmp/llgo-waitgroup-fast-gate'
+          names = [line.split()[-1] for line in subprocess.check_output(['llvm-nm', image], text=True).splitlines()
+                   if 'TestWaitGroupFastAddConcurrentCounter' in line and line.rstrip().endswith('$coro.resume')]
+          assert names, 'missing native counter-test resumes'
+          assembly = subprocess.check_output(['llvm-objdump', '--disassemble', '--disassemble-symbols=' + ','.join(names), image], text=True)
+          assert 'cmpxchg' in assembly, 'native tests did not retain the guarded CAS'
+          PYCODE
+          for procs in 1 4; do
+            GOMAXPROCS="$procs" timeout 90s /tmp/llgo-waitgroup-fast-gate \
+              -test.v -test.count=3 -test.timeout=60s
+          done
 
       - name: Test private channels, brief semaphore waits and memory equality
         if: matrix.lane == 'fault-e2e'
