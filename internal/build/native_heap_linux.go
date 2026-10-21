@@ -37,3 +37,5 @@ import "C"
 func releaseNativeHeap() {
 	C.llgo_release_native_heap()
 }
+
+func beginNativeHeapRelief() func() { return func() {} }

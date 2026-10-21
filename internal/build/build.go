@@ -9601,7 +9601,17 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 		}
 		options := gllvm.NewPassBuilderOptions()
 		defer options.Dispose()
-		if err := mod.RunPasses(llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode()), backend.TargetMachine(), options); err != nil {
+		optimize := func() error {
+			if input.Size() >= largeStagedPackageBitcodeSize {
+				// Module analyses release large maps between passes, but free
+				// allocator pages can overlap the next analysis's working set.
+				// Join pressure relief before later phases use or dispose this context.
+				finishRelief := beginNativeHeapRelief()
+				defer finishRelief()
+			}
+			return mod.RunPasses(llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode()), backend.TargetMachine(), options)
+		}
+		if err := optimize(); err != nil {
 			return "", fmt.Errorf("run detached LLVM passes for %s: %w", pkg.PkgPath, err)
 		}
 	}

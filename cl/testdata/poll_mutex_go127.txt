@@ -121,3 +121,32 @@ func (mu *fdMutex) rwunlock(read bool) bool {
 
 func runtime_Semacquire(sema *uint32)
 func runtime_Semrelease(sema *uint32)
+
+func (mu *fdMutex) incref() bool {
+	for {
+		old := atomic.LoadUint64(&mu.state)
+		if old&mutexClosed != 0 {
+			return false
+		}
+		new := old + mutexRef
+		if new&mutexRefMask == 0 {
+			panic(overflowMsg)
+		}
+		if atomic.CompareAndSwapUint64(&mu.state, old, new) {
+			return true
+		}
+	}
+}
+
+func (mu *fdMutex) decref() bool {
+	for {
+		old := atomic.LoadUint64(&mu.state)
+		if old&mutexRefMask == 0 {
+			panic("inconsistent poll.fdMutex")
+		}
+		new := old - mutexRef
+		if atomic.CompareAndSwapUint64(&mu.state, old, new) {
+			return new&(mutexClosed|mutexRefMask) == mutexClosed
+		}
+	}
+}

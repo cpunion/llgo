@@ -19,3 +19,5 @@
 package build
 
 func releaseNativeHeap() {}
+
+func beginNativeHeapRelief() func() { return func() {} }

@@ -64,6 +64,7 @@ type coroStaticCleanupSitePlan struct {
 	builtin            string
 	generatedCgo       *coroGeneratedCgoCallShape
 	foreignWorker      *coroWorkerForeignCallShape
+	pollFDFast         *coroPollFDFastPlan
 	arguments          []ssa.Value
 	tag                uint32
 }
@@ -2191,8 +2192,19 @@ func (s *coroStaticCleanupState) emitSiteCall(
 			}
 			closureContext = b.Load(site.closureContext)
 		}
+		var fastReturn llssa.BasicBlock
+		if site.plan.pollFDFast != nil {
+			fastReturn = p.fn.MakeBlock()
+			slow := p.fn.MakeBlock()
+			b.If(p.emitCoroPollFDFast(b, args, site.plan.pollFDFast), fastReturn, slow)
+			b.SetBlockContinuation(slow)
+		}
 		p.compileCoroTargetAwaitWithContextAndRecovery(b, site.plan.target, closureContext, args, s, nil)
 		finishSite()
+		if fastReturn != nil {
+			b.Jump(fastReturn)
+			b.SetBlockContinuation(fastReturn)
+		}
 		return true
 	case coroStaticCleanupDispatch:
 		if site.descriptor.IsNil() || site.plan.signature == nil {
