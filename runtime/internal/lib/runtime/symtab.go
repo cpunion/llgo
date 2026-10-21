@@ -129,14 +129,27 @@ type frameSymbolCacheEntry struct {
 // paid a pcline search per frame per walk).
 const frameSymbolCacheSize = 4096
 
-var frameSymbolCache [frameSymbolCacheSize]frameSymbolCacheEntry
+// The native fallback walker is rarely used by programs with prebuilt frame
+// tables. Keep its cache off the static root range until that walker needs it:
+// the conservative collector otherwise faults in the entire zero-filled array
+// even when no stack has ever been symbolized.
+var frameSymbolCache unsafe.Pointer // *[frameSymbolCacheSize]frameSymbolCacheEntry
 
 func recordFrameSymbol(pc, offset uintptr, name string) {
 	if pc == 0 || name == "" || isPCSiteSymbol(name) {
 		return
 	}
+	cache := (*[frameSymbolCacheSize]frameSymbolCacheEntry)(latomic.LoadPointer(&frameSymbolCache))
+	if cache == nil {
+		candidate := new([frameSymbolCacheSize]frameSymbolCacheEntry)
+		if latomic.CompareAndSwapPointer(&frameSymbolCache, nil, unsafe.Pointer(candidate)) {
+			cache = candidate
+		} else {
+			cache = (*[frameSymbolCacheSize]frameSymbolCacheEntry)(latomic.LoadPointer(&frameSymbolCache))
+		}
+	}
 	i := (pc >> 4) & (frameSymbolCacheSize - 1)
-	frameSymbolCache[i] = frameSymbolCacheEntry{pc: pc, offset: offset, name: name}
+	cache[i] = frameSymbolCacheEntry{pc: pc, offset: offset, name: name}
 }
 
 type runtimeFuncInfoRecord struct {
@@ -595,8 +608,12 @@ func applyFuncInfo(sym *pcSymbol, rawFunction string) {
 }
 
 func cachedFrameSymbol(pc uintptr) pcSymbol {
+	cache := (*[frameSymbolCacheSize]frameSymbolCacheEntry)(latomic.LoadPointer(&frameSymbolCache))
+	if cache == nil {
+		return pcSymbol{pc: pc}
+	}
 	i := (pc >> 4) & (frameSymbolCacheSize - 1)
-	entry := frameSymbolCache[i]
+	entry := cache[i]
 	if entry.pc != pc || entry.name == "" {
 		return pcSymbol{pc: pc}
 	}
@@ -2136,7 +2153,7 @@ type frameSymbolResult struct {
 
 const frameSymbolResultCacheSize = 4096
 
-var frameSymbolResultCache [frameSymbolResultCacheSize]*frameSymbolResult
+var frameSymbolResultCache unsafe.Pointer // *[frameSymbolResultCacheSize]*frameSymbolResult
 
 // minLegalPC: nothing below the zero page can be code. Values under it are
 // null-ish slots or shadow-stack synthetic markers, never return addresses.
@@ -2144,12 +2161,21 @@ const minLegalPC = 4096
 
 func frameSymbol(pc uintptr) pcSymbol {
 	if pc > minLegalPC {
-		i := (pc >> 2) & uintptr(len(frameSymbolResultCache)-1)
-		if e := frameSymbolResultCache[i]; e != nil && e.pc == pc {
+		cache := (*[frameSymbolResultCacheSize]*frameSymbolResult)(latomic.LoadPointer(&frameSymbolResultCache))
+		if cache == nil {
+			candidate := new([frameSymbolResultCacheSize]*frameSymbolResult)
+			if latomic.CompareAndSwapPointer(&frameSymbolResultCache, nil, unsafe.Pointer(candidate)) {
+				cache = candidate
+			} else {
+				cache = (*[frameSymbolResultCacheSize]*frameSymbolResult)(latomic.LoadPointer(&frameSymbolResultCache))
+			}
+		}
+		i := (pc >> 2) & uintptr(frameSymbolResultCacheSize-1)
+		if e := cache[i]; e != nil && e.pc == pc {
 			return e.sym
 		}
 		sym := frameSymbolUncached(pc)
-		frameSymbolResultCache[i] = &frameSymbolResult{pc: pc, sym: sym}
+		cache[i] = &frameSymbolResult{pc: pc, sym: sym}
 		return sym
 	}
 	return frameSymbolUncached(pc)
