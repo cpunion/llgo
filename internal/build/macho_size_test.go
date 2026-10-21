@@ -220,6 +220,7 @@ import _ "unsafe"
 const LLGoFiles = "wrap/probe.c"
 //export retained_main_export
 func retained_main_export() int32 { return 42 }
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=caller-thread reentry=managed-ingress memory=by-value
 //go:linkname exportProbe C.export_probe
 func exportProbe() int32
 func main() {
