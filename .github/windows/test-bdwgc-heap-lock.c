@@ -13,6 +13,7 @@
 #include <stdio.h>
 
 static HANDLE lock_start, locked, collector_ready, collect_start, release_heap;
+static volatile LONG lock_requested;
 static void *client_page;
 static volatile LONG client_faults;
 
@@ -71,6 +72,19 @@ static void client_signal_handler(int signal_number)
     (void)signal_number;
 }
 
+static void GC_CALLBACK collection_event(GC_EventType event)
+{
+    /* Heap discovery before this event may itself take the process heap lock.
+     * Acquire it immediately before suspension so that preliminary GC work
+     * cannot hide the lazy signal-table allocation during root scanning. */
+    if (event == GC_EVENT_PRE_STOP_WORLD
+        && InterlockedCompareExchange(&lock_requested, 1, 0) == 0) {
+        SetEvent(lock_start);
+        if (WaitForSingleObject(locked, 10000) != WAIT_OBJECT_0)
+            TerminateProcess(GetCurrentProcess(), 5);
+    }
+}
+
 static unsigned __stdcall collect(void *unused)
 {
     (void)unused;
@@ -104,9 +118,7 @@ int main(void)
         return 4;
     if (WaitForSingleObject(collector_ready, 10000) != WAIT_OBJECT_0)
         return 5;
-    SetEvent(lock_start);
-    if (WaitForSingleObject(locked, 10000) != WAIT_OBJECT_0)
-        TerminateProcess(GetCurrentProcess(), 5);
+    GC_set_on_collection_event(collection_event);
     SetEvent(collect_start);
     if (WaitForMultipleObjects(2, threads, TRUE, 10000) != WAIT_OBJECT_0)
         TerminateProcess(GetCurrentProcess(), 6);

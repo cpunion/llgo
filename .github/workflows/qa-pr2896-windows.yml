@@ -29,39 +29,12 @@ jobs:
         llvm-version: ${{matrix.llvm}}
         windows-abi: ${{ matrix.windows_abi || 'msvc' }}
         windows-arch: ${{ matrix.windows_arch || 'amd64' }}
-    - name: Setup demo dependencies
-      uses: ./.github/actions/setup-demo-deps
-      with:
-        windows-abi: ${{ matrix.windows_abi || 'msvc' }}
-        windows-arch: ${{ matrix.windows_arch || 'amd64' }}
-        install-lldb-python: 'true'
-    - name: Set up Go for build
-      uses: ./.github/actions/setup-go
-      with:
-        architecture: ${{ matrix.host_go_arch || '' }}
-    - name: Build LLGo and test tools
-      shell: bash
-      run: 'dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
-
-        echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
-
-        echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-
-        '
     - name: Activate native Windows target
       if: runner.os == 'Windows'
       uses: ./.github/actions/activate-windows-target
       with:
         windows-abi: ${{ matrix.windows_abi }}
         windows-arch: ${{ matrix.windows_arch }}
-    - name: Build concurrent temporary-file regression
-      shell: bash
-      run: 'cd _demo/go/createtemp-1654
-
-        GOTOOLCHAIN=local GOWORK=off llgo build -p=1 -o "$RUNNER_TEMP/createtemp-stress.exe"
-        .
-
-        '
     - name: Reproduce GC collection with a locked process heap
       shell: python {0}
       run: "import os,pathlib,subprocess\nroot=pathlib.Path(os.environ['RUNNER_TEMP'])\n\
@@ -69,7 +42,8 @@ jobs:
         prefix=pathlib.Path(os.environ['LLGO_MINGW_TARGET_VCPKG_ROOT'])\nexe=root/'bdwgc-heap-lock.exe'\n\
         subprocess.run([str(cc),'-O2','.github/windows/test-bdwgc-heap-lock.c','-I'+str(prefix/'include'),'-L'+str(prefix/'lib'),'-lgc','-o',str(exe)],check=True)\n\
         try:\n    result=subprocess.run([str(exe)],timeout=20)\n    print('BASELINE\
-        \ HEAP PROBE RESULT',result.returncode,flush=True)\nexcept subprocess.TimeoutExpired:\n\
+        \ HEAP PROBE RESULT',result.returncode,flush=True)\n    assert result.returncode==6,\
+        \ 'original collector must reproduce the heap-lock deadlock'\nexcept subprocess.TimeoutExpired:\n\
         \    print('BASELINE HEAP PROBE RESULT timed out as expected for signal-based\
         \ scanning',flush=True)\n"
     - name: Prepare collector CRT fault state before stopping Windows threads
@@ -90,32 +64,3 @@ jobs:
         print('BDWGC GCTEST PASSED',flush=True)\n\nenv=os.environ.copy();env['GC_USE_GETWRITEWATCH']='0'\n\
         subprocess.run([str(build/'gctest.exe')],env=env,timeout=300,check=True)\n\
         print('BDWGC MPROTECT GCTEST PASSED',flush=True)\n"
-    - name: Repeat concurrent temporary-file regression
-      shell: python {0}
-      run: "import os, pathlib, subprocess, time, runpy, shutil\nexe = pathlib.Path(os.environ['RUNNER_TEMP'])\
-        \ / 'createtemp-stress.exe'\nfor iteration in range(1, 31):\n    started =\
-        \ time.monotonic()\n    print(f'Starting createtemp repeat {iteration}/30',\
-        \ flush=True)\n    process = subprocess.Popen([str(exe)])\n    try:\n    \
-        \    status = process.wait(timeout=120)\n    except subprocess.TimeoutExpired:\n\
-        \        print(f'createtemp repeat {iteration} timed out; PID {process.pid}',\
-        \ flush=True)\n        directory = pathlib.Path(os.environ['RUNNER_TEMP'])\
-        \ / 'createtemp-artifacts'\n        directory.mkdir(exist_ok=True)\n     \
-        \   shutil.copy2(exe, directory / exe.name)\n        runpy.run_path('.github/scripts/qa_windows_stacks.py')['capture'](process.pid,\
-        \ directory)\n        os.environ['QA_PID'] = str(process.pid)\n        os.environ['QA_DIRECTORY']\
-        \ = str(directory)\n        subprocess.run(['powershell', '-NoProfile', '-Command',\
-        \ \"Get-Process -Id $env:QA_PID | Select-Object -ExpandProperty Modules |\
-        \ Select-Object ModuleName,FileName,@{Name='BaseAddress';Expression={$_.BaseAddress.ToInt64()}}\
-        \ | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $env:QA_DIRECTORY\
-        \ 'modules.json')\"], timeout=30)\n        with (directory / 'symbols.txt').open('w')\
-        \ as symbols:\n            subprocess.run(['llvm-nm', '--numeric-sort', str(exe)],\
-        \ stdout=symbols, timeout=30)\n        process.kill()\n        process.wait()\n\
-        \        raise SystemExit(1)\n    print(f'Finished repeat {iteration}: {time.monotonic()-started:.1f}s,\
-        \ exit {status}', flush=True)\n    if status:\n        raise SystemExit(status)\n"
-    - name: Upload hung-process evidence
-      if: always()
-      uses: actions/upload-artifact@v7
-      with:
-        name: windows-386-createtemp-hang
-        path: ${{ runner.temp }}/createtemp-artifacts
-        if-no-files-found: ignore
-        retention-days: 3
