@@ -11,4 +11,4 @@ _demo/go/export/libexport.h.want text eol=lf
 internal/test2json/testdata/*.test -text
 
 # Preserve the unified diff on Windows; blank context lines contain one space.
-.github/windows/bdwgc-clang-seh.patch text eol=lf -whitespace
+.github/windows/bdwgc-windows-fault-guard.patch text eol=lf -whitespace

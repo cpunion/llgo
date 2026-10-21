@@ -12,6 +12,40 @@
 #include <stdio.h>
 
 static HANDLE lock_start, locked, collector_ready, collect_start, release_heap;
+static void *client_page;
+static volatile LONG client_faults;
+
+static LONG CALLBACK client_read_fault(PEXCEPTION_POINTERS info)
+{
+    DWORD previous;
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION
+        && info->ExceptionRecord->ExceptionInformation[0] == 0
+        && info->ExceptionRecord->ExceptionInformation[1] == (ULONG_PTR)client_page
+        && VirtualProtect(client_page, 4096, PAGE_READWRITE, &previous)) {
+        InterlockedIncrement(&client_faults);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static int check_client_handler(void)
+{
+    DWORD previous;
+    PVOID handler;
+    int ok;
+    client_page = VirtualAlloc(NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!client_page)
+        return 0;
+    *(volatile int *)client_page = 42;
+    /* Append after the collector's handler: it must leave this fault alone. */
+    handler = AddVectoredExceptionHandler(0, client_read_fault);
+    if (!handler || !VirtualProtect(client_page, 4096, PAGE_NOACCESS, &previous))
+        return 0;
+    ok = *(volatile int *)client_page == 42 && client_faults == 1;
+    RemoveVectoredExceptionHandler(handler);
+    VirtualFree(client_page, 0, MEM_RELEASE);
+    return ok;
+}
 
 static unsigned __stdcall hold_heap(void *unused)
 {
@@ -39,6 +73,8 @@ int main(void)
 {
     HANDLE threads[2];
     GC_INIT();
+    if (!check_client_handler())
+        return 7;
     lock_start = CreateEventW(NULL, TRUE, FALSE, NULL);
     locked = CreateEventW(NULL, TRUE, FALSE, NULL);
     collector_ready = CreateEventW(NULL, TRUE, FALSE, NULL);

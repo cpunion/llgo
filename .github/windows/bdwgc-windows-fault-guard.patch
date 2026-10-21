@@ -1,0 +1,109 @@
+--- a/os_dep.c
++++ b/os_dep.c
+@@ -974,6 +974,62 @@
+ 
+     GC_INNER JMP_BUF GC_jmp_buf;
+ 
++#   if defined(MSWIN32) && defined(__GNUC__) && defined(WRAP_MARK_SOME)
++    /* CRT signal() can allocate from the Windows process heap after the
++     * collector stops a thread holding that heap's lock (bdwgc issue #924).
++     * Install one independent VEH before collections, then only publish the
++     * collecting thread while the temporary read-fault guard is active. */
++    static PVOID GC_root_fault_handler_handle;
++    static volatile LONG GC_root_fault_thread_id;
++
++    static LONG CALLBACK GC_root_read_fault(PEXCEPTION_POINTERS info)
++    {
++        if (info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION
++            && info->ExceptionRecord->NumberParameters >= 2
++            && info->ExceptionRecord->ExceptionInformation[0] == 0
++            && (DWORD)InterlockedCompareExchange(&GC_root_fault_thread_id, 0, 0)
++                   == GetCurrentThreadId()) {
++          InterlockedExchange(&GC_root_fault_thread_id, 0);
++          LONGJMP(GC_jmp_buf, 1);
++        }
++        /* In particular, leave incremental write faults and unrelated
++         * threads to the application's existing exception handlers. */
++        return EXCEPTION_CONTINUE_SEARCH;
++    }
++
++    GC_INNER void GC_init_root_fault_handler(void)
++    {
++        if (GC_root_fault_handler_handle == NULL) {
++          /* Append rather than replacing a process-wide unhandled filter. */
++          GC_root_fault_handler_handle =
++              AddVectoredExceptionHandler(0, GC_root_read_fault);
++          if (GC_root_fault_handler_handle == NULL)
++            ABORT("AddVectoredExceptionHandler failed");
++        }
++    }
++
++    GC_INNER void GC_deinit_root_fault_handler(void)
++    {
++        InterlockedExchange(&GC_root_fault_thread_id, 0);
++        if (GC_root_fault_handler_handle != NULL) {
++          RemoveVectoredExceptionHandler(GC_root_fault_handler_handle);
++          GC_root_fault_handler_handle = NULL;
++        }
++    }
++
++    GC_INNER void GC_setup_temporary_fault_handler(void)
++    {
++        GC_ASSERT(I_HOLD_LOCK());
++        GC_ASSERT(GC_root_fault_handler_handle != NULL);
++        InterlockedExchange(&GC_root_fault_thread_id,
++                            (LONG)GetCurrentThreadId());
++    }
++
++    GC_INNER void GC_reset_fault_handler(void)
++    {
++        InterlockedExchange(&GC_root_fault_thread_id, 0);
++    }
++#   else
+     STATIC void GC_fault_handler(int sig GC_ATTR_UNUSED)
+     {
+         LONGJMP(GC_jmp_buf, 1);
+@@ -1005,6 +1061,8 @@
+ #         endif
+ #       endif
+     }
++
++#   endif
+ 
+     /* Return the first non-addressable location > p (up) or    */
+     /* the smallest location q s.t. [q,p) is addressable (!up). */
+--- a/misc.c
++++ b/misc.c
+@@ -1035,6 +1035,7 @@
+ #   ifdef MSWIN32
+       GC_init_win32();
+ #   endif
++    GC_init_root_fault_handler();
+ #   ifdef GC_READ_ENV_FILE
+       GC_envfile_init();
+ #   endif
+@@ -1506,6 +1507,7 @@
+     if (GC_is_initialized) {
+       /* Prevent duplicate resource close.  */
+       GC_is_initialized = FALSE;
++      GC_deinit_root_fault_handler();
+ #     if defined(GC_WIN32_THREADS) && (defined(MSWIN32) || defined(MSWINCE))
+ #       if !defined(CONSOLE_LOG) || defined(MSWINCE)
+           DeleteCriticalSection(&GC_write_cs);
+--- a/include/private/gc_priv.h
++++ b/include/private/gc_priv.h
+@@ -3149,6 +3149,14 @@
+   GC_INNER void GC_reset_fault_handler(void);
+ #endif /* NEED_FIND_LIMIT || USE_PROC_FOR_LIBRARIES */
+ 
++#if defined(MSWIN32) && defined(__GNUC__) && defined(WRAP_MARK_SOME)
++  GC_INNER void GC_init_root_fault_handler(void);
++  GC_INNER void GC_deinit_root_fault_handler(void);
++#else
++# define GC_init_root_fault_handler() (void)0
++# define GC_deinit_root_fault_handler() (void)0
++#endif
++
+ /* Some convenience macros for cancellation support. */
+ #ifdef CANCEL_SAFE
+ # if defined(GC_ASSERTIONS) \
