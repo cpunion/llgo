@@ -69,6 +69,10 @@ jobs:
         if: matrix.lane == 'integration'
         run: go test -race -shuffle=on ./internal/coro
 
+      - name: Test exact LLVM executor leaf proofs
+        if: matrix.lane == 'integration'
+        run: go test ./internal/llvmproof -count=1
+
       - name: Test target-neutral coroutine runtime core
         if: matrix.lane == 'compat'
         run: |
@@ -508,7 +512,10 @@ jobs:
               test/go/local_buffered_channel_test.go \
               test/go/local_buffered_channel_synctest_test.go \
               test/go/semaphore_brief_wait_test.go \
-              test/go/memory_equality_offsets_test.go
+              test/go/memory_equality_offsets_test.go \
+              test/go/defer_panic_callers_test.go \
+              test/go/runtime_caller_exhaustion_test.go \
+              test/go/recover_defer_go126_test.go
           for procs in 1 4; do
             GOMAXPROCS="$procs" timeout 90s /tmp/llgo-local-channel-gate \
               -test.v -test.count=3 -test.timeout=60s

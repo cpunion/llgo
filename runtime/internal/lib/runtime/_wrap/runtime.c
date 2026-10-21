@@ -33,8 +33,11 @@ int llgo_mem_readable(void *p);
 __attribute__((noinline)) uintptr_t llgo_caller_frame_mark(void)
 {
 #if defined(__GNUC__) || defined(__clang__)
-    uintptr_t *frame = (uintptr_t *)__builtin_frame_address(0);
-    return frame ? frame[0] : 0;
+    /* Keep the exact current-frame scalar read visible even in Clang's O0
+     * proof IR. Both intrinsic occurrences observe this same live frame;
+     * neither follows the saved caller pointer. */
+    return __builtin_frame_address(0)
+        ? *(uintptr_t *)__builtin_frame_address(0) : 0;
 #else
     return 0;
 #endif
