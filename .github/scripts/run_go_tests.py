@@ -3,8 +3,6 @@
 
 import argparse
 import html
-import faulthandler
-import atexit
 import json
 import os
 from pathlib import Path
@@ -40,8 +38,6 @@ def run(command, output, suite, summary=None):
                     cases.append({key: event.get(key) for key in
                                   ("Package", "Test", "Action", "Elapsed")})
             status = process.wait()
-    print("QA Go command exited; preparing timings", file=sys.stderr, flush=True)
-    faulthandler.dump_traceback_later(60, repeat=True)
     cases.sort(key=lambda case: case.get("Elapsed") or 0, reverse=True)
     (output / f"{suite}-times.json").write_text(
         json.dumps(cases, indent=2) + "\n", encoding="utf-8")
@@ -56,8 +52,11 @@ def run(command, output, suite, summary=None):
             report.write(f"{case['Elapsed'] or 0:.2f}\t{case['Action']}\t"
                          f"{case['Package']}\t{case['Test']}\n")
     print()
-    print((output / f"{suite}-times.txt").read_text(encoding="utf-8"), end="")
-    print("QA timing output complete", file=sys.stderr, flush=True)
+    # A single full-suite write can hang in a Windows Git Bash/tee pipe even
+    # after the reader has received every line. Keep the report writes bounded.
+    with (output / f"{suite}-times.txt").open(encoding="utf-8") as timings:
+        for line in timings:
+            print(line, end="", flush=True)
     if summary:
         with Path(summary).open("a", encoding="utf-8") as report:
             report.write(f"\n### Go tests: {cell(suite)} (exit {status})\n\n")
@@ -71,7 +70,6 @@ def run(command, output, suite, summary=None):
                     report.write(f"| {case['Elapsed'] or 0:.2f} | {cell(case['Package'])} | "
                                  f"{cell(case['Test'])} | {case['Action']} |\n")
                 report.write("\n")
-    print("QA summary write complete; returning", file=sys.stderr, flush=True)
     return status if status >= 0 else 128 - status
 
 
@@ -88,7 +86,4 @@ def main():
 
 
 if __name__ == "__main__":
-    atexit.register(lambda: print("QA Python atexit", file=sys.stderr, flush=True))
-    status = main()
-    print("QA main returned", status, file=sys.stderr, flush=True)
-    sys.exit(status)
+    sys.exit(main())
