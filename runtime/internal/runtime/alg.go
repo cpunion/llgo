@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/xgo-dev/llgo/runtime/abi"
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/runtime/goarch"
 )
 
@@ -347,12 +348,7 @@ func memequal(p, q unsafe.Pointer, size uintptr, align uint8) bool {
 			return memequal128(p, q)
 		}
 	}
-	for i := uintptr(0); i < size; i++ {
-		if *(*byte)(add(p, i)) != *(*byte)(add(q, i)) {
-			return false
-		}
-	}
-	return true
+	return c.Memcmp(p, q, size) == 0
 }
 
 func efaceeq(t *_type, x, y unsafe.Pointer) bool {

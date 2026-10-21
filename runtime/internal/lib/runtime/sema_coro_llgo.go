@@ -21,6 +21,8 @@ package runtime
 import (
 	latomic "sync/atomic"
 	"unsafe"
+
+	corort "github.com/xgo-dev/llgo/runtime/internal/runtime"
 )
 
 // llgoCoroSemaphoreParkV2 is opaque compiler-spilled ParkState/source storage.
@@ -50,6 +52,12 @@ func semaAcquire(addr *uint32) {
 }
 
 func semaAcquireWaitGroup(addr *uint32, durable bool) {
+	// One local peer can release a short-lived token before a wait record is
+	// published. This is a bounded scheduling opportunity, never a retry spin;
+	// durable/domain waits and locked or empty-local cases park directly.
+	if !durable && latomic.LoadUint32(addr) == 0 && corort.CoroSemaphoreReadyPeerV1() {
+		coroSchedulerYield()
+	}
 	for {
 		value := latomic.LoadUint32(addr)
 		if value != 0 && latomic.CompareAndSwapUint32(addr, value, value-1) {

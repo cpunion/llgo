@@ -64,7 +64,6 @@ func TestRuntimeSemaphoreSelectsEventDrivenCoroImplementation(t *testing.T) {
 		"psync.",
 		"pthread",
 		".Cond",
-		"coroSchedulerYield",
 		"runtime.Gosched",
 		"llgoCoroSemaphorePrepareOrAbortV2",
 		"llgoCoroSemaphorePrepareDurableOrAbortV1",
@@ -133,10 +132,30 @@ func assertRuntimeSemaphoreExactRetentionSpan(t *testing.T, path, source string)
 		!strings.Contains(coroTimerOwnerNodeText(t, ordinary.Body), "semaAcquireWaitGroup(addr, false)") {
 		t.Fatalf("%s ordinary semaphore must select non-durable shared loop", path)
 	}
-	if function == nil || function.Body == nil || len(function.Body.List) != 1 {
-		t.Fatalf("%s semaAcquire is not one retry loop", path)
+	if function == nil || function.Body == nil || len(function.Body.List) != 2 {
+		t.Fatalf("%s semaAcquire must have one bounded opportunity then one retry loop", path)
 	}
-	loop, ok := function.Body.List[0].(*ast.ForStmt)
+	// A scheduling opportunity may occur only once, outside the retry loop and
+	// before any source publication. Retrying a yield instead of parking would
+	// turn the event-driven implementation back into busy waiting.
+	opportunity, ok := function.Body.List[0].(*ast.IfStmt)
+	if !ok || opportunity.Else != nil || len(opportunity.Body.List) != 1 ||
+		coroTimerOwnerNodeText(t, opportunity.Body.List[0]) != "coroSchedulerYield()" {
+		t.Fatalf("%s semaphore scheduling opportunity is not a single conditional yield", path)
+	}
+	yields := 0
+	ast.Inspect(function.Body, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			if name, ok := call.Fun.(*ast.Ident); ok && name.Name == "coroSchedulerYield" {
+				yields++
+			}
+		}
+		return true
+	})
+	if yields != 1 {
+		t.Fatalf("%s has %d scheduling opportunities, want at most one before retry", path, yields)
+	}
+	loop, ok := function.Body.List[1].(*ast.ForStmt)
 	if !ok || loop.Body == nil {
 		t.Fatalf("%s semaAcquire does not retry token CAS after wake", path)
 	}

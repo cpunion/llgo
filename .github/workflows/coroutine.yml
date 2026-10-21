@@ -499,14 +499,16 @@ jobs:
             go test ./test/go -run '^TestRuntimeFallbackSymbolCacheConcurrentFirstUse$' \
               -timeout=5m -count=1 -v
 
-      - name: Test private and shared single-slot channels with the real runtime
+      - name: Test private channels, brief semaphore waits and memory equality
         if: matrix.lane == 'fault-e2e'
         run: |
           GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
             /tmp/llgo-coro-fault test -c -p=1 -trimpath \
               -o /tmp/llgo-local-channel-gate \
               test/go/local_buffered_channel_test.go \
-              test/go/local_buffered_channel_synctest_test.go
+              test/go/local_buffered_channel_synctest_test.go \
+              test/go/semaphore_brief_wait_test.go \
+              test/go/memory_equality_offsets_test.go
           for procs in 1 4; do
             GOMAXPROCS="$procs" timeout 90s /tmp/llgo-local-channel-gate \
               -test.v -test.count=3 -test.timeout=60s
