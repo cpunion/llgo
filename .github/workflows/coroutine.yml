@@ -680,6 +680,29 @@ jobs:
               go test ./internal/build -run '^TestCoroStdlibSyncAcceptance$' -timeout=15m -count=1
           done
 
+      - name: Test guarded poll locks and dynamic interface comparisons
+        if: matrix.lane == 'stdlib-file'
+        run: |
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 \
+            go build -p=1 -o /tmp/llgo-poll-compiler ./cmd/llgo
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            /tmp/llgo-poll-compiler test -c -p=1 -trimpath \
+              -o /tmp/llgo-poll-gate \
+              test/go/poll_mutex_fast_test.go test/go/interface_compare_fast_test.go
+          python3 - <<'PYCODE'
+          import subprocess
+          image = '/tmp/llgo-poll-gate'
+          names = [line.split()[-1] for line in subprocess.check_output(['llvm-nm', image], text=True).splitlines()
+                   if 'TestPollMutexFastConcurrent' in line and line.rstrip().endswith('$coro.resume')]
+          assert names, 'missing poll-lock counter-test resumes'
+          assembly = subprocess.check_output(['llvm-objdump', '--disassemble', '--disassemble-symbols=' + ','.join(names), image], text=True)
+          assert assembly.count('cmpxchg') >= 3, 'poll lock/unlock and WaitGroup guarded updates were not retained'
+          PYCODE
+          for procs in 1 4; do
+            GOMAXPROCS="$procs" timeout 90s /tmp/llgo-poll-gate \
+              -test.v -test.count=3 -test.timeout=60s
+          done
+
       - name: Verify production time.Sleep coroutine plan
         if: matrix.lane == 'compat'
         run: go test -v ./internal/build -run '^TestCoroNativeTimeSleepProductionPlanAndCodegen$' -timeout=10m -count=1

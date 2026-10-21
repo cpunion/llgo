@@ -416,10 +416,19 @@ func (p *context) compileCoroStaticAwait(
 		}
 	}
 	var fastReturn llssa.BasicBlock
-	if test := p.emitCoroWaitGroupAddFast(b, args, instructionPlan.waitGroupAddFast); !test.IsNil() {
+	var fastValue llssa.Expr
+	fastTest := p.emitCoroWaitGroupAddFast(b, args, instructionPlan.waitGroupAddFast)
+	if instructionPlan.pollMutexFast != nil {
+		if !fastTest.IsNil() {
+			panic("coroutine call has two guarded update recipes")
+		}
+		fastValue = b.AllocaT(p.prog.Bool())
+		fastTest = p.emitCoroPollMutexFast(b, args, instructionPlan.pollMutexFast, fastValue)
+	}
+	if !fastTest.IsNil() {
 		fastReturn = b.Func.MakeBlock()
 		slow := b.Func.MakeBlock()
-		b.If(test, fastReturn, slow)
+		b.If(fastTest, fastReturn, slow)
 		b.SetBlockContinuation(slow)
 	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
@@ -434,13 +443,26 @@ func (p *context) compileCoroStaticAwait(
 		markCoroReflectValueMethodByNameCalls(b, reflectCheck, result.physicalCalls)
 		b.EmitReflectValueMethodCheckedLoad(result.value, reflectCheck)
 	}
-	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, result.value)
-	if !retagged {
-		p.recordCoroValueAddress(call, result.address)
-	}
+	value := result.value
 	if fastReturn != nil {
+		if !fastValue.IsNil() {
+			b.Store(fastValue, value)
+		}
 		b.Jump(fastReturn)
 		b.SetBlockContinuation(fastReturn)
+		if !fastValue.IsNil() {
+			value = b.Load(fastValue)
+		}
+	}
+	// Apply a managed go:linkname declaration's result view after both paths
+	// join, so a fast bool does not erase the caller's named scalar type.
+	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, value)
+	if !retagged {
+		if !fastValue.IsNil() {
+			p.recordCoroValueAddress(call, fastValue)
+		} else {
+			p.recordCoroValueAddress(call, result.address)
+		}
 	}
 	return value
 }
