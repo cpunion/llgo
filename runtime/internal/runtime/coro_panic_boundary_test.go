@@ -232,3 +232,38 @@ func TestCoroPanicBoundaryStagesExactHandleAndTakesOnce(t *testing.T) {
 		t.Fatal("mutated detached token retained validity")
 	}
 }
+
+func TestCoroPanicBoundaryTakeKeepsPendingTokenDuringCriticalResume(t *testing.T) {
+	resetCoroPanicBoundaryTestG()
+	task, frame := newCoroPanicBoundaryTestFrame(t)
+	// Mirror the compiler's source-entry header stores after taking the gate.
+	frame.header.SuspendReason = uint16(coro.SuspendNone)
+	frame.header.Lifecycle = uint16(coro.FrameActive)
+	if token := __llgo_coro_panic_boundary_take_v1(unsafe.Pointer(task), frame.handle); token != nil {
+		t.Fatal("empty panic cursor returned a token")
+	}
+	previous := &panicNode{arg: "outer panic"}
+	node := &panicNode{arg: "staged panic", prev: unsafe.Pointer(previous), defer_: (*Defer)(frame.handle)}
+	getg().panic_ = unsafe.Pointer(node)
+	if !coro.EnterCritical(task) {
+		t.Fatal("enter critical resume")
+	}
+	if token := __llgo_coro_panic_boundary_take_v1(unsafe.Pointer(task), frame.handle); token != nil {
+		t.Fatal("critical resume consumed a pending panic")
+	}
+	if getg().panic_ != unsafe.Pointer(node) || node.prev != unsafe.Pointer(previous) || node.defer_ != (*Defer)(frame.handle) {
+		t.Fatal("rejected landing changed pending panic ownership")
+	}
+	if _, ok := coro.ExitCritical(task); !ok {
+		t.Fatal("exit critical resume")
+	}
+	if token := __llgo_coro_panic_boundary_take_v1(unsafe.Pointer(task), frame.handle); token != unsafe.Pointer(node) {
+		t.Fatal("valid resume failed to take its exact token")
+	}
+	if getg().panic_ != unsafe.Pointer(previous) || node.prev != nil || coroDetachedBoundaryPanic(unsafe.Pointer(node)) != node {
+		t.Fatal("take did not detach exactly one panic")
+	}
+	if token := __llgo_coro_panic_boundary_take_v1(unsafe.Pointer(task), frame.handle); token != nil || getg().panic_ != unsafe.Pointer(previous) {
+		t.Fatal("duplicate take consumed the outer panic")
+	}
+}

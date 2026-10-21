@@ -21,6 +21,7 @@ package runtime
 import (
 	"unsafe"
 
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 	catomic "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 )
 
@@ -64,4 +65,14 @@ func __llgo_coro_sema_release_or_abort_v2(addr unsafe.Pointer) {
 		}
 	}
 	coroKeyedAbortV2("coroutine semaphore release failed")
+}
+
+// CoroSemaphoreReadyPeerV1 is an advisory, read-only hint. The ordinary yield
+// and park operations retain their full transition validators.
+func CoroSemaphoreReadyPeerV1() bool {
+	if coro.ExecutionDomainEnabled() && CurrentExecutionDomainContext() != nil {
+		return false
+	}
+	task, _, _ := coroCurrentTaskV1()
+	return coro.ResumeHasReadyPeer(task)
 }

@@ -163,12 +163,17 @@ func __llgo_coro_panic_boundary_enabled_v1(g unsafe.Pointer) bool {
 //export __llgo_coro_panic_boundary_take_v1
 func __llgo_coro_panic_boundary_take_v1(g, handle unsafe.Pointer) unsafe.Pointer {
 	task := (*coro.G)(g)
-	if task == nil || handle == nil || !coroPanicBoundaryCapability(task) ||
-		!coro.ResumePanicBoundaryMayLand(task, handle) {
+	if task == nil || handle == nil || !coroPanicBoundaryCapability(task) {
 		return nil
 	}
 	gp := getg()
+	// No token exists in the ordinary resume case. Reading this M-local
+	// cursor grants no authority and changes no scheduler or panic state.
+	// A real token still requires the complete capability and landing proof.
 	if gp == nil || gp.panic_ == nil {
+		return nil
+	}
+	if !coro.ResumePanicBoundaryMayLand(task, handle) {
 		return nil
 	}
 	node := (*panicNode)(gp.panic_)
