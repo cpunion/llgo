@@ -9567,7 +9567,13 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 		return "", fmt.Errorf("stat staged bitcode for %s: %w", pkg.PkgPath, err)
 	}
 	backend := llssa.NewProgram(newLLSSATarget(ctx.buildConf, ctx.crossCompile))
-	defer func() { backend.Dispose() }()
+	defer func() {
+		backend.Dispose()
+		// Return this package's unused native pages before the next context
+		// parses and expands its IR. Relieving pressure only after that work
+		// overlaps retired allocations with the next package's working set.
+		releaseNativeHeap()
+	}()
 	discardLocalNames := ctx.passOpt && ctx.buildConf.OptLevel != optlevel.O0 && !ctx.buildConf.CheckLLFiles
 	if discardLocalNames {
 		backend.DiscardLocalValueNames()
