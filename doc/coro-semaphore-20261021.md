@@ -1,5 +1,7 @@
 # Brief semaphore wait follow-up: 2026-10-21
 
+[PR #304](https://github.com/cpunion/llgo/pull/304) targets `llvm-coro` and builds on the private-channel optimization in [PR #303](https://github.com/cpunion/llgo/pull/303). Each must pass its exact-head CI before merge.
+
 Before publishing an ordinary semaphore wait, its active unlocked resume may yield once if its current P already has a ready peer. This single opportunity is outside the retry loop. A token arriving meanwhile is consumed by the original atomic CAS; a remaining wait retains the existing adjacent prepare/park span, keyed registry, cancellation and cleanup protocol. Durable waits, execution domains, locked owners and empty local queues retain direct park. The hint returns only a boolean and never transfers queue or scheduler authority.
 
 Two small common-path changes accompany it. An empty native panic cursor returns before repeating the landing proof, after checking the program capability; any actual token still requires the complete landing proof. General regular-memory equality uses the existing portable `clite.Memcmp` fallback after preserving empty/scalar/alignment cases. No field comparison or scheduling ownership check is removed.
