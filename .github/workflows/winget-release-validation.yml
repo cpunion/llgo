@@ -1,0 +1,84 @@
+name: WinGet release validation
+on:
+  push:
+    branches: [codex/qualify-winget-1.0.8-20261022]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: winget-release-validation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [MSVC, MinGW]
+        goarch: [amd64, arm64, '386']
+        include:
+          - goarch: '386'
+            runner: windows-2025
+          - goarch: amd64
+            runner: windows-2025
+          - goarch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Bootstrap stable WinGet
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+            # Bootstrap from verified release files, avoiding the module's
+            # failing latest-release discovery on the ARM64 image.
+            $base = 'https://github.com/microsoft/winget-cli/releases/download/v1.29.290'
+            $files = @{
+              'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle' = '6824b6e9484ab24687d99a0c829d2bcbcc7849a70a4d0f596fc43c89d20dff15'
+              'DesktopAppInstaller_Dependencies.zip' = '50c377516749002dcdda9c8e52f26e8e2ea73d52131ce96ffd082dcf60ca6677'
+            }
+            $temporary = Join-Path $env:RUNNER_TEMP 'winget-bootstrap'
+            New-Item -ItemType Directory -Force $temporary | Out-Null
+            foreach ($name in $files.Keys) {
+              $path = Join-Path $temporary $name
+              curl.exe --fail --location --retry 5 --retry-all-errors --output $path "$base/$name"
+              if ($LASTEXITCODE -ne 0) { throw "Downloading $name failed" }
+              if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $files[$name]) { throw "Invalid hash for $name" }
+            }
+            $deps = Join-Path $temporary 'dependencies'
+            Expand-Archive (Join-Path $temporary 'DesktopAppInstaller_Dependencies.zip') $deps
+            $arch = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64' } else { 'x64' }
+            $packages = @(Get-ChildItem (Join-Path $deps $arch) -Recurse -File | Where-Object { $_.Extension -in @('.appx', '.msix') })
+            if (-not $packages.Count) { throw "Missing WinGet dependencies for $arch" }
+            Add-AppxPackage -Path (Join-Path $temporary 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle') -DependencyPath $packages.FullName -ForceApplicationShutdown
+          }
+          $env:PATH += ';' + (Join-Path $env:LOCALAPPDATA 'Microsoft/WindowsApps')
+          (Join-Path $env:LOCALAPPDATA 'Microsoft/WindowsApps') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          winget --version
+          if ($LASTEXITCODE -ne 0) { throw 'WinGet bootstrap failed' }
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+      - name: Install native compilation dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          windows-abi: ${{ matrix.profile == 'MSVC' && 'msvc' || 'mingw' }}
+          windows-arch: ${{ matrix.goarch }}
+      - name: Activate native target
+        uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: ${{ matrix.profile == 'MSVC' && 'msvc' || 'mingw' }}
+          windows-arch: ${{ matrix.goarch }}
+      - name: Validate manifest and installed release lifecycle
+        shell: pwsh
+        run: ./.github/windows/test-winget-release.ps1 -GoArch ${{ matrix.goarch }} -Profile ${{ matrix.profile }}
+      - name: Preserve WinGet diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: winget-logs-${{ matrix.goarch }}-${{ matrix.profile }}
+          path: |
+            ~/AppData/Local/Packages/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe/LocalState/DiagOutputDir/
+            ~/AppData/Local/Microsoft/WinGet/DiagOutputDir/
+          if-no-files-found: ignore
