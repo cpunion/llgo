@@ -1232,6 +1232,11 @@ func machoHasStabs(t *testing.T, path string) bool {
 	}
 	const nStab = 0xe0
 	for _, symbol := range f.Symtab.Syms {
+		// Apple strip adds this N_OPT marker even when no source/debug map
+		// remains. Its STAB bits do not make it DWARF or a source-file record.
+		if symbol.Type == 0x3c && symbol.Name == "radr://5614542" {
+			continue
+		}
 		if symbol.Type&nStab != 0 {
 			return true
 		}

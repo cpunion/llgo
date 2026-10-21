@@ -439,10 +439,9 @@ func TestPCLNExternalLinkOptionsIntegration(t *testing.T) {
 	setPCLNIntegrationEnv(t)
 	source := writePCLNIntegrationFixture(t)
 
-	// PR #2113 phase one consumes -s as typed intent and applies its Go
-	// semantics (-s implies -w), but deliberately does not remove the native
-	// symbol table yet. Keeping wantSymtab explicit makes the single expected
-	// change obvious when native symbol stripping is implemented.
+	// Native dynamic imports still need a symbol table on Mach-O after -s
+	// removes ordinary definitions. ELF omission remains a separate policy.
+	// These flags must preserve the external runtime PC map in either case.
 	tests := []struct {
 		name       string
 		options    LinkOptions

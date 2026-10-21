@@ -38,8 +38,9 @@ const (
 // Command packages are responsible for parsing user-facing flag syntax into
 // this representation.
 type LinkOptions struct {
-	// OmitSymbolTable records the requested -s intent. Phase one uses it for
-	// Go's implied -w rule; native symbol-table omission is implemented later.
+	// OmitSymbolTable records the requested -s intent and implies -w unless
+	// explicitly overridden. Eligible native Darwin executables also compact
+	// their symbols after runtime PC metadata has been finalized.
 	OmitSymbolTable bool
 	DWARF           DWARFMode
 	// ExternalLinker and ExternalLinkerFlags retain the Go linker's -extld
