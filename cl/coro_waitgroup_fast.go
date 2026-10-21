@@ -32,6 +32,27 @@ type coroWaitGroupAddFastPlan struct {
 	stateField, valueField int
 }
 
+// This proof borrows only the already frozen callable classifications and
+// predicate binding. It cannot re-run frontend intrinsic classification or
+// publish a competing call/effect plan.
+type coroWaitGroupProofView struct {
+	predicates coro.ProgramPredicateRequirements
+	functions  map[*ssa.Function]coroCallableClassification
+	resolve    func(*ssa.Function) (*ssa.Function, bool)
+}
+
+func (view coroWaitGroupProofView) classification(fn *ssa.Function) (coroCallableClassification, bool) {
+	if view.resolve == nil {
+		return coroCallableClassification{}, false
+	}
+	canonical, found := view.resolve(fn)
+	if !found || canonical == nil {
+		return coroCallableClassification{}, false
+	}
+	classification, frozen := view.functions[canonical]
+	return classification, frozen
+}
+
 func planCoroWaitGroupAddFast(p *context, fn *ssa.Function) *coroWaitGroupAddFastPlan {
 	if p == nil || p.prog == nil || p.emissionUniverse == nil || p.emissionUniverse.coroProgramIR == nil ||
 		fn == nil || fn.Pkg == nil || fn.Pkg.Pkg.Path() != "sync" || fn.Name() != "Add" || hasNoInlineDirective(fn) ||
@@ -42,6 +63,11 @@ func planCoroWaitGroupAddFast(p *context, fn *ssa.Function) *coroWaitGroupAddFas
 	binding := p.emissionUniverse.coroProgramIR.programPredicates
 	if !binding.Valid() || binding.Mask&coro.ExecutionDomainProgramCapability() == 0 || binding.Values.ExecutionDomain() {
 		return nil
+	}
+	view := coroWaitGroupProofView{
+		predicates: binding,
+		functions:  p.emissionUniverse.coroProgramIR.callableClassifications,
+		resolve:    p.emissionUniverse.Resolve,
 	}
 	target := p.prog.Target()
 	if target != nil && target.GOOS != "" && target.GOOS != "darwin" && target.GOOS != "linux" {
@@ -92,7 +118,8 @@ func planCoroWaitGroupAddFast(p *context, fn *ssa.Function) *coroWaitGroupAddFas
 		return nil
 	}
 	syntax, ok := fn.Syntax().(*ast.FuncDecl)
-	if !ok || syntax.Body == nil || !coroWaitGroupAddHasExactRaceImport(p.emissionUniverse, fn, syntax) {
+	owner := p.emissionUniverse.fnOwners[fn]
+	if !ok || syntax.Body == nil || owner == nil || !coroWaitGroupAddHasExactRaceImport(owner.files, fn, syntax) {
 		return nil
 	}
 	var body bytes.Buffer
@@ -101,8 +128,8 @@ func planCoroWaitGroupAddFast(p *context, fn *ssa.Function) *coroWaitGroupAddFas
 	}
 	sum := sha256.Sum256(body.Bytes())
 	if hex.EncodeToString(sum[:]) != coroWaitGroupAddSourceDigest ||
-		!coroWaitGroupAddUsesCanonicalAtomic(p.emissionUniverse, fn, at) ||
-		!coroWaitGroupAddBubbleQueryIsFalse(p.emissionUniverse, fn) {
+		!coroWaitGroupAddUsesCanonicalAtomic(view, fn, at) ||
+		!coroWaitGroupAddBubbleQueryIsFalse(view, fn) {
 		return nil
 	}
 	return &coroWaitGroupAddFastPlan{target: fn, sourceDigest: coroWaitGroupAddSourceDigest, stateField: 1, valueField: 2}
@@ -111,12 +138,8 @@ func planCoroWaitGroupAddFast(p *context, fn *ssa.Function) *coroWaitGroupAddFas
 // A body digest does not bind its file-scoped import names. In particular,
 // checking internal/race.Enabled says nothing about an unrelated package
 // imported as race. Require the exact owning source file and import as well.
-func coroWaitGroupAddHasExactRaceImport(u *EmissionUniverse, fn *ssa.Function, syntax *ast.FuncDecl) bool {
-	owner := u.fnOwners[fn]
-	if owner == nil {
-		return false
-	}
-	for _, file := range owner.files {
+func coroWaitGroupAddHasExactRaceImport(files []*ast.File, fn *ssa.Function, syntax *ast.FuncDecl) bool {
+	for _, file := range files {
 		for _, declaration := range file.Decls {
 			if declaration != syntax {
 				continue
@@ -142,7 +165,7 @@ func coroWaitGroupAddHasExactRaceImport(u *EmissionUniverse, fn *ssa.Function, s
 
 // The source body alone cannot grant atomic authority: its Uint64.Add must
 // still be the single exact receiver-field forwarder to llgo.atomicAddReturnNew.
-func coroWaitGroupAddUsesCanonicalAtomic(u *EmissionUniverse, fn *ssa.Function, atomicType *types.Named) bool {
+func coroWaitGroupAddUsesCanonicalAtomic(view coroWaitGroupProofView, fn *ssa.Function, atomicType *types.Named) bool {
 	var method *ssa.Function
 	for _, block := range fn.Blocks {
 		for _, instruction := range block.Instrs {
@@ -165,8 +188,8 @@ func coroWaitGroupAddUsesCanonicalAtomic(u *EmissionUniverse, fn *ssa.Function, 
 		}
 	}
 	if method != nil {
-		background, classified, err := u.FunctionBackground(method)
-		if err != nil || !classified || background != llssa.InGo {
+		classification, frozen := view.classification(method)
+		if !frozen || !classification.classified || classification.background != llssa.InGo {
 			return false
 		}
 	}
@@ -191,8 +214,8 @@ func coroWaitGroupAddUsesCanonicalAtomic(u *EmissionUniverse, fn *ssa.Function, 
 			if update != nil || field == nil || value.Common().IsInvoke() || len(value.Common().Args) != 2 || value.Common().Args[0] != field || value.Common().Args[1] != method.Params[1] {
 				return false
 			}
-			opcode, intrinsic, err := u.coroIntrinsicOpcode(value.Common().StaticCallee())
-			if err != nil || !intrinsic || opcode != llgoAtomicAddReturnNew {
+			classification, frozen := view.classification(value.Common().StaticCallee())
+			if !frozen || !classification.intrinsic || classification.opcode != llgoAtomicAddReturnNew {
 				return false
 			}
 			update = value
@@ -254,7 +277,7 @@ func (p *context) emitCoroWaitGroupAddFast(b llssa.Builder, args []llssa.Expr, p
 // The current source has one zero-argument bool query before its atomic add.
 // Prove that the exact bound query returns false without even reading memory
 // in this predicate profile; a name or a library's opaque body is insufficient.
-func coroWaitGroupAddBubbleQueryIsFalse(u *EmissionUniverse, fn *ssa.Function) bool {
+func coroWaitGroupAddBubbleQueryIsFalse(view coroWaitGroupProofView, fn *ssa.Function) bool {
 	var query *ssa.Function
 	for _, block := range fn.Blocks {
 		for _, instruction := range block.Instrs {
@@ -272,18 +295,18 @@ func coroWaitGroupAddBubbleQueryIsFalse(u *EmissionUniverse, fn *ssa.Function) b
 			query = target
 		}
 	}
-	value, ok := coroWaitGroupPurePredicate(u, query, make(map[*ssa.Function]bool))
+	value, ok := coroWaitGroupPurePredicate(view, query, make(map[*ssa.Function]bool))
 	return ok && value.Value != nil && value.Value.Kind() == constant.Bool && !constant.BoolVal(value.Value)
 }
 
 // Follow the existing canonical bindings through a small acyclic query chain.
 // Only constants, frozen predicate intrinsics and scalar comparisons are pure.
 // Loads, stores, unknown calls, cycles and an unavailable producer body reject.
-func coroWaitGroupPurePredicate(u *EmissionUniverse, fn *ssa.Function, stack map[*ssa.Function]bool) (*ssa.Const, bool) {
-	if u == nil || u.coroProgramIR == nil || fn == nil || len(stack) >= 8 {
+func coroWaitGroupPurePredicate(view coroWaitGroupProofView, fn *ssa.Function, stack map[*ssa.Function]bool) (*ssa.Const, bool) {
+	if view.resolve == nil || fn == nil || len(stack) >= 8 {
 		return nil, false
 	}
-	canonical, found := u.Resolve(fn)
+	canonical, found := view.resolve(fn)
 	if !found || canonical == nil {
 		return nil, false
 	}
@@ -291,20 +314,19 @@ func coroWaitGroupPurePredicate(u *EmissionUniverse, fn *ssa.Function, stack map
 	if stack[fn] || fn.Signature.Params().Len() != 0 || len(fn.FreeVars) != 0 {
 		return nil, false
 	}
-	opcode, intrinsic, err := u.coroIntrinsicOpcode(fn)
-	if err != nil {
+	classification, frozen := view.classification(fn)
+	if !frozen {
 		return nil, false
 	}
-	if intrinsic {
-		predicate := coroProgramPredicateCapability(opcode)
-		binding := u.coroProgramIR.programPredicates
+	if classification.intrinsic {
+		predicate := coroProgramPredicateCapability(classification.opcode)
+		binding := view.predicates
 		if predicate != 0 && binding.Valid() && binding.Mask&predicate != 0 {
 			return ssa.NewConst(constant.MakeBool(binding.Values&predicate != 0), types.Typ[types.Bool]), true
 		}
 		return nil, false
 	}
-	background, classified, backgroundErr := u.FunctionBackground(fn)
-	if backgroundErr != nil || !classified || background != llssa.InGo {
+	if !classification.classified || classification.background != llssa.InGo {
 		return nil, false
 	}
 	if len(fn.Blocks) == 0 {
@@ -332,7 +354,7 @@ func coroWaitGroupPurePredicate(u *EmissionUniverse, fn *ssa.Function, stack map
 				if value.Common().IsInvoke() || len(value.Common().Args) != 0 {
 					return nil, false
 				}
-				result, ok := coroWaitGroupPurePredicate(u, value.Common().StaticCallee(), stack)
+				result, ok := coroWaitGroupPurePredicate(view, value.Common().StaticCallee(), stack)
 				if !ok {
 					return nil, false
 				}

@@ -19,6 +19,14 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func waitGroupProofViewForTest(u *EmissionUniverse) coroWaitGroupProofView {
+	return coroWaitGroupProofView{
+		predicates: u.coroProgramIR.programPredicates,
+		functions:  u.coroProgramIR.callableClassifications,
+		resolve:    u.Resolve,
+	}
+}
+
 func TestCoroWaitGroupPurePredicateRejectsObservableQueries(t *testing.T) {
 	pkg, _, files := buildGoSSAPkg(t, `package foo
 import "unsafe"
@@ -53,7 +61,7 @@ func ForeignWrapper() bool { return Foreign() }
 		{"Load", false, false}, {"Store", false, false}, {"Cycle", false, false}, {"Unknown", false, false}, {"Foreign", false, false}, {"ForeignWrapper", false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			value, ok := coroWaitGroupPurePredicate(universe, pkg.Func(test.name), make(map[*ssa.Function]bool))
+			value, ok := coroWaitGroupPurePredicate(waitGroupProofViewForTest(universe), pkg.Func(test.name), make(map[*ssa.Function]bool))
 			if ok != test.known {
 				t.Fatalf("known=%t want %t", ok, test.known)
 			}
@@ -62,6 +70,13 @@ func ForeignWrapper() bool { return Foreign() }
 			}
 		})
 	}
+	t.Run("missing-frozen-classification", func(t *testing.T) {
+		view := waitGroupProofViewForTest(universe)
+		view.functions = nil
+		if _, known := coroWaitGroupPurePredicate(view, pkg.Func("False"), make(map[*ssa.Function]bool)); known {
+			t.Fatal("source body reconstructed a missing frozen callable classification")
+		}
+	})
 }
 
 func TestCoroWaitGroupFastUpdateIsCallFreeAtomicIR(t *testing.T) {
@@ -120,7 +135,7 @@ func Query() bool { return (*int)(Context())!=nil }
 			if err != nil {
 				t.Fatal(err)
 			}
-			value, ok := coroWaitGroupPurePredicate(universe, pkg.Func("Query"), make(map[*ssa.Function]bool))
+			value, ok := coroWaitGroupPurePredicate(waitGroupProofViewForTest(universe), pkg.Func("Query"), make(map[*ssa.Function]bool))
 			if ok != test.known {
 				t.Fatalf("known=%t want %t", ok, test.known)
 			}
