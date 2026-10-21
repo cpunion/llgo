@@ -341,6 +341,7 @@ type coroPhysicalInstructionPlan struct {
 	controlTargetID    coro.FunctionID
 	controlReceiver    ssa.Value
 	controlClosure     ssa.Value
+	waitGroupAddFast   *coroWaitGroupAddFastPlan
 	controlInterface   *coroInterfaceDispatchPlan
 	controlSignature   *types.Signature
 	controlFailure     string
@@ -1338,6 +1339,16 @@ func (stage *coroPhysicalPlanStage) freezePhysicalFunctionPlan(plan *coroPhysica
 	}
 	if err := plan.validateLocalChannels(); err != nil {
 		return fmt.Errorf("physical plan local channels: %w", err)
+	}
+	for instruction, physical := range plan.instructions {
+		if proof := physical.waitGroupAddFast; proof != nil {
+			if _, ok := instruction.(*ssa.Call); !ok || physical.control != coroPhysicalControlDirectAwait ||
+				physical.controlTarget != proof.target || physical.controlTargetID == "" ||
+				physical.controlClosure != nil || proof.stateField != 1 || proof.valueField != 2 ||
+				proof.sourceDigest != coroWaitGroupAddSourceDigest {
+				return fmt.Errorf("WaitGroup fast update lost its exact direct-await proof")
+			}
+		}
 	}
 	key := emissionFunctionOwnerKey{function: plan.function, owner: plan.owner}
 	if _, exists := stage.plans[key]; exists {
@@ -2400,6 +2411,7 @@ func clearCoroPhysicalControlForOperation(result *coroPhysicalInstructionPlan) {
 	result.controlTargetID = ""
 	result.controlReceiver = nil
 	result.controlClosure = nil
+	result.waitGroupAddFast = nil
 	result.controlInterface = nil
 	result.controlSignature = nil
 	result.controlFailure = ""
@@ -2650,6 +2662,9 @@ func planCoroPhysicalControlInstruction(
 		result.controlTarget = callee
 		result.controlTargetID = targetPlan.ID
 		result.controlClosure = closureValue
+		if result.control == coroPhysicalControlDirectAwait && closureValue == nil && audit.ctx != nil && !whole.IgnoresBody(callee) {
+			result.waitGroupAddFast = planCoroWaitGroupAddFast(audit.ctx, callee)
+		}
 	case *ssa.Go:
 		result.controlFailureHard = true
 		if !capabilities.staticSpawn {

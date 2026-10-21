@@ -415,6 +415,13 @@ func (p *context) compileCoroStaticAwait(
 			closureContext = b.Field(closureValue, 1)
 		}
 	}
+	var fastReturn llssa.BasicBlock
+	if test := p.emitCoroWaitGroupAddFast(b, args, instructionPlan.waitGroupAddFast); !test.IsNil() {
+		fastReturn = b.Func.MakeBlock()
+		slow := b.Func.MakeBlock()
+		b.If(test, fastReturn, slow)
+		b.SetBlockContinuation(slow)
+	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 	if instructionPlan.recoverAlias {
 		p.observeCoroPhysicalRecoverAlias(call)
@@ -430,6 +437,10 @@ func (p *context) compileCoroStaticAwait(
 	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, result.value)
 	if !retagged {
 		p.recordCoroValueAddress(call, result.address)
+	}
+	if fastReturn != nil {
+		b.Jump(fastReturn)
+		b.SetBlockContinuation(fastReturn)
 	}
 	return value
 }
