@@ -65,8 +65,8 @@ jobs:
     - name: Repeat concurrent temporary-file regression
       shell: python {0}
       run: "import os, pathlib, subprocess, time, runpy, shutil\nexe = pathlib.Path(os.environ['RUNNER_TEMP'])\
-        \ / 'createtemp-stress.exe'\nfor iteration in range(1, 31):\n    started =\
-        \ time.monotonic()\n    print(f'Starting createtemp repeat {iteration}/30',\
+        \ / 'createtemp-stress.exe'\nfor iteration in range(1, 301):\n    started\
+        \ = time.monotonic()\n    print(f'Starting createtemp repeat {iteration}/300',\
         \ flush=True)\n    process = subprocess.Popen([str(exe)])\n    try:\n    \
         \    status = process.wait(timeout=120)\n    except subprocess.TimeoutExpired:\n\
         \        print(f'createtemp repeat {iteration} timed out; PID {process.pid}',\
