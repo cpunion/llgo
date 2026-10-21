@@ -31,9 +31,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-          if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+          $installed = Get-Command winget.exe -ErrorAction SilentlyContinue
+          $version = if ($installed) { [version]((& $installed.Source --version).Trim().TrimStart('v')) } else { [version]'0.0' }
+          if ($version -lt [version]'1.29.290') {
             # Bootstrap from verified release files, avoiding the module's
-            # failing latest-release discovery on the ARM64 image.
+            # failing latest-release discovery on the ARM64 image. Older
+            # preinstalled clients do not recognize the 1.12 schema header.
             $base = 'https://github.com/microsoft/winget-cli/releases/download/v1.29.290'
             $files = @{
               'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle' = '6824b6e9484ab24687d99a0c829d2bcbcc7849a70a4d0f596fc43c89d20dff15'
