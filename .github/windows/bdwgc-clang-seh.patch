@@ -11,7 +11,7 @@
 +if (MINGW AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
 +  add_compile_options(-fms-extensions)
  endif()
-
+ 
  if (POLICY CMP0057)
 --- a/mark.c
 +++ b/mark.c
