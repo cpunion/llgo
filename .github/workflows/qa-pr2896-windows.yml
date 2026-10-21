@@ -6,80 +6,7 @@ name: QA PR2896 Windows
 permissions:
   contents: read
 jobs:
-  build-suite:
-    permissions:
-      contents: read
-      id-token: write
-    runs-on: windows-2022
-    timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-        - windows-2022
-        llvm:
-        - 22
-        windows_abi:
-        - mingw
-    steps:
-    - uses: actions/checkout@v7
-    - name: Install dependencies
-      uses: ./.github/actions/setup-deps
-      with:
-        llvm-version: ${{matrix.llvm}}
-        windows-abi: ${{ matrix.windows_abi || 'msvc' }}
-    - name: Install embedded dependencies
-      uses: ./.github/actions/setup-embed-deps
-    - name: Set up Go
-      uses: ./.github/actions/setup-go
-    - name: Install further optional dependencies for demos
-      uses: ./.github/actions/setup-demo-deps
-      with:
-        windows-abi: ${{ matrix.windows_abi || 'msvc' }}
-    - name: Set LLGO_ROOT
-      shell: bash
-      run: echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-    - name: Build
-      shell: bash
-      run: 'set -euo pipefail
-
-        go build -v ./...
-
-        '
-    - name: Prepare the Windows host Go test runtime
-      if: runner.os == 'Windows'
-      id: windows_go_runtime
-      shell: python {0}
-      run: 'import runpy
-
-        runpy.run_path(''dev/prepare_windows_go_test_runtime.py'', run_name=''__main__'')
-
-        '
-    - name: Probe Windows build-suite compilation
-      shell: bash
-      env:
-        LLGO_GO_TEST_OVERLAY: ${{ steps.windows_go_runtime.outputs.overlay }}
-      run: "set -euo pipefail\npython -u - <<'PYPROBE'\nimport os, subprocess, time\ncmd=['go','test','-x','-json','-ldflags=-linkmode=external\
-        \ -extldflags=-lsynchronization','-run','^TestConfigCloneDoesNotAliasInput$','-timeout=2m','-coverpkg=./...','-coverprofile=qa-probe.txt','-covermode=set','./internal/build']\n\
-        if os.environ.get('LLGO_GO_TEST_OVERLAY'): cmd.insert(4,'-overlay='+os.environ['LLGO_GO_TEST_OVERLAY'])\nprint('QA compile probe:',cmd,flush=True)\n\
-        started=time.monotonic()\ntry:\n r=subprocess.run(cmd,timeout=900)\nexcept subprocess.TimeoutExpired:\n subprocess.run(['powershell','-NoProfile','-Command','Get-CimInstance\
-        \ Win32_Process | Where-Object {$_.Name -match \"go|clang|link|build.test\"} | Select-Object ProcessId,ParentProcessId,Name,CommandLine\
-        \ | Format-List'])\n raise\nprint('QA compile seconds:',time.monotonic()-started,flush=True)\nraise SystemExit(r.returncode)\nPYPROBE\n"
-    - name: Run Windows build suite with live output
-      shell: bash
-      env:
-        LLGO_GO_TEST_OVERLAY: ${{ steps.windows_go_runtime.outputs.overlay }}
-      run: 'set -euo pipefail
-
-        args=(go test -json ''-ldflags=-linkmode=external -extldflags=-lsynchronization'')
-
-        if [[ -n "$LLGO_GO_TEST_OVERLAY" ]]; then args+=("-overlay=$LLGO_GO_TEST_OVERLAY"); fi
-
-        python -u .github/scripts/run_go_tests.py build "${args[@]}" -count=1 -timeout=35m -coverpkg=./... -coverprofile=qa-build.txt -covermode=set
-        ./internal/build
-
-        '
-  demos-x86:
+  createtemp-stress:
     runs-on: windows-2022
     timeout-minutes: 45
     strategy:
@@ -127,7 +54,32 @@ jobs:
       with:
         windows-abi: ${{ matrix.windows_abi }}
         windows-arch: ${{ matrix.windows_arch }}
-    - name: Run demos with live case progress
+    - name: Build concurrent temporary-file regression
       shell: bash
-      timeout-minutes: 18
-      run: bash .github/workflows/test_demo.sh
+      run: 'cd _demo/go/createtemp-1654
+
+        GOTOOLCHAIN=local GOWORK=off llgo build -p=1 -o "$RUNNER_TEMP/createtemp-stress.exe"
+        .
+
+        '
+    - name: Repeat concurrent temporary-file regression
+      shell: python {0}
+      run: "import os, pathlib, subprocess, time\nexe = pathlib.Path(os.environ['RUNNER_TEMP'])\
+        \ / 'createtemp-stress.exe'\nfor iteration in range(1, 11):\n    started =\
+        \ time.monotonic()\n    print(f'Starting createtemp repeat {iteration}/10',\
+        \ flush=True)\n    process = subprocess.Popen([str(exe)])\n    try:\n    \
+        \    status = process.wait(timeout=120)\n    except subprocess.TimeoutExpired:\n\
+        \        print(f'createtemp repeat {iteration} timed out; PID {process.pid}',\
+        \ flush=True)\n        lldb = os.environ.get('LLGO_LLDB')\n        if lldb:\n\
+        \            debug_env = os.environ.copy()\n            prefix = debug_env.get('LLGO_WINDOWS_LLDB_PYTHON_HOME')\n\
+        \            if prefix:\n                debug_env['PYTHONHOME'] = prefix\n\
+        \                debug_env['PATH'] = str(pathlib.Path(prefix) / 'bin') + os.pathsep\
+        \ + debug_env['PATH']\n            if debug_env.get('LLGO_WINDOWS_LLDB_PYTHONPATH'):\n\
+        \                debug_env['PYTHONPATH'] = debug_env['LLGO_WINDOWS_LLDB_PYTHONPATH']\n\
+        \            try:\n                subprocess.run([lldb, '--batch', '-o',\
+        \ f'process attach --pid {process.pid}', '-o', 'thread backtrace all', '-o',\
+        \ 'process detach'], env=debug_env, timeout=45)\n            except subprocess.TimeoutExpired:\n\
+        \                print('LLDB attach also timed out', flush=True)\n       \
+        \ process.kill()\n        process.wait()\n        raise SystemExit(1)\n  \
+        \  print(f'Finished repeat {iteration}: {time.monotonic()-started:.1f}s, exit\
+        \ {status}', flush=True)\n    if status:\n        raise SystemExit(status)\n"
