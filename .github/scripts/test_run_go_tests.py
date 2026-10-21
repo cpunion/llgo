@@ -3,9 +3,11 @@ import io
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 import run_go_tests
@@ -68,6 +70,51 @@ class GoTestReportTests(unittest.TestCase):
         _, status, output, _ = self.invoke(["compiler diagnostic", "[1, 2]"])
         self.assertEqual(status, 0)
         self.assertTrue(output.startswith("compiler diagnostic\n[1, 2]\n"))
+
+    def test_native_log_pipe_preserves_large_output_stderr_and_exit_status(self):
+        repo = Path(__file__).resolve().parents[2]
+        payload = ("native output \u4e2d\u6587\r\n".encode("utf-8") * 400000)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, log = root / "source", root / "log"
+            source.write_bytes(payload)
+            child = ("import pathlib,sys; "
+                     f"sys.stdout.buffer.write(pathlib.Path({str(source)!r}).read_bytes()); "
+                     "sys.stdout.buffer.flush(); "
+                     "sys.stderr.buffer.write(b'final diagnostic\\n'); sys.exit(23)")
+            result = subprocess.run(
+                [sys.executable, str(repo / "dev/run_logged_command.py"), str(log),
+                 sys.executable, "-c", child], capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertEqual(result.stdout, payload + b"final diagnostic\n")
+            self.assertEqual(log.read_bytes(), result.stdout)
+
+    def test_progress_and_json_log_are_visible_before_child_exits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = root / "release"
+            event = json.dumps({"Action": "output", "Output": "probe running\n"})
+            child = ("import pathlib,time; "
+                     f"print({event!r},flush=True); "
+                     f"release=pathlib.Path({str(release)!r}); "
+                     "exec('while not release.exists(): time.sleep(0.01)')")
+            script = Path(run_go_tests.__file__).resolve()
+            command = [sys.executable, str(script), "--output-dir", str(root),
+                       "build", sys.executable, "-c", child]
+            with subprocess.Popen(command, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True) as process:
+                lines = queue.Queue()
+                reader = threading.Thread(target=lambda: lines.put(process.stdout.readline()))
+                reader.start()
+                try:
+                    self.assertEqual(lines.get(timeout=5), "probe running\n")
+                    self.assertIsNone(process.poll())
+                    self.assertEqual((root / "build.jsonl").read_text().strip(), event)
+                finally:
+                    release.touch()
+                    reader.join(timeout=5)
+                    stdout, stderr = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, 0, stdout + stderr)
 
     def test_windows_quarantine_still_rejects_unrelated_failures_after_json_rendering(self):
         repo = Path(__file__).resolve().parents[2]

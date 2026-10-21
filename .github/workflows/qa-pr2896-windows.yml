@@ -55,6 +55,13 @@ jobs:
         runpy.run_path(''dev/prepare_windows_go_test_runtime.py'', run_name=''__main__'')
 
         '
+    - name: Check native pipe with large binary output and failure propagation
+      shell: python {0}
+      run: 'import os,subprocess,sys
+
+        subprocess.run([sys.executable,''-m'',''unittest'',''test_run_go_tests.GoTestReportTests.test_native_log_pipe_preserves_large_output_stderr_and_exit_status''],cwd=''.github/scripts'',check=True,timeout=30)
+
+        '
     - name: Run main batch with a process snapshot on timeout
       shell: python {0}
       env:
