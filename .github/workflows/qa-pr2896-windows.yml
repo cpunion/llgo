@@ -2,14 +2,18 @@ name: QA PR2896 Windows
 'on':
   push:
     branches:
-    - codex/qa-pr2896-windows-20261021
+    - codex/qa-pr2896-main-20261021
 permissions:
   contents: read
 jobs:
-  createtemp-stress:
+  main-suite:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
+      fail-fast: false
       matrix:
         os:
         - windows-2022
@@ -17,10 +21,6 @@ jobs:
         - 22
         windows_abi:
         - mingw
-        windows_arch:
-        - '386'
-        host_go_arch:
-        - x64
     steps:
     - uses: actions/checkout@v7
     - name: Install dependencies
@@ -28,58 +28,50 @@ jobs:
       with:
         llvm-version: ${{matrix.llvm}}
         windows-abi: ${{ matrix.windows_abi || 'msvc' }}
-        windows-arch: ${{ matrix.windows_arch || 'amd64' }}
-    - name: Setup demo dependencies
+    - name: Install embedded dependencies
+      uses: ./.github/actions/setup-embed-deps
+    - name: Set up Go
+      uses: ./.github/actions/setup-go
+    - name: Install further optional dependencies for demos
       uses: ./.github/actions/setup-demo-deps
       with:
         windows-abi: ${{ matrix.windows_abi || 'msvc' }}
-        windows-arch: ${{ matrix.windows_arch || 'amd64' }}
-        install-lldb-python: 'true'
-    - name: Set up Go for build
-      uses: ./.github/actions/setup-go
-      with:
-        architecture: ${{ matrix.host_go_arch || '' }}
-    - name: Build LLGo and test tools
+    - name: Set LLGO_ROOT
       shell: bash
-      run: 'dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+      run: echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+    - name: Build
+      shell: bash
+      run: 'set -euo pipefail
 
-        echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
-
-        echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+        go build -v ./...
 
         '
-    - name: Activate native Windows target
+    - name: Prepare the Windows host Go test runtime
       if: runner.os == 'Windows'
-      uses: ./.github/actions/activate-windows-target
-      with:
-        windows-abi: ${{ matrix.windows_abi }}
-        windows-arch: ${{ matrix.windows_arch }}
-    - name: Build concurrent temporary-file regression
-      shell: bash
-      run: 'cd _demo/go/createtemp-1654
+      id: windows_go_runtime
+      shell: python {0}
+      run: 'import runpy
 
-        GOTOOLCHAIN=local GOWORK=off llgo build -p=1 -o "$RUNNER_TEMP/createtemp-stress.exe"
-        .
+        runpy.run_path(''dev/prepare_windows_go_test_runtime.py'', run_name=''__main__'')
 
         '
-    - name: Repeat concurrent temporary-file regression
+    - name: Run main batch with a process snapshot on timeout
       shell: python {0}
-      run: "import os, pathlib, subprocess, time\nexe = pathlib.Path(os.environ['RUNNER_TEMP'])\
-        \ / 'createtemp-stress.exe'\nfor iteration in range(1, 11):\n    started =\
-        \ time.monotonic()\n    print(f'Starting createtemp repeat {iteration}/10',\
-        \ flush=True)\n    process = subprocess.Popen([str(exe)])\n    try:\n    \
-        \    status = process.wait(timeout=120)\n    except subprocess.TimeoutExpired:\n\
-        \        print(f'createtemp repeat {iteration} timed out; PID {process.pid}',\
-        \ flush=True)\n        lldb = os.environ.get('LLGO_LLDB')\n        if lldb:\n\
-        \            debug_env = os.environ.copy()\n            prefix = debug_env.get('LLGO_WINDOWS_LLDB_PYTHON_HOME')\n\
-        \            if prefix:\n                debug_env['PYTHONHOME'] = prefix\n\
-        \                debug_env['PATH'] = str(pathlib.Path(prefix) / 'bin') + os.pathsep\
-        \ + debug_env['PATH']\n            if debug_env.get('LLGO_WINDOWS_LLDB_PYTHONPATH'):\n\
-        \                debug_env['PYTHONPATH'] = debug_env['LLGO_WINDOWS_LLDB_PYTHONPATH']\n\
-        \            try:\n                subprocess.run([lldb, '--batch', '-o',\
-        \ f'process attach --pid {process.pid}', '-o', 'thread backtrace all', '-o',\
-        \ 'process detach'], env=debug_env, timeout=45)\n            except subprocess.TimeoutExpired:\n\
-        \                print('LLDB attach also timed out', flush=True)\n       \
-        \ process.kill()\n        process.wait()\n        raise SystemExit(1)\n  \
-        \  print(f'Finished repeat {iteration}: {time.monotonic()-started:.1f}s, exit\
-        \ {status}', flush=True)\n    if status:\n        raise SystemExit(status)\n"
+      env:
+        LLGO_STDIO_NOBUF: '1'
+      run: "import os, pathlib, subprocess, time\ncommand = r\"\"\"set -euo pipefail\n\
+        go list ./... | grep -v '^github.com/xgo-dev/llgo/test/go$' | grep -v '^github.com/xgo-dev/llgo/cl$'\
+        \ | grep -v '^github.com/xgo-dev/llgo/internal/build$' | xargs bash dev/go_test_windows.sh\
+        \ python .github/scripts/run_go_tests.py main go test -json '-ldflags=-linkmode=external\
+        \ -extldflags=-lsynchronization' -timeout 20m -coverprofile=coverage-main.txt\
+        \ -covermode=set -coverpkg=./... -bench '^BenchmarkGo126' -benchtime=1x\n\
+        printf 'Main batch returned successfully\\n'\n\"\"\"\nstarted = time.monotonic()\n\
+        process = subprocess.Popen(['bash', '-c', command])\ntry:\n    status = process.wait(timeout=1500)\n\
+        except subprocess.TimeoutExpired:\n    print('Main batch timeout after 25\
+        \ minutes; capturing remaining processes', flush=True)\n    subprocess.run(['powershell',\
+        \ '-NoProfile', '-Command', 'Get-CimInstance Win32_Process | Where-Object\
+        \ {$_.Name -match \"go|python|bash|tee|clang|link|test|debug|chrome\"} | Select-Object\
+        \ ProcessId,ParentProcessId,Name,CommandLine | Format-List'], timeout=30)\n\
+        \    subprocess.run(['taskkill', '/F', '/T', '/PID', str(process.pid)], timeout=30)\n\
+        \    raise SystemExit(1)\nprint(f'Main batch elapsed {time.monotonic()-started:.1f}s,\
+        \ exit {status}', flush=True)\nraise SystemExit(status)\n"
