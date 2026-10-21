@@ -666,7 +666,7 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			"__llgo_coro_doorbell_open_v1":                   false,
 			"__llgo_coro_doorbell_read_v1":                   false,
 			"__llgo_coro_doorbell_close_v1":                  false,
-			"GC_init":                                        false,
+			"__llgo_coro_gc_init_v1":                         false,
 			"GC_add_roots":                                   false,
 			"pthread_self":                                   false,
 		}
