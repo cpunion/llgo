@@ -1,0 +1,49 @@
+// Copyright 2013 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license.
+// See LICENSES/Go-BSD-3-Clause.txt at this module root for license terms.
+
+package poll
+
+type FD struct { fdmu fdMutex; isFile bool }
+func errClosing(bool) error { return nil }
+func (fd *FD) destroy() error { return nil }
+
+func (fd *FD) readLock() error {
+	if !fd.fdmu.rwlock(readlock, waitLock) {
+		return errClosing(fd.isFile)
+	}
+	return nil
+}
+
+func (fd *FD) readUnlock() {
+	if fd.fdmu.rwunlock(readlock) {
+		fd.destroy()
+	}
+}
+
+func (fd *FD) writeLock() error {
+	if !fd.fdmu.rwlock(writeLock, waitLock) {
+		return errClosing(fd.isFile)
+	}
+	return nil
+}
+
+func (fd *FD) writeUnlock() {
+	if fd.fdmu.rwunlock(writeLock) {
+		fd.destroy()
+	}
+}
+
+func (fd *FD) incref() error {
+	if !fd.fdmu.incref() {
+		return errClosing(fd.isFile)
+	}
+	return nil
+}
+
+func (fd *FD) decref() error {
+	if fd.fdmu.decref() {
+		return fd.destroy()
+	}
+	return nil
+}

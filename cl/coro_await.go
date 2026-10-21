@@ -425,6 +425,17 @@ func (p *context) compileCoroStaticAwait(
 		fastValue = b.AllocaT(p.prog.Bool())
 		fastTest = p.emitCoroPollMutexFast(b, args, instructionPlan.pollMutexFast, fastValue)
 	}
+	if instructionPlan.pollFDFast != nil {
+		if !fastTest.IsNil() {
+			panic("coroutine call has two guarded update recipes")
+		}
+		if callee.Signature.Results().Len() != 0 {
+			resultType := p.type_(callee.Signature.Results().At(0).Type(), llssa.InGo)
+			fastValue = b.AllocaT(resultType)
+			b.Store(fastValue, p.prog.Zero(resultType))
+		}
+		fastTest = p.emitCoroPollFDFast(b, args, instructionPlan.pollFDFast)
+	}
 	if !fastTest.IsNil() {
 		fastReturn = b.Func.MakeBlock()
 		slow := b.Func.MakeBlock()

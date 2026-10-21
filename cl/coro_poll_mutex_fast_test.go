@@ -23,9 +23,9 @@ func TestCoroPollMutexFastPlanRequiresExactBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, method := range []string{"rwlock", "rwunlock"} {
+	for _, method := range []string{"rwlock", "rwunlock", "incref", "decref"} {
 		for _, change := range []string{"verified", "receiver", "read", "wait", "layout", "constant", "true", "false", "type", "source", "noinline", "load", "cas", "import", "domain", "missing-classification"} {
-			if method == "rwunlock" && change == "wait" {
+			if method == "rwunlock" && change == "wait" || (method == "incref" || method == "decref") && (change == "read" || change == "wait") {
 				continue
 			}
 			t.Run(method+"/"+change, func(t *testing.T) {

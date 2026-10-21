@@ -23,6 +23,8 @@ import (
 const (
 	coroPollMutexLockDigest   = "384ce72baf95c2a2e125726919e60a7c8d5d5ed492a55ef0f133c39fc32e0a0c"
 	coroPollMutexUnlockDigest = "39c93a7aa7a78ec82f88b5a4516ec790e1d7b576d9e499679e0dc8752b0ab0d5"
+	coroPollMutexIncrefDigest = "ae0e7fe6b225ea3b7ff1a9aaa9b1c140534ccc00a7046127fbcf751a5fc6dfce"
+	coroPollMutexDecrefDigest = "a7b1d42807663ad9813f1329886fbef7c863a0edd1b8edeecc05eb131c2d819b"
 )
 
 // A successful single CAS performs precisely the original non-waiting update.
@@ -31,11 +33,18 @@ type coroPollMutexFastPlan struct {
 	target       *ssa.Function
 	sourceDigest string
 	unlock       bool
+	refOnly      bool
 }
 
 func (proof *coroPollMutexFastPlan) valid() bool {
 	if proof == nil || proof.target == nil {
 		return false
+	}
+	if proof.refOnly {
+		if proof.unlock {
+			return proof.target.Name() == "decref" && proof.sourceDigest == coroPollMutexDecrefDigest
+		}
+		return proof.target.Name() == "incref" && proof.sourceDigest == coroPollMutexIncrefDigest
 	}
 	if proof.unlock {
 		return proof.target.Name() == "rwunlock" && proof.sourceDigest == coroPollMutexUnlockDigest
@@ -46,16 +55,20 @@ func (proof *coroPollMutexFastPlan) valid() bool {
 func planCoroPollMutexFast(p *context, fn *ssa.Function) *coroPollMutexFastPlan {
 	if p == nil || p.prog == nil || p.emissionUniverse == nil || p.emissionUniverse.coroProgramIR == nil ||
 		fn == nil || fn.Pkg == nil || fn.Pkg.Pkg.Path() != "internal/poll" ||
-		(fn.Name() != "rwlock" && fn.Name() != "rwunlock") || hasNoInlineDirective(fn) || len(fn.FreeVars) != 0 ||
+		(fn.Name() != "rwlock" && fn.Name() != "rwunlock" && fn.Name() != "incref" && fn.Name() != "decref") || hasNoInlineDirective(fn) || len(fn.FreeVars) != 0 ||
 		fn.Signature.Recv() == nil || fn.Signature.Recv().Name() != "mu" ||
 		fn.Signature.Results().Len() != 1 || !types.Identical(fn.Signature.Results().At(0).Type(), types.Typ[types.Bool]) ||
 		p.prog.PointerSize() != 8 {
 		return nil
 	}
-	unlock := fn.Name() == "rwunlock"
+	unlock := fn.Name() == "rwunlock" || fn.Name() == "decref"
+	refOnly := fn.Name() == "incref" || fn.Name() == "decref"
 	params := 2
 	if unlock {
 		params = 1
+	}
+	if refOnly {
+		params = 0
 	}
 	if fn.Signature.Params().Len() != params {
 		return nil
@@ -126,7 +139,7 @@ func planCoroPollMutexFast(p *context, fn *ssa.Function) *coroPollMutexFastPlan 
 		return nil
 	}
 	sum := sha256.Sum256(body.Bytes())
-	proof := &coroPollMutexFastPlan{target: fn, sourceDigest: hex.EncodeToString(sum[:]), unlock: unlock}
+	proof := &coroPollMutexFastPlan{target: fn, sourceDigest: hex.EncodeToString(sum[:]), unlock: unlock, refOnly: refOnly}
 	if !proof.valid() {
 		return nil
 	}
@@ -182,12 +195,19 @@ func coroPollMutexExactAtomicImport(files []*ast.File, fn *ssa.Function, syntax 
 }
 
 func (p *context) emitCoroPollMutexFast(b llssa.Builder, args []llssa.Expr, proof *coroPollMutexFastPlan, value llssa.Expr) llssa.Expr {
+	return p.emitCoroPollMutexFastUpdate(b, args, proof, value, false)
+}
+
+func (p *context) emitCoroPollMutexFastUpdate(b llssa.Builder, args []llssa.Expr, proof *coroPollMutexFastPlan, value llssa.Expr, excludeDestroy bool) llssa.Expr {
 	if proof == nil {
 		return llssa.Nil
 	}
 	wantArgs := 3
 	if proof.unlock {
 		wantArgs = 2
+	}
+	if proof.refOnly {
+		wantArgs = 1
 	}
 	if !proof.valid() || len(args) != wantArgs || value.IsNil() {
 		panic("poll mutex update lost frozen operands")
@@ -200,11 +220,23 @@ func (p *context) emitCoroPollMutexFast(b llssa.Builder, args []llssa.Expr, proo
 		u64 := p.prog.Type(types.Typ[types.Uint64], llssa.InGo)
 		constant := func(v uint64) llssa.Expr { return p.prog.IntVal(v, u64) }
 		zero := constant(0)
-		bit := b.SelectValue(args[1], constant(2), constant(4))
 		old := b.LoadKnownNonNil(state).SetOrdering(llssa.OrderingSeqConsistent)
 		ref := b.BinOp(token.AND, old, constant((1<<20-1)<<3))
 		var next, eligible, returned llssa.Expr
-		if proof.unlock {
+		if proof.refOnly {
+			if proof.unlock {
+				next = b.BinOp(token.SUB, old, constant(8))
+				eligible = b.BinOp(token.NEQ, ref, zero)
+				returned = b.BinOp(token.EQL, b.BinOp(token.AND, next, constant(1|((1<<20-1)<<3))), constant(1))
+			} else {
+				next = b.BinOp(token.ADD, old, constant(8))
+				available := b.BinOp(token.EQL, b.BinOp(token.AND, old, constant(1)), zero)
+				noOverflow := b.BinOp(token.NEQ, b.BinOp(token.AND, next, constant((1<<20-1)<<3)), zero)
+				eligible = b.BinOp(token.AND, available, noOverflow)
+				returned = p.prog.BoolVal(true)
+			}
+		} else if proof.unlock {
+			bit := b.SelectValue(args[1], constant(2), constant(4))
 			mask := b.SelectValue(args[1], constant((1<<20-1)<<23), constant((1<<20-1)<<43))
 			next = b.BinOp(token.SUB, b.BinOp(token.AND_NOT, old, bit), constant(8))
 			locked := b.BinOp(token.NEQ, b.BinOp(token.AND, old, bit), zero)
@@ -213,11 +245,18 @@ func (p *context) emitCoroPollMutexFast(b llssa.Builder, args []llssa.Expr, proo
 			eligible = b.BinOp(token.AND, b.BinOp(token.AND, locked, referenced), noWaiters)
 			returned = b.BinOp(token.EQL, b.BinOp(token.AND, next, constant(1|((1<<20-1)<<3))), constant(1))
 		} else {
+			bit := b.SelectValue(args[1], constant(2), constant(4))
 			next = b.BinOp(token.ADD, b.BinOp(token.OR, old, bit), constant(8))
 			available := b.BinOp(token.EQL, b.BinOp(token.AND, old, b.BinOp(token.OR, bit, constant(1))), zero)
 			noOverflow := b.BinOp(token.NEQ, b.BinOp(token.AND, next, constant((1<<20-1)<<3)), zero)
 			eligible = b.BinOp(token.AND, available, noOverflow)
 			returned = p.prog.BoolVal(true)
+		}
+		if excludeDestroy && proof.unlock {
+			// FD's wrapper owns destroy when the last closed reference is
+			// released. Reject that update before CAS so its original slow
+			// call can perform the decrement and destruction exactly once.
+			eligible = b.BinOp(token.AND, eligible, b.BinOp(token.EQL, returned, p.prog.BoolVal(false)))
 		}
 		b.IfThen(eligible, func() {
 			updated := b.AtomicCmpXchg(state, old, next)
