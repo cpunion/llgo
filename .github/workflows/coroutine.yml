@@ -541,23 +541,6 @@ jobs:
               -test.v -test.count=3 -test.timeout=60s
           done
 
-      - name: Test native build information and released main package metadata
-        if: matrix.lane == 'fault-e2e'
-        run: |
-          go test ./internal/build \
-            -run '^Test(GenMainModule|LinkedBuildInfo|BuildInfoSurvivesNativeLink|RuntimeCompilerSourcePatchTypeChecks)' \
-            -timeout=3m -count=1
-          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
-            timeout 5m /tmp/llgo-coro-fault build -p=1 -trimpath \
-            -o /tmp/llgo-buildinfo-gate ./test/go/testdata/coro_buildinfo
-          timeout 30s /tmp/llgo-buildinfo-gate
-          go version -m /tmp/llgo-buildinfo-gate
-          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
-            go test ./test/goroot -run '^TestGoRootRunCases$' -count=1 -v -timeout=5m \
-            -goroot="$(go env GOROOT)" -llgo=/tmp/llgo-coro-fault \
-            -directive-mode=ci -case='^noinit\.go$' \
-            -build-timeout=3m -run-timeout=1m
-
       - name: Test native linked coroutine islands
         if: matrix.lane == 'native-e2e'
         # Each fixture builds and optimizes its own LLVM runtime island. Keep
@@ -679,6 +662,88 @@ jobs:
             LLGO_CORO_STDLIB_ACCEPTANCE="$fixture" \
               go test ./internal/build -run '^TestCoroStdlibSyncAcceptance$' -timeout=15m -count=1
           done
+
+      - name: Test guarded poll locks and dynamic interface comparisons
+        if: matrix.lane == 'stdlib-file'
+        run: |
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 \
+            go build -p=1 -o /tmp/llgo-poll-compiler ./cmd/llgo
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            /tmp/llgo-poll-compiler test -c -p=1 -trimpath \
+              -o /tmp/llgo-poll-gate \
+              test/go/poll_mutex_fast_test.go test/go/interface_compare_fast_test.go
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+          import subprocess
+          image = '/tmp/llgo-poll-gate'
+          out = Path('/tmp/llgo-poll-codegen')
+          out.mkdir()
+          symbols = subprocess.check_output(['llvm-nm', '--print-size', image], text=True)
+          (out / 'symbols.txt').write_text(symbols)
+          groups = {
+              'counter': lambda name: 'TestPollMutexFastConcurrent' in name and name.endswith('$coro.resume'),
+              'fd-read-lock': lambda name: name == 'internal/poll.(*FD).readLock$coro.resume',
+              'fd-read-unlock': lambda name: name == 'internal/poll.(*FD).readUnlock$coro.resume',
+          }
+          proof = {}
+          for group, selected in groups.items():
+              entries = []
+              for line in symbols.splitlines():
+                  fields = line.split()
+                  if len(fields) != 4 or not selected(fields[3]):
+                      continue
+                  address, size, kind, name = fields
+                  start, size = int(address, 16), int(size, 16)
+                  assert kind.lower() == 't' and size > 0, 'missing ELF function extent: ' + name
+                  # A resume contains interior __llgo_pcsite symbols. Selecting
+                  # only its name stops objdump at the first interior symbol;
+                  # the ELF function extent includes its remaining instructions.
+                  assembly = subprocess.check_output([
+                      'llvm-objdump', '--disassemble', '--start-address=' + hex(start),
+                      '--stop-address=' + hex(start + size), image], text=True)
+                  (out / (group + '-' + str(len(entries)) + '.s')).write_text(assembly)
+                  entries.append(dict(name=name, address=start, size=size, cas=assembly.count('cmpxchg')))
+              proof[group] = entries
+          (out / 'proof.json').write_text(json.dumps(proof, indent=2) + '\n')
+          print(json.dumps(proof, indent=2))
+          assert len(proof['counter']) == 2, 'missing poll-lock counter-test resumes'
+          assert sum(entry['cas'] for entry in proof['counter']) >= 3, 'poll lock/unlock and WaitGroup guarded updates were not retained'
+          for group in ('fd-read-lock', 'fd-read-unlock'):
+              assert len(proof[group]) == 1 and proof[group][0]['cas'] >= 1, 'missing production guarded update: ' + group
+          PYCODE
+          for procs in 1 4; do
+            GOMAXPROCS="$procs" timeout 90s /tmp/llgo-poll-gate \
+              -test.v -test.count=3 -test.timeout=60s
+          done
+
+      - name: Test native build information and released main package metadata
+        if: matrix.lane == 'stdlib-file'
+        # Reuse this lane's compiler; the fault lane already owns three full
+        # native builds. Keep every check and its individual timeout intact.
+        run: |
+          go test ./internal/build \
+            -run '^Test(GenMainModule|LinkedBuildInfo|BuildInfoSurvivesNativeLink|RuntimeCompilerSourcePatchTypeChecks)' \
+            -timeout=3m -count=1
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            timeout 5m /tmp/llgo-poll-compiler build -p=1 -trimpath \
+            -o /tmp/llgo-buildinfo-gate ./test/go/testdata/coro_buildinfo
+          timeout 30s /tmp/llgo-buildinfo-gate
+          go version -m /tmp/llgo-buildinfo-gate
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            go test ./test/goroot -run '^TestGoRootRunCases$' -count=1 -v -timeout=5m \
+            -goroot="$(go env GOROOT)" -llgo=/tmp/llgo-poll-compiler \
+            -directive-mode=ci -case='^noinit\.go$' \
+            -build-timeout=3m -run-timeout=1m
+
+      - name: Upload failed poll mutex code generation
+        if: failure() && matrix.lane == 'stdlib-file'
+        uses: actions/upload-artifact@v7
+        with:
+          name: poll-mutex-codegen-llvm-${{ matrix.llvm }}
+          path: /tmp/llgo-poll-codegen
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Verify production time.Sleep coroutine plan
         if: matrix.lane == 'compat'

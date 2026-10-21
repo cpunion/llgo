@@ -342,6 +342,7 @@ type coroPhysicalInstructionPlan struct {
 	controlReceiver    ssa.Value
 	controlClosure     ssa.Value
 	waitGroupAddFast   *coroWaitGroupAddFastPlan
+	pollMutexFast      *coroPollMutexFastPlan
 	controlInterface   *coroInterfaceDispatchPlan
 	controlSignature   *types.Signature
 	controlFailure     string
@@ -1341,6 +1342,13 @@ func (stage *coroPhysicalPlanStage) freezePhysicalFunctionPlan(plan *coroPhysica
 		return fmt.Errorf("physical plan local channels: %w", err)
 	}
 	for instruction, physical := range plan.instructions {
+		if proof := physical.pollMutexFast; proof != nil {
+			if _, ok := instruction.(*ssa.Call); !ok || physical.control != coroPhysicalControlDirectAwait ||
+				physical.controlTarget != proof.target || physical.controlTargetID == "" ||
+				physical.controlClosure != nil || !proof.valid() {
+				return fmt.Errorf("poll mutex update lost its exact direct-await proof")
+			}
+		}
 		if proof := physical.waitGroupAddFast; proof != nil {
 			if _, ok := instruction.(*ssa.Call); !ok || physical.control != coroPhysicalControlDirectAwait ||
 				physical.controlTarget != proof.target || physical.controlTargetID == "" ||
@@ -2412,6 +2420,7 @@ func clearCoroPhysicalControlForOperation(result *coroPhysicalInstructionPlan) {
 	result.controlReceiver = nil
 	result.controlClosure = nil
 	result.waitGroupAddFast = nil
+	result.pollMutexFast = nil
 	result.controlInterface = nil
 	result.controlSignature = nil
 	result.controlFailure = ""
@@ -2664,6 +2673,7 @@ func planCoroPhysicalControlInstruction(
 		result.controlClosure = closureValue
 		if result.control == coroPhysicalControlDirectAwait && closureValue == nil && audit.ctx != nil && !whole.IgnoresBody(callee) {
 			result.waitGroupAddFast = planCoroWaitGroupAddFast(audit.ctx, callee)
+			result.pollMutexFast = planCoroPollMutexFast(audit.ctx, callee)
 		}
 	case *ssa.Go:
 		result.controlFailureHard = true

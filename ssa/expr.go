@@ -918,12 +918,31 @@ func (b Builder) binOp(
 				}
 				return Expr{b.unsafeEface(b.faceAbiType(x).impl, b.faceData(x.impl)), prog.rtType("Eface")}
 			}
-			switch op {
-			case token.EQL:
-				return b.InlineCall(b.Pkg.rtFunc("EfaceEqual"), toEface(x, x.kind == vkEface), toEface(y, y.kind == vkEface))
-			case token.NEQ:
-				ret := b.InlineCall(b.Pkg.rtFunc("EfaceEqual"), toEface(x, x.kind == vkEface), toEface(y, y.kind == vkEface))
-				ret.impl = llvm.CreateNot(b.impl, ret.impl)
+			if op == token.EQL || op == token.NEQ {
+				// An interface is nil exactly when its first word is nil, for
+				// both the type/data and itab/data representations. If either
+				// value is nil, equality needs no dynamic type lookup or value
+				// comparison. In particular, a typed nil still has a nonzero
+				// first word. Keep the original equality call when both words
+				// are nonzero: equal non-comparable dynamic types must panic.
+				left, right := b.InterfaceTypeWord(x), b.InterfaceTypeWord(y)
+				nilWord := prog.Nil(prog.VoidPtr())
+				bothPresent := b.BinOp(token.AND, b.BinOp(token.NEQ, left, nilWord), b.BinOp(token.NEQ, right, nilWord))
+				nilEqual := b.BinOp(token.EQL, left, right)
+				entry := b.impl.GetInsertBlock()
+				blocks := b.Func.MakeBlocks(2)
+				b.If(bothPresent, blocks[0], blocks[1])
+				b.SetBlockContinuation(blocks[0])
+				compared := b.InlineCall(b.Pkg.rtFunc("EfaceEqual"), toEface(x, x.kind == vkEface), toEface(y, y.kind == vkEface))
+				slow := b.impl.GetInsertBlock()
+				b.Jump(blocks[1])
+				b.SetBlockContinuation(blocks[1])
+				value := b.Phi(prog.Bool())
+				value.impl.AddIncoming([]llvm.Value{nilEqual.impl, compared.impl}, []llvm.BasicBlock{entry, slow})
+				ret := value.Expr
+				if op == token.NEQ {
+					ret.impl = llvm.CreateNot(b.impl, ret.impl)
+				}
 				return ret
 			}
 		}
