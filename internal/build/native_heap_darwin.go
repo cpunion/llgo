@@ -27,8 +27,33 @@ static void llgo_release_native_heap(void) {
 */
 import "C"
 
+import "time"
+
 // releaseNativeHeap asks the host allocator to return free LLVM/backend pages
 // at an explicit compiler phase boundary.
 func releaseNativeHeap() {
 	C.llgo_release_native_heap()
+}
+
+// beginNativeHeapRelief returns free allocator pages at intervals while a large
+// detached module runs its requested optimization pipeline. It never changes
+// the LLVM pipeline or frees live allocations. The owner joins this loop
+// before disposing its context or returning from the optimization phase.
+func beginNativeHeapRelief() func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				releaseNativeHeap()
+			}
+		}
+	}()
+	return func() { close(stop); <-done; releaseNativeHeap() }
 }
