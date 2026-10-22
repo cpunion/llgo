@@ -342,6 +342,7 @@ type coroPhysicalInstructionPlan struct {
 	controlReceiver    ssa.Value
 	controlClosure     ssa.Value
 	waitGroupAddFast   *coroWaitGroupAddFastPlan
+	waitGroupWaitFast  *coroWaitGroupWaitFastPlan
 	pollMutexFast      *coroPollMutexFastPlan
 	pollFDFast         *coroPollFDFastPlan
 	controlInterface   *coroInterfaceDispatchPlan
@@ -1375,6 +1376,13 @@ func (stage *coroPhysicalPlanStage) freezePhysicalFunctionPlan(plan *coroPhysica
 				physical.controlTarget != proof.target || physical.controlTargetID == "" ||
 				physical.controlClosure != nil || !proof.valid() {
 				return fmt.Errorf("poll mutex update lost its exact direct-await proof")
+			}
+		}
+		if proof := physical.waitGroupWaitFast; proof != nil {
+			if _, ok := instruction.(*ssa.Call); !ok || physical.control != coroPhysicalControlDirectAwait ||
+				physical.controlTarget != proof.target || physical.controlTargetID == "" ||
+				physical.controlClosure != nil || !proof.valid() {
+				return fmt.Errorf("WaitGroup fast wait lost its exact direct-await proof")
 			}
 		}
 		if proof := physical.waitGroupAddFast; proof != nil {
@@ -2448,6 +2456,7 @@ func clearCoroPhysicalControlForOperation(result *coroPhysicalInstructionPlan) {
 	result.controlReceiver = nil
 	result.controlClosure = nil
 	result.waitGroupAddFast = nil
+	result.waitGroupWaitFast = nil
 	result.pollMutexFast = nil
 	result.pollFDFast = nil
 	result.controlInterface = nil
@@ -2702,6 +2711,7 @@ func planCoroPhysicalControlInstruction(
 		result.controlClosure = closureValue
 		if result.control == coroPhysicalControlDirectAwait && closureValue == nil && audit.ctx != nil && !whole.IgnoresBody(callee) {
 			result.waitGroupAddFast = planCoroWaitGroupAddFast(audit.ctx, callee)
+			result.waitGroupWaitFast = planCoroWaitGroupWaitFast(audit.ctx, whole, callee)
 			result.pollMutexFast = planCoroPollMutexFast(audit.ctx, callee)
 			result.pollFDFast = planCoroPollFDFast(audit.ctx, callee)
 		}

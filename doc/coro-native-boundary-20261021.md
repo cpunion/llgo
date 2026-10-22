@@ -6,7 +6,7 @@ No runtime layout, thread-control declaration or public ownership protocol chang
 
 ## Same-input native measurements
 
-Darwin arm64, Go 1.27.0, LLVM 22.1.8, macOS 26.5 SDK, original stripped O2 flags and all 17 original ordinary-Go scenarios. Two independent cohorts each retained one warmup plus seven rotating Go/baseline/candidate triplets: 816 successful processes, no sample exclusion, matching checksums and positive OS peak RSS records. The baseline is frozen R13 (`a17cb2ada`, production-equivalent to documentation follow-up `b88029433`).
+Darwin arm64, Go 1.27.0, LLVM 22.1.8, macOS 26.5 SDK, original stripped default Os flags and all 17 original ordinary-Go scenarios. Two independent cohorts each retained one warmup plus seven rotating Go/baseline/candidate triplets: 816 successful processes, no sample exclusion, matching checksums and positive OS peak RSS records. The baseline is frozen R13 (`a17cb2ada`, production-equivalent to documentation follow-up `b88029433`).
 
 | Workload | First candidate / Go | Repeat candidate / Go | First candidate / R13 | Repeat candidate / R13 |
 | --- | ---: | ---: | ---: | ---: |

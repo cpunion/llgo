@@ -21,10 +21,16 @@ func llgoWaitGroupReadyPeer() bool
 func llgoWaitGroupYield()
 
 func (wg *WaitGroup) Wait() {
+	wg.llgoWait(true)
+}
+
+// llgoWait retains the complete waiting protocol. A compiler-proved direct
+// Wait call may consume its one scheduling opportunity in the caller's frame
+// and pass false here if a real semaphore wait is still necessary.
+func (wg *WaitGroup) llgoWait(opportunity bool) {
 	if race.Enabled {
 		race.Disable()
 	}
-	opportunity := true
 	for {
 		state := wg.state.Load()
 		v := int32(state >> 32)

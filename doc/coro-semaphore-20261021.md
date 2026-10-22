@@ -8,7 +8,7 @@ Two small common-path changes accompany it. An empty native panic cursor returns
 
 ## Frozen same-input results
 
-Evidence: `20261021/performance-parity-r1/sema-final-r13` and `runtime-scalar-r14-7quartets` under the retained acceptance root. Darwin arm64, Go 1.27.0, LLVM 22.1.8, macOS 26.5 SDK, original stripped O2 flags, original source and counts, shared host. All 17 scenarios ran one warmup plus seven rotating quartets (544 successful processes, all checksums and positive OS peak RSS records retained). The four images are original Go, private-channel commit `266633c8b`, this runtime candidate and a separate scalar-struct compiler prototype. Only the runtime candidate is adopted here; the last prototype's small differences do not establish the requested throughput improvement.
+Evidence: `20261021/performance-parity-r1/sema-final-r13` and `runtime-scalar-r14-7quartets` under the retained acceptance root. Darwin arm64, Go 1.27.0, LLVM 22.1.8, macOS 26.5 SDK, original stripped default Os flags, original source and counts, shared host. All 17 scenarios ran one warmup plus seven rotating quartets (544 successful processes, all checksums and positive OS peak RSS records retained). The four images are original Go, private-channel commit `266633c8b`, this runtime candidate and a separate scalar-struct compiler prototype. Only the runtime candidate is adopted here; the last prototype's small differences do not establish the requested throughput improvement.
 
 | Requested workload | Go ms | Private-channel baseline ms | Runtime candidate ms | Candidate / Go |
 | --- | ---: | ---: | ---: | ---: |
