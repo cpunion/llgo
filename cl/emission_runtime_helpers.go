@@ -697,7 +697,10 @@ func coroLoweredCallExplicitStatusElided(instr ssa.Instruction, helper string) b
 // current frame.  It is intentionally instruction-shaped: the same runtime
 // helper name emitted by any other lowering remains an ordinary managed edge.
 func coroCompilerElidesImplicitFaultRuntimeHelper(instr ssa.Instruction, helper string) bool {
-	switch instr.(type) {
+	switch instruction := instr.(type) {
+	case *ssa.BinOp:
+		return coroInterfaceNilComparisonOperand(instruction) != nil &&
+			(helper == "EfaceEqual" || helper == "IfaceType")
 	case *ssa.FieldAddr:
 		return helper == "AssertNilDeref"
 	case *ssa.Index, *ssa.IndexAddr:
@@ -705,6 +708,37 @@ func coroCompilerElidesImplicitFaultRuntimeHelper(instr ssa.Instruction, helper 
 	default:
 		return false
 	}
+}
+
+// coroInterfaceNilComparisonOperand identifies the exact interface word
+// comparison shared by analysis and physical emission. SSA gives nil the
+// interface operand's type, including error and named interfaces. A type
+// parameter's underlying constraint is also an interface, but its physical
+// value need not use an interface representation, so it supplies no proof.
+// Comparing two dynamic interfaces retains the complete equality protocol.
+func coroInterfaceNilComparisonOperand(instruction *ssa.BinOp) ssa.Value {
+	if instruction == nil || instruction.Op != token.EQL && instruction.Op != token.NEQ {
+		return nil
+	}
+	var value ssa.Value
+	if coroFrameRetentionNilConst(instruction.X) {
+		value = instruction.Y
+	} else if coroFrameRetentionNilConst(instruction.Y) {
+		value = instruction.X
+	} else {
+		return nil
+	}
+	if value == nil || value.Type() == nil {
+		return nil
+	}
+	typ := types.Unalias(value.Type())
+	if _, generic := typ.(*types.TypeParam); generic {
+		return nil
+	}
+	if _, iface := typ.Underlying().(*types.Interface); !iface {
+		return nil
+	}
+	return value
 }
 
 func coroIndexPanicRuntimeHelper(helper string) bool {

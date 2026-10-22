@@ -1920,12 +1920,7 @@ func planCoroPhysicalInstruction(
 			result.recipe = coroPhysicalInstructionNegativeShiftGuard
 			break
 		}
-		if (instruction.Op == token.EQL || instruction.Op == token.NEQ) &&
-			(isUntypedNilConst(instruction.X) || isUntypedNilConst(instruction.Y)) {
-			value := instruction.X
-			if isUntypedNilConst(value) {
-				value = instruction.Y
-			}
+		if value := coroInterfaceNilComparisonOperand(instruction); value != nil {
 			if _, ok := types.Unalias(audit.typeOf(value.Type())).Underlying().(*types.Interface); ok {
 				result.recipe = coroPhysicalInstructionInterfaceNilCompare
 				result.valueOperand = value
