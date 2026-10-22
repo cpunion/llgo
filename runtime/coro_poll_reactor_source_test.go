@@ -78,7 +78,9 @@ func TestCoroNativeFleetPollReactorKeepsOneExactPhysicalWaitPrimitive(t *testing
 	}
 	body := string(data)
 	for _, required := range []string{
-		"[coroNativeFleetDomainCapacityV1]coroNativeFleetPollSetV1",
+		"[coroNativeFleetDomainCapacityV1]unsafe.Pointer",
+		"storage = new(coroNativeFleetPollSetV1)",
+		"coroNativeAtomicStorePointerV1(",
 		"poll, driver := domain.pollOwnerV1(), domain.driverOwnerV1()",
 		"coro.SnapshotExecutorPollOperation(driver, index)",
 		"domain.nextOwnerEpoch != wait.Epoch",
