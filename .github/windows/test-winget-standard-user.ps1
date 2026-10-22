@@ -18,6 +18,14 @@ if ($Child) {
   $dependencies = @(Get-ChildItem (Join-Path $bootstrap "dependencies/$HostArch") -Recurse -File |
     Where-Object { $_.Extension -in @('.appx', '.msix') })
   Add-AppxPackage -Path (Join-Path $bootstrap 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle') -DependencyPath $dependencies.FullName
+  # Match Repair-WinGetPackageManager for a newly created account. Local
+  # manifest installation needs no catalog, but uninstall correlation does.
+  if (-not (Get-AppxPackage -Name Microsoft.Winget.Source)) {
+    $source = Join-Path $Root 'source2.msix'
+    & curl.exe --fail --location --retry 3 --output $source 'https://cdn.winget.microsoft.com/cache/source2.msix'
+    if ($LASTEXITCODE -ne 0) { throw 'Downloading the official WinGet source failed' }
+    Add-AppxPackage -Path $source
+  }
   $winget = Join-Path $env:LOCALAPPDATA 'Microsoft/WindowsApps/winget.exe'
   function Invoke-WinGet([string[]]$Arguments) {
     & $winget @Arguments
