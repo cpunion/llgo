@@ -71,8 +71,10 @@ func RequestReuseOwner(native *thread.Thread, token *uint32, slot uint32) c.Int
 
 // CancelReuseOwner withdraws an exact queued RequestReuseOwner. Zero means the
 // standby pthread had not begun dispatch and is already back in the cache; one
-// means dispatch won the race and the caller must complete the ordinary owner
-// release protocol. Every other value is an invariant failure.
+// means dispatch must complete, either because it won the race or because the
+// freed cache credit was claimed by another returning M. The caller then
+// completes the ordinary owner release protocol. Every other value is an
+// invariant failure.
 //
 //go:linkname CancelReuseOwner C.__llgo_coro_fleet_owner_cancel_reuse_v1
 func CancelReuseOwner(native thread.Thread, token, slot uint32) c.Int
