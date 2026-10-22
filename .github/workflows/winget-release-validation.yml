@@ -14,15 +14,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [MSVC, MinGW]
-        goarch: [amd64, arm64, '386']
+        # ARM64 and all MinGW profiles passed in run 39689822081.
+        # Qualify the remaining MSVC targets on the supported VS 2022 image.
+        profile: [MSVC]
+        goarch: [amd64, '386']
         include:
           - goarch: '386'
-            runner: windows-2025
+            runner: windows-2022
           - goarch: amd64
-            runner: windows-2025
-          - goarch: arm64
-            runner: windows-11-arm
+            runner: windows-2022
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -63,6 +63,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'WinGet bootstrap failed' }
       - name: Set up Go
         uses: ./.github/actions/setup-go
+        with:
+          cache: 'false'
       - name: Install native compilation dependencies
         uses: ./.github/actions/setup-deps
         with:
