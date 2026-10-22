@@ -1049,7 +1049,12 @@ func dispatchPending(g *G, resumed *Frame) (destroy *Frame, yielded, directPark,
 		resumed.state = FrameSuspended
 		g.active = child
 		return nil, false, false, true
-	case pendingComplete:
+	case pendingComplete, pendingCompilerRootComplete:
+		// Arbitrary compatibility consumers keep the complete graph proof.
+		if pending.kind == pendingCompilerRootComplete &&
+			(resumed != g.root || g.frames != resumed || resumed.next != nil || resumed.parent != nil) {
+			return nil, false, false, false
+		}
 		if pending.target != nil || resumed.header == nil ||
 			resumed.header.Lifecycle != uint16(FrameFinalSuspended) || !completionMatchesTerminalFrame(resumed) {
 			return nil, false, false, false

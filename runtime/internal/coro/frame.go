@@ -172,6 +172,9 @@ const (
 	pendingYield
 	pendingParkSet
 	pendingPanic
+	// Owner-only proof from the complete compiler root return gate. It can
+	// survive only the adjacent generated final-suspend/resume return suffix.
+	pendingCompilerRootComplete
 )
 
 type pendingTransition struct {
@@ -887,7 +890,7 @@ func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1
 				g.park == (ParkState{}) && frame == g.root &&
 				g.frames == frame && frame.next == nil && header.Parent == nil &&
 				frame.parkWait == nil && emptyCompletionRecord(&frame.completion) {
-				g.pending = pendingTransition{kind: pendingComplete, from: frame}
+				g.pending = pendingTransition{kind: pendingCompilerRootComplete, from: frame}
 				return true
 			}
 			if ValidG(g) && resumeGateTaken(g) && g.pending.kind == pendingNone &&

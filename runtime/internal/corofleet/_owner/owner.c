@@ -1069,8 +1069,13 @@ static int llgo_coro_fleet_owner_release_v1(
         (void)pthread_mutex_unlock(&factory->mutex);
         return -1;
     }
+    /* Full-cache cancellation can preserve a queued, published STARTING
+     * request. Its exact token/slot still owns the dispatch obligation; wait
+     * for that dispatch and its C return before recycling any Go metadata. */
     while (record != 0 &&
-           (record->state == LLGO_CORO_FLEET_OWNER_DISPATCHING_V1 ||
+           ((record->state == LLGO_CORO_FLEET_OWNER_STARTING_V1 &&
+             record->acknowledged == 0 && record->published == 1) ||
+            record->state == LLGO_CORO_FLEET_OWNER_DISPATCHING_V1 ||
             record->state == LLGO_CORO_FLEET_OWNER_RUNNING_V1)) {
         if (pthread_cond_wait(&factory->changed, &factory->mutex) != 0) {
             factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;

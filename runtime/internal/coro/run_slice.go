@@ -887,6 +887,33 @@ func ResumedExecutorRun(
 		driver.run.issued != ActionCheckResume {
 		return Action{}, false, false
 	}
+	if g != nil && g.pending.kind == pendingCompilerRootComplete {
+		// PrepareCompleteStatusCompiler has just proved the entire zero-park,
+		// singleton root graph, including the exact handle/header and consumed
+		// decision. No user code or scheduler action can run between that hook
+		// and this adjacent physical return. Consume only the issued identity;
+		// all other completion/suspension paths retain Resumed's full proof.
+		frame := g.pending.from
+		if p.current != g || g.runP != p || !p.inResume || p.inlineAwaitDepth != 0 ||
+			g.state != GRunning || p.action != action || !p.runDecisionTaken ||
+			action.Kind != ActionResume || action.Flags != 0 || action.Handle == nil ||
+			frame == nil || frame != g.active || frame.handle != action.Handle ||
+			g.pending.target != nil || g.pending.directChannel {
+			return Action{}, false, false
+		}
+		g.pending = pendingTransition{}
+		p.inResume = false
+		p.runDecisionTaken = false
+		g.state = GDispatching
+		g.active = nil
+		frame.state = FrameDestroyPending
+		frame.header.Lifecycle = uint16(FrameDestroyPending)
+		g.destroyTarget = frame
+		g.destroyRoot = true
+		next = Action{Kind: ActionCheckDestroy, Handle: action.Handle}
+		p.action = next
+		return next, false, true
+	}
 	if g != nil && g.pending.kind == pendingParkSet && g.pending.directChannel && g.active != nil &&
 		g.pending.from == g.active && g.active.handle == action.Handle &&
 		g.active.parkWait != nil && g.active.parkWait.directChannel {
