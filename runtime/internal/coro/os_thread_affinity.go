@@ -80,7 +80,7 @@ func validOSThreadEnqueue(p *P, g *G) bool {
 	if g.osThreadLockDepth == 0 {
 		return p.osThreadLockOwner != g
 	}
-	return p.osThreadLockOwner == g
+	return p.osThreadLockOwner == g || suspendedOSThreadTask(p, g) != nil
 }
 
 func validOSThreadRunOwner(p *P, g *G) bool {
@@ -105,7 +105,7 @@ func validOSThreadRunOwner(p *P, g *G) bool {
 }
 
 func validOSThreadOwnerHeader(p *P) bool {
-	if p == nil {
+	if p == nil || !validOSThreadSuspensions(p) {
 		return false
 	}
 	g := p.osThreadLockOwner
@@ -262,7 +262,7 @@ func osThreadSuspendPeerReady(p *P, owner *G) bool {
 		return false
 	}
 	for candidate := p.readyHead; candidate != nil; candidate = candidate.nextReady {
-		if candidate != owner && candidate.osThreadLockDepth == 0 {
+		if candidate != owner && (candidate.osThreadLockDepth == 0 || suspendedOSThreadTask(p, candidate) != nil) {
 			return true
 		}
 	}
@@ -308,6 +308,18 @@ func PrepareOSThreadSuspendHandoff(
 	task *G,
 	kind ActionKind,
 ) (required, ok bool) {
+	return prepareOSThreadSuspendHandoff(driver, task, kind, false)
+}
+
+// PrepareOSThreadSuspendHandoffForPhysicalReturn admits a committed locked
+// yield even without a local peer. The native target must first authenticate
+// the returning foreign caller's generation-bound request. That caller's next
+// committed physical action satisfies the ordinary peer-service obligation.
+func PrepareOSThreadSuspendHandoffForPhysicalReturn(driver *ExecutorDriver, task *G, kind ActionKind) (bool, bool) {
+	return prepareOSThreadSuspendHandoff(driver, task, kind, true)
+}
+
+func prepareOSThreadSuspendHandoff(driver *ExecutorDriver, task *G, kind ActionKind, returning bool) (required, ok bool) {
 	if !validExecutorDriverHeader(driver) || driver.state != executorDriverActive ||
 		driver.run.issued != ActionInvalid ||
 		driver.poll.phase != executorPollIdle {
@@ -343,7 +355,7 @@ func PrepareOSThreadSuspendHandoff(
 	}
 	switch kind {
 	case ActionYield:
-		if !osThreadSuspendPeerReady(p, task) {
+		if !returning && !osThreadSuspendPeerReady(p, task) {
 			return false, true
 		}
 		p.osThreadSuspend = osThreadSuspendYieldNeedsPeer
@@ -373,7 +385,7 @@ func OSThreadSuspendHandoffPossible(driver *ExecutorDriver) (possible, ok bool) 
 		return false, false
 	}
 	p := driver.p
-	if p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached {
+	if p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached && p.osThreadSuspensions == nil {
 		return false, true
 	}
 	return true, true
@@ -478,6 +490,13 @@ func validOSThreadPeerActionCommit(p *P, task *G) bool {
 }
 
 func commitOSThreadPeerAction(p *P) {
+	if p != nil {
+		for suspended := p.osThreadSuspensions; suspended != nil; suspended = suspended.next {
+			if suspended.phase == osThreadSuspendYieldNeedsPeer {
+				suspended.phase = osThreadSuspendYieldPeerServiced
+			}
+		}
+	}
 	if p != nil && p.osThreadSuspend == osThreadSuspendYieldNeedsPeer {
 		p.osThreadSuspend = osThreadSuspendYieldPeerServiced
 	}
@@ -489,10 +508,31 @@ func commitOSThreadPeerAction(p *P) {
 // not in the ready queue, so runnableForOSThreadOwner cannot represent this
 // debt until the peer first yields.
 func osThreadSuspendCurrentPeerNeedsService(p *P) bool {
-	if p == nil || p.osThreadSuspend != osThreadSuspendYieldNeedsPeer {
+	if p == nil || p.current == nil {
 		return false
 	}
 	owner, current := p.osThreadLockOwner, p.current
-	return owner != nil && current != nil && current != owner &&
-		current.osThreadLockDepth == 0
+	if owner == current && p.osThreadSuspend == osThreadSuspendAttached && osThreadSuspendPeerReady(p, owner) {
+		return true
+	}
+	if p.osThreadSuspend == osThreadSuspendYieldNeedsPeer &&
+		owner != nil && current != owner && current.osThreadLockDepth == 0 {
+		return true
+	}
+	// A detached yielding owner owes the same first peer action after its
+	// physical-selection header moves into cold M storage. That owner is
+	// intentionally absent from this M's runnable selector, so it must remain
+	// an independent bounded-service cause for a sole compute peer.
+	for slow, fast := p.osThreadSuspensions, p.osThreadSuspensions; fast != nil && fast.next != nil; {
+		slow, fast = slow.next, fast.next.next
+		if slow == fast {
+			return false
+		}
+	}
+	for suspended := p.osThreadSuspensions; suspended != nil; suspended = suspended.next {
+		if suspended.phase == osThreadSuspendYieldNeedsPeer && suspended.task != current {
+			return true
+		}
+	}
+	return false
 }

@@ -140,6 +140,15 @@ func Leaf(value uint32) uint32 { return value + 1 }
 				t.Fatalf("verify panic-boundary case=%s: %v\n%s", test.name, err, module.String())
 			}
 			ir := module.String()
+			leaf := module.NamedFunction("foo.Leaf$coro")
+			match := regexp.MustCompile(`@(__llgo_coro_frame_descriptor_v1\.[0-9a-f]+)`).FindStringSubmatch(leaf.String())
+			if len(match) != 2 {
+				t.Fatalf("case=%s missing descriptor", test.name)
+			}
+			flags := uint32(module.NamedGlobal(match[1]).Initializer().Operand(1).ZExtValue())
+			if excluded, want := flags&coro.FrameDescriptorNoNativeFaultBoundaryV1 != 0, test.frozen && !test.want; excluded != want {
+				t.Fatalf("case=%s descriptor flags=%#x exclusion=%t want %t", test.name, flags, excluded, want)
+			}
 			for _, marker := range []string{
 				coroPanicBoundaryTakeHookV1,
 				coroPanicBoundaryTypeHookV1,
@@ -227,6 +236,15 @@ func Unrelated(value uint32) uint32 { return value + 1 }
 		physical := module.NamedFunction("foo." + test.name + "$coro")
 		if physical.IsNil() {
 			t.Fatalf("function-local fault case=%s has no physical entry:\n%s", test.name, module.String())
+		}
+		match := regexp.MustCompile(`@(__llgo_coro_frame_descriptor_v1\.[0-9a-f]+)`).FindStringSubmatch(physical.String())
+		if len(match) != 2 {
+			t.Fatalf("case=%s has no frame descriptor: %s", test.name, physical.String())
+		}
+		descriptor := module.NamedGlobal(match[1])
+		flags := uint32(descriptor.Initializer().Operand(1).ZExtValue())
+		if excluded := flags&coro.FrameDescriptorNoNativeFaultBoundaryV1 != 0; excluded == test.want {
+			t.Fatalf("case=%s descriptor flags=%#x, boundary required=%t", test.name, flags, test.want)
 		}
 		for _, marker := range []string{
 			coroPanicBoundaryTakeHookV1,
@@ -4124,4 +4142,106 @@ func assertCoroRootObjectRetained(t *testing.T, prog llssa.Program, module llvm.
 
 func hasLLVMCall(ir, intrinsic string) bool {
 	return regexp.MustCompile(`call [^\n]*@` + regexp.QuoteMeta(intrinsic) + `\b`).MatchString(ir)
+}
+
+func TestCoroNativeFaultLandingStopsAtProtectedChild(t *testing.T) {
+	const source = `package foo
+import "unsafe"
+
+func Fault() byte { return *(*byte)(unsafe.Pointer(uintptr(1))) }
+func Unrelated(value uint32) uint32 { return value + 1 }
+func Caller() byte { return Fault() + 1 }
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fault, unrelated, caller := ssaPkg.Func("Fault"), ssaPkg.Func("Unrelated"), ssaPkg.Func("Caller")
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{
+			{Function: fault, Demand: coro.AsyncDemand},
+			{Function: unrelated, Demand: coro.AsyncDemand},
+			{Function: caller, Demand: coro.AsyncDemand},
+		},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          universe.FunctionIDConfig(),
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if function == fault || function == unrelated || function == caller {
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	capabilities, err := compilation.CoroProgramCapabilities()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.NativeDefaultFaultBoundary() || capabilities.DynamicPanicOnFault() {
+		t.Fatalf("closed-program fault capabilities = %#x, want native default only", capabilities)
+	}
+	compilation.FinalCoroProgramCapabilities = capabilities
+	compilation.FinalCoroProgramCapabilitiesFrozen = true
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify function-local native-default fault module: %v\n%s", err, module.String())
+	}
+	for _, test := range []struct {
+		name string
+		want bool
+	}{
+		{name: "Fault", want: true},
+		{name: "Unrelated"},
+		{name: "Caller"},
+	} {
+		physical := module.NamedFunction("foo." + test.name + "$coro")
+		if physical.IsNil() {
+			t.Fatalf("function-local fault case=%s has no physical entry:\n%s", test.name, module.String())
+		}
+		match := regexp.MustCompile(`@(__llgo_coro_frame_descriptor_v1\.[0-9a-f]+)`).FindStringSubmatch(physical.String())
+		if len(match) != 2 {
+			t.Fatalf("case=%s has no frame descriptor: %s", test.name, physical.String())
+		}
+		descriptor := module.NamedGlobal(match[1])
+		flags := uint32(descriptor.Initializer().Operand(1).ZExtValue())
+		if test.name == "Caller" && flags&coro.FrameDescriptorNoRuntimeContextV1 != 0 {
+			t.Fatal("caller must install runtime G for independently protected inline child")
+		}
+		if excluded := flags&coro.FrameDescriptorNoNativeFaultBoundaryV1 != 0; excluded == test.want {
+			t.Fatalf("case=%s descriptor flags=%#x, boundary required=%t", test.name, flags, test.want)
+		}
+		for _, marker := range []string{
+			coroPanicBoundaryTakeHookV1,
+			coroPanicBoundaryTypeHookV1,
+			coroPanicBoundaryDataReleaseHookV1,
+		} {
+			if got := strings.Contains(physical.String(), marker); got != test.want {
+				t.Fatalf("function-local fault case=%s marker %q present=%t, want %t:\n%s", test.name, marker, got, test.want, physical.String())
+			}
+		}
+	}
 }

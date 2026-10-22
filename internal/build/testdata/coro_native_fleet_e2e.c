@@ -259,3 +259,27 @@ void __llgo_coro_native_fleet_e2e_stream_close_v1(void) {
         }
     }
 }
+
+
+#include <stdio.h>
+#include <stdlib.h>
+static _Thread_local uintptr_t llgo_coro_rotation_tls_v1;
+void __llgo_coro_native_fleet_e2e_rotation_tls_set_v1(uintptr_t value) {
+    llgo_coro_rotation_tls_v1 = value;
+}
+uintptr_t __llgo_coro_native_fleet_e2e_rotation_tls_get_v1(void) {
+    return llgo_coro_rotation_tls_v1;
+}
+void __llgo_coro_native_fleet_e2e_rotation_witness_v1(uint32_t failure) {
+    if (failure != 0) {
+        fprintf(stderr, "ROTATION CROSS BINDING FAILED %u\n", failure);
+        abort();
+    }
+    puts("ROTATION CROSS BINDING WITNESS PASS");
+    fflush(stdout);
+}
+
+void __llgo_coro_native_fleet_e2e_rotation_trace_v1(uint32_t stage) {
+    fprintf(stderr, "ROTATION TRACE %u\n", stage);
+    fflush(stderr);
+}

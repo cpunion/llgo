@@ -22,7 +22,7 @@ import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 )
 
-const LLGoFiles = "$(pkg-config --cflags bdw-gc): _wrap/coro_allocator.c; _wrap/coro_gc_notify.c; _wrap/coro_init.c"
+const LLGoFiles = "$(pkg-config --cflags bdw-gc): _wrap/coro_allocator.c; _wrap/coro_gc_notify.c; _wrap/coro_init.c; _wrap/coro_initial_exit.c"
 
 const (
 	Success = iota
@@ -70,6 +70,13 @@ func ThreadIsRegistered() c.Int
 //llgo:coro sync
 //go:linkname UnregisterMyThread C.GC_unregister_my_thread
 func UnregisterMyThread() c.Int
+
+// UnregisterInitialThread releases only a retiring primordial OS thread.
+// Factory-created and foreign threads keep their existing cleanup ownership.
+//
+//llgo:coro sync
+//go:linkname UnregisterInitialThread C.__llgo_coro_gc_unregister_initial_thread_v1
+func UnregisterInitialThread() c.Int
 
 //go:linkname Malloc C.GC_malloc
 func Malloc(size uintptr) c.Pointer

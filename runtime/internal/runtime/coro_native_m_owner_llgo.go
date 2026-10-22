@@ -74,9 +74,15 @@ const (
 // back at Idle. The physical pthread may then remain in the bounded C standby
 // cache independently of this logical directory slot.
 type coroNativeMOwnerV1 struct {
-	handoff  coro.ExecutionDomainHandoff
-	deferred coro.DeferredExecutorHandoff
-	resume   coro.ExecutorResumeHandoff
+	handoff          coro.ExecutionDomainHandoff
+	deferred         coro.DeferredExecutorHandoff
+	resume           coro.ExecutorResumeHandoff
+	suspension       coro.OSThreadSuspension
+	rotation         *coroNativeOSThreadRotationV1
+	rotationNext     uint32
+	rotationDispatch uint32
+	retirement       coro.PhysicalOwnerRetirement
+	tainted          bool
 
 	thread threadpkg.Thread
 	self   threadpkg.Thread
@@ -88,6 +94,7 @@ type coroNativeMOwnerV1 struct {
 	predecessorSlot uint32
 	lineageRootSlot uint32
 	lineageSlot     uint32
+	lineageEpoch    uint32
 	ownerEpoch      uint32
 	lifecycle       uint32
 }
@@ -198,20 +205,20 @@ func coroNativeMStartPhysicalOwnerV1(
 	}
 	switch corofleet.TryReuseOwner(&owner.thread, &owner.token, slot) {
 	case 0:
-		return owner.thread != nil && owner.token != 0
+		// Success is the durable C publication receipt. The new Go owner can
+		// already have returned and been reclaimed by a foreign caller.
+		return true
 	case 1:
 		owner.thread = nil
 		owner.token = 0
 	default:
-		owner.thread = nil
-		owner.token = 0
+
 		return false
 	}
 	if !coroTargetReservePhysicalThreadV1() {
 		return false
 	}
-	if corofleet.CreateOwner(&owner.thread, &owner.token, slot) == 0 &&
-		owner.thread != nil && owner.token != 0 {
+	if corofleet.CreateOwner(&owner.thread, &owner.token, slot) == 0 {
 		return true
 	}
 	owner.thread = nil
@@ -235,7 +242,7 @@ func coroNativeMRequestPhysicalOwnerV1(
 	}
 	switch corofleet.RequestReuseOwner(&owner.thread, &owner.token, slot) {
 	case 0:
-		return true, owner.thread != nil && owner.token != 0
+		return true, true
 	case 1:
 		owner.thread = nil
 		owner.token = 0
@@ -543,6 +550,7 @@ func coroNativeMAllocateSuccessorV1(
 			coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
 			return 0, nil, false
 		}
+		owner.rotation = predecessor.rotation
 		owner.handle = predecessor.handle
 		owner.predecessorSlot = predecessorSlot
 		owner.ownerEpoch = epoch
@@ -559,6 +567,9 @@ func coroNativeMAllocateSuccessorV1(
 		} else if predecessor.parentSlot != 0 ||
 			predecessor.lineageRootSlot != 0 || predecessor.baton.Valid() {
 			coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
+			return 0, nil, false
+		}
+		if !owner.retirement.Open() {
 			return 0, nil, false
 		}
 		coroNativeAtomicStoreV1(
@@ -635,6 +646,13 @@ func coroNativeMClaimSuccessorV1(
 		}
 	}
 	owner.self = self
+	if lineageRoot != nil {
+		epoch := coroNativeAtomicLoadV1(&lineageRoot.lineageEpoch)
+		if epoch == 0 || epoch&1 != 0 || epoch > ^uint32(0)-2 ||
+			!coroNativeAtomicCASV1(&lineageRoot.lineageEpoch, epoch, epoch+1) {
+			return nil, nil, nil, false
+		}
+	}
 	if !coroNativeAtomicCASV1(
 		&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
 		owner.predecessorSlot,
@@ -655,6 +673,12 @@ func coroNativeMClaimSuccessorV1(
 	}
 	if peer != nil {
 		coroNativeAtomicStoreV1(&peer.slot, slot)
+	}
+	if owner.rotation != nil && owner.rotation.rootSlot == owner.predecessorSlot {
+		if owner.rotation.active {
+			return nil, nil, nil, false
+		}
+		owner.rotation.rootSlot = slot
 	}
 	return owner, predecessor, domain, true
 }
@@ -697,7 +721,11 @@ func coroNativeMAllocateReplacementV1(
 		owner.parentSlot = parentSlot
 		owner.lineageRootSlot = slot
 		coroNativeAtomicStoreV1(&owner.lineageSlot, slot)
+		coroNativeAtomicStoreV1(&owner.lineageEpoch, 1)
 		owner.ownerEpoch = baton.OwnerEpoch
+		if !owner.retirement.Open() {
+			return 0, nil, false
+		}
 		coroNativeAtomicStoreV1(
 			&owner.lifecycle,
 			uint32(coroNativeMOwnerReplacementPublishedV1),
@@ -721,11 +749,15 @@ func coroNativeMReleaseUnstartedReplacementV1(slot uint32) bool {
 		coroNativeAtomicLoadV1(&owner.lineageSlot) != slot {
 		return false
 	}
+	if !owner.retirement.Reset() {
+		return false
+	}
 	owner.handle = coro.ExecutorFleetHandle{}
 	owner.baton = coro.ExecutionDomainHandoffHandle{}
 	owner.parentSlot = 0
 	owner.lineageRootSlot = 0
 	coroNativeAtomicStoreV1(&owner.lineageSlot, 0)
+	coroNativeAtomicStoreV1(&owner.lineageEpoch, 0)
 	owner.ownerEpoch = 0
 	coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerUnusedV1))
 	return true
@@ -736,6 +768,16 @@ func coroNativeMClearReplacementStorageV1(owner *coroNativeMOwnerV1) {
 		coroRuntimeAbort("native coroutine replacement retained deferred dispatch")
 		return
 	}
+	if owner.suspension != (coro.OSThreadSuspension{}) || owner.rotationNext != 0 {
+		coroRuntimeAbort("native rotation released a pinned M")
+	}
+	if !owner.retirement.Reset() {
+		coroRuntimeAbort("native coroutine M metadata still has readers")
+		return
+	}
+	owner.rotation = nil
+	owner.rotationDispatch = 0
+	owner.tainted = false
 	owner.thread = nil
 	owner.self = nil
 	owner.token = 0
@@ -745,6 +787,7 @@ func coroNativeMClearReplacementStorageV1(owner *coroNativeMOwnerV1) {
 	owner.predecessorSlot = 0
 	owner.lineageRootSlot = 0
 	coroNativeAtomicStoreV1(&owner.lineageSlot, 0)
+	coroNativeAtomicStoreV1(&owner.lineageEpoch, 0)
 	owner.ownerEpoch = 0
 	coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerUnusedV1))
 }
@@ -770,6 +813,7 @@ func coroNativeMRecycleReplacementV1(slot uint32) bool {
 		return false
 	}
 	root, rootOK := coroNativeMOwnerForSlotV1(owner.lineageRootSlot)
+	rootSlot := owner.lineageRootSlot
 	parent, parentOK := coroNativeMOwnerForSlotV1(owner.parentSlot)
 	if !rootOK || !parentOK || root.lineageRootSlot != owner.lineageRootSlot ||
 		root.baton != owner.baton || root.parentSlot != owner.parentSlot ||
@@ -780,11 +824,12 @@ func coroNativeMRecycleReplacementV1(slot uint32) bool {
 		) != owner.parentSlot {
 		return false
 	}
-	released := corofleet.ReleaseOwner(
-		owner.thread,
-		owner.token,
-		slot,
-	)
+	var released c.Int
+	if owner.tainted {
+		released = corofleet.DiscardReturnedOwner(owner.thread, owner.token, slot)
+	} else {
+		released = corofleet.ReleaseOwner(owner.thread, owner.token, slot)
+	}
 	if released != 0 && released != 1 {
 		coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
 		return false
@@ -810,7 +855,7 @@ func coroNativeMRecycleReplacementV1(slot uint32) bool {
 		return false
 	}
 	coroNativeMClearReplacementStorageV1(owner)
-	return true
+	return root == owner || coroNativeMReleaseLineageV1(rootSlot, root)
 }
 
 // coroNativeMWaitAndRecycleOSThreadSuspendV1 is the original M's blocking
@@ -1093,8 +1138,9 @@ func coroTargetRetirePhysicalOwnerV1(
 		}
 		if parent.handoff.ReturnRequested(owner.baton) {
 			// The blocked predecessor already asked this temporary lineage to
-			// return. Its next loop boundary exits and is strongly joined, so no
-			// reusable M survives this unbalanced lock.
+			// return. Mark it before publishing Returned so the parent strongly
+			// joins its pthread instead of admitting a tainted M to clean standby.
+			owner.tainted = true
 			_, _ = state.stop.Leave()
 			return true
 		}
@@ -1122,18 +1168,27 @@ func coroTargetRetirePhysicalOwnerV1(
 		_, _ = state.stop.Leave()
 		return false
 	}
+	if !owner.retirement.Close(replacement && owner.lineageRootSlot == slot) {
+		coroRuntimeAbort("native coroutine M retirement metadata close failed")
+		return false
+	}
 	successorSlot, successor, allocated := coroNativeMAllocateSuccessorV1(
 		slot,
 		owner,
 		epoch,
 		replacement,
 	)
-	if !allocated || successor == nil ||
-		!coroNativeMStartPhysicalOwnerV1(successor, successorSlot) ||
-		coroNativeMOwnerLifecycleLoadV1(successor) != coroNativeMOwnerSuccessorActiveV1 {
-		coroRuntimeAbort("native coroutine physical owner succession failed")
+	if !allocated || successor == nil {
 		return false
 	}
+	if !coroNativeMStartPhysicalOwnerV1(successor, successorSlot) {
+		return false
+	}
+	// StartPhysicalOwner's C OwnerReady acknowledgement follows the exact
+	// successor claim. The successor can already have returned, retired or
+	// been recycled before this old M resumes; a mutable lifecycle equality
+	// cannot invalidate that durable startup receipt.
+
 	// Seal is allowed to linearize while this succession lease is active.
 	// The close owner waits for Quiesced before it snapshots peer.slot, so the
 	// successor published above is then the exact thread it will join.
@@ -1155,6 +1210,17 @@ func coroTargetRetirePhysicalOwnerV1(
 	}
 	if !coroTargetReleasePhysicalThreadV1() {
 		coroRuntimeAbort("native coroutine physical owner capacity release failed")
+		return false
+	}
+	if slot > coroNativeFleetDomainCapacityV1 {
+		reclaim, ok := owner.retirement.ReleasePhysical()
+		if !ok || reclaim && !coroNativeMReclaimRetiredV1(slot, owner) {
+			coroRuntimeAbort("native coroutine M retirement metadata release failed")
+			return false
+		}
+	}
+	if slot == 1 && !coroTargetPrepareInitialThreadExitV1() {
+		coroRuntimeAbort("native coroutine initial collector thread retirement failed")
 		return false
 	}
 	threadpkg.Exit()

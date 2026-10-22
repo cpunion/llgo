@@ -42,6 +42,8 @@ const (
 	// not observe or replace the ambient runtime G. Runtime validation owns the
 	// identically valued flag in runtime/internal/coro.
 	FrameDescriptorNoRuntimeContextV1 uint32 = 1 << 1
+	// No native landing is needed in this complete frozen execution closure.
+	FrameDescriptorNoNativeFaultBoundaryV1 uint32 = 1 << 2
 
 	EntryResolutionABIV0 = "llgo.coro.entry-resolution.v0"
 	PhysicalABIV0        = "llgo.coro.physical.v0"

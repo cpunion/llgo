@@ -54,7 +54,7 @@ func validExecutorRunCursor(cursor *executorRunCursor, p *P) bool {
 	default:
 		return false
 	}
-	return cursor.issued != ActionInvalid || !cursor.readyDebt || p.current != nil || runnableForOSThreadOwner(p)
+	return cursor.issued != ActionInvalid || !cursor.readyDebt || p.current != nil || runnableForOSThreadOwner(p) || nextReadyOSThreadSuspension(p) != nil
 }
 
 func emptyExecutorRunCursor(driver *ExecutorDriver) bool {
@@ -335,7 +335,7 @@ func dispatchExecutorRunReadyAction(
 	// replaying the full head/tail/count header relation here.
 	var g *G
 	imported := selected.transferState == runnableTransferGImported
-	ordinaryOwner := p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached
+	ordinaryOwner := p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached && p.osThreadSuspensions == nil
 	if ordinaryOwner {
 		// In the overwhelmingly common attached/unlocked phase, selection is the
 		// FIFO head. The caller has just selected it, so consume the non-empty
@@ -424,7 +424,7 @@ func nextExecutorRunActionValidated(
 	// the adjacent dequeue/action reducer without replaying the complete idle-P
 	// tuple or probing lower-priority producer queues.
 	if combineDispatch && driver.run.readyDebt && driver.poll.phase == executorPollIdle &&
-		p.current == nil && p.osThreadLockOwner == nil &&
+		p.current == nil && p.osThreadLockOwner == nil && p.osThreadSuspensions == nil &&
 		p.osThreadSuspend == osThreadSuspendAttached && p.readyHead != nil {
 		step, ok = dispatchExecutorRunReadyAction(driver, p.readyHead, true)
 		return step, ok, ok
@@ -938,7 +938,7 @@ func ResumedExecutorRun(
 	driver.run.issued = ActionInvalid
 	if !publishedReady {
 		driver.run.readyDebt = false
-	} else if p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached {
+	} else if p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached && p.osThreadSuspensions == nil {
 		// The direct-channel handoff normally publishes exactly one peer while
 		// the physical owner is unattached. Consume the stable queue head here;
 		// entering nextOSThreadRunnable would only rediscover these two scalar
@@ -1075,7 +1075,7 @@ func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placemen
 	driver.run.issued = ActionInvalid
 	if !publishedReady {
 		driver.run.readyDebt = false
-	} else if p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached {
+	} else if p.osThreadLockOwner == nil && p.osThreadSuspend == osThreadSuspendAttached && p.osThreadSuspensions == nil {
 		driver.run.readyDebt = p.readyHead != nil
 	} else {
 		driver.run.readyDebt = runnableForOSThreadOwner(p)

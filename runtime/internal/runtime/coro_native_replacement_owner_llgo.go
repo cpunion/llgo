@@ -157,11 +157,9 @@ func coroNativeReplacementCommitDestroyV1(
 		}
 		return true
 	}
-	if result.g == &coroProgramGV1State {
-		return coroNativeFleetPhysicalOwnerFailV1(
-			"native replacement attempted to destroy detached program task",
-		)
-	}
+	// Ordinary locked suspensions can leave an unlocked command root runnable
+	// on the compensation M. Finalize only that G, keeping the shared domain
+	// bound for dormant affinity owners, as for main Goexit below.
 	// The detached locked G is rooted privately by parent.resume and therefore
 	// is intentionally absent from P's ready/wait headers. A replacement child
 	// can consequently be the last scheduler-visible G without being the last
@@ -180,6 +178,14 @@ func coroNativeReplacementCommitDestroyV1(
 	switch next.Kind {
 	case coro.ActionComplete:
 		retireOwner := coro.ActionRetiresPhysicalOwner(next)
+		if result.g == &coroProgramGV1State && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 {
+			if !coroReleaseCompletedTask(result.g) {
+				return false
+			}
+			c.Exit(0)
+			for {
+			}
+		}
 		if !coroReleaseCompletedTask(result.g) ||
 			retireOwner && !coroTargetRetirePhysicalOwnerV1(
 				domain.pOwnerV1(),
@@ -206,6 +212,20 @@ func coroNativeReplacementTryReturnV1(
 	domain *coroNativeFleetDomainV1,
 ) (returned, ok bool) {
 	driver := domain.driverOwnerV1()
+	if outerReturn, valid := coroNativeRotationOuterReturnRequestedV1(owner); !valid {
+		return false, false
+	} else if outerReturn && owner.rotation.rootSlot != slot && !coroNativeRotationRequestReturnV1(owner) {
+		return false, false
+	}
+	if owner.rotation != nil && owner.rotation.active && owner.rotation.rootSlot == owner.parentSlot && coro.ExecutorResumeHandoffReturnable(driver) {
+		ready, _, ok := coro.ReadyOSThreadSuspension(driver)
+		if !ok {
+			return false, false
+		}
+		if (ready != nil || owner.suspension != (coro.OSThreadSuspension{})) && !coroNativeRotationRequestReturnV1(owner) {
+			return false, false
+		}
+	}
 	detached, returnable, statusOK := coro.OSThreadSuspendHandoffStatus(driver)
 	if !statusOK {
 		return false, false
@@ -258,6 +278,11 @@ func coroNativeReplacementWaitV1(
 		return true
 	}
 	for {
+		if outerReturn, valid := coroNativeRotationOuterReturnRequestedV1(owner); !valid {
+			return false
+		} else if outerReturn {
+			return coroNativeReplacementDisarmWaitV1(domain, slot)
+		}
 		if coroNativeMReplacementReturnRequestedV1(owner, parent) {
 			return coroNativeReplacementDisarmWaitV1(domain, slot)
 		}
@@ -339,6 +364,10 @@ func coroNativeMRunClaimedReplacementOwnerV1(
 				return coroNativeFleetPhysicalOwnerFailV1(
 					"native replacement execution wait failed",
 				)
+			}
+		case coroRunOSThreadReadyV1:
+			if !coroTargetHandleOSThreadReadyV1(domain.pOwnerV1(), domain.driverOwnerV1()) {
+				return false
 			}
 		case coroRunOSThreadSuspendV1:
 			if !coroTargetHandleOSThreadSuspendV1(
@@ -425,7 +454,7 @@ func coroNativeMRunReplacementOwnerV1(slot uint32) bool {
 			"native replacement M claim failed",
 		)
 	}
-	if corofleet.OwnerReady(slot) != 0 {
+	if corofleet.OwnerReady(slot) != 0 || !coroNativeMPublishLineageReadyV1(owner, slot) {
 		return coroNativeFleetPhysicalOwnerFailV1(
 			"native replacement M startup acknowledgement failed",
 		)

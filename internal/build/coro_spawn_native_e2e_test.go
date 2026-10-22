@@ -445,6 +445,18 @@ func buildCoroSpawnNativeE2EUserSource(
 					}
 				}
 			}
+			// The scalar-only test control adapters are linked from the runtime
+			// island, outside this user universe. Preserve their ambient runtime G
+			// in these exact defined callers; the foreign noblock certificate
+			// remains unchanged and retains its full transport validation.
+			if fn.Blocks != nil && (fn == childFn || fn == ssaPkg.Func("cleanup")) &&
+				strings.Contains(source, "command-line-arguments.CoroRotationControlRegisterV1") &&
+				strings.Contains(source, "command-line-arguments.CoroRotationControlCloseV1") {
+				return coro.SSAFunctionPolicy{Effect: effect, Exec: coro.NeedsRuntimeContext}, nil
+			}
+			if fn == childFn && strings.Contains(source, "command-line-arguments.CoroRotationWaitParentReturnV1") {
+				return coro.SSAFunctionPolicy{Effect: effect, Exec: coro.NeedsRuntimeContext}, nil
+			}
 			if effect != coro.NoSuspend {
 				return coro.SSAFunctionPolicy{Effect: effect}, nil
 			}

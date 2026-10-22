@@ -104,7 +104,10 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 		// GC's allocation lock, but cannot suspend a managed frame or migrate
 		// its collector-critical operation to a worker. Detach joins callbacks
 		// before doorbell reuse. This is not a lock-free/noblock claim.
-		"sync": 37,
+		// The primordial-thread exit wrapper combines native thread identity
+		// with GC unregister. It must run on the retiring M; dispatching that
+		// collector operation to a worker would unregister the wrong thread.
+		"sync": 38,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf(
@@ -119,8 +122,10 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 	// FLS effects are attached to the raw declarations rather than their Go
 	// wrappers. The weak/notification and WASI exit additions are exact foreign
 	// boundaries, not Go caller coloring. The Darwin clock contract covers one
-	// shared managed/raw declaration. This freezes the reviewed 8/40/37 set.
-	const wantManifestSHA256 = "4ac20417b0c17ed865b1a761c0c20c445035a7fbf2e98e4f90cb7e774cace3f5"
+	// shared managed/raw declaration. Initial-thread exit adds only the exact
+	// foreign GC wrapper, rather than a contract on its Go caller. This freezes
+	// the reviewed 8/40/38 set.
+	const wantManifestSHA256 = "bcb386feacf9d8efcb812fa6cc1174c34d25fa24c82dc0bf49b23d3c5d8785db"
 	manifestSHA256 := fmt.Sprintf(
 		"%x", sha256.Sum256([]byte(strings.Join(manifest, "\n"))),
 	)

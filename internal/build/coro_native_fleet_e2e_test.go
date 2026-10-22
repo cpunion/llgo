@@ -2198,7 +2198,12 @@ func TestCoroNativeFleetSameRoutePollReplacementE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetSameRoutePollReplacementE2ESource, "same-route-poll-replacement", true, 1)
 }
 
-func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool, initialLimit uint32) {
+func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool, initialLimit uint32) string {
+	t.Helper()
+	return runCoroNativeFleetE2EWithTimeout(t, source, name, enableChannel, initialLimit, 10*time.Second)
+}
+
+func runCoroNativeFleetE2EWithTimeout(t *testing.T, source, name string, enableChannel bool, initialLimit uint32, runTimeout time.Duration) string {
 	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine fleet link smoke requires Darwin or Linux")
@@ -2269,7 +2274,7 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 		t.Fatalf("link native coroutine fleet smoke: %v\n%s", err, output)
 	}
 
-	runCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
+	runCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), runTimeout)
 	defer cancel()
 	command := exec.CommandContext(runCtx, executable)
 	command.Env = make([]string, 0, len(os.Environ())+1)
@@ -2286,6 +2291,7 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 	if err != nil {
 		t.Fatalf("native coroutine fleet smoke failed: %v\n%s", err, output)
 	}
+	return string(output)
 }
 
 func cachedCoroNativeFleetE2ERuntimeArchive(t *testing.T, clang, ar string) string {
@@ -2359,6 +2365,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet_program_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet_reactor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_m_owner_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_os_thread_rotation_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_replacement_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_replacement_reactor_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_current_task_route.go"),
@@ -2390,6 +2397,9 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_completion_window_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_result_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_keyed_registry_atomic_llgo.go")
+	files = append(files, filepath.Join("testdata", "coro_native_fleet_rotation_control_runtime.go"))
+	files = append(files, filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_initial_thread_exit_nogc_llgo.go"))
+	files = append(files, filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_m_retirement_llgo.go"))
 	files = materializeCoroChannelNativeE2ERuntimeIsland(t, files)
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
@@ -2461,4 +2471,489 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus fault-string, allocation-cache, worker, doorbell, current-G TLS, poll, and fleet-owner leaves", len(objects), len(allowed))
 	}
 	return objects
+}
+
+const coroNativeFleetLockedParkAcrossForeignReturnE2ESource = `package main
+
+import _ "unsafe"
+
+var ResumeChild chan uint32
+var ChildDone chan uint32
+var Failed uint32
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+//llgo:coro worker
+//go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
+func block()
+//llgo:coro noblock
+//go:linkname tlsSet C.__llgo_coro_native_fleet_e2e_rotation_tls_set_v1
+func tlsSet(uintptr)
+//llgo:coro noblock
+//go:linkname tlsGet C.__llgo_coro_native_fleet_e2e_rotation_tls_get_v1
+func tlsGet() uintptr
+//llgo:coro noblock
+//go:linkname witness C.__llgo_coro_native_fleet_e2e_rotation_witness_v1
+func witness(uint32)
+//llgo:coro noblock
+//go:linkname trace C.__llgo_coro_native_fleet_e2e_rotation_trace_v1
+func trace(uint32)
+
+func releaseForeign() { trace(21); unblock(); trace(22) }
+func child() {
+	trace(10)
+    for isWaiting() == 0 {}
+    osThreadLock()
+    osThreadLock()
+    id := threadID()
+    tlsSet(0x19c07a)
+    // At P1 there is no other ready task. CommitSpawn appends this peer
+    // without requesting preemption of its parent. The immediately following
+    // channel park commits before that peer can release the foreign caller.
+    go releaseForeign()
+    trace(13)
+	value := <-ResumeChild
+	trace(14)
+    if value != 71 || threadID() != id || tlsGet() != 0x19c07a { Failed = 191 }
+    osThreadUnlock()
+    if threadID() != id || tlsGet() != 0x19c07a { Failed = 192 }
+    osThreadUnlock()
+    ChildDone <- 1
+}
+func Setup() {
+    ResumeChild = make(chan uint32)
+    ChildDone = make(chan uint32)
+    Failed = 0
+}
+func main() {
+    resetState()
+    go child()
+    osThreadLock()
+    id := threadID()
+    tlsSet(0x8a1001)
+    block()
+    if threadID() != id || tlsGet() != 0x8a1001 { Failed = 193 }
+    osThreadUnlock()
+    ResumeChild <- 71
+    <-ChildDone
+    // Required output proves all checks ran before any process-main exit.
+    witness(Failed)
+}
+func Check() int32 { return int32(Failed) }
+`
+
+func TestCoroNativeFleetLockedParkAcrossForeignReturnE2E(t *testing.T) {
+	output := runCoroNativeFleetE2E(t, coroNativeFleetLockedParkAcrossForeignReturnE2ESource, "locked-park-across-foreign-return", true, 1)
+	if !strings.Contains(output, "ROTATION CROSS BINDING WITNESS PASS") {
+		t.Fatalf("missing in-main TLS/physical-owner completion witness: %s", output)
+	}
+}
+
+const coroNativeFleetLockedComputeAcrossForeignReturnE2ESource = `package main
+
+import _ "unsafe"
+
+var ResumeChild chan uint32
+var ChildDone chan uint32
+var Failed uint32
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+//llgo:coro worker
+//go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
+func block()
+//llgo:coro noblock
+//go:linkname tlsSet C.__llgo_coro_native_fleet_e2e_rotation_tls_set_v1
+func tlsSet(uintptr)
+//llgo:coro noblock
+//go:linkname tlsGet C.__llgo_coro_native_fleet_e2e_rotation_tls_get_v1
+func tlsGet() uintptr
+//llgo:coro noblock
+//go:linkname witness C.__llgo_coro_native_fleet_e2e_rotation_witness_v1
+func witness(uint32)
+//llgo:coro noblock
+//go:linkname trace C.__llgo_coro_native_fleet_e2e_rotation_trace_v1
+func trace(uint32)
+
+
+var Stop uint32
+var Progress uint32
+//llgo:link atomicLoad llgo.atomicLoad
+func atomicLoad(address *uint32) uint32 { return *address }
+//llgo:link atomicStore llgo.atomicStore
+func atomicStore(address *uint32, value uint32) {}
+//llgo:link atomicAdd llgo.atomicAddReturnNew
+func atomicAdd(address *uint32, delta uint32) uint32 { return delta }
+func releaseForeign() { unblock() }
+func child() {
+    for isWaiting() == 0 {}
+    osThreadLock()
+    osThreadLock()
+    id := threadID()
+    tlsSet(0x19c07a)
+    go releaseForeign()
+    for atomicLoad(&Stop) == 0 { atomicAdd(&Progress, 1) }
+    if threadID() != id || tlsGet() != 0x19c07a { Failed = 201 }
+    osThreadUnlock()
+    osThreadUnlock()
+    ChildDone <- 1
+}
+func Setup() { ChildDone = make(chan uint32); Failed = 0; Stop = 0; Progress = 0 }
+func main() {
+    resetState()
+    go child()
+    osThreadLock()
+    id := threadID()
+    tlsSet(0x8a1001)
+    block()
+    if threadID() != id || tlsGet() != 0x8a1001 { Failed = 202 }
+    if atomicLoad(&Progress) == 0 { Failed = 203 }
+    atomicStore(&Stop, 1)
+    osThreadUnlock()
+    <-ChildDone
+    witness(Failed)
+}
+func Check() int32 { return int32(Failed) }
+`
+
+func TestCoroNativeFleetLockedComputeAcrossForeignReturnE2E(t *testing.T) {
+	output := runCoroNativeFleetE2E(t, coroNativeFleetLockedComputeAcrossForeignReturnE2ESource, "LockedComputeAcrossForeignReturn", true, 1)
+	if !strings.Contains(output, "ROTATION CROSS BINDING WITNESS PASS") {
+		t.Fatalf("missing in-main physical/TLS/retirement witness: %s", output)
+	}
+}
+
+const coroNativeFleetMultipleLockedParkAcrossForeignReturnE2ESource = `package main
+
+import _ "unsafe"
+
+var ResumeChild chan uint32
+var ChildDone chan uint32
+var Failed uint32
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+//llgo:coro worker
+//go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
+func block()
+//llgo:coro noblock
+//go:linkname tlsSet C.__llgo_coro_native_fleet_e2e_rotation_tls_set_v1
+func tlsSet(uintptr)
+//llgo:coro noblock
+//go:linkname tlsGet C.__llgo_coro_native_fleet_e2e_rotation_tls_get_v1
+func tlsGet() uintptr
+//llgo:coro noblock
+//go:linkname witness C.__llgo_coro_native_fleet_e2e_rotation_witness_v1
+func witness(uint32)
+//llgo:coro noblock
+//go:linkname trace C.__llgo_coro_native_fleet_e2e_rotation_trace_v1
+func trace(uint32)
+
+
+const Count = 16
+var Ready chan uint32
+//llgo:coro noblock
+//go:linkname armExit C.__llgo_coro_native_fleet_e2e_arm_thread_exit_v1
+func armExit() uintptr
+//llgo:coro noblock
+//go:linkname exitCount C.__llgo_coro_native_fleet_e2e_thread_exit_count_v1
+func exitCount() uintptr
+func releaseForeign() { for i:=0;i<Count;i++ { <-Ready }; unblock() }
+func child(index uint32) {
+    for isWaiting() == 0 {}
+    osThreadLock()
+    osThreadLock()
+    id := threadID()
+    tlsSet(uintptr(index+1))
+    failure := uint32(0)
+    if armExit() != 1 { failure = 211 }
+    Ready <- index
+    value := <-ResumeChild
+    if value != 71 || threadID() != id || tlsGet() != uintptr(index+1) { failure = 212 }
+    // Unbalanced return must retire this exact pthread, including its TLS.
+    ChildDone <- failure
+}
+func Setup() {
+    ResumeChild = make(chan uint32)
+    ChildDone = make(chan uint32, Count)
+    Ready = make(chan uint32)
+    Failed = 0
+}
+func main() {
+    resetState()
+    for i:=uint32(0);i<Count;i++ { go child(i) }
+    go releaseForeign()
+    osThreadLock()
+    id := threadID()
+    tlsSet(0x8a1001)
+    block()
+    if threadID() != id || tlsGet() != 0x8a1001 { Failed = 213 }
+    osThreadUnlock()
+    for i:=0;i<Count;i++ { ResumeChild <- 71 }
+    for i:=0;i<Count;i++ { if failure:=<-ChildDone;failure!=0 { Failed = failure } }
+    for exitCount() < Count {}
+    witness(Failed)
+}
+func Check() int32 { return int32(Failed) }
+`
+
+func TestCoroNativeFleetMultipleLockedParkAcrossForeignReturnE2E(t *testing.T) {
+	output := runCoroNativeFleetE2E(t, coroNativeFleetMultipleLockedParkAcrossForeignReturnE2ESource, "MultipleLockedParkAcrossForeignReturn", true, 1)
+	if !strings.Contains(output, "ROTATION CROSS BINDING WITNESS PASS") {
+		t.Fatalf("missing in-main physical/TLS/retirement witness: %s", output)
+	}
+}
+
+const coroNativeFleetLockedPeerManagedCallbackE2ESource = `package main
+import _ "unsafe"
+var Ready chan int32
+var Done chan uint32
+var Failed uint32
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=managed-callback memory=borrow-until-return
+//go:linkname foreignReentry C.__llgo_coro_native_fleet_e2e_reentry_v1
+func foreignReentry(func(int32) int32, int32) int32
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+//llgo:coro noblock
+//go:linkname tlsSet C.__llgo_coro_native_fleet_e2e_rotation_tls_set_v1
+func tlsSet(uintptr)
+//llgo:coro noblock
+//go:linkname tlsGet C.__llgo_coro_native_fleet_e2e_rotation_tls_get_v1
+func tlsGet() uintptr
+//llgo:coro noblock
+//go:linkname witness C.__llgo_coro_native_fleet_e2e_rotation_witness_v1
+func witness(uint32)
+
+func Setup(){Ready=make(chan int32);Done=make(chan uint32,1);Failed=0}
+func sender(){
+ osThreadLock();osThreadLock()
+ id:=threadID();tlsSet(0x8d101)
+ Ready<-10
+ Ready<-20
+ failure:=uint32(0)
+ if threadID()!=id||tlsGet()!=0x8d101 {failure=221}
+ osThreadUnlock();osThreadUnlock();Done<-failure
+}
+func callback(value int32) int32 {
+ id:=threadID();saved:=tlsGet();tlsSet(uintptr(0xc001+value))
+ result:=value+<-Ready
+ if threadID()!=id||tlsGet()!=uintptr(0xc001+value){Failed=222}
+ tlsSet(saved)
+ return result
+}
+func main(){go sender();result:=foreignReentry(callback,1);failure:=<-Done;if failure!=0{Failed=failure};if result!=33{Failed=223};witness(Failed)}
+func Check()int32{return int32(Failed)}
+`
+
+func TestCoroNativeFleetLockedPeerManagedCallbackE2E(t *testing.T) {
+	output := runCoroNativeFleetE2E(t, coroNativeFleetLockedPeerManagedCallbackE2ESource, "LockedPeerManagedCallback", true, 1)
+	if !strings.Contains(output, "ROTATION CROSS BINDING WITNESS PASS") {
+		t.Fatalf("missing in-main cancellation/TLS witness: %s", output)
+	}
+}
+
+const coroNativeFleetLockedPeerTaskAbortE2ESource = `package main
+import _ "unsafe"
+const Count=8
+var IDs chan uint64
+var Done chan uint32
+var Never chan uint32
+var Failed uint32
+//llgo:coro noblock
+//go:linkname registerControl command-line-arguments.CoroRotationControlRegisterV1
+func registerControl()uint64
+//llgo:coro noblock
+//go:linkname closeControl command-line-arguments.CoroRotationControlCloseV1
+func closeControl(uint64)bool
+//llgo:coro noblock
+//go:linkname postControl C.__llgo_coro_native_fleet_post_control_v1
+func postControl(uint32,uint32,uint32)uint32
+//llgo:coro noblock
+//go:linkname armExit C.__llgo_coro_native_fleet_e2e_arm_thread_exit_v1
+func armExit()uintptr
+//llgo:coro noblock
+//go:linkname exitCount C.__llgo_coro_native_fleet_e2e_thread_exit_count_v1
+func exitCount()uintptr
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+//llgo:coro noblock
+//go:linkname tlsSet C.__llgo_coro_native_fleet_e2e_rotation_tls_set_v1
+func tlsSet(uintptr)
+//llgo:coro noblock
+//go:linkname tlsGet C.__llgo_coro_native_fleet_e2e_rotation_tls_get_v1
+func tlsGet() uintptr
+//llgo:coro noblock
+//go:linkname witness C.__llgo_coro_native_fleet_e2e_rotation_witness_v1
+func witness(uint32)
+
+func Setup(){IDs=make(chan uint64);Done=make(chan uint32,Count);Never=make(chan uint32);Failed=0}
+func cleanup(endpoint uint64,id,value uintptr){
+ failure:=uint32(0)
+ if threadID()!=id||tlsGet()!=value{failure=232}
+ if !closeControl(endpoint){failure=233}
+ Done<-failure
+}
+func child(index uint32){
+ osThreadLock();osThreadLock()
+ id:=threadID();tlsSet(uintptr(index+1))
+ endpoint:=registerControl()
+ if endpoint==0||armExit()!=1{witness(231);return}
+ defer cleanup(endpoint,id,uintptr(index+1))
+ IDs<-endpoint
+ <-Never
+ witness(234)
+}
+func main(){
+ for i:=uint32(0);i<Count;i++{go child(i)}
+ var ids [Count]uint64
+ for i:=0;i<Count;i++{ids[i]=<-IDs}
+ for _,id:=range ids{
+  packed:=postControl(uint32(id>>32),uint32(id),1)
+  if packed&255!=1{witness(235)}
+ }
+ for i:=0;i<Count;i++{if failure:=<-Done;failure!=0{Failed=failure}}
+ for exitCount()<Count{}
+ witness(Failed)
+}
+func Check()int32{return int32(Failed)}
+`
+
+func TestCoroNativeFleetLockedPeerTaskAbortE2E(t *testing.T) {
+	output := runCoroNativeFleetE2E(t, coroNativeFleetLockedPeerTaskAbortE2ESource, "LockedPeerTaskAbort", true, 1)
+	if !strings.Contains(output, "ROTATION CROSS BINDING WITNESS PASS") {
+		t.Fatalf("missing in-main cancellation/TLS witness: %s", output)
+	}
+}
+
+const coroNativeFleetLockedPeerTaskShutdownE2ESource = `package main
+import _ "unsafe"
+const Count=8
+var IDs chan uint64
+var Done chan uint32
+var Never chan uint32
+var Failed uint32
+//llgo:coro noblock
+//go:linkname registerControl command-line-arguments.CoroRotationControlRegisterV1
+func registerControl()uint64
+//llgo:coro noblock
+//go:linkname closeControl command-line-arguments.CoroRotationControlCloseV1
+func closeControl(uint64)bool
+//llgo:coro noblock
+//go:linkname postControl C.__llgo_coro_native_fleet_post_control_v1
+func postControl(uint32,uint32,uint32)uint32
+//llgo:coro noblock
+//go:linkname armExit C.__llgo_coro_native_fleet_e2e_arm_thread_exit_v1
+func armExit()uintptr
+//llgo:coro noblock
+//go:linkname exitCount C.__llgo_coro_native_fleet_e2e_thread_exit_count_v1
+func exitCount()uintptr
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+//llgo:coro noblock
+//go:linkname tlsSet C.__llgo_coro_native_fleet_e2e_rotation_tls_set_v1
+func tlsSet(uintptr)
+//llgo:coro noblock
+//go:linkname tlsGet C.__llgo_coro_native_fleet_e2e_rotation_tls_get_v1
+func tlsGet() uintptr
+//llgo:coro noblock
+//go:linkname witness C.__llgo_coro_native_fleet_e2e_rotation_witness_v1
+func witness(uint32)
+
+func Setup(){IDs=make(chan uint64);Done=make(chan uint32,Count);Never=make(chan uint32);Failed=0}
+func cleanup(endpoint uint64,id,value uintptr){
+ failure:=uint32(0)
+ if threadID()!=id||tlsGet()!=value{failure=232}
+ if !closeControl(endpoint){failure=233}
+ Done<-failure
+}
+func child(index uint32){
+ osThreadLock();osThreadLock()
+ id:=threadID();tlsSet(uintptr(index+1))
+ endpoint:=registerControl()
+ if endpoint==0||armExit()!=1{witness(231);return}
+ defer cleanup(endpoint,id,uintptr(index+1))
+ IDs<-endpoint
+ <-Never
+ witness(234)
+}
+func main(){
+ for i:=uint32(0);i<Count;i++{go child(i)}
+ var ids [Count]uint64
+ for i:=0;i<Count;i++{ids[i]=<-IDs}
+ for _,id:=range ids{
+  packed:=postControl(uint32(id>>32),uint32(id),2)
+  if packed&255!=1{witness(235)}
+ }
+ for i:=0;i<Count;i++{if failure:=<-Done;failure!=0{Failed=failure}}
+ for exitCount()<Count{}
+ witness(Failed)
+}
+func Check()int32{return int32(Failed)}
+`
+
+func TestCoroNativeFleetLockedPeerTaskShutdownE2E(t *testing.T) {
+	output := runCoroNativeFleetE2E(t, coroNativeFleetLockedPeerTaskShutdownE2ESource, "LockedPeerTaskShutdown", true, 1)
+	if !strings.Contains(output, "ROTATION CROSS BINDING WITNESS PASS") {
+		t.Fatalf("missing in-main cancellation/TLS witness: %s", output)
+	}
 }

@@ -51,9 +51,10 @@ type FrameDescriptorV1 struct {
 }
 
 const (
-	FrameDescriptorTraceHiddenV1      uint32 = 1 << 0
-	FrameDescriptorNoRuntimeContextV1 uint32 = 1 << 1
-	frameDescriptorAllowedFlagsV1            = FrameDescriptorTraceHiddenV1 | FrameDescriptorNoRuntimeContextV1
+	FrameDescriptorTraceHiddenV1           uint32 = 1 << 0
+	FrameDescriptorNoRuntimeContextV1      uint32 = 1 << 1
+	FrameDescriptorNoNativeFaultBoundaryV1 uint32 = 1 << 2
+	frameDescriptorAllowedFlagsV1                 = FrameDescriptorTraceHiddenV1 | FrameDescriptorNoRuntimeContextV1 | FrameDescriptorNoNativeFaultBoundaryV1
 )
 
 // SuspendReason describes why a coroutine returned control to its scheduler.
@@ -113,6 +114,19 @@ const (
 	frameRuntimeContextNotRequired
 )
 
+// The same publication byte also caches the function-local negative native
+// fault capability. Exact recognized modes alone can omit a runtime boundary;
+// legacy/unknown or malformed values keep the conservative behavior.
+const frameRuntimeContextNoNativeFault frameRuntimeContextMode = 4
+
+func (mode frameRuntimeContextMode) requiresRuntimeContext() bool {
+	return mode != frameRuntimeContextNotRequired && mode != (frameRuntimeContextNotRequired|frameRuntimeContextNoNativeFault)
+}
+
+func (mode frameRuntimeContextMode) excludesNativeFaultBoundary() bool {
+	return mode == (frameRuntimeContextRequired|frameRuntimeContextNoNativeFault) || mode == (frameRuntimeContextNotRequired|frameRuntimeContextNoNativeFault)
+}
+
 func descriptorRuntimeContextMode(descriptor unsafe.Pointer) (frameRuntimeContextMode, bool) {
 	if descriptor == nil {
 		return frameRuntimeContextUnknown, false
@@ -125,10 +139,14 @@ func descriptorRuntimeContextMode(descriptor unsafe.Pointer) (frameRuntimeContex
 	if value.Version != 1 || value.Flags&^frameDescriptorAllowedFlagsV1 != 0 {
 		return frameRuntimeContextUnknown, false
 	}
+	mode := frameRuntimeContextRequired
 	if value.Flags&FrameDescriptorNoRuntimeContextV1 != 0 {
-		return frameRuntimeContextNotRequired, true
+		mode = frameRuntimeContextNotRequired
 	}
-	return frameRuntimeContextRequired, true
+	if value.Flags&FrameDescriptorNoNativeFaultBoundaryV1 != 0 {
+		mode |= frameRuntimeContextNoNativeFault
+	}
+	return mode, true
 }
 
 const gMagic uint32 = 0x434f524f // "CORO"
