@@ -473,6 +473,9 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer execution wait failed")
 		}
 		return true
+	case coroRunOSThreadReadyV1:
+		domain, ok := coroNativeFleetDomainForHandleV1(&coroNativeFleetV1State, handle, coroNativeFleetDomainActiveV1)
+		return ok && coroTargetHandleOSThreadReadyV1(domain.pOwnerV1(), domain.driverOwnerV1())
 	case coroRunOSThreadSuspendV1:
 		domain, ok := coroNativeFleetDomainForHandleV1(
 			&coroNativeFleetV1State,
@@ -732,7 +735,7 @@ func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32 {
 	case coroNativeMOwnerSuccessorPublishedV1:
 		successor, _, domain, claimed := coroNativeMClaimSuccessorV1(slot)
 		if !claimed || successor != owner || domain == nil ||
-			corofleet.OwnerReady(slot) != 0 {
+			corofleet.OwnerReady(slot) != 0 || !coroNativeMPublishLineageReadyV1(owner, slot) {
 			coroRuntimeAbort("native coroutine successor owner claim failed")
 			return 0
 		}

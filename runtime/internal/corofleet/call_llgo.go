@@ -71,10 +71,8 @@ func RequestReuseOwner(native *thread.Thread, token *uint32, slot uint32) c.Int
 
 // CancelReuseOwner withdraws an exact queued RequestReuseOwner. Zero means the
 // standby pthread had not begun dispatch and is already back in the cache; one
-// means dispatch must complete, either because it won the race or because the
-// freed cache credit was claimed by another returning M. The caller then
-// completes the ordinary owner release protocol. Every other value is an
-// invariant failure.
+// means dispatch won the race and the caller must complete the ordinary owner
+// release protocol. Every other value is an invariant failure.
 //
 //go:linkname CancelReuseOwner C.__llgo_coro_fleet_owner_cancel_reuse_v1
 func CancelReuseOwner(native thread.Thread, token, slot uint32) c.Int
@@ -97,6 +95,13 @@ func JoinOwner(native thread.Thread, token uint32) c.Int
 //
 //go:linkname ReleaseOwner C.__llgo_coro_fleet_owner_release_v1
 func ReleaseOwner(native thread.Thread, token, slot uint32) c.Int
+
+// DiscardReturnedOwner strongly joins an exact returned temporary M, including
+// its TLS destructors. A tainted M must never enter the clean standby cache.
+// Success returns one physical capacity credit; failure returns -1.
+//
+//go:linkname DiscardReturnedOwner C.__llgo_coro_fleet_owner_discard_returned_v1
+func DiscardReturnedOwner(native thread.Thread, token, slot uint32) c.Int
 
 // RetireSelf detaches a permanently tainted owner record before pthread_exit.
 // The process entry thread has no factory record and never calls this leaf.
@@ -125,3 +130,15 @@ func Yield() c.Int
 //
 //go:linkname StopFactory C.__llgo_coro_fleet_factory_stop_v2
 func StopFactory(terminalOwnerToken uint32) c.Int
+
+// RetainReturnedOwner waits for the exact raw Go entry to return without
+// clearing its M slot, TLS or physical token, and returns its dispatch receipt.
+//
+//go:linkname RetainReturnedOwner C.__llgo_coro_fleet_owner_retain_returned_v1
+func RetainReturnedOwner(native thread.Thread, token, slot uint32, dispatch *uint32) c.Int
+
+// RedispatchReturnedOwner consumes one exact retained dispatch receipt. The
+// same pthread reenters the fixed scalar-slot Go ABI; no clean-M cache is used.
+//
+//go:linkname RedispatchReturnedOwner C.__llgo_coro_fleet_owner_redispatch_returned_v1
+func RedispatchReturnedOwner(native thread.Thread, token, slot, dispatch uint32) c.Int

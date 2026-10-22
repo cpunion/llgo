@@ -390,7 +390,7 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 	if !returned {
 		coroRuntimeAbort("native direct replacement lineage return failed")
 	}
-	if !coroNativeMRecycleReplacementV1(returnedSlot) {
+	if !coroNativeRotationAdoptReturnedV1(returnedSlot, returnedOwner, boundary.parentSlot, boundary.parent) {
 		coroRuntimeAbort("native direct claimed replacement recycle failed")
 	}
 	if !boundary.parent.handoff.Complete(boundary.baton) {
@@ -611,6 +611,10 @@ func coroNativeForeignReentryRunV1(
 		case coroRunExecutionWaitV1:
 			if !coroTargetWaitManagedExecutionV1(boundary.driver) {
 				coroRuntimeAbort("synchronous foreign callback execution wait failed")
+			}
+		case coroRunOSThreadReadyV1:
+			if !coroTargetHandleOSThreadReadyV1(boundary.domain.pOwnerV1(), boundary.driver) {
+				coroRuntimeAbort("synchronous foreign callback affinity rotation failed")
 			}
 		case coroRunOSThreadSuspendV1:
 			if result.g != boundary.task ||

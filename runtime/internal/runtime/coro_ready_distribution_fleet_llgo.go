@@ -340,6 +340,27 @@ func coroTargetPrepareOSThreadSuspendV1(
 		if !coro.OSThreadSuspendHandoffCandidate(task) {
 			return false, true
 		}
+		if action.Kind == coro.ActionYield {
+			owner, _, _, _, ownerOK := coroNativeMCurrentOwnerV1(driver)
+			if !ownerOK {
+				return false, false
+			}
+			requested := false
+			if owner.baton.Valid() {
+				parent, ok := coroNativeMOwnerForSlotV1(owner.parentSlot)
+				if !ok || parent.handle != owner.handle {
+					return false, false
+				}
+				requested = parent.handoff.ReturnRequested(owner.baton)
+			}
+			outer, valid := coroNativeRotationOuterReturnRequestedV1(owner)
+			if !valid {
+				return false, false
+			}
+			if requested || outer {
+				return coro.PrepareOSThreadSuspendHandoffForPhysicalReturn(driver, task, action.Kind)
+			}
+		}
 		return coro.PrepareOSThreadSuspendHandoff(
 			driver, task, action.Kind,
 		)
@@ -381,29 +402,60 @@ func coroTargetReplacementReturnPossibleV1(
 // Both stop only after a complete reducer commit, so no physical action or
 // source transaction is split. Ordinary owners skip this hook through the
 // slice-entry negative capability above.
-func coroTargetStopForPhysicalReturnV1(
-	driver *coro.ExecutorDriver,
-) (bool, bool) {
+func coroTargetStopForPhysicalReturnV1(driver *coro.ExecutorDriver) (coroRunStopV1, bool) {
+	if coro.OSThreadSuspensionsPresent(driver) && coro.ExecutorResumeHandoffReturnable(driver) {
+		record, _, readyOK := coro.ReadyOSThreadSuspension(driver)
+		if !readyOK {
+
+			return coroRunInvalidV1, false
+		}
+		if record != nil {
+			owner, _, slot, _, ok := coroNativeMCurrentOwnerV1(driver)
+			if !ok || owner.rotation == nil {
+
+				return coroRunInvalidV1, false
+			}
+			if owner.rotation.active && owner.rotation.rootSlot != slot {
+				if !coroNativeRotationRequestReturnV1(owner) {
+
+					return coroRunInvalidV1, false
+				}
+				return coroRunAgainV1, true
+			}
+			return coroRunOSThreadReadyV1, true
+		}
+	}
 	possible, ok := coro.OSThreadSuspendHandoffPossible(driver)
 	if !ok {
-		return false, false
+
+		return coroRunInvalidV1, false
 	}
 	if possible {
 		detached, returnable, statusOK := coro.OSThreadSuspendHandoffStatus(driver)
-		return detached && returnable, statusOK
+		if !statusOK {
+
+			return coroRunInvalidV1, false
+		}
+		if detached {
+			if returnable {
+				return coroRunAgainV1, true
+			}
+			return coroRunInvalidV1, true
+		}
 	}
 	owner, _, _, _, ownerOK := coroNativeMCurrentOwnerV1(driver)
 	if !ownerOK || !owner.baton.Valid() {
-		return false, ownerOK
+		return coroRunInvalidV1, ownerOK
 	}
 	parent, parentOK := coroNativeMOwnerForSlotV1(owner.parentSlot)
 	if !parentOK || parent.handle != owner.handle {
-		return false, false
+
+		return coroRunInvalidV1, false
 	}
-	if !parent.handoff.ReturnRequested(owner.baton) {
-		return false, true
+	if parent.handoff.ReturnRequested(owner.baton) && coro.ExecutorResumeHandoffReturnable(driver) {
+		return coroRunAgainV1, true
 	}
-	return coro.ExecutorResumeHandoffReturnable(driver), true
+	return coroRunInvalidV1, true
 }
 
 // coroTargetHandleOSThreadSuspendV1 temporarily blocks the original M on
@@ -411,57 +463,13 @@ func coroTargetStopForPhysicalReturnV1(
 // the same P/driver/source island. The ordinary suspended LLVM frame is already
 // rooted by P's ready/wait queues, so this path neither copies an active resume
 // nor acquires another managed-execution P lease.
-func coroTargetHandleOSThreadSuspendV1(
-	p *coro.P,
-	driver *coro.ExecutorDriver,
-	task *coro.G,
-	action coro.Action,
-) bool {
-	if p == nil || driver == nil || task == nil ||
-		action.Handle != nil || action.Flags != 0 ||
-		(action.Kind != coro.ActionYield &&
-			action.Kind != coro.ActionPark) {
+func coroTargetHandleOSThreadSuspendV1(p *coro.P, driver *coro.ExecutorDriver, task *coro.G, action coro.Action) bool {
+	if p == nil || driver == nil || task == nil || action.Handle != nil || action.Flags != 0 || (action.Kind != coro.ActionYield && action.Kind != coro.ActionPark) {
 		return false
 	}
-	detached, _, statusOK := coro.OSThreadSuspendHandoffStatus(driver)
-	parent, domain, parentSlot, ownerEpoch, physicalOK :=
-		coroNativeMCurrentOwnerV1(driver)
-	if !statusOK || !detached || !physicalOK ||
-		domain == nil || domain.pOwnerV1() != p ||
-		domain.driverOwnerV1() != driver {
-		return false
-	}
-	baton, begun := parent.handoff.Begin(ownerEpoch)
-	if !begun {
-		return false
-	}
-	childSlot, child, allocated := coroNativeMAllocateReplacementV1(
-		parentSlot,
-		domain.handle,
-		baton,
-	)
-	if !allocated {
-		_ = coroNativeAbortOSThreadSuspendV1(
-			parent, baton, driver, task,
-		)
-		return false
-	}
-	if !coroNativeMStartPhysicalOwnerV1(child, childSlot) {
-		child.thread = nil
-		child.token = 0
-		aborted := coroNativeAbortOSThreadSuspendV1(
-			parent, baton, driver, task,
-		)
-		released := coroNativeMReleaseUnstartedReplacementV1(childSlot)
-		_ = aborted && released
-		return false
-	}
-	if !coroNativeMWaitAndRecycleOSThreadSuspendV1(
-		childSlot, child, parent,
-	) ||
-		!parent.handoff.Complete(baton) ||
-		!coro.RestoreOSThreadSuspendHandoff(driver, task) {
-		return false
-	}
-	return true
+	return coroNativeRotateOSThreadOwnersV1(p, driver, task)
+}
+
+func coroTargetHandleOSThreadReadyV1(p *coro.P, driver *coro.ExecutorDriver) bool {
+	return coroNativeRotateOSThreadOwnersV1(p, driver, nil)
 }

@@ -32,8 +32,14 @@ int __llgo_coro_fleet_owner_cancel_reuse_v1(
     pthread_t thread, uint32_t token, uint32_t slot);
 int __llgo_coro_fleet_owner_ready_v1(uint32_t slot);
 int __llgo_coro_fleet_owner_join_v1(pthread_t thread, uint32_t token);
+int __llgo_coro_fleet_owner_retain_returned_v1(
+    pthread_t thread, uint32_t token, uint32_t slot, uint32_t *dispatch);
+int __llgo_coro_fleet_owner_redispatch_returned_v1(
+    pthread_t thread, uint32_t token, uint32_t slot, uint32_t dispatch);
 int __llgo_coro_fleet_owner_release_v1(
     pthread_t thread, uint32_t token, uint32_t slot);
+int __llgo_coro_fleet_owner_discard_returned_v1(
+        pthread_t thread, uint32_t token, uint32_t slot);
 int __llgo_coro_fleet_owner_retire_self_v1(uint32_t slot);
 int __llgo_coro_fleet_owner_stop_standby_v1(uint32_t *joined);
 int __llgo_coro_fleet_owner_yield_v1(void);

@@ -84,8 +84,8 @@ func coroTargetHandleOSThreadSuspendV1(
 	return false
 }
 
-func coroTargetStopForPhysicalReturnV1(*coro.ExecutorDriver) (bool, bool) {
-	return false, true
+func coroTargetStopForPhysicalReturnV1(*coro.ExecutorDriver) (coroRunStopV1, bool) {
+	return coroRunInvalidV1, true
 }
 
 // Single-thread realms have no distinct reusable physical owner to retire.
@@ -94,3 +94,5 @@ func coroTargetStopForPhysicalReturnV1(*coro.ExecutorDriver) (bool, bool) {
 func coroTargetRetirePhysicalOwnerV1(*coro.P, *coro.ExecutorDriver) bool {
 	return true
 }
+
+func coroTargetHandleOSThreadReadyV1(*coro.P, *coro.ExecutorDriver) bool { return false }

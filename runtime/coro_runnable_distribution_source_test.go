@@ -194,9 +194,6 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	for _, required := range []string{
 		"coroNativeMDirectoryCapacityV1 uint32 = 10_000",
 		"coroNativeMPageCapacityV1      uint32 = 64",
-		"handoff  coro.ExecutionDomainHandoff",
-		"deferred coro.DeferredExecutorHandoff",
-		"resume   coro.ExecutorResumeHandoff",
 		"token  uint32",
 		"owners [coroNativeFleetDomainCapacityV1]coroNativeMOwnerV1",
 		"pages  [coroNativeMPageCountV1]unsafe.Pointer",
@@ -218,6 +215,44 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	}
 	if strings.Contains(directory, "owners [coroNativeMDirectoryCapacityV1]coroNativeMOwnerV1") {
 		t.Error("native M directory still reserves every logical owner in BSS")
+	}
+	// Additional cold affinity fields change gofmt's alignment. Check the
+	// protocol field types on the actual owner struct instead of whitespace.
+	parsed, err := parser.ParseFile(token.NewFileSet(), "internal/runtime/coro_native_m_owner_llgo.go", directory, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerFields := make(map[string]string)
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		spec, ok := node.(*ast.TypeSpec)
+		if !ok || spec.Name.Name != "coroNativeMOwnerV1" {
+			return true
+		}
+		structure, ok := spec.Type.(*ast.StructType)
+		if !ok {
+			return false
+		}
+		for _, field := range structure.Fields.List {
+			selected, ok := field.Type.(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			pkg, ok := selected.X.(*ast.Ident)
+			if !ok || pkg.Name != "coro" {
+				continue
+			}
+			for _, name := range field.Names {
+				ownerFields[name.Name] = selected.Sel.Name
+			}
+		}
+		return false
+	})
+	for field, want := range map[string]string{
+		"handoff": "ExecutionDomainHandoff", "deferred": "DeferredExecutorHandoff", "resume": "ExecutorResumeHandoff",
+	} {
+		if ownerFields[field] != want {
+			t.Errorf("native owner %s type = %q, want coro.%s", field, ownerFields[field], want)
+		}
 	}
 	if strings.Index(directory, "new(coroNativeMOwnerPageV1)") <
 		strings.Index(directory, "coroNativeAtomicCASPointerV1(pageAddress, nil, publishing)") {

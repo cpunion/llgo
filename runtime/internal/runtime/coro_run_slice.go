@@ -102,6 +102,7 @@ const (
 	// The bounded run slice releases its managed-execution P lease before the
 	// outer owner handles this stop.
 	coroRunOSThreadSuspendV1
+	coroRunOSThreadReadyV1
 	// coroRunForeignReentryCompleteV1 returns one fully destroyed synchronous
 	// callback child to the native boundary adapter. The parent LLVM resume is
 	// already active below C and must not be resumed by the scheduler.
@@ -295,11 +296,11 @@ func coroStopAfterStableReductionV1(
 	if driver == nil || result == nil {
 		return false, false
 	}
-	stop, ok = coroTargetStopForPhysicalReturnV1(driver)
-	if !ok || !stop {
-		return stop, ok
+	reason, valid := coroTargetStopForPhysicalReturnV1(driver)
+	if !valid || reason == coroRunInvalidV1 {
+		return false, valid
 	}
-	result.stop = coroRunAgainV1
+	result.stop = reason
 	return true, true
 }
 
@@ -325,11 +326,13 @@ func coroReduceExecutorRunActionPreparedV1(
 		baseCost++
 	}
 	if g == nil || action.Handle == nil || runtimeContext == nil || remaining < baseCost {
+
 		return false, false
 	}
 	if dispatched {
 		if returnRequested && g != policy.main && action.Kind == coro.ActionCheckResume &&
 			!coro.RequestTaskCancellation(p, g, coro.TaskCancelShutdown) {
+
 			return false, false
 		}
 		result.dispatches++
@@ -342,6 +345,7 @@ func coroReduceExecutorRunActionPreparedV1(
 	running, returnRequested := false, false
 	if policy.main != nil {
 		if policy.lifecycle == nil {
+
 			return false, false
 		}
 		switch *policy.lifecycle {
@@ -350,9 +354,11 @@ func coroReduceExecutorRunActionPreparedV1(
 		case coroProgramMainReturnRequestedV1:
 			returnRequested = true
 		default:
+
 			return false, false
 		}
 	} else if policy.lifecycle != nil {
+
 		return false, false
 	}
 	var releaseReceipt coro.CompletedTaskReleaseReceipt
@@ -365,6 +371,7 @@ func coroReduceExecutorRunActionPreparedV1(
 		releaseReceipt, committed = coro.CommitExecutorRunActionCompiler(driver, g, next)
 	}
 	if !committed {
+
 		return false, false
 	}
 	if next.Kind == coro.ActionForeignReentryComplete {
@@ -391,6 +398,7 @@ func coroReduceExecutorRunActionPreparedV1(
 			p, driver, g, next,
 		)
 		if !suspendOK {
+
 			return false, false
 		}
 	}
@@ -407,6 +415,7 @@ func coroReduceExecutorRunActionPreparedV1(
 			distributed, distributionOK = coroTargetAfterStableRunActionV1(target, p)
 		}
 		if !distributionOK || !coro.CommitExecutorRunActionDistribution(driver, distributed) {
+
 			return false, false
 		}
 		stopAfterStable = stop
@@ -434,16 +443,19 @@ func coroReduceExecutorRunActionPreparedV1(
 	switch next.Kind {
 	case coro.ActionCheckResume, coro.ActionCheckDestroy, coro.ActionPanicDestroy:
 		if g == policy.main && returnRequested && next.Kind == coro.ActionCheckResume {
+
 			return false, false
 		}
 	case coro.ActionYield, coro.ActionPark:
 		if g == policy.main && returnRequested {
+
 			return false, false
 		}
 	case coro.ActionComplete:
 		isMain := g == policy.main
 		retireOwner := coro.ActionRetiresPhysicalOwner(next)
 		if !coroReleaseCompletedTaskReceipt(g, releaseReceipt) {
+
 			return false, false
 		}
 		if isMain {
@@ -451,6 +463,7 @@ func coroReduceExecutorRunActionPreparedV1(
 			return true, true
 		}
 		if retireOwner && !coroTargetRetirePhysicalOwnerV1(p, driver) {
+
 			return false, false
 		}
 	case coro.ActionPanicComplete:
@@ -460,6 +473,7 @@ func coroReduceExecutorRunActionPreparedV1(
 		result.stop, result.g, result.action = coroRunDestroyCommitV1, g, next
 		return true, true
 	default:
+
 		return false, false
 	}
 	if stopAfterStable {
@@ -489,6 +503,7 @@ func coroReduceExecutorRunStepV1(
 	result *coroRunResultV1,
 ) (terminal, ok bool) {
 	if p == nil || driver == nil || runtimeContext == nil || result == nil || !policy.valid() {
+
 		return false, false
 	}
 	returnRequested := false
@@ -498,6 +513,7 @@ func coroReduceExecutorRunStepV1(
 		case coroProgramMainReturnRequestedV1:
 			returnRequested = true
 		default:
+
 			return false, false
 		}
 	}
@@ -506,6 +522,7 @@ func coroReduceExecutorRunStepV1(
 		distributed, targetOK := false, true
 		distribute, stopAfterStable, distributionOK := coroTargetReadyDistributionV1(target)
 		if !distributionOK {
+
 			return false, false
 		}
 		if distribute {
@@ -513,6 +530,7 @@ func coroReduceExecutorRunStepV1(
 		}
 		if !targetOK || distributed && !step.Poll.Complete ||
 			step.Poll.Complete && !coro.CommitExecutorRunSourceDistribution(driver, distributed) {
+
 			return false, false
 		}
 		result.used++
@@ -524,22 +542,26 @@ func coroReduceExecutorRunStepV1(
 		return false, true
 	case coro.ExecutorRunStepMaterialize:
 		if !coroMaterializeResumeCleanupStepV1(step.Cleanup) {
+
 			return false, false
 		}
 		result.used++
 		return false, true
 	case coro.ExecutorRunStepDirectChannel:
 		if step.Direct == nil || !coroMaterializeDirectChannelCompletionV1(step.Direct) {
+
 			return false, false
 		}
 		result.used++
 		return false, true
 	case coro.ExecutorRunStepDispatch:
 		if step.Dispatched || step.G == nil || step.Action.Handle == nil {
+
 			return false, false
 		}
 		if returnRequested && step.G != policy.main && step.Action.Kind == coro.ActionCheckResume &&
 			!coro.RequestTaskCancellation(p, step.G, coro.TaskCancelShutdown) {
+
 			return false, false
 		}
 		result.used++
@@ -552,6 +574,7 @@ func coroReduceExecutorRunStepV1(
 		)
 	case coro.ExecutorRunStepDestroyCommit:
 		if step.G == nil || step.Action.Kind != coro.ActionCommitDestroy || step.Action.Handle != nil {
+
 			return false, false
 		}
 		result.stop, result.g, result.action = coroRunDestroyCommitV1, step.G, step.Action
@@ -560,6 +583,7 @@ func coroReduceExecutorRunStepV1(
 		result.stop = coroRunIdleV1
 		return true, true
 	default:
+
 		return false, false
 	}
 }
@@ -570,21 +594,33 @@ func coroReduceExecutorRunStepV1(
 // entry. Command-main placement is deliberately unavailable in this variant.
 func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget uint32) coroRunResultV1 {
 	if p == nil || driver == nil || now < 0 || budget == 0 {
+
 		return coroRunResultV1{}
 	}
 	runtimeContext := coroCaptureRuntimeContextV1()
 	if runtimeContext == nil {
+
 		return coroRunResultV1{}
 	}
 	run, runOK := coro.BeginExecutorRunSlice(driver)
 	if !runOK {
+
 		return coroRunResultV1{}
 	}
 	target, targetOK := coroTargetBeginRunSliceV1(p, driver)
 	if !targetOK {
+
 		return coroRunResultV1{}
 	}
 	result := coroRunResultV1{}
+	if target.physicalReturn {
+		if stop, ok := coroStopAfterStableReductionV1(driver, &result); !ok {
+
+			return coroRunResultV1{}
+		} else if stop {
+			return result
+		}
+	}
 	held := false
 	for result.used < budget {
 		coroObserveGCV1()
@@ -597,6 +633,7 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 			held, wait, permitOK = coroPrepareManagedExecutionV1(driver)
 			if !permitOK {
 				_ = coroFinishManagedExecutionV1(driver, held)
+
 				return coroRunResultV1{}
 			}
 			if wait {
@@ -614,6 +651,7 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 		}
 		if !nextOK || actionSelected && !coroActionStepMatchesManagedExecutionV1(actionStep, held) {
 			_ = coroFinishManagedExecutionV1(driver, held)
+
 			return coroRunResultV1{}
 		}
 		var terminal, reduced bool
@@ -632,6 +670,7 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 			}
 			if !nextOK || !coroStepMatchesManagedExecutionV1(step, held) {
 				_ = coroFinishManagedExecutionV1(driver, held)
+
 				return coroRunResultV1{}
 			}
 			terminal, reduced = coroReduceExecutorRunStepV1(
@@ -641,10 +680,12 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 		}
 		if !reduced {
 			_ = coroFinishManagedExecutionV1(driver, held)
+
 			return coroRunResultV1{}
 		}
 		if terminal {
 			if !coroFinishManagedExecutionV1(driver, held) {
+
 				return coroRunResultV1{}
 			}
 			return result
@@ -653,10 +694,12 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 			stopForReturn, returnOK := coroStopAfterStableReductionV1(driver, &result)
 			if !returnOK {
 				_ = coroFinishManagedExecutionV1(driver, held)
+
 				return coroRunResultV1{}
 			}
 			if stopForReturn {
 				if !coroFinishManagedExecutionV1(driver, held) {
+
 					return coroRunResultV1{}
 				}
 				return result
@@ -664,6 +707,7 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 		}
 	}
 	if !coroFinishManagedExecutionV1(driver, held) {
+
 		return coroRunResultV1{}
 	}
 	result.stop = coroRunSliceBudgetV1

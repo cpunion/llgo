@@ -574,7 +574,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 		"callOK := coroWorkerCallWordsV2(",
 		"boundary.parent.handoff.RequestReturn(boundary.baton)",
 		"coroNativeMReplacementLineageOwnerV1(",
-		"coroNativeMRecycleReplacementV1(returnedSlot)",
+		"coroNativeRotationAdoptReturnedV1(returnedSlot, returnedOwner, boundary.parentSlot, boundary.parent)",
 		"coroTargetReenterManagedExecutionAtRouteV1(",
 		"coro.RestoreExecutorResume(&boundary.resume)",
 		"boundary.finishV1()",
@@ -660,7 +660,7 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 	preparedAllocate := strings.Index(prepared, "coroNativeMAllocateReplacementV1(")
 	reclaimCancel := strings.Index(reclaim, "corofleet.CancelReuseOwner(")
 	reclaimRequest := strings.Index(reclaim, "boundary.parent.handoff.RequestReturn(boundary.baton)")
-	reclaimRecycle := strings.Index(reclaim, "coroNativeMRecycleReplacementV1(returnedSlot)")
+	reclaimRecycle := strings.Index(reclaim, "coroNativeRotationAdoptReturnedV1(")
 	finishResolve := strings.Index(finishBody, "boundary.resolveDeferredReplacementV1()")
 	finishReclaim := strings.Index(finishBody, "boundary.reclaimReplacementV1()")
 	finishReenter := strings.Index(finishBody, "coroTargetReenterManagedExecutionAtRouteV1(")

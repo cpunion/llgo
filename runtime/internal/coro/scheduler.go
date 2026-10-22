@@ -176,6 +176,8 @@ type P struct {
 	// physical-owner handoff may temporarily run unlocked peers while the
 	// owner remains suspended and rooted by this P.
 	osThreadLockOwner *G
+	// Suspended affinity owners are cold, M-local records rooted by P.
+	osThreadSuspensions *OSThreadSuspension
 	// foreignReentry is the top of a scheduler-owned, owner-M-stack-backed
 	// synchronous callback chain. Ordinary tasks pay no per-G pointer, and no
 	// callback target is recovered from a code address.
@@ -549,7 +551,7 @@ func PollPreemptCompiler(g *G) bool {
 //go:noinline
 func servicePreemptBudgetExpired(p *P, mode uint32) bool {
 	if mode != executorModeBound || runnableForOSThreadOwner(p) || HasWaiting(p) ||
-		osThreadSuspendCurrentPeerNeedsService(p) {
+		osThreadSuspendCurrentPeerNeedsService(p) || nextReadyOSThreadSuspension(p) != nil {
 		return true
 	}
 	driver := p.executor
@@ -716,7 +718,15 @@ func nextOSThreadRunnable(p *P) *G {
 		if p.osThreadSuspend != osThreadSuspendAttached {
 			return nil
 		}
-		return p.readyHead
+		if p.osThreadSuspensions == nil {
+			return p.readyHead
+		}
+		for candidate := p.readyHead; candidate != nil; candidate = candidate.nextReady {
+			if candidate.osThreadLockDepth == 0 {
+				return candidate
+			}
+		}
+		return nil
 	}
 	switch p.osThreadSuspend {
 	case osThreadSuspendAttached:
@@ -1965,7 +1975,7 @@ func TerminalG(p *P, g *G) bool {
 		emptySchedulerWaitQueues(p) &&
 		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound &&
 		p.executor == nil && p.channelSource == nil && p.osThreadLockOwner == nil &&
-		p.osThreadSuspend == osThreadSuspendAttached &&
+		p.osThreadSuspend == osThreadSuspendAttached && p.osThreadSuspensions == nil &&
 		!p.inResume && p.inlineAwaitDepth == 0 && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
 		ValidG(g) && gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
 		g.taskControlLeases == 0 && g.runAction == ActionInvalid && g.transferState == runnableTransferGIdle &&
