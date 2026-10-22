@@ -178,7 +178,10 @@ func coroRunPhysicalActionV1(
 		if !ok {
 			return coro.Action{}, false, false, false
 		}
-		needsRuntimeContext = needsRuntimeContext || panicBoundary
+		// Execution-domain channel/timer adapters observe the current logical G
+		// even when the source body itself is context-independent. A native
+		// landing is a separate service and may be omitted for this frame.
+		needsRuntimeContext = needsRuntimeContext || panicBoundary || coro.ExecutionDomainEnabled()
 		if needsRuntimeContext {
 			activation, entered := coroEnterRuntimeContextFrom(g, runtimeContext)
 			if !entered {

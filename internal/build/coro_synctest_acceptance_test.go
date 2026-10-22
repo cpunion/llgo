@@ -32,6 +32,7 @@ func TestCoroSynctestAcceptance(t *testing.T) {
 	}
 	for _, fixture := range []struct{ name, output string }{
 		{"coro_synctest_go127", "synctest Run/Wait/channel/select/Cond/Sleep/Timer/Ticker/AfterFunc ok"},
+		{"coro_synctest_context_go127", "synctest context-free child receive ok"},
 		{"coro_synctest_objects_go127", "synctest heap association/WaitGroup/weak ownership ok"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
