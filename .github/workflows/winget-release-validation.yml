@@ -41,6 +41,7 @@ jobs:
             $files = @{
               'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle' = '6824b6e9484ab24687d99a0c829d2bcbcc7849a70a4d0f596fc43c89d20dff15'
               'DesktopAppInstaller_Dependencies.zip' = '50c377516749002dcdda9c8e52f26e8e2ea73d52131ce96ffd082dcf60ca6677'
+              'e53e159d00e04f729cc2180cffd1c02e_License1.xml' = 'bcb15118ec47df24e3e6013a7006147c3a15b3a8104ed660fe87c8b4ed01f485'
             }
             $temporary = Join-Path $env:RUNNER_TEMP 'winget-bootstrap'
             New-Item -ItemType Directory -Force $temporary | Out-Null
@@ -56,6 +57,11 @@ jobs:
             $packages = @(Get-ChildItem (Join-Path $deps $arch) -Recurse -File | Where-Object { $_.Extension -in @('.appx', '.msix') })
             if (-not $packages.Count) { throw "Missing WinGet dependencies for $arch" }
             Add-AppxPackage -Path (Join-Path $temporary 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle') -DependencyPath $packages.FullName -ForceApplicationShutdown
+            # Server 2022 also needs the release's offline license. Match the
+            # WinGet repair module's provision-and-register installation path.
+            Add-AppxProvisionedPackage -Online -PackagePath (Join-Path $temporary 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle') -LicensePath (Join-Path $temporary 'e53e159d00e04f729cc2180cffd1c02e_License1.xml') | Out-Null
+            $package = Get-AppxPackage -Name Microsoft.DesktopAppInstaller
+            Add-AppxPackage -Register -DisableDevelopmentMode -Path (Join-Path $package.InstallLocation 'AppxManifest.xml')
           }
           $env:PATH += ';' + (Join-Path $env:LOCALAPPDATA 'Microsoft/WindowsApps')
           (Join-Path $env:LOCALAPPDATA 'Microsoft/WindowsApps') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
