@@ -31,7 +31,7 @@ func TestNativeStandbyCapacityAcrossAcknowledgementAndCancel(t *testing.T) {
 	if err != nil {
 		t.Skip("cc is unavailable")
 	}
-	for _, fixture := range []string{"standby_pending_ack", "standby_cancel_full"} {
+	for _, fixture := range []string{"standby_pending_ack", "standby_cancel_full", "queued_release_full"} {
 		t.Run(fixture, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()

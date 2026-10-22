@@ -71,8 +71,9 @@ func RequestReuseOwner(native *thread.Thread, token *uint32, slot uint32) c.Int
 
 // CancelReuseOwner withdraws an exact queued RequestReuseOwner. Zero means the
 // standby pthread had not begun dispatch and is already back in the cache; one
-// means dispatch won the race and the caller must complete the ordinary owner
-// release protocol. Every other value is an invariant failure.
+// means dispatch won or the full cache kept the request queued; the caller
+// must complete the ordinary owner release protocol. Every other value is an
+// invariant failure.
 //
 //go:linkname CancelReuseOwner C.__llgo_coro_fleet_owner_cancel_reuse_v1
 func CancelReuseOwner(native thread.Thread, token, slot uint32) c.Int
@@ -90,8 +91,10 @@ func OwnerReady(slot uint32) c.Int
 func JoinOwner(native thread.Thread, token uint32) c.Int
 
 // ReleaseOwner acknowledges that one temporary replacement has returned from
-// Go and may be cached. Zero retains the live pthread in standby; one means
-// the bounded cache was full and the adapter strongly joined it.
+// Go and may be cached. A published queued request waits through dispatch and
+// return before its metadata can be reclaimed. Zero retains the live pthread
+// in standby; one means the bounded cache was full and the adapter strongly
+// joined it.
 //
 //go:linkname ReleaseOwner C.__llgo_coro_fleet_owner_release_v1
 func ReleaseOwner(native thread.Thread, token, slot uint32) c.Int
