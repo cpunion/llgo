@@ -156,7 +156,7 @@ func TestCompilerRootCompletionUsesTrustedSuffix(t *testing.T) {
 	) {
 		t.Fatal("publish compiler root return")
 	}
-	if task.g.pending.kind != pendingComplete || task.g.pending.from != frame ||
+	if task.g.pending.kind != pendingCompilerRootComplete || task.g.pending.from != frame ||
 		task.g.pending.target != nil {
 		t.Fatalf("compiler root pending transition = %+v", task.g.pending)
 	}
