@@ -19,6 +19,8 @@
 package runtime
 
 import (
+	"unsafe"
+
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
 	"github.com/xgo-dev/llgo/runtime/internal/corodoorbell"
 )
@@ -35,7 +37,10 @@ type coroNativeFleetPollSetV1 struct {
 	operations [coroNativeFleetPollCapacityV1]coro.OperationID
 }
 
-var coroNativeFleetPollSetsV1 [coroNativeFleetDomainCapacityV1]coroNativeFleetPollSetV1
+// Logical routes which have never performed a physical wait retain only a
+// nil root. The unique physical owner materializes one fixed-capacity buffer
+// before its first poll; that address stays rooted for the process lifetime.
+var coroNativeFleetPollSetsV1 [coroNativeFleetDomainCapacityV1]unsafe.Pointer
 
 type coroNativeFleetArmedWaitV1 struct {
 	Handle      coro.ExecutorFleetHandle
@@ -87,7 +92,9 @@ func coroNativeFleetWaitStorageV1(
 	if !ok || handle.Route == 0 || handle.Route > coroNativeFleetV1State.domainCount {
 		return nil, nil, false
 	}
-	return domain, &coroNativeFleetPollSetsV1[handle.Route-1], true
+	return domain, (*coroNativeFleetPollSetV1)(coroNativeAtomicLoadPointerV1(
+		&coroNativeFleetPollSetsV1[handle.Route-1],
+	)), true
 }
 
 // coroNativeFleetBuildPhysicalWaitV1 is the sole route-local poll-set
@@ -106,6 +113,13 @@ func coroNativeFleetBuildPhysicalWaitV1(
 	doorbellFD, ok := domain.doorbell.ReadFD()
 	if !ok {
 		return coroNativeFleetPhysicalWaitV1{}, false
+	}
+	if storage == nil {
+		// Only the admitted physical owner builds a route's wait snapshot.
+		// Its replacement cannot use this buffer until that owner has left
+		// the managed scheduler; no callback ever materializes or frees it.
+		storage = new(coroNativeFleetPollSetV1)
+		coroNativeAtomicStorePointerV1(&coroNativeFleetPollSetsV1[handle.Route-1], unsafe.Pointer(storage))
 	}
 	for index := range storage.entries {
 		storage.entries[index] = corodoorbell.PollFD{}
@@ -232,7 +246,7 @@ func coroNativeFleetWaitPhysicalPassAtV1(
 	mode coroNativeFleetPhysicalWaitModeV1,
 ) coroNativeFleetPhysicalWaitResultV1 {
 	domain, storage, ok := coroNativeFleetWaitStorageV1(wait.handle)
-	if !ok || wait.count == 0 || wait.count > corodoorbell.PollSetCapacity ||
+	if !ok || storage == nil || wait.count == 0 || wait.count > corodoorbell.PollSetCapacity ||
 		now < 0 || wait.deadline < 0 ||
 		!wait.hasDeadline && wait.deadline != 0 ||
 		mode != coroNativeFleetPhysicalWaitIdleV1 &&

@@ -985,3 +985,59 @@ func TestCoroNativeFleetAdoptsBoundProgramStorageV1(t *testing.T) {
 		t.Fatal("adopted native fleet retained external program storage")
 	}
 }
+
+func TestCoroNativeFleetUnusedPollStorageIsBounded(t *testing.T) {
+	// Eight potential routes must not eagerly root eight maximum-size poll
+	// buffers when only the program owner is active.
+	want := uintptr(coroNativeFleetDomainCapacityV1) * unsafe.Sizeof(unsafe.Pointer(nil))
+	if got := unsafe.Sizeof(coroNativeFleetPollSetsV1); got > want {
+		t.Fatalf("unused fleet poll roots occupy %d bytes, want <= %d", got, want)
+	}
+}
+
+func TestCoroNativeFleetPollStorageMaterializesOneStableRoute(t *testing.T) {
+	saved, savedPoll := coroNativeFleetV1State, coroNativeFleetPollSetsV1
+	coroNativeFleetV1State = coroNativeFleetStateV1{}
+	for i := range coroNativeFleetPollSetsV1 {
+		coroNativeFleetPollSetsV1[i] = nil
+	}
+	t.Cleanup(func() {
+		for i := uint32(0); i < coroNativeFleetV1State.domainCount; i++ {
+			if !coroNativeFleetV1State.domains[i].doorbell.Close() {
+				t.Error("close test doorbell")
+			}
+		}
+		coroNativeFleetV1State, coroNativeFleetPollSetsV1 = saved, savedPoll
+	})
+	if !coroNativeFleetStartStateV1(&coroNativeFleetV1State, 2) {
+		t.Fatal("start two routes")
+	}
+	for i, root := range coroNativeFleetPollSetsV1 {
+		if root != nil {
+			t.Fatalf("route %d allocated without waiting", i+1)
+		}
+	}
+	handle := coroNativeFleetV1State.domains[1].handle
+	if _, ok := coroNativeFleetBuildPhysicalWaitV1(handle, -1, true); ok {
+		t.Fatal("invalid deadline accepted")
+	}
+	if coroNativeFleetPollSetsV1[1] != nil {
+		t.Fatal("invalid wait allocated storage")
+	}
+	wait, ok := coroNativeFleetBuildPhysicalWaitV1(handle, 0, false)
+	if !ok || wait.count != 1 {
+		t.Fatal("build doorbell-only wait", wait, ok)
+	}
+	root := coroNativeFleetPollSetsV1[1]
+	if root == nil {
+		t.Fatal("real wait has no rooted storage")
+	}
+	for i, other := range coroNativeFleetPollSetsV1 {
+		if i != 1 && other != nil {
+			t.Fatalf("unrelated route %d allocated", i+1)
+		}
+	}
+	if _, ok := coroNativeFleetBuildPhysicalWaitV1(handle, 0, false); !ok || coroNativeFleetPollSetsV1[1] != root {
+		t.Fatal("wait storage address changed")
+	}
+}
