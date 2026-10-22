@@ -43,7 +43,8 @@ if ($Child) {
     Write-Host $output
   } finally {
     if ($installed) {
-      Invoke-WinGet @('uninstall', '--name', 'LLGo (MSVC)', '--exact', '--silent', '--disable-interactivity')
+      Invoke-WinGet @('uninstall', '--name', 'LLGo (MSVC)', '--exact', '--source', 'winget',
+        '--accept-source-agreements', '--silent', '--disable-interactivity')
     }
   }
   $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;" + [Environment]::GetEnvironmentVariable('PATH', 'User')
