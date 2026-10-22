@@ -1,6 +1,6 @@
 # Function-local native coroutine boundaries: 2026-10-22
 
-This is an intermediate acceptance record. All four remaining parity targets—batch creation, serial creation, standard file I/O and loopback TCP—must reach Go performance before final project closeout. Buffered channels are already faster in the current original-input measurements. No final unified acceptance or new held-goroutine RSS result is claimed here.
+This is an intermediate acceptance record. All four remaining parity targets—batch creation, serial creation, standard file I/O and loopback TCP—must reach Go performance before final project closeout. Buffered channels are already faster in the current original-input measurements. The later held-memory measurements below are diagnostics; no final unified acceptance is claimed here.
 
 PR 312 merged into `cpunion/llgo:llvm-coro` as `edb37b42c41db5e9bbb9d6fd2bef4c750c70d738`. Its exact tip `1152887eec2736d4ddde186ad07cbd0d3633bfed` passed CI run 39725656588, 20/20. Paginated reviews, inline comments, issue comments and threads were empty immediately before merge. The merge tree equals the tested tip tree. The first frozen compiler producer, corresponding to `799af6a90`, separately passed full native test/go: 307 top-level tests, 691 including subtests, with all 46 nested compiler domains joined and reclaimed. Those receipts retain their producer identity. The corrected compiler's original core image is byte-identical; its I/O image has five independently ordered adjacent store instructions, and was remeasured separately.
 
@@ -63,13 +63,59 @@ Three additional failures were reproduced independently. First, exiting the prim
 
 The isolated clean-r7 source passed the complete native fleet group: 34 top-level checks / 35 including subchecks, full core/factory/thread race tests and runtime source contracts. Existing cross-return park/compute cases, sixteen locked peers with actual TLS/thread retirement, managed callbacks, task Abort and Shutdown all pass. A foreign-blocked owner services 12000 locked exits; a separate preceding candidate passed that test three times. Standalone serial and locked-parent 12000-exit programs also pass against fresh Go controls. The C retained-owner, standby pending-credit and full-cache cancellation fixtures all pass plain, AddressSanitizer/UndefinedBehaviorSanitizer and ThreadSanitizer runs. A first sanitizer replay incorrectly compiled an already-included C implementation twice; its duplicate-symbol setup failure is retained separately from the corrected complete replay.
 
-Public test/go regressions cover nested locks, P1/P4 rings with 2/8/16/64 participants, ordinary return and Goexit, and both ordinary and locked-parent directory reuse beyond 12000 exits. These public tests still require exact committed native acceptance. The integrated test harness gives the 12000-exit native capacity fixture a predeclared 90-second runtime budget for slower CI hosts; ordinary fleet controls keep their 10-second limit. Exact follow-up CI, paginated review audit and full native test/go remain required before integration acceptance. No passing earlier producer is substituted for these gates.
+Public test/go regressions cover nested locks, P1/P4 rings with 2/8/16/64 participants, ordinary return and Goexit, and both ordinary and locked-parent directory reuse beyond 12000 exits. Both public regressions now pass exact-411 native acceptance and Go race controls. The integrated test harness gives the 12000-exit native capacity fixture a predeclared 90-second runtime budget for slower CI hosts; ordinary fleet controls keep their 10-second limit. Exact tip `e322bd760` passes CI run 39804061858, 20/20. Paginated reviews, inline comments, issue comments and threads are all empty immediately before merge. PR 313 merged into `cpunion/llgo:llvm-coro` as `81cfcc47b37ca99793a9f6e8bc7292210ee86ad4`; its merge tree equals the tested tip tree. The complete native producer retains its identity below. This is an intermediate functional integration, not final project acceptance.
 
-Exact producer `411ddec19` subsequently passed its full core/factory/thread race checks three times, runtime contracts, the parent-return and 12000-exit native controls three times each, and both public LockOSThread test/go regressions under Go race and LLGo. Its complete native test/go remains running. CI found the new primordial-thread wrapper was missing from the frozen production-contract inventory; an owner-manifest audit proves exactly one additional foreign `sync` declaration and all previous 85 entries unchanged. The reviewed inventory becomes 8 contract / 40 noblock / 38 sync. No Go caller is annotated and no removed directive class is restored. An independent JS/WASM job failed before testing because the package source returned HTTP 403. Both failures and the follow-up CI retain separate receipts.
+Exact producer `411ddec19` subsequently passed its full core/factory/thread race checks three times, runtime contracts, the parent-return and 12000-exit native controls three times each, and both public LockOSThread test/go regressions under Go race and LLGo. Its complete native test/go passes 309 top-level tests / 703 including subtests, with all 46 nested compiler domains joined and reclaimed. CI found the new primordial-thread wrapper was missing from the frozen production-contract inventory; an owner-manifest audit proves exactly one additional foreign `sync` declaration and all previous 85 entries unchanged. The reviewed inventory becomes 8 contract / 40 noblock / 38 sync. No Go caller is annotated and no removed directive class is restored. An independent JS/WASM job failed before testing because the package source returned HTTP 403. Both failures and the follow-up CI retain separate receipts.
 
 The later seven-brand comparison campaign retained 560 more original-input samples. Both cohorts breached the predeclared load gate, so all are diagnostic. Together with the earlier 720 samples, they establish no new parity result and do not authorize adoption of those performance prototypes.
 
 Evidence: `locked-owner-clean-r7`, `locked-owner-clean-r6`, `locked-owner-clean-r5`, `locked-owner-lifetime-capacity-r1`, `locked-owner-directory-trace-r1` and `gc-main-exit-r1`, under the same evidence root. Every red run, fixture setup failure and positive producer retains its own source identity.
+
+## Merged PR 313 performance baseline
+
+The exact-e322 source/compiler produced fresh stripped images from the unchanged ordinary-Go fixtures, default Os and no LTO. The merge commit has the same source tree. Two predeclared cohorts each retain a warmup and seven alternating Go/LLGo rounds, 160 total samples. Both meet the predeclared load admission and measurement gates; no owned compiler runs during timing. Go 1.27 reference images are byte-identical to the preceding reference producer. Every checksum, output, guard receipt and peak RSS sample is retained.
+
+| Original case | LLGo / Go, cohort 1 | LLGo / Go, cohort 2 |
+| --- | ---: | ---: |
+| Buffered channel | 0.1542x | 0.1547x |
+| Batch goroutine creation | 1.9591x | 1.9833x |
+| Serial goroutine creation | 2.0105x | 2.0291x |
+| Standard file I/O | 2.1337x | 2.1686x |
+| Loopback TCP | 1.5294x | 1.5276x |
+
+All four requested parity targets remain open. These accepted measurements establish the merged functional baseline; they do not establish parity or replace the final frozen acceptance. Later allocator, zero-state and backend-inlining prototypes remain isolated. Their expanded-duration sampling is diagnostic, and none is adopted in this record.
+
+Evidence: `locked-owner-integration-r1`, `locked-owner-integration-r2`, `native-locked-owner-integration-r1`, `locked-owner-directive-review-r1` and `merged-313-comparison-r1`. Native producer `411ddec19` and CI tip `e322bd760` differ only in the host inventory test and documentation; all compiler/runtime production source blobs are byte-identical. The native result retains the 411 identity.
+
+## Current held-memory diagnostic: 2026-10-23
+
+Fresh held-program images use the exact e322 compiler/runtime producer, whose source tree equals merge 81cfcc47b. At GOMAXPROCS=1, GOGC=100 and GOMEMLIMIT=off, one warmup and three alternating measured processes per cell each retain seven RSS observations after the ready/GC barrier. All 24 processes, including the explicit collector-setting controls, release and join successfully.
+
+| Parked goroutines | Go RSS | LLGo default RSS |
+| --- | ---: | ---: |
+| 0 | 4.313 MiB | 6.781 MiB |
+| 1,000 | 7.156 MiB | 7.766 MiB |
+
+These are process RSS medians, separate from vmmap physical footprint. The zero-population LLGo map has about 128 KiB resident across all six native stacks, including the main thread; oversized resident stacks do not explain the roughly 2.5 MiB RSS difference. Explicit GC_MARKERS=1 does not materially change RSS. The startup marker policy already exists in this producer, and the additional sampled threads are the native factory/worker threads. Older memory rows retain their original producer identities and do not establish a controlled improvement relative to this run.
+
+Evidence is in `collector-workers-memory-r1`. Its first stack captures have a console/artifact pathname collision and are unusable as stacks; corrected `measure-r2` captures preserve the actual samples. The first run's RSS and vmmap artifacts remain valid. Bounded helper inlining, a bounded spawn batch and package annotation elision pass their focused/native controls but remain isolated without a material measured benefit. Selective runtime-library LTO variants are still being screened; neither is adopted or a parity result.
+
+## Private runtime-library optimization candidate: 2026-10-23
+
+Candidate S2 optimizes and jointly links only `runtime/internal/coro`, `runtime/internal/runtime` and `runtime/internal/coroalloc` at O2. Application and standard-library modules retain native Os objects. Two predeclared compiler-free screening cohorts retain 320 alternating Go/current/runtime-Os/runtime-O2 samples, using the original five sources/counts, unstripped images and the same default runtime settings. Both meet the load gate; all samples and failed admission observations remain available. This screening does not replace exact final stripped acceptance.
+
+| Case | Runtime-O2 / Go, cohort 1 | Cohort 2 | Time reduction from current |
+| --- | ---: | ---: | ---: |
+| Batch creation | 1.6368x | 1.6591x | 16.9% / 17.4% |
+| Serial creation | 1.7197x | 1.7457x | 13.7% / 13.0% |
+| File I/O | 2.0147x | 2.0213x | 6.0% / 3.3% |
+| TCP | 1.4185x | 1.4160x | 6.2% / 7.0% |
+
+All four parity targets remain open. S2's 33 guarded CLI build/run steps pass, including original/active eleven-check programs, sieves, zero-after-GC and locked-thread tests at P1/P4. Fresh and cached stripped core/I/O builds produce byte-identical images at each output path. Stripped sizes are 2,888,720 and 4,651,456 bytes, about 1.7% and 1.4% larger than the merged baseline. Fresh default-policy held-memory screening is essentially unchanged: empty current/S2 RSS is 6.781/6.750 MiB; 1,000 parked tasks is 7.766/7.781 MiB. No material baseline-memory improvement is established.
+
+Proposed integration S3 narrows the policy to the measured native Darwin arm64/default Os profile. Cross targets, custom archive/linker choices and debug/IR-output profiles retain ordinary package code generation. A versioned cache field separates the emitted object policies. Raw bitcode requires an LLVM-aware archive index: wrapped C bitcode controls pass with Apple ar, while the same raw payload fails to link; the linked LLVM archive writer fixes that case. S3 uses the existing writer only for the three private bitcode packages. Native application objects and explicit custom-archiver fallback have real link/run regressions. S3 has not yet completed its exact frozen native/CI/performance gates.
+
+Evidence: `runtime-lto-screen-r1`, `runtime-selective-lto-r1`, `runtime-selective-lto-r2` and `runtime-library-integration-r1`. S2 and proposed S3 retain separate producer identities. No runtime/core ownership checks or G/Frame layout change.
 
 ## Remaining project gates
 
