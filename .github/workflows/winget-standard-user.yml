@@ -1,0 +1,82 @@
+name: WinGet standard-user validation
+on:
+  push:
+    branches: [codex/winget-standard-user-20261022]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: winget-standard-user-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [MSVC]
+        goarch: [amd64, '386', arm64]
+        include:
+          - goarch: '386'
+            runner: windows-2025
+          - goarch: amd64
+            runner: windows-2025
+          - goarch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Bootstrap stable WinGet
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $installed = Get-Command winget.exe -ErrorAction SilentlyContinue
+          $version = if ($installed) { [version]((& $installed.Source --version).Trim().TrimStart('v')) } else { [version]'0.0' }
+          if ($version -lt [version]'1.29.290') {
+            # Bootstrap from verified release files, avoiding the module's
+            # failing latest-release discovery on the ARM64 image. Older
+            # preinstalled clients do not recognize the 1.12 schema header.
+            $base = 'https://github.com/microsoft/winget-cli/releases/download/v1.29.290'
+            $files = @{
+              'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle' = '6824b6e9484ab24687d99a0c829d2bcbcc7849a70a4d0f596fc43c89d20dff15'
+              'DesktopAppInstaller_Dependencies.zip' = '50c377516749002dcdda9c8e52f26e8e2ea73d52131ce96ffd082dcf60ca6677'
+              'e53e159d00e04f729cc2180cffd1c02e_License1.xml' = 'bcb15118ec47df24e3e6013a7006147c3a15b3a8104ed660fe87c8b4ed01f485'
+            }
+            $temporary = Join-Path $env:RUNNER_TEMP 'winget-bootstrap'
+            New-Item -ItemType Directory -Force $temporary | Out-Null
+            foreach ($name in $files.Keys) {
+              $path = Join-Path $temporary $name
+              curl.exe --fail --location --retry 5 --retry-all-errors --output $path "$base/$name"
+              if ($LASTEXITCODE -ne 0) { throw "Downloading $name failed" }
+              if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $files[$name]) { throw "Invalid hash for $name" }
+            }
+            $deps = Join-Path $temporary 'dependencies'
+            Expand-Archive (Join-Path $temporary 'DesktopAppInstaller_Dependencies.zip') $deps
+            $arch = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64' } else { 'x64' }
+            $packages = @(Get-ChildItem (Join-Path $deps $arch) -Recurse -File | Where-Object { $_.Extension -in @('.appx', '.msix') })
+            if (-not $packages.Count) { throw "Missing WinGet dependencies for $arch" }
+            Add-AppxPackage -Path (Join-Path $temporary 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle') -DependencyPath $packages.FullName -ForceApplicationShutdown
+            # Server 2022 also needs the release's offline license. Match the
+            # WinGet repair module's provision-and-register installation path.
+            Add-AppxProvisionedPackage -Online -PackagePath (Join-Path $temporary 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle') -LicensePath (Join-Path $temporary 'e53e159d00e04f729cc2180cffd1c02e_License1.xml') | Out-Null
+            $package = Get-AppxPackage -Name Microsoft.DesktopAppInstaller
+            Add-AppxPackage -Register -DisableDevelopmentMode -Path (Join-Path $package.InstallLocation 'AppxManifest.xml')
+          }
+          $env:PATH += ';' + (Join-Path $env:LOCALAPPDATA 'Microsoft/WindowsApps')
+          (Join-Path $env:LOCALAPPDATA 'Microsoft/WindowsApps') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          winget --version
+          if ($LASTEXITCODE -ne 0) { throw 'WinGet bootstrap failed' }
+      - name: Validate as a standard user without development dependencies
+        shell: powershell
+        run: ./.github/windows/test-winget-standard-user.ps1 -GoArch ${{ matrix.goarch }}
+      - name: Preserve WinGet diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: winget-standard-${{ matrix.goarch }}
+          path: |
+            C:/Users/Public/llgo-winget-standard/standard-user.log
+            ~/AppData/Local/Packages/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe/LocalState/DiagOutputDir/
+            ~/AppData/Local/Microsoft/WinGet/DiagOutputDir/
+          if-no-files-found: ignore
