@@ -117,6 +117,7 @@ func (s *envSection) empty() bool {
 }
 
 type commonSection struct {
+	RuntimeLibraryCodegen   string       `yaml:"RUNTIME_LIBRARY_OPTIMIZATION,omitempty"`
 	AbiMode                 string       `yaml:"ABI_MODE,omitempty"`
 	BuildTags               []string     `yaml:"BUILD_TAGS,omitempty"`
 	Target                  string       `yaml:"TARGET,omitempty"`
@@ -173,7 +174,7 @@ type commonSection struct {
 }
 
 func (s *commonSection) empty() bool {
-	return s.AbiMode == "" && len(s.BuildTags) == 0 && s.Target == "" && s.RuntimeGC == "" && s.LLVMCPU == "" &&
+	return s.RuntimeLibraryCodegen == "" && s.AbiMode == "" && len(s.BuildTags) == 0 && s.Target == "" && s.RuntimeGC == "" && s.LLVMCPU == "" &&
 		s.LLVMFeatures == "" && s.TargetABI == "" && s.PlatformABI == "" && s.ObjectFormat == "" &&
 		s.DriverFlavor == "" && s.LinkerFlavor == "" && s.TargetTriple == "" && s.CRTFlavor == "" &&
 		s.CXXRuntime == "" && s.SDKVersion == "" && s.CRTVersion == "" && s.ToolsetVersion == "" &&

@@ -7879,6 +7879,9 @@ func (c *context) clangConfig() clang.Config {
 
 func (c *context) linker() *clang.Cmd {
 	config := c.clangConfig()
+	if runtimeLibraryLTO(c.buildConf) {
+		config.LDFLAGS = append(config.LDFLAGS, "-flto=full", "-Wl,--lto-O2")
+	}
 	cmd := clang.NewLinker(config)
 	if config.Linker == "" && config.CXX != "" {
 		// Native LLGo historically linked through clang++. Preserve that C++
@@ -9235,7 +9238,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 			return err
 		}
 	}
-	applySizeOptimizationAttributes(ret.Module(), ctx.buildConf.OptLevel)
+	applySizeOptimizationAttributes(ret.Module(), runtimeLibraryOptLevel(ctx.buildConf, pkgPath))
 	printCmds := ctx.shouldPrintCommands(verbose)
 	if ctx.mode != ModeGen {
 		if aPkg.AltPkg == nil || llruntime.HasAdditiveAltPkg(pkgPath) {
@@ -9284,7 +9287,7 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 			}
 			return fmt.Errorf("verify LLVM module for package %s (invalid functions %v): %w", pkgPath, broken, err)
 		}
-		if err := mod.RunPasses(llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode()), ctx.prog.TargetMachine(), pbo); err != nil {
+		if err := mod.RunPasses(llvmPassPipeline(runtimeLibraryOptLevel(ctx.buildConf, pkgPath), ctx.buildConf.ltoMode()), ctx.prog.TargetMachine(), pbo); err != nil {
 			return fmt.Errorf("run LLVM passes failed for %v: %w", pkgPath, err)
 		}
 	}
@@ -9609,7 +9612,7 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 				finishRelief := beginNativeHeapRelief()
 				defer finishRelief()
 			}
-			return mod.RunPasses(llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode()), backend.TargetMachine(), options)
+			return mod.RunPasses(llvmPassPipeline(runtimeLibraryOptLevel(ctx.buildConf, pkg.PkgPath), ctx.buildConf.ltoMode()), backend.TargetMachine(), options)
 		}
 		if err := optimize(); err != nil {
 			return "", fmt.Errorf("run detached LLVM passes for %s: %w", pkg.PkgPath, err)
@@ -9646,7 +9649,11 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 		return "", err
 	}
 	if ctx.shouldPrintCommands(false) {
-		fmt.Fprintf(os.Stderr, "# detached LLVM object emission %s for pkg: %s\n", name, pkg.PkgPath)
+		kind := "object"
+		if runtimeLibraryLTOPackage(ctx.buildConf, pkg.PkgPath) {
+			kind = "runtime library bitcode"
+		}
+		fmt.Fprintf(os.Stderr, "# detached LLVM %s emission %s for pkg: %s\n", kind, name, pkg.PkgPath)
 	}
 	// MachineOutliner is a module pass between selection and assembly output.
 	// It otherwise keeps every expanded machine function resident. Large
@@ -9656,7 +9663,14 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 	if input.Size() >= largeStagedPackageBitcodeSize && (strings.HasPrefix(triple, "aarch64-") || strings.HasPrefix(triple, "arm64-")) {
 		setNativeMachineOutliner(backend.TargetMachine(), false)
 	}
-	if err := emitNativeObjectFile(backend.TargetMachine(), mod, name); err != nil {
+	if runtimeLibraryLTOPackage(ctx.buildConf, pkg.PkgPath) {
+		buf := gllvm.WriteFullLTOBitcodeToMemoryBuffer(mod, false)
+		defer buf.Dispose()
+		if err := os.WriteFile(name, buf.Bytes(), 0600); err != nil {
+			_ = os.Remove(name)
+			return "", err
+		}
+	} else if err := emitNativeObjectFile(backend.TargetMachine(), mod, name); err != nil {
 		_ = os.Remove(name)
 		return "", err
 	}
@@ -9891,7 +9905,7 @@ func releaseCoroFrontendForStagedBackend(ctx *context, pkgs []*aPackage) {
 }
 
 func exportObject(ctx *context, pkgPath string, exportFile string, pkg llssa.Package) (string, error) {
-	applySizeOptimizationAttributes(pkg.Module(), ctx.buildConf.OptLevel)
+	applySizeOptimizationAttributes(pkg.Module(), runtimeLibraryOptLevel(ctx.buildConf, pkgPath))
 	if useInMemoryNativeCodegen(ctx) {
 		return exportObjectInMemory(ctx, pkgPath, exportFile, pkg)
 	}
@@ -9986,6 +10000,9 @@ func exportObjectInMemory(ctx *context, pkgPath string, exportFile string, pkg l
 
 func emitObjectToMemoryBuffer(ctx *context, pkg llssa.Package) (gllvm.MemoryBuffer, string, error) {
 	ltoMode := ctx.buildConf.ltoMode()
+	if runtimeLibraryLTOPackage(ctx.buildConf, pkg.Path()) {
+		ltoMode = lto.Full
+	}
 	var (
 		buf  gllvm.MemoryBuffer
 		err  error
