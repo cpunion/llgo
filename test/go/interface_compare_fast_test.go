@@ -7,6 +7,7 @@ package gotest
 import (
 	"io"
 	"math"
+	"runtime"
 	"testing"
 )
 
@@ -129,5 +130,54 @@ func TestDynamicInterfaceComparisonLoopAndOrder(t *testing.T) {
 		if left != right || !dynamicInterfaceEqual(nil, nil) || dynamicErrorEqual(nil, io.EOF) {
 			t.Fatal("comparison loop or aggregate PHI changed")
 		}
+	}
+}
+
+//go:noinline
+func constantInterfaceNil(value any) bool { return value == nil }
+
+//go:noinline
+func constantErrorNil(value error) bool { return nil == value }
+
+//go:noinline
+func mixedInterfaceNil(left, right any) bool {
+	if left == nil {
+		return right == nil
+	}
+	return left == right
+}
+
+func checkConstantInterfaceNilComparisons() {
+	var pointer *interfaceCompareError
+	for _, value := range []any{nil, pointer, []int(nil), map[int]int(nil), (func())(nil), 42} {
+		if constantInterfaceNil(value) != dynamicInterfaceEqual(value, nil) {
+			panic("constant interface nil comparison changed")
+		}
+	}
+	for _, value := range []error{nil, pointer, interfaceCompareSlice(nil), io.EOF} {
+		if constantErrorNil(value) != dynamicErrorEqual(nil, value) {
+			panic("constant error nil comparison changed")
+		}
+	}
+	if !mixedInterfaceNil(nil, nil) || mixedInterfaceNil(pointer, nil) {
+		panic("mixed nil comparison changed")
+	}
+	panicked := false
+	func() {
+		defer func() { panicked = recover() != nil }()
+		value := []int(nil)
+		mixedInterfaceNil(value, value)
+	}()
+	if !panicked {
+		panic("mixed dynamic comparison lost non-comparable panic")
+	}
+}
+
+func TestConstantInterfaceNilComparisonAfterYield(t *testing.T) {
+	for range 32 {
+		checkConstantInterfaceNilComparisons()
+		done := make(chan struct{})
+		go func() { runtime.Gosched(); checkConstantInterfaceNilComparisons(); close(done) }()
+		<-done
 	}
 }
