@@ -8,7 +8,7 @@ The inline transaction checks capacity, element size, buffer, count, closed-send
 
 ## Same-input native measurements
 
-Darwin arm64, M4 Max, Go 1.27.0, LLVM 22.1.8, macOS 26.5 SDK, stripped default O2, no LTO flag. These are elapsed medians from seven rotating triplets after one warmup triplet for every one of the 17 original ordinary-Go scenarios. All 408 processes exited successfully and matched their checksums. Inputs, counts, compiler flags and raw samples are retained. Unrelated host load remains present; these are observations on this host rather than a quiet-host or cross-platform guarantee.
+Darwin arm64, M4 Max, Go 1.27.0, LLVM 22.1.8, macOS 26.5 SDK, stripped default Os, no LTO flag. These are elapsed medians from seven rotating triplets after one warmup triplet for every one of the 17 original ordinary-Go scenarios. All 408 processes exited successfully and matched their checksums. Inputs, counts, compiler flags and raw samples are retained. Unrelated host load remains present; these are observations on this host rather than a quiet-host or cross-platform guarantee.
 
 The comparison baseline is merged memory-fix tree `f1574c2f0b5f8e6c3b6bc59ac70a117690077e0a`. Idle and park elapsed fields are excluded from throughput claims.
 

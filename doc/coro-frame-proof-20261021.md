@@ -8,7 +8,7 @@ LLVM 22's target implementations read the current FP for depth zero and walk mem
 
 ## Original-input measurements
 
-Darwin arm64, Go 1.27.0, LLVM 22.1.8 and macOS 26.5 SDK. The baseline is frozen R15, production-equivalent to merge `3593d4bb3` (tested source HEAD `71f4402c8`). All 17 original ordinary-Go scenarios, counts, stripped default O2 flags and non-LTO settings are unchanged. Two independent cohorts each retain one warmup and seven rotating Go/baseline/candidate samples: 816 successful runs, checksums and OS peak-RSS observations. No sample exclusion or diagnostic-count substitution. Shared-host variability remains visible in the full records.
+Darwin arm64, Go 1.27.0, LLVM 22.1.8 and macOS 26.5 SDK. The baseline is frozen R15, production-equivalent to merge `3593d4bb3` (tested source HEAD `71f4402c8`). All 17 original ordinary-Go scenarios, counts, stripped default Os flags and non-LTO settings are unchanged. Two independent cohorts each retain one warmup and seven rotating Go/baseline/candidate samples: 816 successful runs, checksums and OS peak-RSS observations. No sample exclusion or diagnostic-count substitution. Shared-host variability remains visible in the full records.
 
 | Workload | First / Go | Repeat / Go | First / R15 | Repeat / R15 |
 | --- | ---: | ---: | ---: | ---: |
