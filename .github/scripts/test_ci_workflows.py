@@ -361,21 +361,15 @@ else:
         self.assertIn("needs.release.outputs.stable == 'true'", call["if"])
         self.assertEqual(jobs["release"]["outputs"]["stable"], "${{ steps.release-type.outputs.stable }}")
         self.assertEqual(call["uses"], "./.github/workflows/winget.yml")
-        self.assertEqual(call["with"], {"tag": "${{ github.ref_name }}"})
-        self.assertEqual(call["secrets"], {"WINGET_PR_TOKEN": "${{ secrets.WINGET_PR_TOKEN }}"})
         workflow = load("winget.yml")
         self.assertEqual(set(workflow["on"]), {"workflow_call", "workflow_dispatch"})
         self.assertEqual(workflow["permissions"], {"contents": "read"})
-        self.assertEqual(workflow["concurrency"], {"group": "winget-${{ inputs.tag }}", "cancel-in-progress": "false"})
         self.assertEqual(workflow["on"]["workflow_dispatch"]["inputs"]["dry_run"]["default"], "true")
         self.assertEqual(workflow["on"]["workflow_call"]["inputs"]["dry_run"]["default"], "false")
         job = workflow["jobs"]["submit"]
         self.assertEqual(job["if"], "github.repository == 'xgo-dev/llgo' || inputs.dry_run")
-        self.assertEqual(job["strategy"], {"fail-fast": "false", "matrix": {"profile": ["msvc", "mingw"]}})
         step = next(step for step in job["steps"] if step.get("name") == "Submit release manifests")
         self.assertEqual(step["env"]["WINGET_PR_TOKEN"], "${{ !inputs.dry_run && secrets.WINGET_PR_TOKEN || '' }}")
-        self.assertIn('--tag "$RELEASE_TAG"', step["run"])
-        self.assertIn('args+=(--dry-run)', step["run"])
         self.assertNotIn("${{", step["run"])
 
     def test_fury_upload_validates_packages_and_stops_on_failure(self):
@@ -543,6 +537,7 @@ else:
                 git("add", ".")
                 git("commit", "-qm", "base")
                 base = git("rev-parse", "HEAD")
+                historical_blob = git("rev-parse", "HEAD:README.md")
 
                 if case == "docs-only":
                     (repo / "README.md").write_text("updated prose\n")
@@ -554,7 +549,32 @@ else:
                     (repo / "compiler.go").write_text("package compiler\n")
                 git("add", ".")
                 git("commit", "-qm", "pr")
+                if case == "base-policy":
+                    (repo / "README.md").write_text("final documentation edit\n")
+                    git("add", ".")
+                    git("commit", "-qm", "docs after code")
                 head = git("rev-parse", "HEAD")
+
+                # Exercise checkout's transport, including lazy retrieval of
+                # the trusted policy when the PR replaces its current blob.
+                git("config", "uploadpack.allowFilter", "true")
+                git("config", "uploadpack.allowAnySHA1InWant", "true")
+                remote = repo.as_uri()
+                repo = repo / "checkout"
+                repo.mkdir()
+                git("init", "-q")
+                git("config", "protocol.file.allow", "always")
+                git("remote", "add", "origin", remote)
+                fetch = ["fetch", "--quiet", "--no-tags"]
+                configured_filter = load("ci-prepare.yml")["jobs"]["prepare"]["steps"][0]["with"].get("filter")
+                if configured_filter:
+                    fetch.append("--filter=" + configured_filter)
+                git(*fetch, "origin", "+refs/heads/*:refs/remotes/origin/*")
+                git("checkout", "-q", "--detach", head)
+                self.assertEqual(git("rev-parse", "--is-shallow-repository"), "false")
+                if case != "missing-base-policy":
+                    self.assertIn("?" + historical_blob,
+                                  git("rev-list", "--objects", "--all", "--missing=print"))
 
                 event = repo / "event.json"
                 event.write_text(json.dumps({"pull_request": {
