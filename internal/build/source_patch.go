@@ -151,6 +151,15 @@ func applySourcePatchForPkg(base, current map[string][]byte, runtimeDir, goroot,
 		if err != nil {
 			return false, nil, nil, fmt.Errorf("parse source patch directives %s: %w", filename, err)
 		}
+		matches, err := sourcePatchRequirementsMatch(directives.requirements, srcDir, readOverlay)
+		if err != nil {
+			return false, nil, nil, fmt.Errorf("check source patch requirements %s: %w", filename, err)
+		}
+		if !matches {
+			// Do not publish replacement declarations or their implicit skips
+			// when the standard-library implementation has changed.
+			continue
+		}
 		patchSrcs[name] = struct {
 			filename string
 			data     []byte
@@ -415,9 +424,10 @@ func packageStubSource(src []byte) ([]byte, error) {
 }
 
 type sourcePatchDirectives struct {
-	skipAll     bool
-	skips       map[string]struct{}
-	annotations map[string][]string
+	skipAll      bool
+	skips        map[string]struct{}
+	annotations  map[string][]string
+	requirements []sourcePatchRequirement
 }
 
 func collectSourcePatchDirectives(src []byte) (sourcePatchDirectives, error) {
@@ -433,6 +443,12 @@ func collectSourcePatchDirectives(src []byte) (sourcePatchDirectives, error) {
 	for _, group := range file.Comments {
 		for _, comment := range group.List {
 			line := strings.TrimSpace(comment.Text)
+			if requirement, ok, err := parseSourcePatchRequirement(line); err != nil {
+				return sourcePatchDirectives{}, err
+			} else if ok {
+				d.requirements = append(d.requirements, requirement)
+				continue
+			}
 			if name, marker, ok := parseSourcePatchAnnotationDirective(line); ok {
 				for _, previous := range d.annotations[name] {
 					if previous == marker {
@@ -471,6 +487,7 @@ func collectSourcePatchDirectives(src []byte) (sourcePatchDirectives, error) {
 //   - //llgo:skip A B: comment the named declarations from the stdlib package view
 //   - //llgo:annotate F marker: attach //llgo:marker to the exact stdlib function F
 //   - //llgo:annotate F coro noblock: attach the exact multiword coroutine directive
+//   - //llgo:require-source file.go SHA256: apply this patch only to an exact source file
 //
 // Unlike cl/import.go directives, these are consumed only while constructing the
 // load-time overlay and are rewritten to plain comments before type checking.
@@ -567,7 +584,8 @@ func sanitizeSourcePatchDirectiveLines(src []byte) []byte {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(string(line))
 		_, _, annotation := parseSourcePatchAnnotationDirective(trimmed)
-		if _, _, ok := parseSourcePatchDirective(trimmed); !ok && !annotation {
+		_, requirement, _ := parseSourcePatchRequirement(trimmed)
+		if _, _, ok := parseSourcePatchDirective(trimmed); !ok && !annotation && !requirement {
 			continue
 		}
 		switch {

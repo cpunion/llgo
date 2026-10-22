@@ -443,7 +443,7 @@ jobs:
         # Keep the analyzer and source-contract tests in one short-lived
         # process. Tests that invoke the complete build pipeline own a separate
         # lane below because each retains a full runtime/stdlib LLVM universe.
-        run: go test ./internal/build -run 'Coro|Coroutine' -skip 'E2E|^TestCoroNativeTimeSleepProductionPlanAndCodegen$|^TestCoroStdlibSyncAcceptance$|^Test(BuildCoroPlanErrors|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants|RealNativeCoroTargetIsTrustedPlainSchedulerIsland)$' -timeout=10m -count=1
+        run: go test ./internal/build -run 'Coro|Coroutine|SourcePatchRequirement' -skip 'E2E|^TestCoroNativeTimeSleepProductionPlanAndCodegen$|^TestCoroStdlibSyncAcceptance$|^Test(BuildCoroPlanErrors|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants|RealNativeCoroTargetIsTrustedPlainSchedulerIsland)$' -timeout=10m -count=1
 
       - name: Test coroutine production build plan
         if: matrix.lane == 'integration-build'
@@ -508,8 +508,11 @@ jobs:
         run: |
           GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
             /tmp/llgo-coro-fault test -c -p=1 -trimpath \
-              -o /tmp/llgo-waitgroup-fast-gate test/go/waitgroup_fast_add_test.go
+              -o /tmp/llgo-waitgroup-fast-gate \
+              test/go/waitgroup_fast_add_test.go \
+              test/go/waitgroup_brief_wait_test.go
           python3 - <<'PYCODE'
+          from pathlib import Path
           import subprocess
           image = '/tmp/llgo-waitgroup-fast-gate'
           names = [line.split()[-1] for line in subprocess.check_output(['llvm-nm', image], text=True).splitlines()
@@ -517,6 +520,10 @@ jobs:
           assert names, 'missing native counter-test resumes'
           assembly = subprocess.check_output(['llvm-objdump', '--disassemble', '--disassemble-symbols=' + ','.join(names), image], text=True)
           assert 'cmpxchg' in assembly, 'native tests did not retain the guarded CAS'
+          # The rejected patch is never added to the package. Its source
+          # position in the actual image proves admission without requiring
+          # the optimizer to retain a particular helper call or symbol.
+          assert b'waitgroup_coro_go127.go' in Path(image).read_bytes(), 'source-guarded pre-wait path was not admitted'
           PYCODE
           for procs in 1 4; do
             GOMAXPROCS="$procs" timeout 90s /tmp/llgo-waitgroup-fast-gate \
@@ -532,6 +539,7 @@ jobs:
               test/go/local_buffered_channel_test.go \
               test/go/local_buffered_channel_synctest_test.go \
               test/go/semaphore_brief_wait_test.go \
+              test/go/waitgroup_brief_wait_synctest_test.go \
               test/go/memory_equality_offsets_test.go \
               test/go/defer_panic_callers_test.go \
               test/go/runtime_caller_exhaustion_test.go \
