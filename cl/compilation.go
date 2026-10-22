@@ -105,6 +105,7 @@ type Compilation struct {
 	coroFactsValidationErr   error
 	coroCapabilities         sync.Once
 	coroCapabilitiesByFunc   map[*ssa.Function]coro.ProgramCapabilities
+	coroNativeFaultByFunc    map[*ssa.Function]bool
 	coroPredicateMasksByFunc map[*ssa.Function]coro.ProgramCapabilities
 	coroCapabilitiesErr      error
 	coroClosedInterfacePlain *coroClosedInterfacePlainPlan
@@ -190,11 +191,11 @@ func (c *Compilation) coroPanicBoundaryEmissionEnabled(function *ssa.Function) b
 	if !c.FinalCoroProgramCapabilities.NativeDefaultFaultBoundary() {
 		return false
 	}
-	capabilities, err := c.coroFunctionProgramCapability(function)
+	required, err := c.coroFunctionNativeFaultBoundary(function)
 	if err != nil {
 		panic(fmt.Sprintf("resolve native fault-boundary demand: %v", err))
 	}
-	return capabilities.NativeDefaultFaultBoundary()
+	return required
 }
 
 func (c *Compilation) validateCoroTargetCapabilities() error {

@@ -59,9 +59,16 @@ func (c *Compilation) coroFunctionProgramCapabilities() (
 			return
 		}
 		c.coroPredicateMasksByFunc = universe.coroProgramIR.coroLocalProgramPredicateMasks()
-		c.coroCapabilitiesByFunc, c.coroCapabilitiesErr = deriveCoroFunctionProgramCapabilities(
-			plan, local, c.CoroLibraryEffects, c.coroPredicateMasksByFunc,
+		faults := &coroNativeFaultProjection{
+			required:      make(map[*ssa.Function]bool),
+			isolatedCalls: universe.coroProgramIR.nativeFaultIsolatedCalls(),
+		}
+		c.coroCapabilitiesByFunc, c.coroCapabilitiesErr = deriveCoroFunctionProgramCapabilitiesWithFaultProjection(
+			plan, local, c.CoroLibraryEffects, faults, c.coroPredicateMasksByFunc,
 		)
+		if c.coroCapabilitiesErr == nil {
+			c.coroNativeFaultByFunc = faults.required
+		}
 	})
 	return c.coroCapabilitiesByFunc, c.coroCapabilitiesErr
 }
@@ -89,6 +96,16 @@ func deriveCoroFunctionProgramCapabilities(
 	imported map[*ssa.Function]coro.LibraryEffectFunction,
 	predicateMasks ...map[*ssa.Function]coro.ProgramCapabilities,
 ) (map[*ssa.Function]coro.ProgramCapabilities, error) {
+	return deriveCoroFunctionProgramCapabilitiesWithFaultProjection(plan, local, imported, nil, predicateMasks...)
+}
+
+func deriveCoroFunctionProgramCapabilitiesWithFaultProjection(
+	plan *coro.SSAPlan,
+	local map[*ssa.Function]coro.ProgramCapabilities,
+	imported map[*ssa.Function]coro.LibraryEffectFunction,
+	faults *coroNativeFaultProjection,
+	predicateMasks ...map[*ssa.Function]coro.ProgramCapabilities,
+) (map[*ssa.Function]coro.ProgramCapabilities, error) {
 	if plan == nil {
 		return nil, fmt.Errorf("coroutine function capabilities require an SSA plan")
 	}
@@ -100,13 +117,13 @@ func deriveCoroFunctionProgramCapabilities(
 		masks = predicateMasks[0]
 	}
 	capabilities := make(map[*ssa.Function]coro.ProgramCapabilities, len(functions))
-	reverse := make(map[*ssa.Function]map[*ssa.Function]struct{}, len(functions))
+	reverse := make(map[*ssa.Function]map[*ssa.Function]bool, len(functions))
 	archive := make(map[coro.FunctionID]coro.SSAImportedFunctionPlan)
 	for _, function := range plan.ImportedFunctions() {
 		archive[function.Fact.ID] = function
 	}
 
-	addEdge := func(caller, callee *ssa.Function) error {
+	addEdge := func(caller, callee *ssa.Function, isolated bool) error {
 		if caller == nil || callee == nil {
 			return fmt.Errorf("coroutine function capability graph contains a nil edge")
 		}
@@ -126,12 +143,15 @@ func deriveCoroFunctionProgramCapabilities(
 		if coroCallableNeedsNativeFaultBoundary(plan, callee) {
 			capabilities[caller] |= coro.NativeDefaultFaultBoundaryProgramCapability()
 		}
+		if faults != nil && !isolated && coroCallableNeedsNativeFaultBoundary(plan, callee) {
+			faults.required[caller] = true
+		}
 		callers := reverse[callee]
 		if callers == nil {
-			callers = make(map[*ssa.Function]struct{})
+			callers = make(map[*ssa.Function]bool)
 			reverse[callee] = callers
 		}
-		callers[caller] = struct{}{}
+		callers[caller] = callers[caller] || !isolated
 		return nil
 	}
 
@@ -173,6 +193,9 @@ func deriveCoroFunctionProgramCapabilities(
 			masks[function] |= fact.ProgramPredicates.Mask
 		}
 		capabilities[function] = capability
+		if faults != nil {
+			faults.required[function] = capability.NativeDefaultFaultBoundary()
+		}
 		masks[function] |= 0
 	}
 	for function := range local {
@@ -200,7 +223,7 @@ func deriveCoroFunctionProgramCapabilities(
 		}
 		entry, _ := plan.FunctionPlan(owner)
 		if entry.Emission != coro.EmitNone {
-			if err := addEdge(owner, target); err != nil {
+			if err := addEdge(owner, target, false); err != nil {
 				return nil, err
 			}
 		}
@@ -227,7 +250,7 @@ func deriveCoroFunctionProgramCapabilities(
 						if !ok || target == nil {
 							return nil, fmt.Errorf("call in %q targets missing function %q", caller.Name(), targetID)
 						}
-						if err := addEdge(caller, target); err != nil {
+						if err := addEdge(caller, target, faults != nil && faults.isolatedCalls[call]); err != nil {
 							return nil, err
 						}
 					}
@@ -243,7 +266,7 @@ func deriveCoroFunctionProgramCapabilities(
 					return nil, fmt.Errorf("dynamic call in %q has no frozen coroutine CallPlan", caller.Name())
 				}
 				if _, ok := plan.FunctionPlan(common.StaticCallee()); ok {
-					if err := addEdge(caller, common.StaticCallee()); err != nil {
+					if err := addEdge(caller, common.StaticCallee(), faults != nil && faults.isolatedCalls[call]); err != nil {
 						return nil, err
 					}
 				}
@@ -278,6 +301,9 @@ func deriveCoroFunctionProgramCapabilities(
 					// and let the existing source-edge fixed point propagate them;
 					// no unavailable body or second call graph is reconstructed.
 					capabilities[caller] |= entry.Fact.ProgramCapabilities
+					if faults != nil && entry.Fact.ProgramCapabilities.NativeDefaultFaultBoundary() {
+						faults.required[caller] = true
+					}
 					masks[caller] |= entry.Fact.ProgramPredicates.Mask
 				}
 				continue
@@ -288,7 +314,7 @@ func deriveCoroFunctionProgramCapabilities(
 			if _, ok := capabilities[call.Target]; !ok {
 				return nil, fmt.Errorf("lowered call %q in %q targets an unplanned function", call.LogicalName, caller.Name())
 			}
-			if err := addEdge(caller, call.Target); err != nil {
+			if err := addEdge(caller, call.Target, false); err != nil {
 				return nil, err
 			}
 		}
@@ -296,18 +322,22 @@ func deriveCoroFunctionProgramCapabilities(
 
 	queue := make([]*ssa.Function, 0, len(capabilities))
 	for function, capability := range capabilities {
-		if capability != 0 || masks[function] != 0 {
+		if capability != 0 || masks[function] != 0 || (faults != nil && faults.required[function]) {
 			queue = append(queue, function)
 		}
 	}
 	for len(queue) != 0 {
 		callee := queue[0]
 		queue = queue[1:]
-		for caller := range reverse[callee] {
+		for caller, propagateFault := range reverse[callee] {
 			joined := capabilities[caller] | capabilities[callee]
 			joinedMask := masks[caller] | masks[callee]
-			if joined == capabilities[caller] && joinedMask == masks[caller] {
+			faultChanged := faults != nil && propagateFault && faults.required[callee] && !faults.required[caller]
+			if joined == capabilities[caller] && joinedMask == masks[caller] && !faultChanged {
 				continue
+			}
+			if faultChanged {
+				faults.required[caller] = true
 			}
 			if !joined.Valid() {
 				return nil, fmt.Errorf("function %q acquired invalid program capabilities %#x", caller.Name(), joined)

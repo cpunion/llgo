@@ -1472,7 +1472,7 @@ func checkedExecutorRun(
 					return Action{}, false, false
 				}
 			}
-			needsRuntimeContext = mode != frameRuntimeContextNotRequired
+			needsRuntimeContext = mode.requiresRuntimeContext()
 		}
 		if !prepareIssuedRunDecision(p, g) {
 			return Action{}, false, false
@@ -1559,7 +1559,7 @@ func BeginIssuedExecutorResumeRuntimeContext(
 			return Action{}, false, false, false
 		}
 	}
-	needsRuntimeContext = mode != frameRuntimeContextNotRequired
+	needsRuntimeContext = mode.requiresRuntimeContext()
 	if g.park.phase == parkMaterialized && g.park.directChannel &&
 		g.park.taskCancelKind == TaskCancelNone && g.park.taskCancelPhase == taskCancelIdle {
 		// The direct-channel materializer published this exact owner-only
@@ -1582,7 +1582,7 @@ func BeginIssuedExecutorResumeRuntimeContext(
 	p.inResume = true
 	next = Action{Kind: ActionResume, Handle: action.Handle}
 	p.action = next
-	return next, needsRuntimeContext, g.panicBoundary, true
+	return next, needsRuntimeContext, g.panicBoundary && !mode.excludesNativeFaultBoundary(), true
 }
 
 // Resumed commits the return from a direct llvm.coro.resume call. Coroutine

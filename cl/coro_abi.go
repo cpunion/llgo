@@ -382,6 +382,28 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	if entry.plan.External == coro.Defined && entry.plan.Exec&contextUnproven == 0 {
 		descriptorFlags |= coro.FrameDescriptorNoRuntimeContextV1
 	}
+	panicBoundaryEnabled := coroNativePanicBoundaryTarget(p) &&
+		(p.compilation == nil || p.compilation.coroPanicBoundaryEmissionEnabled(entry.function))
+	// Reuse exactly the immutable function-local proof which controls landing
+	// emission. Dynamic panic-on-fault enables every function; unfrozen or
+	// unknown programs cannot publish this negative capability.
+	if coroNativePanicBoundaryTarget(p) && p.compilation != nil &&
+		p.compilation.FinalCoroProgramCapabilitiesFrozen && !panicBoundaryEnabled {
+		descriptorFlags |= coro.FrameDescriptorNoNativeFaultBoundaryV1
+	}
+	if descriptorFlags&coro.FrameDescriptorNoRuntimeContextV1 != 0 &&
+		coroNativePanicBoundaryTarget(p) && p.compilation != nil &&
+		p.compilation.FinalCoroProgramCapabilitiesFrozen && !panicBoundaryEnabled {
+		// An inline child may own the only native landing. Its synchronous
+		// activation still needs the logical runtime G installed by this root.
+		transitive, err := p.compilation.coroFunctionProgramCapability(entry.function)
+		if err != nil {
+			panic(err)
+		}
+		if transitive.NativeDefaultFaultBoundary() {
+			descriptorFlags &^= coro.FrameDescriptorNoRuntimeContextV1
+		}
+	}
 	frameAllocHook := coroFrameAllocHookV1
 	frameFreeHook := coroFrameFreeHookV1
 	descriptorPrefix := coroDescriptorPrefixV1
@@ -424,8 +446,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		return llssa.PathOf(pkg)
 	}
 	target := p.prog.TargetSpec()
-	if coroNativePanicBoundaryTarget(p) &&
-		(p.compilation == nil || p.compilation.coroPanicBoundaryEmissionEnabled(entry.function)) {
+	if panicBoundaryEnabled {
 		panicBoundaryEnabledHook = coroPanicBoundaryEnabledHookV1
 		panicBoundaryPushHook = coroPanicBoundaryPushHookV1
 		panicBoundaryPopHook = coroPanicBoundaryPopHookV1
