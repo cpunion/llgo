@@ -62,6 +62,11 @@ Copy-Item $PSCommandPath (Join-Path $Root 'probe.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Could not grant the test user access to the fixture' }
 & winget settings --enable LocalManifestFiles
 if ($LASTEXITCODE -ne 0) { throw 'Could not enable local manifest validation' }
+# The admin setting belongs to the invoking account. Use WinGet's documented
+# machine policy so that the separate standard account can use local manifests.
+$policy = 'HKLM:\Software\Policies\Microsoft\Windows\AppInstaller'
+New-Item -Path $policy -Force | Out-Null
+New-ItemProperty -Path $policy -Name EnableLocalManifestFiles -PropertyType DWord -Value 1 -Force | Out-Null
 
 $user = 'llgowgtest'
 $password = ConvertTo-SecureString ([Guid]::NewGuid().ToString('N') + 'aA1!') -AsPlainText -Force
