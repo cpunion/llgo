@@ -1,0 +1,24 @@
+name: Verify WinGet automation
+on:
+  push:
+    branches: [codex/verify-winget-automation-20261022]
+permissions:
+  contents: read
+jobs:
+  policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r .github/scripts/requirements-ci.txt
+      - name: Check production workflow contracts
+        run: |
+          rm .github/workflows/verify-winget-automation.yml
+          python -m unittest discover -s .github/scripts -p 'test_*.py' -v
+  preview:
+    uses: ./.github/workflows/winget.yml
+    with:
+      tag: v1.0.8
+      dry_run: true
