@@ -234,8 +234,8 @@ func coroWaitGroupCanonicalLoad(view coroWaitGroupProofView, fn *ssa.Function, t
 	return returned
 }
 
-func (p *context) emitCoroWaitGroupWaitFast(b llssa.Builder, args []llssa.Expr, proof *coroWaitGroupWaitFastPlan) (llssa.Expr, llssa.Expr) {
-	if !proof.validFor(p.immutablePlan()) || len(args) != 1 || p.coroBody() == nil || b.Func != p.fn {
+func (p *context) emitCoroWaitGroupWaitFast(b llssa.Builder, args []llssa.Expr, proof *coroWaitGroupWaitFastPlan, body *coroBodyContext) (llssa.Expr, llssa.Expr) {
+	if !proof.validFor(p.immutablePlan()) || len(args) != 1 || body == nil || b.Func != p.fn {
 		panic("WaitGroup wait lost frozen operands or its active caller frame")
 	}
 	done, opportunity := b.AllocaT(p.prog.Bool()), b.AllocaT(p.prog.Bool())
@@ -254,7 +254,7 @@ func (p *context) emitCoroWaitGroupWaitFast(b llssa.Builder, args []llssa.Expr, 
 			ready := p.compileCoroStaticOutcomeTargetCall(b, proof.ready, nil, true)
 			b.IfThen(ready, func() {
 				b.Store(opportunity, p.prog.BoolVal(false))
-				p.coroBody().yieldCurrentFrame(b)
+				body.yieldCurrentFrame(b)
 				current := b.LoadKnownNonNil(state).SetOrdering(llssa.OrderingSeqConsistent)
 				b.Store(done, b.BinOp(token.EQL, current, zero))
 			})

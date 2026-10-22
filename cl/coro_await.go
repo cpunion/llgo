@@ -378,7 +378,8 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 func (p *context) compileCoroStaticAwait(
 	b llssa.Builder, call *ssa.Call, instructionPlan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if !p.hasCoroPhysicalBody() || call == nil || instructionPlan.control != coroPhysicalControlDirectAwait {
+	body := p.coroBody()
+	if body == nil || call == nil || instructionPlan.control != coroPhysicalControlDirectAwait {
 		panic("coroutine child await escaped its frozen physical control recipe")
 	}
 	// Keep the ordinary call lowerer's frontend-elided package-init rule ahead
@@ -429,7 +430,7 @@ func (p *context) compileCoroStaticAwait(
 			panic("coroutine call has two guarded WaitGroup recipes")
 		}
 		var opportunity llssa.Expr
-		fastTest, opportunity = p.emitCoroWaitGroupWaitFast(b, args, proof)
+		fastTest, opportunity = p.emitCoroWaitGroupWaitFast(b, args, proof, body)
 		callee, args = proof.fallback, append(args, opportunity)
 	}
 	if instructionPlan.pollMutexFast != nil {
@@ -1269,7 +1270,7 @@ func (p *context) awaitCoroChildCompletionWithRecovery(
 	// every word on all returning paths, so clearing it again at each call site
 	// only enlarges the state machine.
 	completedInline := p.emitCoroStaticInlineAwait(
-		b, child, startedInline, typeWord, dataWord, statusWord,
+		b, body, child, startedInline, typeWord, dataWord, statusWord,
 	)
 	consume := p.pkg.NewFunc(body.abi.awaitConsumeHook, coroAwaitConsumeSignature(), llssa.InC)
 
@@ -1516,9 +1517,8 @@ func (p *context) sharedCoroTerminalBlock(source llssa.Builder, body *coroBodyCo
 // in its parent. A declined/deep or genuinely suspended child converges on the
 // existing false result and parent suspend path.
 func (p *context) emitCoroStaticInlineAwait(
-	b llssa.Builder, child, startedInline, typeWord, dataWord, statusWord llssa.Expr,
+	b llssa.Builder, body *coroBodyContext, child, startedInline, typeWord, dataWord, statusWord llssa.Expr,
 ) llssa.Expr {
-	body := p.coroBody()
 	if body == nil || b == nil || b.Func != p.fn || child.IsNil() || startedInline.IsNil() ||
 		typeWord.IsNil() || dataWord.IsNil() || statusWord.IsNil() ||
 		body.abi.awaitInlineFinishHook == "" ||
