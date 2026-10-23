@@ -322,6 +322,9 @@ type aFunction struct {
 	Prog Program
 
 	blks []BasicBlock
+	// Bound newly hoisted local storage, including alignment, independently of
+	// explicit dynamic Alloca operations and oversized heap-backed variables.
+	entryLocalAllocBytes uint64
 
 	defer_           *aDefer
 	recoverToken     Expr
