@@ -1015,6 +1015,8 @@ const (
 	// drop helper. Neither intrinsic exposes the private header address.
 	llgoCoroBindResultState = llgoInstrBase + 0x63
 	llgoCoroLoadResultState = llgoInstrBase + 0x64
+	// Advisory locality projection: physical hidden G, or nil in a raw owner.
+	llgoCoroCurrentTaskIfPresent = llgoInstrBase + 0x65
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )

@@ -102,7 +102,7 @@ func __llgo_coro_preempt_poll_v1(g unsafe.Pointer) bool {
 
 //export __llgo_coro_yield_prepare_v1
 func __llgo_coro_yield_prepare_v1(g, handle, header unsafe.Pointer) {
-	if !coro.PrepareYield((*coro.G)(g), handle, (*coro.HeaderV1)(header)) {
+	if !coro.PrepareYieldCompiler((*coro.G)(g), handle, (*coro.HeaderV1)(header)) {
 		coroRuntimeAbort("invalid coroutine yield handoff")
 	}
 }

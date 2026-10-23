@@ -18,7 +18,13 @@
 
 package runtime
 
-import "github.com/xgo-dev/llgo/runtime/internal/coro"
+import (
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"unsafe"
+)
+
+//go:linkname coroCompilerCurrentTaskIfPresentV1 llgo.coroCurrentTaskIfPresent
+func coroCompilerCurrentTaskIfPresentV1() unsafe.Pointer
 
 // coroCurrentTaskRouteV1 resolves producer locality only while a managed
 // stackless resume owns the exact executor. Native goroutines, independent
@@ -26,15 +32,8 @@ import "github.com/xgo-dev/llgo/runtime/internal/coro"
 // deliberately return route zero. A synchronous same-G C-to-Go reentry is
 // still inside that managed resume and may inherit its route.
 func coroCurrentTaskV1() (*coro.G, *coro.ExecutorDriver, coro.RouteID) {
-	gp := getgIfPresent()
-	if gp == nil || gp.startfn != nil || gp.startarg == nil {
-		return nil, nil, 0
-	}
-	task := (*coro.G)(gp.startarg)
-	if ctx := (*coroRuntimeContext)(coro.TaskLocal(task)); ctx != gp.context || !validCoroRuntimeTaskContext(task, ctx) {
-		return nil, nil, 0
-	}
-	driver, route, current := coro.CurrentExecutorDriverForActiveResume(task)
+	task := (*coro.G)(coroCompilerCurrentTaskIfPresentV1())
+	driver, route, current := coro.CurrentExecutorDriverForCompilerTask(task)
 	if !current {
 		return nil, nil, 0
 	}

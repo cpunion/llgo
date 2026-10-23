@@ -212,7 +212,7 @@ func beginSpawnCompiler(
 		active.header.Lifecycle != uint16(FrameActive) ||
 		child.magic != 0 || !gPreemptStateAtDepthZero(child, preemptDisabled) ||
 		child.state != GNew || child.taskState != taskStorageStatic ||
-		child.taskStorage != nil || child.taskLocal != nil {
+		child.taskStorage != nil || child.taskLocal != nil || child.initialRunPrepared || child.yieldRunPrepared {
 		return false
 	}
 	child.magic = gMagic
@@ -376,6 +376,7 @@ func CommitSpawnCompiler(parent, child *G, handle unsafe.Pointer) bool {
 	child.root = root
 	child.active = root
 	child.state = GRunnable
+	child.initialRunPrepared = true
 	child.spawnParent = nil
 	child.spawnP = nil
 	appendReadyUnchecked(p, child)
