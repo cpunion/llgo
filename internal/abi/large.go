@@ -11,6 +11,10 @@ const (
 	// MaxImplicitStackVarSize matches cmd/compile's default limit for
 	// compiler-generated temporaries.
 	MaxImplicitStackVarSize uint64 = 64 * 1024
+	// Bound zero-store scalarization independently of the permitted stack
+	// allocation size. SROA can expand a direct 64KiB aggregate zero store into
+	// over 130,000 instructions even when the local itself is valid.
+	minAggregateZeroMemsetSize uint64 = 1024
 
 	runtimeAllocU = "github.com/xgo-dev/llgo/runtime/internal/runtime.AllocU"
 )
@@ -30,6 +34,14 @@ func (l largeAggregateLowerer) isLargeAggregate(typ llvm.Type) bool {
 	switch typ.TypeKind() {
 	case llvm.ArrayTypeKind, llvm.StructTypeKind:
 		return l.td.TypeAllocSize(typ) > MaxImplicitStackVarSize
+	}
+	return false
+}
+
+func (l largeAggregateLowerer) shouldLowerAggregateZeroStore(typ llvm.Type) bool {
+	switch typ.TypeKind() {
+	case llvm.ArrayTypeKind, llvm.StructTypeKind:
+		return l.td.TypeAllocSize(typ) >= minAggregateZeroMemsetSize
 	}
 	return false
 }
@@ -120,8 +132,9 @@ func insertedAggregateProjection(value llvm.Value, path []uint32) (llvm.Value, b
 	return llvm.Value{}, false
 }
 
-// transformLargeMemory keeps large zero stores, discarded loads and copies
-// out of target aggregate scalarization. Lower an adjacent load/store pair to
+// transformLargeMemory keeps zero stores beyond the scalarization budget,
+// discarded large loads and copies out of target aggregate scalarization.
+// Lower an adjacent load/store pair to
 // memmove; delayed/multiple stores retain one snapshot at the original load.
 // Volatile accesses remain untouched: ordinary memcpy/memset must not replace
 // observable source memory operations.
@@ -131,7 +144,7 @@ func (l largeAggregateLowerer) transformLargeMemory(m llvm.Module) {
 		for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
 			for instr := bb.FirstInstruction(); !instr.IsNil(); instr = llvm.NextInstruction(instr) {
 				if store := instr.IsAStoreInst(); !store.IsNil() && !store.IsVolatile() &&
-					!store.Operand(0).IsAConstantAggregateZero().IsNil() && l.isLargeAggregate(store.Operand(0).Type()) {
+					!store.Operand(0).IsAConstantAggregateZero().IsNil() && l.shouldLowerAggregateZeroStore(store.Operand(0).Type()) {
 					zeroStores = append(zeroStores, store)
 				}
 				load := instr.IsALoadInst()
