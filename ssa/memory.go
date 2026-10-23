@@ -126,7 +126,24 @@ func (b Builder) Alloc(elem Type, heap bool) (ret Expr) {
 	} else {
 		// Stack-local zero-sized variables keep a distinct alloca. Only heap
 		// allocations and package globals use the shared module sentinel.
-		ret = Expr{llvm.CreateAlloca(b.impl, elem.ll), prog.VoidPtr()}
+		allocation := b.impl
+		var entry Builder
+		// A non-heap Alloc denotes the same function-local variable on every
+		// execution. Define its storage in the entry so SROA can promote branch
+		// and loop temporaries, while retaining zeroing at this source point.
+		// A bounded budget preserves source-position storage for overflow; this
+		// does not add an allocator call or change explicit Alloca semantics.
+		charge := prog.SizeOf(elem) + prog.AlignOf(elem) - 1
+		if charge <= llabi.MaxStackVarSize && b.Func.entryLocalAllocBytes <= llabi.MaxStackVarSize-charge {
+			b.Func.entryLocalAllocBytes += charge
+			entry = b.Func.NewBuilder()
+			entry.SetBlockEx(b.Func.Block(0), AtStart, true)
+			allocation = entry.impl
+		}
+		ret = Expr{llvm.CreateAlloca(allocation, elem.ll), prog.VoidPtr()}
+		if entry != nil {
+			entry.Dispose()
+		}
 		ret.impl = b.zeroinit(ret, size).impl
 	}
 	ret.Type = prog.Pointer(elem)
