@@ -749,6 +749,11 @@ type SSAFunctionBodyFacts struct {
 	// program planning must still close every ordinary call over an exact plain
 	// or static-outcome target and reject hidden lowered calls.
 	StaticOutcomeLocal bool
+	// OutcomeLocalStorageBytes sums evaluated nonheap source locals and
+	// caller-owned outcome result slots, including target alignment padding.
+	// It is a local-storage projection, not a backend stack-size certificate.
+	// Unknown or overflowing layouts saturate and reject synchronous outcomes.
+	OutcomeLocalStorageBytes uint64
 }
 
 func (facts SSAFunctionBodyFacts) validate(function *ssa.Function) error {
@@ -2424,14 +2429,15 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	outcomePrimaryUses := classifySSAOutcomePrimaryUses(
 		graph, canonicalRoots, byID, callPlans, loweredCalls, exactInterfaceReceivers,
 	)
+	outcomeStorage := ssaOutcomeLocalStorageBudgets(byID, localBodyFacts, callPlans, loweredCalls)
 	if err := applySSAOutcomePlainPlans(
-		base, byID, localBodyFacts, callPlans, loweredCalls, outcomePrimaryUses, maxPlain,
+		base, byID, localBodyFacts, callPlans, loweredCalls, outcomePrimaryUses, outcomeStorage, maxPlain,
 	); err != nil {
 		return nil, err
 	}
 	if err := applySSAStaticOutcomePlans(
 		base, byID, localBodyFacts, callPlans, loweredCalls, elidedCalls,
-		exactInterfaceReceivers, outcomePrimaryUses, rawPlainVariants,
+		exactInterfaceReceivers, outcomePrimaryUses, rawPlainVariants, outcomeStorage,
 	); err != nil {
 		return nil, err
 	}
@@ -2712,6 +2718,7 @@ func applySSAOutcomePlainPlans(
 	callPlans map[ssa.CallInstruction]SSACallPlan,
 	loweredCalls map[*ssa.Function][]SSALoweredCall,
 	primaryUses ssaOutcomePrimaryUses,
+	outcomeStorage map[FunctionID]uint64,
 	maxAtomicCost int,
 ) error {
 	if base == nil {
@@ -2742,7 +2749,8 @@ func applySSAOutcomePlainPlans(
 	}
 	eligible := func(plan FunctionPlan, function *ssa.Function, facts SSAFunctionBodyFacts, classified bool) bool {
 		if function == nil || len(function.FreeVars) != 0 || !classified || facts.HasCycle || facts.AtomicPath == nil ||
-			facts.InstructionCount <= 0 || !primaryUses.needsAtomicOutcome(plan) {
+			facts.InstructionCount <= 0 || !primaryUses.needsAtomicOutcome(plan) ||
+			outcomeStorage[plan.ID] > maxSSAOutcomeLocalStorageBytes {
 			return false
 		}
 		for _, lowered := range loweredCalls[function] {
@@ -2870,6 +2878,7 @@ func applySSAStaticOutcomePlans(
 	exactInterfaceReceivers map[*ssa.Call]ssa.Value,
 	primaryUses ssaOutcomePrimaryUses,
 	rawPlainVariants map[*ssa.Function]struct{},
+	outcomeStorage map[FunctionID]uint64,
 ) error {
 	if base == nil {
 		return fmt.Errorf("coro: static-outcome planning requires a complete graph plan")
@@ -2996,6 +3005,7 @@ func applySSAStaticOutcomePlans(
 			facts.Effect&^MayPark != NoSuspend ||
 			len(function.FreeVars) != 0 ||
 			invalidCall[plan.ID] || plan.HasStaticOutcome() ||
+			outcomeStorage[plan.ID] > maxSSAOutcomeLocalStorageBytes ||
 			plan.External != Defined || plan.Emission != EmitCoroutine ||
 			plan.ManagedEntry != ManagedEntryCoroutine || plan.Primary != PrimaryCoroutine ||
 			plan.ManagedDemand == NoDemand || plan.RawPlainOnly ||

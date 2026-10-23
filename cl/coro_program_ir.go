@@ -18,6 +18,7 @@ package cl
 
 import (
 	"fmt"
+	"go/types"
 	"slices"
 	"sort"
 
@@ -285,7 +286,7 @@ func (ir *coroProgramIR) freezeSiteOwner(
 	}
 	semantic := ir.semanticPlans[key]
 	preamble := ir.functionPreambles[key]
-	facts, err := deriveCoroLocalBodyFacts(prog, function, semantic, preamble.emitsGoBody, ir.coroSuccessors)
+	facts, err := deriveCoroLocalBodyFacts(prog, function, semantic, ir.sitePlans[key], preamble.emitsGoBody, ir.coroSuccessors)
 	if err != nil {
 		return err
 	}
@@ -312,6 +313,7 @@ func deriveCoroLocalBodyFacts(
 	prog llssa.Program,
 	function *ssa.Function,
 	semantic map[ssa.Instruction]coroSemanticInstructionPlan,
+	sites map[ssa.Instruction]coroEmissionSitePlan,
 	outcomePlainEligible bool,
 	successors func(*ssa.BasicBlock) []*ssa.BasicBlock,
 ) (coro.SSAFunctionBodyFacts, error) {
@@ -360,6 +362,12 @@ func deriveCoroLocalBodyFacts(
 				facts.OutcomePlainDAG = false
 				continue
 			}
+			if alloc, ok := instruction.(*ssa.Alloc); ok && (!alloc.Heap || sites[instruction].plainAllocation.borrowed()) {
+				elem := alloc.Type().Underlying().(*types.Pointer).Elem()
+				if !prog.LocalGoTypeExceedsNativeStack(elem) {
+					chargeCoroOutcomeLocalStorage(prog, &facts, elem)
+				}
+			}
 			if _, deferInstruction := instruction.(*ssa.Defer); deferInstruction {
 				hasEvaluatedDefer = true
 			}
@@ -385,6 +393,10 @@ func deriveCoroLocalBodyFacts(
 					Instruction:      call,
 					InstructionIndex: instructionIndex,
 				})
+				if call.Common() != nil && call.Common().Signature() != nil {
+					chargeCoroOutcomeLocalStorage(prog, &facts,
+						newOutcomePlainPhysicalABI(call.Common().Signature()).resultSlotType)
+				}
 				if call.Common() == nil || call.Common().Signature() == nil ||
 					prog.LocalGoTypeExceedsNativeStack(
 						newOutcomePlainPhysicalABI(call.Common().Signature()).resultSlotType,
@@ -598,7 +610,7 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 			if !present {
 				return fmt.Errorf("finalize intrinsic body %q: owner %q has no function preamble", function.Name(), owner.identity)
 			}
-			facts, err := deriveCoroLocalBodyFacts(prog, function, ir.semanticPlans[key], preamble.emitsGoBody, ir.coroSuccessors)
+			facts, err := deriveCoroLocalBodyFacts(prog, function, ir.semanticPlans[key], ir.sitePlans[key], preamble.emitsGoBody, ir.coroSuccessors)
 			if err != nil {
 				return fmt.Errorf("finalize intrinsic body %q: %w", function.Name(), err)
 			}
@@ -947,4 +959,21 @@ func sameCoroEmissionSitePlan(first, second coroEmissionSitePlan) bool {
 		first.plainAllocation == second.plainAllocation &&
 		slices.Equal(first.localityDispatchers, second.localityDispatchers) &&
 		first.hasCallPlan == second.hasCallPlan && sameCoroFrozenCallSitePlan(first.callPlan, second.callPlan)
+}
+
+// chargeCoroOutcomeLocalStorage accounts only for source locals and physical
+// result slots. Register spills, runtime/foreign frames and imported bodies are
+// outside this projection; the outcome limit is not a total native stack proof.
+func chargeCoroOutcomeLocalStorage(prog llssa.Program, facts *coro.SSAFunctionBodyFacts, typ types.Type) {
+	size, align := prog.PhysicalSizeOfGoType(typ), prog.PhysicalAlignOfGoType(typ)
+	if size < 0 || align <= 0 {
+		facts.OutcomeLocalStorageBytes = ^uint64(0)
+		return
+	}
+	charge := uint64(size) + uint64(align) - 1
+	if charge < uint64(size) || facts.OutcomeLocalStorageBytes > ^uint64(0)-charge {
+		facts.OutcomeLocalStorageBytes = ^uint64(0)
+		return
+	}
+	facts.OutcomeLocalStorageBytes += charge
 }

@@ -309,14 +309,8 @@ func (p Program) TypeSizes(sizes types.Sizes) types.Sizes {
 	return (*goProgram)(unsafe.Pointer(p))
 }
 
-// PhysicalSizeOfGoType returns the target Go-layout size without constructing
-// an LLVM type. Whole-program planning uses this before the runtime LLVM
-// package is necessarily available, so layout queries cannot depend on
-// Program.Type or runtime named-type materialization.
-func (p Program) PhysicalSizeOfGoType(typ types.Type) int64 {
-	if p == nil || typ == nil {
-		return -1
-	}
+// physicalGoTypeSizes initializes the layout shared by pre-LLVM queries.
+func (p Program) physicalGoTypeSizes() types.Sizes {
 	layout := (*goProgram)(unsafe.Pointer(p))
 	if layout.sizes == nil {
 		arch := ""
@@ -332,7 +326,26 @@ func (p Program) PhysicalSizeOfGoType(typ types.Type) int64 {
 			layout.sizes = &types.StdSizes{WordSize: word, MaxAlign: word}
 		}
 	}
-	return layout.Sizeof(typ)
+	return layout.sizes
+}
+
+// PhysicalSizeOfGoType returns the target Go-layout size without constructing
+// an LLVM type. Whole-program planning uses this before the runtime LLVM
+// package is necessarily available, so layout queries cannot depend on
+// Program.Type or runtime named-type materialization.
+func (p Program) PhysicalSizeOfGoType(typ types.Type) int64 {
+	if p == nil || typ == nil {
+		return -1
+	}
+	return p.physicalGoTypeSizes().Sizeof(typ)
+}
+
+// PhysicalAlignOfGoType shares the pre-LLVM target layout used by size queries.
+func (p Program) PhysicalAlignOfGoType(typ types.Type) int64 {
+	if p == nil || typ == nil {
+		return -1
+	}
+	return p.physicalGoTypeSizes().Alignof(typ)
 }
 
 // TODO(xsw):
