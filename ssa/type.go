@@ -326,7 +326,7 @@ func (p Program) physicalGoTypeSizes() types.Sizes {
 			layout.sizes = &types.StdSizes{WordSize: word, MaxAlign: word}
 		}
 	}
-	return layout.sizes
+	return layout
 }
 
 // PhysicalSizeOfGoType returns the target Go-layout size without constructing
