@@ -151,6 +151,20 @@ func GroundGenericTypeArgs(arguments []types.Type) bool {
 // only for instantiation identity and therefore follows referents and named
 // underlying types all the way to a TypeParam.
 func TypeContainsUnresolvedTypeParam(typ types.Type, visiting map[types.Type]bool) bool {
+	// Groundness asks whether any reachable node contains a type parameter.
+	// A query-local visited set examines shared DAG nodes once, including when
+	// a cycle reaches an already active node. Do not retain negative results
+	// between queries: an active ancestor can still expose a type parameter.
+	seen := make(map[types.Type]bool, len(visiting))
+	for node, active := range visiting {
+		if active {
+			seen[node] = true
+		}
+	}
+	return typeContainsUnresolvedTypeParam(typ, seen)
+}
+
+func typeContainsUnresolvedTypeParam(typ types.Type, visiting map[types.Type]bool) bool {
 	if typ == nil {
 		return true
 	}
@@ -159,7 +173,6 @@ func TypeContainsUnresolvedTypeParam(typ types.Type, visiting map[types.Type]boo
 		return false
 	}
 	visiting[typ] = true
-	defer delete(visiting, typ)
 
 	switch value := typ.(type) {
 	case *types.TypeParam:
@@ -167,26 +180,26 @@ func TypeContainsUnresolvedTypeParam(typ types.Type, visiting map[types.Type]boo
 	case *types.Named:
 		if arguments := value.TypeArgs(); arguments != nil {
 			for index := 0; index < arguments.Len(); index++ {
-				if TypeContainsUnresolvedTypeParam(arguments.At(index), visiting) {
+				if typeContainsUnresolvedTypeParam(arguments.At(index), visiting) {
 					return true
 				}
 			}
 		}
-		return TypeContainsUnresolvedTypeParam(value.Underlying(), visiting)
+		return typeContainsUnresolvedTypeParam(value.Underlying(), visiting)
 	case *types.Pointer:
-		return TypeContainsUnresolvedTypeParam(value.Elem(), visiting)
+		return typeContainsUnresolvedTypeParam(value.Elem(), visiting)
 	case *types.Array:
-		return TypeContainsUnresolvedTypeParam(value.Elem(), visiting)
+		return typeContainsUnresolvedTypeParam(value.Elem(), visiting)
 	case *types.Slice:
-		return TypeContainsUnresolvedTypeParam(value.Elem(), visiting)
+		return typeContainsUnresolvedTypeParam(value.Elem(), visiting)
 	case *types.Chan:
-		return TypeContainsUnresolvedTypeParam(value.Elem(), visiting)
+		return typeContainsUnresolvedTypeParam(value.Elem(), visiting)
 	case *types.Map:
-		return TypeContainsUnresolvedTypeParam(value.Key(), visiting) ||
-			TypeContainsUnresolvedTypeParam(value.Elem(), visiting)
+		return typeContainsUnresolvedTypeParam(value.Key(), visiting) ||
+			typeContainsUnresolvedTypeParam(value.Elem(), visiting)
 	case *types.Struct:
 		for index := 0; index < value.NumFields(); index++ {
-			if TypeContainsUnresolvedTypeParam(value.Field(index).Type(), visiting) {
+			if typeContainsUnresolvedTypeParam(value.Field(index).Type(), visiting) {
 				return true
 			}
 		}
@@ -194,37 +207,37 @@ func TypeContainsUnresolvedTypeParam(typ types.Type, visiting map[types.Type]boo
 		if typeParamListLen(value.TypeParams()) != 0 || typeParamListLen(value.RecvTypeParams()) != 0 {
 			return true
 		}
-		if value.Recv() != nil && TypeContainsUnresolvedTypeParam(value.Recv().Type(), visiting) {
+		if value.Recv() != nil && typeContainsUnresolvedTypeParam(value.Recv().Type(), visiting) {
 			return true
 		}
 		for _, tuple := range []*types.Tuple{value.Params(), value.Results()} {
 			for index := 0; index < tuple.Len(); index++ {
-				if TypeContainsUnresolvedTypeParam(tuple.At(index).Type(), visiting) {
+				if typeContainsUnresolvedTypeParam(tuple.At(index).Type(), visiting) {
 					return true
 				}
 			}
 		}
 	case *types.Tuple:
 		for index := 0; index < value.Len(); index++ {
-			if TypeContainsUnresolvedTypeParam(value.At(index).Type(), visiting) {
+			if typeContainsUnresolvedTypeParam(value.At(index).Type(), visiting) {
 				return true
 			}
 		}
 	case *types.Interface:
 		value.Complete()
 		for index := 0; index < value.NumMethods(); index++ {
-			if TypeContainsUnresolvedTypeParam(value.Method(index).Type(), visiting) {
+			if typeContainsUnresolvedTypeParam(value.Method(index).Type(), visiting) {
 				return true
 			}
 		}
 		for index := 0; index < value.NumEmbeddeds(); index++ {
-			if TypeContainsUnresolvedTypeParam(value.EmbeddedType(index), visiting) {
+			if typeContainsUnresolvedTypeParam(value.EmbeddedType(index), visiting) {
 				return true
 			}
 		}
 	case *types.Union:
 		for index := 0; index < value.Len(); index++ {
-			if TypeContainsUnresolvedTypeParam(value.Term(index).Type(), visiting) {
+			if typeContainsUnresolvedTypeParam(value.Term(index).Type(), visiting) {
 				return true
 			}
 		}
