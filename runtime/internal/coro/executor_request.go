@@ -228,7 +228,9 @@ func (registry *ExecutorRegistry) Request(handle ExecutorHandle) ExecutorRequest
 }
 
 // ObserveRequested is an acquire observation for a running compiler safepoint.
-// It never clears the request or drains a source.
+// A detached previous physical owner may also observe it while its handoff
+// keeps the exact registry binding alive. It never clears the request or drains
+// a source, and reads no scheduler-owned state.
 func (registry *ExecutorRegistry) ObserveRequested(handle ExecutorHandle) bool {
 	slot, ok := executorSlot(registry, handle)
 	if !ok || preemptLoad(&slot.generation) != handle.Generation {

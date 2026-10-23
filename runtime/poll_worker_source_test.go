@@ -656,7 +656,8 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 	immediateCreate := strings.Index(immediate, "coroNativeMRequestPhysicalOwnerV1(replacement, slot)")
 	preparedRelease := strings.Index(prepared, "coroTargetReleaseManagedExecutionAtRouteV1(")
 	preparedArm := strings.Index(prepared, "boundary.parent.deferred.Arm()")
-	preparedRecheck := strings.Index(prepared, "coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)")
+	preparedDemand := strings.Index(prepared, "coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)")
+	preparedRequest := strings.Index(prepared, "coro.ExecutorResumeHandoffRequestPending(&boundary.resume)")
 	preparedAllocate := strings.Index(prepared, "coroNativeMAllocateReplacementV1(")
 	reclaimCancel := strings.Index(reclaim, "corofleet.CancelReuseOwner(")
 	reclaimRequest := strings.Index(reclaim, "boundary.parent.handoff.RequestReturn(boundary.baton)")
@@ -666,7 +667,8 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyScalarScratchSameMEntrance(t *testi
 	finishReenter := strings.Index(finishBody, "coroTargetReenterManagedExecutionAtRouteV1(")
 	finishRestore := strings.Index(finishBody, "coro.RestoreExecutorResume(&boundary.resume)")
 	if detach < beginEntry || immediateRelease < 0 || immediateCreate <= immediateRelease ||
-		preparedRelease < 0 || preparedArm <= preparedRelease || preparedRecheck <= preparedArm ||
+		preparedDemand < 0 || preparedRelease <= preparedDemand ||
+		preparedArm <= preparedRelease || preparedRequest <= preparedArm ||
 		preparedAllocate >= 0 ||
 		reclaimCancel < 0 || reclaimRequest <= reclaimCancel || reclaimRecycle <= reclaimRequest ||
 		resolveEntry <= completeEntry || finishResolve < 0 || finishReclaim <= finishResolve ||
@@ -761,18 +763,19 @@ func TestRuntimeNativeSyscallDeferredReplacementUsesStableRequestGate(t *testing
 
 	boundary := readRuntimePollFile(t, runtimeCoroOSThreadForeignSource)
 	prepare := strings.Index(boundary, "func (boundary *coroNativeForeignBoundaryV1) prepareDeferredReplacementV1()")
-	release, arm, recheck := -1, -1, -1
+	demand, release, arm, requestObservation := -1, -1, -1, -1
 	if prepare >= 0 {
-		prepared := boundary[prepare:]
+		prepared := strings.SplitN(boundary[prepare:], "func (boundary *coroNativeForeignBoundaryV1) beginV1(", 2)[0]
+		demand = strings.Index(prepared, "coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)")
 		release = strings.Index(prepared, "coroTargetReleaseManagedExecutionAtRouteV1(")
 		arm = strings.Index(prepared, "boundary.parent.deferred.Arm()")
-		recheck = strings.Index(prepared, "coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)")
-		if recheck > 0 && strings.Index(prepared[:recheck], "coroNativeMAllocateReplacementV1(") >= 0 {
+		requestObservation = strings.Index(prepared, "coro.ExecutorResumeHandoffRequestPending(&boundary.resume)")
+		if strings.Contains(prepared, "coroNativeMAllocateReplacementV1(") {
 			t.Error("deferred native syscall eagerly allocates a replacement slot")
 		}
 	}
-	if prepare < 0 || release < 0 || arm <= release || recheck <= arm {
-		t.Error("deferred native syscall does not release, arm, then recheck durable demand")
+	if prepare < 0 || demand < 0 || release <= demand || arm <= release || requestObservation <= arm {
+		t.Error("deferred native syscall must snapshot demand before admission and observe atomic requests after Arm")
 	}
 
 	request := readRuntimePollFile(t, "internal/runtime/coro_native_deferred_replacement_llgo.go")

@@ -167,8 +167,9 @@ func (boundary *coroNativeForeignBoundaryV1) startReplacementV1(
 
 // prepareDeferredReplacementV1 publishes the logical handoff without eagerly
 // consuming either a replacement directory slot or a physical M. Arm happens
-// only after the managed-execution permit is released. The post-Arm demand
-// recheck closes the request-before-Arm window; a later request races Withdraw
+// only after the managed-execution permit is released. Snapshot scheduler
+// demand before Arm can admit a replacement. The post-Arm atomic request
+// observation closes the request-before-Arm window; a later request races Withdraw
 // directly in the stable parent owner and allocates a slot only after it wins.
 func (boundary *coroNativeForeignBoundaryV1) prepareDeferredReplacementV1() bool {
 	if boundary == nil || !boundary.active || boundary.driver == nil ||
@@ -177,6 +178,11 @@ func (boundary *coroNativeForeignBoundaryV1) prepareDeferredReplacementV1() bool
 		boundary.baton.Valid() || boundary.replacementQueued ||
 		boundary.replacementDeferred || !boundary.route.Valid() ||
 		!boundary.parent.deferred.Idle() {
+		return false
+	}
+	required, demandOK :=
+		coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)
+	if !demandOK {
 		return false
 	}
 	baton, begun := boundary.parent.handoff.Begin(boundary.ownerEpoch)
@@ -198,13 +204,15 @@ func (boundary *coroNativeForeignBoundaryV1) prepareDeferredReplacementV1() bool
 		coroRuntimeAbort("native deferred replacement arm failed")
 		return false
 	}
-	required, demandOK :=
-		coro.ExecutorResumeHandoffCompensationRequired(&boundary.resume)
-	if !demandOK {
-		coroRuntimeAbort("native deferred replacement demand recheck failed")
+	coroNativeDeferredDemandProbeAfterArmV1(boundary)
+	requested, requestOK :=
+		coro.ExecutorResumeHandoffRequestPending(&boundary.resume)
+	coroNativeDeferredDemandProbeAfterReadV1(requestOK)
+	if !requestOK {
+		coroRuntimeAbort("native deferred replacement request observation failed")
 		return false
 	}
-	if required && !coroNativeMActivateDeferredReplacementV1(boundary.domain) {
+	if (required || requested) && !coroNativeMActivateDeferredReplacementV1(boundary.domain) {
 		coroRuntimeAbort("native deferred replacement demand start failed")
 		return false
 	}
