@@ -729,7 +729,10 @@ func (p *Transformer) transformFuncBody(
 				rv = b.CreateRetVoid()
 			case AttrWidthType:
 				if p.optimize {
-					if load := ret.IsALoadInst(); !load.IsNil() {
+					// Re-reading the source is safe only beside the original load.
+					// An intervening call or store may have changed that storage;
+					// the return must still carry the previously loaded SSA value.
+					if load := ret.IsALoadInst(); !load.IsNil() && llvm.NextInstruction(load) == instr {
 						iptr := b.CreateBitCast(ret.Operand(0), llvm.PointerType(nft.ReturnType(), 0), "")
 						rv = b.CreateRet(b.CreateLoad(nft.ReturnType(), iptr, ""))
 						break
