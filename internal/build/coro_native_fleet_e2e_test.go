@@ -2359,6 +2359,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_trace_release.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_atomic_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_deferred_demand_probe_default.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_deferred_replacement_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet_owner_llgo.go"),

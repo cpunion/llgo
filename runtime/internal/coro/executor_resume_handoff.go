@@ -247,7 +247,8 @@ func ExecutorResumeHandoffReturnable(driver *ExecutorDriver) bool {
 // releasable park state. Task control is the sole externally posted source
 // which does not require a park, so its aggregate live-endpoint count is
 // checked separately. Durable facts and requests which have already arrived
-// retain their independent O(1) gates below.
+// retain their independent O(1) gates below. The caller must still exclusively
+// own the idle P: do not call this after publishing replacement admission.
 func ExecutorResumeHandoffCompensationRequired(
 	handoff *ExecutorResumeHandoff,
 ) (required, ok bool) {
@@ -265,6 +266,35 @@ func ExecutorResumeHandoffCompensationRequired(
 		control != nil && control.activeCount != 0 ||
 		ownerLocalCompletionPending(driver) ||
 		executorRunSourceRequested(driver), true
+}
+
+// ExecutorResumeHandoffRequestPending closes the request-before-admission
+// window after the owner has sampled CompensationRequired and published a
+// replacement gate. A replacement may already be running on the P. Only the
+// parent-owned handoff, immutable binding pointers/handle, and atomic request
+// words may be read here; no P queue, driver cursor, source catalog, or task
+// state is inspected. The detached handoff keeps the binding alive until the
+// replacement is strongly joined and the original resume is restored.
+func ExecutorResumeHandoffRequestPending(
+	handoff *ExecutorResumeHandoff,
+) (pending, ok bool) {
+	if handoff == nil || handoff.state != executorResumeHandoffDetached ||
+		handoff.driver == nil || handoff.task == nil ||
+		handoff.action.Kind != ActionResume || handoff.action.Handle == nil {
+		return false, false
+	}
+	driver := handoff.driver
+	if driver.p == nil || driver.registry == nil ||
+		driver.handle.Slot == 0 || driver.handle.Slot > ExecutorRequestCapacity ||
+		driver.handle.Generation == 0 {
+		return false, false
+	}
+	schedule := preemptLoad(&driver.p.schedule)
+	if schedule != scheduleIdle && schedule != scheduleRequested {
+		return false, false
+	}
+	return driver.registry.ObserveRequested(driver.handle) ||
+		schedule == scheduleRequested, true
 }
 
 // ExecutorResumeHandoffContext returns the exact logical task and physical
