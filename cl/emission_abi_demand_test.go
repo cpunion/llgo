@@ -1502,7 +1502,7 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 		"deferData", "unreachable", "stackSave", "coroYield",
 		"coroCriticalEnter", "coroCriticalPin", "coroCriticalExit", "coroGoexit",
 		"coroOSThreadLock", "coroOSThreadUnlock", "controlTrap", "controlFork",
-		"closureEnv", "coroCurrentTask", "coroExecutionDomainEnabled", "coroGCObservationEnabled")
+		"closureEnv", "coroCurrentTask", "coroCurrentTaskIfPresent", "coroExecutionDomainEnabled", "coroGCObservationEnabled")
 	add(emissionIntrinsicRawAllValues, "syscall")
 	add(emissionIntrinsicCompileValues,
 		"coroBindResultState", "coroLoadResultState",

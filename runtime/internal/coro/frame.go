@@ -175,6 +175,7 @@ const (
 	// Owner-only proof from the complete compiler root return gate. It can
 	// survive only the adjacent generated final-suspend/resume return suffix.
 	pendingCompilerRootComplete
+	pendingCompilerYield
 )
 
 type pendingTransition struct {
@@ -1729,4 +1730,23 @@ func LoadPanicTraceFrame(g *G, cursor unsafe.Pointer) (snapshot PanicTraceFrameS
 	}
 	snapshot, frameNext, ok := retainedPanicTraceFrame(g, (*Frame)(cursor))
 	return snapshot, unsafe.Pointer(frameNext), ok
+}
+
+// PrepareYieldCompiler validates the complete source-free ParkState once.
+// A delivered wait retains its ticket history across later yields; that
+// history does not retain a source or result lease. The adjacent physical
+// return consumes this receipt without repeating the park/queue audit.
+func PrepareYieldCompiler(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
+	if g != nil && g.runP != nil && g.runP.inlineAwaitDepth == 0 && g.runP.action.Handle == handle &&
+		ValidG(g) && resumeGateTaken(g) && handle != nil && header != nil &&
+		g.pending == (pendingTransition{}) && g.spawnChild == nil && releasableParkState(&g.park) {
+		frame := g.active
+		if frame != nil && frame == g.frames && frame.owner == g && frame.handle == handle && frame.header == header &&
+			frame.state == FrameActive && header.G == unsafe.Pointer(g) &&
+			header.SuspendReason == uint16(SuspendYield) && header.Lifecycle == uint16(FrameSuspended) {
+			g.pending = pendingTransition{kind: pendingCompilerYield, from: frame}
+			return true
+		}
+	}
+	return PrepareYield(g, handle, header)
 }

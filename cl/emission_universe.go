@@ -3360,6 +3360,10 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 	case llgoCoroExecutionDomainEnabled, llgoCoroGCObservationEnabled:
 		// A compile-time capability query has no callable or scheduler edge.
 		return CoroIntrinsicCallInlineNoSuspend
+	case llgoCoroCurrentTaskIfPresent:
+		// A managed physical body projects its hidden G. A raw owner projects
+		// nil and keeps the ordinary durable cross-owner publication path.
+		return CoroIntrinsicCallInlineNoSuspend
 	case llgoCoroCurrentTask:
 		// Typed-FFI adapters receive the active physical task directly. The
 		// intrinsic emits no call and is valid only in their managed owner.
@@ -3713,6 +3717,12 @@ func coroExactIntrinsicShapeForOpcode(opcode int) (coroExactIntrinsicShape, bool
 				{anyPointer: true},
 				{anyPointer: true},
 			},
+		}, true
+	case llgoCoroCurrentTaskIfPresent:
+		return coroExactIntrinsicShape{
+			name:      "llgo.coroCurrentTaskIfPresent",
+			signature: "func() unsafe.Pointer",
+			result:    &coroIntrinsicTypeShape{basic: types.UnsafePointer},
 		}, true
 	case llgoCoroCurrentTask:
 		return coroExactIntrinsicShape{

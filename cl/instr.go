@@ -846,6 +846,7 @@ var llgoInstrs = map[string]int{
 	"coroOSThreadUnlock":         llgoCoroOSThreadUnlock,
 	"coroFFICall":                llgoCoroFFICall,
 	"coroCurrentTask":            llgoCoroCurrentTask,
+	"coroCurrentTaskIfPresent":   llgoCoroCurrentTaskIfPresent,
 	"coroBorrowResult":           llgoCoroBorrowResult,
 	"coroBindResultState":        llgoCoroBindResultState,
 	"coroLoadResultState":        llgoCoroLoadResultState,
@@ -3526,6 +3527,14 @@ func (p *context) callEx(
 				panic(err)
 			}
 			ret = b.Const(constant.MakeBool(enabled), p.type_(types.Typ[types.Bool], llssa.InGo))
+		case llgoCoroCurrentTaskIfPresent:
+			if act != llssa.Call || ds != nil || len(args) != 0 {
+				panic("llgo.coroCurrentTaskIfPresent requires an exact direct zero-argument call")
+			}
+			ret = p.managedPhysicalTask()
+			if ret.IsNil() {
+				ret = p.prog.Nil(p.prog.VoidPtr())
+			}
 		case llgoCoroCurrentTask:
 			if act != llssa.Call || ds != nil || len(args) != 0 {
 				panic("llgo.coroCurrentTask requires an exact direct zero-argument call")

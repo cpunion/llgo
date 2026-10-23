@@ -88,6 +88,15 @@ type G struct {
 	taskStorage unsafe.Pointer
 	taskSize    uintptr
 	taskState   taskStorageState
+	// initialRunPrepared is a compiler-commit receipt for one initial root.
+	// It occupies taskState's pointer-alignment padding and leaves the task
+	// P-neutral. Only the adjacent bounded selector may consume it; arbitrary
+	// callers continue through BeginRunG's complete validator.
+	initialRunPrepared bool
+	// yieldRunPrepared certifies the exact stable compiler/runner yield.
+	// It leaves runAction zero so runnable transfer and locked-owner handoff
+	// retain their existing protocols, without increasing G.
+	yieldRunPrepared bool
 	// taskLocal is one runtime-adapter-owned, scanned logical-task context.
 	// The scheduler never interprets it. Keeping the attachment on G makes
 	// runtime state migrate with the LLVM frame chain without a global map.
@@ -372,7 +381,7 @@ func InitG(g *G) bool {
 		g.park != (ParkState{}) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageStatic ||
-		g.taskLocal != nil ||
+		g.initialRunPrepared || g.yieldRunPrepared || g.taskLocal != nil ||
 		!emptyPanicRecord(&g.panicRecord) || g.panicUnwind ||
 		g.panicTraceHead != nil || g.panicTraceTail != nil || g.panicTraceCount != 0 {
 		return false
@@ -1064,7 +1073,7 @@ func dispatchPending(g *G, resumed *Frame) (destroy *Frame, yielded, directPark,
 		resumed.header.Lifecycle = uint16(FrameDestroyPending)
 		g.destroyTarget = resumed
 		return resumed, false, false, true
-	case pendingYield:
+	case pendingYield, pendingCompilerYield:
 		if pending.target != nil || resumed.header == nil ||
 			resumed.header.SuspendReason != uint16(SuspendYield) ||
 			resumed.header.Lifecycle != uint16(FrameSuspended) {
@@ -1187,6 +1196,8 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 	if !ok {
 		return Action{}, false
 	}
+	g.initialRunPrepared = false
+	g.yieldRunPrepared = false
 	return action, true
 }
 

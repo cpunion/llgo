@@ -546,12 +546,13 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 				atomic := semantics == CoroIntrinsicCallInlineNoSuspend &&
 					isCoroAtomicIntrinsic(frozen.opcode)
 				predicate := ir.programPredicates.Mask&coroProgramPredicateCapability(frozen.opcode) != 0
+				taskProjection := semantics == CoroIntrinsicCallInlineNoSuspend && frozen.opcode == llgoCoroCurrentTaskIfPresent
 				structured := semantics == CoroIntrinsicCallInlineSuspend ||
 					semantics == CoroIntrinsicCallInlineNativeBlock ||
 					semantics == CoroIntrinsicCallInlineForeignTransaction ||
 					semantics == CoroIntrinsicCallInlineYield ||
 					semantics == CoroIntrinsicCallInlineOutcome
-				if !atomic && !structured && !predicate {
+				if !atomic && !structured && !predicate && !taskProjection {
 					continue
 				}
 				for _, owner := range sortedUseOwners(function) {
@@ -564,7 +565,11 @@ func (ir *coroProgramIR) finalizeOutcomePlainIntrinsicSemantics(
 						semantic.effect != coro.NoSuspend || semantic.exec != 0 {
 						return fmt.Errorf("intrinsic call %q has an incompatible preliminary semantic recipe", call.String())
 					}
-					if predicate {
+					if taskProjection {
+						semantic.recipe = coro.RecipeID("cl.intrinsic.current-task-projection.v1")
+						semantic.outcomePlainLeaf = true
+						semantic.staticOutcome = true
+					} else if predicate {
 						semantic.recipe = coro.RecipeID("cl.intrinsic.program-predicate.constant.v1")
 						semantic.outcomePlainLeaf = true
 						semantic.staticOutcome = true

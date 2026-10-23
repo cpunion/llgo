@@ -359,7 +359,12 @@ func dispatchExecutorRunReadyAction(
 	}
 	var action Action
 	var ok bool
-	if g.runAction == ActionInvalid && g.park.phase == parkMaterialized && g.park.directChannel {
+	if g.yieldRunPrepared && g.runAction == ActionInvalid {
+		action, ok = beginExecutorRunYieldPrepared(p, g, peerRunnable)
+	} else if g.initialRunPrepared && g.runAction == ActionInvalid &&
+		g.park.taskCancelKind == TaskCancelNone && g.park.taskCancelPhase == taskCancelIdle {
+		action, ok = beginExecutorRunInitialPrepared(p, g, peerRunnable)
+	} else if g.runAction == ActionInvalid && g.park.phase == parkMaterialized && g.park.directChannel {
 		action, ok = beginExecutorRunDirectChannelContinuation(p, g, peerRunnable)
 	} else if g.runAction == ActionCheckResume ||
 		g.runAction == ActionInvalid && g.park.phase == parkMaterialized {
@@ -914,7 +919,9 @@ func ResumedExecutorRun(
 		p.action = next
 		return next, false, true
 	}
-	if g != nil && g.pending.kind == pendingParkSet && g.pending.directChannel && g.active != nil &&
+	if g != nil && g.pending.kind == pendingCompilerYield {
+		next, ok = resumedExecutorCompilerYield(driver, p, g, action)
+	} else if g != nil && g.pending.kind == pendingParkSet && g.pending.directChannel && g.active != nil &&
 		g.pending.from == g.active && g.active.handle == action.Handle &&
 		g.active.parkWait != nil && g.active.parkWait.directChannel {
 		// PrepareCurrentDirectChannelPark installed the pending direct marker
@@ -957,6 +964,9 @@ func ResumedExecutorRun(
 	}
 	if !validOSThreadPeerActionCommit(p, g) {
 		return Action{}, false, false
+	}
+	if next.Kind == ActionYield {
+		g.yieldRunPrepared = true
 	}
 	// Resumed has just produced the complete stable Yield/Park state and cleared
 	// P.current/action/service state. Preserve a same-resume ready publication,
