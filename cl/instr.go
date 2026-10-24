@@ -3621,6 +3621,24 @@ func (p *context) callEx(
 		if rawC {
 			p.inCFunc = false
 		}
+		if act == llssa.Call && ds == nil {
+			if target, direct := p.coroStaticDescriptorClosureTarget(source); direct {
+				entry, _, kind := p.compileFunction(target)
+				if entry == nil || kind != goFunc {
+					panic("static descriptor closure target did not resolve to a Go body")
+				}
+				buildCall := llssa.Builder.Call
+				if entry.NeedsEnv() {
+					// Reuse the producer's snapshot, including across an intervening
+					// receiver mutation or GC; never reconstruct its bindings here.
+					env := b.Field(fn, 1)
+					buildCall = func(b llssa.Builder, fn llssa.Expr, args ...llssa.Expr) llssa.Expr {
+						return b.CallClosureEntry(fn, env, args...)
+					}
+				}
+				return p.emitDoAtSource(b, act, ds, mayRecover, source, entry.Expr, buildCall, args...)
+			}
+		}
 		buildCall := llssa.Builder.Call
 		if !rawC && p.dynamicCallValueKnownNonNil(call, source) {
 			buildCall = llssa.Builder.CallClosureKnownNonNil
