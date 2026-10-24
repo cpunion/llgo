@@ -37,7 +37,7 @@ func init() {
 
 func runCmd(cmd *base.Command, args []string) {
 
-	if err := cmd.Flag.Parse(args); err != nil {
+	if !base.ParseFlags(cmd, args) {
 		return
 	}
 

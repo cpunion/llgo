@@ -43,7 +43,9 @@ func init() {
 }
 
 func runMonitor(cmd *base.Command, args []string) {
-	cmd.Flag.Parse(args)
+	if !base.ParseFlags(cmd, args) {
+		return
+	}
 	args = cmd.Flag.Args()
 
 	if len(args) > 1 {

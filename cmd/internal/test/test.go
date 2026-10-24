@@ -46,9 +46,8 @@ func runCmd(cmd *base.Command, args []string) {
 	// Split args at -args to separate llgo flags from test binary args
 	llgoArgs, testBinaryArgs := splitArgsAt(args, "-args")
 
-	if err := cmd.Flag.Parse(llgoArgs); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		mockable.Exit(1)
+	if !base.ParseFlags(cmd, llgoArgs) {
+		return
 	}
 
 	conf := build.NewDefaultConf(build.ModeTest)
