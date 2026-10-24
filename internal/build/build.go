@@ -9380,7 +9380,10 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 // rewriting conditions and speculating blocks repeats expensive work on giant
 // functions. Keep mandatory coroutine cleanup and the complete requested
 // optimization pipeline after this step.
-const coroPackageLoweringPipeline = "coro-early,cgscc(coro-split,function(simplifycfg<no-simplify-cond-branch;no-speculate-blocks>)),coro-cleanup"
+// Keep annotation elision adjacent to CoroSplit: it must consume certified
+// child calls while callers still have their presplit coroutine bodies. Once
+// CoroCleanup runs, the later optimizer cannot recover that frame-lifetime proof.
+const coroPackageLoweringPipeline = "coro-early,cgscc(coro-split,coro-annotation-elide,function(simplifycfg<no-simplify-cond-branch;no-speculate-blocks>)),coro-cleanup"
 
 // shouldDeferCoroLoweringToFullLTO preserves presplit coroutine bodies and
 // exact static call edges until LLVM owns the complete program. Package-level

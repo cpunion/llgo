@@ -496,7 +496,7 @@ jobs:
 
       - name: Test detached backend memory and root preservation
         if: matrix.lane == 'integration-build'
-        run: go test ./ssa ./internal/build -run '^Test(CoroPackageLoweringPreservesSuspendedOwner|StagedPackageCompactionWriteFailurePreservesOwner|DiscardLocalValueNamesPreservesSymbolsAndRoots|LargeAArch64CodegenReleasesMachineFunctions)$' -timeout=5m -count=1
+        run: go test ./ssa ./internal/build -run '^Test(CoroPackageLoweringPreservesSuspendedOwner|CoroPackageLoweringElidesCertifiedStaticChild|StagedPackageCompactionWriteFailurePreservesOwner|DiscardLocalValueNamesPreservesSymbolsAndRoots|LargeAArch64CodegenReleasesMachineFunctions)$' -timeout=5m -count=1
 
       - name: Test native coroutine fault landing
         if: matrix.lane == 'fault-e2e'
