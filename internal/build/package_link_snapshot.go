@@ -38,6 +38,7 @@ type packageLinkSnapshot struct {
 	pcLineInfo             []pcLineRecord
 	definedGlobals         []string
 	exportFunctionNames    []string
+	dceExportRoots         []string
 	hasLocalCExports       bool
 }
 
@@ -84,6 +85,14 @@ func freezePackageLinkSnapshot(pkg *aPackage) {
 		}
 	}
 	sort.Strings(snapshot.exportFunctionNames)
+	for goName, cName := range lpkg.ExportFuncs() {
+		name := cName
+		if fn := lpkg.FuncOf(goName); fn != nil && fn.Name() == goName {
+			name = goName
+		}
+		snapshot.dceExportRoots = append(snapshot.dceExportRoots, name)
+	}
+	sort.Strings(snapshot.dceExportRoots)
 	pkg.LinkSnapshot = snapshot
 }
 

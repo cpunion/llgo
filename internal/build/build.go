@@ -3716,7 +3716,7 @@ func (c *Config) deadcodeDropEnabled() bool {
 }
 
 func (c *Config) packageMetaEnabled() bool {
-	return c.CollectPackageMeta || c.deadcodeDropEnabled()
+	return c.CollectPackageMeta || c.deadcodeDropEnabled() || c.stagedMethodDCEEnabled()
 }
 
 func (c *Config) parallelism() int {
@@ -8362,7 +8362,7 @@ func generateMainEntryPackage(ctx *context, pkg *packages.Package, linkedOrder [
 	// frontend and LLVM context. Apply method-liveness overrides at this shared
 	// generation boundary so staged and direct backends both freeze the same
 	// entry bitcode before it is exported exactly once.
-	if ctx.buildConf.deadcodeDropEnabled() {
+	if ctx.buildConf.deadcodeDropEnabled() || ctx.buildConf.stagedMethodDCEEnabled() {
 		if err := applyDeadcodeDropOverrides(ctx, linkedOrder, entryPkg, req.needRuntime, ctx.buildConf.Verbose); err != nil {
 			return nil, err
 		}
@@ -8555,6 +8555,9 @@ func applyDeadcodeDropOverrides(ctx *context, pkgs []Package, entryPkg Package, 
 		return err
 	}
 	liveSlots := deadcode.Analyze(summary, roots)
+	if ctx != nil && ctx.buildConf.stagedMethodDCEEnabled() {
+		return emitStagedMethodOverrides(entryPkg.LPkg.Module(), pkgs, liveSlots, verbose)
+	}
 	sourceModules, err := dceSourceModules(pkgs)
 	if err != nil {
 		return err
@@ -8589,12 +8592,8 @@ func dceEntryRootCandidates(ctx *context, pkgs []Package, needRuntime bool) ([]s
 	// root, so their final linker names must seed the analysis explicitly.
 	var exports []string
 	for _, pkg := range pkgs {
-		for goName, cName := range pkg.LPkg.ExportFuncs() {
-			name := cName
-			if fn := pkg.LPkg.FuncOf(goName); fn != nil && fn.Name() == goName {
-				name = goName
-			}
-			exports = append(exports, name)
+		if snapshot := packageLinkSnapshotOf(pkg); snapshot != nil {
+			exports = append(exports, snapshot.dceExportRoots...)
 		}
 	}
 	slices.Sort(exports)
@@ -9304,6 +9303,11 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 		}
 	}
 	freezePackageLinkSnapshot(aPkg)
+	if ctx.buildConf.stagedMethodDCEEnabled() {
+		if err := captureStagedMethodTypes(aPkg); err != nil {
+			return err
+		}
+	}
 	// ModeGen callers consume the in-memory LLVM module directly. They do not
 	// need cgo/link objects or a package archive for a later link step.
 	if ctx.mode == ModeGen {
@@ -10266,9 +10270,10 @@ type aPackage struct {
 	// LinkSnapshot survives disposal of the package LLVM module. StagedBitcode
 	// is the verified presplit frontend result; coroutine/default lowering
 	// consumes it only after compilation-wide SSA state has been released.
-	LinkSnapshot    *packageLinkSnapshot
-	sourceSelection *packageSourceSelection
-	StagedBitcode   string
+	LinkSnapshot       *packageLinkSnapshot
+	sourceSelection    *packageSourceSelection
+	StagedBitcode      string
+	MethodTypeFragment []byte // compact constants only; no source LLVM ownership
 
 	// CoroLibraryEffectRecords is producer-owned package metadata copied from
 	// cl before object emission. The package archiver publishes it through a
