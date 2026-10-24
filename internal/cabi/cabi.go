@@ -729,29 +729,47 @@ func (p *Transformer) transformFuncBody(
 				rv = b.CreateRetVoid()
 			case AttrWidthType:
 				if p.optimize {
-					// Re-reading the source is safe only beside the original load.
-					// An intervening call or store may have changed that storage;
-					// the return must still carry the previously loaded SSA value.
-					if load := ret.IsALoadInst(); !load.IsNil() && llvm.NextInstruction(load) == instr {
+					// Only reuse an adjacent ordinary load whose storage covers
+					// the carrier. Preserve the source alignment: an ABI register
+					// type does not imply that its source has the same alignment.
+					if load := ret.IsALoadInst(); !load.IsNil() && !load.IsVolatile() &&
+						llvm.NextInstruction(load) == instr &&
+						p.td.TypeStoreSize(nft.ReturnType()) <= p.td.TypeStoreSize(ret.Type()) {
 						iptr := b.CreateBitCast(ret.Operand(0), llvm.PointerType(nft.ReturnType(), 0), "")
-						rv = b.CreateRet(b.CreateLoad(nft.ReturnType(), iptr, ""))
+						value := b.CreateLoad(nft.ReturnType(), iptr, "")
+						value.SetAlignment(load.Alignment())
+						rv = b.CreateRet(value)
 						break
 					}
 				}
-				ptr := llvm.CreateAlloca(b, info.Return.Type)
-				b.CreateStore(ret, ptr)
-				iptr := b.CreateBitCast(ptr, llvm.PointerType(nft.ReturnType(), 0), "")
-				rv = b.CreateRet(b.CreateLoad(nft.ReturnType(), iptr, ""))
+				rv = b.CreateRet(p.packReturnValue(b, ret, nft.ReturnType()))
 			case AttrWidthType2:
-				ptr := llvm.CreateAlloca(b, info.Return.Type)
-				b.CreateStore(ret, ptr)
-				iptr := b.CreateBitCast(ptr, llvm.PointerType(nft.ReturnType(), 0), "")
-				rv = b.CreateRet(b.CreateLoad(nft.ReturnType(), iptr, ""))
+				rv = b.CreateRet(p.packReturnValue(b, ret, nft.ReturnType()))
 			}
 			instr.ReplaceAllUsesWith(rv)
 			instr.EraseFromParentAsInstruction()
 		}
 	}
+}
+
+// packReturnValue preserves the captured SSA value while providing storage and
+// alignment for both its logical type and the ABI carrier. For example, AArch64
+// returns a nine-byte aggregate in two eight-byte registers.
+func (p *Transformer) packReturnValue(b llvm.Builder, value llvm.Value, carrier llvm.Type) llvm.Value {
+	logical := value.Type()
+	storage := logical
+	if p.td.TypeAllocSize(carrier) > p.td.TypeAllocSize(logical) {
+		storage = carrier
+	}
+	ptr := llvm.CreateAlloca(b, storage)
+	ptr.SetAlignment(max(ptr.Alignment(), p.Alignof(logical), p.Alignof(carrier)))
+	if p.td.TypeStoreSize(carrier) > p.td.TypeStoreSize(logical) {
+		b.CreateStore(llvm.ConstNull(carrier), ptr)
+	}
+	b.CreateStore(value, ptr)
+	result := b.CreateLoad(carrier, ptr, "")
+	result.SetAlignment(ptr.Alignment())
+	return result
 }
 
 func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call llvm.Value, fn llvm.Value) bool {

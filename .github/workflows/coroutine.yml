@@ -776,9 +776,9 @@ jobs:
           go test -race ./cl/ssawrap -count=1
           go test -race ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache|Emission.*)$' -count=1
 
-      - name: Test captured aggregate return values
+      - name: Test aggregate return snapshots and load safety
         if: matrix.lane == 'integration'
-        run: go test -race ./internal/cabi -run '^TestSmallAggregateReturnPreservesLoadedSnapshot$' -count=3 -timeout=3m
+        run: go test -race ./internal/cabi -run '^Test(SmallAggregateReturnPreservesLoadedSnapshot|AggregateReturnLoadSafety|AggregateReturnCarrierAtProtectedBoundary)$' -count=3 -timeout=3m
 
       - name: Test SSA builder and source/physical type boundaries
         if: matrix.lane == 'compat'
