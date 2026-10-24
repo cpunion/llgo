@@ -25,6 +25,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -384,7 +385,8 @@ func parenthesizedMethodName(name string) string {
 
 func fileImportsUnsafe(file *ast.File) bool {
 	for _, imp := range file.Imports {
-		if imp.Path.Value == `"unsafe"` {
+		path, _ := strconv.Unquote(imp.Path.Value)
+		if path == "unsafe" {
 			return true
 		}
 	}

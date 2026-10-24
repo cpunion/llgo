@@ -104,6 +104,7 @@ func TestLinknameExternalImportAcrossPackages(t *testing.T) {
 		imported                 bool
 	}{
 		{"unsafe", "imports.go", "import _ \"unsafe\"\n", true},
+		{"raw unsafe", "imports.go", "import _ `unsafe`\n", true},
 		{"ordinary", "imports.go", "", false},
 		{"unrelated import", "imports.go", "import \"fmt\"\n", false},
 		{"cgo generated", "_cgo_import.go", "", true},
