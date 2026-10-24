@@ -17,6 +17,7 @@
 package funcinfo
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"sort"
@@ -192,7 +193,6 @@ func buildStringTable(strings []string) (map[string]uint32, []uint32, []byte, er
 	pool := stringPool{
 		offsets: map[string]uint32{"": 0},
 		data:    []byte{0},
-		text:    "\x00",
 	}
 	offsets := make([]uint32, len(values))
 	for id, s := range values {
@@ -249,16 +249,22 @@ func splitFileName(file string) (root, name string) {
 }
 
 type stringPool struct {
-	offsets map[string]uint32
-	data    []byte
-	text    string
+	offsets  map[string]uint32
+	data     []byte
+	suffixes stringSuffixIndex
 }
 
 func (p *stringPool) offset(s string) (uint32, error) {
 	if off, ok := p.offsets[s]; ok {
 		return off, nil
 	}
-	if off := strings.Index(p.text, s+"\x00"); off >= 0 {
+	plain := len(s) != 0 && strings.IndexByte(s, 0) < 0
+	if plain {
+		if off, ok := p.suffixes.find(s); ok {
+			p.offsets[s] = off
+			return off, nil
+		}
+	} else if off := bytes.Index(p.data, []byte(s+"\x00")); off >= 0 {
 		uoff := uint32(off)
 		p.offsets[s] = uoff
 		return uoff, nil
@@ -269,7 +275,22 @@ func (p *stringPool) offset(s string) (uint32, error) {
 	off := uint32(len(p.data))
 	p.data = append(p.data, s...)
 	p.data = append(p.data, 0)
-	p.text = string(p.data)
+	// Ordinary queries can only match suffixes ending at an existing NUL.
+	// Index each segment when an arbitrary input embeds additional NULs.
+	if plain {
+		p.suffixes.insert(s, off+uint32(len(s)))
+	} else {
+		for start := 0; start < len(s); {
+			end := strings.IndexByte(s[start:], 0)
+			if end < 0 {
+				end = len(s) - start
+			}
+			if end != 0 {
+				p.suffixes.insert(s[start:start+end], off+uint32(start+end))
+			}
+			start += end + 1
+		}
+	}
 	p.offsets[s] = off
 	return off, nil
 }

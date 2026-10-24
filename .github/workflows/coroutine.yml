@@ -805,6 +805,10 @@ jobs:
           go test ./internal/build -run '^Test(CoroLibraryProgramPredicateProducedArchiveConsumer|BDWGCNotificationAutomaticForeignThreadAndDetach)$' -count=1
           go test ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
+      - name: Test function metadata string pool compatibility
+        if: matrix.lane == 'compat'
+        run: go test -race -shuffle=on -count=3 ./internal/build/funcinfo
+
       - name: Test coroutine physical ABI and function dispatch lowering
         if: matrix.lane == 'compat'
         # Run every compiler test whose name is part of the coroutine contract;
