@@ -22,7 +22,7 @@ import "unsafe"
 // target-neutral channel/select catalog. Every source includes one inline
 // page; a target may configure stable pages before binding and monotonically
 // publish more stable pages from its owner while bound.
-const ChannelOperationPageCapacity = 64
+const ChannelOperationPageCapacity = operationCatalogPageCapacity
 
 // ChannelOperationSourceCapacity is the default capacity of an unconfigured
 // source. Keep this compatibility name for small, embedded, and bare-metal

@@ -23,8 +23,12 @@ import (
 
 func TestOperationDynamicPageDirectoryIsSparseAndPublishesCompleteBlocks(t *testing.T) {
 	pointerSize := unsafe.Sizeof(uintptr(0))
-	if operationPageDirectoryBlockCapacity != 64 || operationPageDirectoryBlockCount != 8 ||
-		unsafe.Sizeof(operationDynamicPageDirectory{}) > 9*pointerSize {
+	wantRoots := uint32(8)
+	if operationCatalogPageCapacity == 16 {
+		wantRoots = 32
+	}
+	if operationPageDirectoryBlockCapacity != 64 || operationPageDirectoryBlockCount != wantRoots ||
+		unsafe.Sizeof(operationDynamicPageDirectory{}) > uintptr(wantRoots+1)*pointerSize {
 		t.Fatalf("dynamic directory layout: block=%d roots=%d size=%d pointer=%d",
 			operationPageDirectoryBlockCapacity, operationPageDirectoryBlockCount,
 			unsafe.Sizeof(operationDynamicPageDirectory{}), pointerSize)
@@ -58,10 +62,10 @@ func TestOperationDynamicPageDirectoryIsSparseAndPublishesCompleteBlocks(t *test
 }
 
 func TestOperationSourcesAttachStablePagesWhileBound(t *testing.T) {
-	if TimerRegistrationMaximumCapacity != 511*TimerRegistrationPageCapacity ||
-		PollOperationMaximumCapacity != 511*PollOperationPageCapacity ||
-		ManualOperationMaximumCapacity != 511*ManualOperationPageCapacity ||
-		WorkerOperationMaximumCapacity != 511*WorkerOperationPageCapacity {
+	if TimerRegistrationMaximumCapacity != operationCatalogMaximumSlots ||
+		PollOperationMaximumCapacity != operationCatalogMaximumSlots ||
+		ManualOperationMaximumCapacity != operationCatalogMaximumSlots ||
+		WorkerOperationMaximumCapacity != operationCatalogMaximumSlots {
 		t.Fatal("dynamic source maximum no longer matches OperationID encoding")
 	}
 

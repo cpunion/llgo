@@ -23,8 +23,8 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/coroclock"
 )
 
-// Native keeps the target-neutral 64-slot page granularity. These are logical
-// limits reached through demand-paged growth, not process-global reservations.
+// Native uses logical limits independent of page granularity, reached
+// through demand-paged growth, not process-global reservations.
 // Timers retain a larger limit because ordinary Go code can create more live
 // Timer/Ticker values than blocking file operations.
 const (
@@ -44,7 +44,7 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 		coro.PollOperationConfiguredCapacity(&coroProgramPollSourceV1State) != coro.PollOperationPageCapacity ||
 		coro.ManualOperationConfiguredCapacity(&coroProgramManualSourceV2State) != coro.ManualOperationPageCapacity ||
 		coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coro.ChannelOperationPageCapacity ||
-		coroNativePollCapacityV1 != coroNativeSourcePageCountV1*coro.PollOperationPageCapacity ||
+		coroNativePollCapacityV1 != coroNativePollLogicalCapacityV1 ||
 		coroNativeWorkerCapacityV1 != coroRuntimeWorkerCapacityV1 ||
 		coroNativeWorkerQueueSizeV1 != coroNativeWorkerCapacityV1 {
 		return false

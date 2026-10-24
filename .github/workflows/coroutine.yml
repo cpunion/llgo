@@ -147,6 +147,24 @@ jobs:
             ./internal/runtime/coro_native_atomic_host.go \
             ./internal/runtime/coro_native_fleet_test.go \
             -run '^TestCoroNativeFleet' -count=1
+          # Exercise the native page shape under the host race detector.
+          go test -p=1 -race -shuffle=on -tags=coro_smallpage_test ./internal/coro -count=3 -timeout=10m
+          # Fleet state is process-global: use three fresh processes.
+          for small_page_round in 1 2 3; do
+            go test -p=1 -race -shuffle=on -gcflags=command-line-arguments=-lang=go1.20 -tags=coro_native_fleet_test,coro_smallpage_test \
+              ./internal/runtime/coro_run_slice.go \
+              ./internal/runtime/coro_task_context_test_adapter.go \
+              ./internal/runtime/coro_execution_quota_default.go \
+              ./internal/runtime/coro_ready_distribution_default.go \
+              ./internal/runtime/coro_native_fleet.go \
+              ./internal/runtime/coro_gc_observer_test_adapter.go \
+              ./internal/runtime/coro_gc_observer_nobdwgc.go \
+              ./internal/runtime/coro_native_deferred_replacement_default.go \
+              ./internal/runtime/coro_native_fleet_reactor.go \
+              ./internal/runtime/coro_native_atomic_host.go \
+              ./internal/runtime/coro_native_fleet_test.go \
+              -run '^TestCoroNativeFleet' -count=1
+          done
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
             -tags=coro_runtime_adapter_test \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \

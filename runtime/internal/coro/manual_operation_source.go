@@ -21,7 +21,7 @@ import "unsafe"
 // ManualOperationPageCapacity matches the other paged operation catalogs. The
 // inline page keeps small/embedded executors allocation-free; native targets
 // may attach stable extra pages without changing OperationID or ParkState.
-const ManualOperationPageCapacity = 64
+const ManualOperationPageCapacity = operationCatalogPageCapacity
 
 // ManualOperationSourceCapacity is the inline capacity retained for source
 // compatibility. Configured capacity may be larger when extra pages are

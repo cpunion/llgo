@@ -158,7 +158,7 @@ func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
 	core := readRuntimePollFile(t, runtimeCoroChannelSource)
 	normalizedCore := strings.Join(strings.Fields(core), " ")
 	for _, required := range []string{
-		"const ChannelOperationPageCapacity = 64",
+		"const ChannelOperationPageCapacity = operationCatalogPageCapacity",
 		"const ChannelOperationSourceCapacity = ChannelOperationPageCapacity",
 		"extraPages []ChannelOperationPage",
 		"dynamicPages operationDynamicPageDirectory",
@@ -206,7 +206,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	core := readRuntimePollFile(t, runtimeCoroWorkerSource)
 	normalizedCore := strings.Join(strings.Fields(core), " ")
 	for _, required := range []string{
-		"const WorkerOperationPageCapacity = 64",
+		"const WorkerOperationPageCapacity = operationCatalogPageCapacity",
 		"const WorkerOperationSourceCapacity = WorkerOperationPageCapacity",
 		"extraPages []WorkerOperationPage",
 		"dynamicPages operationDynamicPageDirectory",
@@ -224,8 +224,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	native := readRuntimePollFile(t, runtimeCoroNativeWorkerSource)
 	for _, required := range []string{
 		"coroNativeWorkerThreadCountV1 = 4",
-		"coroNativeWorkerPageCountV1 = 16",
-		"coroNativeWorkerCapacityV1  = coroNativeWorkerPageCountV1 * coro.WorkerOperationPageCapacity",
+		"coroNativeWorkerCapacityV1  = coroworker.QueueCapacity",
 		"coroNativeWorkerQueueSizeV1 = coroworker.QueueCapacity",
 		"bounded C11 sequence ring",
 		"reservation := coroworker.QueueReserve()",

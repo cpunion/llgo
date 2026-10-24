@@ -21,7 +21,7 @@ import "unsafe"
 // WorkerOperationPageCapacity is the allocation-free granularity of the
 // target-neutral worker catalog. Every source includes one inline page; a
 // target may attach additional stable pages before binding the source.
-const WorkerOperationPageCapacity = 64
+const WorkerOperationPageCapacity = operationCatalogPageCapacity
 
 // WorkerOperationSourceCapacity is the default capacity of an unconfigured
 // source. Keep this compatibility name for small, embedded, and bare-metal

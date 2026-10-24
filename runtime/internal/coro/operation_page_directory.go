@@ -18,13 +18,12 @@ package coro
 
 import "unsafe"
 
-// Every current operation catalog uses 64-slot pages. The two-word
-// OperationID reserves 15 source-local bits, so 511 complete pages (32,704
-// slots) are representable without changing the producer ABI. The remaining
-// 63 encodings stay invalid rather than creating a partial final page.
+// Native coroutine catalogs use smaller pages to reduce inline source
+// storage. Other profiles retain their original 64-slot pages. Both keep the
+// historical 32,704-slot limit and the existing two-word OperationID codec.
 const (
-	operationCatalogPageCapacity        = uint32(64)
-	operationCatalogMaximumPageCount    = operationLocalMask / operationCatalogPageCapacity
+	operationCatalogMaximumSlots        = operationLocalMask / 64 * 64
+	operationCatalogMaximumPageCount    = operationCatalogMaximumSlots / operationCatalogPageCapacity
 	operationDynamicPageCapacity        = operationCatalogMaximumPageCount - 1
 	operationPageDirectoryBlockCapacity = uint32(64)
 	operationPageDirectoryBlockCount    = (operationDynamicPageCapacity + operationPageDirectoryBlockCapacity - 1) /
@@ -45,10 +44,9 @@ type OperationPageDirectoryBlock struct {
 // heap, arena, or static pages while the source is bound.
 //
 // blocks and their pages are pointer-typed so a tracing runtime keeps target-
-// allocated storage rooted. The source pays for only eight root pointers;
-// targets attach one block per 64 dynamic pages instead of every source
-// embedding the full 510-pointer representable catalog. The owner writes a
-// complete block/page path before release-publishing count. Producers acquire
+// allocated storage rooted. Targets attach one block per 64 dynamic pages;
+// only the directory's bounded root pointer array is stored inline. The owner
+// writes a complete block/page path before release-publishing count. Producers acquire
 // count before reading those immutable pointers.
 type operationDynamicPageDirectory struct {
 	blocks [operationPageDirectoryBlockCount]*OperationPageDirectoryBlock
