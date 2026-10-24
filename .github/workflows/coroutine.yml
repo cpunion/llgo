@@ -570,7 +570,8 @@ jobs:
               test/go/defer_panic_callers_test.go \
               test/go/runtime_caller_exhaustion_test.go \
               test/go/recover_defer_go126_test.go \
-              test/go/bound_method_direct_test.go
+              test/go/bound_method_direct_test.go \
+              test/go/field_guard_memory_test.go
           for procs in 1 4; do
             GOMAXPROCS="$procs" timeout 90s /tmp/llgo-local-channel-gate \
               -test.v -test.count=3 -test.timeout=60s
