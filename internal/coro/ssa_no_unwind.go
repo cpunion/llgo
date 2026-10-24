@@ -659,7 +659,28 @@ func (a *ssaExactNoUnwindAnalysis) valueProvenNonNil(value ssa.Value, use ssa.In
 		if !successor.Dominates(useBlock) {
 			continue
 		}
-		if !sameNoUnwindFieldLoad(subject, value) || a.guardValueStable(successor, useBlock, use) {
+		if !sameNoUnwindFieldLoad(subject, value) {
+			return true
+		}
+		// A saved comparison may test an earlier field load after memory has
+		// changed. Require a local load and validate its suffix as well as the
+		// paths following the branch. Non-local loads remain conservative.
+		load, ok := noUnwindStripConversions(subject).(*ssa.UnOp)
+		if !ok || a.blocks[load] != block {
+			continue
+		}
+		stable := false
+		for _, instruction := range block.Instrs {
+			if instruction == load {
+				stable = true
+				continue
+			}
+			if stable && noUnwindMayClobberMemory(instruction) {
+				stable = false
+				break
+			}
+		}
+		if stable && a.guardValueStable(block, successor, useBlock, use) {
 			return true
 		}
 	}
@@ -731,7 +752,7 @@ func noUnwindFieldLoad(value ssa.Value) (*ssa.FieldAddr, bool) {
 // clobbered before the equivalent load used at the call. It rejects every
 // store and every potentially effectful call on a path from the guarded edge
 // to the use; this is intentionally more conservative than alias analysis.
-func (a *ssaExactNoUnwindAnalysis) guardValueStable(start, useBlock *ssa.BasicBlock, use ssa.Instruction) bool {
+func (a *ssaExactNoUnwindAnalysis) guardValueStable(guard, start, useBlock *ssa.BasicBlock, use ssa.Instruction) bool {
 	canReachUse := make(map[*ssa.BasicBlock]bool)
 	queue := []*ssa.BasicBlock{useBlock}
 	canReachUse[useBlock] = true
@@ -739,7 +760,7 @@ func (a *ssaExactNoUnwindAnalysis) guardValueStable(start, useBlock *ssa.BasicBl
 		block := queue[0]
 		queue = queue[1:]
 		for _, predecessor := range block.Preds {
-			if !canReachUse[predecessor] {
+			if predecessor != guard && !canReachUse[predecessor] {
 				canReachUse[predecessor] = true
 				queue = append(queue, predecessor)
 			}
@@ -748,24 +769,34 @@ func (a *ssaExactNoUnwindAnalysis) guardValueStable(start, useBlock *ssa.BasicBl
 	if !canReachUse[start] {
 		return false
 	}
+	// A later iteration can reload the field after this use. Inspect the tail
+	// of the use block whenever it can reach the use again without a fresh
+	// guard. Crossing the guard starts a new proof and ends this interval.
+	reentersUse := false
+	for _, successor := range useBlock.Succs {
+		if successor != guard && canReachUse[successor] {
+			reentersUse = true
+			break
+		}
+	}
 	seen := make(map[*ssa.BasicBlock]bool)
 	queue = []*ssa.BasicBlock{start}
 	for len(queue) != 0 {
 		block := queue[0]
 		queue = queue[1:]
-		if seen[block] || !canReachUse[block] {
+		if block == guard || seen[block] || !canReachUse[block] {
 			continue
 		}
 		seen[block] = true
 		for _, instruction := range block.Instrs {
-			if instruction == use {
+			if instruction == use && !reentersUse {
 				break
 			}
 			if noUnwindMayClobberMemory(instruction) {
 				return false
 			}
 		}
-		if block == useBlock {
+		if block == useBlock && !reentersUse {
 			continue
 		}
 		for _, successor := range block.Succs {
