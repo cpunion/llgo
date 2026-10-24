@@ -64,6 +64,7 @@ main.main$coro:
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
     __llgo_coro_frame_descriptor_v1.563b05cc2b729101b3411d2563b17edd
+    __llgo_coro_frame_free_borrowed_v1
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1

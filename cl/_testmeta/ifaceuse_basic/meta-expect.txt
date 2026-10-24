@@ -20,6 +20,7 @@ main.main$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
     __llgo_coro_frame_descriptor_v1.f0a9a96f5a044c51b2a45478a1b7e8bc
+    __llgo_coro_frame_free_borrowed_v1
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_run_decision_take_zero_v1

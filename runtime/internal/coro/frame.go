@@ -238,6 +238,7 @@ type frameProperties uint8
 const (
 	frameBorrowedStorage frameProperties = 1 << iota
 	frameDeferredPanicScope
+	frameBorrowedReleasePrepared
 )
 
 func (frame *Frame) borrowedStorage() bool {
@@ -1072,6 +1073,97 @@ func ReleaseFrameCompiler(
 	}
 	legacyRaw, legacyTotal, legacyOK := ReleaseFrame(g, storage, size, align, descriptor)
 	return legacyRaw, legacyRaw, legacyTotal, legacyOK
+}
+
+// PrepareBorrowedFrameReleaseCompiler validates and unlinks the exact child
+// whose LLVM destruction callback supplies its complete borrowed storage span.
+// The adapter must relocate retained trace metadata before clearing that span.
+func PrepareBorrowedFrameReleaseCompiler(
+	g *G, handle unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer,
+) (metadata unsafe.Pointer, retained, ok bool) {
+	if !ValidG(g) || handle == nil || !gPreemptEnabledAtDepthZero(g) ||
+		align == 0 || align&(align-1) != 0 || uintptr(handle)%align != 0 {
+		return nil, false, false
+	}
+	frame := g.destroyTarget
+	if frame == nil || !frame.borrowedStorage() || frame.handle != handle ||
+		frame.owner != g || frame.allocationSize != 0 || frame.header == nil ||
+		frame.header.Descriptor != descriptor || descriptor == nil ||
+		!allocationContains(handle, size, unsafe.Pointer(frame), unsafe.Sizeof(Frame{})) ||
+		!allocationContains(handle, size, unsafe.Pointer(frame.header), unsafe.Sizeof(HeaderV1{})) {
+		return nil, false, false
+	}
+	inline := g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
+		g.pending.from == frame.parent
+	previousTail := g.panicTraceTail
+	if !CommitFrameDestroyV2(g, handle) {
+		return nil, false, false
+	}
+	if inline {
+		g.pending.target = nil
+	}
+	retained = frame.state == FrameTraceRetained
+	if retained {
+		// The LLVM handle is dead. Reuse its word for the exact previous tail
+		// until the adjacent adapter relocates this node. The private property
+		// makes this receipt distinct from legacy borrowed trace retention.
+		frame.handle = unsafe.Pointer(previousTail)
+		frame.properties |= frameBorrowedReleasePrepared
+	}
+	return unsafe.Pointer(frame), retained, true
+}
+
+// BorrowedPanicTraceAllocationSize is the owned metadata extent required only
+// when a destroyed borrowed child contributes to an exceptional trace.
+func BorrowedPanicTraceAllocationSize() uintptr {
+	return unsafe.Sizeof(Frame{})
+}
+
+// RelocateBorrowedPanicTraceFrameCompiler moves the newly appended trace tail
+// out of dead LLVM storage. No retained node may outlive its borrowed lifetime:
+// LLVM can reuse that storage immediately after the destroy call returns.
+func RelocateBorrowedPanicTraceFrameCompiler(
+	g *G, metadata, raw unsafe.Pointer, total uintptr,
+) bool {
+	if !ValidG(g) || !activePanicTrace(g) || metadata == nil || raw == nil ||
+		total != unsafe.Sizeof(Frame{}) || uintptr(raw)%unsafe.Alignof(Frame{}) != 0 ||
+		allocationContains(raw, total, metadata, 1) ||
+		allocationContains(metadata, unsafe.Sizeof(Frame{}), raw, 1) {
+		return false
+	}
+	frame := (*Frame)(metadata)
+	if g.destroyTarget != nil || g.panicTraceTail != frame || !frame.borrowedStorage() ||
+		frame.owner != g || frame.state != FrameTraceRetained || frame.allocationSize != 0 ||
+		frame.header == nil || frame.next != nil || frame.properties&frameBorrowedReleasePrepared == 0 {
+		return false
+	}
+	// PrepareBorrowedFrameReleaseCompiler captured the previous tail in the
+	// dead handle word. The compiler-owned no-suspend interval permits a
+	// constant-time exact-tail proof; walking every retained ancestor here
+	// would make a deep exceptional unwind quadratic.
+	previous := (*Frame)(frame.handle)
+	if previous == nil {
+		if g.panicTraceCount != 1 || g.panicTraceHead != frame {
+			return false
+		}
+	} else if g.panicTraceCount < 2 || g.panicTraceHead == frame ||
+		previous.owner != g || previous.state != FrameTraceRetained ||
+		previous.next != frame || previous.parent != frame {
+		return false
+	}
+	relocated := (*Frame)(raw)
+	*relocated = *frame
+	relocated.properties &^= frameBorrowedStorage | frameBorrowedReleasePrepared
+	relocated.handle = raw
+	relocated.allocationSize = total
+	if previous == nil {
+		g.panicTraceHead = relocated
+	} else {
+		previous.next = relocated
+		previous.parent = relocated
+	}
+	g.panicTraceTail = relocated
+	return true
 }
 
 // CommitFrameDestroyV2 completes the physical destroy of an allocation-elided

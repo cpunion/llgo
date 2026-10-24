@@ -74,6 +74,7 @@ func __llgo_coro_critical_exit_v1(unsafe.Pointer) bool { return false }
 func __llgo_coro_os_thread_lock_v1(unsafe.Pointer) {}
 func __llgo_coro_os_thread_unlock_v1(unsafe.Pointer) {}
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_frame_free_borrowed_v1(g, handle unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {}
 func __llgo_coro_chan_send_buffer_try_v1(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 { return 0 }
 func __llgo_coro_chan_recv_buffer_try_v1(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 { return 0 }
 func __llgo_coro_chan_send_try_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uint32, uint32) uint32 { return 0 }
@@ -169,6 +170,7 @@ func __llgo_coro_program_main_return_v1() {}
 		coroRunDecisionTakeZeroSymbolV1,
 		"__llgo_coro_complete_prepare_v1",
 		"__llgo_coro_frame_free_v1",
+		"__llgo_coro_frame_free_borrowed_v1",
 		"__llgo_coro_await_prepare_inline_v4",
 		"__llgo_coro_await_inline_destroy_consume_v4",
 		"__llgo_coro_await_consume_v1",

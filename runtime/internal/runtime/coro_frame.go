@@ -133,6 +133,28 @@ func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status ui
 	}
 }
 
+// __llgo_coro_frame_free_borrowed_v1 ends the lifetime of one LLVM-owned
+// child span. Unlike the dynamic callback it never accepts an allocation to
+// return to the allocator. Exceptional trace metadata gets an independent
+// allocation before the complete dead LLVM span is cleared.
+//
+//export __llgo_coro_frame_free_borrowed_v1
+func __llgo_coro_frame_free_borrowed_v1(g, handle unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {
+	task := (*coro.G)(g)
+	metadata, retained, ok := coro.PrepareBorrowedFrameReleaseCompiler(task, handle, size, align, descriptor)
+	if !ok {
+		coroRuntimeAbort("invalid borrowed coroutine frame destruction")
+	}
+	if retained {
+		total := coro.BorrowedPanicTraceAllocationSize()
+		raw := coroalloc.AllocFrame(total)
+		if raw == nil || !coro.RelocateBorrowedPanicTraceFrameCompiler(task, metadata, raw, total) {
+			coroRuntimeAbort("invalid borrowed coroutine panic trace relocation")
+		}
+	}
+	coro.Zero(handle, size)
+}
+
 //export __llgo_coro_frame_free_v1
 func __llgo_coro_frame_free_v1(g, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {
 	task := (*coro.G)(g)

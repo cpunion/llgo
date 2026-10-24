@@ -26,6 +26,7 @@ main.init$coro:
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
     __llgo_coro_frame_descriptor_v1.6ddd5df2873a1d491c13531ce48943bf
+    __llgo_coro_frame_free_borrowed_v1
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -53,6 +54,7 @@ main.main$coro:
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
     __llgo_coro_frame_descriptor_v1.4eab6dd8f06278cdb8d6ceda45a3944d
+    __llgo_coro_frame_free_borrowed_v1
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
