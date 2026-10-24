@@ -449,6 +449,10 @@ jobs:
         # lane below because each retains a full runtime/stdlib LLVM universe.
         run: go test ./internal/build -run 'Coro|Coroutine|SourcePatchRequirement' -skip 'E2E|^TestCoroNativeTimeSleepProductionPlanAndCodegen$|^TestCoroStdlibSyncAcceptance$|^Test(BuildCoroPlanErrors|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants|RealNativeCoroTargetIsTrustedPlainSchedulerIsland)$' -timeout=10m -count=1
 
+      - name: Test staged method type retention and cache metadata
+        if: matrix.lane == 'integration'
+        run: go test -race -shuffle=on ./internal/dcepass ./internal/build -run '^Test(MethodFragment|EmitStrongType|MethodArray|StagedMethodTypes|SemanticDeadcode|PackageMetaEnabled|LinkedCExports|DeadcodeEntry)' -timeout=10m -count=1
+
       - name: Test coroutine production build plan
         if: matrix.lane == 'integration-build'
         # These tests intentionally run build.Do and therefore materialize a

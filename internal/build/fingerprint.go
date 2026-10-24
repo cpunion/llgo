@@ -41,6 +41,7 @@ type manifestMetadata struct {
 	NeedRt           bool     `yaml:"need_rt,omitempty"`
 	NeedPyInit       bool     `yaml:"need_py_init,omitempty"`
 	CoroRootAnchorV1 string   `yaml:"coro_root_anchor_v1,omitempty"`
+	MethodTypesHash  string   `yaml:"method_types_hash,omitempty"`
 }
 
 // manifestData is the structured representation of manifest content.
@@ -117,6 +118,7 @@ func (s *envSection) empty() bool {
 }
 
 type commonSection struct {
+	MethodTypeFragments     int          `yaml:"method_type_fragments,omitempty"`
 	RuntimeLibraryCodegen   string       `yaml:"RUNTIME_LIBRARY_OPTIMIZATION,omitempty"`
 	AbiMode                 string       `yaml:"ABI_MODE,omitempty"`
 	BuildTags               []string     `yaml:"BUILD_TAGS,omitempty"`

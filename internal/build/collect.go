@@ -155,6 +155,9 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 	m.common.CRTVersion = c.crossCompile.Toolchain.CRTVersion
 	m.common.ToolsetVersion = c.crossCompile.Toolchain.ToolsetVersion
 	m.common.GoGlobalDCE = c.buildConf.goGlobalDCEEnabled()
+	if c.buildConf.stagedMethodDCEEnabled() {
+		m.common.MethodTypeFragments = methodTypeFragmentVersion
+	}
 	if c.coroPlanDigest != "" {
 		metadata := c.coroPlanMetadata
 		m.common.CoroPlanDigest = c.coroPlanDigest
@@ -578,6 +581,16 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 	}
 
 	// Use the .a archive directly for linking (no extraction needed)
+	if c.buildConf.stagedMethodDCEEnabled() {
+		fragment, err := readCachedMethodTypes(paths.MethodTypes, meta.MethodTypesHash)
+		if err != nil {
+			if pkgMeta != nil {
+				_ = pkgMeta.Close()
+			}
+			return false
+		}
+		pkg.MethodTypeFragment = fragment
+	}
 	pkg.ArchiveFile = paths.Archive
 	pkg.LinkArgs = meta.LinkArgs
 	pkg.NeedRt = meta.NeedRt
@@ -600,6 +613,7 @@ func parseManifestMetadata(content string) (*cacheArchiveMetadata, error) {
 			meta.NeedRt = data.Metadata.NeedRt
 			meta.NeedPyInit = data.Metadata.NeedPyInit
 			meta.CoroRootAnchorV1 = data.Metadata.CoroRootAnchorV1
+			meta.MethodTypesHash = data.Metadata.MethodTypesHash
 		}
 		return meta, nil
 	}
@@ -656,6 +670,7 @@ type cacheArchiveMetadata struct {
 	NeedRt           bool
 	NeedPyInit       bool
 	CoroRootAnchorV1 string
+	MethodTypesHash  string
 }
 
 // saveToCache saves a built package to cache.
@@ -722,7 +737,16 @@ func (c *context) saveToCache(pkg *aPackage) error {
 		NeedPyInit:       pkg.NeedPyInit,
 		CoroRootAnchorV1: pkg.CoroRootAnchorV1,
 	}
-	if len(meta.LinkArgs) == 0 && !meta.NeedRt && !meta.NeedPyInit && meta.CoroRootAnchorV1 == "" {
+	if c.buildConf.stagedMethodDCEEnabled() {
+		if _, err := decodeMethodTypeFragment(pkg.MethodTypeFragment); err != nil {
+			return err
+		}
+		if err := writeManifest(paths.MethodTypes, string(pkg.MethodTypeFragment)); err != nil {
+			return err
+		}
+		meta.MethodTypesHash = digestBytes(pkg.MethodTypeFragment)
+	}
+	if len(meta.LinkArgs) == 0 && !meta.NeedRt && !meta.NeedPyInit && meta.CoroRootAnchorV1 == "" && meta.MethodTypesHash == "" {
 		data.Metadata = nil
 	} else {
 		data.Metadata = meta
