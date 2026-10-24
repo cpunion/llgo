@@ -24,10 +24,11 @@ import "github.com/xgo-dev/llgo/runtime/internal/coro"
 const (
 	// Sleep has no fallible API with which to report a profile-local quota.
 	// Use the complete representable catalog, still growing one page on demand.
-	coroRuntimeTimerCapacityV1  = coro.TimerRegistrationMaximumCapacity
-	coroRuntimePollCapacityV1   = 16 * coro.PollOperationPageCapacity
-	coroRuntimeManualCapacityV1 = 32 * coro.ManualOperationPageCapacity
-	coroRuntimeWorkerCapacityV1 = 16 * coro.WorkerOperationPageCapacity
+	coroRuntimeTimerCapacityV1 = coro.TimerRegistrationMaximumCapacity
+	// Hosted quotas stay independent of the inline page granularity.
+	coroRuntimePollCapacityV1   = 1024
+	coroRuntimeManualCapacityV1 = 2048
+	coroRuntimeWorkerCapacityV1 = 1024
 )
 
 func coroCurrentExecutorSourcesV1(

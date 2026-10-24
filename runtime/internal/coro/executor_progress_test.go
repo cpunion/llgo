@@ -126,9 +126,9 @@ func TestExecutorPollProgressSkipsConfiguredUnallocatedTails(t *testing.T) {
 	timers := new(TimerRegistrationTable)
 	poll := new(PollOperationSource)
 	worker := new(WorkerOperationSource)
-	var timerPages [15]TimerRegistrationPage
-	var pollPages [15]PollOperationPage
-	var workerPages [15]WorkerOperationPage
+	var timerPages [1024/TimerRegistrationPageCapacity - 1]TimerRegistrationPage
+	var pollPages [1024/PollOperationPageCapacity - 1]PollOperationPage
+	var workerPages [1024/WorkerOperationPageCapacity - 1]WorkerOperationPage
 	if !ConfigureTimerRegistrationPages(timers, timerPages[:]) ||
 		!ConfigurePollOperationPages(poll, pollPages[:]) ||
 		!ConfigureWorkerOperationPages(worker, workerPages[:]) {

@@ -30,10 +30,10 @@ const (
 	// monotonic tombstones and are never reused.
 	coroNativeFleetDomainCapacityV1 = coro.ExecutorFleetCapacity
 
-	// These are the hosted profile's logical capacity limits in 64-slot pages,
-	// not eager reservations. Every P starts with the target-neutral inline page
-	// and grows one stable page at a time before an irreversible park transaction.
-	coroNativeSourcePageCountV1 = 16
+	// Hosted poll bounds are logical limits, not eager reservations. Every P
+	// starts with an inline page and grows stable pages before an irreversible
+	// park transaction, independently of the page granularity.
+	coroNativePollLogicalCapacityV1 = 1024
 )
 
 type coroNativeFleetLifecycleV1 uint8

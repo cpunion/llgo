@@ -163,12 +163,12 @@ func newChannelClaimCoreFixtureWithSourceHooks(
 func TestChannelOperationPagedCatalogSelectCompletesOneThousand(t *testing.T) {
 	const count = 1000
 	source := new(ChannelOperationSource)
-	var pages [15]ChannelOperationPage
+	var pages [1024/ChannelOperationPageCapacity - 1]ChannelOperationPage
 	if ChannelOperationConfiguredCapacity(source) != ChannelOperationPageCapacity ||
 		!ConfigureChannelOperationPages(source, pages[:1]) ||
 		ChannelOperationConfiguredCapacity(source) != 2*ChannelOperationPageCapacity ||
 		!ConfigureChannelOperationPages(source, pages[:]) ||
-		ChannelOperationConfiguredCapacity(source) != 16*ChannelOperationPageCapacity ||
+		ChannelOperationConfiguredCapacity(source) != 1024 ||
 		!ConfigureChannelOperationPages(source, pages[:]) {
 		t.Fatal("configure paged channel catalog")
 	}
@@ -184,7 +184,7 @@ func TestChannelOperationPagedCatalogSelectCompletesOneThousand(t *testing.T) {
 		t.Fatalf("paged channel IDs did not remain linear: page2=%+v last=%+v",
 			fixture.ids[ChannelOperationPageCapacity], fixture.ids[count-1])
 	}
-	var replacement [15]ChannelOperationPage
+	var replacement [1024/ChannelOperationPageCapacity - 1]ChannelOperationPage
 	if ConfigureChannelOperationPages(source, pages[:]) ||
 		ConfigureChannelOperationPages(source, replacement[:]) ||
 		ConfigureChannelOperationPages(source, pages[:14]) {
@@ -213,7 +213,7 @@ func TestChannelOperationPagedCatalogSelectCompletesOneThousand(t *testing.T) {
 
 func TestChannelOperationConfiguredCapacityPreflightsSelectBeyondFourCases(t *testing.T) {
 	source := new(ChannelOperationSource)
-	var pages [15]ChannelOperationPage
+	var pages [1024/ChannelOperationPageCapacity - 1]ChannelOperationPage
 	if !ConfigureChannelOperationPages(source, pages[:]) {
 		t.Fatal("configure channel select capacity")
 	}
@@ -228,7 +228,7 @@ func TestChannelOperationConfiguredCapacityPreflightsSelectBeyondFourCases(t *te
 	}
 	dynamic := new(ChannelOperationPage)
 	if !attachChannelOperationPageForTest(source, p, dynamic) ||
-		ChannelOperationConfiguredCapacity(source) != 17*ChannelOperationPageCapacity ||
+		ChannelOperationConfiguredCapacity(source) != 1024+ChannelOperationPageCapacity ||
 		!CanReserveChannelOperations(p, source, 1025) ||
 		AttachChannelOperationPage(source, p, dynamic, nil) ||
 		AttachChannelOperationPage(source, p, &pages[0], nil) {
@@ -246,7 +246,7 @@ func TestChannelOperationConfiguredCapacityPreflightsSelectBeyondFourCases(t *te
 func TestChannelOperationDynamicCatalogCompletesBeyondStaticProfile(t *testing.T) {
 	const count = 1025
 	source := new(ChannelOperationSource)
-	var pages [15]ChannelOperationPage
+	var pages [1024/ChannelOperationPageCapacity - 1]ChannelOperationPage
 	if !ConfigureChannelOperationPages(source, pages[:]) {
 		t.Fatal("configure static channel profile")
 	}
@@ -286,7 +286,7 @@ func TestChannelOperationDynamicCatalogCompletesBeyondStaticProfile(t *testing.T
 
 func TestChannelReadyIndexSkipsLargeEmptyActivePrefix(t *testing.T) {
 	source := new(ChannelOperationSource)
-	var pages [15]ChannelOperationPage
+	var pages [1024/ChannelOperationPageCapacity - 1]ChannelOperationPage
 	if !ConfigureChannelOperationPages(source, pages[:]) {
 		t.Fatal("configure indexed channel profile")
 	}
@@ -319,7 +319,7 @@ func TestChannelReadyIndexSkipsLargeEmptyActivePrefix(t *testing.T) {
 }
 
 func TestChannelOperationDynamicPagePublicationIsProducerSafe(t *testing.T) {
-	if ChannelOperationMaximumCapacity != 511*ChannelOperationPageCapacity {
+	if ChannelOperationMaximumCapacity != operationCatalogMaximumSlots {
 		t.Fatalf("channel maximum capacity = %d", ChannelOperationMaximumCapacity)
 	}
 	source := new(ChannelOperationSource)

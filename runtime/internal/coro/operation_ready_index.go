@@ -18,12 +18,12 @@ package coro
 
 // operationReadyPage and operationReadyPageIndex are the allocation-free,
 // target-neutral readiness index shared by paged operation catalogs. A leaf
-// covers one 64-slot page; the summary covers every complete page representable
-// by OperationID's 15-bit local field. Both use only the runtime core's required
+// covers one configured source page; the summary covers every complete page
+// representable by OperationID's 15-bit local field. Both use only the runtime core's required
 // 32-bit atomic load/store/CAS contract.
 const (
 	operationReadyWordBits     = uint32(32)
-	operationReadyWordsPerPage = operationCatalogPageCapacity / operationReadyWordBits
+	operationReadyWordsPerPage = (operationCatalogPageCapacity + operationReadyWordBits - 1) / operationReadyWordBits
 	operationReadyIndexWords   = (operationCatalogMaximumPageCount + operationReadyWordBits - 1) /
 		operationReadyWordBits
 )

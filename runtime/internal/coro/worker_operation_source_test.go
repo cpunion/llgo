@@ -516,12 +516,12 @@ func TestWorkerOperationSourceProducerPrefixIsAlignedPOD(t *testing.T) {
 
 func TestWorkerOperationSourcePagedCatalogAdmitsAndDrainsOneThousand(t *testing.T) {
 	source := new(WorkerOperationSource)
-	var pages [15]WorkerOperationPage
+	var pages [1024/WorkerOperationPageCapacity - 1]WorkerOperationPage
 	if WorkerOperationConfiguredCapacity(source) != WorkerOperationPageCapacity ||
 		!ConfigureWorkerOperationPages(source, pages[:1]) ||
 		WorkerOperationConfiguredCapacity(source) != 2*WorkerOperationPageCapacity ||
 		!ConfigureWorkerOperationPages(source, pages[:]) ||
-		WorkerOperationConfiguredCapacity(source) != 16*WorkerOperationPageCapacity ||
+		WorkerOperationConfiguredCapacity(source) != 1024 ||
 		!ConfigureWorkerOperationPages(source, pages[:]) {
 		t.Fatal("configure paged worker catalog")
 	}

@@ -21,7 +21,7 @@ import "unsafe"
 // PollOperationPageCapacity is the allocation-free granularity of the
 // target-neutral readiness catalog. Every source includes one inline page; a
 // target may attach additional stable pages before binding the source.
-const PollOperationPageCapacity = 64
+const PollOperationPageCapacity = operationCatalogPageCapacity
 
 // PollOperationSourceCapacity is the default capacity of an unconfigured
 // source. Keep this compatibility name for small and embedded profiles; it is

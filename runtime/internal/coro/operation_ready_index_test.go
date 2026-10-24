@@ -20,13 +20,13 @@ import "testing"
 
 func TestOperationReadyPageAndSummaryBoundaries(t *testing.T) {
 	var page operationReadyPage
-	for _, local := range []uint32{0, 31, 32, 63} {
+	for _, local := range []uint32{0, operationCatalogPageCapacity/2 - 1, operationCatalogPageCapacity / 2, operationCatalogPageCapacity - 1} {
 		if !page.mark(local) {
 			t.Fatalf("mark ready leaf %d", local)
 		}
 	}
 	cursor := uint32(0)
-	for _, want := range []uint32{0, 31, 32, 63} {
+	for _, want := range []uint32{0, operationCatalogPageCapacity/2 - 1, operationCatalogPageCapacity / 2, operationCatalogPageCapacity - 1} {
 		got, marked, ok := page.next(cursor, operationCatalogPageCapacity)
 		if !ok || !marked || got != want || !page.clear(got) {
 			t.Fatalf("take ready leaf from %d = (%d,%t,%t), want %d", cursor, got, marked, ok, want)

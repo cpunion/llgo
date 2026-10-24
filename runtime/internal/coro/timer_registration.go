@@ -21,7 +21,7 @@ import "unsafe"
 // TimerRegistrationPageCapacity is the allocation-free granularity of the
 // target-neutral timer catalog. Every table includes one inline page; a target
 // may attach additional stable pages before binding the table.
-const TimerRegistrationPageCapacity = 64
+const TimerRegistrationPageCapacity = operationCatalogPageCapacity
 
 // TimerRegistrationCapacity is the default capacity of an unconfigured table.
 // Keep this compatibility name for small and embedded profiles; it is not the

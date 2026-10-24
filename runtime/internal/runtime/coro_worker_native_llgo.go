@@ -30,9 +30,8 @@ const (
 	// pending work while those threads block in file and syscall operations.
 	// Keep this program/fleet-neutral: the non-timer native profile deliberately
 	// does not link the fleet capacity policy.
-	coroNativeWorkerPageCountV1 = 16
 	coroNativeWorkerQueueSizeV1 = coroworker.QueueCapacity
-	coroNativeWorkerCapacityV1  = coroNativeWorkerPageCountV1 * coro.WorkerOperationPageCapacity
+	coroNativeWorkerCapacityV1  = coroworker.QueueCapacity
 )
 
 type coroNativeWorkerDeliveryV1 uint8

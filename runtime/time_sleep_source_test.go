@@ -386,7 +386,7 @@ func TestNativeTimerCapacityIsDemandPagedAndAdmitsStandardLibraryStress(t *testi
 	}
 	policy := string(policyData)
 	for _, contract := range []string{
-		"coroNativeSourcePageCountV1 = 16",
+		"coroNativePollLogicalCapacityV1 = 1024",
 		"not eager reservations",
 		"coroNativeFleetValidateOwnedDomainSourcesV1(domain)",
 		"coro.TimerRegistrationConfiguredCapacity(&domain.timers) == coro.TimerRegistrationPageCapacity",
@@ -419,15 +419,18 @@ func TestNativeTimerCapacityIsDemandPagedAndAdmitsStandardLibraryStress(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	capacity := string(capacityData)
+	capacity := strings.Join(strings.Fields(string(capacityData)), " ")
 	for _, contract := range []string{
 		"coroRuntimeTimerCapacityV1  = coro.TimerRegistrationMaximumCapacity",
+		"coroRuntimePollCapacityV1 = 1024",
+		"coroRuntimeManualCapacityV1 = 2048",
+		"coroRuntimeWorkerCapacityV1 = 1024",
 		"func ensureCoroTimerOperationCapacityV1(",
 		"page := new(coro.TimerRegistrationPage)",
 		"coro.AttachTimerRegistrationPage(timers, p, page, nil)",
 		"block := new(coro.OperationPageDirectoryBlock)",
 	} {
-		if !strings.Contains(capacity, contract) {
+		if !strings.Contains(capacity, strings.Join(strings.Fields(contract), " ")) {
 			t.Errorf("demand-paged timer capacity lacks %q", contract)
 		}
 	}
