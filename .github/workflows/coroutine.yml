@@ -69,6 +69,10 @@ jobs:
         if: matrix.lane == 'integration'
         run: go test -race -shuffle=on ./internal/coro
 
+      - name: Test command flag failures and help
+        if: matrix.lane == 'integration'
+        run: go test -race -shuffle=on ./cmd/internal/base ./cmd/internal/build -run '^Test(ParseFlags|CommandFlagParseExit|BuildFlagParseExit)' -count=1
+
       - name: Test exact LLVM executor leaf proofs
         if: matrix.lane == 'integration'
         run: go test ./internal/llvmproof -count=1
