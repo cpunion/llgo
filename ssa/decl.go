@@ -274,7 +274,8 @@ func (g Global) InitNil() {
 
 // InitSharedGo defines ordinary package-level Go storage, including variables
 // referenced through linkname from a separately compiled package.
-// Zero definitions coalesce; a nonzero static initializer overrides them.
+// All ordinary zero globals use common/weak linkage so later static or imported
+// definitions win, even without a linkname directive.
 // Keep runtime initialization in each package's init function. A cgo
 // import may replace zero storage, but never a nonzero static definition.
 func (g Global) InitSharedGo(v Expr, externalImport bool) error {

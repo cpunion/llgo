@@ -24,6 +24,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -381,17 +382,20 @@ func parenthesizedMethodName(name string) string {
 	return ""
 }
 
+func fileImportsUnsafe(file *ast.File) bool {
+	for _, imp := range file.Imports {
+		if imp.Path.Value == `"unsafe"` {
+			return true
+		}
+	}
+	return false
+}
+
 // collectPackageLinknames follows cmd/compile's package-scoped go:linkname
 // behavior and diagnoses method names that would otherwise be silently ignored.
 func collectPackageLinknames(prog llssa.Program, fset *token.FileSet, files []*ast.File, syms map[string]string, linkDocs map[*ast.CommentGroup]bool) error {
 	for _, file := range files {
-		importsUnsafe := false
-		for _, imp := range file.Imports {
-			if imp.Path.Value == `"unsafe"` {
-				importsUnsafe = true
-				break
-			}
-		}
+		importsUnsafe := fileImportsUnsafe(file)
 		for _, group := range file.Comments {
 			for _, item := range directive.ParseGroup(group) {
 				if item.Name != "llgo:link" && (item.Name != "go:linkname" || !importsUnsafe) {
@@ -1097,6 +1101,13 @@ func ParsePkgSyntaxWithOptions(prog llssa.Program, fset *token.FileSet, pkg *typ
 		return err
 	}
 	for _, file := range files {
+		// Replacing Go storage across packages requires an unsafe file or
+		// cgo-generated input. Use the physical filename so //line cannot
+		// impersonate generated code; cmd/go excludes user _cgo_ files.
+		filename := fset.PositionFor(file.Pos(), false).Filename
+		if !fileImportsUnsafe(file) && !strings.HasPrefix(filepath.Base(filename), "_cgo_") {
+			continue
+		}
 		for _, group := range file.Comments {
 			for _, comment := range group.List {
 				// Only canonical gc line directives affect Go storage here.

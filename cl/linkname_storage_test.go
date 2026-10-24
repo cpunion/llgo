@@ -99,22 +99,51 @@ var B int32 = 42
 }
 
 func TestLinknameExternalImportAcrossPackages(t *testing.T) {
+	for _, tc := range []struct {
+		name, filename, preamble string
+		imported                 bool
+	}{
+		{"unsafe", "imports.go", "import _ \"unsafe\"\n", true},
+		{"ordinary", "imports.go", "", false},
+		{"unrelated import", "imports.go", "import \"fmt\"\n", false},
+		{"cgo generated", "_cgo_import.go", "", true},
+		{"forged line", "imports.go", "//line _cgo_import.go:1\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testLinknameExternalImportAcrossPackages(t, tc.filename, tc.preamble, tc.imported)
+		})
+	}
+}
+
+func testLinknameExternalImportAcrossPackages(t *testing.T, filename, preamble string, imported bool) {
+	t.Helper()
 	fset := token.NewFileSet()
 	imp := importer.Default()
 	prog := ssatest.NewProgramEx(t, nil, imp)
-	imports, err := parser.ParseFile(fset, "imports.go", `package imports
-//go:cgo_import_dynamic shared_import remote "libexample.so"
+	source := "package imports\n" + preamble
+	if strings.HasPrefix(preamble, "//line ") {
+		source = preamble + "package imports\n"
+	}
+	imports, err := parser.ParseFile(fset, filename, source+`//go:cgo_import_dynamic shared_import remote "libexample.so"
+//go:cgo_import_static shared_static
 `, parser.ParseComments)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ParsePkgSyntax(prog, fset, types.NewPackage("imports", "imports"), []*ast.File{imports}); err != nil {
+	// An unsafe import in another file must not authorize these directives.
+	other, err := parser.ParseFile(fset, "other.go", "package imports\nimport _ \"unsafe\"\n", parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ParsePkgSyntax(prog, fset, types.NewPackage("imports", "imports"), []*ast.File{imports, other}); err != nil {
 		t.Fatal(err)
 	}
 	consumer, err := parser.ParseFile(fset, "consumer.go", `package consumer
 import _ "unsafe"
 //go:linkname Value shared_import
 var Value uintptr
+//go:linkname Static shared_static
+var Static uintptr
 var Unrelated uintptr
 `, parser.ParseComments)
 	if err != nil {
@@ -130,8 +159,10 @@ var Unrelated uintptr
 		t.Fatal(err)
 	}
 	mod := compiled.Module()
-	if !mod.NamedGlobal("shared_import").Initializer().IsNil() {
-		t.Fatal("import in another package did not replace eligible zero storage")
+	for _, name := range []string{"shared_import", "shared_static"} {
+		if got := mod.NamedGlobal(name).Initializer().IsNil(); got != imported {
+			t.Errorf("%s: external storage = %v, want %v", name, got, imported)
+		}
 	}
 	if mod.NamedGlobal("consumer.Unrelated").Initializer().IsNil() {
 		t.Fatal("unrelated Go variable lost storage")
@@ -153,7 +184,7 @@ func TestLinknameImportCanonicalSpelling(t *testing.T) {
 	} {
 		t.Run(tc.directive, func(t *testing.T) {
 			fset := token.NewFileSet()
-			file, err := parser.ParseFile(fset, "imports.go", "package imports\n"+tc.directive+"\n", parser.ParseComments)
+			file, err := parser.ParseFile(fset, "imports.go", "package imports\nimport _ \"unsafe\"\n"+tc.directive+"\n", parser.ParseComments)
 			if err != nil {
 				t.Fatal(err)
 			}
