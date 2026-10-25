@@ -365,14 +365,14 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 
 	cSource := readRuntimePollFile(t, runtimeCoroWorkerCSource)
 	for _, required := range []string{
-		"_Atomic size_t sequence;",
+		"_Atomic size_t sequence[LLGO_CORO_WORKER_QUEUE_CAPACITY_V1];",
 		"_Atomic uint32_t producer_state;",
 		"_Atomic size_t enqueue_position;",
 		"_Atomic bool handoff_poller;",
 		"atomic_is_lock_free(&queue->enqueue_position)",
-		"atomic_store_explicit(&slot->sequence, reservation + 1, memory_order_release);",
+		"atomic_store_explicit(&queue->sequence[slot], reservation + 1, memory_order_release);",
 		"LLGO_CORO_WORKER_HANDOFF_POLLS_V1",
-		"handoff_slot->sequence",
+		"&queue->sequence[handoff_slot]",
 		"llgo_coro_worker_cpu_relax_v1();",
 		"&queue->handoff_poller, false",
 		"llgo_coro_worker_job_canceled_v1",

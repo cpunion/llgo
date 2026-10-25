@@ -35,6 +35,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -121,11 +122,6 @@ typedef uintptr_t (*llgo_coro_worker_fn7_v1)(uintptr_t, uintptr_t, uintptr_t, ui
 typedef uintptr_t (*llgo_coro_worker_fn8_v1)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 typedef uintptr_t (*llgo_coro_worker_fn9_v1)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 
-struct llgo_coro_worker_queue_slot_v1 {
-    _Atomic size_t sequence;
-    struct llgo_coro_worker_job_v1 job;
-};
-
 /*
  * There is exactly one physical coroutine worker pool in one process. Exact P
  * owners reserve independent sequence cells and publish or cancel them before
@@ -143,7 +139,10 @@ struct llgo_coro_worker_queue_v1 {
     /* Exactly one between-job worker may advertise a kernel-free handoff. */
     _Atomic bool handoff_poller;
     llgo_coro_worker_wake_v1 wake;
-    struct llgo_coro_worker_queue_slot_v1 slots[LLGO_CORO_WORKER_QUEUE_CAPACITY_V1];
+    _Atomic size_t sequence[LLGO_CORO_WORKER_QUEUE_CAPACITY_V1];
+    /* Raw syscall words are retained by their parked compiler frame. Keep
+       this POD-only payload outside the collector's static root segment. */
+    struct llgo_coro_worker_job_v1 *jobs;
 };
 
 static struct llgo_coro_worker_queue_v1 llgo_coro_worker_queue_v1;
@@ -281,7 +280,7 @@ static bool llgo_coro_worker_queue_leave_producer_v1(
 static bool llgo_coro_worker_queue_reservation_slot_v1(
     struct llgo_coro_worker_queue_v1 *queue,
     size_t reservation,
-    struct llgo_coro_worker_queue_slot_v1 **slot) {
+    size_t *slot) {
     if (slot == NULL ||
         !atomic_load_explicit(&queue->initialized, memory_order_acquire) ||
         llgo_coro_worker_queue_stopping_v1(queue)) {
@@ -291,9 +290,8 @@ static bool llgo_coro_worker_queue_reservation_slot_v1(
     if (reservation >= enqueue || enqueue - reservation > LLGO_CORO_WORKER_QUEUE_CAPACITY_V1) {
         return false;
     }
-    struct llgo_coro_worker_queue_slot_v1 *candidate =
-        &queue->slots[reservation & (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1)];
-    if (atomic_load_explicit(&candidate->sequence, memory_order_acquire) != reservation) {
+    size_t candidate = reservation & (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1);
+    if (atomic_load_explicit(&queue->sequence[candidate], memory_order_acquire) != reservation) {
         return false;
     }
     *slot = candidate;
@@ -304,13 +302,13 @@ static bool llgo_coro_worker_queue_publish_reserved_v1(
     struct llgo_coro_worker_queue_v1 *queue,
     size_t reservation,
     const struct llgo_coro_worker_job_v1 *job) {
-    struct llgo_coro_worker_queue_slot_v1 *slot = NULL;
+    size_t slot = 0;
     if (!llgo_coro_worker_queue_reservation_slot_v1(
             queue, reservation, &slot)) {
         return false;
     }
-    slot->job = *job;
-    atomic_store_explicit(&slot->sequence, reservation + 1, memory_order_release);
+    queue->jobs[slot] = *job;
+    atomic_store_explicit(&queue->sequence[slot], reservation + 1, memory_order_release);
     /*
      * Only a successful exchange of the exact handoff token may suppress the
      * wake. A poller clears that token before sleeping and rechecks after a
@@ -335,7 +333,8 @@ bool __llgo_coro_worker_queue_can_release_v1(void) {
         atomic_load_explicit(&queue->producer_state, memory_order_relaxed) == 0 &&
         atomic_load_explicit(&queue->enqueue_position, memory_order_relaxed) == 0 &&
         atomic_load_explicit(&queue->dequeue_position, memory_order_relaxed) == 0 &&
-        !atomic_load_explicit(&queue->handoff_poller, memory_order_relaxed);
+        !atomic_load_explicit(&queue->handoff_poller, memory_order_relaxed) &&
+        queue->jobs == NULL;
 }
 
 bool __llgo_coro_worker_queue_init_v1(void) {
@@ -344,13 +343,22 @@ bool __llgo_coro_worker_queue_init_v1(void) {
         return false;
     }
 
+    /* Initialization is single-owner and precedes every producer/consumer.
+       mmap supplies zero-filled POD storage without touching all cold pages. */
+    size_t bytes = sizeof(*queue->jobs) * LLGO_CORO_WORKER_QUEUE_CAPACITY_V1;
+    void *jobs = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (jobs == MAP_FAILED) {
+        return false;
+    }
+    queue->jobs = jobs;
+
     atomic_init(&queue->producer_state, 0);
     atomic_init(&queue->enqueue_position, 0);
     atomic_init(&queue->dequeue_position, 0);
     atomic_init(&queue->handoff_poller, false);
     for (size_t index = 0; index < LLGO_CORO_WORKER_QUEUE_CAPACITY_V1; ++index) {
-        atomic_init(&queue->slots[index].sequence, index);
-        memset(&queue->slots[index].job, 0, sizeof(queue->slots[index].job));
+        atomic_init(&queue->sequence[index], index);
     }
 
     /* Refuse a target on which the supposedly nonblocking ingress atomics lock. */
@@ -359,8 +367,11 @@ bool __llgo_coro_worker_queue_init_v1(void) {
         !atomic_is_lock_free(&queue->enqueue_position) ||
         !atomic_is_lock_free(&queue->dequeue_position) ||
         !atomic_is_lock_free(&queue->handoff_poller) ||
-        !atomic_is_lock_free(&queue->slots[0].sequence) ||
+        !atomic_is_lock_free(&queue->sequence[0]) ||
         !llgo_coro_worker_wake_init_v1(&queue->wake)) {
+        if (munmap(queue->jobs, bytes) == 0) {
+            queue->jobs = NULL;
+        }
         return false;
     }
     atomic_store_explicit(&queue->initialized, true, memory_order_release);
@@ -380,9 +391,8 @@ size_t __llgo_coro_worker_queue_reserve_v2(void) {
             (void)llgo_coro_worker_queue_leave_producer_v1(queue);
             return 0;
         }
-        struct llgo_coro_worker_queue_slot_v1 *slot =
-            &queue->slots[position & (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1)];
-        size_t sequence = atomic_load_explicit(&slot->sequence, memory_order_acquire);
+        size_t slot = position & (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1);
+        size_t sequence = atomic_load_explicit(&queue->sequence[slot], memory_order_acquire);
         if (sequence == position) {
             size_t expected = position;
             if (atomic_compare_exchange_weak_explicit(
@@ -477,19 +487,18 @@ static uint32_t llgo_coro_worker_queue_try_take_v1(
     struct llgo_coro_worker_job_v1 *job) {
     for (;;) {
         size_t position = atomic_load_explicit(&queue->dequeue_position, memory_order_relaxed);
-        struct llgo_coro_worker_queue_slot_v1 *slot =
-            &queue->slots[position & (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1)];
-        size_t sequence = atomic_load_explicit(&slot->sequence, memory_order_acquire);
+        size_t slot = position & (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1);
+        size_t sequence = atomic_load_explicit(&queue->sequence[slot], memory_order_acquire);
         if (sequence == position + 1) {
             if (!atomic_compare_exchange_weak_explicit(
                     &queue->dequeue_position, &position, position + 1,
                     memory_order_relaxed, memory_order_relaxed)) {
                 continue;
             }
-            *job = slot->job;
-            memset(&slot->job, 0, sizeof(slot->job));
+            *job = queue->jobs[slot];
+            memset(&queue->jobs[slot], 0, sizeof(queue->jobs[slot]));
             atomic_store_explicit(
-                &slot->sequence,
+                &queue->sequence[slot],
                 position + LLGO_CORO_WORKER_QUEUE_CAPACITY_V1,
                 memory_order_release);
             if (llgo_coro_worker_job_valid_v1(job)) {
@@ -536,13 +545,12 @@ uint32_t __llgo_coro_worker_queue_wait_take_v1(
              */
             size_t handoff_position = atomic_load_explicit(
                 &queue->dequeue_position, memory_order_relaxed);
-            struct llgo_coro_worker_queue_slot_v1 *handoff_slot =
-                &queue->slots[handoff_position &
-                    (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1)];
+            size_t handoff_slot = handoff_position &
+                (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1);
             for (uint32_t attempt = 0;
                  attempt < LLGO_CORO_WORKER_HANDOFF_POLLS_V1 &&
                      atomic_load_explicit(
-                         &handoff_slot->sequence, memory_order_acquire) !=
+                         &queue->sequence[handoff_slot], memory_order_acquire) !=
                          handoff_position + 1 &&
                      atomic_load_explicit(
                          &queue->handoff_poller, memory_order_acquire);
@@ -597,9 +605,16 @@ bool __llgo_coro_worker_queue_destroy_after_join_v1(void) {
         return false;
     }
 
+    /* Ingress is sealed with zero outstanding reservations, all consumers
+       have joined, and every completed cell already cleared its payload.
+       Release the complete mapping before publishing the reusable header. */
+    size_t bytes = sizeof(*queue->jobs) * LLGO_CORO_WORKER_QUEUE_CAPACITY_V1;
+    if (queue->jobs == NULL || munmap(queue->jobs, bytes) != 0) {
+        return false;
+    }
+    queue->jobs = NULL;
     for (size_t index = 0; index < LLGO_CORO_WORKER_QUEUE_CAPACITY_V1; ++index) {
-        memset(&queue->slots[index].job, 0, sizeof(queue->slots[index].job));
-        atomic_store_explicit(&queue->slots[index].sequence, 0, memory_order_relaxed);
+        atomic_store_explicit(&queue->sequence[index], 0, memory_order_relaxed);
     }
     atomic_store_explicit(&queue->enqueue_position, 0, memory_order_relaxed);
     atomic_store_explicit(&queue->dequeue_position, 0, memory_order_relaxed);
