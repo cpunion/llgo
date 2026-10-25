@@ -680,9 +680,9 @@ struct llgo_coro_worker_fault_action_v1 {
 };
 
 static struct llgo_coro_worker_fault_action_v1 llgo_coro_worker_fault_actions_v1[] = {
-    {SIGSEGV, {0}},
-    {SIGBUS, {0}},
-    {SIGFPE, {0}},
+    {.signal = SIGSEGV},
+    {.signal = SIGBUS},
+    {.signal = SIGFPE},
 };
 static pthread_once_t llgo_coro_worker_fault_once_v1 = PTHREAD_ONCE_INIT;
 static int llgo_coro_worker_fault_ready_v1;
