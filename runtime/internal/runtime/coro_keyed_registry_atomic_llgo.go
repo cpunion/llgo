@@ -18,7 +18,10 @@
 
 package runtime
 
-import catomic "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
+import (
+	catomic "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
+	"unsafe"
+)
 
 func coroKeyedAtomicLoadUint32(address *uint32) uint32 {
 	return catomic.Load(address)
@@ -43,4 +46,13 @@ func coroKeyedAtomicLoadUintptr(address *uintptr) uintptr {
 
 func coroKeyedAtomicStoreUintptr(address *uintptr, value uintptr) {
 	catomic.Store(address, value)
+}
+
+func coroKeyedAtomicLoadPointer(address *unsafe.Pointer) unsafe.Pointer {
+	return catomic.Load(address)
+}
+
+func coroKeyedAtomicCompareAndSwapPointer(address *unsafe.Pointer, old, new unsafe.Pointer) bool {
+	_, swapped := catomic.CompareAndExchange(address, old, new)
+	return swapped
 }

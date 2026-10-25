@@ -11,12 +11,16 @@ func __llgo_coro_domain_post_v1(sourceSlot, generation uint32) bool {
 		return false
 	}
 	registry := &coroProgramKeyedRegistryV2State
+	slots := registry.loadSlots()
+	if slots == nil {
+		return false
+	}
 	limit := coroKeyedAtomicLoadUint32(&registry.scanLimit)
-	if limit > uint32(len(registry.slots)) {
+	if limit > uint32(coroKeyedRegistryCapacityV2) {
 		return false
 	}
 	for index := uint32(0); index < limit; index++ {
-		slot := &registry.slots[index]
+		slot := &slots[index]
 		control := coroKeyedAtomicLoadUint32(&slot.control)
 		if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryActiveV2 {
 			continue

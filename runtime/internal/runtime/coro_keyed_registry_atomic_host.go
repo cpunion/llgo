@@ -18,7 +18,10 @@
 
 package runtime
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"unsafe"
+)
 
 func coroKeyedAtomicLoadUint32(address *uint32) uint32 {
 	return atomic.LoadUint32(address)
@@ -42,4 +45,12 @@ func coroKeyedAtomicLoadUintptr(address *uintptr) uintptr {
 
 func coroKeyedAtomicStoreUintptr(address *uintptr, value uintptr) {
 	atomic.StoreUintptr(address, value)
+}
+
+func coroKeyedAtomicLoadPointer(address *unsafe.Pointer) unsafe.Pointer {
+	return atomic.LoadPointer(address)
+}
+
+func coroKeyedAtomicCompareAndSwapPointer(address *unsafe.Pointer, old, new unsafe.Pointer) bool {
+	return atomic.CompareAndSwapPointer(address, old, new)
 }
