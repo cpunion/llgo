@@ -149,9 +149,9 @@ func (p Program) SetNativeExport(name string, info NativeExportInfo) {
 // NativeExport reports an explicit native go:linkname definition's entry ABI.
 func (p Program) NativeExport(name string) (NativeExportInfo, bool) {
 	p.packageSyntax.mu.RLock()
-	cc, ok := p.packageSyntax.nativeExports[name]
+	info, ok := p.packageSyntax.nativeExports[name]
 	p.packageSyntax.mu.RUnlock()
-	return cc, ok
+	return info, ok
 }
 
 // setLinkname updates both indexes while the caller holds mu. Counts preserve a

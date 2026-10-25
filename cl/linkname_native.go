@@ -81,6 +81,7 @@ func collectNativeLinkDefinitions(prog llssa.Program, fset *token.FileSet, pkg *
 							return fmt.Errorf("%s: native extern variable %s cannot have a Go initializer", fset.Position(ident.Pos()), ident.Name)
 						}
 						if cc == llssa.Stdcall {
+							// Keep this name in sync with initLink for imported variables.
 							prog.SetTypeCallConv(name+stdcallVariableTypeSuffix, llssa.Stdcall)
 						}
 					}
@@ -101,6 +102,8 @@ func (p *context) nativeVariableType(v *ssa.Global) types.Type {
 	if strings.HasPrefix(target, "stdcall.") {
 		elem := typ.Underlying().(*types.Pointer).Elem()
 		if sig, ok := elem.Underlying().(*types.Signature); ok {
+			// Call conventions are keyed by the qualified type name, and
+			// NewVar caches by symbol; repeated queries need no shared type identity.
 			named := types.NewNamed(types.NewTypeName(v.Pos(), v.Pkg.Pkg, v.Name()+stdcallVariableTypeSuffix, nil), sig, nil)
 			return types.NewPointer(named)
 		}

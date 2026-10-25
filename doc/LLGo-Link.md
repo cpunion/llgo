@@ -89,7 +89,7 @@ Identical to `C.<name>`, except the entry or the call uses the `stdcall` convent
 func MessageBeep(typ uint32) int32
 ```
 
-`stdcall.` is available on Windows targets only. On any other target, a `stdcall.` linkname is rejected with a compile error, whether it is on a function or a variable and whether or not it has a body.
+`stdcall.` is supported on Windows targets only. On other targets, LLGo rejects it when its ABI is needed; an unused declaration may not trigger that diagnostic.
 
 On Windows 386 it selects stdcall; on Windows amd64 and arm64 it uses the platform C ABI. The native-entry restrictions above also apply.
 
@@ -106,7 +106,7 @@ func Sqrt(x *Object) *Object
 
 Here `math` is the Python module name, and `sqrt` is the function's name within it.
 
-`py.` is reference-only. A function annotated with `//go:linkname` and a `py.` target cannot have a body; it is rejected with a compile error, since Go declarations do not define Python module attributes. Placeholder `//llgo:link` bindings retain their specialized Python behavior.
+`py.` is reference-only. If a function annotated with `//go:linkname` and a `py.` target has a body, LLGo ignores that body and binds the Python module attribute. Placeholder `//llgo:link` bindings retain their specialized Python behavior.
 
 ### `llgo.<name>`: compiler instructions
 
@@ -119,7 +119,7 @@ func Str(string) *Char
 
 `c.Str` is **not** a call to a function. It defines a C-style string constant. For example, `c.Str("Hello")` yields a constant `*c.Char` pointing at a 6-byte, `\0`-terminated string.
 
-For `//go:linkname`, `llgo.<name>` is allowed on prototypes only. A function with such a target cannot have a body; it is rejected with a compile error, because an instruction has nothing to export or define. Placeholder `//llgo:link` instruction bindings retain their specialized behavior. `llgo.<name>` is not allowed on variables.
+For `//go:linkname`, a function targeting `llgo.<name>` expands to a compiler instruction; any Go body is ignored. Placeholder `//llgo:link` instruction bindings retain their specialized behavior. `llgo.<name>` is not allowed on variables.
 
 ## Linkname on variables
 
@@ -137,7 +137,7 @@ var Counter int32
 
 Rules:
 
-- `stdcall.native_counter` also denotes external storage (Windows targets only; on other targets it is a compile error).
+- `stdcall.native_counter` also denotes external storage (Windows targets only; other targets reject it when its ABI is needed).
 - For scalars and other non-function types, no calling convention is involved. The prefix is still required, because it is what says "this is extern storage" rather than "this is a Go definition".
 - For function-pointer variables, the prefix additionally selects the calling convention, and the variable uses the native function-pointer representation:
 
@@ -239,11 +239,11 @@ This binds the Go method `TranslationUnit.Cursor` to the C function `clang_getTr
 | Go symbol | `//go:linkname` | `<name>` or `<pkgPath>.<name>` | Defines a Go symbol (Go ABI) | References the Go symbol |
 | C / C++ function | `//go:linkname` | `C.<manglingName>` | Exports a C entry, with thread/GC boundary handling | References an external C function |
 | stdcall function | `//go:linkname` | `stdcall.<manglingName>` | Exports a stdcall entry, same boundary handling (Windows only) | References an external stdcall function (Windows only) |
-| Python function | `//go:linkname` | `py.<name>` | Rejected | References a Python module function; needs `const LLGoPackage = "py.<moduleName>"` |
-| Compiler instruction | `//go:linkname` | `llgo.<name>` | Rejected | Expanded by the compiler (e.g. `llgo.cstr`) |
+| Python function | `//go:linkname` | `py.<name>` | Body ignored; references the Python module function | References a Python module function; needs `const LLGoPackage = "py.<moduleName>"` |
+| Compiler instruction | `//go:linkname` | `llgo.<name>` | Body ignored; expanded by the compiler | Expanded by the compiler (e.g. `llgo.cstr`) |
 | Function or method placeholder | `//llgo:link` | `<name>`, `<pkgPath>.<name>` or `<callconv>.<name>` | References the target; placeholder body ignored | Rejected; a placeholder body is required |
 
-On non-Windows targets, every `stdcall.` linkname (function or variable, with or without a body) is rejected with a compile error.
+On non-Windows targets, a `stdcall.` binding is rejected when its ABI is needed; this is not an eager check of every unused declaration.
 
 ### Variables
 
