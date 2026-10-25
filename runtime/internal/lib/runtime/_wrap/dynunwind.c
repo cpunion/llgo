@@ -99,6 +99,14 @@ static uint64_t *dynunw_ctx;
 
 #define UNW_INIT_SIGNAL_FRAME 1
 
+/* Debug output is best effort. Consume the result for fortified libc without
+ * retrying a write while a fault is being reported. */
+static void dynunw_debug_write(const char *text, size_t length)
+{
+    ssize_t written = write(2, text, length);
+    (void)written;
+}
+
 /* ---- context translation ---------------------------------------------- */
 
 /* LLVM libunwind's unw_context_t is the unw_getcontext register dump:
@@ -306,13 +314,13 @@ void llgo_dynunwind_capture(void *uctx)
         len = snprintf(line, sizeof(line),
                        "[dynunwind] flavor=%s frames=%d cost=%lldns\n",
                        llgo_dynunwind_flavor, dynunw_count, dynunw_ns);
-        write(2, line, len);
+        dynunw_debug_write(line, len);
         for (i = 0; i < dynunw_count; i++) {
             len = snprintf(line, sizeof(line), "[dynunwind] #%02d %p %s+0x%lx\n",
                            i, (void *)dynunw_pcs[i],
                            dynunw_names[i][0] ? dynunw_names[i] : "??",
                            (unsigned long)dynunw_offs[i]);
-            write(2, line, len);
+            dynunw_debug_write(line, len);
         }
     }
 }
@@ -331,7 +339,7 @@ void llgo_dynunwind_init(void)
     if (!dynunw_resolve()) {
         dynunw_enabled = 0;
         if (dynunw_debug)
-            write(2, "[dynunwind] no libunwind flavor resolved\n", 41);
+            dynunw_debug_write("[dynunwind] no libunwind flavor resolved\n", 41);
         return;
     }
     if (dynunw_cursor == NULL) {
@@ -341,7 +349,7 @@ void llgo_dynunwind_init(void)
         if (scratch == MAP_FAILED) {
             dynunw_enabled = 0;
             if (dynunw_debug)
-                write(2, "[dynunwind] scratch allocation failed\n",
+                dynunw_debug_write("[dynunwind] scratch allocation failed\n",
                       sizeof("[dynunwind] scratch allocation failed\n") - 1);
             return;
         }
@@ -352,7 +360,7 @@ void llgo_dynunwind_init(void)
         char line[96];
         int len = snprintf(line, sizeof(line), "[dynunwind] resolved flavor=%s\n",
                            llgo_dynunwind_flavor);
-        write(2, line, len);
+        dynunw_debug_write(line, len);
     }
     /* Warm-up: nongnu libunwind builds lazy per-process state (address-space
      * setup, dl_iterate_phdr caches) on first use; do that in normal context
