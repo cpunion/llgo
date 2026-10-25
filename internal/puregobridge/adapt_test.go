@@ -92,3 +92,15 @@ func TestBackendIsExplicitAndWiresNativeSource(t *testing.T) {
 		t.Fatal("explicit adapter must not alias an upstream Go runtime entry")
 	}
 }
+
+func TestAdaptRejectsPartialAndChangedQualifiedSource(t *testing.T) {
+	for _, source := range []fstest.MapFS{
+		{},
+		{"cgo.go": {Data: []byte("package purego\n")}},
+	} {
+		changes, err := Adapt("github.com/ebitengine/purego", "v0.9.1", "linux", "amd64", true, source)
+		if err == nil || changes != nil || !strings.Contains(err.Error(), "cgo.go") {
+			t.Fatalf("unverified source produced changes: %+v, %v", changes, err)
+		}
+	}
+}
