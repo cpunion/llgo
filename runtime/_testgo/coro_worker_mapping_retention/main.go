@@ -1,3 +1,5 @@
+//go:build darwin || linux
+
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
