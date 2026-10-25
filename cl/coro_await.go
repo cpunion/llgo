@@ -1295,7 +1295,10 @@ func (p *context) awaitCoroChildCompletionWithRecovery(
 	if normalContinuation == nil {
 		panic("coroutine child await lost its resumed normal continuation")
 	}
-	body.activate(b)
+	// An inline completion did not leave this physical parent resume. Keep its
+	// countdown so repeated synchronous managed calls cannot postpone polling
+	// forever. The actual resumed/canceled gates below start a fresh episode.
+	body.activateHeader(b)
 	resumeBuilder := p.fn.NewBuilder()
 	resumeBuilder.DICopyCurrentDebugLocation(b)
 	resumeBuilder.SetBlock(resumedOutcome)
