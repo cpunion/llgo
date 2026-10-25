@@ -327,6 +327,30 @@ static bool llgo_coro_worker_queue_publish_reserved_v1(
     return true;
 }
 
+#if defined(LLGO_CORO_WORKER_MAPPING_TEST)
+/* Test-only scalar observation from the collector thread. It reads static
+ * sequence controls, never payload pointers, and is absent from production. */
+uint32_t __llgo_coro_worker_queue_published_for_test_v1(void) {
+    struct llgo_coro_worker_queue_v1 *queue = &llgo_coro_worker_queue_v1;
+    if (!atomic_load_explicit(&queue->initialized, memory_order_acquire)) {
+        return 0;
+    }
+    size_t begin = atomic_load_explicit(&queue->dequeue_position, memory_order_acquire);
+    size_t end = atomic_load_explicit(&queue->enqueue_position, memory_order_acquire);
+    if (end < begin || end - begin > LLGO_CORO_WORKER_QUEUE_CAPACITY_V1) {
+        return 0;
+    }
+    uint32_t published = 0;
+    for (size_t position = begin; position < end; ++position) {
+        size_t slot = position & (LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 - 1);
+        if (atomic_load_explicit(&queue->sequence[slot], memory_order_acquire) == position + 1) {
+            ++published;
+        }
+    }
+    return published;
+}
+#endif
+
 bool __llgo_coro_worker_queue_can_release_v1(void) {
     struct llgo_coro_worker_queue_v1 *queue = &llgo_coro_worker_queue_v1;
     return !atomic_load_explicit(&queue->initialized, memory_order_acquire) &&

@@ -50,7 +50,8 @@ func TestCoroWorkerMappingRetentionAcceptance(t *testing.T) {
 	build := exec.CommandContext(ctx, compiler, "build", "-p=1", "-Os", "-trimpath", "-ldflags=-s -w", "-o", image,
 		"./_testgo/coro_worker_mapping_retention")
 	build.Dir = filepath.Join(root, "runtime")
-	build.Env = append(os.Environ(), "LLGO_ROOT="+root, "LLGO_BUILD_CACHE=off")
+	build.Env = append(os.Environ(), "LLGO_ROOT="+root, "LLGO_BUILD_CACHE=off",
+		"CFLAGS="+strings.TrimSpace(os.Getenv("CFLAGS")+" -DLLGO_CORO_WORKER_MAPPING_TEST=1"))
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("worker mapping GC build: %v\n%s", err, output)
 	}
@@ -60,8 +61,10 @@ func TestCoroWorkerMappingRetentionAcceptance(t *testing.T) {
 			defer cancel()
 			run := exec.CommandContext(ctx, image)
 			run.Env = append(os.Environ(), "GOMAXPROCS="+procs, "GOGC=100", "GOMEMLIMIT=off")
-			if output, err := run.CombinedOutput(); err != nil || !strings.Contains(string(output), "worker mapping retention ok") {
+			if output, err := run.CombinedOutput(); err != nil || !strings.Contains(string(output), "worker mapping retention ok queued 4") {
 				t.Fatalf("worker mapping GC run: %v\n%s", err, output)
+			} else {
+				t.Logf("%s", output)
 			}
 		})
 	}

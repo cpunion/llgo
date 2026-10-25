@@ -30,13 +30,18 @@ static _Atomic uint32_t *gate;
 static _Atomic uint32_t held;
 static _Atomic uint32_t released;
 static _Atomic uint32_t collected;
+static uint32_t queued_before_collection;
+
+extern uint32_t __llgo_coro_worker_queue_published_for_test_v1(void);
 
 static void *collect(void *unused) {
     (void)unused;
     while (atomic_load_explicit(gate, memory_order_acquire) == 0 ||
-           atomic_load_explicit(&held, memory_order_acquire) < 4) {
+           atomic_load_explicit(&held, memory_order_acquire) < 4 ||
+           __llgo_coro_worker_queue_published_for_test_v1() < 4) {
         sched_yield();
     }
+    queued_before_collection = __llgo_coro_worker_queue_published_for_test_v1();
     GC_word before = GC_get_gc_no();
     for (unsigned cycle = 0; cycle < 4; ++cycle) {
         GC_gcollect();
@@ -75,5 +80,6 @@ uintptr_t llgo_worker_mapping_hold(void *pointer, uintptr_t size, uintptr_t inde
 
 uintptr_t llgo_worker_mapping_collector_join(void) {
     return GC_pthread_join(collector, NULL) == 0 &&
-        atomic_load_explicit(&collected, memory_order_acquire) == 1 ? 0 : 1;
+        atomic_load_explicit(&collected, memory_order_acquire) == 1 &&
+        queued_before_collection == 4 ? queued_before_collection : 1;
 }
