@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -86,14 +87,25 @@ static int dynunw_ctx_is_ucontext; /* nongnu: pass the ucontext_t through */
 
 const char *llgo_dynunwind_flavor = "none";
 
-/* Cursor/context buffers. Sized generously: nongnu aarch64's unw_cursor_t is
- * 4096 words (33KB); LLVM's is ~1.5KB. Static so the signal stack does not
- * pay for them (the fault path is not reentrant: the runtime converts the
- * fault to a panic and never returns to the handler). */
-static uint64_t dynunw_cursor[8192];
-static uint64_t dynunw_ctx[1024];
+/* Keep the existing generous flavor-independent bounds, outside the signal
+ * stack. Resolve and allocate once in normal context before installing the
+ * legacy handler. The coroutine handler never uses this scratch and must not
+ * make the collector fault in its cold pages while scanning static roots.
+ * The mapping has process lifetime, matching the old static buffers. */
+#define DYNUNW_CURSOR_WORDS 8192
+#define DYNUNW_CONTEXT_WORDS 1024
+static uint64_t *dynunw_cursor;
+static uint64_t *dynunw_ctx;
 
 #define UNW_INIT_SIGNAL_FRAME 1
+
+/* Debug output is best effort. Consume the result for fortified libc without
+ * retrying a write while a fault is being reported. */
+static void dynunw_debug_write(const char *text, size_t length)
+{
+    ssize_t written = write(2, text, length);
+    (void)written;
+}
 
 /* ---- context translation ---------------------------------------------- */
 
@@ -302,13 +314,13 @@ void llgo_dynunwind_capture(void *uctx)
         len = snprintf(line, sizeof(line),
                        "[dynunwind] flavor=%s frames=%d cost=%lldns\n",
                        llgo_dynunwind_flavor, dynunw_count, dynunw_ns);
-        write(2, line, len);
+        dynunw_debug_write(line, len);
         for (i = 0; i < dynunw_count; i++) {
             len = snprintf(line, sizeof(line), "[dynunwind] #%02d %p %s+0x%lx\n",
                            i, (void *)dynunw_pcs[i],
                            dynunw_names[i][0] ? dynunw_names[i] : "??",
                            (unsigned long)dynunw_offs[i]);
-            write(2, line, len);
+            dynunw_debug_write(line, len);
         }
     }
 }
@@ -327,14 +339,28 @@ void llgo_dynunwind_init(void)
     if (!dynunw_resolve()) {
         dynunw_enabled = 0;
         if (dynunw_debug)
-            write(2, "[dynunwind] no libunwind flavor resolved\n", 41);
+            dynunw_debug_write("[dynunwind] no libunwind flavor resolved\n", 41);
         return;
+    }
+    if (dynunw_cursor == NULL) {
+        size_t bytes = (DYNUNW_CURSOR_WORDS + DYNUNW_CONTEXT_WORDS) * sizeof(uint64_t);
+        void *scratch = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (scratch == MAP_FAILED) {
+            dynunw_enabled = 0;
+            if (dynunw_debug)
+                dynunw_debug_write("[dynunwind] scratch allocation failed\n",
+                      sizeof("[dynunwind] scratch allocation failed\n") - 1);
+            return;
+        }
+        dynunw_cursor = scratch;
+        dynunw_ctx = dynunw_cursor + DYNUNW_CURSOR_WORDS;
     }
     if (dynunw_debug) {
         char line[96];
         int len = snprintf(line, sizeof(line), "[dynunwind] resolved flavor=%s\n",
                            llgo_dynunwind_flavor);
-        write(2, line, len);
+        dynunw_debug_write(line, len);
     }
     /* Warm-up: nongnu libunwind builds lazy per-process state (address-space
      * setup, dl_iterate_phdr caches) on first use; do that in normal context

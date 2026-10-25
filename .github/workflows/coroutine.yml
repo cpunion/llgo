@@ -81,6 +81,14 @@ jobs:
         if: matrix.lane == 'integration'
         run: go test ./cl -run '^TestCoroInlineAwaitPreservesCallerPreemptCountdown$' -count=1
 
+      - name: Test lazy unwind scratch and actual fault contexts
+        if: matrix.lane == 'compat'
+        run: |
+          sudo apt-get install --no-install-recommends -y libunwind8
+          cd runtime
+          LLGO_DYNUNWIND_FAULT_ACCEPTANCE=1 go test . \
+            -run '^TestDynUnwind(ScratchInitializationContract|RealFaultContexts)$' -count=3 -v
+
       - name: Test target-neutral coroutine runtime core
         if: matrix.lane == 'compat'
         run: |
