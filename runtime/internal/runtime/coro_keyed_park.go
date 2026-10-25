@@ -37,12 +37,12 @@ const (
 // one-waiter semaphore path O(1), while a registry which has actually reached
 // N simultaneous slots retains the original bounded O(N) FIFO selection.
 func (registry *coroKeyedRegistryV2) raiseScanLimit(needed uint32) bool {
-	if registry == nil || needed == 0 || needed > uint32(len(registry.slots)) {
+	if registry == nil || needed == 0 || needed > uint32(coroKeyedRegistryCapacityV2) {
 		return false
 	}
 	for {
 		limit := coroKeyedAtomicLoadUint32(&registry.scanLimit)
-		if limit > uint32(len(registry.slots)) {
+		if limit > uint32(coroKeyedRegistryCapacityV2) {
 			return false
 		}
 		if limit >= needed {
@@ -64,8 +64,9 @@ func (registry *coroKeyedRegistryV2) register(
 		key == 0 || !operation.Valid() || operation.Source() != coro.OperationSourceManual {
 		return coroKeyedRegistryHandleV2{}, false
 	}
-	for index := range registry.slots {
-		slot := &registry.slots[index]
+	slots := registry.ensureSlots()
+	for index := range slots {
+		slot := &slots[index]
 		control := coroKeyedAtomicLoadUint32(&slot.control)
 		generation := coroKeyedRegistryControlGenerationV2(control)
 		if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryFreeV2 ||
@@ -181,15 +182,19 @@ func (registry *coroKeyedRegistryV2) claimOne(
 	if registry == nil || !validCoroKeyedParkKindV2(kind) || key == 0 {
 		return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
 	}
+	slots := registry.loadSlots()
+	if slots == nil {
+		return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
+	}
 	for {
 		limit := coroKeyedAtomicLoadUint32(&registry.scanLimit)
-		if limit > uint32(len(registry.slots)) {
+		if limit > uint32(coroKeyedRegistryCapacityV2) {
 			return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
 		}
 		selected := -1
 		var candidate coroKeyedRegistrySnapshotV2
 		for index := uint32(0); index < limit; index++ {
-			slot := &registry.slots[index]
+			slot := &slots[index]
 			control := coroKeyedAtomicLoadUint32(&slot.control)
 			if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryActiveV2 {
 				continue
@@ -209,7 +214,7 @@ func (registry *coroKeyedRegistryV2) claimOne(
 		generation := coroKeyedRegistryControlGenerationV2(candidate.control)
 		posting := coroKeyedRegistryControlV2(generation, coroKeyedRegistryPostingV2)
 		if coroKeyedAtomicCompareAndSwapUint32(
-			&registry.slots[selected].control, candidate.control, posting,
+			&slots[selected].control, candidate.control, posting,
 		) {
 			return coroKeyedRegistryHandleV2{
 				Slot: uint32(selected) + 1, Generation: generation,

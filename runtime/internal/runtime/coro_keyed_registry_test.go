@@ -19,6 +19,7 @@
 package runtime
 
 import (
+	goruntime "runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -257,7 +258,7 @@ func TestCoroKeyedRegistryConcurrentFIFOClaimsRemainLockFreeV2(t *testing.T) {
 func TestCoroKeyedRegistrySequenceWrapPreservesFIFOAndGenerationBoundV2(t *testing.T) {
 	registry := new(coroKeyedRegistryV2)
 	coroKeyedAtomicStoreUint32(
-		&registry.slots[0].control,
+		&registry.ensureSlots()[0].control,
 		coroKeyedRegistryControlV2(coroKeyedRegistryMaxGenerationV2, coroKeyedRegistryFreeV2),
 	)
 	coroKeyedAtomicStoreUint32(&registry.sequence, ^uint32(0)-1)
@@ -377,5 +378,81 @@ func TestCoroKeyedPreparedStateAndTicketOrderingV2(t *testing.T) {
 	}
 	if got := unsafe.Sizeof(state); got != wantSize {
 		t.Fatalf("CoroKeyedParkV2 size = %d, want %d", got, wantSize)
+	}
+}
+
+func TestCoroKeyedRegistryColdReadsDoNotAllocateV2(t *testing.T) {
+	registry := new(coroKeyedRegistryV2)
+	operation := keyedRegistryOperation(t, 1, 1)
+	handle := coroKeyedRegistryHandleV2{Slot: 1, Generation: 1}
+	allocations := testing.AllocsPerRun(100, func() {
+		if _, _, found := registry.claimOne(coroKeyedParkSemaphoreV2, 0x9171, 0, false); found {
+			panic("cold registry fabricated a waiter")
+		}
+		if registry.claimExact(handle, operation) != coroKeyedRegistryClaimInvalidV2 ||
+			registry.finishPost(handle, operation) != coroKeyedRegistryPublishInvalidV2 ||
+			registry.retire(handle, operation) || registry.publicationRetired(handle) {
+			panic("cold registry fabricated an exact generation")
+		}
+		if _, ok := registry.register(coroKeyedParkInvalidV2, 0x9171, 0, operation); ok {
+			panic("invalid registration succeeded")
+		}
+	})
+	if allocations != 0 || registry.loadSlots() != nil || registry.sequence != 0 || registry.scanLimit != 0 {
+		t.Fatalf("cold queries changed registry: allocations=%v slots=%p sequence=%d limit=%d",
+			allocations, registry.loadSlots(), registry.sequence, registry.scanLimit)
+	}
+}
+
+func TestCoroKeyedRegistryConcurrentFirstPublicationSurvivesGCV2(t *testing.T) {
+	const count = 32
+	registry := new(coroKeyedRegistryV2)
+	type result struct {
+		handle    coroKeyedRegistryHandleV2
+		operation coro.OperationID
+		key       uintptr
+		ok        bool
+	}
+	start := make(chan struct{})
+	results := make(chan result, count)
+	var joined sync.WaitGroup
+	joined.Add(count)
+	for index := 0; index < count; index++ {
+		operation := keyedRegistryOperation(t, uint32(index+1), 1)
+		key := uintptr(0x9200 + index)
+		go func(operation coro.OperationID, key uintptr) {
+			defer joined.Done()
+			<-start
+			handle, ok := registry.register(coroKeyedParkSemaphoreV2, key, 0, operation)
+			results <- result{handle: handle, operation: operation, key: key, ok: ok}
+		}(operation, key)
+	}
+	close(start)
+	joined.Wait()
+	close(results)
+	retainedAddress := uintptr(unsafe.Pointer(registry.loadSlots()))
+	if retainedAddress == 0 {
+		t.Fatal("first-use registrations did not publish storage")
+	}
+	// The registration goroutines and their losing candidate allocations have
+	// all retired. Only the stable registry owner must keep every waiter live.
+	goruntime.GC()
+	goruntime.GC()
+	seen := make(map[uint32]bool, count)
+	for result := range results {
+		if !result.ok || result.handle.Slot == 0 || seen[result.handle.Slot] {
+			t.Fatalf("first-use registration lost or duplicated: %+v", result)
+		}
+		seen[result.handle.Slot] = true
+		handle, operation, found := registry.claimOne(coroKeyedParkSemaphoreV2, result.key, 0, true)
+		if !found || handle != result.handle || operation != result.operation ||
+			registry.claimExact(handle, operation) != coroKeyedRegistryClaimAlreadyV2 ||
+			!registry.retire(handle, operation) ||
+			registry.finishPost(handle, operation) != coroKeyedRegistryPublishRetiredV2 {
+			t.Fatalf("first-use waiter changed after GC: %+v; claimed=%+v/%+v/%t", result, handle, operation, found)
+		}
+	}
+	if len(seen) != count || uintptr(unsafe.Pointer(registry.loadSlots())) != retainedAddress {
+		t.Fatalf("registry moved or lost waiters: count=%d stable=%t", len(seen), uintptr(unsafe.Pointer(registry.loadSlots())) == retainedAddress)
 	}
 }
