@@ -117,7 +117,9 @@ class InstallerShellContainerTests(unittest.TestCase):
         docker.write_text(f"#!{sys.executable}\n" + FAKE_DOCKER)
         docker.chmod(0o755)
 
-    def start(self, mode, *, distro=False, timeout="1", cleanup_timeout="0.25"):
+    def start(self, mode, *, distro=False, timeout="5", cleanup_timeout="1"):
+        # Successful fixture commands need startup headroom on loaded runners;
+        # only dedicated stall cases consume their explicit short host budget.
         environment = dict(
             os.environ,
             PATH=f"{self.temporary}{os.pathsep}{os.environ['PATH']}",
@@ -183,7 +185,7 @@ class InstallerShellContainerTests(unittest.TestCase):
         self.assertTrue(any(call[0] == "rm" for call in calls))
 
     def test_stalled_attach_is_bounded_and_not_reported_as_success(self):
-        status, output, calls = self.finish(self.start("attach-hang"))
+        status, output, calls = self.finish(self.start("attach-hang", timeout="2"))
         self.assertEqual(status, 124, output)
         self.assertIn("host deadline", output)
         self.assertIn("CONTAINER_FAILURE_LOG", output)
@@ -191,7 +193,7 @@ class InstallerShellContainerTests(unittest.TestCase):
         self.assertTrue(any(call[0] == "rm" for call in calls))
 
     def test_client_exit_does_not_leave_term_ignoring_child_alive(self):
-        process = self.start("orphan-child")
+        process = self.start("orphan-child", timeout="2")
         self.wait_started(process, "child.json")
         child = json.loads((self.temporary / "child.json").read_text())
         self.assertNotEqual(child["pgid"], os.getpgrp())
@@ -220,13 +222,13 @@ class InstallerShellContainerTests(unittest.TestCase):
         self.assertFalse(child_alive(), "Docker client's TERM-ignoring child survived")
 
     def test_stalled_create_with_published_id_is_also_cleaned_up(self):
-        status, output, calls = self.finish(self.start("create-hang"))
+        status, output, calls = self.finish(self.start("create-hang", timeout="2"))
         self.assertEqual(status, 124, output)
         self.assertTrue(any(call[0] == "kill" for call in calls))
         self.assertTrue(any(call[0] == "rm" for call in calls))
 
     def test_stalled_create_without_id_uses_verified_name_lookup_only(self):
-        status, output, calls = self.finish(self.start("create-hang-no-id"))
+        status, output, calls = self.finish(self.start("create-hang-no-id", timeout="2"))
         self.assertEqual(status, 124, output)
         self.assertTrue(any(call[0] == "inspect" and call[-1].startswith("llgo-installer-")
                             for call in calls))
@@ -259,7 +261,7 @@ class InstallerShellContainerTests(unittest.TestCase):
         self.assertTrue(any(call[0] == "rm" for call in calls))
 
     def test_real_distro_entrypoint_uses_host_deadline(self):
-        status, output, calls = self.finish(self.start("attach-hang", distro=True))
+        status, output, calls = self.finish(self.start("attach-hang", distro=True, timeout="2"))
         self.assertEqual(status, 1, output)
         self.assertIn("FAIL fedora:fixture (exit 124)", output)
         self.assertNotIn("PASS fedora:fixture", output)
