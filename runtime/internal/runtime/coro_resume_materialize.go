@@ -73,8 +73,9 @@ const (
 )
 
 // Two native domains each configure 1024 manual-operation slots. The registry
-// stores only scalar equality keys and POD identities; it never retains G, P,
-// ParkState, an LLVM handle, or any other Go pointer.
+// slots contain only scalar equality keys and POD identities, never G, P,
+// ParkState or an LLVM handle. The registry owns one collector-visible pointer
+// to their stable array, allocated on the first valid registration.
 const coroKeyedRegistryCapacityV2 = 2 * 1024
 
 type coroKeyedRegistryHandleV2 struct {
@@ -113,7 +114,31 @@ type coroKeyedRegistrySlotV2 struct {
 type coroKeyedRegistryV2 struct {
 	sequence  uint32
 	scanLimit uint32
-	slots     [coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2
+	// The array is published once, remains stable, and is retained by this
+	// collector-visible pointer. Read-only wake attempts never allocate.
+	slots unsafe.Pointer // *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2
+}
+
+// loadSlots never initializes storage: an unpublished registry has no waiters.
+func (registry *coroKeyedRegistryV2) loadSlots() *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2 {
+	if registry == nil {
+		return nil
+	}
+	return (*[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2)(coroKeyedAtomicLoadPointer(&registry.slots))
+}
+
+// ensureSlots runs only after a valid registration request. The winning zeroed
+// array is never moved or reset. Concurrent losing allocations are ordinary
+// collectable Go objects and never contain a published registry generation.
+func (registry *coroKeyedRegistryV2) ensureSlots() *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2 {
+	if slots := registry.loadSlots(); slots != nil {
+		return slots
+	}
+	candidate := new([coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2)
+	if coroKeyedAtomicCompareAndSwapPointer(&registry.slots, nil, unsafe.Pointer(candidate)) {
+		return candidate
+	}
+	return registry.loadSlots()
 }
 
 var coroProgramKeyedRegistryV2State coroKeyedRegistryV2
@@ -187,10 +212,14 @@ func coroKeyedRegistrySlotV2For(
 	handle coroKeyedRegistryHandleV2,
 ) (*coroKeyedRegistrySlotV2, bool) {
 	if registry == nil || handle.Slot == 0 || handle.Generation == 0 ||
-		handle.Slot > uint32(len(registry.slots)) {
+		handle.Slot > coroKeyedRegistryCapacityV2 {
 		return nil, false
 	}
-	return &registry.slots[handle.Slot-1], true
+	slots := registry.loadSlots()
+	if slots == nil {
+		return nil, false
+	}
+	return &slots[handle.Slot-1], true
 }
 
 func coroKeyedRegistryLoadOperationV2(
