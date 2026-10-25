@@ -85,7 +85,11 @@ elif args[0] == "start":
             stall()
         while True:
             time.sleep(1)
-    if mode in ("attach-hang", "signal", "cleanup-hang"):
+    if mode == "cleanup-hang":
+        # Enter cleanup after identity verification, independent of the host
+        # watchdog deadline. Other cases exercise a stalled attach.
+        sys.exit(124)
+    if mode in ("attach-hang", "signal"):
         stall()
     sys.exit(37 if mode == "failure" else 0)
 elif args[0] == "logs":
@@ -113,14 +117,14 @@ class InstallerShellContainerTests(unittest.TestCase):
         docker.write_text(f"#!{sys.executable}\n" + FAKE_DOCKER)
         docker.chmod(0o755)
 
-    def start(self, mode, *, distro=False):
+    def start(self, mode, *, distro=False, timeout="1", cleanup_timeout="0.25"):
         environment = dict(
             os.environ,
             PATH=f"{self.temporary}{os.pathsep}{os.environ['PATH']}",
             FAKE_DOCKER_ROOT=str(self.temporary),
             FAKE_DOCKER_MODE=mode,
-            LLGO_SHELL_CONTAINER_TIMEOUT="1",
-            LLGO_SHELL_CONTAINER_CLEANUP_TIMEOUT="0.25",
+            LLGO_SHELL_CONTAINER_TIMEOUT=timeout,
+            LLGO_SHELL_CONTAINER_CLEANUP_TIMEOUT=cleanup_timeout,
         )
         command = [sys.executable, str(WATCHDOG), "fedora:fixture", "true"]
         if distro:
@@ -239,10 +243,11 @@ class InstallerShellContainerTests(unittest.TestCase):
                 self.assertEqual(status, 125, output)
 
     def test_cleanup_commands_have_their_own_deadlines(self):
-        status, output, calls = self.finish(self.start("cleanup-hang"))
+        status, output, calls = self.finish(self.start("cleanup-hang", timeout="5", cleanup_timeout="1"))
         self.assertEqual(status, 124, output)
-        self.assertIn("cleanup deadline", output)
-        self.assertTrue(any(call[0] == "rm" for call in calls))
+        for command in ("logs", "kill", "rm"):
+            self.assertIn(f"cleanup deadline exceeded during docker {command}", output)
+            self.assertTrue(any(call[0] == command for call in calls), output)
 
     def test_signal_preserves_failure_and_cleans_owned_container(self):
         process = self.start("signal")
