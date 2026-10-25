@@ -84,6 +84,7 @@ jobs:
           go test -race -shuffle=on ./internal/coroalloc -count=1
           go test -race -shuffle=on ./internal/coro -count=1
           go test -race -shuffle=on ./internal/corodoorbell -count=1
+          go test -race -shuffle=on ./internal/coroworker -count=3
           go test -race -tags=coro_gc_observer_test \
             ./internal/runtime/coro_gc_observer_llgo.go \
             ./internal/runtime/coro_gc_observer_test.go -count=1
@@ -520,6 +521,14 @@ jobs:
             cat /tmp/llgo-coro-fault-reject.log
             exit 1
           fi
+
+      - name: Test parked worker arguments across forced collection
+        if: matrix.lane == 'fault-e2e'
+        run: |
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            LLGO_TEST_LLGO=/tmp/llgo-coro-fault LLGO_CORO_WORKER_MAPPING_ACCEPTANCE=1 \
+            timeout 8m go test -p=1 ./internal/build \
+              -run '^TestCoroWorkerMappingRetentionAcceptance$' -timeout=7m -count=1 -v
 
       - name: Test concurrent first use of native fallback symbol caches
         if: matrix.lane == 'fault-e2e'
