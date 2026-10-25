@@ -77,6 +77,10 @@ jobs:
         if: matrix.lane == 'integration'
         run: go test ./internal/llvmproof -count=1
 
+      - name: Test inline child returns preserve preemption progress
+        if: matrix.lane == 'integration'
+        run: go test ./cl -run '^TestCoroInlineAwaitPreservesCallerPreemptCountdown$' -count=1
+
       - name: Test target-neutral coroutine runtime core
         if: matrix.lane == 'compat'
         run: |
@@ -576,6 +580,14 @@ jobs:
             GOMAXPROCS="$procs" timeout 90s /tmp/llgo-local-channel-gate \
               -test.v -test.count=3 -test.timeout=60s
           done
+
+      - name: Test progress across synchronous managed call chains
+        if: matrix.lane == 'fault-e2e'
+        run: |
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            LLGO_TEST_LLGO=/tmp/llgo-coro-fault LLGO_CORO_CALL_PROGRESS_ACCEPTANCE=1 \
+            timeout 8m go test -p=1 ./internal/build \
+              -run '^TestCoroInlineAwaitProgressAcceptance$' -timeout=7m -count=1 -v
 
       - name: Test native linked coroutine islands
         if: matrix.lane == 'native-e2e'

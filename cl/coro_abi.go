@@ -1088,13 +1088,24 @@ func (c *coroBodyContext) publishStateValue(
 	b.Store(b.FieldAddr(c.header, coroHeaderLine), line)
 }
 
-func (c *coroBodyContext) activate(b llssa.Builder) {
+// activateHeader restores the logical active state without starting a new
+// physical resume episode. Synchronous child returns retain the caller's
+// remaining safepoint countdown.
+func (c *coroBodyContext) activateHeader(b llssa.Builder) {
 	if c.abi.version < coroPhysicalABIVersionV1 {
 		return
 	}
 	prog := b.Prog
 	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(coroSuspendNone, prog.Uint16()))
 	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(coroLifecycleActive, prog.Uint16()))
+}
+
+func (c *coroBodyContext) activate(b llssa.Builder) {
+	if c.abi.version < coroPhysicalABIVersionV1 {
+		return
+	}
+	c.activateHeader(b)
+	prog := b.Prog
 	if c.preemptCountdown.IsNil() {
 		panic("coroutine activation has no private preemption countdown")
 	}
