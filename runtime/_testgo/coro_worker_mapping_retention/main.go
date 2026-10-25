@@ -37,8 +37,8 @@ func holdBuffer(pointer unsafe.Pointer, size, index uintptr) uintptr
 //go:linkname joinCollector C.llgo_worker_mapping_collector_join
 func joinCollector() uintptr
 
-// Four calls occupy native workers while additional callers prepare distinct
-// buffers. Compiler frames must retain their arguments across forced GC.
+// Four calls occupy native workers and four more must be published in the
+// unscanned queue before collection. Parked compiler frames retain all buffers.
 func main() {
 	var gate uint32
 	if startCollector(&gate) != 0 {
@@ -63,9 +63,10 @@ func main() {
 	ready.Wait()
 	atomic.StoreUint32(&gate, 1)
 	done.Wait()
-	if joinCollector() != 0 {
-		panic("collector did not finish four full collections")
+	queued := joinCollector()
+	if queued != 4 {
+		panic("collector did not confirm four queued calls and four full collections")
 	}
 	runtime.KeepAlive(&gate)
-	println("worker mapping retention ok")
+	println("worker mapping retention ok queued", queued)
 }
