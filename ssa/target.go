@@ -365,7 +365,13 @@ func (p *Target) defaultSpec() (spec TargetSpec) {
 			features = append(features, "+"+archFeature)
 		}
 		features = append(features, "+neon")
-		if arm64.LSE {
+		// The canonical macOS ARM64 target runs on Apple Silicon, whose
+		// platform baseline includes LSE (Clang defaults it to apple-m1).
+		// Add only LSE; retain the requested GOARM64 ISA and generic tuning.
+		// Named or explicitly redirected triples keep their own feature set.
+		macOSLSE := p.Target == "" && goos == "darwin" &&
+			spec.Triple == intllvm.GetTargetTriple("darwin", "arm64")
+		if arm64.LSE || macOSLSE {
 			features = append(features, "+lse")
 		}
 		if arm64.Crypto {

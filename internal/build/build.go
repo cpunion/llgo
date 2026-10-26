@@ -9668,6 +9668,10 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 		setNativeMachineOutliner(backend.TargetMachine(), false)
 	}
 	if runtimeLibraryLTOPackage(ctx.buildConf, pkg.PkgPath) {
+		if err := prepareRuntimeLibraryTargetAttributes(mod, backend.TargetSpec()); err != nil {
+			_ = os.Remove(name)
+			return "", err
+		}
 		buf := gllvm.WriteFullLTOBitcodeToMemoryBuffer(mod, false)
 		defer buf.Dispose()
 		if err := os.WriteFile(name, buf.Bytes(), 0600); err != nil {
@@ -10005,6 +10009,9 @@ func exportObjectInMemory(ctx *context, pkgPath string, exportFile string, pkg l
 func emitObjectToMemoryBuffer(ctx *context, pkg llssa.Package) (gllvm.MemoryBuffer, string, error) {
 	ltoMode := ctx.buildConf.ltoMode()
 	if runtimeLibraryLTOPackage(ctx.buildConf, pkg.Path()) {
+		if err := prepareRuntimeLibraryTargetAttributes(pkg.Module(), pkg.Prog.TargetSpec()); err != nil {
+			return gllvm.MemoryBuffer{}, "", err
+		}
 		ltoMode = lto.Full
 	}
 	var (
