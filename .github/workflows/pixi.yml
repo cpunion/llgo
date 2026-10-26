@@ -39,7 +39,7 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          # Other host profiles run daily in llgo-compat/ci.
+          # Other host profiles run daily in llgo-compat/ci's Development environments.
           - ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

@@ -11,6 +11,9 @@ concurrency:
   group: targets.yml-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
+permissions:
+  contents: read
+
 jobs:
   prepare:
     uses: ./.github/workflows/ci-prepare.yml
@@ -33,7 +36,7 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest
+          - ubuntu-24.04
         llvm: [22]
     runs-on: ${{ fromJSON(needs.prepare.outputs.linux_large_runner) }}
     steps:
@@ -80,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The full host matrix runs in llgo-compat/ci's Target profiles.
+        # Other host profiles run daily in llgo-compat/ci's Target profiles.
         os: [ubuntu-24.04]
     runs-on: ${{ fromJSON(needs.prepare.outputs.linux_large_runner) }}
     env:
