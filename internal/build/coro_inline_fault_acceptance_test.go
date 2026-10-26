@@ -26,6 +26,7 @@ import (
 var observed byte
 var conditionalYield bool
 var forwardingVisits int
+var safeChildVisits int
 //go:noinline
 func faultLeaf() { observed = *(*byte)(unsafe.Pointer(uintptr(1))) }
 // A source-visible yield branch keeps this a physical coroutine, while the
@@ -40,6 +41,29 @@ func forwardFaultTwice() { forwardFault() }
 func forwardingVisit() { forwardingVisits++ }
 // This caller must own a frame, rather than transparently forwarding too.
 func forwardedCall() { forwardingVisit(); forwardFaultTwice() }
+// A physical safe child must not inherit its caller's local fault demand.
+//go:noinline
+func safePhysicalChild() {
+ if conditionalYield { runtime.Gosched() }
+ safeChildVisits++
+}
+//go:noinline
+func localFaultWithSafeChild() {
+ safePhysicalChild()
+ observed = *(*byte)(unsafe.Pointer(uintptr(1)))
+}
+// This child has no local landing but protects its own faulting child.
+func protectedFaultingChild() { safePhysicalChild(); forwardFaultTwice() }
+//go:noinline
+func localFaultWithProtectedChild() {
+ protectedFaultingChild()
+ observed = *(*byte)(unsafe.Pointer(uintptr(1)))
+}
+//go:noinline
+func localFaultWithFaultingChild() {
+ forwardFaultTwice()
+ observed = *(*byte)(unsafe.Pointer(uintptr(1)))
+}
 //go:noinline
 func direct() { faultLeaf() }
 //go:noinline
@@ -73,13 +97,14 @@ func catches(f func()) (caught bool) {
 func main() {
  indirect=new(runner)
  conditionalYield=len(os.Args)>100
- cases:=[]func(){faultLeaf,direct,nested,deferred,deferredValue,method,throughInterface,throughValue,yielded,parked,forwardedCall}
+ cases:=[]func(){faultLeaf,direct,nested,deferred,deferredValue,method,throughInterface,throughValue,yielded,parked,forwardedCall,localFaultWithSafeChild,localFaultWithProtectedChild,localFaultWithFaultingChild}
  for _,f:=range cases {
   if !catches(f) {panic("inline native fault was not recovered")}
   runtime.GC()
  }
  if forwardingVisits!=1 {panic("forwarding caller lost its side effect")}
- println("ok inline native fault",len(cases),observed,forwardingVisits)
+ if safeChildVisits!=2 {panic("safe physical child lost its side effect")}
+ println("ok inline native fault",len(cases),observed,forwardingVisits,safeChildVisits)
 }
 `
 
@@ -126,7 +151,7 @@ func TestCoroInlineNativeFaultAcceptance(t *testing.T) {
 	}
 	oracle := filepath.Join(dir, "official-go")
 	run(t, false, filepath.Join(runtime.GOROOT(), "bin/go"), "build", "-p=1", "-o", oracle, source)
-	const want = "ok inline native fault 11 0 1"
+	const want = "ok inline native fault 14 0 1 2"
 	for _, procs := range []string{"1", "4"} {
 		t.Setenv("GOMAXPROCS", procs)
 		if got := run(t, true, oracle); got != want {

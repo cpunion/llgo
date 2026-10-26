@@ -27,6 +27,9 @@ func Root() bool { return Mid() }
 func Forward() bool { return Fault() }
 func ForwardTwice() bool { return Forward() }
 func ViaForward() bool { Sibling(); return ForwardTwice() }
+func LocalFaultWithSafeChild() bool { Sibling(); return *(*byte)(unsafe.Pointer(uintptr(1))) == 0 }
+func LocalFaultWithProtectedChild() bool { Mid(); return *(*byte)(unsafe.Pointer(uintptr(1))) == 0 }
+func LocalFaultWithFaultingChild() bool { ForwardTwice(); return *(*byte)(unsafe.Pointer(uintptr(1))) == 0 }
 func Sibling() {}
 func Unrelated(value uint32) uint32 { return value + 1 }
 `
@@ -46,19 +49,23 @@ func Unrelated(value uint32) uint32 { return value + 1 }
 	fault, mid, root, sibling, unrelated := ssaPkg.Func("Fault"), ssaPkg.Func("Mid"), ssaPkg.Func("Root"), ssaPkg.Func("Sibling"), ssaPkg.Func("Unrelated")
 	forward, viaForward := ssaPkg.Func("Forward"), ssaPkg.Func("ViaForward")
 	forwardTwice := ssaPkg.Func("ForwardTwice")
+	localSafe, localProtected, localFaulting := ssaPkg.Func("LocalFaultWithSafeChild"), ssaPkg.Func("LocalFaultWithProtectedChild"), ssaPkg.Func("LocalFaultWithFaultingChild")
 	plan, err := coro.AnalyzeSSA(
 		ssaPkg.Prog,
 		coro.Roots{
 			{Function: root, Demand: coro.AsyncDemand},
 			{Function: viaForward, Demand: coro.AsyncDemand},
 			{Function: unrelated, Demand: coro.AsyncDemand},
+			{Function: localSafe, Demand: coro.AsyncDemand},
+			{Function: localProtected, Demand: coro.AsyncDemand},
+			{Function: localFaulting, Demand: coro.AsyncDemand},
 		},
 		coro.SSAConfig{
 			EmissionUniverse:     ssaUniverse,
 			FunctionIDs:          universe.FunctionIDConfig(),
 			MaxPlainInstructions: -1,
 			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
-				if function == fault || function == mid || function == root || function == sibling || function == unrelated || function == forward || function == viaForward || function == forwardTwice {
+				if function == fault || function == mid || function == root || function == sibling || function == unrelated || function == forward || function == viaForward || function == forwardTwice || function == localSafe || function == localProtected || function == localFaulting {
 					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
 				}
 				return coro.SSAFunctionPolicy{}, nil
@@ -103,6 +110,9 @@ func Unrelated(value uint32) uint32 { return value + 1 }
 		{name: "Root"},
 		{name: "Sibling"},
 		{name: "Unrelated"},
+		{name: "LocalFaultWithSafeChild", want: true},
+		{name: "LocalFaultWithProtectedChild", want: true},
+		{name: "LocalFaultWithFaultingChild", want: true, inline: true},
 	} {
 		physical := module.NamedFunction("foo." + test.name + "$coro")
 		if physical.IsNil() {

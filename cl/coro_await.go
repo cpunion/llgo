@@ -1585,30 +1585,33 @@ func (p *context) emitCoroInlineChildResume(body *coroBodyContext, b llssa.Build
 	}
 	enabledName, pushName := body.abi.panicBoundaryEnabledHook, body.abi.panicBoundaryPushHook
 	popName, stageName := body.abi.panicBoundaryPopHook, body.abi.panicBoundaryStageHook
+	if pushName == "" && (enabledName != "" || popName != "" || stageName != "") ||
+		pushName != "" && (enabledName == "" || popName == "" || stageName == "") {
+		panic("inline coroutine child resume has an incomplete panic boundary ABI")
+	}
+	// The child owns its landing dispatch, while this caller owns the native
+	// activation. Use the same frozen direct-child proof for either caller
+	// landing policy: a caller's own faults do not require a boundary around
+	// a child that has no local landing. Such a child still protects its own
+	// faulting children. Dynamic panic-on-fault keeps every boundary enabled.
+	site := p.coroEmissionSite()
+	childBoundaryKnown := coroNativePanicBoundaryTarget(p) && p.compilation != nil &&
+		p.compilation.FinalCoroProgramCapabilitiesFrozen &&
+		site != nil && site.hasExpectedPhysical &&
+		site.expectedPhysical.control == coroPhysicalControlDirectAwait &&
+		site.expectedPhysical.controlTarget != nil &&
+		len(site.expectedPhysical.controlTarget.Blocks) != 0
+	if childBoundaryKnown && !p.compilation.coroPanicBoundaryEmissionEnabled(site.expectedPhysical.controlTarget) {
+		b.CoroResume(child)
+		return
+	}
 	if pushName == "" {
-		if enabledName != "" || popName != "" || stageName != "" {
-			panic("inline coroutine child resume has an incomplete panic boundary ABI")
-		}
-		// A physical child owns its landing dispatch, but the caller owns
-		// this native resume activation and must install the child's boundary.
-		// The fault projection may correctly exclude the caller's own frame.
-		// Consume the same frozen direct-child SitePlan that authorized that
-		// isolation; ordinary children keep their existing direct resume.
-		site := p.coroEmissionSite()
-		if !coroNativePanicBoundaryTarget(p) || p.compilation == nil ||
-			site == nil || !site.hasExpectedPhysical ||
-			site.expectedPhysical.control != coroPhysicalControlDirectAwait ||
-			site.expectedPhysical.controlTarget == nil ||
-			len(site.expectedPhysical.controlTarget.Blocks) == 0 ||
-			!p.compilation.coroPanicBoundaryEmissionEnabled(site.expectedPhysical.controlTarget) {
+		if !childBoundaryKnown {
 			b.CoroResume(child)
 			return
 		}
 		enabledName, pushName = coroPanicBoundaryEnabledHookV1, coroPanicBoundaryPushHookV1
 		popName, stageName = coroPanicBoundaryPopHookV1, coroPanicBoundaryStageHookV1
-	}
-	if enabledName == "" || popName == "" || stageName == "" {
-		panic("inline coroutine child resume has an incomplete panic boundary ABI")
 	}
 
 	enabledHook := p.pkg.NewFunc(
