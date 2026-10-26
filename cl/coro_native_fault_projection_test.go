@@ -82,20 +82,25 @@ func Parent() { Child(); Imported() }
 	for _, test := range []struct {
 		name           string
 		defined, mixed bool
+		forwarding     bool
 		control        coroPhysicalControlRecipe
 		want           bool
 	}{
-		{"local-child", true, false, coroPhysicalControlDirectAwait, true},
-		{"missing-child-definition", false, false, coroPhysicalControlDirectAwait, false},
-		{"outcome-child", true, false, coroPhysicalControlDirectOutcome, false},
-		{"raw-child", true, false, coroPhysicalControlRawPlainCall, false},
-		{"owner-disagreement", true, true, coroPhysicalControlDirectAwait, false},
+		{"local-child", true, false, false, coroPhysicalControlDirectAwait, true},
+		{"missing-child-definition", false, false, false, coroPhysicalControlDirectAwait, false},
+		{"outcome-child", true, false, false, coroPhysicalControlDirectOutcome, false},
+		{"raw-child", true, false, false, coroPhysicalControlRawPlainCall, false},
+		{"owner-disagreement", true, true, false, coroPhysicalControlDirectAwait, false},
+		{"transparent-parent", true, false, true, coroPhysicalControlDirectAwait, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ir := newCoroProgramIR()
 			ir.physicalPlansSealed = true
 			owner := &preparedEmissionPackage{identity: "first"}
 			ir.physicalPlans[emissionFunctionOwnerKey{function: parent, owner: owner}] = &coroPhysicalFunctionPlan{function: parent, instructions: map[ssa.Instruction]coroPhysicalInstructionPlan{childCall: {control: test.control, controlTarget: child}, importCall: {control: coroPhysicalControlDirectAwait, controlTarget: imported}}}
+			if test.forwarding {
+				ir.physicalPlans[emissionFunctionOwnerKey{function: parent, owner: owner}].tailForward = &coroPhysicalTailForwardPlan{}
+			}
 			// Even a declaration carrying a physical placeholder cannot certify a
 			// producer's native landing. Imported archive bodies stay conservative.
 			ir.physicalPlans[emissionFunctionOwnerKey{function: imported, owner: owner}] = &coroPhysicalFunctionPlan{function: imported}
