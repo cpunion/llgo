@@ -19,12 +19,27 @@ import (
 
 const coroInlineNativeFaultFixture = `package main
 import (
+ "os"
  "runtime"
  "unsafe"
 )
 var observed byte
+var conditionalYield bool
+var forwardingVisits int
 //go:noinline
 func faultLeaf() { observed = *(*byte)(unsafe.Pointer(uintptr(1))) }
+// A source-visible yield branch keeps this a physical coroutine, while the
+// ordinary execution faults before any scheduler handoff can protect it.
+//go:noinline
+func forwardedFaultLeaf() {
+ if conditionalYield { runtime.Gosched() }
+ observed = *(*byte)(unsafe.Pointer(uintptr(1)))
+}
+func forwardFault() { forwardedFaultLeaf() }
+func forwardFaultTwice() { forwardFault() }
+func forwardingVisit() { forwardingVisits++ }
+// This caller must own a frame, rather than transparently forwarding too.
+func forwardedCall() { forwardingVisit(); forwardFaultTwice() }
 //go:noinline
 func direct() { faultLeaf() }
 //go:noinline
@@ -57,12 +72,14 @@ func catches(f func()) (caught bool) {
 }
 func main() {
  indirect=new(runner)
- cases:=[]func(){faultLeaf,direct,nested,deferred,deferredValue,method,throughInterface,throughValue,yielded,parked}
+ conditionalYield=len(os.Args)>100
+ cases:=[]func(){faultLeaf,direct,nested,deferred,deferredValue,method,throughInterface,throughValue,yielded,parked,forwardedCall}
  for _,f:=range cases {
   if !catches(f) {panic("inline native fault was not recovered")}
   runtime.GC()
  }
- println("ok inline native fault",len(cases),observed)
+ if forwardingVisits!=1 {panic("forwarding caller lost its side effect")}
+ println("ok inline native fault",len(cases),observed,forwardingVisits)
 }
 `
 
@@ -109,7 +126,7 @@ func TestCoroInlineNativeFaultAcceptance(t *testing.T) {
 	}
 	oracle := filepath.Join(dir, "official-go")
 	run(t, false, filepath.Join(runtime.GOROOT(), "bin/go"), "build", "-p=1", "-o", oracle, source)
-	const want = "ok inline native fault 10 0"
+	const want = "ok inline native fault 11 0 1"
 	for _, procs := range []string{"1", "4"} {
 		t.Setenv("GOMAXPROCS", procs)
 		if got := run(t, true, oracle); got != want {

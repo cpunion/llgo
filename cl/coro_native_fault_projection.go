@@ -33,7 +33,12 @@ func (ir *coroProgramIR) nativeFaultIsolatedCalls() map[ssa.CallInstruction]bool
 			if !ok {
 				continue
 			}
-			separate := physical.control == coroPhysicalControlDirectAwait && defined[physical.controlTarget]
+			// A transparent ramp returns its target's frame instead of resuming
+			// an independent child. Propagate the target's landing demand through
+			// that frozen forwarding edge so its eventual caller protects the
+			// actual physical frame, even across multiple forwarding ramps.
+			separate := function.tailForward == nil &&
+				physical.control == coroPhysicalControlDirectAwait && defined[physical.controlTarget]
 			// All ownership variants must agree before an occurrence is isolated.
 			if seen[call] {
 				isolated[call] = isolated[call] && separate
