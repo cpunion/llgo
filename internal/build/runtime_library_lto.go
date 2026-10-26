@@ -17,12 +17,15 @@
 package build
 
 import (
+	"fmt"
 	"github.com/xgo-dev/llgo/internal/optlevel"
+	llssa "github.com/xgo-dev/llgo/ssa"
+	"github.com/xgo-dev/llvm"
 	"os"
 	"runtime"
 )
 
-const runtimeLibraryOptimizationVersion = "darwin-arm64-runtime-o2-lto-v1"
+const runtimeLibraryOptimizationVersion = "darwin-arm64-runtime-o2-lto-target-v2"
 
 // Only the three private implementation modules enter this library optimizer.
 // Application and standard-library packages keep their native Os objects, so
@@ -66,4 +69,48 @@ func runtimeLibraryOptimizationID(conf *Config) string {
 		return runtimeLibraryOptimizationVersion
 	}
 	return ""
+}
+
+// prepareRuntimeLibraryTargetAttributes preserves the exact effective backend
+// configuration across full-LTO serialization. A TargetMachine's options do
+// not become function attributes merely by writing its module as bitcode.
+// Check every definition first so a conflicting foreign attribute cannot leave
+// a partially changed module behind. Declarations retain their own contracts.
+func prepareRuntimeLibraryTargetAttributes(mod llvm.Module, target llssa.TargetSpec) error {
+	if mod.IsNil() || target.Triple == "" {
+		return fmt.Errorf("runtime library target attributes: missing module or effective target")
+	}
+	if mod.Target() != target.Triple {
+		return fmt.Errorf("runtime library target attributes: module target %q differs from effective target %q", mod.Target(), target.Triple)
+	}
+	// Explicit toolchain profiles may defer CPU or features to their linker.
+	// Keep those legacy modules unchanged rather than invent a frozen option.
+	if target.CPU == "" || target.Features == "" {
+		return nil
+	}
+	settings := []struct{ name, value string }{
+		{"target-cpu", target.CPU},
+		{"target-features", target.Features},
+	}
+	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		if fn.IsDeclaration() {
+			continue
+		}
+		for _, setting := range settings {
+			attribute := fn.GetStringAttributeAtIndex(-1, setting.name)
+			if !attribute.IsNil() && attribute.GetStringValue() != setting.value {
+				return fmt.Errorf("runtime library target attributes: %s has conflicting %s=%q, want %q", fn.Name(), setting.name, attribute.GetStringValue(), setting.value)
+			}
+		}
+	}
+	ctx := mod.Context()
+	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		if fn.IsDeclaration() {
+			continue
+		}
+		for _, setting := range settings {
+			fn.AddFunctionAttr(ctx.CreateStringAttribute(setting.name, setting.value))
+		}
+	}
+	return nil
 }

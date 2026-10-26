@@ -81,6 +81,13 @@ jobs:
         if: matrix.lane == 'integration'
         run: go test ./cl -run '^TestCoroInlineAwaitPreservesCallerPreemptCountdown$' -count=1
 
+      - name: Test macOS ARM64 atomics and runtime LTO target attributes
+        if: matrix.lane == 'integration'
+        run: |
+          go test ./internal/xtool/llvm -count=1
+          go test ./ssa -run '^Test(TargetArchitectureFeatures|MacOSARM64LSEAtomicCodegen)$' -count=1 -v
+          go test ./internal/build -run '^Test(RuntimeLibraryTargetAttributes|NativeRuntimeLTOTargetAttributes|RuntimeLibraryOptimizationFingerprint)' -count=1 -v
+
       - name: Test lazy unwind scratch and actual fault contexts
         if: matrix.lane == 'compat'
         run: |

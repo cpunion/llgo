@@ -123,9 +123,95 @@ func main() {
 		demandGates[index].Done()
 	}
 	demandDone.Wait()
+	for _, procs := range []int{1, 4} {
+		runtime.GOMAXPROCS(procs)
+		atomicInstructionStress()
+	}
 	for _, procs := range []int{1, 2} {
 		runtime.GOMAXPROCS(procs)
 		atomicValueFirstPublication()
 	}
 	runtime.GOMAXPROCS(previous)
+}
+
+// atomicInstructionStress exercises the SC read/modify/write instructions
+// selected by both the generic and LSE ARM64 backends. Distinct worker bits
+// make a lost bit update observable without requiring one timing schedule.
+func atomicInstructionStress() {
+	const workers, rounds = 16, 1024
+	var count32 atomic.Uint32
+	var count64 atomic.Uint64
+	var bits32 atomic.Uint32
+	var bits64 atomic.Uint64
+	var swap32 atomic.Uint32
+	var swap64 atomic.Uint64
+	var done sync.WaitGroup
+	done.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			mask32, mask64 := uint32(1)<<worker, uint64(1)<<worker
+			for repeat := 0; repeat < rounds; repeat++ {
+				count32.Add(1)
+				for {
+					old := count32.Load()
+					if count32.CompareAndSwap(old, old+1) {
+						break
+					}
+					runtime.Gosched()
+				}
+				count64.Add(1)
+				for {
+					old := count64.Load()
+					if count64.CompareAndSwap(old, old+1) {
+						break
+					}
+					runtime.Gosched()
+				}
+				bits32.Or(mask32)
+				bits64.Or(mask64)
+				if bits32.Load()&mask32 == 0 || bits64.Load()&mask64 == 0 {
+					panic("atomic bit update lost an owned bit")
+				}
+				bits32.And(^mask32)
+				bits64.And(^mask64)
+				if swap32.Swap(uint32(worker+1)) > workers || swap64.Swap(uint64(worker+1)) > workers {
+					panic("atomic exchange returned a torn value")
+				}
+			}
+			done.Done()
+		}()
+	}
+	done.Wait()
+	if count32.Load() != workers*rounds*2 || count64.Load() != workers*rounds*2 || bits32.Load() != 0 || bits64.Load() != 0 {
+		panic("atomic RMW final value mismatch")
+	}
+
+	// A ready flag publishes freshly initialized ordinary fields through SC
+	// stores/loads. The acknowledgement prevents the next publication from
+	// overtaking consumption of the current record.
+	type packet struct{ sequence, inverse uint64 }
+	var pointer atomic.Pointer[packet]
+	var ready atomic.Uint32
+	done.Add(1)
+	go func() {
+		for sequence := uint64(1); sequence <= 512; sequence++ {
+			for ready.Load() != 0 {
+				runtime.Gosched()
+			}
+			pointer.Store(&packet{sequence, ^sequence})
+			ready.Store(1)
+		}
+		done.Done()
+	}()
+	for sequence := uint64(1); sequence <= 512; sequence++ {
+		for ready.Load() == 0 {
+			runtime.Gosched()
+		}
+		value := pointer.Load()
+		if value == nil || value.sequence != sequence || value.inverse != ^sequence {
+			panic("atomic pointer exposed an incomplete publication")
+		}
+		ready.Store(0)
+	}
+	done.Wait()
 }

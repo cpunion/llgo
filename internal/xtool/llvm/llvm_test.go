@@ -161,6 +161,7 @@ func TestGetTargetSpec(t *testing.T) {
 		wantCPU    string
 		feature    string
 	}{
+		{"macOS ARM64 LSE", "darwin", "arm64", "", "arm64-apple-macosx", "generic", "+lse"},
 		{"native-style amd64", "linux", "amd64", "", "x86_64-unknown-linux", "x86-64", "+sse2"},
 		{"wasm32", "wasip1", "wasm", "", "wasm32-unknown-wasip1", "generic", "+bulk-memory"},
 		{"armv5", "linux", "arm", "5", "armv5-unknown-linux-gnueabi", "generic", "+armv5t"},

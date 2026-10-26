@@ -124,7 +124,8 @@ func GetTargetSpec(goos, goarch, goarm string) (spec TargetSpec) {
 	case "arm64":
 		spec.CPU = "generic"
 		if goos == "darwin" {
-			spec.Features = "+neon"
+			// macOS ARM64 shares Clang's Apple Silicon LSE baseline.
+			spec.Features = "+neon,+lse"
 		} else {
 			spec.Features = "+neon,-fmv"
 		}
