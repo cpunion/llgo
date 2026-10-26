@@ -54,20 +54,23 @@ type G struct {
 	// to the ready tail before starting it. Only check-resume, check-destroy,
 	// and direct panic-destroy continuations may cross that stable boundary.
 	runAction ActionKind
-	// transferState reuses the last byte before pointer alignment. Ordinary Gs
+	// transferState shares the scalar header before pointer alignment. Ordinary Gs
 	// remain zero; a durable runnable-transfer slot marks it non-zero while no P
 	// queue owns the continuation. This prevents a stray Enqueue from creating
 	// a second scheduler owner without increasing G's native or wasm32 size.
 	transferState runnableTransferGState
+	// Keep these owner-only flags in the scalar header instead of giving each
+	// intervening pointer group its own alignment gap. The magic and preempt
+	// words retain their ABI offsets; root starts at offset 16 on both widths.
+	destroyRoot   bool
+	queued        bool
+	waiting       bool
 	root          *Frame
 	active        *Frame
 	frames        *Frame
 	pending       pendingTransition
 	destroyTarget *Frame
-	destroyRoot   bool
 	nextReady     *G
-	queued        bool
-	waiting       bool
 	// park is the common multi-source logical wait cell. It also owns the
 	// one-byte task stop token so park commit cannot forget it.
 	park ParkState

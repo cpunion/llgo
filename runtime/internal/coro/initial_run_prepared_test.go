@@ -36,8 +36,8 @@ func newInitialRunFixture(t *testing.T) initialRunFixture {
 func TestInitialRunReceiptDispatchAndSize(t *testing.T) {
 	f := newInitialRunFixture(t)
 	defer runtime.KeepAlive(f.root.memory)
-	if unsafe.Sizeof(uintptr(0)) == 8 && TaskStorageSize() != 264 {
-		t.Fatalf("G storage grew to %d", TaskStorageSize())
+	if TaskStorageSize() != wantSchedulerGSize {
+		t.Fatalf("G storage = %d, want %d", TaskStorageSize(), wantSchedulerGSize)
 	}
 	if !f.child.initialRunPrepared || f.child.runAction != ActionInvalid {
 		t.Fatal("initial child lost P-neutral publication")

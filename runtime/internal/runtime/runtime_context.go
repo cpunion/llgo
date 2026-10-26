@@ -40,6 +40,9 @@ type runtimeContext struct {
 	m m
 	p p
 
+	// startfn is consumed only by the native pthread entry. Logical tasks have
+	// compiler-owned coroutine entries and do not need this pointer-sized slot.
+	startfn goroutineFunc
 	// startRoot keeps a native goroutine's compiler-generated startup record
 	// scanned until its entry call has returned. Stackless tasks carry their
 	// arguments in the task allocation and never pay for this field.
@@ -147,6 +150,7 @@ func initCoroRuntimeContext(ctx *coroRuntimeContext, callergp *g, status uint32)
 func initCoroRuntimeContextUntracked(ctx *coroRuntimeContext, callergp *g, status uint32) *g {
 	gp := &ctx.g
 	gp.atomicstatus = status
+	gp.contextKind = runtimeContextCoroRoot
 	gp.goid = nextGoid(gp, callergp)
 	if callergp != nil {
 		gp.parentGoid = callergp.goid
@@ -164,6 +168,7 @@ func initRuntimeContextUntracked(ctx *runtimeContext, callergp *g, status uint32
 	// particular, bootstrap must not consume the command goroutine's ID 1.
 	gp := &ctx.g
 	gp.atomicstatus = status
+	gp.contextKind = runtimeContextNative
 	gp.context = &ctx.coroRuntimeContext
 	mp := &ctx.m
 	pp := &ctx.p

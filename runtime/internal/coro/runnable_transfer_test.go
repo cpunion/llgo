@@ -109,7 +109,7 @@ func TestRunnableTransferStateUsesExistingGPadding(t *testing.T) {
 		unsafe.Sizeof(G{}) != wantSchedulerGSize ||
 		affinityOffset != lockDepthOffset+1 || unsafe.Sizeof(G{}.runnableAffinity) != 1 ||
 		panicBoundaryOffset != affinityOffset+1 || unsafe.Sizeof(G{}.panicBoundary) != 1 ||
-		rootOffset != uintptr(12) && rootOffset != uintptr(16) {
+		rootOffset != uintptr(16) {
 		t.Fatalf("G transfer layout changed: transfer=%d/%d affinity=%d/%d boundary=%d/%d lock=%d root=%d size=%d want=%d",
 			transferOffset, unsafe.Sizeof(G{}.transferState),
 			affinityOffset, unsafe.Sizeof(G{}.runnableAffinity),
