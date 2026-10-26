@@ -1583,30 +1583,45 @@ func (p *context) emitCoroInlineChildResume(body *coroBodyContext, b llssa.Build
 	if body == nil || b == nil || b.Func != p.fn || child.IsNil() {
 		panic("inline coroutine child resume has an incomplete physical body")
 	}
-	if body.abi.panicBoundaryPushHook == "" {
-		if body.abi.panicBoundaryEnabledHook != "" || body.abi.panicBoundaryPopHook != "" ||
-			body.abi.panicBoundaryStageHook != "" {
+	enabledName, pushName := body.abi.panicBoundaryEnabledHook, body.abi.panicBoundaryPushHook
+	popName, stageName := body.abi.panicBoundaryPopHook, body.abi.panicBoundaryStageHook
+	if pushName == "" {
+		if enabledName != "" || popName != "" || stageName != "" {
 			panic("inline coroutine child resume has an incomplete panic boundary ABI")
 		}
-		b.CoroResume(child)
-		return
+		// A physical child owns its landing dispatch, but the caller owns
+		// this native resume activation and must install the child's boundary.
+		// The fault projection may correctly exclude the caller's own frame.
+		// Consume the same frozen direct-child SitePlan that authorized that
+		// isolation; ordinary children keep their existing direct resume.
+		site := p.coroEmissionSite()
+		if !coroNativePanicBoundaryTarget(p) || p.compilation == nil ||
+			site == nil || !site.hasExpectedPhysical ||
+			site.expectedPhysical.control != coroPhysicalControlDirectAwait ||
+			site.expectedPhysical.controlTarget == nil ||
+			len(site.expectedPhysical.controlTarget.Blocks) == 0 ||
+			!p.compilation.coroPanicBoundaryEmissionEnabled(site.expectedPhysical.controlTarget) {
+			b.CoroResume(child)
+			return
+		}
+		enabledName, pushName = coroPanicBoundaryEnabledHookV1, coroPanicBoundaryPushHookV1
+		popName, stageName = coroPanicBoundaryPopHookV1, coroPanicBoundaryStageHookV1
 	}
-	if body.abi.panicBoundaryEnabledHook == "" || body.abi.panicBoundaryPopHook == "" ||
-		body.abi.panicBoundaryStageHook == "" {
+	if enabledName == "" || popName == "" || stageName == "" {
 		panic("inline coroutine child resume has an incomplete panic boundary ABI")
 	}
 
 	enabledHook := p.pkg.NewFunc(
-		body.abi.panicBoundaryEnabledHook, coroPanicBoundaryEnabledSignature(), llssa.InC,
+		enabledName, coroPanicBoundaryEnabledSignature(), llssa.InC,
 	).Expr
 	push := p.pkg.NewFunc(
-		body.abi.panicBoundaryPushHook, coroPanicBoundaryPushSignature(), llssa.InC,
+		pushName, coroPanicBoundaryPushSignature(), llssa.InC,
 	).Expr
 	pop := p.pkg.NewFunc(
-		body.abi.panicBoundaryPopHook, coroPanicBoundaryCloseSignature(), llssa.InC,
+		popName, coroPanicBoundaryCloseSignature(), llssa.InC,
 	).Expr
 	stage := p.pkg.NewFunc(
-		body.abi.panicBoundaryStageHook, coroPanicBoundaryCloseSignature(), llssa.InC,
+		stageName, coroPanicBoundaryCloseSignature(), llssa.InC,
 	).Expr
 	enabled := b.Call(enabledHook, body.task)
 	allocate := p.fn.MakeBlock()

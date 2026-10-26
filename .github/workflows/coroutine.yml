@@ -81,6 +81,15 @@ jobs:
         if: matrix.lane == 'integration'
         run: go test ./cl -run '^TestCoroInlineAwaitPreservesCallerPreemptCountdown$' -count=1
 
+      - name: Test inline child native fault activation
+        if: matrix.lane == 'integration'
+        env:
+          LLGO_CORO_INLINE_FAULT_ACCEPTANCE: "1"
+        run: |
+          go test ./cl -run '^TestCoro(InlineFaultActivationBelongsToDirectCaller|NativeDefaultFaultBoundaryIsFunctionLocal|NativePanicBoundaryAddsNoCoroutineFrameStorage|NativeFault.*)$' -count=1 -v
+          go test ./internal/build -run '^TestCoroInlineNativeFaultAcceptance$' -count=1 -v
+          go test ./internal/build -run '^TestPCLNModeNativeIntegration$/^(packaging|fault-signal-does-not-load)$/^external$' -count=1 -v
+
       - name: Test lazy unwind scratch and actual fault contexts
         if: matrix.lane == 'compat'
         run: |
