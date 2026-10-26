@@ -7,6 +7,7 @@
 package llgoext
 
 import (
+	"os"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -80,6 +81,12 @@ func startNativeRecord(result *nativeStartResult) {
 }
 
 func TestRuntimeNativeStartStorageAndLifetime(t *testing.T) {
+	// The acceptance harness runs this test alone in a fresh process. A
+	// global count cannot distinguish this native child's retirement from an
+	// unrelated test goroutine finishing concurrently.
+	if os.Getenv("LLGO_NATIVE_START_ACCEPTANCE_CHILD") != "1" {
+		t.Skip("run through TestCoroContextLayoutAcceptance for isolated native lifetime accounting")
+	}
 	parent := currentRuntimeGMPState()
 	checkRunningRuntimeGMP(t, parent)
 	baseline := runtime.NumGoroutine()
@@ -118,6 +125,9 @@ func TestRuntimeNativeStartStorageAndLifetime(t *testing.T) {
 }
 
 func TestRuntimeNativeStartRejectsNilEntry(t *testing.T) {
+	if os.Getenv("LLGO_NATIVE_START_ACCEPTANCE_CHILD") != "1" {
+		t.Skip("run through TestCoroContextLayoutAcceptance for isolated native lifetime accounting")
+	}
 	baseline := runtime.NumGoroutine()
 	defer func() {
 		if got := recover(); got != "go of nil func value" {

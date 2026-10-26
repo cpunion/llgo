@@ -61,9 +61,22 @@ func TestCoroContextLayoutAcceptance(t *testing.T) {
 				t.Fatalf("missing context layout receipt: %s", output)
 			}
 			t.Log(strings.TrimSpace(output))
+			// Global registered-G assertions need a fresh process, including
+			// between repeats. Other tests may have returned before their last
+			// child or testing.tRunner has physically retired.
+			for _, name := range []string{"NativeStartStorageAndLifetime", "NativeStartRejectsNilEntry"} {
+				for repeat := 0; repeat < 3; repeat++ {
+					output := run(t, root, 90*time.Second, append(env, "LLGO_NATIVE_START_ACCEPTANCE_CHILD=1"),
+						native, "-test.v", "-test.count=1", "-test.timeout=60s", "-test.run=^TestRuntime"+name+"$")
+					if strings.Count(output, "--- PASS: TestRuntime"+name+" ") != 1 || strings.Contains(output, "--- SKIP:") {
+						t.Fatalf("missing isolated native pass for %s: %s", name, output)
+					}
+					t.Log(output)
+				}
+			}
 			output = run(t, root, 90*time.Second, env, native, "-test.v", "-test.count=3", "-test.timeout=60s",
-				"-test.run=^TestRuntime(NativeStart.*|GetGIsolation|GMP.*)$")
-			for _, name := range []string{"NativeStartStorageAndLifetime", "NativeStartRejectsNilEntry", "GMPLinks", "GMPIDBatchAllocation", "GetGIsolation"} {
+				"-test.run=^TestRuntime(GetGIsolation|GMP.*)$")
+			for _, name := range []string{"GMPLinks", "GMPIDBatchAllocation", "GetGIsolation"} {
 				if strings.Count(output, "--- PASS: TestRuntime"+name+" ") != 3 {
 					t.Fatalf("missing three native passes for %s: %s", name, output)
 				}
