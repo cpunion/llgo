@@ -5903,6 +5903,7 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		coroRunDecisionTakeZeroSymbolV1,
 		"__llgo_coro_complete_prepare_v1",
 		"__llgo_coro_frame_free_v1",
+		"__llgo_coro_frame_free_borrowed_v1",
 		"__llgo_coro_await_prepare_inline_v4",
 		"__llgo_coro_await_inline_destroy_consume_v4",
 		"__llgo_coro_await_consume_v1",
@@ -5977,6 +5978,18 @@ func requiredCoroProgramRuntimePlanWithLibrary(
 		}
 		if handled, err := validateCoroHostPullRuntimeFunctionV1(name, fn); handled && err != nil {
 			return nil, nil, nil, nil, err
+		}
+		if name == "__llgo_coro_frame_free_borrowed_v1" {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 5 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.Uintptr]) ||
+				!types.Identical(sig.Params().At(3).Type(), types.Typ[types.Uintptr]) ||
+				!types.Identical(sig.Params().At(4).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("borrowed coroutine frame release ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, uintptr, uintptr, unsafe.Pointer) signature", name)
+			}
 		}
 		if name == "__llgo_coro_complete_prepare_v2" {
 			sig := fn.Signature
@@ -9380,7 +9393,10 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 // rewriting conditions and speculating blocks repeats expensive work on giant
 // functions. Keep mandatory coroutine cleanup and the complete requested
 // optimization pipeline after this step.
-const coroPackageLoweringPipeline = "coro-early,cgscc(coro-split,function(simplifycfg<no-simplify-cond-branch;no-speculate-blocks>)),coro-cleanup"
+// Keep annotation elision adjacent to CoroSplit: it must consume certified
+// child calls while callers still have their presplit coroutine bodies. Once
+// CoroCleanup runs, the later optimizer cannot recover that frame-lifetime proof.
+const coroPackageLoweringPipeline = "coro-early,cgscc(coro-split,coro-annotation-elide,function(simplifycfg<no-simplify-cond-branch;no-speculate-blocks>)),coro-cleanup"
 
 // shouldDeferCoroLoweringToFullLTO preserves presplit coroutine bodies and
 // exact static call edges until LLVM owns the complete program. Package-level

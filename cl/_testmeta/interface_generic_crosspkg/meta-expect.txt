@@ -95,6 +95,7 @@ github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[int]
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
     __llgo_coro_frame_descriptor_v1.f9140bf3df9b9204588e24ecb53eafff
+    __llgo_coro_frame_free_borrowed_v1
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -118,6 +119,7 @@ github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[stri
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
     __llgo_coro_frame_descriptor_v1.cdb7011b3bebbb82ecb7469e9a3d9724
+    __llgo_coro_frame_free_borrowed_v1
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1
@@ -142,6 +144,7 @@ github.com/xgo-dev/llgo/cl/_testmeta/interface_generic_crosspkg/model.(*Box[stri
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
     __llgo_coro_frame_descriptor_v1.2fe4e90bb32293812d1349c370e6a343
+    __llgo_coro_frame_free_borrowed_v1
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_run_decision_take_zero_v1
@@ -178,6 +181,7 @@ main.main$coro:
     __llgo_coro_fault_prepare_v1
     __llgo_coro_frame_alloc_v1
     __llgo_coro_frame_descriptor_v1.71e01656caed4e80c81297dea4787d95
+    __llgo_coro_frame_free_borrowed_v1
     __llgo_coro_frame_free_v1
     __llgo_coro_frame_publish_v3
     __llgo_coro_panic_prepare_v1

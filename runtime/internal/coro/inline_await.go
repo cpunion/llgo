@@ -592,10 +592,12 @@ func CommitInlineAwaitDestroyCompiler(g *G, parentHandle, childHandle unsafe.Poi
 // The common Return path consumes pendingInlineDestroy, which was published by
 // FinishInlineAwaitReturnCompiler after its complete owner/action proof. A dynamic
 // ReleaseFrameCompiler changes only that receipt's target from the exact child
-// to nil after validating and unlinking it; a borrowed child keeps the target
-// until this commit unlinks its embedded metadata. No callback, suspension, or
-// scheduler entry can occur inside either adjacent interval. Every fallible
-// observation is therefore completed before the no-fail reactivate suffix.
+// to nil after validating and unlinking it. The extent-aware borrowed release
+// hook consumes the same receipt before clearing the child payload; legacy
+// borrowed children keep the target until this commit unlinks their metadata.
+// No callback, suspension, or scheduler entry can occur inside either adjacent
+// interval. Every fallible observation is therefore completed before the
+// no-fail reactivate suffix.
 func CommitInlineAwaitReturnPhysicalDestroyCompiler(
 	g *G, parentHandle, childHandle unsafe.Pointer,
 ) bool {
@@ -629,13 +631,10 @@ func CommitInlineAwaitReturnPhysicalDestroyCompiler(
 				child.state = FrameDestroyed
 				child.header.Lifecycle = uint16(FrameDestroyed)
 				g.destroyTarget = nil
-				// This compiler-private receipt requires an ordinary Return with
-				// no retained panic trace or park payload. After the unlink every
-				// remaining pointer names g, parent, or the dying child storage
-				// itself; none keeps an otherwise dead object alive. The next
-				// PublishFrameV3Compiler clears and initializes the complete
-				// borrowed Frame before relinking it, so clearing the same metadata
-				// area here would be duplicate lifetime work.
+				// This compatibility receipt predates the extent-aware borrowed
+				// release callback. It unlinks only scheduler metadata; current
+				// compiler bodies clear the complete child span in that callback
+				// and enter the already-consumed receipt case above instead.
 			default:
 				return false
 			}
