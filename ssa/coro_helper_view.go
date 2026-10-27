@@ -180,6 +180,10 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 	if !types.Identical(view.RawType(), signature) || view.NeedsEnv() {
 		fail("symbol conflicts with another physical signature")
 	}
+	// NewFuncEx marks instantiated definitions linkonce, including a reused
+	// definition. Reapply this view's stronger ODR contract on every lookup so
+	// independently emitted modules never publish mixed linkonce linkages.
+	view.impl.SetLinkage(llvm.LinkOnceODRLinkage)
 	if view.HasBody() {
 		attribute := view.impl.GetStringAttributeAtIndex(-1, coroHelperViewAttribute)
 		if attribute.IsNil() || attribute.GetStringValue() != fingerprint {
@@ -188,7 +192,6 @@ func (p Package) NewCoroHelperView(name string, signature *types.Signature, targ
 		return view
 	}
 	view.impl.AddFunctionAttr(p.mod.Context().CreateStringAttribute(coroHelperViewAttribute, fingerprint))
-	view.impl.SetLinkage(llvm.LinkOnceODRLinkage)
 	view.impl.SetUnnamedAddr(true)
 	view.Inline(AlwaysInline)
 	// An independently compiled consumer may discover this entry only by a
