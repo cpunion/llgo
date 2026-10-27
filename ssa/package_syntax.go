@@ -17,8 +17,10 @@
 package ssa
 
 import (
+	"go/token"
 	"go/types"
 	"sync"
+	"sync/atomic"
 )
 
 // packageSyntaxData is Go-owned metadata collected before LLVM package
@@ -26,18 +28,21 @@ import (
 // so those Programs can share it directly for concurrent read-only access.
 // One-shot compiler users keep the same Program-local mutation behavior.
 type packageSyntaxData struct {
-	mu                   sync.RWMutex
-	linknames            map[string]string
-	linknameTargets      map[string]int
-	linkDirectives       map[string]string
-	nativeExports        map[string]NativeExportInfo
-	externalImports      map[string]none
-	wasmImports          map[string]wasmImport
-	exports              map[string]string
-	closureEnvDirectives map[closureEnvDirectiveKey]none
-	parsedPackages       map[*types.Package]struct{}
-	noInterface          map[string]none
-	typeCallConvs        map[string]CallConv
+	mu                    sync.RWMutex
+	hasNativeTypeMetadata atomic.Bool
+	linknames             map[string]string
+	linknameTargets       map[string]int
+	linkDirectives        map[string]string
+	nativeExports         map[string]NativeExportInfo
+	externalImports       map[string]none
+	wasmImports           map[string]wasmImport
+	exports               map[string]string
+	closureEnvDirectives  map[closureEnvDirectiveKey]none
+	parsedPackages        map[*types.Package]struct{}
+	noInterface           map[string]none
+	typeCallConvs         map[string]CallConv
+	nativeStructFields    map[token.Pos]bool
+	nativeStructVars      map[*types.Var]bool
 }
 
 func newPackageSyntaxData() *packageSyntaxData {
@@ -53,6 +58,8 @@ func newPackageSyntaxData() *packageSyntaxData {
 		parsedPackages:       make(map[*types.Package]struct{}),
 		noInterface:          make(map[string]none),
 		typeCallConvs:        make(map[string]CallConv),
+		nativeStructFields:   make(map[token.Pos]bool),
+		nativeStructVars:     make(map[*types.Var]bool),
 	}
 }
 
