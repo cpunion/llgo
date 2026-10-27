@@ -46,8 +46,14 @@ func TestCoroHelperViewPreservesManagedPrefixWithoutFrames(t *testing.T) {
 					{Parameter: -1, Constant: f.prog.IntVal(7, f.prog.Uint32())},
 				}
 				view := f.pkg.NewCoroHelperView("view", sourceSignature, callee.Expr, prefix, arguments)
+				if got := view.impl.Linkage(); got != llvm.LinkOnceODRLinkage {
+					t.Fatalf("new helper linkage = %v, want linkonce_odr", got)
+				}
 				if again := f.pkg.NewCoroHelperView("view", sourceSignature, callee.Expr, prefix, arguments); again.impl.C != view.impl.C {
 					t.Fatal("identical typed view did not reuse its definition")
+				}
+				if got := view.impl.Linkage(); got != llvm.LinkOnceODRLinkage {
+					t.Fatalf("reused helper linkage = %v, want linkonce_odr", got)
 				}
 				calls := 0
 				for _, block := range view.impl.BasicBlocks() {
