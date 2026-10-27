@@ -22,11 +22,12 @@ import (
 	"runtime"
 )
 
-const runtimeLibraryOptimizationVersion = "darwin-arm64-runtime-o2-lto-v1"
+const runtimeLibraryOptimizationVersion = "darwin-arm64-runtime-o2-public-runtime-os-lto-v1"
 
-// Only the three private implementation modules enter this library optimizer.
-// Application and standard-library packages keep their native Os objects, so
-// large user coroutine modules never enter the combined linker IR. Keep the
+// The three private implementation modules use O2. The public runtime package
+// contributes Os bitcode to the same linker so its wrappers can be optimized
+// with their implementation. Application and other standard-library packages
+// keep native Os objects and do not enter the combined linker IR. Keep the
 // measured native profile explicit; cross targets, debug builds and custom
 // linker/archive choices retain the ordinary package pipeline.
 func runtimeLibraryLTO(conf *Config) bool {
@@ -46,7 +47,8 @@ func runtimeLibraryLTOPackage(conf *Config, pkg string) bool {
 		return false
 	}
 	switch pkg {
-	case "github.com/xgo-dev/llgo/runtime/internal/coro",
+	case "runtime",
+		"github.com/xgo-dev/llgo/runtime/internal/coro",
 		"github.com/xgo-dev/llgo/runtime/internal/runtime",
 		"github.com/xgo-dev/llgo/runtime/internal/coroalloc":
 		return true
@@ -55,7 +57,7 @@ func runtimeLibraryLTOPackage(conf *Config, pkg string) bool {
 }
 
 func runtimeLibraryOptLevel(conf *Config, pkg string) optlevel.Level {
-	if runtimeLibraryLTOPackage(conf, pkg) {
+	if pkg != "runtime" && runtimeLibraryLTOPackage(conf, pkg) {
 		return optlevel.O2
 	}
 	return conf.OptLevel
