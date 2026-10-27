@@ -48,7 +48,7 @@ func newproc1(fn goroutineFunc, arg unsafe.Pointer, callergp *g) *g {
 
 	ctx := allocRuntimeContext()
 	gp := initRuntimeContext(ctx, callergp, _Grunnable)
-	gp.startfn = fn
+	ctx.startfn = fn
 	gp.startarg = arg
 	ctx.startRoot = arg
 	return gp
@@ -68,13 +68,22 @@ func mstart(arg unsafe.Pointer) unsafe.Pointer {
 	}
 	gp := mp.curg
 	pp := mp.p
+	if gp.context == nil || gp.contextKind != runtimeContextNative {
+		fatal("runtime: invalid native mstart context")
+		return nil
+	}
+	ctx := (*runtimeContext)(unsafe.Pointer(gp.context))
+	if &ctx.g != gp || &ctx.m != mp || &ctx.p != pp {
+		fatal("runtime: mismatched native mstart ownership")
+		return nil
+	}
 
 	setg(gp)
 	casgstatus(gp, _Grunnable, _Grunning)
 	setpstatus(pp, _Prunning)
 
-	fn, arg := gp.startfn, gp.startarg
-	gp.startfn = nil
+	fn, arg := ctx.startfn, gp.startarg
+	ctx.startfn = nil
 	gp.startarg = nil
 	// newproc1 rejects a nil entry before publishing the context, but mstart
 	// executes after a cross-thread field handoff that coroutine SSA cannot
@@ -134,15 +143,17 @@ func GMPForTesting() (goid, parentGoid uint64, mid int64, pid int32, gstatus, ps
 	pp := mp.p
 	core := gp.context
 	linked = mp.curg == gp && pp.m == mp && core != nil && &core.g == gp
-	if linked && gp.startarg == nil {
+	if linked && gp.contextKind == runtimeContextNative {
 		// Native Gs and executor placeholders own their M/P in one complete
 		// runtimeContext allocation.
 		ctx := (*runtimeContext)(unsafe.Pointer(core))
 		linked = &ctx.coroRuntimeContext == core && &ctx.m == mp && &ctx.p == pp
-	} else if linked {
+	} else if linked && gp.contextKind.isCoro() {
 		// A stackless logical G owns only coroRuntimeContext and temporarily
 		// borrows the executor's M/P while its physical frame is resumed.
-		linked = gp.localContext == &core.local
+		linked = gp.startarg != nil && gp.localContext == &core.local
+	} else {
+		linked = false
 	}
 	return gp.goid, gp.parentGoid, mp.id, pp.id, readgstatus(gp), readpstatus(pp), linked
 }

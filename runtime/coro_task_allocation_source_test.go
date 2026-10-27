@@ -62,7 +62,7 @@ func TestCoroSpawnFusesTaskAndRuntimeContextAllocation(t *testing.T) {
 	context := readRuntimePollFile(t, "internal/runtime/coro_task_context.go")
 	for _, required := range []string{
 		"if ctx != &(*coroTaskAllocation)(unsafe.Pointer(task)).context",
-		"embedded := ctx.g.coroEmbedded",
+		"embedded := ctx.g.contextKind == runtimeContextCoroEmbedded",
 		"if !embedded {",
 		"FreeRoot(unsafe.Pointer(ctx))",
 	} {

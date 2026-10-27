@@ -49,7 +49,7 @@ func CurrentExecutionDomainContext() unsafe.Pointer {
 		return nil
 	}
 	gp := getgIfPresent()
-	if gp == nil || gp.startfn != nil || gp.startarg == nil {
+	if gp == nil || !gp.contextKind.isCoro() || gp.startarg == nil {
 		return nil
 	}
 	entry := coro.LookupExecutionDomainTask((*coro.G)(gp.startarg))
@@ -66,7 +66,7 @@ func EnterExecutionDomain(context unsafe.Pointer, activity *coro.ExecutionDomain
 		return false
 	}
 	gp := getgIfPresent()
-	if gp == nil || gp.startfn != nil || gp.startarg == nil {
+	if gp == nil || !gp.contextKind.isCoro() || gp.startarg == nil {
 		return false
 	}
 	entry := new(coro.ExecutionDomainTask)
@@ -76,7 +76,7 @@ func EnterExecutionDomain(context unsafe.Pointer, activity *coro.ExecutionDomain
 
 func LeaveExecutionDomain() bool {
 	gp := getgIfPresent()
-	if gp == nil || gp.startfn != nil || gp.startarg == nil {
+	if gp == nil || !gp.contextKind.isCoro() || gp.startarg == nil {
 		return false
 	}
 	post, ok := coro.DetachExecutionDomainTask((*coro.G)(gp.startarg))
