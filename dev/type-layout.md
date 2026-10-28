@@ -148,7 +148,10 @@ architecture, `LLGoSizesFor` supplies the architecture defaults. Cross-target
 C ABI users must additionally configure platform-specific properties such as
 `PointerSize` and `NativeAlign64`; GOARCH alone cannot express every OS ABI.
 
-`test/go/type_sizes*_test.go` contains executable checks for both Go and LLGo.
+`test/go/type_sizes_gc_test.go` checks gc-specific sizes and ignored LLGo
+annotations; `type_sizes_llgo_test.go` checks LLGo-specific sizes and native
+representation. Both supply `types.Sizes` implementations to the shared suite
+in `type_sizes_test.go`, which has no compiler-identity branches.
 The common tests compare each compiler's sizes with its own unsafe constants,
 generic builtins, real addresses and array strides, aggregate reflection metadata, packed
 loads/stores, maps, copying, and closure environments. LLGo-specific tests also

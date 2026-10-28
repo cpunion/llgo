@@ -14,7 +14,44 @@ import (
 	"unsafe"
 )
 
-const sizesUseLLGo = true
+func compilerSizesForTest() map[string]types.Sizes {
+	return map[string]types.Sizes{
+		"gc":   types.SizesFor("gc", runtime.GOARCH),
+		"llgo": types.SizesFor("llgo", runtime.GOARCH),
+	}
+}
+
+func TestLLGoTypeSizes(t *testing.T) {
+	if unsafe.Sizeof(sizeFunc(nil)) != 2*unsafe.Sizeof(uintptr(0)) {
+		t.Fatal("Go funcval must contain code and environment words")
+	}
+	if unsafe.Sizeof(sizeNativeFunc(nil)) != unsafe.Sizeof(llgoCFunc(nil)) {
+		t.Fatal("native function must occupy one native pointer")
+	}
+	if unsafe.Sizeof(sizePacked{}) != 11 || unsafe.Alignof(sizePacked{}) != 1 || unsafe.Sizeof(sizePacked2{}) != 12 || unsafe.Alignof(sizePacked2{}) != 2 {
+		t.Fatal("packed layout")
+	}
+	if unsafe.Sizeof(sizePadding{}) != 2 || unsafe.Sizeof(sizeNoPadding{}) != 8 || unsafe.Sizeof(sizePaddingIf[sizeEmpty, sizeEmpty]{}) != 2 {
+		t.Fatal("padding layout")
+	}
+	x := llgoGenericPacked[uint64]{}
+	if unsafe.Sizeof(x) != 9 || unsafe.Offsetof(x.V) != 1 {
+		t.Fatal("generic packed layout")
+	}
+	type Plain struct {
+		B byte
+		X uint64
+		Y uint16
+	}
+	if reflect.TypeOf((*sizePacked)(nil)).ConvertibleTo(reflect.TypeOf((*Plain)(nil))) {
+		t.Fatal("pointer conversion between different layouts")
+	}
+	type OtherEmpty struct{}
+	mixed, base := sizePaddingMixed[sizeEmpty, OtherEmpty]{}, sizePaddingBase[sizeEmpty]{}
+	if unsafe.Sizeof(mixed) != 2 || unsafe.Offsetof(mixed.Last) != 1 || unsafe.Sizeof(base) != 2 || unsafe.Offsetof(base.Value) != 1 {
+		t.Fatal("conditional padding conflicts")
+	}
+}
 
 //llgo:cdecl
 type llgoNativeAnonymous struct {

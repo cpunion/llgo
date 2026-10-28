@@ -6,12 +6,14 @@ import (
 	"go/token"
 	"go/types"
 	"reflect"
-	"runtime"
 	"testing"
 	"unsafe"
 )
 
 type sizeFunc func(int) int
+
+//llgo:cdecl
+type sizeNativeFunc func(int) int
 type sizeAlias = sizeFunc
 type sizeDefined sizeFunc
 type sizeEmpty struct{}
@@ -92,6 +94,8 @@ type sizePaddingBase[T any] struct {
 // compilers must agree with their own types.Sizes model and physical storage.
 const sizeCommonSource = `package p
 type F func(int) int
+//llgo:cdecl
+type NativeF func(int) int
 type Alias = F
 type Defined F
 type Empty struct{}
@@ -130,71 +134,74 @@ type Str string
 `
 
 func TestCompilerTypeSizes(t *testing.T) {
-	names := []string{runtime.Compiler}
-	if sizesUseLLGo {
-		names = []string{"gc", "llgo"}
-	}
-	for _, compiler := range names {
+	// Each compiler-specific file supplies implementations of the same public
+	// interface. All common checks compare that interface with real storage.
+	for compiler, sizes := range compilerSizesForTest() {
 		t.Run(compiler, func(t *testing.T) {
-			sizes := types.SizesFor(compiler, runtime.GOARCH)
-			if sizes == nil {
-				t.Fatalf("no sizes for %s/%s", compiler, runtime.GOARCH)
-			}
-			fset := token.NewFileSet()
-			file, err := parser.ParseFile(fset, "sizes.go", sizeCommonSource, parser.ParseComments)
-			if err != nil {
-				t.Fatal(err)
-			}
-			conf := types.Config{Sizes: sizes}
-			pkg, err := conf.Check("sizes", fset, []*ast.File{file}, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, tc := range []struct {
-				name        string
-				size, align uintptr
-				offsets     []uintptr
-			}{
-				{"F", unsafe.Sizeof(sizeFunc(nil)), unsafe.Alignof(sizeFunc(nil)), nil},
-				{"Alias", unsafe.Sizeof(sizeAlias(nil)), unsafe.Alignof(sizeAlias(nil)), nil},
-				{"Defined", unsafe.Sizeof(sizeDefined(nil)), unsafe.Alignof(sizeDefined(nil)), nil},
-				{"FuncRecord", unsafe.Sizeof(sizeFuncRecord{}), unsafe.Alignof(sizeFuncRecord{}), []uintptr{0, unsafe.Offsetof(sizeFuncRecord{}.F), unsafe.Offsetof(sizeFuncRecord{}.Z)}},
-				{"Generic", unsafe.Sizeof(sizeContainer[[2]sizeFunc]{}), unsafe.Alignof(sizeContainer[[2]sizeFunc]{}), []uintptr{0, unsafe.Offsetof(sizeContainer[[2]sizeFunc]{}.V), unsafe.Offsetof(sizeContainer[[2]sizeFunc]{}.Z)}},
-				{"Packed", unsafe.Sizeof(sizePacked{}), unsafe.Alignof(sizePacked{}), []uintptr{0, unsafe.Offsetof(sizePacked{}.X), unsafe.Offsetof(sizePacked{}.Y)}},
-				{"Packed2", unsafe.Sizeof(sizePacked2{}), unsafe.Alignof(sizePacked2{}), []uintptr{0, unsafe.Offsetof(sizePacked2{}.X), unsafe.Offsetof(sizePacked2{}.Y)}},
-				{"Padding", unsafe.Sizeof(sizePadding{}), unsafe.Alignof(sizePadding{}), []uintptr{0, unsafe.Offsetof(sizePadding{}.X)}},
-				{"NoPadding", unsafe.Sizeof(sizeNoPadding{}), unsafe.Alignof(sizeNoPadding{}), []uintptr{0, unsafe.Offsetof(sizeNoPadding{}.E)}},
-				{"Same", unsafe.Sizeof(sizePaddingIf[sizeEmpty, sizeEmpty]{}), unsafe.Alignof(sizePaddingIf[sizeEmpty, sizeEmpty]{}), []uintptr{0, unsafe.Offsetof(sizePaddingIf[sizeEmpty, sizeEmpty]{}.B)}},
-				{"Ptr", unsafe.Sizeof((*byte)(nil)), unsafe.Alignof((*byte)(nil)), nil},
-				{"Slice", unsafe.Sizeof([]sizeFunc(nil)), unsafe.Alignof([]sizeFunc(nil)), nil},
-				{"Array", unsafe.Sizeof([3]sizeFunc{}), unsafe.Alignof([3]sizeFunc{}), nil},
-				{"Interface", unsafe.Sizeof((interface{ M() })(nil)), unsafe.Alignof((interface{ M() })(nil)), nil},
-				{"Map", unsafe.Sizeof(map[int]sizeFunc(nil)), unsafe.Alignof(map[int]sizeFunc(nil)), nil},
-				{"Chan", unsafe.Sizeof((chan sizeFunc)(nil)), unsafe.Alignof((chan sizeFunc)(nil)), nil},
-				{"Complex", unsafe.Sizeof(complex128(0)), unsafe.Alignof(complex128(0)), nil},
-				{"Str", unsafe.Sizeof(""), unsafe.Alignof(""), nil},
-			} {
-				typ := pkg.Scope().Lookup(tc.name).Type()
-				if got := sizes.Sizeof(typ); got != int64(tc.size) {
-					t.Errorf("%s size %d != unsafe %d", tc.name, got, tc.size)
-				}
-				if got := sizes.Alignof(typ); got != int64(tc.align) {
-					t.Errorf("%s align %d != unsafe %d", tc.name, got, tc.align)
-				}
-				if tc.offsets != nil {
-					st := typ.Underlying().(*types.Struct)
-					fields := make([]*types.Var, st.NumFields())
-					for i := range fields {
-						fields[i] = st.Field(i)
-					}
-					for i, offset := range sizes.Offsetsof(fields) {
-						if offset != int64(tc.offsets[i]) {
-							t.Errorf("%s field %d offset %d != unsafe %d", tc.name, i, offset, tc.offsets[i])
-						}
-					}
-				}
-			}
+			testCompilerTypeSizes(t, sizes)
 		})
+	}
+}
+
+func testCompilerTypeSizes(t *testing.T, sizes types.Sizes) {
+	t.Helper()
+	if sizes == nil {
+		t.Fatal("nil types.Sizes")
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sizes.go", sizeCommonSource, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := types.Config{Sizes: sizes}
+	pkg, err := conf.Check("sizes", fset, []*ast.File{file}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name        string
+		size, align uintptr
+		offsets     []uintptr
+	}{
+		{"F", unsafe.Sizeof(sizeFunc(nil)), unsafe.Alignof(sizeFunc(nil)), nil},
+		{"NativeF", unsafe.Sizeof(sizeNativeFunc(nil)), unsafe.Alignof(sizeNativeFunc(nil)), nil},
+		{"Alias", unsafe.Sizeof(sizeAlias(nil)), unsafe.Alignof(sizeAlias(nil)), nil},
+		{"Defined", unsafe.Sizeof(sizeDefined(nil)), unsafe.Alignof(sizeDefined(nil)), nil},
+		{"FuncRecord", unsafe.Sizeof(sizeFuncRecord{}), unsafe.Alignof(sizeFuncRecord{}), []uintptr{0, unsafe.Offsetof(sizeFuncRecord{}.F), unsafe.Offsetof(sizeFuncRecord{}.Z)}},
+		{"Generic", unsafe.Sizeof(sizeContainer[[2]sizeFunc]{}), unsafe.Alignof(sizeContainer[[2]sizeFunc]{}), []uintptr{0, unsafe.Offsetof(sizeContainer[[2]sizeFunc]{}.V), unsafe.Offsetof(sizeContainer[[2]sizeFunc]{}.Z)}},
+		{"Packed", unsafe.Sizeof(sizePacked{}), unsafe.Alignof(sizePacked{}), []uintptr{0, unsafe.Offsetof(sizePacked{}.X), unsafe.Offsetof(sizePacked{}.Y)}},
+		{"Packed2", unsafe.Sizeof(sizePacked2{}), unsafe.Alignof(sizePacked2{}), []uintptr{0, unsafe.Offsetof(sizePacked2{}.X), unsafe.Offsetof(sizePacked2{}.Y)}},
+		{"Padding", unsafe.Sizeof(sizePadding{}), unsafe.Alignof(sizePadding{}), []uintptr{0, unsafe.Offsetof(sizePadding{}.X)}},
+		{"NoPadding", unsafe.Sizeof(sizeNoPadding{}), unsafe.Alignof(sizeNoPadding{}), []uintptr{0, unsafe.Offsetof(sizeNoPadding{}.E)}},
+		{"Same", unsafe.Sizeof(sizePaddingIf[sizeEmpty, sizeEmpty]{}), unsafe.Alignof(sizePaddingIf[sizeEmpty, sizeEmpty]{}), []uintptr{0, unsafe.Offsetof(sizePaddingIf[sizeEmpty, sizeEmpty]{}.B)}},
+		{"Ptr", unsafe.Sizeof((*byte)(nil)), unsafe.Alignof((*byte)(nil)), nil},
+		{"Slice", unsafe.Sizeof([]sizeFunc(nil)), unsafe.Alignof([]sizeFunc(nil)), nil},
+		{"Array", unsafe.Sizeof([3]sizeFunc{}), unsafe.Alignof([3]sizeFunc{}), nil},
+		{"Interface", unsafe.Sizeof((interface{ M() })(nil)), unsafe.Alignof((interface{ M() })(nil)), nil},
+		{"Map", unsafe.Sizeof(map[int]sizeFunc(nil)), unsafe.Alignof(map[int]sizeFunc(nil)), nil},
+		{"Chan", unsafe.Sizeof((chan sizeFunc)(nil)), unsafe.Alignof((chan sizeFunc)(nil)), nil},
+		{"Complex", unsafe.Sizeof(complex128(0)), unsafe.Alignof(complex128(0)), nil},
+		{"Str", unsafe.Sizeof(""), unsafe.Alignof(""), nil},
+	} {
+		typ := pkg.Scope().Lookup(tc.name).Type()
+		if got := sizes.Sizeof(typ); got != int64(tc.size) {
+			t.Errorf("%s size %d != unsafe %d", tc.name, got, tc.size)
+		}
+		if got := sizes.Alignof(typ); got != int64(tc.align) {
+			t.Errorf("%s align %d != unsafe %d", tc.name, got, tc.align)
+		}
+		if tc.offsets != nil {
+			st := typ.Underlying().(*types.Struct)
+			fields := make([]*types.Var, st.NumFields())
+			for i := range fields {
+				fields[i] = st.Field(i)
+			}
+			for i, offset := range sizes.Offsetsof(fields) {
+				if offset != int64(tc.offsets[i]) {
+					t.Errorf("%s field %d offset %d != unsafe %d", tc.name, i, offset, tc.offsets[i])
+				}
+			}
+		}
 	}
 }
 
@@ -206,18 +213,6 @@ func TestCompilerLayoutStorage(t *testing.T) {
 	}
 	if size, align := sizeGeneric[sizeContainer[[2]sizeFunc]](); size != unsafe.Sizeof(sizeContainer[[2]sizeFunc]{}) || align != unsafe.Alignof(sizeContainer[[2]sizeFunc]{}) {
 		t.Fatal("generic function-containing layout differs from constant layout")
-	}
-	if sizesUseLLGo {
-		if unsafe.Sizeof(sizePacked{}) != 11 || unsafe.Alignof(sizePacked{}) != 1 || unsafe.Sizeof(sizePacked2{}) != 12 || unsafe.Alignof(sizePacked2{}) != 2 {
-			t.Fatal("packed golden layout")
-		}
-		if unsafe.Sizeof(sizePadding{}) != 2 || unsafe.Sizeof(sizeNoPadding{}) != 8 || unsafe.Sizeof(sizePaddingIf[sizeEmpty, sizeEmpty]{}) != 2 {
-			t.Fatal("padding golden layout")
-		}
-	} else {
-		if unsafe.Sizeof(sizePadding{}) != 1 || unsafe.Sizeof(sizeNoPadding{}) != 8+unsafe.Alignof(uint64(0)) || unsafe.Sizeof(sizePaddingIf[sizeEmpty, sizeEmpty]{}) != 0 {
-			t.Fatal("gc must ignore llgo directives")
-		}
 	}
 	packed := [2]sizePacked{{1, 2, 3}, {4, 5, 6}}
 	if stride := uintptr(unsafe.Pointer(&packed[1])) - uintptr(unsafe.Pointer(&packed[0])); stride != unsafe.Sizeof(sizePacked{}) {
@@ -310,9 +305,6 @@ func TestCompilerLayoutConversions(t *testing.T) {
 	if got := reflect.ValueOf(plain).Convert(reflect.TypeOf(p)).Interface().(sizePacked); got != p {
 		t.Fatal("reflection natural conversion")
 	}
-	if sizesUseLLGo && reflect.TypeOf(&p).ConvertibleTo(reflect.TypeOf(&plain)) {
-		t.Fatal("pointer conversion between different layouts")
-	}
 	native := sizeNativeNested{}
 	native.A[0].X, native.A[1].X = 31, 37
 	ordinary := sizeOrdinaryNested(native)
@@ -329,20 +321,16 @@ func TestCompilerConditionalPaddingConflicts(t *testing.T) {
 	type OtherEmpty struct{}
 	mixed := sizePaddingMixed[sizeEmpty, OtherEmpty]{}
 	base := sizePaddingBase[sizeEmpty]{}
-	wantSize, wantOffset := uintptr(0), uintptr(0)
-	if sizesUseLLGo {
-		wantSize, wantOffset = 2, 1
+	// The compiler-specific files check the expected differences. Here the
+	// public reflection interface and actual addresses must agree with unsafe.
+	if reflect.TypeOf(mixed).Size() != unsafe.Sizeof(mixed) || reflect.TypeOf(base).Size() != unsafe.Sizeof(base) {
+		t.Fatal("conditional padding reflection size")
 	}
-	if unsafe.Sizeof(mixed) != wantSize || unsafe.Offsetof(mixed.Last) != wantOffset {
-		t.Fatal("non-adjacent empty member conflict")
-	}
-	if unsafe.Sizeof(base) != wantSize || unsafe.Offsetof(base.Value) != wantOffset {
-		t.Fatal("embedded empty base conflict")
-	}
+	wantOffset := unsafe.Offsetof(mixed.Last)
 	if actual := uintptr(unsafe.Pointer(&mixed.Last)) - uintptr(unsafe.Pointer(&mixed)); actual != wantOffset {
 		t.Fatal("non-adjacent field address")
 	}
-	if actual := uintptr(unsafe.Pointer(&base.Value)) - uintptr(unsafe.Pointer(&base)); actual != wantOffset {
+	if actual := uintptr(unsafe.Pointer(&base.Value)) - uintptr(unsafe.Pointer(&base)); actual != unsafe.Offsetof(base.Value) {
 		t.Fatal("embedded base field address")
 	}
 }
@@ -376,8 +364,8 @@ func TestCompilerGenericPacked(t *testing.T) {
 	if x.B != 7 || x.V != 42 {
 		t.Fatal(x)
 	}
-	if runtime.Compiler == "llgo" && (unsafe.Sizeof(x) != 9 || unsafe.Offsetof(x.V) != 1) {
-		t.Fatal("generic packed layout")
+	if size, align := sizeGeneric[llgoGenericPacked[uint64]](); size != unsafe.Sizeof(x) || align != unsafe.Alignof(x) {
+		t.Fatal("generic packed layout differs from constant layout")
 	}
 }
 
