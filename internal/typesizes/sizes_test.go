@@ -271,6 +271,14 @@ func TestDirectiveDiagnostics(t *testing.T) {
 		"//llgo:pack 3\ntype T struct { A int }",
 		"//llgo:packed\ntype T int",
 		"type (\n//llgo:cdecl\nT func()\nU int\n)",
+		"//llgo:packed\n//llgo:pack 2\ntype T struct { X int }",
+		"type T struct {\n//llgo:padding 1\nX struct{}\n}",
+		"var X struct {\n//llgo:padding-if\nX struct{}\n}",
+		"//llgo:cdecl argument\ntype T func()",
+		"//llgo:stdcall argument\ntype T func()",
+		"//llgo:cdecl\n//llgo:stdcall\ntype T func()",
+		"//llgo:cdecl\ntype (T func(); U int)",
+		"type (\n//llgo:cdecl argument\nT func()\nU int\n)",
 	} {
 		fset := token.NewFileSet()
 		file, err := parser.ParseFile(fset, "bad.go", "package p\n"+source, parser.ParseComments)
@@ -374,6 +382,7 @@ func TestReservedLayoutDeclarations(t *testing.T) {
 	for _, source := range []string{
 		"const LLGoTypeLayout_T = 1",
 		"type __llgo_native_Cdecl_0_0_false int",
+		"func LLGoTypeLayout_T() {}",
 		"//go:linkname f C.f\nvar f, g func()",
 	} {
 		fset := token.NewFileSet()

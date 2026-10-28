@@ -23,6 +23,10 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
+// LayoutStorageWrapperPrefix marks field storage that must survive native ABI
+// normalization. Its padding and alignment are part of the declared layout.
+const LayoutStorageWrapperPrefix = "$llgo.layout.storage"
+
 type structLayout struct {
 	wrapped []bool
 }
@@ -158,6 +162,24 @@ func (p Program) toLLVMStructBody(raw *types.Struct, native bool) ([]llvm.Type, 
 				parts = append(parts, llvm.ArrayType(p.tyInt8(), int(padding)))
 			}
 			field = p.ctx.StructType(parts, true)
+			if p.target.effectiveGOOS() == "windows" && p.target.effectiveGOARCH() == "386" &&
+				(pack != 0 || fieldAlign <= goFieldAlign) {
+				// Win32's legacy ABI adapter unwraps ordinary Go/386 scalar
+				// alignment adjustments. Packing and explicit storage padding
+				// must retain their bytes and offsets at the call boundary.
+				// Reuse each physical shape: repeated tuple/metadata lowering
+				// must not introduce distinct LLVM identities for equal layouts.
+				if p.layoutStorageWrappers == nil {
+					p.layoutStorageWrappers = make(map[llvm.Type]llvm.Type)
+				}
+				wrapper, ok := p.layoutStorageWrappers[field]
+				if !ok {
+					wrapper = p.ctx.StructCreateNamed(LayoutStorageWrapperPrefix)
+					wrapper.StructSetBody(parts, true)
+					p.layoutStorageWrappers[field] = wrapper
+				}
+				field = wrapper
+			}
 			wrapped[i] = true
 		}
 		body = append(body, field)

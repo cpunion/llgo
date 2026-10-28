@@ -145,6 +145,8 @@ type aProgram struct {
 	// LLVM type is not a safe identity for this metadata.
 	structLayouts    typeutil.Map
 	hasStructLayouts bool
+	// Preserve structural identity when marking Win32 layout storage by name.
+	layoutStorageWrappers map[llvm.Type]llvm.Type
 	// nativeStorage caches transient Type views whose addressable storage is
 	// owned by a C/host ABI rather than by the Go data model. Canonical types
 	// map to their native view, while native views map to themselves.
