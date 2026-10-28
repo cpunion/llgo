@@ -1,7 +1,9 @@
 package gotest
 
 import (
+	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -139,6 +141,61 @@ func TestCompilerTypeSizes(t *testing.T) {
 	for compiler, sizes := range compilerSizesForTest() {
 		t.Run(compiler, func(t *testing.T) {
 			testCompilerTypeSizes(t, sizes)
+		})
+	}
+}
+
+type sizeTestImports map[string]*types.Package
+
+func (p sizeTestImports) Import(path string) (*types.Package, error) {
+	if path == "unsafe" {
+		return types.Unsafe, nil
+	}
+	if pkg := p[path]; pkg != nil {
+		return pkg, nil
+	}
+	return nil, fmt.Errorf("missing import %q", path)
+}
+
+func TestCompilerImportedTypeSizes(t *testing.T) {
+	for compiler, sizes := range compilerSizesForTest() {
+		t.Run(compiler, func(t *testing.T) {
+			imports := sizeTestImports{}
+			check := func(path, source string) *types.Package {
+				t.Helper()
+				fset := token.NewFileSet()
+				file, err := parser.ParseFile(fset, "sizes.go", source, parser.ParseComments)
+				if err != nil {
+					t.Fatal(err)
+				}
+				conf := types.Config{Sizes: sizes, Importer: imports}
+				pkg, err := conf.Check(path, fset, []*ast.File{file}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return pkg
+			}
+			imports["a"] = check("a", "package a\n//llgo:cdecl\ntype NativeA func(int) int")
+			imports["b"] = check("b", "package b\n//llgo:cdecl\ntype NativeB func(int) int")
+			pkg := check("copies", `package copies
+import . "a"
+import renamed "a"
+import . "b"
+import "unsafe"
+type CopyA NativeA
+type CopyB NativeB
+var _ renamed.NativeA
+const SizeA = unsafe.Sizeof(CopyA(nil))
+const SizeB = unsafe.Sizeof(CopyB(nil))
+`)
+			for _, suffix := range []string{"A", "B"} {
+				typ := pkg.Scope().Lookup("Copy" + suffix).Type()
+				want := int64(unsafe.Sizeof(sizeNativeFunc(nil)))
+				constantSize, ok := constant.Int64Val(pkg.Scope().Lookup("Size" + suffix).(*types.Const).Val())
+				if got := sizes.Sizeof(typ); got != want || !ok || constantSize != want {
+					t.Errorf("Copy%s: size=%d, constant=%d, want %d", suffix, got, constantSize, want)
+				}
+			}
 		})
 	}
 }

@@ -33,7 +33,19 @@ type llgoFieldKey struct {
 type llgoTypeDecl struct {
 	attrs   LLGoTypeAttrs
 	ref     ast.Expr
-	imports map[string]string
+	imports map[string][]string // import path -> local names; empty uses the package name
+}
+
+func (d llgoTypeDecl) importsAs(pkg *Package, name string) bool {
+	for _, local := range d.imports[pkg.Path()] {
+		if local == "" {
+			local = pkg.Name()
+		}
+		if local == name {
+			return true
+		}
+	}
+	return false
 }
 
 // LLGoLayout retains attributes that go/types.Type does not encode. Keys
@@ -130,19 +142,20 @@ resolved:
 	switch ref := ref.(type) {
 	case *ast.Ident:
 		inherited = m.typeAttrs(llgoDeclKey{key.pkg, ref.Name}, seen)
-		if path := d.imports["."]; inherited == (LLGoTypeAttrs{}) && path != "" && key.pkg != nil {
+		if inherited == (LLGoTypeAttrs{}) && key.pkg != nil {
 			for _, pkg := range key.pkg.Imports() {
-				if pkg.Path() == path {
+				if d.importsAs(pkg, ".") {
 					inherited = m.typeAttrs(llgoDeclKey{pkg, ref.Name}, seen)
-					break
+					if inherited != (LLGoTypeAttrs{}) {
+						break
+					}
 				}
 			}
 		}
 	case *ast.SelectorExpr:
 		if id, ok := ref.X.(*ast.Ident); ok && key.pkg != nil {
 			for _, pkg := range key.pkg.Imports() {
-				path := d.imports[id.Name]
-				if path == pkg.Path() || path == "" && id.Name == pkg.Name() {
+				if d.importsAs(pkg, id.Name) {
 					inherited = m.typeAttrs(llgoDeclKey{pkg, ref.Sel.Name}, seen)
 					break
 				}
@@ -318,12 +331,15 @@ func (m *LLGoLayout) ParseSyntax(fset *token.FileSet, pkg *Package, files []*ast
 		}
 	}
 	for _, file := range files {
-		imports := make(map[string]string)
+		imports := make(map[string][]string)
 		for _, imp := range file.Imports {
 			path, _ := strconv.Unquote(imp.Path.Value)
+			name := ""
 			if imp.Name != nil {
-				imports[imp.Name.Name] = path
+				name = imp.Name.Name
 			}
+			// Retain every file-local binding, including multiple names for one path.
+			imports[path] = append(imports[path], name)
 		}
 		for _, decl := range file.Decls {
 			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil && (strings.HasPrefix(fd.Name.Name, llgoTypeMetadataPrefix) || strings.HasPrefix(fd.Name.Name, "__llgo_native_")) {
