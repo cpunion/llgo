@@ -8,12 +8,9 @@ compiler names and architectures still return nil; `gccgo` retains its standard
 library implementation. Build constraints are unchanged.
 
 The canonical parser, layout model, metadata encoding, and validation live in
-`runtime/_patch/go/types/llgo_*.go`. Run `go generate ./internal/typesizes`
-after changing them. Generation changes package/import declarations for the
-compiler adapter and generates reflection's tag-display helper. Consistency
-tests check generated copies. The runtime does not import the compiler: the
-patch is compiled inside standard `go/types`, while the compiler imports the
-generated adapter. Neither layout implementation depends on LLVM.
+`runtime/_patch/go/types/llgo_*.go`. The compiler uses the generated adapter in
+`internal/typesizes`; reflection's tag-display helper is generated from the
+same source. Neither layout implementation depends on LLVM.
 
 The model includes Go closures (code and environment words), native function
 pointers, pointers and aggregate fields, arrays including zero-length arrays,
@@ -21,6 +18,40 @@ aliases and defined types, instantiated generic structs, native calling
 conventions, SIMD alignment markers, ordinary trailing zero-sized field
 padding, and the layout directives below. Nested aggregates are laid out
 recursively instead of adjusting offsets computed using gc sizes.
+
+## Maintaining one implementation
+
+The source patch compiles inside standard `go/types`. The compiler adapter
+imports `go/types` to work with the host toolchain's types. Importing that adapter
+back into the patched package would create an import cycle. The two packages
+therefore need separate source files, but the layout rules have one maintained
+implementation.
+
+Edit the shared `llgo_*.go` files under `runtime/_patch/go/types`, then run from
+the repository root:
+
+```sh
+go generate ./internal/typesizes
+go test ./internal/typesizes -run '^TestGeneratedAdapterMatchesPatch$' -count=1
+```
+
+Commit the canonical source and generated files together. Do not edit the files
+marked `Code generated` directly. When adding or removing a shared source file,
+update the file list in `internal/typesizes/generate.go` and its generated output.
+The package-specific entry points `check.go` and `sizes.go` are not copied.
+
+Generation changes the package declaration and qualifies standard `go/types`
+identifiers; it does not rewrite layout rules. Reflection's generated helper
+also changes the exported helper name to its package-local name.
+`TestGeneratedAdapterMatchesPatch` runs the generator in `-check` mode, computes
+expected output without writing files, and compares the complete generated
+contents. Only CRLF/LF differences are ignored. A stale or manually edited copy
+fails this test, which is included in the regular Go CI suite.
+
+Text consistency alone does not prove correct layouts. The source-versus-LLVM
+checks, export-data tests, C++ comparisons, and Go/LLGo execution tests described
+below separately check that the shared rules produce the expected storage and
+reflection behavior.
 
 ## Source attributes
 
