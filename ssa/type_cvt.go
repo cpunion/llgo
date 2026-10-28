@@ -460,12 +460,13 @@ func (p goTypes) cvtStruct(typ *types.Struct) (raw *types.Struct, cvt bool) {
 	flds := make([]*types.Var, n)
 	tags := make([]string, n)
 	needcvt := false
+	native := p.packageSyntax.layout.TypeAttrs(typ).Native
 	for i := 0; i < n; i++ {
 		f := typ.Field(i)
 		_, rawCallback := f.Type().(*types.Signature)
 		var t types.Type
 		var cvt bool
-		if !rawCallback || !p.packageSyntax.layout.TypeAttrs(typ).Native {
+		if !rawCallback || !native {
 			t, cvt = p.cvtType(f.Type())
 		}
 		if cvt {

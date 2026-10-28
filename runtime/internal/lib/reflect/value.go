@@ -2042,6 +2042,13 @@ func (v Value) assignTo(context string, dst *abi.Type, target unsafe.Pointer) Va
 		v = makeMethodValue(context, v)
 	}
 	typ := v.typ()
+	if v.Kind() == Func {
+		publicDst := toPublicType(dst).common()
+		publicSrc := v.Type().common()
+		if publicDst.Kind() == abi.Func && (publicDst.TFlag^publicSrc.TFlag)&abi.TFlagNative != 0 && directlyAssignable(publicDst, publicSrc) {
+			return cvtFunc(v, toType(publicDst))
+		}
+	}
 	if typ.Kind() == abi.Func {
 		typ = closureOf(typ.FuncType())
 	}
@@ -3452,6 +3459,9 @@ func sameLayout(x, y *abi.Type, pointers bool, seen map[[2]*abi.Type]bool) bool 
 func cvtFunc(v Value, typ Type) Value {
 	f := v.flag
 	t := typ.common()
+	if (v.typ().TFlag^t.TFlag)&abi.TFlagNative != 0 && v.IsNil() {
+		return Zero(typ)
+	}
 	if v.typ().TFlag&abi.TFlagNative != 0 && t.TFlag&abi.TFlagNative == 0 {
 		// Copy the code pointer now: later writes to an addressable source must
 		// not change the converted Go value. MakeFunc supplies the Go ABI entry,

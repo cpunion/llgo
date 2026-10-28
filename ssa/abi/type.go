@@ -147,35 +147,37 @@ func (b *Builder) reflectTypeArgBaseString(t types.Type) string {
 }
 
 func publicLayoutTypeString(s string) string {
+	if !strings.Contains(s, "llgo.layout:") {
+		return s
+	}
 	var out strings.Builder
-	for i := 0; i < len(s); {
-		if s[i] != '"' {
-			out.WriteByte(s[i])
-			i++
-			continue
+	for rest := s; ; {
+		i := strings.IndexByte(rest, '"')
+		if i < 0 {
+			out.WriteString(rest)
+			return out.String()
 		}
-		end := i + 1
-		for end < len(s) {
-			if s[end] == '\\' {
-				end += 2
-				continue
-			}
-			if s[end] == '"' {
-				end++
-				break
-			}
-			end++
-		}
-		tag, err := strconv.Unquote(s[i:end])
+		quoted, err := strconv.QuotedPrefix(rest[i:])
 		if err != nil {
 			return s
 		}
-		if clean := typesizes.LLGoFieldTag(tag); clean != "" {
+		tag, err := strconv.Unquote(quoted)
+		if err != nil {
+			return s
+		}
+		clean := typesizes.LLGoFieldTag(tag)
+		prefix := rest[:i]
+		if clean == "" && clean != tag {
+			prefix = strings.TrimSuffix(prefix, " ")
+		}
+		out.WriteString(prefix)
+		if clean == tag {
+			out.WriteString(quoted)
+		} else if clean != "" {
 			out.WriteString(strconv.Quote(clean))
 		}
-		i = end
+		rest = rest[i+len(quoted):]
 	}
-	return out.String()
 }
 
 func reflectTypeArgPkgPath(pkg *types.Package) string {

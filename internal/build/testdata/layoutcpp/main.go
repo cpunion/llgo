@@ -38,6 +38,19 @@ type Pack2 struct {
 	Y uint16
 }
 
+//llgo:cdecl
+//llgo:packed
+type Lane struct {
+	X    uint32
+	Tail byte
+}
+
+//llgo:cdecl
+type PackedArray struct{ Lanes [2]Lane }
+
+//go:linkname roundArray C.llgo_layout_round_array
+func roundArray(x PackedArray) PackedArray
+
 //go:linkname metric C.llgo_layout_metric
 func metric(i int32) uint64
 
@@ -75,6 +88,9 @@ func main() {
 	}
 	if got := roundPack2(Pack2{1, 2, 3}); got != (Pack2{2, 4, 6}) {
 		panic("pack2 C ABI")
+	}
+	if got := roundArray(PackedArray{[2]Lane{{3, 7}, {5, 9}}}); got != (PackedArray{[2]Lane{{4, 7}, {7, 9}}}) {
+		panic("packed array C ABI")
 	}
 	if unsafe.Sizeof(roundPacked) != unsafe.Sizeof((func(Packed) Packed)(nil)) {
 		panic("native function size")

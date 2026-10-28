@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // LLGoTypeAttrs controls native representation and maximum field alignment.
@@ -49,7 +50,7 @@ type LLGoLayout struct {
 	padding       map[llgoFieldKey]string
 	fieldAttrs    map[*Var]LLGoTypeAttrs
 	fieldPadding  map[*Var]string
-	packed        bool
+	packed        atomic.Bool
 	nativeFuncs   map[string]*Named
 	nativePkg     *Package
 	recordedTypes map[Type]bool
@@ -59,9 +60,7 @@ const llgoTypeMetadataPrefix = "LLGoTypeLayout_"
 
 // HasPacked reports whether code may access storage below its natural alignment.
 func (m *LLGoLayout) HasPacked() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.packed
+	return m.packed.Load()
 }
 
 func llgoObjectName(t Type) *TypeName {
@@ -75,13 +74,13 @@ func llgoObjectName(t Type) *TypeName {
 }
 
 func (m *LLGoLayout) TypeAttrs(t Type) LLGoTypeAttrs {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 	attrs := LLGoTypeAttrs{}
 	if st, ok := t.Underlying().(*Struct); ok && st.NumFields() > 0 {
 		attrs, _, _ = llgoTagLayout(st.Tag(0))
 	}
 	if obj := llgoObjectName(t); obj != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
 		source := m.typeAttrs(llgoDeclKey{obj.Pkg(), obj.Name()}, make(map[llgoDeclKey]bool))
 		if source.Native {
 			attrs.Native, attrs.CallConv = true, source.CallConv
@@ -212,7 +211,9 @@ func (m *LLGoLayout) RecordType(t Type) {
 				f := t.Field(i)
 				if attrs, pad, ok := llgoTagLayout(t.Tag(i)); ok {
 					m.fieldAttrs[f], m.fieldPadding[f] = attrs, pad
-					m.packed = m.packed || attrs.Pack != 0
+					if attrs.Pack != 0 {
+						m.packed.Store(true)
+					}
 				}
 				visit(f.Type())
 			}
@@ -393,7 +394,7 @@ func (m *LLGoLayout) ParseSyntax(fset *token.FileSet, pkg *Package, files []*ast
 							return errAt(directive, "requires a struct type declaration")
 						}
 						d.attrs.Pack = pack
-						m.packed = true
+						m.packed.Store(true)
 						used[directive.pos] = true
 					}
 				}
@@ -405,7 +406,7 @@ func (m *LLGoLayout) ParseSyntax(fset *token.FileSet, pkg *Package, files []*ast
 				}
 				generic := ts.TypeParams != nil && len(ts.TypeParams.List) != 0
 				var parseErr error
-				ast.Inspect(ts.Type, func(node ast.Node) bool {
+				llgoInspect(ts.Type, func(node ast.Node) bool {
 					st, ok := node.(*ast.StructType)
 					if !ok || parseErr != nil {
 						return parseErr == nil
@@ -428,7 +429,7 @@ func (m *LLGoLayout) ParseSyntax(fset *token.FileSet, pkg *Package, files []*ast
 		}
 		// Anonymous and function-local structs also have field directives.
 		var parseErr error
-		ast.Inspect(file, func(node ast.Node) bool {
+		llgoInspect(file, func(node ast.Node) bool {
 			if parseErr != nil {
 				return false
 			}
@@ -612,4 +613,31 @@ func LLGoTypeDeclCallConv(fset *token.FileSet, decl *ast.GenDecl) (LLGoCallConv,
 		return cc, fmt.Errorf("%s: %s applies to a type declaration", fset.Position(cc.Pos), cc.Name)
 	}
 	return cc, nil
+}
+
+// llgoInspect visits nodes in preorder, with the same subtree pruning as
+// ast.Inspect. Only direct children use ast.Walk: recursive Walk frames are
+// large enough to exhaust a default Wasm goroutine stack on a short type.
+func llgoInspect(root ast.Node, visit func(ast.Node) bool) {
+	stack := []ast.Node{root}
+	for len(stack) != 0 {
+		node := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if !visit(node) {
+			continue
+		}
+		start := len(stack)
+		ast.Inspect(node, func(child ast.Node) bool {
+			if child == node {
+				return true
+			}
+			if child != nil {
+				stack = append(stack, child)
+			}
+			return false
+		})
+		for i, j := start, len(stack)-1; i < j; i, j = i+1, j-1 {
+			stack[i], stack[j] = stack[j], stack[i]
+		}
+	}
 }

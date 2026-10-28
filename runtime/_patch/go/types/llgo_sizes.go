@@ -141,14 +141,16 @@ func (s *LLGoSizes) typeLayout(t Type, native, alignmentOnly bool) llgoSizeAlign
 			size = 8
 		case Complex128:
 			size = 16
-		case Int, Uint:
+		case Invalid, Int, Uint:
+			// Invalid types can occur during go/types error recovery. Keep its
+			// word-sized fallback so the original diagnostic is not a panic.
 			size = s.WordSize
 		case Uintptr, UnsafePointer:
 			size = word
 		case String:
 			return llgoSizeAlign{2 * s.WordSize, s.WordSize}
 		default:
-			panic("LLGoSizes: size of untyped or invalid basic type")
+			panic("LLGoSizes: size of untyped basic type")
 		}
 		a := size
 		if u.Info()&IsComplex != 0 {
@@ -299,8 +301,9 @@ func (s *LLGoSizes) fieldsLayout(fields llgoFields, native bool, pack int64) (ll
 		offsets[i] = result.size
 		result.size = llgoAdd(result.size, l.size)
 		if l.size == 0 {
-			if padding == "padding" && i+1 < fields.len() || conflict ||
-				i+1 == fields.len() && !native && result.size > 0 && padding != "no-padding" && padding != "padding-if" {
+			interiorPadding := padding == "padding" && i+1 < fields.len()
+			trailingPadding := i+1 == fields.len() && !native && result.size > 0 && padding != "no-padding" && padding != "padding-if"
+			if interiorPadding || conflict || trailingPadding {
 				result.size = llgoAdd(result.size, 1)
 			}
 		}

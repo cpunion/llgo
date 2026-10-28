@@ -4,7 +4,7 @@
 
 package typesizes
 
-import . "go/types"
+import "go/types"
 
 import (
 	"fmt"
@@ -18,7 +18,7 @@ import (
 // structural Signature would also change unrelated Go closures and generics.
 // A canonical generic named type represents each native signature shape. Type
 // arguments retain real parameter/result types, including enclosing parameters.
-func (m *LLGoLayout) nativeFunctionExpr(pkg *Package, expr ast.Expr, cc string) ast.Expr {
+func (m *LLGoLayout) nativeFunctionExpr(pkg *types.Package, expr ast.Expr, cc string) ast.Expr {
 	switch x := expr.(type) {
 	case *ast.IndexListExpr:
 		x.X = m.nativeFunctionExpr(pkg, x.X, cc)
@@ -84,46 +84,46 @@ func (m *LLGoLayout) nativeFunctionExpr(pkg *Package, expr ast.Expr, cc string) 
 	return expr
 }
 
-func (m *LLGoLayout) nativeFunctionName(pkg *Package, cc string, nin, nout int, variadic bool) string {
+func (m *LLGoLayout) nativeFunctionName(pkg *types.Package, cc string, nin, nout int, variadic bool) string {
 	prefix := "Cdecl"
 	if cc == "stdcall" {
 		prefix = "Stdcall"
 	}
 	name := fmt.Sprintf("%s_%d_%d_%t", prefix, nin, nout, variadic)
 	if m.nativeFuncs == nil {
-		m.nativeFuncs = make(map[string]*Named)
-		m.nativePkg = NewPackage("llgo.internal/native", "native")
+		m.nativeFuncs = make(map[string]*types.Named)
+		m.nativePkg = types.NewPackage("llgo.internal/native", "native")
 		m.nativePkg.MarkComplete()
 	}
 	named := m.nativeFuncs[name]
 	if named == nil {
-		tparams := make([]*TypeParam, nin+nout)
-		params, results := make([]*Var, nin), make([]*Var, nout)
-		constraint := NewInterfaceType(nil, nil).Complete()
+		tparams := make([]*types.TypeParam, nin+nout)
+		params, results := make([]*types.Var, nin), make([]*types.Var, nout)
+		constraint := types.NewInterfaceType(nil, nil).Complete()
 		for i := range tparams {
-			tp := NewTypeParam(NewTypeName(token.NoPos, m.nativePkg, fmt.Sprintf("T%d", i), nil), constraint)
+			tp := types.NewTypeParam(types.NewTypeName(token.NoPos, m.nativePkg, fmt.Sprintf("T%d", i), nil), constraint)
 			tparams[i] = tp
-			var t Type = tp
+			var t types.Type = tp
 			if variadic && i == nin-1 {
-				t = NewSlice(t)
+				t = types.NewSlice(t)
 			}
-			v := NewVar(token.NoPos, m.nativePkg, "", t)
+			v := types.NewVar(token.NoPos, m.nativePkg, "", t)
 			if i < nin {
 				params[i] = v
 			} else {
 				results[i-nin] = v
 			}
 		}
-		sig := NewSignatureType(nil, nil, nil, NewTuple(params...), NewTuple(results...), variadic)
-		obj := NewTypeName(token.NoPos, m.nativePkg, name, nil)
-		named = NewNamed(obj, sig, nil)
+		sig := types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), types.NewTuple(results...), variadic)
+		obj := types.NewTypeName(token.NoPos, m.nativePkg, name, nil)
+		named = types.NewNamed(obj, sig, nil)
 		named.SetTypeParams(tparams)
 		m.nativePkg.Scope().Insert(obj)
 		m.nativeFuncs[name] = named
 	}
 	local := "__llgo_native_" + name
 	if pkg.Scope().Lookup(local) == nil {
-		pkg.Scope().Insert(NewTypeName(token.NoPos, pkg, local, named))
+		pkg.Scope().Insert(types.NewTypeName(token.NoPos, pkg, local, named))
 	}
 
 	return local
@@ -132,7 +132,7 @@ func (m *LLGoLayout) nativeFunctionName(pkg *Package, cc string, nin, nout int, 
 // A shared ValueSpec type cannot describe both a Go closure and a native slot.
 func llgoHasAnonymousCallback(expr ast.Expr) bool {
 	found := false
-	ast.Inspect(expr, func(node ast.Node) bool {
+	llgoInspect(expr, func(node ast.Node) bool {
 		switch node := node.(type) {
 		case *ast.FuncType:
 			found = true

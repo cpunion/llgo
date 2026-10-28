@@ -52,7 +52,7 @@ func (p Program) isNativeStorage(t Type) bool {
 }
 
 func (p Program) withNativeStorage(t Type) Type {
-	if t == nil || !p.usesWideGoStorage() && p.sourceSizes.MaxAlign == p.sourceSizes.NativeAlign64 {
+	if t == nil || (!p.usesWideGoStorage() && p.sourceSizes.MaxAlign == p.sourceSizes.NativeAlign64) {
 		return t
 	}
 	if native, ok := p.nativeStorage[t]; ok {

@@ -129,7 +129,7 @@ func (m *LLGoLayout) nativeFunctionName(pkg *Package, cc string, nin, nout int, 
 // A shared ValueSpec type cannot describe both a Go closure and a native slot.
 func llgoHasAnonymousCallback(expr ast.Expr) bool {
 	found := false
-	ast.Inspect(expr, func(node ast.Node) bool {
+	llgoInspect(expr, func(node ast.Node) bool {
 		switch node := node.(type) {
 		case *ast.FuncType:
 			found = true

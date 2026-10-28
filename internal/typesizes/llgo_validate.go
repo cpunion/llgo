@@ -4,7 +4,7 @@
 
 package typesizes
 
-import . "go/types"
+import "go/types"
 
 import (
 	"fmt"
@@ -14,19 +14,19 @@ import (
 // Validate rejects managed references whose packed storage cannot be scanned
 // by LLGo's word-aligned conservative collectors. Native C storage is explicitly
 // outside this ownership contract; callers must keep Go owners alive separately.
-func (s *LLGoSizes) Validate(t Type) error {
-	seen := make(map[Type]bool)
-	var visit func(Type) error
-	visit = func(t Type) error {
+func (s *LLGoSizes) Validate(t types.Type) error {
+	seen := make(map[types.Type]bool)
+	var visit func(types.Type) error
+	visit = func(t types.Type) error {
 		if t == nil || seen[t] {
 			return nil
 		}
 		seen[t] = true
-		if n, ok := t.(*Named); ok && n.TypeParams().Len() > 0 && (n.TypeArgs().Len() == 0 || llgoVariableLayout(t, make(map[Type]bool))) {
+		if n, ok := t.(*types.Named); ok && n.TypeParams().Len() > 0 && (n.TypeArgs().Len() == 0 || llgoVariableLayout(t, make(map[types.Type]bool))) {
 			return nil
 		}
 		switch u := t.Underlying().(type) {
-		case *Struct:
+		case *types.Struct:
 			attrs := LLGoTypeAttrs{}
 			if s.Layout != nil {
 				attrs = s.Layout.TypeAttrs(t)
@@ -34,13 +34,13 @@ func (s *LLGoSizes) Validate(t Type) error {
 			if attrs == (LLGoTypeAttrs{}) && u.NumFields() > 0 {
 				attrs, _, _ = llgoTagLayout(u.Tag(0))
 			}
-			if _, named := t.(*Named); named && attrs.Native && u.NumFields() > 0 {
+			if _, named := t.(*types.Named); named && attrs.Native && u.NumFields() > 0 {
 				underlying, _, _ := llgoTagLayout(u.Tag(0))
 				if !underlying.Native {
 					return fmt.Errorf("native type %s reuses a Go struct's field identity; declare the native struct explicitly or derive from a native type", t)
 				}
 			}
-			if !attrs.Native && attrs.Pack > 0 && attrs.Pack < s.PointerSize && s.managedReferences(t, make(map[Type]bool)) {
+			if !attrs.Native && attrs.Pack > 0 && attrs.Pack < s.PointerSize && s.managedReferences(t, make(map[types.Type]bool)) {
 				return fmt.Errorf("packed Go type %s contains managed references below pointer alignment; use pack %d or native C storage with separately retained Go owners", t, s.PointerSize)
 			}
 			for i := 0; i < u.NumFields(); i++ {
@@ -48,21 +48,21 @@ func (s *LLGoSizes) Validate(t Type) error {
 					return err
 				}
 			}
-		case *Array:
+		case *types.Array:
 			return visit(u.Elem())
-		case *Slice:
+		case *types.Slice:
 			return visit(u.Elem())
-		case *Pointer:
+		case *types.Pointer:
 			return visit(u.Elem())
-		case *Map:
+		case *types.Map:
 			if err := visit(u.Key()); err != nil {
 				return err
 			}
 			return visit(u.Elem())
-		case *Chan:
+		case *types.Chan:
 			return visit(u.Elem())
-		case *Signature:
-			for _, list := range []*Tuple{u.Params(), u.Results()} {
+		case *types.Signature:
+			for _, list := range []*types.Tuple{u.Params(), u.Results()} {
 				for i := 0; i < list.Len(); i++ {
 					if err := visit(list.At(i).Type()); err != nil {
 						return err
@@ -75,7 +75,7 @@ func (s *LLGoSizes) Validate(t Type) error {
 	return visit(t)
 }
 
-func (s *LLGoSizes) managedReferences(t Type, seen map[Type]bool) bool {
+func (s *LLGoSizes) managedReferences(t types.Type, seen map[types.Type]bool) bool {
 	if seen[t] {
 		return false
 	}
@@ -84,13 +84,13 @@ func (s *LLGoSizes) managedReferences(t Type, seen map[Type]bool) bool {
 		return false
 	}
 	switch u := t.Underlying().(type) {
-	case *Pointer, *Map, *Chan, *Slice, *Interface, *Signature:
+	case *types.Pointer, *types.Map, *types.Chan, *types.Slice, *types.Interface, *types.Signature:
 		return true
-	case *Basic:
-		return u.Kind() == String || u.Kind() == UnsafePointer
-	case *Array:
+	case *types.Basic:
+		return u.Kind() == types.String || u.Kind() == types.UnsafePointer
+	case *types.Array:
 		return u.Len() != 0 && s.managedReferences(u.Elem(), seen)
-	case *Struct:
+	case *types.Struct:
 		for i := 0; i < u.NumFields(); i++ {
 			if s.managedReferences(u.Field(i).Type(), seen) {
 				return true
@@ -100,7 +100,7 @@ func (s *LLGoSizes) managedReferences(t Type, seen map[Type]bool) bool {
 	return false
 }
 
-func (s *LLGoSizes) ValidatePackage(pkg *Package) error {
+func (s *LLGoSizes) ValidatePackage(pkg *types.Package) error {
 	for _, name := range pkg.Scope().Names() {
 		if err := s.Validate(pkg.Scope().Lookup(name).Type()); err != nil {
 			return err
@@ -110,7 +110,7 @@ func (s *LLGoSizes) ValidatePackage(pkg *Package) error {
 }
 
 // ValidateInstances also checks concrete types used only inside function bodies.
-func (s *LLGoSizes) ValidateInstances(fset *token.FileSet, info *Info) error {
+func (s *LLGoSizes) ValidateInstances(fset *token.FileSet, info *types.Info) error {
 	if info == nil {
 		return nil
 	}

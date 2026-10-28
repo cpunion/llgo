@@ -123,7 +123,8 @@ atomic operations.
 
 The conservative collectors scan pointer-aligned words. Ordinary packed Go
 types that contain managed references below native pointer alignment are
-rejected, including pointers, closures, strings, slices, maps and interfaces.
+rejected, including pointers, `unsafe.Pointer`, closures, strings, slices, maps, channels
+and interfaces.
 Numerical fields and native callback pointers do not have this restriction.
 Explicit native C storage may be packed, but any Go-owned objects referenced
 through unaligned C storage must be retained separately.

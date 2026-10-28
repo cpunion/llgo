@@ -239,27 +239,40 @@ func (p Package) newWasmReflectCallBridge(rawSig *types.Signature, name string) 
 	)
 	fn := p.NewFunc(name, types.NewSignatureType(nil, nil, nil, params, nil, false), CDecl)
 	fn.impl.SetLinkage(llvm.InternalLinkage)
-	b := fn.MakeBody(5)
-	defer b.Dispose()
 	prog := p.Prog
+	separateContext := prog.target.effectiveGOARCH() != "wasm"
+	blocks := 3
+	if separateContext {
+		blocks = 5
+	}
+	b := fn.MakeBody(blocks)
+	defer b.Dispose()
 	args := make([]Expr, rawSig.Params().Len())
 	for i := range args {
 		typ := prog.Type(rawSig.Params().At(i).Type(), CDecl)
 		args[i] = b.Load(b.Convert(prog.Pointer(typ), b.wasmReflectSlot(fn.Param(3), i)))
 	}
 	b.If(b.BinOp(token.NEQ, fn.Param(2), prog.IntVal(0, prog.Byte())), fn.Block(1), fn.Block(2))
-	b.SetBlock(fn.Block(1))
-	b.If(b.BinOp(token.EQL, fn.Param(2), prog.IntVal(2, prog.Byte())), fn.Block(3), fn.Block(4))
-	// Methods pass the receiver as an ordinary first argument. Closures use
-	// the platform's hidden environment convention (swiftself/nest natively).
-	for _, context := range []int{0, 1, 2} {
+	contexts := []int{0, 1}
+	if separateContext {
+		b.SetBlock(fn.Block(1))
+		b.If(b.BinOp(token.EQL, fn.Param(2), prog.IntVal(2, prog.Byte())), fn.Block(3), fn.Block(4))
+		contexts = append(contexts, 2)
+	}
+	// Native methods and closures use different receiver/environment ABIs.
+	// Wasm shares one ordinary prefix argument: another branch would duplicate
+	// large aggregate snapshots and can exhaust the goroutine's fixed stack.
+	for _, context := range contexts {
 		entrySig, callArgs, block := rawSig, args, 2
 		if context != 0 {
 			entrySig = FuncAddCtx(types.NewParam(token.NoPos, nil, "env", ptr), rawSig)
 			callArgs = append([]Expr{fn.Param(1)}, args...)
-			block = 4
-			if context == 2 {
-				block = 3
+			block = 1
+			if separateContext {
+				block = 4
+				if context == 2 {
+					block = 3
+				}
 			}
 		}
 		b.SetBlock(fn.Block(block))

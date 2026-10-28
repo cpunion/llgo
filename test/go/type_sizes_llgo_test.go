@@ -129,7 +129,6 @@ func TestLLGoAnonymousLayoutIdentity(t *testing.T) {
 	}
 }
 
-type llgoEmpty struct{}
 type llgoGoFunc func()
 
 //llgo:cdecl
@@ -199,12 +198,6 @@ func TestLLGoLinkedFunctionValues(t *testing.T) {
 	}
 }
 
-type llgoFuncTail struct {
-	B byte
-	F llgoGoFunc
-	E llgoEmpty
-}
-
 //llgo:packed
 type llgoPacked struct {
 	B byte
@@ -219,107 +212,14 @@ type llgoPack2 struct {
 	Y uint16
 }
 
-type llgoNoPad struct {
-	X uint64
-	//llgo:no-padding
-	E llgoEmpty
-}
-
-type llgoPad struct {
-	//llgo:padding
-	E llgoEmpty
-	B byte
-}
-
-type llgoPair[A, B any] struct {
-	//llgo:padding-if
-	A A
-	//llgo:padding-if
-	B B
-}
-
-const llgoLayoutSource = `package layout
-type Empty struct{}
-type GoFunc func()
-//llgo:cdecl
-type CFunc func()
-type FuncTail struct { B byte; F GoFunc; E Empty }
-//llgo:packed
-type Packed struct { B byte; X uint32; Z byte }
-//llgo:pack 2
-type Pack2 struct { B byte; X uint32; Y uint16 }
-type NoPad struct {
- X uint64
- //llgo:no-padding
- E Empty
-}
-type Pad struct {
- //llgo:padding
- E Empty
- B byte
-}
-type Pair[A, B any] struct {
- //llgo:padding-if
- A A
- //llgo:padding-if
- B B
-}
-type Same = Pair[Empty, Empty]
-type Nested struct { B byte; P [2]Packed; N [2]NoPad }
-`
-
 func TestLLGoSizesCompilerNames(t *testing.T) {
 	if runtime.Compiler != "llgo" {
 		t.Fatalf("Compiler = %q", runtime.Compiler)
 	}
-	for _, compiler := range []string{"gc", "llgo"} {
-		t.Run(compiler, func(t *testing.T) {
-			sizes := types.SizesFor(compiler, runtime.GOARCH)
-			if sizes == nil {
-				t.Fatal("nil sizes")
-			}
-			fset := token.NewFileSet()
-			file, err := parser.ParseFile(fset, "layout.go", llgoLayoutSource, parser.ParseComments)
-			if err != nil {
-				t.Fatal(err)
-			}
-			conf := types.Config{Sizes: sizes}
-			pkg, err := conf.Check("example/layout", fset, []*ast.File{file}, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, tc := range []struct {
-				name        string
-				size, align uintptr
-				offsets     []uintptr
-			}{
-				{"GoFunc", unsafe.Sizeof(llgoGoFunc(nil)), unsafe.Alignof(llgoGoFunc(nil)), nil},
-				{"CFunc", unsafe.Sizeof(llgoCFunc(nil)), unsafe.Alignof(llgoCFunc(nil)), nil},
-				{"FuncTail", unsafe.Sizeof(llgoFuncTail{}), unsafe.Alignof(llgoFuncTail{}), []uintptr{0, unsafe.Offsetof(llgoFuncTail{}.F), unsafe.Offsetof(llgoFuncTail{}.E)}},
-				{"Packed", unsafe.Sizeof(llgoPacked{}), unsafe.Alignof(llgoPacked{}), []uintptr{0, unsafe.Offsetof(llgoPacked{}.X), unsafe.Offsetof(llgoPacked{}.Z)}},
-				{"Pack2", unsafe.Sizeof(llgoPack2{}), unsafe.Alignof(llgoPack2{}), []uintptr{0, unsafe.Offsetof(llgoPack2{}.X), unsafe.Offsetof(llgoPack2{}.Y)}},
-				{"NoPad", unsafe.Sizeof(llgoNoPad{}), unsafe.Alignof(llgoNoPad{}), []uintptr{0, unsafe.Offsetof(llgoNoPad{}.E)}},
-				{"Pad", unsafe.Sizeof(llgoPad{}), unsafe.Alignof(llgoPad{}), []uintptr{0, unsafe.Offsetof(llgoPad{}.B)}},
-				{"Same", unsafe.Sizeof(llgoPair[llgoEmpty, llgoEmpty]{}), unsafe.Alignof(llgoPair[llgoEmpty, llgoEmpty]{}), []uintptr{0, unsafe.Offsetof(llgoPair[llgoEmpty, llgoEmpty]{}.B)}},
-			} {
-				typ := pkg.Scope().Lookup(tc.name).Type()
-				if size, align := sizes.Sizeof(typ), sizes.Alignof(typ); size != int64(tc.size) || align != int64(tc.align) {
-					t.Errorf("%s size/align = %d/%d, unsafe = %d/%d", tc.name, size, align, tc.size, tc.align)
-				}
-				if tc.offsets != nil {
-					st := typ.Underlying().(*types.Struct)
-					fields := make([]*types.Var, st.NumFields())
-					for i := range fields {
-						fields[i] = st.Field(i)
-					}
-					for i, offset := range sizes.Offsetsof(fields) {
-						if offset != int64(tc.offsets[i]) {
-							t.Errorf("%s field %d = %d, unsafe = %d", tc.name, i, offset, tc.offsets[i])
-						}
-					}
-				}
-			}
-		})
+	for compiler, sizes := range compilerSizesForTest() {
+		if sizes != types.SizesFor(compiler, runtime.GOARCH) {
+			t.Fatalf("%s factory identity changes across calls", compiler)
+		}
 	}
 	if types.SizesFor("llgo", "unknown") != nil || types.SizesFor("unknown", runtime.GOARCH) != nil {
 		t.Fatal("unsupported target must return nil")
@@ -398,15 +298,6 @@ func TestLLGoLayoutStorage(t *testing.T) {
 	if unsafe.Sizeof(llgoPack2{}) != 8 || unsafe.Alignof(llgoPack2{}) != 2 {
 		t.Fatal("pack 2 layout")
 	}
-	if unsafe.Sizeof(llgoNoPad{}) != 8 || unsafe.Sizeof([2]llgoNoPad{}) != 16 {
-		t.Fatal("no-padding stride")
-	}
-	if unsafe.Sizeof(llgoPad{}) != 2 || unsafe.Offsetof(llgoPad{}.B) != 1 {
-		t.Fatal("padding layout")
-	}
-	if unsafe.Sizeof(llgoPair[llgoEmpty, llgoEmpty]{}) != 2 {
-		t.Fatal("padding-if conflict")
-	}
 	a := [2]llgoPacked{llgoPackedGlobal, {0x56, 0x87654321, 0x78}}
 	llgoStoreUint32(&a[0].X, 0xaabbccdd)
 	if a[0].B != 0x12 || a[0].Z != 0x34 || a[0].X != 0xaabbccdd || a[1].X != 0x87654321 {
@@ -429,10 +320,7 @@ func TestLLGoLayoutStorage(t *testing.T) {
 	if a[0].X != 1234 || a[0].Z != 0x34 {
 		t.Fatal("packed reflection store")
 	}
-	pair := llgoPair[llgoEmpty, llgoEmpty]{}
-	if uintptr(unsafe.Pointer(&pair.B))-uintptr(unsafe.Pointer(&pair.A)) != 1 {
-		t.Fatal("padding-if addresses")
-	}
+
 }
 
 func TestLLGoPointerLayoutConversions(t *testing.T) {
@@ -502,5 +390,40 @@ func TestLLGoNativeCallbackConversionSnapshot(t *testing.T) {
 	fn = func(v int32) int32 { return v + 100 }
 	if got := converted(35); got != 42 {
 		t.Fatalf("converted callback = %d, want 42", got)
+	}
+}
+
+func TestLLGoNativeCallbackAssignment(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		t.Skip("native MakeFunc requires a libffi trampoline")
+	}
+	captured := int32(7)
+	fn := func(v int32) int32 { return v + captured }
+	var native llgoAbsPointer
+	reflect.ValueOf(&native).Elem().Set(reflect.ValueOf(&fn).Elem())
+	fn = func(v int32) int32 { return v + 100 }
+	if got := native(35); got != 42 {
+		t.Fatalf("assigned callback = %d, want 42", got)
+	}
+	reflect.ValueOf(&fn).Elem().Set(reflect.ValueOf(native))
+	if got := fn(35); got != 42 {
+		t.Fatalf("assigned Go callback = %d, want 42", got)
+	}
+	fn = nil
+	reflect.ValueOf(&native).Elem().Set(reflect.ValueOf(fn))
+	if native != nil {
+		t.Fatal("nil Go callback assignment became non-nil")
+	}
+	reflect.ValueOf(&fn).Elem().Set(reflect.ValueOf(native))
+	if fn != nil {
+		t.Fatal("nil native callback assignment became non-nil")
+	}
+	for _, pair := range [][2]reflect.Value{
+		{reflect.ValueOf(fn), reflect.ValueOf(native)},
+		{reflect.ValueOf(native), reflect.ValueOf(fn)},
+	} {
+		if !pair[0].Convert(pair[1].Type()).IsNil() {
+			t.Fatal("nil callback conversion became non-nil")
+		}
 	}
 }

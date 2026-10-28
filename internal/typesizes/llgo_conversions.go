@@ -4,7 +4,7 @@
 
 package typesizes
 
-import . "go/types"
+import "go/types"
 
 import (
 	"fmt"
@@ -14,12 +14,12 @@ import (
 
 // ValidateConversions complements Go's tag-insensitive pointer conversions.
 // A value conversion can copy fields; a pointer conversion cannot do so.
-func (s *LLGoSizes) ValidateConversions(fset *token.FileSet, files []*ast.File, info *Info) (err error) {
+func (s *LLGoSizes) ValidateConversions(fset *token.FileSet, files []*ast.File, info *types.Info) (err error) {
 	if info == nil {
 		return nil
 	}
 	for _, file := range files {
-		ast.Inspect(file, func(node ast.Node) bool {
+		llgoInspect(file, func(node ast.Node) bool {
 			if err != nil {
 				return false
 			}
@@ -32,18 +32,18 @@ func (s *LLGoSizes) ValidateConversions(fset *token.FileSet, files []*ast.File, 
 			if !to.IsType() || from.Type == nil {
 				return true
 			}
-			x, ok := to.Type.Underlying().(*Pointer)
+			x, ok := to.Type.Underlying().(*types.Pointer)
 			if !ok {
 				return true
 			}
-			y, ok := from.Type.Underlying().(*Pointer)
+			y, ok := from.Type.Underlying().(*types.Pointer)
 			if !ok {
 				return true
 			}
-			if llgoVariableLayout(x.Elem(), make(map[Type]bool)) || llgoVariableLayout(y.Elem(), make(map[Type]bool)) {
+			if llgoVariableLayout(x.Elem(), make(map[types.Type]bool)) || llgoVariableLayout(y.Elem(), make(map[types.Type]bool)) {
 				return true
 			}
-			if !s.samePointerLayout(x.Elem(), y.Elem(), make(map[[2]Type]bool)) {
+			if !s.samePointerLayout(x.Elem(), y.Elem(), make(map[[2]types.Type]bool)) {
 				err = fmt.Errorf("%s: cannot convert pointers between different LLGo layouts: %s to %s", fset.Position(call.Pos()), from.Type, to.Type)
 			}
 			return true
@@ -52,31 +52,31 @@ func (s *LLGoSizes) ValidateConversions(fset *token.FileSet, files []*ast.File, 
 	return
 }
 
-func llgoVariableLayout(t Type, seen map[Type]bool) bool {
+func llgoVariableLayout(t types.Type, seen map[types.Type]bool) bool {
 	if seen[t] {
 		return false
 	}
 	seen[t] = true
-	if _, ok := t.(*TypeParam); ok {
+	if _, ok := t.(*types.TypeParam); ok {
 		return true
 	}
 	switch t := t.Underlying().(type) {
-	case *Struct:
+	case *types.Struct:
 		for i := 0; i < t.NumFields(); i++ {
 			if llgoVariableLayout(t.Field(i).Type(), seen) {
 				return true
 			}
 		}
-	case *Array:
+	case *types.Array:
 		return llgoVariableLayout(t.Elem(), seen)
-	case *Pointer:
+	case *types.Pointer:
 		return llgoVariableLayout(t.Elem(), seen)
 	}
 	return false
 }
 
-func (s *LLGoSizes) samePointerLayout(x, y Type, seen map[[2]Type]bool) bool {
-	key := [2]Type{x, y}
+func (s *LLGoSizes) samePointerLayout(x, y types.Type, seen map[[2]types.Type]bool) bool {
+	key := [2]types.Type{x, y}
 	if seen[key] {
 		return true
 	}
@@ -85,8 +85,8 @@ func (s *LLGoSizes) samePointerLayout(x, y Type, seen map[[2]Type]bool) bool {
 		return false
 	}
 	switch x := x.Underlying().(type) {
-	case *Struct:
-		y, ok := y.Underlying().(*Struct)
+	case *types.Struct:
+		y, ok := y.Underlying().(*types.Struct)
 		if !ok || x.NumFields() != y.NumFields() {
 			return false
 		}
@@ -97,25 +97,25 @@ func (s *LLGoSizes) samePointerLayout(x, y Type, seen map[[2]Type]bool) bool {
 				return false
 			}
 		}
-	case *Array:
-		y, ok := y.Underlying().(*Array)
+	case *types.Array:
+		y, ok := y.Underlying().(*types.Array)
 		return ok && x.Len() == y.Len() && s.samePointerLayout(x.Elem(), y.Elem(), seen)
-	case *Pointer:
-		if y, ok := y.Underlying().(*Pointer); ok {
+	case *types.Pointer:
+		if y, ok := y.Underlying().(*types.Pointer); ok {
 			return s.samePointerLayout(x.Elem(), y.Elem(), seen)
 		}
 	}
 	return true
 }
 
-func (s *LLGoSizes) structNative(t *Struct) bool {
+func (s *LLGoSizes) structNative(t *types.Struct) bool {
 	if t.NumFields() == 0 {
 		return false
 	}
 	a, _, _ := llgoTagLayout(t.Tag(0))
 	return a.Native
 }
-func (s *LLGoSizes) structPack(t *Struct) int64 {
+func (s *LLGoSizes) structPack(t *types.Struct) int64 {
 	if t.NumFields() == 0 {
 		return 0
 	}

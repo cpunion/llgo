@@ -4,7 +4,7 @@
 
 package typesizes
 
-import . "go/types"
+import "go/types"
 
 // This file is also compiled by the LLGo compiler itself. Run go generate
 // ./internal/typesizes after editing it; the generated adapter only changes
@@ -21,11 +21,11 @@ type LLGoSizes struct {
 	Layout             *LLGoLayout
 
 	// These hooks supply compiler-created types that have no source declaration.
-	NativeType  func(Type) bool
-	NativeField func(*Var) bool
+	NativeType  func(types.Type) bool
+	NativeField func(*types.Var) bool
 	// StorageLayout is used only after compiler type rewriting (for example
 	// internal/abi runtime substitutions). Source clients should leave it nil.
-	StorageLayout func(Type) (size, align int64, ok bool)
+	StorageLayout func(types.Type) (size, align int64, ok bool)
 }
 
 // LLGoSizesFor returns the LLGo layout for arch, or nil for an unknown target.
@@ -53,31 +53,31 @@ func LLGoSizesFor(arch string) *LLGoSizes {
 
 type llgoSizeAlign struct{ size, align int64 }
 
-func (s *LLGoSizes) Sizeof(t Type) int64  { return s.typeLayout(t, false, false).size }
-func (s *LLGoSizes) Alignof(t Type) int64 { return s.typeLayout(t, false, true).align }
+func (s *LLGoSizes) Sizeof(t types.Type) int64  { return s.typeLayout(t, false, false).size }
+func (s *LLGoSizes) Alignof(t types.Type) int64 { return s.typeLayout(t, false, true).align }
 
-func (s *LLGoSizes) Offsetsof(fields []*Var) []int64 {
+func (s *LLGoSizes) Offsetsof(fields []*types.Var) []int64 {
 	_, offsets := s.FieldsLayout(fields, false)
 	return offsets
 }
 
 // FieldsLayout returns size/alignment and field offsets for a struct. Native
 // selects C storage for fields; explicit declaration metadata is also honored.
-func (s *LLGoSizes) FieldsLayout(fields []*Var, native bool) ([2]int64, []int64) {
+func (s *LLGoSizes) FieldsLayout(fields []*types.Var, native bool) ([2]int64, []int64) {
 	attrs := s.fieldAttrs(fields)
 	native = native || attrs.Native || len(fields) > 0 && s.NativeField != nil && s.NativeField(fields[0])
 	l, offsets := s.fieldsLayout(llgoFields{fields: fields}, native, attrs.Pack)
 	return [2]int64{l.size, l.align}, offsets
 }
 
-func (s *LLGoSizes) fieldAttrs(fields []*Var) LLGoTypeAttrs {
+func (s *LLGoSizes) fieldAttrs(fields []*types.Var) LLGoTypeAttrs {
 	if s.Layout != nil && len(fields) != 0 {
 		return s.Layout.StructAttrs(fields[0])
 	}
 	return LLGoTypeAttrs{}
 }
 
-func (s *LLGoSizes) typeLayout(t Type, native, alignmentOnly bool) llgoSizeAlign {
+func (s *LLGoSizes) typeLayout(t types.Type, native, alignmentOnly bool) llgoSizeAlign {
 	if s.StorageLayout != nil {
 		if size, align, ok := s.StorageLayout(t); ok {
 			return llgoSizeAlign{size, align}
@@ -93,10 +93,10 @@ func (s *LLGoSizes) typeLayout(t Type, native, alignmentOnly bool) llgoSizeAlign
 	}
 	// Aliases are available starting in Go 1.22. Use their public interface so
 	// that the source patch continues to build against older supported GOROOTs.
-	if alias, ok := t.(interface{ Rhs() Type }); ok {
+	if alias, ok := t.(interface{ Rhs() types.Type }); ok {
 		return s.typeLayout(alias.Rhs(), native, alignmentOnly)
 	}
-	if n, ok := t.(*Named); ok {
+	if n, ok := t.(*types.Named); ok {
 		// A declared type owns its representation. A native enclosing struct
 		// must not silently turn a named Go closure or pointer into C storage.
 		native = attrs.Native || s.NativeType != nil && s.NativeType(t)
@@ -117,8 +117,8 @@ func (s *LLGoSizes) typeLayout(t Type, native, alignmentOnly bool) llgoSizeAlign
 					index = 2
 				}
 				if index >= 0 {
-					if st, ok := n.Underlying().(*Struct); ok && st.NumFields() == 1 {
-						if a, ok := st.Field(0).Type().(*Array); ok && a.Len() == 0 {
+					if st, ok := n.Underlying().(*types.Struct); ok && st.NumFields() == 1 {
+						if a, ok := st.Field(0).Type().(*types.Array); ok && a.Len() == 0 {
 							return llgoSizeAlign{0, s.VectorAlign[index]}
 						}
 					}
@@ -131,30 +131,32 @@ func (s *LLGoSizes) typeLayout(t Type, native, alignmentOnly bool) llgoSizeAlign
 		word = s.PointerSize
 	}
 	switch u := t.Underlying().(type) {
-	case *Basic:
+	case *types.Basic:
 		size := int64(0)
 		switch u.Kind() {
-		case Bool, Int8, Uint8:
+		case types.Bool, types.Int8, types.Uint8:
 			size = 1
-		case Int16, Uint16:
+		case types.Int16, types.Uint16:
 			size = 2
-		case Int32, Uint32, Float32:
+		case types.Int32, types.Uint32, types.Float32:
 			size = 4
-		case Int64, Uint64, Float64, Complex64:
+		case types.Int64, types.Uint64, types.Float64, types.Complex64:
 			size = 8
-		case Complex128:
+		case types.Complex128:
 			size = 16
-		case Int, Uint:
+		case types.Invalid, types.Int, types.Uint:
+			// Invalid types can occur during go/types error recovery. Keep its
+			// word-sized fallback so the original diagnostic is not a panic.
 			size = s.WordSize
-		case Uintptr, UnsafePointer:
+		case types.Uintptr, types.UnsafePointer:
 			size = word
-		case String:
+		case types.String:
 			return llgoSizeAlign{2 * s.WordSize, s.WordSize}
 		default:
-			panic("LLGoSizes: size of untyped or invalid basic type")
+			panic("LLGoSizes: size of untyped basic type")
 		}
 		a := size
-		if u.Info()&IsComplex != 0 {
+		if u.Info()&types.IsComplex != 0 {
 			a /= 2
 		}
 		limit := s.MaxAlign
@@ -165,18 +167,18 @@ func (s *LLGoSizes) typeLayout(t Type, native, alignmentOnly bool) llgoSizeAlign
 			a = limit
 		}
 		return llgoSizeAlign{size, a}
-	case *Pointer, *Map, *Chan:
+	case *types.Pointer, *types.Map, *types.Chan:
 		return llgoSizeAlign{word, word}
-	case *Signature:
+	case *types.Signature:
 		if native {
 			return llgoSizeAlign{word, word}
 		}
 		return llgoSizeAlign{2 * word, word}
-	case *Slice:
+	case *types.Slice:
 		return llgoSizeAlign{3 * s.WordSize, s.WordSize}
-	case *Interface:
+	case *types.Interface:
 		return llgoSizeAlign{2 * s.WordSize, s.WordSize}
-	case *Array:
+	case *types.Array:
 		elem := s.typeLayout(u.Elem(), native, alignmentOnly)
 		size := int64(0)
 		if u.Len() > 0 {
@@ -186,7 +188,7 @@ func (s *LLGoSizes) typeLayout(t Type, native, alignmentOnly bool) llgoSizeAlign
 			}
 		}
 		return llgoSizeAlign{size, elem.align}
-	case *Struct:
+	case *types.Struct:
 		fields := llgoFields{st: u}
 		if fields.closure() {
 			return llgoSizeAlign{2 * s.WordSize, s.WordSize}
@@ -220,15 +222,15 @@ func (s *LLGoSizes) typeLayout(t Type, native, alignmentOnly bool) llgoSizeAlign
 		}
 		l, _ := s.fieldsLayout(fields, native, pack)
 		return l
-	case *TypeParam, *Union:
+	case *types.TypeParam, *types.Union:
 		panic("LLGoSizes: layout of an uninstantiated type")
 	}
 	panic("LLGoSizes: unsupported type")
 }
 
 type llgoFields struct {
-	st     *Struct
-	fields []*Var
+	st     *types.Struct
+	fields []*types.Var
 }
 
 func (f llgoFields) len() int {
@@ -237,7 +239,7 @@ func (f llgoFields) len() int {
 	}
 	return len(f.fields)
 }
-func (f llgoFields) at(i int) *Var {
+func (f llgoFields) at(i int) *types.Var {
 	if f.st != nil {
 		return f.st.Field(i)
 	}
@@ -247,8 +249,8 @@ func (f llgoFields) closure() bool {
 	if f.len() != 2 || f.at(0).Name() != "$f" || f.at(1).Name() != "$data" {
 		return false
 	}
-	_, ok := f.at(0).Type().(*Signature)
-	return ok && f.at(1).Type() == Typ[UnsafePointer]
+	_, ok := f.at(0).Type().(*types.Signature)
+	return ok && f.at(1).Type() == types.Typ[types.UnsafePointer]
 }
 
 func (s *LLGoSizes) fieldsLayout(fields llgoFields, native bool, pack int64) (llgoSizeAlign, []int64) {
@@ -284,7 +286,7 @@ func (s *LLGoSizes) fieldsLayout(fields llgoFields, native bool, pack int64) (ll
 			for {
 				found := false
 				for j := 0; j < i; j++ {
-					if offsets[j] == result.size && Identical(fields.at(j).Type(), field.Type()) {
+					if offsets[j] == result.size && types.Identical(fields.at(j).Type(), field.Type()) {
 						found = true
 						break
 					}
@@ -302,8 +304,9 @@ func (s *LLGoSizes) fieldsLayout(fields llgoFields, native bool, pack int64) (ll
 		offsets[i] = result.size
 		result.size = llgoAdd(result.size, l.size)
 		if l.size == 0 {
-			if padding == "padding" && i+1 < fields.len() || conflict ||
-				i+1 == fields.len() && !native && result.size > 0 && padding != "no-padding" && padding != "padding-if" {
+			interiorPadding := padding == "padding" && i+1 < fields.len()
+			trailingPadding := i+1 == fields.len() && !native && result.size > 0 && padding != "no-padding" && padding != "padding-if"
+			if interiorPadding || conflict || trailingPadding {
 				result.size = llgoAdd(result.size, 1)
 			}
 		}

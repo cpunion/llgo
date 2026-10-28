@@ -56,7 +56,19 @@ func (v Expr) IsNil() bool {
 
 // SetOrdering sets the ordering of the atomic operation.
 func (v Expr) SetOrdering(ordering AtomicOrdering) Expr {
-	v.memoryInstruction().SetOrdering(ordering)
+	inst := v.memoryInstruction()
+	inst.SetOrdering(ordering)
+	if ordering != OrderingNotAtomic && (!inst.IsALoadInst().IsNil() || !inst.IsAStoreInst().IsNil()) {
+		// Atomic accesses require natural alignment even in a graph containing
+		// packed storage. In particular, i64 atomics still require 8 on 386.
+		typ := inst.Type()
+		if !inst.IsAStoreInst().IsNil() {
+			typ = inst.Operand(0).Type()
+		}
+		td := llvm.NewTargetData(inst.InstructionParent().Parent().GlobalParent().DataLayout())
+		inst.SetAlignment(int(td.TypeStoreSize(typ)))
+		td.Dispose()
+	}
 	return v
 }
 

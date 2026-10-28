@@ -16,7 +16,7 @@ func (s *LLGoSizes) ValidateConversions(fset *token.FileSet, files []*ast.File, 
 		return nil
 	}
 	for _, file := range files {
-		ast.Inspect(file, func(node ast.Node) bool {
+		llgoInspect(file, func(node ast.Node) bool {
 			if err != nil {
 				return false
 			}

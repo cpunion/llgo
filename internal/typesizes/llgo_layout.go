@@ -4,7 +4,7 @@
 
 package typesizes
 
-import . "go/types"
+import "go/types"
 
 import (
 	"fmt"
@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // LLGoTypeAttrs controls native representation and maximum field alignment.
@@ -25,11 +26,11 @@ type LLGoTypeAttrs struct {
 }
 
 type llgoDeclKey struct {
-	pkg  *Package
+	pkg  *types.Package
 	name string
 }
 type llgoFieldKey struct {
-	pkg *Package
+	pkg *types.Package
 	pos token.Pos
 }
 type llgoTypeDecl struct {
@@ -50,41 +51,39 @@ type LLGoLayout struct {
 	structs       map[llgoFieldKey]llgoDeclKey
 	attrs         map[llgoFieldKey]LLGoTypeAttrs
 	padding       map[llgoFieldKey]string
-	fieldAttrs    map[*Var]LLGoTypeAttrs
-	fieldPadding  map[*Var]string
-	packed        bool
-	nativeFuncs   map[string]*Named
-	nativePkg     *Package
-	recordedTypes map[Type]bool
+	fieldAttrs    map[*types.Var]LLGoTypeAttrs
+	fieldPadding  map[*types.Var]string
+	packed        atomic.Bool
+	nativeFuncs   map[string]*types.Named
+	nativePkg     *types.Package
+	recordedTypes map[types.Type]bool
 }
 
 const llgoTypeMetadataPrefix = "LLGoTypeLayout_"
 
 // HasPacked reports whether code may access storage below its natural alignment.
 func (m *LLGoLayout) HasPacked() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.packed
+	return m.packed.Load()
 }
 
-func llgoObjectName(t Type) *TypeName {
-	if _, ok := t.(*TypeParam); ok {
+func llgoObjectName(t types.Type) *types.TypeName {
+	if _, ok := t.(*types.TypeParam); ok {
 		return nil
 	}
-	if n, ok := t.(interface{ Obj() *TypeName }); ok {
+	if n, ok := t.(interface{ Obj() *types.TypeName }); ok {
 		return n.Obj()
 	}
 	return nil
 }
 
-func (m *LLGoLayout) TypeAttrs(t Type) LLGoTypeAttrs {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+func (m *LLGoLayout) TypeAttrs(t types.Type) LLGoTypeAttrs {
 	attrs := LLGoTypeAttrs{}
-	if st, ok := t.Underlying().(*Struct); ok && st.NumFields() > 0 {
+	if st, ok := t.Underlying().(*types.Struct); ok && st.NumFields() > 0 {
 		attrs, _, _ = llgoTagLayout(st.Tag(0))
 	}
 	if obj := llgoObjectName(t); obj != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
 		source := m.typeAttrs(llgoDeclKey{obj.Pkg(), obj.Name()}, make(map[llgoDeclKey]bool))
 		if source.Native {
 			attrs.Native, attrs.CallConv = true, source.CallConv
@@ -110,7 +109,7 @@ func (m *LLGoLayout) typeAttrs(key llgoDeclKey, seen map[llgoDeclKey]bool) LLGoT
 	seen[key] = true
 	d := m.types[key]
 	if key.pkg != nil {
-		if c, ok := key.pkg.Scope().Lookup(llgoTypeMetadataPrefix + key.name).(*Const); ok && c.Val().Kind() == constant.String {
+		if c, ok := key.pkg.Scope().Lookup(llgoTypeMetadataPrefix + key.name).(*types.Const); ok && c.Val().Kind() == constant.String {
 			if attrs, _, found := llgoTagLayout(constant.StringVal(c.Val())); found {
 				d.attrs = attrs
 			}
@@ -163,7 +162,7 @@ resolved:
 	return inherited
 }
 
-func (m *LLGoLayout) StructAttrs(field *Var) LLGoTypeAttrs {
+func (m *LLGoLayout) StructAttrs(field *types.Var) LLGoTypeAttrs {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if attrs, ok := m.fieldAttrs[field]; ok {
@@ -181,7 +180,7 @@ func (m *LLGoLayout) StructAttrs(field *Var) LLGoTypeAttrs {
 	return attrs
 }
 
-func (m *LLGoLayout) Padding(field *Var) string {
+func (m *LLGoLayout) Padding(field *types.Var) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if padding, ok := m.fieldPadding[field]; ok {
@@ -192,46 +191,48 @@ func (m *LLGoLayout) Padding(field *Var) string {
 
 // RecordType restores exported metadata without needing source comments or
 // source positions. It also supports synthetic structs built by clients.
-func (m *LLGoLayout) RecordType(t Type) {
+func (m *LLGoLayout) RecordType(t types.Type) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.fieldAttrs == nil {
-		m.fieldAttrs = make(map[*Var]LLGoTypeAttrs)
-		m.fieldPadding = make(map[*Var]string)
+		m.fieldAttrs = make(map[*types.Var]LLGoTypeAttrs)
+		m.fieldPadding = make(map[*types.Var]string)
 	}
 	if m.recordedTypes == nil {
-		m.recordedTypes = make(map[Type]bool)
+		m.recordedTypes = make(map[types.Type]bool)
 	}
 	seen := m.recordedTypes
-	var visit func(Type)
-	visit = func(t Type) {
+	var visit func(types.Type)
+	visit = func(t types.Type) {
 		if t == nil || seen[t] {
 			return
 		}
 		seen[t] = true
 		switch t := t.Underlying().(type) {
-		case *Struct:
+		case *types.Struct:
 			for i := 0; i < t.NumFields(); i++ {
 				f := t.Field(i)
 				if attrs, pad, ok := llgoTagLayout(t.Tag(i)); ok {
 					m.fieldAttrs[f], m.fieldPadding[f] = attrs, pad
-					m.packed = m.packed || attrs.Pack != 0
+					if attrs.Pack != 0 {
+						m.packed.Store(true)
+					}
 				}
 				visit(f.Type())
 			}
-		case *Array:
+		case *types.Array:
 			visit(t.Elem())
-		case *Slice:
+		case *types.Slice:
 			visit(t.Elem())
-		case *Pointer:
+		case *types.Pointer:
 			visit(t.Elem())
-		case *Chan:
+		case *types.Chan:
 			visit(t.Elem())
-		case *Map:
+		case *types.Map:
 			visit(t.Key())
 			visit(t.Elem())
-		case *Signature:
-			for _, tuple := range []*Tuple{t.Params(), t.Results()} {
+		case *types.Signature:
+			for _, tuple := range []*types.Tuple{t.Params(), t.Results()} {
 				for i := 0; i < tuple.Len(); i++ {
 					visit(tuple.At(i).Type())
 				}
@@ -241,16 +242,16 @@ func (m *LLGoLayout) RecordType(t Type) {
 	visit(t)
 }
 
-func (m *LLGoLayout) RecordPackage(pkg *Package) {
+func (m *LLGoLayout) RecordPackage(pkg *types.Package) {
 	m.metadataMu.Lock()
 	defer m.metadataMu.Unlock()
 	for _, name := range pkg.Scope().Names() {
 		obj := pkg.Scope().Lookup(name)
 		m.RecordType(obj.Type())
-		if _, ok := obj.(*TypeName); ok {
+		if _, ok := obj.(*types.TypeName); ok {
 			attrs := m.TypeAttrs(obj.Type())
 			if attrs != (LLGoTypeAttrs{}) && pkg.Scope().Lookup(llgoTypeMetadataPrefix+name) == nil {
-				pkg.Scope().Insert(NewConst(token.NoPos, pkg, llgoTypeMetadataPrefix+name, Typ[String], constant.MakeString(llgoLayoutTag("", attrs, ""))))
+				pkg.Scope().Insert(types.NewConst(token.NoPos, pkg, llgoTypeMetadataPrefix+name, types.Typ[types.String], constant.MakeString(llgoLayoutTag("", attrs, ""))))
 			}
 		}
 	}
@@ -287,7 +288,7 @@ func llgoLayoutDirective(name string) bool {
 
 // ParseSyntax records layout attributes before any unsafe constant is folded.
 // warn may be nil. Errors refer to the original source comment positions.
-func (m *LLGoLayout) ParseSyntax(fset *token.FileSet, pkg *Package, files []*ast.File, warn func(error)) error {
+func (m *LLGoLayout) ParseSyntax(fset *token.FileSet, pkg *types.Package, files []*ast.File, warn func(error)) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.types == nil {
@@ -396,7 +397,7 @@ func (m *LLGoLayout) ParseSyntax(fset *token.FileSet, pkg *Package, files []*ast
 							return errAt(directive, "requires a struct type declaration")
 						}
 						d.attrs.Pack = pack
-						m.packed = true
+						m.packed.Store(true)
 						used[directive.pos] = true
 					}
 				}
@@ -408,7 +409,7 @@ func (m *LLGoLayout) ParseSyntax(fset *token.FileSet, pkg *Package, files []*ast
 				}
 				generic := ts.TypeParams != nil && len(ts.TypeParams.List) != 0
 				var parseErr error
-				ast.Inspect(ts.Type, func(node ast.Node) bool {
+				llgoInspect(ts.Type, func(node ast.Node) bool {
 					st, ok := node.(*ast.StructType)
 					if !ok || parseErr != nil {
 						return parseErr == nil
@@ -431,7 +432,7 @@ func (m *LLGoLayout) ParseSyntax(fset *token.FileSet, pkg *Package, files []*ast
 		}
 		// Anonymous and function-local structs also have field directives.
 		var parseErr error
-		ast.Inspect(file, func(node ast.Node) bool {
+		llgoInspect(file, func(node ast.Node) bool {
 			if parseErr != nil {
 				return false
 			}
@@ -615,4 +616,31 @@ func LLGoTypeDeclCallConv(fset *token.FileSet, decl *ast.GenDecl) (LLGoCallConv,
 		return cc, fmt.Errorf("%s: %s applies to a type declaration", fset.Position(cc.Pos), cc.Name)
 	}
 	return cc, nil
+}
+
+// llgoInspect visits nodes in preorder, with the same subtree pruning as
+// ast.Inspect. Only direct children use ast.Walk: recursive Walk frames are
+// large enough to exhaust a default Wasm goroutine stack on a short type.
+func llgoInspect(root ast.Node, visit func(ast.Node) bool) {
+	stack := []ast.Node{root}
+	for len(stack) != 0 {
+		node := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if !visit(node) {
+			continue
+		}
+		start := len(stack)
+		ast.Inspect(node, func(child ast.Node) bool {
+			if child == node {
+				return true
+			}
+			if child != nil {
+				stack = append(stack, child)
+			}
+			return false
+		})
+		for i, j := start, len(stack)-1; i < j; i, j = i+1, j-1 {
+			stack[i], stack[j] = stack[j], stack[i]
+		}
+	}
 }
