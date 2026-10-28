@@ -31,6 +31,40 @@ type wasmReflectBridgePair struct {
 	make Function
 }
 
+// Native libffi has no packed-field offsets and cannot reproduce the calling
+// convention of an unaligned aggregate. Reuse typed compiler bridges for those
+// signatures, including aggregates that contain packed fields or arrays.
+func (p Program) signatureNeedsLayoutBridge(sig *types.Signature) bool {
+	var packed func(types.Type) bool
+	packed = func(t types.Type) bool {
+		if p.packageSyntax.layout.TypeAttrs(t).Pack != 0 {
+			return true
+		}
+		switch t := t.Underlying().(type) {
+		case *types.Array:
+			return packed(t.Elem())
+		case *types.Struct:
+			if t.NumFields() > 0 && p.packageSyntax.layout.StructAttrs(t.Field(0)).Pack != 0 {
+				return true
+			}
+			for i := 0; i < t.NumFields(); i++ {
+				if packed(t.Field(i).Type()) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, tuple := range []*types.Tuple{sig.Params(), sig.Results()} {
+		for i := 0; i < tuple.Len(); i++ {
+			if packed(tuple.At(i).Type()) {
+				return true
+			}
+		}
+	}
+	return sig.Recv() != nil && packed(sig.Recv().Type())
+}
+
 // wasmReflectBridge returns package-local bridges shared by every function
 // type with the same lowered WebAssembly signature and GC-root extraction
 // shape. Signedness, names, and other source-only distinctions deliberately do
@@ -199,13 +233,13 @@ func (p Package) newWasmReflectCallBridge(rawSig *types.Signature, name string) 
 	params := types.NewTuple(
 		types.NewParam(token.NoPos, nil, "fn", ptr),
 		types.NewParam(token.NoPos, nil, "env", ptr),
-		types.NewParam(token.NoPos, nil, "prefix", types.Typ[types.Bool]),
+		types.NewParam(token.NoPos, nil, "context", types.Typ[types.Uint8]),
 		types.NewParam(token.NoPos, nil, "args", ptrs),
 		types.NewParam(token.NoPos, nil, "results", ptrs),
 	)
 	fn := p.NewFunc(name, types.NewSignatureType(nil, nil, nil, params, nil, false), CDecl)
 	fn.impl.SetLinkage(llvm.InternalLinkage)
-	b := fn.MakeBody(3)
+	b := fn.MakeBody(5)
 	defer b.Dispose()
 	prog := p.Prog
 	args := make([]Expr, rawSig.Params().Len())
@@ -213,17 +247,27 @@ func (p Package) newWasmReflectCallBridge(rawSig *types.Signature, name string) 
 		typ := prog.Type(rawSig.Params().At(i).Type(), CDecl)
 		args[i] = b.Load(b.Convert(prog.Pointer(typ), b.wasmReflectSlot(fn.Param(3), i)))
 	}
-	b.If(fn.Param(2), fn.Block(1), fn.Block(2))
-	for _, prefix := range []bool{true, false} {
+	b.If(b.BinOp(token.NEQ, fn.Param(2), prog.IntVal(0, prog.Byte())), fn.Block(1), fn.Block(2))
+	b.SetBlock(fn.Block(1))
+	b.If(b.BinOp(token.EQL, fn.Param(2), prog.IntVal(2, prog.Byte())), fn.Block(3), fn.Block(4))
+	// Methods pass the receiver as an ordinary first argument. Closures use
+	// the platform's hidden environment convention (swiftself/nest natively).
+	for _, context := range []int{0, 1, 2} {
 		entrySig, callArgs, block := rawSig, args, 2
-		if prefix {
+		if context != 0 {
 			entrySig = FuncAddCtx(types.NewParam(token.NoPos, nil, "env", ptr), rawSig)
 			callArgs = append([]Expr{fn.Param(1)}, args...)
-			block = 1
+			block = 4
+			if context == 2 {
+				block = 3
+			}
 		}
 		b.SetBlock(fn.Block(block))
 		entry := Expr{fn.Param(0).impl, prog.FuncDecl(entrySig, CDecl)}
 		ret := b.Call(entry, callArgs...)
+		if context == 1 {
+			prog.markClosureEnvCall(ret.impl, 0)
+		}
 		for i := 0; i < rawSig.Results().Len(); i++ {
 			value := ret
 			if rawSig.Results().Len() > 1 {

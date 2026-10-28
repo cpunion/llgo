@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/xgo-dev/llgo/internal/typesizes"
+
 	"github.com/xgo-dev/llgo/runtime/abi"
 )
 
@@ -141,7 +143,39 @@ func (b *Builder) reflectTypeArgBaseString(t types.Type) string {
 		_, s := ChanDir(t.Dir())
 		return s + " " + b.reflectTypeArgString(t.Elem())
 	}
-	return types.TypeString(t, reflectTypeArgPkgPath)
+	return publicLayoutTypeString(types.TypeString(t, reflectTypeArgPkgPath))
+}
+
+func publicLayoutTypeString(s string) string {
+	var out strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '"' {
+			out.WriteByte(s[i])
+			i++
+			continue
+		}
+		end := i + 1
+		for end < len(s) {
+			if s[end] == '\\' {
+				end += 2
+				continue
+			}
+			if s[end] == '"' {
+				end++
+				break
+			}
+			end++
+		}
+		tag, err := strconv.Unquote(s[i:end])
+		if err != nil {
+			return s
+		}
+		if clean := typesizes.LLGoFieldTag(tag); clean != "" {
+			out.WriteString(strconv.Quote(clean))
+		}
+		i = end
+	}
+	return out.String()
 }
 
 func reflectTypeArgPkgPath(pkg *types.Package) string {
@@ -237,11 +271,14 @@ func (b *Builder) funcStr(t *types.Signature) string {
 }
 
 func (b *Builder) TFlag(t types.Type) (flag abi.TFlag) {
+	if b.nativeType(t) {
+		flag |= abi.TFlagNative
+	}
 	switch t := types.Unalias(t).(type) {
 	case *types.Basic:
 		flag |= abi.TFlagNamed
 	case *types.Named:
-		return (b.TFlag(t.Underlying()) & ^abi.TFlagExtraStar) | abi.TFlagNamed
+		return (b.TFlag(t.Underlying()) & ^abi.TFlagExtraStar) | abi.TFlagNamed | flag
 	case *types.Struct:
 		if IsClosure(t) {
 			flag |= abi.TFlagClosure
@@ -363,6 +400,11 @@ func (b *Builder) FieldAlign(t types.Type) uintptr {
 }
 
 func (b *Builder) PtrBytes(t types.Type) uintptr {
+	if b.nativeType(t) {
+		if _, ok := t.Underlying().(*types.Signature); ok {
+			return uintptr(b.Sizes.Sizeof(t))
+		}
+	}
 	switch t := types.Unalias(t).(type) {
 	case *types.Basic:
 		switch t.Kind() {
@@ -414,6 +456,9 @@ func (b *Builder) PtrBytes(t types.Type) uintptr {
 }
 
 func (b *Builder) Size(t types.Type) uintptr {
+	if b.nativeType(t) {
+		return uintptr(b.Sizes.Sizeof(t))
+	}
 	switch t := types.Unalias(t).(type) {
 	case *types.Basic:
 		switch t.Kind() {
@@ -460,6 +505,13 @@ func (b *Builder) Size(t types.Type) uintptr {
 		return b.Size(t.Underlying())
 	}
 	panic("unsupported size: " + t.String())
+}
+
+func (b *Builder) nativeType(t types.Type) bool {
+	if sizes, ok := b.Sizes.(interface{ IsNativeType(types.Type) bool }); ok {
+		return sizes.IsNativeType(t)
+	}
+	return false
 }
 
 func (b *Builder) RuntimeName(t types.Type) string {

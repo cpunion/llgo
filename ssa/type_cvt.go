@@ -76,7 +76,7 @@ func (p Program) Type(typ types.Type, cc CallConv) Type {
 		typ, _ = p.gocvt.cvtType(typ)
 	}
 	ret := p.rawType(typ)
-	if isNativeCallConv(cc) {
+	if isNativeCallConv(cc) || p.hasNativeTypeLayout(typ) {
 		return p.withNativeStorage(ret)
 	}
 	return ret
@@ -177,11 +177,19 @@ func typeNameLinkname(obj *types.TypeName) string {
 }
 
 func (p goTypes) shouldConvertAlias(t *types.Alias) bool {
+	if p.packageSyntax.layout.TypeAttrs(t).Native {
+		_, structure := t.Underlying().(*types.Struct)
+		return structure
+	}
 	background, ok := p.packageSyntax.typeCallConv(typeNameLinkname(t.Obj()))
 	return !ok || !isNativeCallConv(background)
 }
 
 func (p goTypes) shouldConvertNamed(t *types.Named) bool {
+	if p.packageSyntax.layout.TypeAttrs(t).Native {
+		_, structure := t.Underlying().(*types.Struct)
+		return structure
+	}
 	background, ok := p.packageSyntax.typeCallConv(namedLinkname(t))
 	return !ok || !isNativeCallConv(background)
 }
@@ -454,7 +462,13 @@ func (p goTypes) cvtStruct(typ *types.Struct) (raw *types.Struct, cvt bool) {
 	needcvt := false
 	for i := 0; i < n; i++ {
 		f := typ.Field(i)
-		if t, cvt := p.cvtType(f.Type()); cvt {
+		_, rawCallback := f.Type().(*types.Signature)
+		var t types.Type
+		var cvt bool
+		if !rawCallback || !p.packageSyntax.layout.TypeAttrs(typ).Native {
+			t, cvt = p.cvtType(f.Type())
+		}
+		if cvt {
 			f = types.NewField(f.Pos(), f.Pkg(), f.Name(), t, f.Anonymous())
 			needcvt = true
 		}
