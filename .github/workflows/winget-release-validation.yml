@@ -53,9 +53,6 @@ jobs:
         with:
           name: llgo-1.0.9-native-candidates
           path: qualification
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
       - name: Bootstrap stable WinGet
         shell: powershell
         run: |
@@ -102,6 +99,9 @@ jobs:
         with:
           cache: 'false'
           architecture: ${{ matrix.goarch == 'arm64' && 'arm64' || 'x64' }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
       - name: Stage the selected original compiler package
         shell: pwsh
         run: |
