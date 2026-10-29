@@ -61,6 +61,27 @@ def matrix_size(job):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_unix_archives_stage_runtime_but_system_packages_only_ship_llgo(self):
+        root = WORKFLOWS.parents[1]
+        config = yaml.safe_load((root / '.goreleaser.yaml').read_text())
+        self.assertIn('bash .github/unix/stage-toolchains.sh', config['before']['hooks'])
+        toolchain = config['archives'][0]['files'][-1]
+        self.assertEqual(toolchain['src'], '.release-toolchains/{{.Os}}/{{.Arch}}')
+        self.assertEqual(toolchain['dst'], 'crosscompile/clang')
+        package = config['nfpms'][0]
+        self.assertFalse(any('crosscompile' in item['dst'] for item in package['contents']))
+        for dependency in ('libllvm22 (>= 1:22.1)', 'llvm-22', 'clang-22', 'lld-22'):
+            self.assertIn(dependency, package['overrides']['deb']['dependencies'])
+        for dependency in ('llvm-libs >= 22.1', 'llvm < 23', 'clang < 23', 'lld < 23'):
+            self.assertIn(dependency, package['overrides']['rpm']['dependencies'])
+        for build in config['builds']:
+            if build['id'].startswith('llgo-linux-'):
+                self.assertIn('-X github.com/xgo-dev/llgo/xtool/env/llvm.ldLLVMConfigBin=/usr/bin/llvm-config-22', build['ldflags'])
+        job = load('release-build.yml')['jobs']['test-artifacts']
+        smoke = next(step for step in job['steps'] if step.get('name') == 'Test Hello World')
+        self.assertEqual(smoke['env']['LLGO_BUILD_CACHE'], '0')
+        self.assertTrue(smoke['env']['LLVM_CONFIG'].endswith('/current/crosscompile/clang/bin/llvm-config'))
+
     def test_macos_benchmark_installs_only_legacy_base_dependency(self):
         steps = load("benchmark.yml")["jobs"]["benchmark"]["steps"]
         step = next(s for s in steps if s.get("name") == "Install legacy macOS linker for the benchmark base")

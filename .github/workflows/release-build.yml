@@ -414,6 +414,7 @@ jobs:
       - name: Verify standalone native archive without ESP tools
         shell: pwsh
         run: |
+          # The preceding full-ZIP check deliberately retains this extracted inspection tool.
           $readObj = Join-Path $env:RUNNER_TEMP 'extracted ZIP 空格 llgo-${{ matrix.goarch }}-${{ matrix.abi }}/crosscompile/clang/bin/llvm-readobj.exe'
           ./.github/windows/test-release.ps1 -CheckOnly -Native -ReadObj $readObj `
             -Profile '${{ matrix.abi }}' -GoArch '${{ matrix.goarch }}'
@@ -442,6 +443,7 @@ jobs:
       - name: Test native archive Go C and C++ compilation
         shell: pwsh
         run: |
+          # Reuse llvm-readobj from the full ZIP; the native ZIP does not contain ESP tools.
           $readObj = Join-Path $env:RUNNER_TEMP 'extracted ZIP 空格 llgo-${{ matrix.goarch }}-${{ matrix.abi }}/crosscompile/clang/bin/llvm-readobj.exe'
           ./.github/windows/test-release.ps1 -Native -ReadObj $readObj `
             -Profile '${{ matrix.abi }}' -GoArch '${{ matrix.goarch }}'
@@ -494,6 +496,7 @@ jobs:
     if: needs.prepare.outputs.run_code_ci == 'true'
     needs: [prepare, build]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: macos-15-intel
@@ -547,8 +550,16 @@ jobs:
             "versions/$version/${{ matrix.goos }}-${{ matrix.goarch }}"
           echo "$LLGO_INSTALL_ROOT/bin" >> "$GITHUB_PATH"
 
+      - name: Verify Unix runtime payload
+        run: bash .github/unix/test-release.sh "$RUNNER_TEMP/llgo-release-install/current"
+
       - name: Test Hello World
         uses: ./.github/actions/test-helloworld
+        env:
+          # Use the installed runtime toolchain, with no cache from a source build.
+          LLVM_CONFIG: ${{ runner.temp }}/llgo-release-install/current/crosscompile/clang/bin/llvm-config
+          LLGO_BUILD_CACHE: '0'
+          LLGO_ROOT: ''
         with:
           mod-version: ${{ matrix.go-mod-version }}
 

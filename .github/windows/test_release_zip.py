@@ -2,6 +2,7 @@ import tempfile
 import json
 from pathlib import Path
 import unittest
+from unittest import mock
 import zipfile
 
 import release_zip
@@ -91,6 +92,32 @@ class ReleaseZIPTests(unittest.TestCase):
     def test_native_output_cannot_modify_source_tree(self):
         with self.assertRaisesRegex(ValueError, 'outside the release directory'):
             release_zip.create_native(self.stage, self.stage / 'native.zip')
+
+    def test_native_rejects_links_introduced_after_source_scan(self):
+        for name in ('bin/link', 'linked-directory', 'release.json'):
+            with self.subTest(name=name):
+                metadata = self.stage / 'release.json'
+                metadata.write_text('{}')
+                link = self.stage / name
+                outside = self.root / 'outside.json'
+                outside.write_text('{}')
+                original_entries = release_zip.entries
+
+                def scan_then_link(root):
+                    result = original_entries(root)
+                    if Path(root).resolve() == self.stage.resolve():
+                        if link.exists():
+                            link.unlink()
+                        target = self.stage / 'bin' if name == 'linked-directory' else outside
+                        link.symlink_to(target, target_is_directory=name == 'linked-directory')
+                    return result
+
+                with mock.patch.object(release_zip, 'entries', side_effect=scan_then_link):
+                    with self.assertRaisesRegex(ValueError, 'symbolic link'):
+                        release_zip.create_native(self.stage, self.archive)
+                self.assertEqual((self.stage / '.hidden').read_text(), 'hidden release file')
+                self.assertEqual(outside.read_text(), '{}')
+                link.unlink()
 
 
 if __name__ == '__main__':

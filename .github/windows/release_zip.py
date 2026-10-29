@@ -56,10 +56,11 @@ def create_native(source, destination):
         for path in source.iterdir():
             if path.name == 'crosscompile':
                 continue
-            if path.is_dir():
-                shutil.copytree(path, stage / path.name)
+            if path.is_dir() and not path.is_symlink():
+                shutil.copytree(path, stage / path.name, symlinks=True)
             else:
-                shutil.copy2(path, stage / path.name)
+                shutil.copy2(path, stage / path.name, follow_symlinks=False)
+        entries(stage)  # Reject copied links before rewriting release.json.
         (stage / 'release.json').write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
         shutil.copystat(source / 'release.json', stage / 'release.json')
         create(stage, destination)

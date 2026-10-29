@@ -26,7 +26,7 @@ checksums are distinct even though they share a release tag. Changes to the
 pin file invalidate the archive caches without disabling integrity checks.
 
 Compiler, packaging, and native artifact tests remain separate for x86 and
-amd64/arm64. WinGet candidates and publication require all six Windows ZIPs
+amd64/arm64. WinGet candidates and publication require all six native Windows ZIPs
 and all architecture tests to pass.
 
 The llvm-mingw runtime dependencies apply `bdwgc-windows-fault-guard.patch` to

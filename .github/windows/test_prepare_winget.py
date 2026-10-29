@@ -3,6 +3,8 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
 import zipfile
 
@@ -85,6 +87,21 @@ class WinGetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'checksum'):
             winget.prepare(self.root, self.output, '1.2.3')
         self.assertFalse(self.output.exists())
+
+    def test_missing_artifact_names_zip_or_sidecar_without_partial_output(self):
+        path = self.root / winget.archive_name('1.2.3', 'amd64', 'msvc')
+        for missing in (path.with_suffix('.zip.sha256'), path):
+            with self.subTest(missing=missing.name):
+                missing.unlink()
+                with self.assertRaisesRegex(ValueError, f'Missing release artifact: {missing.name}'):
+                    winget.prepare(self.root, self.output, '1.2.3')
+                self.assertFalse(self.output.exists())
+                result = subprocess.run([sys.executable, str(Path(winget.__file__)), '--artifacts', str(self.root),
+                                         '--output', str(self.output), '--version', '1.2.3'],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(missing.name, result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
 
     def test_wrong_architecture_rejected(self):
         self.fixture('mingw', 'arm64', goarch='amd64')

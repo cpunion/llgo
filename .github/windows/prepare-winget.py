@@ -21,9 +21,13 @@ def archive_name(version, arch, profile):
 
 def release_info(artifacts, version, arch, profile):
     path = artifacts / archive_name(version, arch, profile)
+    sidecar = path.with_suffix('.zip.sha256')
+    for required in (path, sidecar):
+        if not required.is_file():
+            raise ValueError(f'Missing release artifact: {required.name}')
     with path.open('rb') as stream:
         checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
-    if path.with_suffix('.zip.sha256').read_text().strip() != f'{checksum}  {path.name}':
+    if sidecar.read_text().strip() != f'{checksum}  {path.name}':
         raise ValueError(f'ZIP checksum does not match: {path.name}')
     with zipfile.ZipFile(path) as archive:
         for required in ('bin/llgo.exe', 'runtime/go.mod', 'WINDOWS.md'):
@@ -112,4 +116,7 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--version', required=True)
     args = parser.parse_args()
-    prepare(args.artifacts, args.output, args.version)
+    try:
+        prepare(args.artifacts, args.output, args.version)
+    except (ValueError, OSError) as error:
+        parser.exit(1, f'{error}\n')

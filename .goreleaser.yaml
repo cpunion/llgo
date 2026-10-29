@@ -14,6 +14,7 @@ env:
 before:
   hooks:
     - go mod download
+    - bash .github/unix/stage-toolchains.sh
 
 builds:
   - id: llgo-darwin-amd64
@@ -56,6 +57,7 @@ builds:
     ldflags:
       - -X github.com/xgo-dev/llgo/internal/env.buildVersion=v{{.Version}}
       - -X github.com/xgo-dev/llgo/internal/env.buildTime={{.Date}}
+      - -X github.com/xgo-dev/llgo/xtool/env/llvm.ldLLVMConfigBin=/usr/bin/llvm-config-22
       - "-extldflags=-Wl,-rpath,$ORIGIN/../crosscompile/clang/lib"
     env:
       # Use the packaged host Clang with the Debian 12 sysroot and GCC 12 headers.
@@ -76,6 +78,7 @@ builds:
     ldflags:
       - -X github.com/xgo-dev/llgo/internal/env.buildVersion=v{{.Version}}
       - -X github.com/xgo-dev/llgo/internal/env.buildTime={{.Date}}
+      - -X github.com/xgo-dev/llgo/xtool/env/llvm.ldLLVMConfigBin=/usr/bin/llvm-config-22
       - "-extldflags=-Wl,-rpath,$ORIGIN/../crosscompile/clang/lib"
     env:
       # The amd64 Clang driver is multi-target; libraries and headers stay arm64.
@@ -101,7 +104,7 @@ archives:
       - THIRD_PARTY_NOTICES.md
       - runtime
       - targets
-      - src: ".sysroot/{{.Os}}/{{.Arch}}/crosscompile/clang"
+      - src: ".release-toolchains/{{.Os}}/{{.Arch}}"
         dst: crosscompile/clang
         info:
           mode: 0755
@@ -144,6 +147,11 @@ nfpms:
         dependencies:
           - golang-go (>= 1.20)
           - libc6 (>= 2.36)
+          - libllvm22 (>= 1:22.1)
+          - llvm-22
+          - clang-22
+          - lld-22
+          - libc++-22-dev
           - build-essential
           - pkg-config
           - libgc-dev
@@ -157,6 +165,18 @@ nfpms:
         dependencies:
           - golang-bin >= 1.20
           - glibc >= 2.36
+          - llvm-libs >= 22.1
+          - llvm-libs < 23
+          - llvm >= 22.1
+          - llvm < 23
+          - llvm-devel >= 22.1
+          - llvm-devel < 23
+          - clang >= 22.1
+          - clang < 23
+          - lld >= 22.1
+          - lld < 23
+          - libcxx-devel
+          - llvm-libunwind-devel
           - gcc
           - gcc-c++
           - make
@@ -181,9 +201,6 @@ nfpms:
         type: tree
       - src: targets/
         dst: /usr/lib/llgo/targets
-        type: tree
-      - src: ".sysroot/linux/{{.Arch}}/crosscompile/clang/"
-        dst: /usr/lib/llgo/crosscompile/clang
         type: tree
       - src: /usr/lib/llgo/bin/llgo
         dst: /usr/bin/llgo

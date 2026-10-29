@@ -422,6 +422,12 @@ The APT/YUM configurations below accept packages without GPG signature verificat
 
 #### Debian/Ubuntu
 
+The DEB contains LLGo's compiler, runtime, targets and licenses. LLVM 22,
+Clang, LLD and native libraries are installed as system dependencies. Ubuntu
+26.04 provides LLVM 22 in its standard repositories; on older Debian/Ubuntu
+releases, enable the matching [apt.llvm.org LLVM 22 repository](https://apt.llvm.org/)
+before installing LLGo.
+
 Install the latest stable release for amd64 or arm64 from the APT repository:
 
 ```sh
@@ -458,6 +464,9 @@ export CGO_LDFLAGS="$($LLVM_CONFIG --ldflags) $($LLVM_CONFIG --libs all)"
 ```
 
 #### Fedora Linux 44 or newer
+
+The RPM contains LLGo itself and depends on the system LLVM/Clang/LLD 22
+packages and native libraries; it does not bundle a second LLVM toolchain.
 
 Install the latest stable release for amd64 or arm64 from the YUM/DNF repository:
 
@@ -497,6 +506,9 @@ llgo run .
 ### on Windows
 
 The release workflow builds six integrated Windows variants, each as a ZIP: `llgo<VERSION>.windows-{386,amd64,arm64}-{msvc,mingw}.zip`. Check the [release assets](https://github.com/xgo-dev/llgo/releases) for availability in each version. Add the extracted `bin` directory to `PATH`; the archives keep the same `runtime`, `targets`, and `crosscompile/clang` layout as Unix releases. Each architecture's MSVC and MinGW archives contain the same statically linked, DLL-free `llgo.exe`.
+
+Each variant also has a smaller `...-native.zip` for native Windows development,
+used by WinGet. It omits the bundled ESP toolchain; use the full ZIP for ESP builds.
 
 See [Windows release dependencies and PowerShell setup](WINDOWS.md) for the external tools, ABI-specific libraries, and pkg-config configuration needed to compile native programs. The document is included in every Windows ZIP.
 
