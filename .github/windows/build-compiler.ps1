@@ -49,7 +49,7 @@ if ($GoArch -eq '386') {
   $parent = Join-Path $env:RUNNER_TEMP 'llgo-release-x86-sdk'
   if (Test-Path $parent) { Remove-Item -Recurse -Force $parent }
   Expand-ReleaseXz `
-    -URL "https://github.com/xgo-dev/espressif-llvm-project-prebuilt/releases/download/$($toolchain.release)/$($toolchain.sdk.asset)" `
+    -URL "https://github.com/xgo-dev/espressif-llvm-project-prebuilt/releases/download/$($toolchain.sdk.release)/$($toolchain.sdk.asset)" `
     -SHA256 $toolchain.sdk.sha256 `
     -CacheDirectory (Join-Path $env:RUNNER_TOOL_CACHE 'llgo-release-downloads/llvm-x86') `
     -Destination $parent

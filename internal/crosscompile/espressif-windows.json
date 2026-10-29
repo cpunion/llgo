@@ -2,6 +2,8 @@
   "release": "22.1.4_20261020",
   "producer_commit": "9538f2aefdc85c338fb37bb2d6af0dbd18fc4b45",
   "sdk": {
+    "release": "22.1.4_20261020",
+    "producer_commit": "9538f2aefdc85c338fb37bb2d6af0dbd18fc4b45",
     "version": "22.1.8",
     "asset": "llvm-sdk-22.1.8-i686-w64-mingw32.tar.xz",
     "sha256": "31fa7fefeddf99305f04b2010ba8a029001eedef930cb33ce8a6544a628de267"
