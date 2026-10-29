@@ -50,7 +50,9 @@ try {
   $env:PATH = $savedPath
   try {
     if ($installed) {
-      Invoke-WinGet @('uninstall', '--id', "XGo.LLGo.$Profile", '--exact', '--silent',
+      # A locally installed manifest need not correlate to the public catalog
+      # ID (notably when that catalog no longer contains the x86 installer).
+      Invoke-WinGet @('uninstall', '--name', "LLGo ($Profile)", '--exact', '--silent',
         '--accept-source-agreements', '--disable-interactivity')
     }
   } finally { Stop-Process -Id $server.Id -ErrorAction SilentlyContinue }
