@@ -111,6 +111,8 @@ func createTestTarXz(t *testing.T, files map[string]string) string {
 }
 
 func TestWindowsArchiveTools(t *testing.T) {
+	t.Setenv("ProgramW6432", "")
+	t.Setenv("ProgramFiles(x86)", "")
 	touch := func(t *testing.T, name string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
@@ -139,6 +141,19 @@ func TestWindowsArchiveTools(t *testing.T) {
 			t.Fatalf("windowsSevenZip() = %q, want %q", got, sevenZip)
 		}
 	})
+
+	for _, variable := range []string{"ProgramW6432", "ProgramFiles(x86)"} {
+		t.Run("7-ZipFrom"+variable, func(t *testing.T) {
+			root := t.TempDir()
+			sevenZip := filepath.Join(root, "7-Zip", "7z.exe")
+			touch(t, sevenZip)
+			t.Setenv(variable, root)
+			t.Setenv("PATH", t.TempDir())
+			if got := windowsSevenZip(t.TempDir()); got != sevenZip {
+				t.Fatalf("redirected ProgramFiles lookup = %q, want %q", got, sevenZip)
+			}
+		})
+	}
 
 	t.Run("NativeFallback", func(t *testing.T) {
 		systemRoot := t.TempDir()
