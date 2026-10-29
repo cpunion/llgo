@@ -49,6 +49,22 @@ func TestESPClangHostDownload(t *testing.T) {
 	}
 }
 
+func TestMalformedWindowsESPPinsFailBeforeUse(t *testing.T) {
+	for name, data := range map[string]string{
+		"truncated JSON":     "{",
+		"wrong release type": `{"release":22}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("malformed embedded pins must fail before download URLs or checksums are used")
+				}
+			}()
+			mustParseESPWindowsPins([]byte(data))
+		})
+	}
+}
+
 func TestWindowsESPClangPinsMatchDownloads(t *testing.T) {
 	for arch, pin := range espWindowsPins.Payloads {
 		platform := getESPClangPlatform("windows", arch)

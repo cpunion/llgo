@@ -11,18 +11,22 @@ import (
 //go:embed espressif-windows.json
 var espWindowsJSON []byte
 
-var espWindowsPins = func() (pins struct {
+type espWindowsToolchainPins struct {
 	Release  string `json:"release"`
 	Payloads map[string]struct {
 		Asset  string `json:"asset"`
 		SHA256 string `json:"sha256"`
 	} `json:"payloads"`
-}) {
-	if err := json.Unmarshal(espWindowsJSON, &pins); err != nil {
+}
+
+var espWindowsPins = mustParseESPWindowsPins(espWindowsJSON)
+
+func mustParseESPWindowsPins(data []byte) (pins espWindowsToolchainPins) {
+	if err := json.Unmarshal(data, &pins); err != nil {
 		panic(err)
 	}
 	return
-}()
+}
 
 func espClangRelease(platform string) string {
 	if strings.HasSuffix(platform, "-w64-mingw32") {
