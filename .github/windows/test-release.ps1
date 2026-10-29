@@ -133,8 +133,9 @@ func main() {
   $savedLocalAppData = $env:LOCALAPPDATA
   $env:LOCALAPPDATA = Join-Path $work 'fresh user cache'
   New-Item -ItemType Directory -Force $env:LOCALAPPDATA | Out-Null
-  # Embedded builds must work with Go and the compact package alone. Keep the
-  # native SDK installed above out of both tool discovery and compiler flags.
+  # Embedded builds must not rely on the native SDK. Archive extraction can
+  # discover installed 7-Zip separately or use an xz-capable Windows tar.
+  # Keep the native SDK out of both tool discovery and compiler flags.
   $embeddedEnvironment = @{}
   foreach ($name in @('PATH', 'LLVM_CONFIG', 'CC', 'CXX', 'CGO_CPPFLAGS', 'CGO_CFLAGS', 'CGO_CXXFLAGS', 'CGO_LDFLAGS')) {
     $embeddedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)

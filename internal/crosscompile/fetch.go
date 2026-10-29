@@ -391,8 +391,13 @@ func extractTarXzWith7ZipCommand(sevenZip, tarXzFile, dest string, command func(
 }
 
 func windowsSevenZip(programFiles string) string {
-	if programFiles != "" {
-		sevenZip := filepath.Join(programFiles, "7-Zip", "7z.exe")
+	// WoW64 redirects ProgramFiles for an x86 LLGo process. The extractor can
+	// still be a native 64-bit executable installed under ProgramW6432.
+	for _, root := range []string{programFiles, os.Getenv("ProgramW6432"), os.Getenv("ProgramFiles(x86)")} {
+		if root == "" {
+			continue
+		}
+		sevenZip := filepath.Join(root, "7-Zip", "7z.exe")
 		if fileExists(sevenZip) {
 			return sevenZip
 		}
