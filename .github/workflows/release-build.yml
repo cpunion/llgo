@@ -316,7 +316,7 @@ jobs:
         with:
           name: windows-host-compiler-${{ matrix.goarch }}
           path: ${{ runner.temp }}/llgo-windows-compiler
-      - name: Build integrated Windows archive
+      - name: Build full and native Windows archives
         shell: pwsh
         run: >-
           ./.github/windows/build-release.ps1
@@ -329,6 +329,8 @@ jobs:
           path: |
             .windows-dist/*.windows-${{ matrix.goarch }}-${{ matrix.abi }}.zip
             .windows-dist/*.windows-${{ matrix.goarch }}-${{ matrix.abi }}.zip.sha256
+            .windows-dist/*.windows-${{ matrix.goarch }}-${{ matrix.abi }}-native.zip
+            .windows-dist/*.windows-${{ matrix.goarch }}-${{ matrix.abi }}-native.zip.sha256
           if-no-files-found: error
           retention-days: 3
           include-hidden-files: true
@@ -409,6 +411,12 @@ jobs:
         run: >-
           ./.github/windows/test-release.ps1 -CheckOnly
           -Profile '${{ matrix.abi }}' -GoArch '${{ matrix.goarch }}'
+      - name: Verify standalone native archive without ESP tools
+        shell: pwsh
+        run: |
+          $readObj = Join-Path $env:RUNNER_TEMP 'extracted ZIP 空格 llgo-${{ matrix.goarch }}-${{ matrix.abi }}/crosscompile/clang/bin/llvm-readobj.exe'
+          ./.github/windows/test-release.ps1 -CheckOnly -Native -ReadObj $readObj `
+            -Profile '${{ matrix.abi }}' -GoArch '${{ matrix.goarch }}'
       - name: Install native target dependencies
         uses: ./.github/actions/setup-deps
         with:
@@ -431,6 +439,12 @@ jobs:
         run: >-
           ./.github/windows/test-release.ps1
           -Profile '${{ matrix.abi }}' -GoArch '${{ matrix.goarch }}'
+      - name: Test native archive Go C and C++ compilation
+        shell: pwsh
+        run: |
+          $readObj = Join-Path $env:RUNNER_TEMP 'extracted ZIP 空格 llgo-${{ matrix.goarch }}-${{ matrix.abi }}/crosscompile/clang/bin/llvm-readobj.exe'
+          ./.github/windows/test-release.ps1 -Native -ReadObj $readObj `
+            -Profile '${{ matrix.abi }}' -GoArch '${{ matrix.goarch }}'
 
   test-windows-artifacts-x86:
     if: needs.prepare.outputs.run_code_ci == 'true'
@@ -617,19 +631,21 @@ jobs:
           pattern: llgo-windows-*
           merge-multiple: true
           path: .windows-dist
-      - name: Verify all six Windows ZIPs
+      - name: Verify all twelve full and native Windows ZIPs
         shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           cd .windows-dist
           archives=(llgo*.windows-*.zip)
-          test "${#archives[@]}" = 6
+          test "${#archives[@]}" = 12
           for arch in 386 amd64 arm64; do
             for abi in msvc mingw; do
-              archive="llgo${version}.windows-${arch}-${abi}.zip"
-              test -s "$archive"
-              sha256sum -c "$archive.sha256"
+              for suffix in '' '-native'; do
+                archive="llgo${version}.windows-${arch}-${abi}${suffix}.zip"
+                test -s "$archive"
+                sha256sum -c "$archive.sha256"
+              done
             done
           done
       - name: Set up QEMU

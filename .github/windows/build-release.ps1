@@ -82,3 +82,14 @@ if ($LASTEXITCODE -ne 0) { throw 'Creating or verifying the Windows ZIP failed' 
 $zipChecksum = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
 "$zipChecksum  $zipName" | Set-Content -Encoding ascii "$zip.sha256"
 Write-Host "Created $zip"
+
+# WinGet's x86 local-manifest scanner cannot reliably process the full ESP ZIP.
+# Publish a native-only sibling for every architecture and ABI, retaining the
+# full archive above for the existing installers and embedded development.
+$nativeName = "llgo$($metadata.version).windows-$GoArch-$Profile-native.zip"
+$nativeZip = Join-Path $root ".windows-dist/$nativeName"
+& python (Join-Path $PSScriptRoot 'release_zip.py') create-native $nativeZip $stage
+if ($LASTEXITCODE -ne 0) { throw 'Creating or verifying the native Windows ZIP failed' }
+$nativeChecksum = (Get-FileHash -Algorithm SHA256 $nativeZip).Hash.ToLowerInvariant()
+"$nativeChecksum  $nativeName" | Set-Content -Encoding ascii "$nativeZip.sha256"
+Write-Host "Created $nativeZip"

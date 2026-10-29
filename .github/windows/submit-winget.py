@@ -112,7 +112,7 @@ def published_installers(api, tag):
     # Check all six profile/architecture ZIPs before either PR can be submitted.
     for profile in manifests.PROFILES:
         for arch in manifests.ARCHITECTURES:
-            name = f'llgo{version}.windows-{arch}-{profile}.zip'
+            name = manifests.archive_name(version, arch, profile)
             value = asset(name)
             if value['digest'] != 'sha256:' + hashes.get(name, ''):
                 raise ValueError(f'Published installer checksum mismatch: {name}')
@@ -195,7 +195,7 @@ def submit(api, tag, profile, output, dry_run=False):
 
 {identifier} {version} for x86, x64 and ARM64, from [LLGo {tag}](https://github.com/{SOURCE}/releases/tag/{tag}).
 
-The release pipeline tested all six Windows ZIPs. Installer hashes match both the published checksum file and GitHub asset digests. MSVC retains the portable alias; MinGW adds the archive binaries to PATH. WinGet installation validation runs on this PR.
+The release pipeline tested all six native Windows ZIPs. These omit the ESP toolchain, which remains available in the full release archives. Installer hashes match both the published checksum file and GitHub asset digests. MSVC retains the portable alias; MinGW adds the archive binaries to PATH. WinGet installation validation runs on this PR.
 
 ## ✅ Checklist
 

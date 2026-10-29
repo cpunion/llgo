@@ -4,7 +4,9 @@ Choose the release matching your host architecture (`386`, `amd64` or `arm64`) a
 
 For each architecture, the two ABI archives contain the same `llgo.exe`. The native C/C++ toolchain selects the ABI used by generated programs.
 
-The integrated package contains LLGo, its own DLL dependencies, `runtime`, `targets`, licenses, and the ESP Clang under `crosscompile/clang`. Native Windows development tools are installed separately.
+The full package (`llgo<VERSION>.windows-<ARCH>-<ABI>.zip`) contains LLGo, its own DLL dependencies, `runtime`, `targets`, licenses, and the ESP Clang under `crosscompile/clang`. The smaller native package (`llgo<VERSION>.windows-<ARCH>-<ABI>-native.zip`), used by WinGet, contains the same compiler and native resources but omits the ESP toolchain. Native Windows development tools are installed separately for both packages.
+
+For ESP development, install the full archive instead. The shell and PowerShell installers continue to select the full archive. Installing a native ZIP does not download ESP tools; the full archive provides the bundled toolchain used by release tests.
 
 The `386` archives contain a PE32 LLGo compiler and PE32 ESP tools, validated
 under WoW64. Release CI builds their LLVM 22.1.8 SDK from pinned sources; that
@@ -32,7 +34,7 @@ the installation.
 |---|---|
 | `llgo version` | No Go or native Clang. Keep the packaged DLLs beside `llgo.exe`. |
 | Compile native Windows programs | Go, native Clang/Clang++ and a linker, matching SDK/CRT and native libraries, and pkg-config. |
-| Compile ESP firmware | Go and the bundled ESP toolchain. The first build may download and compile target libraries such as newlib and compiler-rt. |
+| Compile ESP firmware | The full archive, Go and its bundled ESP toolchain. The first build may download and compile target libraries such as newlib and compiler-rt. |
 
 Do not use `crosscompile/clang` as your native Windows Clang. The ESP tools and their DLLs match the release host architecture; ARM64 packages run them natively. Use one native ABI profile at a time; mixing MSVC and MinGW headers, libraries, DLLs, or pkg-config metadata can break builds.
 

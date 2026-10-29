@@ -22,9 +22,9 @@ class WinGetTests(unittest.TestCase):
                 self.fixture(profile, arch)
 
     def fixture(self, profile, arch, version='1.2.3', compiler=None, **overrides):
-        path = self.root / f'llgo{version}.windows-{arch}-{profile}.zip'
+        path = self.root / f'llgo{version}.windows-{arch}-{profile}-native.zip'
         compiler = compiler if compiler is not None else f'host-compiler-{arch}'.encode()
-        metadata = dict(version=version, goos='windows', goarch=arch, abi=profile, commit='a' * 40,
+        metadata = dict(version=version, goos='windows', goarch=arch, abi=profile, commit='a' * 40, distribution='native',
                         compiler_sha256=hashlib.sha256(compiler).hexdigest())
         metadata.update(overrides)
         with zipfile.ZipFile(path, 'w') as archive:
@@ -50,7 +50,7 @@ class WinGetTests(unittest.TestCase):
             self.assertNotIn('ProductCode', text)
             self.assertNotIn('Scope:', text)
             for arch in ('amd64', 'arm64', '386'):
-                archive = self.root / f'llgo1.2.3.windows-{arch}-{label.lower()}.zip'
+                archive = self.root / f'llgo1.2.3.windows-{arch}-{label.lower()}-native.zip'
                 self.assertIn(hashlib.sha256(archive.read_bytes()).hexdigest(), text)
                 self.assertIn('/releases/download/v1.2.3/' + archive.name, text)
 
@@ -68,7 +68,7 @@ class WinGetTests(unittest.TestCase):
                     text = (directory / f'XGo.LLGo.{label}.installer.yaml').read_text()
                     self.assertIn(f'PackageVersion: "{version}"', text)
                     for arch in winget.ARCHITECTURES:
-                        name = f'llgo{version}.windows-{arch}-{profile}.zip'
+                        name = f'llgo{version}.windows-{arch}-{profile}-native.zip'
                         self.assertIn(f'/releases/download/v{version}/{name}', text)
                         self.assertIn(hashlib.sha256((self.root / name).read_bytes()).hexdigest(), text)
 
@@ -80,7 +80,7 @@ class WinGetTests(unittest.TestCase):
                 self.assertFalse(self.output.exists())
 
     def test_corrupted_archive_rejected_before_output(self):
-        path = self.root / 'llgo1.2.3.windows-arm64-mingw.zip'
+        path = self.root / 'llgo1.2.3.windows-arm64-mingw-native.zip'
         path.write_bytes(path.read_bytes() + b'tampered')
         with self.assertRaisesRegex(ValueError, 'checksum'):
             winget.prepare(self.root, self.output, '1.2.3')
@@ -90,6 +90,22 @@ class WinGetTests(unittest.TestCase):
         self.fixture('mingw', 'arm64', goarch='amd64')
         with self.assertRaisesRegex(ValueError, 'metadata'):
             winget.prepare(self.root, self.output, '1.2.3')
+
+    def test_full_archive_cannot_be_substituted_for_native_archive(self):
+        self.fixture('msvc', '386', distribution='full')
+        with self.assertRaisesRegex(ValueError, 'metadata'):
+            winget.prepare(self.root, self.output, '1.2.3')
+        self.assertFalse(self.output.exists())
+
+    def test_native_archive_cannot_reintroduce_esp_payload(self):
+        path = self.fixture('mingw', 'arm64')
+        with zipfile.ZipFile(path, 'a') as archive:
+            archive.writestr('crosscompile/clang/bin/clang.exe', b'large ESP compiler')
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        path.with_suffix('.zip.sha256').write_text(f'{digest}  {path.name}\n')
+        with self.assertRaisesRegex(ValueError, 'contains the ESP toolchain'):
+            winget.prepare(self.root, self.output, '1.2.3')
+        self.assertFalse(self.output.exists())
 
     def test_different_host_compilers_rejected_before_output(self):
         self.fixture('mingw', '386', compiler=b'different host compiler')

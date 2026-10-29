@@ -1,4 +1,4 @@
-"""Prepare reviewable WinGet manifests from six checksummed Windows release ZIPs.
+"""Prepare WinGet manifests from six checksummed native Windows release ZIPs.
 
 This never uploads release assets or submits to winget-pkgs.
 """
@@ -15,8 +15,12 @@ SCHEMA = '1.12.0'
 REPOSITORY = 'https://github.com/xgo-dev/llgo'
 
 
+def archive_name(version, arch, profile):
+    return f'llgo{version}.windows-{arch}-{profile}-native.zip'
+
+
 def release_info(artifacts, version, arch, profile):
-    path = artifacts / f'llgo{version}.windows-{arch}-{profile}.zip'
+    path = artifacts / archive_name(version, arch, profile)
     with path.open('rb') as stream:
         checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
     if path.with_suffix('.zip.sha256').read_text().strip() != f'{checksum}  {path.name}':
@@ -26,9 +30,12 @@ def release_info(artifacts, version, arch, profile):
             if not archive.getinfo(required).file_size:
                 raise ValueError(f'Empty release component: {required}')
         metadata = json.loads(archive.read('release.json'))
+        if any(name == 'crosscompile' or name.startswith('crosscompile/') for name in archive.namelist()):
+            raise ValueError(f'Native ZIP contains the ESP toolchain: {path.name}')
         with archive.open('bin/llgo.exe') as compiler:
             compiler_hash = hashlib.file_digest(compiler, 'sha256').hexdigest()
-    expected = {'version': version, 'goos': 'windows', 'goarch': arch, 'abi': profile}
+    expected = {'version': version, 'goos': 'windows', 'goarch': arch, 'abi': profile,
+                'distribution': 'native'}
     if any(metadata.get(k) != v for k, v in expected.items()):
         raise ValueError(f'ZIP metadata does not match {path.name}')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata.get('commit', '')):
@@ -77,7 +84,7 @@ def write_manifests(output, version, installers):
         write_manifest(directory, f'{identifier}.yaml', 'version', common + 'DefaultLocale: en-US\n')
         notes = ('Native compilation requires Go, native Clang, SDK/CRT, pkg-config, '
                  f'and libraries for the {label} ABI. See WINDOWS.md in the package. '
-                 'The bundled crosscompile/clang is the ESP toolchain. '
+                 'Use the full Windows release archive for bundled ESP tools. '
                  'Use one LLGo ABI profile on PATH at a time.')
         locale = common + 'PackageLocale: en-US\nPublisher: XGo\n'
         locale += f'PackageName: {yaml_scalar(f"LLGo ({label})")}\n'
