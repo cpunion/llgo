@@ -170,6 +170,7 @@ nfpms:
       deb:
         dependencies:
           - golang-go (>= 1.20)
+          - ca-certificates
           - libc6 (>= 2.36)
           - libllvm22 (>= 1:22.1)
           - llvm-22
@@ -188,6 +189,7 @@ nfpms:
       rpm:
         dependencies:
           - golang-bin >= 1.20
+          - ca-certificates
           - glibc >= 2.36
           - llvm-libs >= 22.1
           - llvm-libs < 23
