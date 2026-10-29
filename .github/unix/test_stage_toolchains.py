@@ -28,6 +28,12 @@ class RuntimeToolchainTests(unittest.TestCase):
                 (sdk / 'bin/clang').chmod(0o755)
                 (sdk / 'bin/clang++').symlink_to('clang')
                 (sdk / 'lib/libLLVM-22.so').symlink_to('libLLVM.so.22.1')
+                if platform.startswith('linux/'):
+                    for name, macro in [('Targets', 'LLVM_TARGET'), ('AsmParsers', 'LLVM_ASM_PARSER'),
+                                        ('AsmPrinters', 'LLVM_ASM_PRINTER')]:
+                        path = sdk / f'include/llvm/Config/{name}.def'
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(f'{macro}(X86)\n{macro}(AArch64)\n{macro}(Xtensa)\n')
             # Different libraries must not be replaced by links.
             (source / 'darwin/amd64/crosscompile/clang/lib/libLLVM-22.dylib').write_bytes(b'different')
             for _ in range(2):  # Staging is repeatable; stale files cannot reappear.
@@ -47,6 +53,13 @@ class RuntimeToolchainTests(unittest.TestCase):
                 self.assertEqual(os.readlink(output / 'darwin/arm64/lib/libLLVM-22.dylib'), 'libLLVM.dylib')
                 self.assertFalse((output / 'darwin/amd64/lib/libLLVM-22.dylib').is_symlink())
                 self.assertFalse((source / 'darwin/arm64/crosscompile/clang/lib/libLLVM-22.dylib').is_symlink())
+                for arch in ('amd64', 'arm64'):
+                    for name in ('Targets', 'AsmParsers', 'AsmPrinters'):
+                        definition = output / f'system-linux/{arch}/include/llvm/Config/{name}.def'
+                        self.assertNotIn('(Xtensa)', definition.read_text())
+                        self.assertIn('(AArch64)', definition.read_text())
+                        original = source / f'linux/{arch}/crosscompile/clang/include/llvm/Config/{name}.def'
+                        self.assertIn('(Xtensa)', original.read_text())
                 (output / 'linux/arm64/stale').touch()
 
     def test_source_and_staging_must_not_overlap(self):

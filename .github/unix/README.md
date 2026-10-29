@@ -14,14 +14,15 @@ payload, run the Go/C/C++ smoke program with the packaged LLVM selected and the
 build cache disabled, and build ESP32 firmware.
 
 DEB/RPM contain only LLGo's compiler, runtime, targets and license documents.
-They depend on system LLVM/Clang/LLD 22 and native libraries. Their binaries use
-the system `libLLVM.so.22.1`; the tar.gz binary's relative runtime search path
-also permits this system fallback when the bundled toolchain is absent. On
+They depend on system LLVM/Clang/LLD 22 and native libraries. Separate package
+compilers omit Xtensa from their LLVM initializer lists because Fedora's LLVM
+does not provide that experimental backend. This generated header overlay is
+used only while building the package compilers; the SDK and ESP-enabled tarball
+compilers are unchanged. Their binaries use the system `libLLVM.so.22.1`. On
 Debian/Ubuntu, the configured fallback is `llvm-config-22`; Fedora supplies
 unversioned LLVM commands. Ubuntu 26.04 and Fedora 44 supply the required LLVM
 22 packages. Earlier Debian/Ubuntu releases need the matching apt.llvm.org
-repository enabled first. ESP tools remain available in the tar.gz distribution
-or through LLGo's target toolchain download support.
+repository enabled first. Use the tar.gz distribution for ESP development.
 
 CI installs each DEB/RPM with its declared dependencies in a fresh distribution
 container, checks that no toolchain is bundled and that LLVM resolves from the

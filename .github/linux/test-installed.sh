@@ -26,7 +26,10 @@ fi
 llvm_config=${LLVM_CONFIG:-llvm-config}
 [[ "$("$llvm_config" --version)" == 22.* ]]
 [[ "$(llgo env LLGO_LLVM_VERSION)" == 22.* ]]
-"$("$llvm_config" --bindir)/clang++" --version
+llvm_bin=$("$llvm_config" --bindir)
+"$llvm_bin/llvm-nm" --undefined-only --dynamic "$root/bin/llgo" > imports.txt
+! grep -q LLVMInitializeXtensa imports.txt
+"$llvm_bin/clang++" --version
 llgo version
 
 cat > go.mod <<'MODULE'

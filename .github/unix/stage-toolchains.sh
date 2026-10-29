@@ -37,9 +37,20 @@ for platform in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
         rm "$target/lib/libLLVM-22.dylib"
         ln -s libLLVM.dylib "$target/lib/libLLVM-22.dylib"
     fi
+    if [[ "$platform" == linux/* ]]; then
+        # Fedora's LLVM 22 omits the experimental Xtensa backend. Package
+        # compilers use the common target set; tarballs retain the ESP build.
+        # Override only the generated target lists, leaving the SDK untouched.
+        config="$stage/system-linux/${platform#linux/}/include/llvm/Config"
+        mkdir -p "$config"
+        for definition in Targets AsmParsers AsmPrinters; do
+            sed '/^LLVM_[A-Z_]*(Xtensa)$/d' "$source/include/llvm/Config/$definition.def" \
+                > "$config/$definition.def"
+        done
+    fi
 done
 
-for platform in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+for platform in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 system-linux/amd64 system-linux/arm64; do
     mkdir -p "$destination/${platform%/*}"
     rm -rf "$destination/$platform"
     mv "$stage/$platform" "$destination/$platform"

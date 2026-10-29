@@ -69,6 +69,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(toolchain['src'], '.release-toolchains/{{.Os}}/{{.Arch}}')
         self.assertEqual(toolchain['dst'], 'crosscompile/clang')
         package = config['nfpms'][0]
+        self.assertEqual(package['ids'], ['llgo-linux-amd64-system', 'llgo-linux-arm64-system'])
+        self.assertFalse(set(package['ids']) & set(config['archives'][0]['ids']))
         self.assertFalse(any('crosscompile' in item['dst'] for item in package['contents']))
         for dependency in ('libllvm22 (>= 1:22.1)', 'llvm-22', 'clang-22', 'lld-22'):
             self.assertIn(dependency, package['overrides']['deb']['dependencies'])
