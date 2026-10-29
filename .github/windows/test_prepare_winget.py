@@ -46,7 +46,7 @@ class WinGetTests(unittest.TestCase):
             self.assertIn('Architecture: x64', text)
             self.assertIn('Architecture: arm64', text)
             self.assertIn('Architecture: x86', text)
-            self.assertEqual('ArchiveBinariesDependOnPath: true' in text, label == 'MinGW')
+            self.assertNotIn('ArchiveBinariesDependOnPath', text)
             self.assertNotIn('ProductCode', text)
             self.assertNotIn('Scope:', text)
             for arch in ('amd64', 'arm64', '386'):

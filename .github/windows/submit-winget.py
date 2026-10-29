@@ -195,7 +195,7 @@ def submit(api, tag, profile, output, dry_run=False):
 
 {identifier} {version} for x86, x64 and ARM64, from [LLGo {tag}](https://github.com/{SOURCE}/releases/tag/{tag}).
 
-The release pipeline tested all six native Windows ZIPs. These omit the ESP toolchain, which remains available in the full release archives. Installer hashes match both the published checksum file and GitHub asset digests. MSVC retains the portable alias; MinGW adds the archive binaries to PATH. WinGet installation validation runs on this PR.
+The release pipeline tested all six native Windows ZIPs. These omit the ESP toolchain, which remains available in the full release archives. Installer hashes match both the published checksum file and GitHub asset digests. Both profiles expose the tested portable llgo alias. WinGet installation validation runs on this PR.
 
 ## ✅ Checklist
 

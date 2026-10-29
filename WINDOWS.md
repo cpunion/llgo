@@ -123,6 +123,6 @@ Run the generated program as well as compiling it. Its DLL dependencies are sepa
 
 ## WinGet packaging
 
-MinGW requires `ArchiveBinariesDependOnPath: true` so WinGet adds the actual packaged `bin` directory to PATH. The default portable symbolic-link entry can fail with `0xC0000135` when the packaged DLLs are not on the DLL search path. MSVC can use the portable command alias.
+The native WinGet packages use a portable `llgo` command alias for both ABI profiles. Release tests run the shared compiler through a symbolic link outside the installation directory with an isolated PATH, and compile native programs through the same alias. Older MinGW manifests used `ArchiveBinariesDependOnPath: true` for DLL lookup; do not remove it from an older package without verifying that package's compiler and DLL dependencies.
 
 The repository can [prepare WinGet candidates](https://github.com/xgo-dev/llgo/blob/main/.github/windows/WINGET.md) from tested release ZIPs. Candidate generation does not publish a package to the public WinGet source; check publication status before using a package ID. Each candidate explains the external development dependencies rather than installing a complete native development environment.

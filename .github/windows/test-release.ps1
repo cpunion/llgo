@@ -68,10 +68,22 @@ foreach ($setting in @("GOOS=windows", "GOARCH=$GoArch", "CGO_ENABLED=1", "vcs.r
   if (-not $buildInfo.Contains($setting)) { throw "Release Go build information is missing $setting" }
 }
 
+if ($Native) {
+  # Exercise WinGet's portable alias outside the package tree, including native
+  # resource discovery during compilation below. This is required for both ABIs.
+  $links = Join-Path $env:RUNNER_TEMP "portable links 空格 llgo-$GoArch-$Profile"
+  New-Item -ItemType Directory -Force $links | Out-Null
+  $alias = Join-Path $links 'llgo.exe'
+  if (Test-Path $alias) { Remove-Item -LiteralPath $alias -Force }
+  New-Item -ItemType SymbolicLink -Path $alias -Target $llgo | Out-Null
+  $llgo = $alias
+}
+
 $savedPath = $env:PATH
 try {
   Remove-Item Env:LLGO_ROOT -ErrorAction SilentlyContinue
-  $env:PATH = (Join-Path $releaseRoot 'bin') + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot
+  $commandDirectory = Split-Path -Parent $llgo
+  $env:PATH = $commandDirectory + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot
   $version = (Invoke-ReleaseCapture $llgo @('version')).Trim()
   if ($version -ne "llgo v$($metadata.version) windows/$GoArch") {
     throw "Unexpected release compiler version: $version"

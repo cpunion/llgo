@@ -61,6 +61,7 @@ def create_native(source, destination):
             else:
                 shutil.copy2(path, stage / path.name)
         (stage / 'release.json').write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
+        shutil.copystat(source / 'release.json', stage / 'release.json')
         create(stage, destination)
 
 

@@ -95,8 +95,8 @@ def write_manifests(output, version, installers):
         locale += f'Documentations:\n- DocumentLabel: Windows dependencies\n  DocumentUrl: {REPOSITORY}/blob/v{version}/WINDOWS.md\n'
         write_manifest(directory, f'{identifier}.locale.en-US.yaml', 'defaultLocale', locale)
         installer = common + 'InstallerType: zip\nNestedInstallerType: portable\n'
-        if profile == 'mingw':
-            installer += 'ArchiveBinariesDependOnPath: true\n'
+        # Both ABI profiles share the same host compiler. Release tests qualify
+        # the native ZIP's portable alias with an isolated DLL search PATH.
         installer += ('NestedInstallerFiles:\n- RelativeFilePath: bin/llgo.exe\n'
                       '  PortableCommandAlias: llgo\nUpgradeBehavior: uninstallPrevious\n'
                       'Commands:\n- llgo\nInstallers:\n')
