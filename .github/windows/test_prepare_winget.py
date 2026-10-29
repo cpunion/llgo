@@ -24,7 +24,7 @@ class WinGetTests(unittest.TestCase):
                 self.fixture(profile, arch)
 
     def fixture(self, profile, arch, version='1.2.3', compiler=None, **overrides):
-        path = self.root / f'llgo{version}.windows-{arch}-{profile}-native.zip'
+        path = self.root / f'llgo{version}.windows-{arch}-{profile}.zip'
         compiler = compiler if compiler is not None else f'host-compiler-{arch}'.encode()
         metadata = dict(version=version, goos='windows', goarch=arch, abi=profile, commit='a' * 40, distribution='native',
                         compiler_sha256=hashlib.sha256(compiler).hexdigest())
@@ -52,7 +52,7 @@ class WinGetTests(unittest.TestCase):
             self.assertNotIn('ProductCode', text)
             self.assertNotIn('Scope:', text)
             for arch in ('amd64', 'arm64', '386'):
-                archive = self.root / f'llgo1.2.3.windows-{arch}-{label.lower()}-native.zip'
+                archive = self.root / f'llgo1.2.3.windows-{arch}-{label.lower()}.zip'
                 self.assertIn(hashlib.sha256(archive.read_bytes()).hexdigest(), text)
                 self.assertIn('/releases/download/v1.2.3/' + archive.name, text)
 
@@ -70,7 +70,7 @@ class WinGetTests(unittest.TestCase):
                     text = (directory / f'XGo.LLGo.{label}.installer.yaml').read_text()
                     self.assertIn(f'PackageVersion: "{version}"', text)
                     for arch in winget.ARCHITECTURES:
-                        name = f'llgo{version}.windows-{arch}-{profile}-native.zip'
+                        name = f'llgo{version}.windows-{arch}-{profile}.zip'
                         self.assertIn(f'/releases/download/v{version}/{name}', text)
                         self.assertIn(hashlib.sha256((self.root / name).read_bytes()).hexdigest(), text)
 
@@ -82,7 +82,7 @@ class WinGetTests(unittest.TestCase):
                 self.assertFalse(self.output.exists())
 
     def test_corrupted_archive_rejected_before_output(self):
-        path = self.root / 'llgo1.2.3.windows-arm64-mingw-native.zip'
+        path = self.root / 'llgo1.2.3.windows-arm64-mingw.zip'
         path.write_bytes(path.read_bytes() + b'tampered')
         with self.assertRaisesRegex(ValueError, 'checksum'):
             winget.prepare(self.root, self.output, '1.2.3')

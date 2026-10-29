@@ -4,14 +4,12 @@ param(
   [Parameter(Mandatory = $true)]
   [ValidateSet('amd64', 'arm64', '386')][string]$GoArch,
   [switch]$CheckOnly,
-  [switch]$Native,
   [string]$ReadObj
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'release-lib.ps1')
-$suffix = if ($Native) { '-native' } else { '' }
-$archives = @(Get-ChildItem '.windows-dist' -Filter "*.windows-$GoArch-$Profile$suffix.zip")
+$archives = @(Get-ChildItem '.windows-dist' -Filter "*.windows-$GoArch-$Profile.zip")
 if ($archives.Count -ne 1) { throw "Expected exactly one windows/$GoArch/$Profile ZIP" }
 $archive = $archives[0]
 $checksumLine = (Get-Content -Raw ($archive.FullName + '.sha256')).Trim()
@@ -20,7 +18,7 @@ if ($checksumLine -ne "$actual  $($archive.Name)") { throw 'The Windows ZIP chec
 
 # A different location, including Unicode and spaces, makes build-tree dependencies
 # and accidentally unquoted paths observable before an archive can be published.
-$releaseRoot = Join-Path $env:RUNNER_TEMP "extracted ZIP 空格 llgo-$GoArch-$Profile$suffix"
+$releaseRoot = Join-Path $env:RUNNER_TEMP "extracted ZIP 空格 llgo-$GoArch-$Profile"
 if (Test-Path $releaseRoot) { Remove-Item -LiteralPath $releaseRoot -Recurse -Force }
 Expand-Archive -LiteralPath $archive.FullName -DestinationPath $releaseRoot
 & python (Join-Path $PSScriptRoot 'release_zip.py') verify $archive.FullName $releaseRoot
@@ -30,31 +28,17 @@ foreach ($entry in @('bin/llgo.exe', 'runtime/go.mod', 'targets', 'LICENSES', 'W
 }
 $metadata = Get-Content -Raw (Join-Path $releaseRoot 'release.json') | ConvertFrom-Json
 if ($metadata.goos -ne 'windows' -or $metadata.goarch -ne $GoArch -or $metadata.abi -ne $Profile -or
-    $archive.Name -ne "llgo$($metadata.version).windows-$GoArch-$Profile$suffix.zip") {
+    $archive.Name -ne "llgo$($metadata.version).windows-$GoArch-$Profile.zip") {
   throw 'The archive name, host architecture, and ABI metadata disagree'
 }
 $commit = (& git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $metadata.commit -ne $commit) { throw 'The release belongs to a different commit' }
 
-if ($Native) {
-  if ($metadata.distribution -ne 'native' -or (Test-Path (Join-Path $releaseRoot 'crosscompile')) -or
-      $metadata.esp_clang_host -or $metadata.esp_clang_version -or $metadata.esp_clang_sha256) {
-    throw 'The native archive must omit the ESP toolchain and its metadata'
-  }
-  # Use an explicitly supplied inspection tool, never an implicit build-tree
-  # dependency. Compiler startup below gets only its own bin and Windows PATH.
-  if (-not $ReadObj -or -not (Test-Path $ReadObj)) { throw 'Native ZIP checks require -ReadObj' }
-} else {
-  foreach ($entry in @('crosscompile/clang/bin/clang++.exe', 'crosscompile/clang/bin/llvm-readobj.exe',
-      'crosscompile/clang/THIRD-PARTY-LICENSES.txt', 'crosscompile/clang/LICENSE-LLVM.txt')) {
-    if (-not (Test-Path (Join-Path $releaseRoot $entry))) { throw "Release archive is missing $entry" }
-  }
-  if ($metadata.esp_clang_host -ne "windows/$GoArch") {
-    throw 'The ESP toolchain host does not match the LLGo release host'
-  }
-  Assert-ReleaseESPPayload -Root (Join-Path $releaseRoot 'crosscompile/clang') -GoArch $GoArch -Version $metadata.esp_clang_version
-  $ReadObj = Join-Path $releaseRoot 'crosscompile/clang/bin/llvm-readobj.exe'
+if ($metadata.distribution -ne 'native' -or (Test-Path (Join-Path $releaseRoot 'crosscompile')) -or
+    $metadata.esp_clang_host -or $metadata.esp_clang_version -or $metadata.esp_clang_sha256) {
+  throw 'The Windows archive must omit the ESP toolchain and its metadata'
 }
+if (-not $ReadObj -or -not (Test-Path $ReadObj)) { throw 'ZIP checks require the CI inspection tool -ReadObj' }
 
 $llgo = Join-Path $releaseRoot 'bin/llgo.exe'
 if ($metadata.compiler_sha256 -notmatch '^[0-9a-f]{64}$' -or
@@ -68,16 +52,13 @@ foreach ($setting in @("GOOS=windows", "GOARCH=$GoArch", "CGO_ENABLED=1", "vcs.r
   if (-not $buildInfo.Contains($setting)) { throw "Release Go build information is missing $setting" }
 }
 
-if ($Native) {
-  # Exercise WinGet's portable alias outside the package tree, including native
-  # resource discovery during compilation below. This is required for both ABIs.
-  $links = Join-Path $env:RUNNER_TEMP "portable links 空格 llgo-$GoArch-$Profile"
-  New-Item -ItemType Directory -Force $links | Out-Null
-  $alias = Join-Path $links 'llgo.exe'
-  if (Test-Path $alias) { Remove-Item -LiteralPath $alias -Force }
-  New-Item -ItemType SymbolicLink -Path $alias -Target $llgo | Out-Null
-  $llgo = $alias
-}
+# Exercise the portable alias outside the package tree for both ABIs.
+$links = Join-Path $env:RUNNER_TEMP "portable links 空格 llgo-$GoArch-$Profile"
+New-Item -ItemType Directory -Force $links | Out-Null
+$alias = Join-Path $links 'llgo.exe'
+if (Test-Path $alias) { Remove-Item -LiteralPath $alias -Force }
+New-Item -ItemType SymbolicLink -Path $alias -Target $llgo | Out-Null
+$llgo = $alias
 
 $savedPath = $env:PATH
 try {
@@ -96,20 +77,22 @@ if ($CheckOnly) { return }
 
 # Native SDK/CRT and gc/libffi/etc. remain host dependencies, as for the Unix
 # integrated releases. setup-deps and activate-windows-target select that ABI.
-# LLGO_ROOT stays unset so runtime (and ESP Clang in full ZIPs) come from the archive.
+# LLGO_ROOT stays unset so runtime discovery uses the installed compiler alias.
 $env:LLGO_BUILD_CACHE = 'off'
 $work = Join-Path $env:RUNNER_TEMP ('llgo-release-smoke-' + [Guid]::NewGuid())
 New-Item -ItemType Directory $work | Out-Null
 Push-Location $work
 try {
-  @'
+  $utf8 = [Text.UTF8Encoding]::new($false)
+  $moduleSource = @'
 module release-smoke
 
 go 1.27
 
 require github.com/goplus/lib v0.5.1
-'@ | Set-Content -Encoding utf8 'go.mod'
-  @'
+'@
+  [IO.File]::WriteAllText((Join-Path $work 'go.mod'), $moduleSource, $utf8)
+  $programSource = @'
 package main
 
 import (
@@ -124,7 +107,8 @@ func main() {
 	c.Printf(c.Str("Hello, LLGo!\n"))
 	c.Printf(std.Str("Hello LLGo by cpp/std.Str\n").CStr())
 }
-'@ | Set-Content -Encoding utf8 'main.go'
+'@
+  [IO.File]::WriteAllText((Join-Path $work 'main.go'), $programSource, $utf8)
   & $go mod tidy
   if ($LASTEXITCODE -ne 0) { throw 'Preparing the native release smoke test failed' }
   $program = Join-Path $work 'hello.exe'
@@ -141,23 +125,40 @@ func main() {
       $lines -notcontains 'Hello LLGo by cpp/std.Str') {
     throw "Unexpected native Go/C/C++ output:`n$output"
   }
-
-  if ($Native) {
-    Write-Host "Passed native Go/C/C++ builds without ESP tools for windows/$GoArch/$Profile"
-    return
-  }
+  Write-Host "Passed native Go/C/C++ compilation and execution for windows/$GoArch/$Profile"
 
   New-Item -ItemType Directory 'embedded' | Out-Null
-  Set-Content -Encoding utf8 'embedded/main.go' 'package main; func main() {}'
+  [IO.File]::WriteAllText((Join-Path $work 'embedded/main.go'), 'package main; func main() {}', $utf8)
   $firmware = Join-Path $work 'embedded/demo.out'
-  $trace = Invoke-ReleaseCapture $llgo @('build', '-x', '-target', 'esp32-coreboard-v2', '-o', $firmware, './embedded')
-  if (-not (Test-Path "$firmware.elf")) { throw 'The integrated ESP Clang did not produce firmware' }
-  # Go traces can use either slash style on Windows.
-  if (-not $trace.Replace('\', '/').Contains($releaseRoot.Replace('\', '/') + '/crosscompile/clang')) {
-    throw "The embedded build did not use the extracted release toolchain`n$trace"
+  $savedLocalAppData = $env:LOCALAPPDATA
+  $env:LOCALAPPDATA = Join-Path $work 'fresh user cache'
+  New-Item -ItemType Directory -Force $env:LOCALAPPDATA | Out-Null
+  # Embedded builds must work with Go and the compact package alone. Keep the
+  # native SDK installed above out of both tool discovery and compiler flags.
+  $embeddedEnvironment = @{}
+  foreach ($name in @('PATH', 'LLVM_CONFIG', 'CC', 'CXX', 'CGO_CPPFLAGS', 'CGO_CFLAGS', 'CGO_CXXFLAGS', 'CGO_LDFLAGS')) {
+    $embeddedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
+    [Environment]::SetEnvironmentVariable($name, $null)
   }
-  Write-Host "Passed native Go/C/C++ and integrated ESP builds for windows/$GoArch/$Profile"
+  $env:PATH = (Split-Path $go) + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot
+  $trace = Invoke-ReleaseCapture $llgo @('build', '-x', '-target', 'esp32-coreboard-v2', '-o', $firmware, './embedded')
+  if (-not (Test-Path "$firmware.elf")) { throw 'The downloaded ESP Clang did not produce firmware' }
+  $pins = Get-Content -Raw (Join-Path $PSScriptRoot '../../internal/crosscompile/espressif-windows.json') | ConvertFrom-Json
+  $target = @{ amd64 = 'x86_64-w64-mingw32'; arm64 = 'aarch64-w64-mingw32'; '386' = 'i686-w64-mingw32' }[$GoArch]
+  $cached = Join-Path $env:LOCALAPPDATA "llgo/crosscompile/esp-clang-$($pins.release)-$target"
+  if (-not $trace.Contains('ESP Clang not found in LLGO_ROOT or cache, will download.') -or
+      -not $trace.Replace('\', '/').Contains($cached.Replace('\', '/'))) {
+    throw "The embedded build did not download and use the pinned host toolchain`n$trace"
+  }
+  Assert-ReleaseESPPayload -Root $cached -GoArch $GoArch -Version $pins.release
+  if (-not (Test-Path (Join-Path $cached 'LICENSE-LLVM.txt'))) { throw 'Downloaded ESP tools are missing their license' }
+  Write-Host "Passed native Go/C/C++ and on-demand ESP builds for windows/$GoArch/$Profile"
+
 } finally {
+  if (Test-Path variable:embeddedEnvironment) {
+    foreach ($name in $embeddedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $embeddedEnvironment[$name]) }
+  }
+  if (Test-Path variable:savedLocalAppData) { $env:LOCALAPPDATA = $savedLocalAppData }
   Pop-Location
   Remove-Item -LiteralPath $work -Recurse -Force
 }

@@ -33,7 +33,7 @@ func TestESPClangHostDownload(t *testing.T) {
 		{"darwin", "amd64", "x86_64-apple-darwin"},
 		{"linux", "arm64", "aarch64-linux-gnu"},
 		{"linux", "amd64", "x86_64-linux-gnu"},
-		{"windows", "386", "x86_64-w64-mingw32"},
+		{"windows", "386", "i686-w64-mingw32"},
 		{"windows", "amd64", "x86_64-w64-mingw32"},
 		{"windows", "arm64", "aarch64-w64-mingw32"},
 	}
@@ -49,11 +49,33 @@ func TestESPClangHostDownload(t *testing.T) {
 	}
 }
 
+func TestWindowsESPClangPinsMatchDownloads(t *testing.T) {
+	for arch, pin := range espWindowsPins.Payloads {
+		platform := getESPClangPlatform("windows", arch)
+		if pin.Asset != "clang-esp-"+espClangRelease(platform)+"-"+platform+".tar.xz" {
+			t.Errorf("wrong Windows %s download asset: %s", arch, pin.Asset)
+		}
+		if len(pin.SHA256) != 64 || espClangSHA256[platform] != pin.SHA256 {
+			t.Errorf("missing Windows %s payload checksum", arch)
+		}
+		if !strings.Contains(espClangCacheDir(platform), espWindowsPins.Release+"-"+platform) {
+			t.Errorf("wrong Windows %s cache key", arch)
+		}
+	}
+	if len(espWindowsPins.Payloads) != 3 {
+		t.Fatal("Windows downloads must cover x86, amd64 and arm64")
+	}
+	if espClangRelease("aarch64-apple-darwin") != espClangVersion {
+		t.Fatal("Windows payload update changed the Unix release")
+	}
+}
+
 func TestESPClangCacheSeparatesHosts(t *testing.T) {
 	legacy := filepath.Join(cacheDir(), "esp-clang-"+espClangVersion)
+	x86 := espClangCacheDir(getESPClangPlatform("windows", "386"))
 	x64 := espClangCacheDir(getESPClangPlatform("windows", "amd64"))
 	arm64 := espClangCacheDir(getESPClangPlatform("windows", "arm64"))
-	if x64 == arm64 || x64 == legacy || arm64 == legacy {
+	if x86 == x64 || x86 == arm64 || x64 == arm64 || x64 == legacy || arm64 == legacy {
 		t.Fatalf("ESP payload caches overlap: x64=%q arm64=%q legacy=%q", x64, arm64, legacy)
 	}
 }

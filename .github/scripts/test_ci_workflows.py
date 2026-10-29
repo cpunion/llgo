@@ -521,7 +521,7 @@ sys.exit(subprocess.call(command + ['./internal/build']))
         jobs = load("release-build.yml")["jobs"]
         self.assertNotIn("build-windows-x86-toolchains", jobs)
         self.assertFalse((WORKFLOWS.parent / "windows/build-x86-toolchains.sh").exists())
-        pins = json.loads((WORKFLOWS.parent / "windows/espressif-toolchain.json").read_text())
+        pins = json.loads((WORKFLOWS.parents[1] / "internal/crosscompile/espressif-windows.json").read_text())
         self.assertRegex(pins["release"], r"^22\.1\.4_\d{8}$")
         self.assertRegex(pins["producer_commit"], r"^[0-9a-f]{40}$")
         self.assertEqual(pins["sdk"]["version"], "22.1.8")
@@ -536,19 +536,17 @@ sys.exit(subprocess.call(command + ['./internal/build']))
             step = next(step for step in jobs[name]["steps"]
                         if step.get("name") == "Cache Windows x86 LLVM SDK archive")
             self.assertEqual(step["if"], "matrix.goarch == '386'")
-            self.assertIn("espressif-toolchain.json", step["with"]["key"])
+            self.assertIn("espressif-windows.json", step["with"]["key"])
             self.assertEqual(step["with"]["path"], "${{ runner.tool_cache }}/llgo-release-downloads/llvm-x86")
+        script = (WORKFLOWS.parent / "windows/build-compiler.ps1").read_text()
+        self.assertIn("espressif-windows.json", script)
+        self.assertIn("https://github.com/xgo-dev/espressif-llvm-project-prebuilt/releases/download/", script)
         for name in ("build-windows", "build-windows-x86"):
-            step = next(step for step in jobs[name]["steps"]
-                        if step.get("name") == "Cache ESP release archive")
-            self.assertNotIn("if", step)
-            self.assertIn("espressif-toolchain.json", step["with"]["key"])
-        for filename in ("build-compiler.ps1", "build-release.ps1"):
-            script = (WORKFLOWS.parent / "windows" / filename).read_text()
-            self.assertIn("espressif-toolchain.json", script)
-            self.assertIn("https://github.com/xgo-dev/espressif-llvm-project-prebuilt/releases/download/", script)
-            self.assertNotIn("Expand-ReleaseLocalXz", script)
-            self.assertNotIn("cpunion/espressif", script)
+            self.assertFalse(any(step.get("name") == "Cache ESP release archive" for step in jobs[name]["steps"]))
+        package = (WORKFLOWS.parent / "windows/build-release.ps1").read_text()
+        self.assertNotIn("Expand-ReleaseXz", package)
+        self.assertNotIn("create-native", package)
+        self.assertIn("distribution = 'native'", package)
 
     def test_release_artifact_dependencies_and_tag_guard_are_preserved(self):
         jobs = load("release-build.yml")["jobs"]

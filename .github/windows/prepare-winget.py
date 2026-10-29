@@ -13,10 +13,12 @@ PROFILES = {'msvc': 'MSVC', 'mingw': 'MinGW'}
 ARCHITECTURES = {'amd64': 'x64', 'arm64': 'arm64', '386': 'x86'}
 SCHEMA = '1.12.0'
 REPOSITORY = 'https://github.com/xgo-dev/llgo'
+# Keep WinGet's x86 scanner away from the legacy ESP/LLVM SDK bundles.
+MAX_ZIP_SIZE = 128 * 1024 * 1024
 
 
 def archive_name(version, arch, profile):
-    return f'llgo{version}.windows-{arch}-{profile}-native.zip'
+    return f'llgo{version}.windows-{arch}-{profile}.zip'
 
 
 def release_info(artifacts, version, arch, profile):
@@ -25,6 +27,8 @@ def release_info(artifacts, version, arch, profile):
     for required in (path, sidecar):
         if not required.is_file():
             raise ValueError(f'Missing release artifact: {required.name}')
+    if path.stat().st_size > MAX_ZIP_SIZE:
+        raise ValueError(f'Windows ZIP exceeds the 128 MiB package budget: {path.name}')
     with path.open('rb') as stream:
         checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
     if sidecar.read_text().strip() != f'{checksum}  {path.name}':
@@ -88,7 +92,7 @@ def write_manifests(output, version, installers):
         write_manifest(directory, f'{identifier}.yaml', 'version', common + 'DefaultLocale: en-US\n')
         notes = ('Native compilation requires Go, native Clang, SDK/CRT, pkg-config, '
                  f'and libraries for the {label} ABI. See WINDOWS.md in the package. '
-                 'Use the full Windows release archive for bundled ESP tools. '
+                 'ESP tools are downloaded with pinned checksums on the first embedded build. '
                  'Use one LLGo ABI profile on PATH at a time.')
         locale = common + 'PackageLocale: en-US\nPublisher: XGo\n'
         locale += f'PackageName: {yaml_scalar(f"LLGo ({label})")}\n'

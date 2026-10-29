@@ -32,34 +32,10 @@ foreach ($entry in @('LICENSE', 'LICENSES', 'README.md', 'WINDOWS.md', 'THIRD_PA
 Copy-Item -LiteralPath (Join-Path $HostCompilerDirectory 'licenses') `
   -Destination (Join-Path $stage 'LICENSES/windows-runtime') -Recurse
 
-# ESP tools match the LLGo host architecture for both MSVC and MinGW packages.
-$toolchain = Get-Content -Raw (Join-Path $PSScriptRoot 'espressif-toolchain.json') | ConvertFrom-Json
-$espVersion = $toolchain.release
-$espTarget = @{ amd64 = 'x86_64-w64-mingw32'; arm64 = 'aarch64-w64-mingw32'; '386' = 'i686-w64-mingw32' }[$GoArch]
-$espChecksum = $toolchain.payloads.$GoArch.sha256
-if (-not $espChecksum) { throw "Missing pinned ESP Clang checksum for windows/$GoArch" }
-$espAsset = "clang-esp-$espVersion-$espTarget.tar.xz"
-if ($toolchain.payloads.$GoArch.asset -ne $espAsset) { throw 'The pinned ESP asset does not match the release architecture' }
-$espParent = Join-Path $env:RUNNER_TEMP ('llgo-release-esp-' + [Guid]::NewGuid())
-try {
-  Expand-ReleaseXz `
-    -URL "https://github.com/xgo-dev/espressif-llvm-project-prebuilt/releases/download/$espVersion/$espAsset" `
-    -SHA256 $espChecksum `
-    -CacheDirectory (Join-Path $env:RUNNER_TOOL_CACHE 'llgo-release-downloads/esp') `
-    -Destination $espParent
-  $crosscompile = Join-Path $stage 'crosscompile'
-  New-Item -ItemType Directory $crosscompile | Out-Null
-  Move-Item -LiteralPath (Join-Path $espParent 'esp-clang') -Destination (Join-Path $crosscompile 'clang')
-} finally {
-  if (Test-Path $espParent) { Remove-Item -LiteralPath $espParent -Recurse -Force }
-}
-# Validate from the final location so tools executed by these checks are not
-# subsequently moved or deleted with the temporary extraction directory.
-Assert-ReleaseESPPayload -Root (Join-Path $crosscompile 'clang') -GoArch $GoArch -Version $espVersion
-$readObj = Join-Path $crosscompile 'clang/bin/llvm-readobj.exe'
+# Inspect using CI-only tools from the host artifact; no ESP SDK is published.
+$readObj = Join-Path $HostCompilerDirectory 'inspection/llvm-readobj.exe'
+if (-not (Test-Path $readObj)) { throw 'The compiler artifact is missing its inspection tool' }
 Copy-ReleaseDLLs -ReadObj $readObj -Executable $executable -GoArch $GoArch -Profile 'msvc' -CheckOnly
-Copy-Item -LiteralPath (Join-Path $root 'LICENSES/XGo-LLVM-Apache-2.0-WITH-LLVM-exception.txt') `
-  -Destination (Join-Path $stage 'crosscompile/clang/LICENSE-LLVM.txt')
 @{
   version = $metadata.version
   commit = $commit
@@ -69,9 +45,7 @@ Copy-Item -LiteralPath (Join-Path $root 'LICENSES/XGo-LLVM-Apache-2.0-WITH-LLVM-
   abi = $Profile
   llvm_version = $llvmVersion
   compiler_sha256 = (Get-FileHash -Algorithm SHA256 $executable).Hash.ToLowerInvariant()
-  esp_clang_version = $espVersion
-  esp_clang_host = "windows/$GoArch"
-  esp_clang_sha256 = $espChecksum
+  distribution = 'native'
 } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $stage 'release.json')
 
 # Directory records must be STORE for WinGet compatibility.
@@ -82,14 +56,3 @@ if ($LASTEXITCODE -ne 0) { throw 'Creating or verifying the Windows ZIP failed' 
 $zipChecksum = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
 "$zipChecksum  $zipName" | Set-Content -Encoding ascii "$zip.sha256"
 Write-Host "Created $zip"
-
-# WinGet's x86 local-manifest scanner cannot reliably process the full ESP ZIP.
-# Publish a native-only sibling for every architecture and ABI, retaining the
-# full archive above for the existing installers and embedded development.
-$nativeName = "llgo$($metadata.version).windows-$GoArch-$Profile-native.zip"
-$nativeZip = Join-Path $root ".windows-dist/$nativeName"
-& python (Join-Path $PSScriptRoot 'release_zip.py') create-native $nativeZip $stage
-if ($LASTEXITCODE -ne 0) { throw 'Creating or verifying the native Windows ZIP failed' }
-$nativeChecksum = (Get-FileHash -Algorithm SHA256 $nativeZip).Hash.ToLowerInvariant()
-"$nativeChecksum  $nativeName" | Set-Content -Encoding ascii "$nativeZip.sha256"
-Write-Host "Created $nativeZip"

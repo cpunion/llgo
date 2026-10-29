@@ -1,11 +1,8 @@
 """Create WinGet-compatible ZIPs and compare them with an extracted release."""
 import argparse
 import hashlib
-import json
 from pathlib import Path, PurePosixPath
-import shutil
 import stat
-import tempfile
 import zipfile
 
 
@@ -41,31 +38,6 @@ def digest(stream):
     return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def create_native(source, destination):
-    """Keep the native compiler, DLLs and resources; leave ESP in the full ZIP."""
-    source, destination = Path(source).resolve(), Path(destination).resolve()
-    if destination.is_relative_to(source):
-        raise ValueError("The ZIP must be outside the release directory")
-    entries(source)  # Reject links before copying the release tree.
-    metadata = json.loads((source / 'release.json').read_text(encoding='utf-8-sig'))
-    metadata['distribution'] = 'native'
-    for key in ('esp_clang_version', 'esp_clang_host', 'esp_clang_sha256'):
-        metadata.pop(key, None)
-    with tempfile.TemporaryDirectory(prefix='llgo-native-') as temporary:
-        stage = Path(temporary)
-        for path in source.iterdir():
-            if path.name == 'crosscompile':
-                continue
-            if path.is_dir() and not path.is_symlink():
-                shutil.copytree(path, stage / path.name, symlinks=True)
-            else:
-                shutil.copy2(path, stage / path.name, follow_symlinks=False)
-        entries(stage)  # Reject copied links before rewriting release.json.
-        (stage / 'release.json').write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
-        shutil.copystat(source / 'release.json', stage / 'release.json')
-        create(stage, destination)
-
-
 def verify(archive_path, directory):
     expected = entries(directory)
     with zipfile.ZipFile(archive_path) as archive:
@@ -92,14 +64,12 @@ def verify(archive_path, directory):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("create", "create-native", "verify"))
+    parser.add_argument("operation", choices=("create", "verify"))
     parser.add_argument("archive", type=Path)
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()
     if args.operation == "create":
         create(args.directory, args.archive)
-    elif args.operation == "create-native":
-        create_native(args.directory, args.archive)
     else:
         verify(args.archive, args.directory)
     print(f"Verified ZIP contents and directory records: {args.archive.name}")

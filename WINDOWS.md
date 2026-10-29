@@ -4,15 +4,11 @@ Choose the release matching your host architecture (`386`, `amd64` or `arm64`) a
 
 For each architecture, the two ABI archives contain the same `llgo.exe`. The native C/C++ toolchain selects the ABI used by generated programs.
 
-The full package (`llgo<VERSION>.windows-<ARCH>-<ABI>.zip`) contains LLGo, its own DLL dependencies, `runtime`, `targets`, licenses, and the ESP Clang under `crosscompile/clang`. The smaller native package (`llgo<VERSION>.windows-<ARCH>-<ABI>-native.zip`), used by WinGet, contains the same compiler and native resources but omits the ESP toolchain. Native Windows development tools are installed separately for both packages.
+The ZIP (`llgo<VERSION>.windows-<ARCH>-<ABI>.zip`) contains LLGo, its DLL dependencies, `runtime`, `targets`, documentation and licenses. There is one compact archive per architecture/ABI; native C/C++ tools are installed separately. The package does not include the ESP toolchain.
 
-For ESP development, install the full archive instead. The shell and PowerShell installers continue to select the full archive. Installing a native ZIP does not download ESP tools; the full archive provides the bundled toolchain used by release tests.
+The first ESP build downloads the pinned ESP Clang for the LLGo host (`i686`, `x86_64` or `aarch64`), verifies its SHA256, and caches it by version and host architecture. Subsequent builds reuse that cache. The downloaded toolchain keeps its LLVM and component licenses. First ESP builds require network access for these tools and target libraries.
 
-The `386` archives contain a PE32 LLGo compiler and PE32 ESP tools, validated
-under WoW64. Release CI builds their LLVM 22.1.8 SDK from pinned sources; that
-SDK is a build input, not an end-user dependency. The compiler host's static
-MinGW runtime does not select the ABI of user programs: the activated native
-MSVC/MinGW toolchain does.
+The `386` archive contains a PE32 LLGo compiler and downloads PE32 ESP tools. ARM64 hosts download native ARM64 ESP tools. The ESP tools' MinGW runtime does not select the ABI of user programs: use the native MSVC or MinGW setup below.
 
 The installer uses the OS architecture by default. Set `LLGO_ARCH=386` to
 select the x86 archive on x64 Windows. Automatic development-dependency setup
@@ -34,9 +30,9 @@ the installation.
 |---|---|
 | `llgo version` | No Go or native Clang. Keep the packaged DLLs beside `llgo.exe`. |
 | Compile native Windows programs | Go, native Clang/Clang++ and a linker, matching SDK/CRT and native libraries, and pkg-config. |
-| Compile ESP firmware | The full archive, Go and its bundled ESP toolchain. The first build may download and compile target libraries such as newlib and compiler-rt. |
+| Compile ESP firmware | Go; the first build downloads the checksummed ESP toolchain and target libraries such as newlib and compiler-rt. |
 
-Do not use `crosscompile/clang` as your native Windows Clang. The ESP tools and their DLLs match the release host architecture; ARM64 packages run them natively. Use one native ABI profile at a time; mixing MSVC and MinGW headers, libraries, DLLs, or pkg-config metadata can break builds.
+Do not use `crosscompile/clang` as your native Windows Clang. Downloaded ESP tools and their DLLs match the release host architecture; ARM64 hosts run them natively. Use one native ABI profile at a time; mixing MSVC and MinGW headers, libraries, DLLs, or pkg-config metadata can break builds.
 
 ## Versions and shared dependencies
 

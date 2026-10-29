@@ -114,6 +114,8 @@ def published_installers(api, tag):
         for arch in manifests.ARCHITECTURES:
             name = manifests.archive_name(version, arch, profile)
             value = asset(name)
+            if value['size'] > manifests.MAX_ZIP_SIZE:
+                raise ValueError(f'Published Windows ZIP exceeds the 128 MiB package budget: {name}')
             if value['digest'] != 'sha256:' + hashes.get(name, ''):
                 raise ValueError(f'Published installer checksum mismatch: {name}')
             installers[profile, arch] = (value['browser_download_url'], hashes[name])
@@ -195,7 +197,7 @@ def submit(api, tag, profile, output, dry_run=False):
 
 {identifier} {version} for x86, x64 and ARM64, from [LLGo {tag}](https://github.com/{SOURCE}/releases/tag/{tag}).
 
-The release pipeline tested all six native Windows ZIPs. These omit the ESP toolchain, which remains available in the full release archives. Installer hashes match both the published checksum file and GitHub asset digests. Both profiles expose the tested portable llgo alias. WinGet installation validation runs on this PR.
+The release pipeline tested all six Windows ZIPs. ESP tools are downloaded with pinned checksums when an embedded build needs them. Installer hashes match both the published checksum file and GitHub asset digests. Both profiles expose the tested portable llgo alias. WinGet installation validation runs on this PR.
 
 ## ✅ Checklist
 

@@ -39,7 +39,7 @@ class FakeGitHub(winget.GitHub):
         checksums = ''
         for profile in winget.manifests.PROFILES:
             for arch in winget.manifests.ARCHITECTURES:
-                name = f'llgo1.2.3.windows-{arch}-{profile}-native.zip'
+                name = f'llgo1.2.3.windows-{arch}-{profile}.zip'
                 data = name.encode()
                 digest = hashlib.sha256(data).hexdigest()
                 checksums += f'{digest}  {name}\n'
@@ -152,9 +152,9 @@ class SubmissionTests(unittest.TestCase):
         self.assertIn('/pull/123', self.submit())
         self.assertEqual(self.api.writes, [])
 
-    def test_legacy_full_zip_cannot_replace_missing_native_asset(self):
-        self.api.assets[0]['name'] = self.api.assets[0]['name'].replace('-native.zip', '.zip')
-        with self.assertRaisesRegex(ValueError, 'Missing or invalid published asset:.*native.zip'):
+    def test_oversized_legacy_full_zip_is_rejected(self):
+        self.api.assets[0]['size'] = winget.manifests.MAX_ZIP_SIZE + 1
+        with self.assertRaisesRegex(ValueError, 'Published Windows ZIP exceeds'):
             self.submit()
         self.assertEqual(self.api.writes, [])
 
