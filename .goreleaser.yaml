@@ -171,6 +171,8 @@ nfpms:
         dependencies:
           - golang-go (>= 1.20)
           - ca-certificates
+          - tar
+          - xz-utils
           - libc6 (>= 2.36)
           - libllvm22 (>= 1:22.1)
           - llvm-22
@@ -190,6 +192,8 @@ nfpms:
         dependencies:
           - golang-bin >= 1.20
           - ca-certificates
+          - tar
+          - xz
           - glibc >= 2.36
           - llvm-libs >= 22.1
           - llvm-libs < 23
@@ -228,6 +232,11 @@ nfpms:
       - src: targets/
         dst: /usr/lib/llgo/targets
         type: tree
+      - src: .release-toolchains/payloads/linux/{{.Arch}}/
+        dst: /usr/lib/llgo/crosscompile
+        type: tree
+      - src: LICENSES/XGo-LLVM-Apache-2.0-WITH-LLVM-exception.txt
+        dst: /usr/lib/llgo/LICENSES/XGo-LLVM-Apache-2.0-WITH-LLVM-exception.txt
       - src: /usr/lib/llgo/bin/llgo
         dst: /usr/bin/llgo
         type: symlink

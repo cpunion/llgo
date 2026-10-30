@@ -27,6 +27,17 @@ runs:
       if: steps.cache-esp-clang.outputs.cache-hit != 'true'
       run: bash .github/workflows/download_esp_clang.sh
       shell: bash
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.13'
+    - name: Cache ESP runtime archives
+      uses: actions/cache@v6
+      with:
+        path: .esp-runtime-downloads
+        key: esp-runtime-v1-${{ hashFiles('internal/crosscompile/espressif.json', '.github/esp-toolchain.py') }}
+    - name: Stage verified ESP runtimes and bundled archives
+      run: python3 .github/esp-toolchain.py
+      shell: bash
     - name: Check file
       run: tree .sysroot
       shell: bash

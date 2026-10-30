@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] https://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-22 main" \
         > /etc/apt/sources.list.d/llvm-22.list \
     && apt-get update && apt-get install -y --no-install-recommends \
-    libllvm22 llvm-22 clang-22 lld-22 libc++-22-dev \
+    libllvm22 llvm-22 clang-22 lld-22 libc++-22-dev tar xz-utils \
     build-essential pkg-config libgc-dev libssl-dev zlib1g-dev libffi-dev \
     libcjson-dev libsqlite3-dev libuv1-dev \
     && rm -rf /var/lib/apt/lists/*

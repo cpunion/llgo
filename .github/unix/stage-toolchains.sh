@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Keep the build SDK intact; publish only its compiler/runtime payload.
+# Keep the build SDK intact; stage separately pinned executable payloads.
 set -euo pipefail
 
 source_root=$(cd "${1:-.sysroot}" && pwd -P)
@@ -13,30 +13,27 @@ case "$source_root/" in
     "$destination/"*) echo 'Release staging must not contain the build sysroot' >&2; exit 1 ;;
 esac
 
+runtime_root=$(cd "${3:-.esp-runtime}" && pwd -P)
+case "$destination/" in
+    "$runtime_root/"*) echo 'Release staging must be outside the runtime source' >&2; exit 1 ;;
+esac
+case "$runtime_root/" in
+    "$destination/"*) echo 'Release staging must not contain the runtime source' >&2; exit 1 ;;
+esac
 stage=$(mktemp -d "$destination/.staging.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 for platform in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
-    source="$source_root/$platform/crosscompile/clang"
+    sdk="$source_root/$platform/crosscompile/clang"
+    source="$runtime_root/$platform"
     target="$stage/$platform"
     test -f "$source/LICENSE-LLVM.txt"
     test -x "$source/bin/clang"
     mkdir -p "$target"
-    # Clang resource headers and target runtime libraries live under lib/clang;
-    # the excluded include trees and top-level archives are SDK build inputs.
-    tar -c -C "$source" \
-        --exclude='./include/llvm' --exclude='./include/llvm-c' \
-        --exclude='./include/clang' --exclude='./include/clang-c' \
-        --exclude='./lib/libLLVM*.a' --exclude='./lib/libclang*.a' \
-        --exclude='./bin/llvm-exegesis' . | tar -x -C "$target"
-    # The macOS SDK ships two identical regular files. Retain both loader names
-    # through a relative symlink, but never deduplicate different libraries.
-    if [[ "$platform" == darwin/* && ! -L "$target/lib/libLLVM.dylib" &&
-          ! -L "$target/lib/libLLVM-22.dylib" &&
-          -f "$target/lib/libLLVM.dylib" && -f "$target/lib/libLLVM-22.dylib" ]] &&
-        cmp -s "$target/lib/libLLVM.dylib" "$target/lib/libLLVM-22.dylib"; then
-        rm "$target/lib/libLLVM-22.dylib"
-        ln -s libLLVM.dylib "$target/lib/libLLVM-22.dylib"
-    fi
+    tar -c -C "$source" . | tar -x -C "$target"
+    mkdir -p "$stage/payloads/$platform"
+    # DEB/RPM retain the xz archive. It is unpacked locally into the user cache
+    # for embedded builds, keeping the system LLVM and native compiler separate.
+    cp "$runtime_root/payloads/$platform/"*.tar.xz "$stage/payloads/$platform/"
     if [[ "$platform" == linux/* ]]; then
         # Fedora's LLVM 22 omits the experimental Xtensa backend. Package
         # compilers use the common target set; tarballs retain the ESP build.
@@ -44,15 +41,15 @@ for platform in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
         config="$stage/system-linux/${platform#linux/}/include/llvm/Config"
         mkdir -p "$config"
         for definition in Targets AsmParsers AsmPrinters; do
-            sed '/^LLVM_[A-Z_]*(Xtensa)$/d' "$source/include/llvm/Config/$definition.def" \
+            sed '/^LLVM_[A-Z_]*(Xtensa)$/d' "$sdk/include/llvm/Config/$definition.def" \
                 > "$config/$definition.def"
         done
     fi
 done
 
-for platform in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 system-linux/amd64 system-linux/arm64; do
+for platform in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 system-linux/amd64 system-linux/arm64 payloads; do
     mkdir -p "$destination/${platform%/*}"
-    rm -rf "$destination/$platform"
+    rm -rf "${destination:?}/$platform"
     mv "$stage/$platform" "$destination/$platform"
     echo "Staged runtime toolchain: $platform"
 done

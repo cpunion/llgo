@@ -27,6 +27,17 @@ class ReleaseZIPTests(unittest.TestCase):
             archive.extractall(self.root / 'extracted')
         release_zip.verify(self.archive, self.root / 'extracted')
 
+    def test_bundled_xz_payload_is_stored_byte_for_byte(self):
+        payload = self.stage / 'crosscompile/clang-esp-payload.tar.xz'
+        payload.parent.mkdir()
+        payload.write_bytes(b'already compressed ESP runtime')
+        release_zip.create(self.stage, self.archive)
+        with zipfile.ZipFile(self.archive) as archive:
+            info = archive.getinfo('crosscompile/clang-esp-payload.tar.xz')
+            self.assertEqual(info.compress_type, zipfile.ZIP_STORED)
+            self.assertEqual(info.compress_size, payload.stat().st_size)
+            self.assertEqual(archive.read(info), payload.read_bytes())
+
     def test_deflated_directory_regression(self):
         release_zip.create(self.stage, self.archive)
         broken = self.root / 'broken.zip'

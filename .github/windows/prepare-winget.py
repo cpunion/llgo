@@ -1,4 +1,4 @@
-"""Prepare WinGet manifests from six checksummed native Windows release ZIPs.
+"""Prepare WinGet manifests from six checksummed Windows ZIPs with bundled ESP.
 
 This never uploads release assets or submits to winget-pkgs.
 """
@@ -11,6 +11,7 @@ import zipfile
 
 PROFILES = {'msvc': 'MSVC', 'mingw': 'MinGW'}
 ARCHITECTURES = {'amd64': 'x64', 'arm64': 'arm64', '386': 'x86'}
+ESP_HOSTS = {'amd64': 'x86_64-w64-mingw32', 'arm64': 'aarch64-w64-mingw32', '386': 'i686-w64-mingw32'}
 SCHEMA = '1.12.0'
 REPOSITORY = 'https://github.com/xgo-dev/llgo'
 # Keep WinGet's x86 scanner away from the legacy ESP/LLVM SDK bundles.
@@ -38,12 +39,26 @@ def release_info(artifacts, version, arch, profile):
             if not archive.getinfo(required).file_size:
                 raise ValueError(f'Empty release component: {required}')
         metadata = json.loads(archive.read('release.json'))
-        if any(name == 'crosscompile' or name.startswith('crosscompile/') for name in archive.namelist()):
-            raise ValueError(f'Native ZIP contains the ESP toolchain: {path.name}')
+        esp_version = metadata.get('esp_clang_version')
+        esp_asset = f'clang-esp-{esp_version}-{ESP_HOSTS[arch]}.tar.xz'
+        if (not isinstance(esp_version, str) or not esp_version or
+                metadata.get('esp_clang_host') != ESP_HOSTS[arch] or
+                metadata.get('esp_clang_asset') != esp_asset or
+                not re.fullmatch(r'[0-9a-f]{64}', metadata.get('esp_clang_sha256', ''))):
+            raise ValueError(f'Invalid bundled ESP metadata: {path.name}')
+        payload = 'crosscompile/' + esp_asset
+        if payload not in archive.namelist():
+            raise ValueError(f'Missing bundled ESP archive: {path.name}')
+        with archive.open(payload) as stream:
+            payload_hash = hashlib.file_digest(stream, 'sha256').hexdigest()
+        if payload_hash != metadata['esp_clang_sha256']:
+            raise ValueError(f'Bundled ESP checksum does not match: {path.name}')
+        if any(name.startswith('crosscompile/clang/') for name in archive.namelist()):
+            raise ValueError(f'ESP tools must use the bundled archive: {path.name}')
         with archive.open('bin/llgo.exe') as compiler:
             compiler_hash = hashlib.file_digest(compiler, 'sha256').hexdigest()
     expected = {'version': version, 'goos': 'windows', 'goarch': arch, 'abi': profile,
-                'distribution': 'native'}
+                'distribution': 'full'}
     if any(metadata.get(k) != v for k, v in expected.items()):
         raise ValueError(f'ZIP metadata does not match {path.name}')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata.get('commit', '')):
@@ -92,7 +107,7 @@ def write_manifests(output, version, installers):
         write_manifest(directory, f'{identifier}.yaml', 'version', common + 'DefaultLocale: en-US\n')
         notes = ('Native compilation requires Go, native Clang, SDK/CRT, pkg-config, '
                  f'and libraries for the {label} ABI. See WINDOWS.md in the package. '
-                 'ESP tools are downloaded with pinned checksums on the first embedded build. '
+                 'The bundled ESP toolchain is verified and unpacked locally on the first embedded build. '
                  'Use one LLGo ABI profile on PATH at a time.')
         locale = common + 'PackageLocale: en-US\nPublisher: XGo\n'
         locale += f'PackageName: {yaml_scalar(f"LLGo ({label})")}\n'
@@ -104,7 +119,7 @@ def write_manifests(output, version, installers):
         write_manifest(directory, f'{identifier}.locale.en-US.yaml', 'defaultLocale', locale)
         installer = common + 'InstallerType: zip\nNestedInstallerType: portable\n'
         # Both ABI profiles share the same host compiler. Release tests qualify
-        # the native ZIP's portable alias with an isolated DLL search PATH.
+        # the ZIP's portable alias with an isolated DLL search PATH.
         installer += ('NestedInstallerFiles:\n- RelativeFilePath: bin/llgo.exe\n'
                       '  PortableCommandAlias: llgo\nUpgradeBehavior: uninstallPrevious\n'
                       'Commands:\n- llgo\nInstallers:\n')

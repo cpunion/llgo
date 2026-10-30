@@ -34,9 +34,17 @@ if ($metadata.goos -ne 'windows' -or $metadata.goarch -ne $GoArch -or $metadata.
 $commit = (& git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $metadata.commit -ne $commit) { throw 'The release belongs to a different commit' }
 
-if ($metadata.distribution -ne 'native' -or (Test-Path (Join-Path $releaseRoot 'crosscompile')) -or
-    $metadata.esp_clang_host -or $metadata.esp_clang_version -or $metadata.esp_clang_sha256) {
-  throw 'The Windows archive must omit the ESP toolchain and its metadata'
+$pins = Get-Content -Raw (Join-Path $PSScriptRoot '../../internal/crosscompile/espressif.json') | ConvertFrom-Json
+$target = @{ amd64 = 'x86_64-w64-mingw32'; arm64 = 'aarch64-w64-mingw32'; '386' = 'i686-w64-mingw32' }[$GoArch]
+$payload = $pins.payloads.$target
+$bundle = Join-Path $releaseRoot "crosscompile/$($payload.asset)"
+if ($metadata.distribution -ne 'full' -or $metadata.esp_clang_host -ne $target -or
+    $metadata.esp_clang_version -ne $pins.release -or $metadata.esp_clang_asset -ne $payload.asset -or
+    $metadata.esp_clang_sha256 -ne $payload.sha256 -or -not (Test-Path -LiteralPath $bundle)) {
+  throw 'The Windows archive must contain the pinned ESP runtime archive and metadata'
+}
+if ((Get-FileHash -Algorithm SHA256 $bundle).Hash.ToLowerInvariant() -ne $payload.sha256) {
+  throw 'The bundled ESP runtime checksum does not match its pin'
 }
 if (-not $ReadObj -or -not (Test-Path $ReadObj)) { throw 'ZIP checks require the CI inspection tool -ReadObj' }
 
@@ -141,13 +149,11 @@ func main() {
     [Environment]::SetEnvironmentVariable($name, $null)
   }
   $env:PATH = (Split-Path $go) + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot
-  $pins = Get-Content -Raw (Join-Path $PSScriptRoot '../../internal/crosscompile/espressif-windows.json') | ConvertFrom-Json
-  $target = @{ amd64 = 'x86_64-w64-mingw32'; arm64 = 'aarch64-w64-mingw32'; '386' = 'i686-w64-mingw32' }[$GoArch]
   $cached = Join-Path $env:LOCALAPPDATA "llgo/crosscompile/esp-clang-$($pins.release)-$target"
-  $evidence = Join-Path $env:RUNNER_TEMP "llgo-esp-download-$GoArch-$Profile"
+  $evidence = Join-Path $env:RUNNER_TEMP "llgo-esp-runtime-$GoArch-$Profile"
   New-Item -ItemType Directory -Force $evidence | Out-Null
   $results = @()
-  Write-Host "Testing ESP download from $($pins.repository) release $($pins.release)"
+  Write-Host "Testing bundled ESP runtime $($pins.release) from $bundle"
   foreach ($board in @('esp32-coreboard-v2', 'esp32c3')) {
     foreach ($mode in @('default', 'full')) {
       $firmware = Join-Path $work "embedded/$board-$mode.out"
@@ -158,15 +164,21 @@ func main() {
       if (-not $trace.Replace('\', '/').Contains($cached.Replace('\', '/'))) {
         throw "The embedded build did not use the pinned host toolchain`n$trace"
       }
-      $downloaded = $trace.Contains('ESP Clang not found in LLGO_ROOT or cache, will download.')
-      if ($downloaded -ne ($results.Count -eq 0)) {
-        throw "Expected one fresh ESP download followed by reuse of that payload`n$trace"
+      if ($trace.Contains('ESP Clang not found') -or $trace.Contains('Downloading ESP Clang')) {
+        throw "A released package must not download the ESP toolchain`n$trace"
+      }
+      $unpacked = $trace.Contains('Using bundled ESP Clang archive:')
+      if ($unpacked -ne ($results.Count -eq 0)) {
+        throw "Expected local ESP extraction followed by cache reuse`n$trace"
+      }
+      if ($unpacked -and -not $trace.Replace('\', '/').Contains($bundle.Replace('\', '/'))) {
+        throw "The embedded build did not use the bundled archive`n$trace"
       }
       $header = [IO.File]::ReadAllBytes("$firmware.elf")
       $machine = if ($board -eq 'esp32c3') { 243 } else { 94 }
       if ($header.Length -lt 20 -or [BitConverter]::ToUInt32($header, 0) -ne 0x464c457f -or
           $header[4] -ne 1 -or $header[5] -ne 1 -or [BitConverter]::ToUInt16($header, 18) -ne $machine) {
-        throw "The downloaded ESP tools produced an invalid ELF for $board/$mode"
+        throw "The bundled ESP tools produced an invalid ELF for $board/$mode"
       }
       $results += "$board-$mode"
       Write-Host "Passed ESP firmware $board/$mode for windows/$GoArch/$Profile"
@@ -175,14 +187,14 @@ func main() {
   Assert-ReleaseESPPayload -Root $cached -GoArch $GoArch -Version $pins.release
   $manifest = Get-Content -LiteralPath (Join-Path $cached 'LLGO-LLVM-MANIFEST.txt')
   if ($manifest -notcontains 'windows_llvm_link_mode=shared' -or $manifest -notcontains 'llvm_expected_version=22.1.4') {
-    throw 'The downloaded ESP tools must use shared LLVM 22.1.4'
+    throw 'The bundled ESP tools must use shared LLVM 22.1.4'
   }
-  if (-not (Test-Path (Join-Path $cached 'LICENSE-LLVM.txt'))) { throw 'Downloaded ESP tools are missing their license' }
+  if (-not (Test-Path (Join-Path $cached 'LICENSE-LLVM.txt'))) { throw 'Bundled ESP tools are missing their license' }
   @{
     repository = $pins.repository; release = $pins.release; target = $target
-    firmware = $results; status = 'passed'
+    source = 'bundled-archive'; firmware = $results; status = 'passed'
   } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidence 'results.json') -Encoding utf8
-  Write-Host "Passed native Go/C/C++ and on-demand ESP builds for windows/$GoArch/$Profile"
+  Write-Host "Passed native Go/C/C++ and bundled ESP builds for windows/$GoArch/$Profile"
 
 } finally {
   if (Test-Path variable:embeddedEnvironment) {

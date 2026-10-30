@@ -49,7 +49,7 @@ func TestESPClangHostDownload(t *testing.T) {
 	}
 }
 
-func TestMalformedWindowsESPPinsFailBeforeUse(t *testing.T) {
+func TestMalformedESPPinsFailBeforeUse(t *testing.T) {
 	for name, data := range map[string]string{
 		"truncated JSON":     "{",
 		"wrong release type": `{"release":22}`,
@@ -60,29 +60,25 @@ func TestMalformedWindowsESPPinsFailBeforeUse(t *testing.T) {
 					t.Fatal("malformed embedded pins must fail before download URLs or checksums are used")
 				}
 			}()
-			mustParseESPWindowsPins([]byte(data))
+			mustParseESPPins([]byte(data))
 		})
 	}
 }
 
-func TestWindowsESPClangPinsMatchDownloads(t *testing.T) {
-	for arch, pin := range espWindowsPins.Payloads {
-		platform := getESPClangPlatform("windows", arch)
-		if pin.Asset != "clang-esp-"+espClangRelease(platform)+"-"+platform+".tar.xz" {
-			t.Errorf("wrong Windows %s download asset: %s", arch, pin.Asset)
+func TestESPClangPinsMatchDownloads(t *testing.T) {
+	for platform, pin := range espPins.Payloads {
+		if pin.Asset != "clang-esp-"+espClangVersion+"-"+platform+".tar.xz" {
+			t.Errorf("wrong %s download asset: %s", platform, pin.Asset)
 		}
 		if len(pin.SHA256) != 64 || espClangSHA256[platform] != pin.SHA256 {
-			t.Errorf("missing Windows %s payload checksum", arch)
+			t.Errorf("missing %s payload checksum", platform)
 		}
-		if !strings.Contains(espClangCacheDir(platform), espWindowsPins.Release+"-"+platform) {
-			t.Errorf("wrong Windows %s cache key", arch)
+		if !strings.Contains(espClangCacheDir(platform), espPins.Release+"-"+platform) {
+			t.Errorf("wrong %s cache key", platform)
 		}
 	}
-	if len(espWindowsPins.Payloads) != 3 {
-		t.Fatal("Windows downloads must cover x86, amd64 and arm64")
-	}
-	if espClangRelease("aarch64-apple-darwin") != espClangVersion {
-		t.Fatal("Windows payload update changed the Unix release")
+	if len(espPins.Payloads) != 7 {
+		t.Fatal("ESP payloads must cover four Unix and three Windows hosts")
 	}
 }
 

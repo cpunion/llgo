@@ -233,7 +233,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ runner.tool_cache }}/llgo-release-downloads/llvm-x86
-          key: llgo-release-llvm-x86-v1-${{ hashFiles('internal/crosscompile/espressif-windows.json') }}
+          key: llgo-release-llvm-x86-v1-${{ hashFiles('internal/crosscompile/espressif.json') }}
       - name: Download release metadata
         uses: actions/download-artifact@v8
         with:
@@ -310,6 +310,11 @@ jobs:
         with:
           name: windows-host-compiler-${{ matrix.goarch }}
           path: ${{ runner.temp }}/llgo-windows-compiler
+      - name: Cache bundled ESP archive
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.tool_cache }}/llgo-release-downloads/esp-${{ matrix.goarch }}
+          key: llgo-esp-archive-v1-${{ matrix.goarch }}-${{ hashFiles('internal/crosscompile/espressif.json') }}
       - name: Build compact Windows archive
         shell: pwsh
         run: >-
@@ -426,21 +431,21 @@ jobs:
           bash test/installer/install_msys_path_test.sh
           .windows-dist/*.windows-${{ matrix.goarch }}-mingw.zip
           "$RUNNER_TEMP/llgo-release-install"
-      - name: Test native compilation and on-demand ESP toolchain
+      - name: Test native compilation and bundled ESP toolchain
         shell: pwsh
         run: >-
           ./.github/windows/test-release.ps1
           -ReadObj '${{ runner.temp }}/llgo-release-inspection/inspection/llvm-readobj.exe'
           -Profile '${{ matrix.abi }}' -GoArch '${{ matrix.goarch }}'
 
-      - name: Upload Windows ESP download validation evidence
+      - name: Upload Windows bundled ESP validation evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: esp-download-windows-${{ matrix.goarch }}-${{ matrix.abi }}
+          name: esp-runtime-windows-${{ matrix.goarch }}-${{ matrix.abi }}
           path: |
-            ${{ runner.temp }}/llgo-esp-download-${{ matrix.goarch }}-${{ matrix.abi }}/*.log
-            ${{ runner.temp }}/llgo-esp-download-${{ matrix.goarch }}-${{ matrix.abi }}/results.json
+            ${{ runner.temp }}/llgo-esp-runtime-${{ matrix.goarch }}-${{ matrix.abi }}/*.log
+            ${{ runner.temp }}/llgo-esp-runtime-${{ matrix.goarch }}-${{ matrix.abi }}/results.json
           if-no-files-found: warn
           retention-days: 7
 
@@ -569,20 +574,20 @@ jobs:
       - name: Test native assembly shared-library calls
         run: bash dev/test_native_asm.sh
 
-      - name: Test on-demand ESP runtime download and firmware
+      - name: Test bundled ESP runtime and firmware
         run: >-
-          python3 .github/unix/test-esp-download.py
+          python3 .github/unix/test-esp-runtime.py
           "$RUNNER_TEMP/llgo-release-install/current"
-          --output "$RUNNER_TEMP/llgo-esp-download"
+          --output "$RUNNER_TEMP/llgo-esp-runtime"
 
-      - name: Upload ESP download validation evidence
+      - name: Upload bundled ESP validation evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: esp-download-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: esp-runtime-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
-            ${{ runner.temp }}/llgo-esp-download/*.log
-            ${{ runner.temp }}/llgo-esp-download/results.json
+            ${{ runner.temp }}/llgo-esp-runtime/*.log
+            ${{ runner.temp }}/llgo-esp-runtime/results.json
           if-no-files-found: warn
           retention-days: 7
 

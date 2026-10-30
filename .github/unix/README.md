@@ -1,40 +1,35 @@
 # Unix release payloads
 
-The macOS and Linux tar.gz archives include the LLVM shared libraries needed by
-LLGo, native and ESP compiler/linker tools, Clang resource headers, target
-runtimes and licenses. They omit LLVM/Clang SDK headers, top-level static
-development libraries and the llvm-exegesis benchmark tool. On macOS, identical
-libLLVM dylibs share one payload through a relative symlink.
+The macOS and Linux tar.gz archives include LLGo's LLVM shared libraries, native
+and ESP compiler/linker tools, compiler resources, target runtimes and licenses.
+They omit LLVM/Clang development SDK files and benchmark tools. Identical files
+use relative symlinks so the tar.gz writer preserves every tool/loader name
+without storing duplicate library or executable contents.
 
-GoReleaser's before hook runs `stage-toolchains.sh` to copy the runtime payload
-from `.sysroot` into `.release-toolchains`. The build still reads the complete
-SDK from `.sysroot`; pruning never modifies a cached SDK. Run the same hook when
-preparing archives manually. The four native archive tests verify the installed
-payload, run the Go/C/C++ smoke program with the packaged LLVM selected and the
-build cache disabled, and build ESP32 firmware.
+All seven runtime payloads are pinned in
+[`espressif.json`](../../internal/crosscompile/espressif.json). The release setup
+runs `esp-toolchain.py` to verify producer archives and stage their runtime files
+under `.esp-runtime`. GoReleaser's `stage-toolchains.sh` hook copies those files
+to `.release-toolchains`. LLGo is still built with the separately pinned complete
+SDK in `.sysroot`; staging never prunes or replaces that SDK.
 
-The same four jobs also select a runtime root without bundled tools and force a
-fresh, checksum-pinned ESP download. `test-esp-download.py` builds ESP32 and
-ESP32-C3 firmware with default and Full LTO, checks the ELF architecture and
-downloaded runtime manifest, and retains logs as CI artifacts. This covers the
-standalone ESP release independently of the SDK used to build LLGo. Windows
-archive tests run the same four firmware cases on each host architecture/ABI.
+DEB/RPM include LLGo, runtime sources, targets, licenses and the original ESP
+runtime archive. The first embedded build verifies and unpacks that archive
+locally into the user cache. Native compilation continues to use system
+LLVM/Clang/LLD 22 and native libraries. Separate package compilers omit Xtensa
+initializers because Fedora's LLVM does not expose that experimental backend.
+Their binaries use the system `libLLVM.so.22.1`; Debian/Ubuntu selects
+`llvm-config-22`, while Fedora supplies unversioned LLVM commands.
 
-DEB/RPM contain only LLGo's compiler, runtime, targets and license documents.
-They depend on system LLVM/Clang/LLD 22 and native libraries. Separate package
-compilers omit Xtensa from their LLVM initializer lists because Fedora's LLVM
-does not provide that experimental backend. This generated header overlay is
-used only while building the package compilers; the SDK and ESP-enabled tarball
-compilers are unchanged. Their binaries use the system `libLLVM.so.22.1`. On
-Debian/Ubuntu, the configured fallback is `llvm-config-22`; Fedora supplies
-unversioned LLVM commands. Ubuntu 26.04 and Fedora 44 supply the required LLVM
-22 packages. Earlier Debian/Ubuntu releases need the matching apt.llvm.org
-repository enabled first. Use the tar.gz distribution for ESP development.
+Ubuntu 26.04 and Fedora 44 provide LLVM 22 packages. Earlier Debian/Ubuntu
+releases need the matching apt.llvm.org repository enabled first. The release
+container uses the same DEB payload and external native dependencies.
 
-CI installs each DEB/RPM with its declared dependencies in a fresh distribution
-container, checks that no toolchain is bundled and that LLVM resolves from the
-system, then compiles and runs a mixed Go/C/C++ program. The release container
-installs the same external LLVM 22 dependencies on its Debian base.
+CI installs each distribution with declared dependencies, runs a mixed Go/C/C++
+program and builds ESP32/ESP32-C3 firmware with default and Full LTO. Tests use
+fresh caches and assert that the packaged ESP runtime is used without an ESP
+network download. The four tar.gz tests also check the runtime profile and
+loader paths. Logs and per-host firmware results are retained as CI artifacts.
 
 Local packaging regression tests:
 

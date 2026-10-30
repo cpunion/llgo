@@ -36,6 +36,18 @@ Copy-Item -LiteralPath (Join-Path $HostCompilerDirectory 'licenses') `
 $readObj = Join-Path $HostCompilerDirectory 'inspection/llvm-readobj.exe'
 if (-not (Test-Path $readObj)) { throw 'The compiler artifact is missing its inspection tool' }
 Copy-ReleaseDLLs -ReadObj $readObj -Executable $executable -GoArch $GoArch -Profile 'msvc' -CheckOnly
+$toolchain = Get-Content -Raw (Join-Path $PSScriptRoot '../../internal/crosscompile/espressif.json') | ConvertFrom-Json
+$espHost = @{ amd64 = 'x86_64-w64-mingw32'; arm64 = 'aarch64-w64-mingw32'; '386' = 'i686-w64-mingw32' }[$GoArch]
+$payload = $toolchain.payloads.$espHost
+$espArchive = Get-ReleaseArchive `
+  -URL "https://github.com/$($toolchain.repository)/releases/download/$($toolchain.release)/$($payload.asset)" `
+  -SHA256 $payload.sha256 `
+  -CacheDirectory (Join-Path $env:RUNNER_TOOL_CACHE "llgo-release-downloads/esp-$GoArch")
+$embedded = Join-Path $stage 'crosscompile'
+New-Item -ItemType Directory -Force $embedded | Out-Null
+# Preserve the producer's xz stream and tar hard links. Flattening tool aliases
+# into ZIP would store clang repeatedly and exceed the x86 package budget.
+Copy-Item -LiteralPath $espArchive -Destination (Join-Path $embedded $payload.asset)
 @{
   version = $metadata.version
   commit = $commit
@@ -45,7 +57,11 @@ Copy-ReleaseDLLs -ReadObj $readObj -Executable $executable -GoArch $GoArch -Prof
   abi = $Profile
   llvm_version = $llvmVersion
   compiler_sha256 = (Get-FileHash -Algorithm SHA256 $executable).Hash.ToLowerInvariant()
-  distribution = 'native'
+  distribution = 'full'
+  esp_clang_host = $espHost
+  esp_clang_version = $toolchain.release
+  esp_clang_asset = $payload.asset
+  esp_clang_sha256 = $payload.sha256
 } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $stage 'release.json')
 
 # Directory records must be STORE for WinGet compatibility.

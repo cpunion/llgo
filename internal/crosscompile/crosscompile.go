@@ -332,11 +332,10 @@ func targetDebugInfoPolicy(linker, llvmTarget string) DebugInfoPolicy {
 var (
 	wasiSdkUrl      = "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-macos.tar.gz"
 	wasiMacosSubdir = "wasi-sdk-25.0-x86_64-macos"
-	espClangBaseUrl = "https://github.com/" + espWindowsPins.Repository + "/releases/download"
+	espClangBaseUrl = "https://github.com/" + espPins.Repository + "/releases/download"
+	espClangVersion = espPins.Release
 	espClangSHA256  = espClangChecksums()
 )
-
-const espClangVersion = "22.1.4_20261030"
 
 // cacheRoot can be overridden for testing
 var cacheRoot = env.LLGoCacheDir
@@ -394,22 +393,37 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 		return "", nil
 	}
 
-	// Try to download ESP Clang if platform is supported
+	// Install bundled ESP Clang, or download it for source checkouts.
 	platformSuffix := getESPClangPlatform(runtime.GOOS, runtime.GOARCH)
 	if platformSuffix != "" {
-		version := espClangRelease(platformSuffix)
+		version := espClangVersion
 		checksum, ok := espClangSHA256[platformSuffix]
 		if !ok {
 			err = fmt.Errorf("missing ESP Clang checksum for %s", platformSuffix)
 			return
+		}
+		pin := espPins.Payloads[platformSuffix]
+		if pin.Asset == "" {
+			return "", fmt.Errorf("missing ESP Clang asset for %s", platformSuffix)
 		}
 		cacheClangDir := espClangCacheDir(platformSuffix)
 		if _, err = os.Stat(cacheClangDir); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				return
 			}
-			fmt.Fprintln(os.Stderr, "ESP Clang not found in LLGO_ROOT or cache, will download.")
-			if err = checkDownloadAndExtractESPClang(espClangBaseUrl+"/"+version, version, platformSuffix, checksum, cacheClangDir); err != nil {
+			bundle := filepath.Join(filepath.Dir(espClangRoot), pin.Asset)
+			_, bundleErr := os.Stat(bundle)
+			switch {
+			case bundleErr == nil:
+				fmt.Fprintln(os.Stderr, "Using bundled ESP Clang archive:", bundle)
+				err = checkInstallESPClangArchive(bundle, checksum, cacheClangDir)
+			case errors.Is(bundleErr, fs.ErrNotExist):
+				fmt.Fprintln(os.Stderr, "ESP Clang not found in LLGO_ROOT or cache, will download.")
+				err = checkDownloadAndExtractESPClang(espClangBaseUrl+"/"+version, pin.Asset, checksum, cacheClangDir)
+			default:
+				return "", bundleErr
+			}
+			if err != nil {
 				return
 			}
 		}
@@ -424,7 +438,7 @@ func getESPClangRoot(forceEspClang bool) (clangRoot string, err error) {
 // Include the tool host in the cache key: x64 and ARM64 LLGo installations
 // can share a Windows user cache, but cannot share a native ESP payload.
 func espClangCacheDir(platform string) string {
-	return filepath.Join(cacheDir(), "esp-clang-"+espClangRelease(platform)+"-"+platform)
+	return filepath.Join(cacheDir(), "esp-clang-"+espClangVersion+"-"+platform)
 }
 
 // getESPClangPlatform returns the platform suffix for ESP Clang downloads

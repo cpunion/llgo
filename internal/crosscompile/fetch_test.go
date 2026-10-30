@@ -840,7 +840,7 @@ func TestESPClangExtractionLogic(t *testing.T) {
 	}
 
 	// Test that function skips download for existing directory
-	err = checkDownloadAndExtractESPClang("", "", "", "", espClangDir)
+	err = checkDownloadAndExtractESPClang("", "", "", espClangDir)
 	if err != nil {
 		t.Fatalf("checkDownloadAndExtractESPClang failed: %v", err)
 	}
@@ -947,7 +947,7 @@ func TestESPClangDownloadWhenNotExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Test download and extract when directory doesn't exist
-	err = checkDownloadAndExtractESPClang(server.URL, "test", "linux", checksum, espClangDir)
+	err = checkDownloadAndExtractESPClang(server.URL, "clang-esp-test-linux.tar.xz", checksum, espClangDir)
 	if err != nil {
 		t.Fatalf("checkDownloadAndExtractESPClang failed: %v", err)
 	}
@@ -1017,7 +1017,7 @@ func TestESPClangDownloadLicenseFailure(t *testing.T) {
 	t.Setenv("LLGO_ROOT", llgoRoot)
 
 	destDir := filepath.Join(t.TempDir(), "esp-clang")
-	err = checkDownloadAndExtractESPClang(server.URL, "test", "linux", checksum, destDir)
+	err = checkDownloadAndExtractESPClang(server.URL, "clang-esp-test-linux.tar.xz", checksum, destDir)
 	if err == nil || !strings.Contains(err.Error(), "read ESP Clang license") {
 		t.Fatalf("checkDownloadAndExtractESPClang() error = %v, want license read error", err)
 	}
@@ -1136,7 +1136,7 @@ func TestESPClangRejectsChecksumMismatch(t *testing.T) {
 	defer server.Close()
 
 	destination := filepath.Join(t.TempDir(), "esp-clang")
-	err = checkDownloadAndExtractESPClang(server.URL, "test", "linux", strings.Repeat("0", 64), destination)
+	err = checkDownloadAndExtractESPClang(server.URL, "clang-esp-test-linux.tar.xz", strings.Repeat("0", 64), destination)
 	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Fatalf("checksum mismatch error = %v", err)
 	}

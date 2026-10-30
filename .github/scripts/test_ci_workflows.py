@@ -61,7 +61,7 @@ def matrix_size(job):
 
 
 class WorkflowContractTests(unittest.TestCase):
-    def test_unix_archives_stage_runtime_but_system_packages_only_ship_llgo(self):
+    def test_unix_archives_and_system_packages_bundle_pinned_esp(self):
         root = WORKFLOWS.parents[1]
         config = yaml.safe_load((root / '.goreleaser.yaml').read_text())
         self.assertIn('bash .github/unix/stage-toolchains.sh', config['before']['hooks'])
@@ -71,7 +71,12 @@ class WorkflowContractTests(unittest.TestCase):
         package = config['nfpms'][0]
         self.assertEqual(package['ids'], ['llgo-linux-amd64-system', 'llgo-linux-arm64-system'])
         self.assertFalse(set(package['ids']) & set(config['archives'][0]['ids']))
-        self.assertFalse(any('crosscompile' in item['dst'] for item in package['contents']))
+        embedded = next(item for item in package['contents'] if item['dst'] == '/usr/lib/llgo/crosscompile')
+        self.assertEqual(embedded['src'], '.release-toolchains/payloads/linux/{{.Arch}}/')
+        self.assertEqual(embedded['type'], 'tree')
+        license_file = 'LICENSES/XGo-LLVM-Apache-2.0-WITH-LLVM-exception.txt'
+        license = next(item for item in package['contents'] if item['dst'] == '/usr/lib/llgo/' + license_file)
+        self.assertEqual(license['src'], license_file)
         for dependency in ('libllvm22 (>= 1:22.1)', 'llvm-22', 'clang-22', 'lld-22'):
             self.assertIn(dependency, package['overrides']['deb']['dependencies'])
         for dependency in ('llvm-libs >= 22.1', 'llvm < 23', 'clang < 23', 'lld < 23'):
@@ -521,7 +526,7 @@ sys.exit(subprocess.call(command + ['./internal/build']))
         jobs = load("release-build.yml")["jobs"]
         self.assertNotIn("build-windows-x86-toolchains", jobs)
         self.assertFalse((WORKFLOWS.parent / "windows/build-x86-toolchains.sh").exists())
-        pins = json.loads((WORKFLOWS.parents[1] / "internal/crosscompile/espressif-windows.json").read_text())
+        pins = json.loads((WORKFLOWS.parents[1] / "internal/crosscompile/espressif.json").read_text())
         self.assertRegex(pins["release"], r"^22\.1\.4_\d{8}$")
         self.assertRegex(pins["producer_commit"], r"^[0-9a-f]{40}$")
         self.assertRegex(pins["sdk"]["release"], r"^22\.1\.4_\d{8}$")
@@ -529,27 +534,32 @@ sys.exit(subprocess.call(command + ['./internal/build']))
         self.assertEqual(pins["sdk"]["version"], "22.1.8")
         self.assertEqual(pins["sdk"]["asset"], "llvm-sdk-22.1.8-i686-w64-mingw32.tar.xz")
         self.assertRegex(pins["sdk"]["sha256"], r"^[0-9a-f]{64}$")
-        self.assertEqual(set(pins["payloads"]), {"386", "amd64", "arm64"})
-        for arch, target in (("386", "i686"), ("amd64", "x86_64"), ("arm64", "aarch64")):
-            pin = pins["payloads"][arch]
-            self.assertEqual(pin["asset"], f"clang-esp-{pins['release']}-{target}-w64-mingw32.tar.xz")
+        self.assertEqual(pins['sdk']['repository'], 'xgo-dev/espressif-llvm-project-prebuilt')
+        self.assertEqual(pins['llvm_version'], '22.1.4')
+        self.assertEqual(set(pins["payloads"]), {
+            'i686-w64-mingw32', 'x86_64-w64-mingw32', 'aarch64-w64-mingw32',
+            'x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-linux-gnu', 'aarch64-linux-gnu'})
+        for target, pin in pins["payloads"].items():
+            self.assertEqual(pin["asset"], f"clang-esp-{pins['release']}-{target}.tar.xz")
             self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
         for name in ("build-windows-compiler", "build-windows-compiler-x86"):
             step = next(step for step in jobs[name]["steps"]
                         if step.get("name") == "Cache Windows x86 LLVM SDK archive")
             self.assertEqual(step["if"], "matrix.goarch == '386'")
-            self.assertIn("espressif-windows.json", step["with"]["key"])
+            self.assertIn("espressif.json", step["with"]["key"])
             self.assertEqual(step["with"]["path"], "${{ runner.tool_cache }}/llgo-release-downloads/llvm-x86")
         script = (WORKFLOWS.parent / "windows/build-compiler.ps1").read_text()
-        self.assertIn("espressif-windows.json", script)
-        self.assertIn("https://github.com/xgo-dev/espressif-llvm-project-prebuilt/releases/download/", script)
+        self.assertIn("espressif.json", script)
+        self.assertIn("https://github.com/$($toolchain.sdk.repository)/releases/download/", script)
         self.assertIn("$($toolchain.sdk.release)/$($toolchain.sdk.asset)", script)
         for name in ("build-windows", "build-windows-x86"):
-            self.assertFalse(any(step.get("name") == "Cache ESP release archive" for step in jobs[name]["steps"]))
+            cache = next(step for step in jobs[name]['steps'] if step.get('name') == 'Cache bundled ESP archive')
+            self.assertIn('espressif.json', cache['with']['key'])
         package = (WORKFLOWS.parent / "windows/build-release.ps1").read_text()
         self.assertNotIn("Expand-ReleaseXz", package)
         self.assertNotIn("create-native", package)
-        self.assertIn("distribution = 'native'", package)
+        self.assertIn("distribution = 'full'", package)
+        self.assertIn('Copy-Item -LiteralPath $espArchive', package)
 
     def test_release_artifact_dependencies_and_tag_guard_are_preserved(self):
         jobs = load("release-build.yml")["jobs"]
