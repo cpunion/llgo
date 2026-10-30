@@ -9,6 +9,8 @@ The compiler tests cover three layers:
   including hosted wasm32/wasm64. Check emitted global types, LLVM allocation
   sizes, two-element arrays, ABI alignment, and string field offsets against
   explicit expectations. `go/types.Sizes` supplies frontend configuration only.
+  Extended backends absent from the official Windows LLVM build explicitly skip;
+  core hosted architectures remain mandatory.
 - `internal/build/TestCgoTypesLLVMLayout`: run real `go tool cgo -godefs` for
   native target ABIs, lower the resulting Go declarations, and compare their
   LLVM types, sizes, and record offsets with separately compiled C. The native

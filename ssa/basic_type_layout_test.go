@@ -3,6 +3,7 @@ package ssa
 import (
 	"fmt"
 	"go/types"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -55,6 +56,17 @@ func TestGoBasicTypeLLVMStorage(t *testing.T) {
 	}
 	for _, target := range targets {
 		t.Run(target.name, func(t *testing.T) {
+			if _, err := llvm.GetTargetFromTriple(target.triple); err != nil {
+				// The official Windows LLVM archive omits several extra
+				// backends. Keep the core hosted targets mandatory.
+				if runtime.GOOS == "windows" {
+					switch target.arch {
+					case "ppc64", "ppc64le", "s390x", "mips", "mipsle", "mips64", "mips64le", "loong64":
+						t.Skipf("LLVM build lacks %s: %v", target.arch, err)
+					}
+				}
+				t.Fatal(err)
+			}
 			prog := NewProgram(&Target{GOOS: target.os, GOARCH: target.arch, LLVMTarget: target.triple, WasmProfile: target.profile})
 			defer prog.Dispose()
 			// Match the production frontend configuration, but never use this
