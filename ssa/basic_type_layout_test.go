@@ -121,7 +121,8 @@ func TestGoBasicTypeLLVMStorage(t *testing.T) {
 						wantAlign = target.word
 					}
 					// Raw LLVM scalar ABI alignment, not a substitute for Go
-					// field alignment (notably MSVC i686's i64/double).
+					// field alignment. i386 System V uses four-byte i64/double
+					// ABI alignment; MSVC i686 keeps eight-byte ABI alignment.
 					if target.name == "linux-386" && wantAlign == 8 {
 						wantAlign = 4
 					}

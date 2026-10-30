@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/crosscompile"
@@ -42,6 +43,13 @@ func cLayoutTargets() []cLayoutTarget {
 	}
 }
 
+// Cache immutable IR bytes, not LLVM objects: each caller still owns its
+// context/module and disposes them through t.Cleanup.
+var cLayoutOracleCache = struct {
+	sync.Mutex
+	ir map[string][]byte
+}{ir: make(map[string][]byte)}
+
 // Use the same compiler constructor and argument merging as LLGo C preambles.
 func cLayoutOracle(t *testing.T, target cLayoutTarget) llvm.Module {
 	t.Helper()
@@ -49,15 +57,35 @@ func cLayoutOracle(t *testing.T, target cLayoutTarget) llvm.Module {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	out := filepath.Join(dir, "oracle.ll")
 	ctx := &context{buildConf: &Config{}, commands: commandEnv{environ: os.Environ()},
 		crossCompile: crosscompile.Export{CC: clang, CCFLAGS: []string{"--target=" + target.triple}}}
 	cmd := ctx.compiler()
-	var diagnostics bytes.Buffer
-	cmd.Stderr = &diagnostics
-	if err := cmd.Compile("-std=c11", "-S", "-emit-llvm", "-o", out, "testdata/typelayout/oracle.c"); err != nil {
-		t.Fatalf("C oracle %s: %v\n%s", target.triple, err, diagnostics.String())
+	args := []string{"-std=c11", "-S", "-emit-llvm", "testdata/typelayout/oracle.c"}
+	// Include the compiler and effective flags (including CFLAGS/CCFLAGS),
+	// while excluding the caller-specific output path.
+	key := clang + "\x00" + strings.Join(cmd.CompileArguments(args...), "\x00")
+	ir := func() []byte {
+		cLayoutOracleCache.Lock()
+		defer cLayoutOracleCache.Unlock()
+		if ir, ok := cLayoutOracleCache.ir[key]; ok {
+			return ir
+		}
+		out := filepath.Join(t.TempDir(), "compiled-oracle.ll")
+		var diagnostics bytes.Buffer
+		cmd.Stderr = &diagnostics
+		if err := cmd.Compile(append(slices.Clone(args), "-o", out)...); err != nil {
+			t.Fatalf("C oracle %s: %v\n%s", target.triple, err, diagnostics.String())
+		}
+		ir, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cLayoutOracleCache.ir[key] = ir
+		return ir
+	}()
+	out := filepath.Join(t.TempDir(), "oracle.ll")
+	if err := os.WriteFile(out, ir, 0600); err != nil {
+		t.Fatal(err)
 	}
 	llvmctx := llvm.NewContext()
 	t.Cleanup(llvmctx.Dispose)
@@ -80,6 +108,21 @@ func cLayoutConstant(t *testing.T, mod llvm.Module, name string) uint64 {
 		t.Fatalf("C oracle missing %s", name)
 	}
 	return g.Initializer().ZExtValue()
+}
+
+func cgoLayoutTypeNames(t *testing.T, mod llvm.Module) []string {
+	t.Helper()
+	names := []string{}
+	for g := mod.FirstGlobal(); !g.IsNil(); g = llvm.NextGlobal(g) {
+		// LongDouble is a C-only oracle entry; cmd/cgo cannot represent it.
+		if strings.HasPrefix(g.Name(), "value_") && g.Name() != "value_LongDouble" {
+			names = append(names, strings.TrimPrefix(g.Name(), "value_"))
+		}
+	}
+	if want := int(cLayoutConstant(t, mod, "audit_type_count")); want == 0 || len(names) != want {
+		t.Fatalf("oracle has %d cgo types, AUDIT_TYPES in types.h defines %d", len(names), want)
+	}
+	return names
 }
 
 // Check the C compiler's final IR against its constant expressions, rather than
@@ -108,8 +151,9 @@ func TestCTypeLLVMLayout(t *testing.T) {
 					t.Errorf("%s array=%d, want %d", name, got, want)
 				}
 			}
-			if count != 24 {
-				t.Fatalf("checked %d C globals, want 24", count)
+			// AUDIT_TYPES plus the C-only LongDouble entry in oracle.c.
+			if want := int(cLayoutConstant(t, mod, "audit_type_count")) + 1; count != want {
+				t.Fatalf("checked %d C globals, want %d (AUDIT_TYPES plus LongDouble)", count, want)
 			}
 		})
 	}
@@ -151,7 +195,7 @@ func cgoLayoutTypes(t *testing.T, target cLayoutTarget, cc string, flags ...stri
 
 // Compare each preprocessed C type's actual LLGo global against an independent
 // C compilation. The return value permits a negative ABI mismatch test.
-func cgoLayoutDifferences(t *testing.T, target cLayoutTarget, goPkg *types.Package, mod llvm.Module) []string {
+func cgoLayoutDifferences(t *testing.T, target cLayoutTarget, goPkg *types.Package, mod llvm.Module, names []string) []string {
 	t.Helper()
 	llssa.Initialize(llssa.InitAll)
 	prog := llssa.NewProgram(&llssa.Target{GOOS: target.os, GOARCH: target.arch, LLVMTarget: target.triple, WasmProfile: target.profile})
@@ -160,17 +204,19 @@ func cgoLayoutDifferences(t *testing.T, target cLayoutTarget, goPkg *types.Packa
 	pkg := prog.NewPackage("layout", "layout")
 	td := prog.TargetData()
 	diffs := []string{}
-	checked := 0
-	for _, name := range goPkg.Scope().Names() {
+	if names == nil {
+		names = cgoLayoutTypeNames(t, mod)
+	}
+	for _, name := range names {
 		obj, ok := goPkg.Scope().Lookup(name).(*types.TypeName)
 		if !ok {
+			diffs = append(diffs, "missing Go type "+name)
 			continue
 		}
 		cGlobal := mod.NamedGlobal("value_" + name)
 		if cGlobal.IsNil() {
-			continue
+			t.Fatalf("C oracle missing value_%s", name)
 		}
-		checked++
 		// Named C records retain C field alignment (e.g. Windows i686 double).
 		prog.SetTypeCallConv("layout."+name, llssa.CDecl)
 		pkg.NewVar("layout."+name, types.NewPointer(obj.Type()), llssa.CDecl)
@@ -202,9 +248,6 @@ func cgoLayoutDifferences(t *testing.T, target cLayoutTarget, goPkg *types.Packa
 			}
 		}
 	}
-	if checked < 14 {
-		t.Fatalf("only compared %d C types", checked)
-	}
 	return diffs
 }
 
@@ -224,17 +267,12 @@ func TestCgoPackageLLVMLayout(t *testing.T) {
 	target := cLayoutTarget{conf.Goos, conf.Goarch, pkg.Prog.Target().Spec().Triple, ""}
 	oracle := cLayoutOracle(t, target)
 	td := pkg.Prog.TargetData()
-	count := 0
-	for g := oracle.FirstGlobal(); !g.IsNil(); g = llvm.NextGlobal(g) {
-		if !strings.HasPrefix(g.Name(), "value_") || g.Name() == "value_LongDouble" {
-			continue
-		}
-		name := strings.TrimPrefix(g.Name(), "value_")
+	for _, name := range cgoLayoutTypeNames(t, oracle) {
+		g := oracle.NamedGlobal("value_" + name)
 		got := pkg.Module().NamedGlobal("main.Value" + name)
 		if got.IsNil() {
 			t.Fatalf("missing cgo global Value%s", name)
 		}
-		count++
 		physical := got.GlobalValueType()
 		if size, want := td.TypeAllocSize(physical), cLayoutConstant(t, oracle, "size_"+name); size != want {
 			t.Errorf("%s: cgo -> LLVM %s size=%d, C sizeof=%d", name, physical, size, want)
@@ -242,9 +280,6 @@ func TestCgoPackageLLVMLayout(t *testing.T) {
 		if typ := g.GlobalValueType(); name != "Bool" && name != "Record" && physical.String() != typ.String() {
 			t.Errorf("%s: cgo -> LLVM type=%s, C LLVM type=%s", name, physical, typ)
 		}
-	}
-	if count != 23 {
-		t.Fatalf("checked %d cgo globals, want 23", count)
 	}
 }
 
@@ -261,7 +296,7 @@ func TestCgoTypesLLVMLayout(t *testing.T) {
 				t.Skip("cmd/cgo does not support GOARCH=wasm; C and runtime binding IR tested separately")
 			}
 			pkg := cgoLayoutTypes(t, target, clang, "--target="+target.triple)
-			if diffs := cgoLayoutDifferences(t, target, pkg, cLayoutOracle(t, target)); len(diffs) != 0 {
+			if diffs := cgoLayoutDifferences(t, target, pkg, cLayoutOracle(t, target), nil); len(diffs) != 0 {
 				t.Fatal(strings.Join(diffs, "\n"))
 			}
 		})
@@ -275,7 +310,7 @@ func TestCgoCompilerLayoutMismatch(t *testing.T) {
 	}
 	target := cLayoutTarget{"linux", "amd64", "x86_64-unknown-linux-gnu", ""}
 	pkg := cgoLayoutTypes(t, target, clang, "--target="+target.triple, "-fshort-enums")
-	diffs := cgoLayoutDifferences(t, target, pkg, cLayoutOracle(t, target))
+	diffs := cgoLayoutDifferences(t, target, pkg, cLayoutOracle(t, target), nil)
 	if !slices.ContainsFunc(diffs, func(s string) bool { return strings.HasPrefix(s, "Enum:") }) {
 		t.Fatalf("missed incompatible cgo compiler options: %v", diffs)
 	}
@@ -292,7 +327,7 @@ func TestCgoGCCAndLLGoClangLayout(t *testing.T) {
 	for _, target := range cLayoutTargets() {
 		if target.os == runtime.GOOS && target.arch == runtime.GOARCH {
 			pkg := cgoLayoutTypes(t, target, gcc)
-			if diffs := cgoLayoutDifferences(t, target, pkg, cLayoutOracle(t, target)); len(diffs) != 0 {
+			if diffs := cgoLayoutDifferences(t, target, pkg, cLayoutOracle(t, target), nil); len(diffs) != 0 {
 				t.Fatal(strings.Join(diffs, "\n"))
 			}
 			return
@@ -330,7 +365,11 @@ func TestRuntimeCTypeLLVMLayout(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if diffs := cgoLayoutDifferences(t, target, pkg, cLayoutOracle(t, target)); len(diffs) != 0 {
+			// Explicitly require the runtime aliases represented by the C
+			// fixture, so a rename/removal reports the missing type by name.
+			names := []string{"Char", "Int", "Uint", "Long", "Ulong", "LongLong", "UlongLong",
+				"SizeT", "SsizeT", "IntptrT", "UintptrT", "Float", "Double", "Pointer"}
+			if diffs := cgoLayoutDifferences(t, target, pkg, cLayoutOracle(t, target), names); len(diffs) != 0 {
 				t.Fatal(strings.Join(diffs, "\n"))
 			}
 		})
