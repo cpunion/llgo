@@ -29,9 +29,7 @@ for image in "$@"; do
         opensuse/*:*)
             # These packages and their dependencies are in OSS. Unrelated
             # non-OSS and codec repositories must not gate shell startup tests.
-            # Use the official CDN: download.opensuse.org DNS/connection failures
-            # on self-hosted runners otherwise stop the test before shell startup.
-            setup='sed -i -e s,http://,https://,g -e s,download.opensuse.org,cdn.opensuse.org,g /etc/zypp/repos.d/*.repo && zypper --non-interactive refresh --repo repo-oss && zypper --non-interactive install --no-recommends --repo repo-oss bash zsh fish tar gzip'
+            setup='sed -i s,http://,https://,g /etc/zypp/repos.d/*.repo && zypper --non-interactive refresh --repo repo-oss && zypper --non-interactive install --no-recommends --repo repo-oss bash zsh fish tar gzip'
             ;;
         *) printf 'Unsupported shell-test image: %s\n' "$image" >&2; exit 1 ;;
     esac

@@ -9,9 +9,10 @@ without storing duplicate library or executable contents.
 All seven runtime payloads are pinned in
 [`espressif.json`](../../internal/crosscompile/espressif.json). The release setup
 runs `esp-toolchain.py` to verify producer archives and stage their runtime files
-under `.esp-runtime`. GoReleaser's `stage-toolchains.sh` hook copies those files
-to `.release-toolchains`. LLGo is still built with the separately pinned complete
-SDK in `.sysroot`; staging never prunes or replaces that SDK.
+directly under `.release-toolchains`. GoReleaser's `stage-toolchains.sh` hook
+only generates the Linux system LLVM target-list overlays. LLGo is still built
+with the separately pinned complete SDK in `.sysroot`; staging never prunes or
+replaces that SDK.
 
 DEB/RPM include LLGo, runtime sources, targets, licenses and the original ESP
 runtime archive. The first embedded build verifies and unpacks that archive

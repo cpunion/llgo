@@ -27,8 +27,7 @@ class ESPStagingTests(unittest.TestCase):
         self.license.write_text('Complete LLVM license')
         self.pins = json.loads((esp.ROOT / 'internal/crosscompile/espressif.json').read_text())
         for platform, target in esp.PLATFORMS.items():
-            if not platform.startswith('windows/'):
-                self.fixture(target)
+            self.fixture(target)
 
     def fixture(self, target, manifest_target=None, development=False):
         pin = self.pins['payloads'][target]
@@ -63,8 +62,6 @@ class ESPStagingTests(unittest.TestCase):
         for _ in range(2):
             self.stage()
             for platform, target in esp.PLATFORMS.items():
-                if platform.startswith('windows/'):
-                    continue
                 runtime = self.output / platform
                 self.assertFalse((runtime / 'stale').exists())
                 self.assertEqual((runtime / 'bin/clang++').read_bytes(), b'compiler')
@@ -75,15 +72,18 @@ class ESPStagingTests(unittest.TestCase):
                 self.assertEqual((runtime / 'LICENSE-LLVM.txt').read_text(), 'Complete LLVM license')
                 pin = self.pins['payloads'][target]
                 bundled = self.output / 'payloads' / platform / pin['asset']
-                self.assertEqual(esp.digest(bundled), pin['sha256'])
-                self.assertFalse(os.path.samefile(bundled, self.cache / (pin['sha256'] + '.tar.xz')))
+                if platform.startswith('linux/'):
+                    self.assertEqual(esp.digest(bundled), pin['sha256'])
+                    self.assertFalse(os.path.samefile(bundled, self.cache / (pin['sha256'] + '.tar.xz')))
+                else:
+                    self.assertFalse(bundled.parent.exists())
             (self.output / 'linux/arm64/stale').touch()
 
     def test_cached_archive_revalidated_without_changing_good_output(self):
         self.stage()
-        target = esp.PLATFORMS['darwin/amd64']
+        target = esp.PLATFORMS['linux/amd64']
         pin = self.pins['payloads'][target]
-        bundled = self.output / 'payloads/darwin/amd64' / pin['asset']
+        bundled = self.output / 'payloads/linux/amd64' / pin['asset']
         before = bundled.read_bytes()
         (self.cache / (pin['sha256'] + '.tar.xz')).write_bytes(b'tampered cache')
         with self.assertRaisesRegex(ValueError, 'Cached ESP runtime archive checksum mismatch'):

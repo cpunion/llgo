@@ -53,7 +53,6 @@ go.work*
 .dist/
 .sysroot/
 .release-toolchains/
-.esp-runtime/
 .esp-runtime-downloads/
 .windows-dist/
 

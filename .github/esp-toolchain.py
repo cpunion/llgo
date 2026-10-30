@@ -18,9 +18,6 @@ PLATFORMS = {
     'darwin/arm64': 'aarch64-apple-darwin',
     'linux/amd64': 'x86_64-linux-gnu',
     'linux/arm64': 'aarch64-linux-gnu',
-    'windows/386': 'i686-w64-mingw32',
-    'windows/amd64': 'x86_64-w64-mingw32',
-    'windows/arm64': 'aarch64-w64-mingw32',
 }
 MARKER = 'LLGO-ESP-STAGE.json'
 
@@ -98,8 +95,6 @@ def stage_unix(pins, cache, output, license_file, base_url=None):
         stage = Path(temporary) / 'stage'
         stage.mkdir()
         for platform, target in PLATFORMS.items():
-            if platform.startswith('windows/'):
-                continue
             pin = pins['payloads'][target]
             archive = cached_archive(base_url + '/' + pin['asset'], pin['sha256'], cache)
             unpack = Path(temporary) / 'unpack' / platform
@@ -113,9 +108,10 @@ def stage_unix(pins, cache, output, license_file, base_url=None):
             destination = stage / platform
             destination.parent.mkdir(parents=True, exist_ok=True)
             runtime.rename(destination)
-            payload = stage / 'payloads' / platform / pin['asset']
-            payload.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(archive, payload)
+            if platform.startswith('linux/'):
+                payload = stage / 'payloads' / platform / pin['asset']
+                payload.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(archive, payload)
             print('Staged pinned ESP runtime: ' + platform, flush=True)
         (stage / MARKER).write_text(json.dumps(pins, indent=2) + '\n')
         backup = output.with_name(output.name + '.old-' + uuid.uuid4().hex)
@@ -134,7 +130,7 @@ def stage_unix(pins, cache, output, license_file, base_url=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cache', type=Path, default=Path('.esp-runtime-downloads'))
-    parser.add_argument('--output', type=Path, default=Path('.esp-runtime'))
+    parser.add_argument('--output', type=Path, default=Path('.release-toolchains'))
     args = parser.parse_args()
     pins = json.loads((ROOT / 'internal/crosscompile/espressif.json').read_text())
     stage_unix(pins, args.cache, args.output, ROOT / 'LICENSES/XGo-LLVM-Apache-2.0-WITH-LLVM-exception.txt')
