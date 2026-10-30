@@ -129,7 +129,6 @@ func main() {
 
   New-Item -ItemType Directory 'embedded' | Out-Null
   [IO.File]::WriteAllText((Join-Path $work 'embedded/main.go'), 'package main; func main() {}', $utf8)
-  $firmware = Join-Path $work 'embedded/demo.out'
   $savedLocalAppData = $env:LOCALAPPDATA
   $env:LOCALAPPDATA = Join-Path $work 'fresh user cache'
   New-Item -ItemType Directory -Force $env:LOCALAPPDATA | Out-Null
@@ -142,17 +141,47 @@ func main() {
     [Environment]::SetEnvironmentVariable($name, $null)
   }
   $env:PATH = (Split-Path $go) + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot
-  $trace = Invoke-ReleaseCapture $llgo @('build', '-x', '-target', 'esp32-coreboard-v2', '-o', $firmware, './embedded')
-  if (-not (Test-Path "$firmware.elf")) { throw 'The downloaded ESP Clang did not produce firmware' }
   $pins = Get-Content -Raw (Join-Path $PSScriptRoot '../../internal/crosscompile/espressif-windows.json') | ConvertFrom-Json
   $target = @{ amd64 = 'x86_64-w64-mingw32'; arm64 = 'aarch64-w64-mingw32'; '386' = 'i686-w64-mingw32' }[$GoArch]
   $cached = Join-Path $env:LOCALAPPDATA "llgo/crosscompile/esp-clang-$($pins.release)-$target"
-  if (-not $trace.Contains('ESP Clang not found in LLGO_ROOT or cache, will download.') -or
-      -not $trace.Replace('\', '/').Contains($cached.Replace('\', '/'))) {
-    throw "The embedded build did not download and use the pinned host toolchain`n$trace"
+  $evidence = Join-Path $env:RUNNER_TEMP "llgo-esp-download-$GoArch-$Profile"
+  New-Item -ItemType Directory -Force $evidence | Out-Null
+  $results = @()
+  Write-Host "Testing ESP download from $($pins.repository) release $($pins.release)"
+  foreach ($board in @('esp32-coreboard-v2', 'esp32c3')) {
+    foreach ($mode in @('default', 'full')) {
+      $firmware = Join-Path $work "embedded/$board-$mode.out"
+      $buildArguments = @('build', '-x')
+      if ($mode -eq 'full') { $buildArguments += '-lto=full' }
+      $trace = Invoke-ReleaseCapture $llgo ($buildArguments + @('-target', $board, '-o', $firmware, './embedded'))
+      [IO.File]::WriteAllText((Join-Path $evidence "$board-$mode.log"), $trace, $utf8)
+      if (-not $trace.Replace('\', '/').Contains($cached.Replace('\', '/'))) {
+        throw "The embedded build did not use the pinned host toolchain`n$trace"
+      }
+      $downloaded = $trace.Contains('ESP Clang not found in LLGO_ROOT or cache, will download.')
+      if ($downloaded -ne ($results.Count -eq 0)) {
+        throw "Expected one fresh ESP download followed by reuse of that payload`n$trace"
+      }
+      $header = [IO.File]::ReadAllBytes("$firmware.elf")
+      $machine = if ($board -eq 'esp32c3') { 243 } else { 94 }
+      if ($header.Length -lt 20 -or [BitConverter]::ToUInt32($header, 0) -ne 0x464c457f -or
+          $header[4] -ne 1 -or $header[5] -ne 1 -or [BitConverter]::ToUInt16($header, 18) -ne $machine) {
+        throw "The downloaded ESP tools produced an invalid ELF for $board/$mode"
+      }
+      $results += "$board-$mode"
+      Write-Host "Passed ESP firmware $board/$mode for windows/$GoArch/$Profile"
+    }
   }
   Assert-ReleaseESPPayload -Root $cached -GoArch $GoArch -Version $pins.release
+  $manifest = Get-Content -LiteralPath (Join-Path $cached 'LLGO-LLVM-MANIFEST.txt')
+  if ($manifest -notcontains 'windows_llvm_link_mode=shared' -or $manifest -notcontains 'llvm_expected_version=22.1.4') {
+    throw 'The downloaded ESP tools must use shared LLVM 22.1.4'
+  }
   if (-not (Test-Path (Join-Path $cached 'LICENSE-LLVM.txt'))) { throw 'Downloaded ESP tools are missing their license' }
+  @{
+    repository = $pins.repository; release = $pins.release; target = $target
+    firmware = $results; status = 'passed'
+  } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidence 'results.json') -Encoding utf8
   Write-Host "Passed native Go/C/C++ and on-demand ESP builds for windows/$GoArch/$Profile"
 
 } finally {

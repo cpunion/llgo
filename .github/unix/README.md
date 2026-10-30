@@ -13,6 +13,13 @@ preparing archives manually. The four native archive tests verify the installed
 payload, run the Go/C/C++ smoke program with the packaged LLVM selected and the
 build cache disabled, and build ESP32 firmware.
 
+The same four jobs also select a runtime root without bundled tools and force a
+fresh, checksum-pinned ESP download. `test-esp-download.py` builds ESP32 and
+ESP32-C3 firmware with default and Full LTO, checks the ELF architecture and
+downloaded runtime manifest, and retains logs as CI artifacts. This covers the
+standalone ESP release independently of the SDK used to build LLGo. Windows
+archive tests run the same four firmware cases on each host architecture/ABI.
+
 DEB/RPM contain only LLGo's compiler, runtime, targets and license documents.
 They depend on system LLVM/Clang/LLD 22 and native libraries. Separate package
 compilers omit Xtensa from their LLVM initializer lists because Fedora's LLVM

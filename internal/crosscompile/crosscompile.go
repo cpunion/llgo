@@ -332,11 +332,11 @@ func targetDebugInfoPolicy(linker, llvmTarget string) DebugInfoPolicy {
 var (
 	wasiSdkUrl      = "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-macos.tar.gz"
 	wasiMacosSubdir = "wasi-sdk-25.0-x86_64-macos"
-	espClangBaseUrl = "https://github.com/xgo-dev/espressif-llvm-project-prebuilt/releases/download"
+	espClangBaseUrl = "https://github.com/" + espWindowsPins.Repository + "/releases/download"
 	espClangSHA256  = espClangChecksums()
 )
 
-const espClangVersion = "22.1.4_20260912"
+const espClangVersion = "22.1.4_20261030"
 
 // cacheRoot can be overridden for testing
 var cacheRoot = env.LLGoCacheDir
