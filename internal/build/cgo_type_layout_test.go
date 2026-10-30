@@ -125,7 +125,9 @@ func cgoLayoutTypes(t *testing.T, target cLayoutTarget, cc string, flags ...stri
 	args := append([]string{"tool", "cgo", "-godefs", "-objdir", dir, "--", "-I" + filepath.Dir(source)}, flags...)
 	args = append(args, source)
 	cmd := exec.Command("go", args...)
-	cmd.Env = withEnv(os.Environ(), "CC="+cc, "GOOS="+target.os, "GOARCH="+target.arch)
+	// cmd/cgo parses CC as a quoted command; LLVM installations on Windows
+	// commonly live under Program Files. Quoted fields preserve backslashes.
+	cmd.Env = withEnv(os.Environ(), "CC=\""+cc+"\"", "GOOS="+target.os, "GOARCH="+target.arch)
 	output, err := cmd.Output()
 	if err != nil {
 		var failure *exec.ExitError
