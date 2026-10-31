@@ -40,9 +40,10 @@ def cached_archive(url, expected, cache):
             os.replace(partial, archive)
         finally:
             partial.unlink(missing_ok=True)
-    # Extract afresh from a verified archive; restored cache contents are not trusted.
-    if digest(archive) != expected:
-        raise ValueError('Cached ESP runtime archive checksum mismatch: ' + str(archive))
+    else:
+        # Existing cache entries are untrusted; fresh downloads were checked above.
+        if digest(archive) != expected:
+            raise ValueError('Cached ESP runtime archive checksum mismatch: ' + str(archive))
     return archive
 
 

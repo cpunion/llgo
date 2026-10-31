@@ -7,11 +7,12 @@ ESP payloads for all seven supported hosts have a separate runtime release pin. 
 [`espressif.json`](../../internal/crosscompile/espressif.json).
 
 [`espressif.json`](../../internal/crosscompile/espressif.json) pins the releases, asset names, and independent SHA-256
-values. Compiler building, bundled ESP archives and fallback source-build downloads consume these pins. Downloads
-and cache hits are checked against the committed hash before extraction;
-release checksum sidecars and extracted directory markers are not trust anchors.
-Each use extracts a fresh copy. LLGo consumes published, checksum-pinned runtime assets independently of its
-development SDKs.
+values. Compiler builds, release staging and fallback source-build downloads
+consume these pins. Release staging checks downloaded and restored archives
+against the committed hash and extracts a fresh copy; release checksum sidecars
+and extracted directory markers are not trust anchors. The compiler verifies
+the archive on first installation, then reuses its extracted toolchain cache.
+LLGo consumes published runtime assets independently of its development SDKs.
 
 The host SDK deliberately uses upstream LLVM 22.1.8, matching LLGo's other
 host SDKs. The separate ESP tools use Espressif LLVM 22.1.4 and run out of
@@ -24,8 +25,10 @@ packaging-only ESP update can retain the existing, validated LLVM 22.1.8 SDK.
 To update the pins, wait for the producer release build and native Windows
 payload/SDK validation to pass, confirm the complete release asset list, then
 verify downloaded bytes before committing their hashes. SDK and ESP payload
-checksums and release tags are independent. Changes to the
-pin file invalidate the archive caches without disabling integrity checks.
+checksums and release tags are independent. Windows archive cache keys use the
+selected asset's SHA-256. The shared Unix cache
+uses the Unix payload digests and restores unchanged archives across updates;
+unrelated SDK or host pin edits do not force their download again.
 
 Compiler, packaging, and native artifact tests remain separate for x86 and
 amd64/arm64. WinGet candidates and publication require all six compact Windows ZIPs

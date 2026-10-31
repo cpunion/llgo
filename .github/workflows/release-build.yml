@@ -228,12 +228,19 @@ jobs:
         with:
           path: ${{ runner.tool_cache }}/llgo-release-downloads/llvm-arm64
           key: llgo-release-llvm-archive-v1-de718c58ebbc5f61d58c17b90457fcf42983bc2c4a4aba3e010d108713bfd7f1
+      - name: Read Windows x86 LLVM SDK archive digest
+        if: matrix.goarch == '386'
+        id: llvm-sdk-pin
+        shell: pwsh
+        run: |
+          $pins = Get-Content internal/crosscompile/espressif.json -Raw | ConvertFrom-Json
+          "sha256=$($pins.sdk.sha256)" >> $env:GITHUB_OUTPUT
       - name: Cache Windows x86 LLVM SDK archive
         if: matrix.goarch == '386'
         uses: actions/cache@v6
         with:
           path: ${{ runner.tool_cache }}/llgo-release-downloads/llvm-x86
-          key: llgo-release-llvm-x86-v1-${{ hashFiles('internal/crosscompile/espressif.json') }}
+          key: llgo-release-llvm-x86-v1-${{ steps.llvm-sdk-pin.outputs.sha256 }}
       - name: Download release metadata
         uses: actions/download-artifact@v8
         with:
@@ -310,11 +317,18 @@ jobs:
         with:
           name: windows-host-compiler-${{ matrix.goarch }}
           path: ${{ runner.temp }}/llgo-windows-compiler
+      - name: Read bundled ESP archive digest
+        id: esp-pin
+        shell: pwsh
+        run: |
+          $pins = Get-Content internal/crosscompile/espressif.json -Raw | ConvertFrom-Json
+          $target = @{ amd64 = 'x86_64-w64-mingw32'; arm64 = 'aarch64-w64-mingw32'; '386' = 'i686-w64-mingw32' }['${{ matrix.goarch }}']
+          "sha256=$($pins.payloads.$target.sha256)" >> $env:GITHUB_OUTPUT
       - name: Cache bundled ESP archive
         uses: actions/cache@v6
         with:
           path: ${{ runner.tool_cache }}/llgo-release-downloads/esp-${{ matrix.goarch }}
-          key: llgo-esp-archive-v1-${{ matrix.goarch }}-${{ hashFiles('internal/crosscompile/espressif.json') }}
+          key: llgo-esp-archive-v1-${{ matrix.goarch }}-${{ steps.esp-pin.outputs.sha256 }}
       - name: Build compact Windows archive
         shell: pwsh
         run: >-
