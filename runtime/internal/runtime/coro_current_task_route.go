@@ -49,7 +49,7 @@ func coroCurrentTaskV1() (*coro.G, *coro.ExecutorDriver, coro.RouteID) {
 
 func coroCurrentTaskFromRuntimeContextV1() (*coro.G, *coro.ExecutorDriver, coro.RouteID) {
 	gp := getgIfPresent()
-	if gp == nil || gp.startfn != nil || gp.startarg == nil {
+	if gp == nil || !gp.contextKind.isCoro() || gp.startarg == nil {
 		return nil, nil, 0
 	}
 	task := (*coro.G)(gp.startarg)

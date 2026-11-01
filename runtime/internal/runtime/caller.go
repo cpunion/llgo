@@ -806,7 +806,7 @@ func CoroDeferredPanicActive() bool {
 }
 
 func currentCoroRuntimeTask(gp *g) *coro.G {
-	if gp == nil || gp.startfn != nil || gp.startarg == nil || gp.context == nil {
+	if gp == nil || !gp.contextKind.isCoro() || gp.startarg == nil || gp.context == nil {
 		return nil
 	}
 	task := (*coro.G)(gp.startarg)

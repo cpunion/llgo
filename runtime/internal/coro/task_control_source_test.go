@@ -23,7 +23,7 @@ import (
 	"unsafe"
 )
 
-const wantSchedulerGSize = 152 + 2*unsafe.Sizeof(uintptr(0)) + (unsafe.Sizeof(uintptr(0))/4-1)*96
+const wantSchedulerGSize = 156 + (unsafe.Sizeof(uintptr(0))/4-1)*92
 
 var (
 	_ [wantSchedulerGSize - unsafe.Sizeof(G{})]byte
@@ -368,7 +368,7 @@ func TestTaskControlRegisteredDeliveryProofFailsClosed(t *testing.T) {
 	}
 }
 
-func TestTaskControlLeaseUsesExistingGAlignmentPadding(t *testing.T) {
+func TestTaskControlLeaseSharesCompactGHeader(t *testing.T) {
 	stateEnd := unsafe.Offsetof(G{}.state) + unsafe.Sizeof(GState(0))
 	leaseOffset := unsafe.Offsetof(G{}.taskControlLeases)
 	leaseEnd := leaseOffset + unsafe.Sizeof(G{}.taskControlLeases)
@@ -376,13 +376,11 @@ func TestTaskControlLeaseUsesExistingGAlignmentPadding(t *testing.T) {
 	pointerAlign := unsafe.Alignof(uintptr(0))
 	align := func(offset uintptr) uintptr { return (offset + pointerAlign - 1) &^ (pointerAlign - 1) }
 	rootOffset := unsafe.Offsetof(G{}.root)
-	wantRootOffset := uintptr(12)
-	if pointerAlign == 8 {
-		wantRootOffset = 16
-	}
 	if unsafe.Offsetof(G{}.state) != 8 || leaseOffset != 9 || runActionOffset != 10 ||
-		leaseOffset != stateEnd || align(stateEnd) != rootOffset || align(leaseEnd+2) != rootOffset ||
-		rootOffset != wantRootOffset || unsafe.Sizeof(G{}) != wantSchedulerGSize {
+		leaseOffset != stateEnd || unsafe.Offsetof(G{}.destroyRoot) != 12 ||
+		unsafe.Offsetof(G{}.queued) != 13 || unsafe.Offsetof(G{}.waiting) != 14 ||
+		align(unsafe.Offsetof(G{}.waiting)+1) != rootOffset ||
+		rootOffset != 16 || unsafe.Sizeof(G{}) != wantSchedulerGSize {
 		t.Fatalf("G scalar padding/layout changed: state=%d lease=%d..%d runAction=%d root=%d size=%d align=%d",
 			unsafe.Offsetof(G{}.state), leaseOffset, leaseEnd, runActionOffset, rootOffset, unsafe.Sizeof(G{}), pointerAlign)
 	}

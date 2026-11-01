@@ -138,7 +138,7 @@ func destroyG(ptr c.Pointer) {
 		return
 	}
 	coroCurrentGStoreV1(nil)
-	if gp.startarg != nil {
+	if gp.contextKind != runtimeContextNative || gp.startarg != nil {
 		// A managed logical G must restore the executor placeholder before
 		// pthread exit. Do not mutate or free either a standalone command
 		// context or an interior spawned-task context from the C destructor;

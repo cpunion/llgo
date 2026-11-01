@@ -551,6 +551,15 @@ jobs:
             timeout 8m go test -p=1 ./internal/build \
               -run '^TestCoroWorkerMappingRetentionAcceptance$' -timeout=7m -count=1 -v
 
+      - name: Test compact logical contexts and native startup ownership
+        if: matrix.lane == 'fault-e2e'
+        run: |
+          go test -p=1 ./ssa -run '^TestCoroRuntimeContextStorageLayout$' -count=1 -v
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            LLGO_TEST_LLGO=/tmp/llgo-coro-fault LLGO_CORO_CONTEXT_LAYOUT_ACCEPTANCE=1 \
+            timeout 13m go test -p=1 ./internal/build \
+              -run '^TestCoroContextLayoutAcceptance$' -timeout=12m -count=1 -v
+
       - name: Test concurrent first use of native fallback symbol caches
         if: matrix.lane == 'fault-e2e'
         run: |

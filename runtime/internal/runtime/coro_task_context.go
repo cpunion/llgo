@@ -71,7 +71,9 @@ func coroBindRuntimeContextAt(task *coro.G, parentG *g, ctx *coroRuntimeContext,
 	gp := initCoroRuntimeContext(ctx, parentG, _Grunnable)
 	gp.localContext = &ctx.local
 	gp.isMain = !embedded
-	gp.coroEmbedded = embedded
+	if embedded {
+		gp.contextKind = runtimeContextCoroEmbedded
+	}
 	if coro.BindTaskLocal(task, unsafe.Pointer(ctx)) {
 		gp.startarg = unsafe.Pointer(task)
 		return true
@@ -164,7 +166,7 @@ func coroInitializeTaskAllocationRuntimeContextCompiler(
 	gp := initCoroRuntimeContext(ctx, parentG, _Grunnable)
 	gp.localContext = &ctx.local
 	gp.isMain = false
-	gp.coroEmbedded = true
+	gp.contextKind = runtimeContextCoroEmbedded
 	gp.startarg = unsafe.Pointer(task)
 	return true
 }
@@ -177,7 +179,7 @@ func validCoroRuntimeContext(ctx *coroRuntimeContext) bool {
 		return false
 	}
 	gp := &ctx.g
-	return gp.context == ctx && gp.localContext == &ctx.local
+	return gp.contextKind.isCoro() && gp.context == ctx && gp.localContext == &ctx.local
 }
 
 func validCoroRuntimeTaskContext(task *coro.G, ctx *coroRuntimeContext) bool {
@@ -245,15 +247,15 @@ func coroHasRecoverAliasRuntimeV1(task *coro.G, token unsafe.Pointer) bool {
 // same immutable context/task identity without adding another activation word.
 func validCoroRuntimeTaskG(task *coro.G, gp *g) bool {
 	if task == nil || gp == nil || gp.context == nil || &gp.context.g != gp ||
-		gp.localContext != &gp.context.local || gp.startfn != nil ||
+		gp.localContext != &gp.context.local || !gp.contextKind.isCoro() ||
 		gp.startarg != unsafe.Pointer(task) {
 		return false
 	}
 	// This predicate runs around every physical coroutine resume. The task is
-	// already scheduler-valid and coroEmbedded selects the combined allocation
+	// already scheduler-valid and contextKind selects the combined allocation
 	// representation. The command root is the only independently allocated
 	// logical-task context; every dynamic G must match the exact tail address.
-	if gp.coroEmbedded {
+	if gp.contextKind == runtimeContextCoroEmbedded {
 		return gp.context == &(*coroTaskAllocation)(unsafe.Pointer(task)).context
 	}
 	return gp.isMain
@@ -289,7 +291,7 @@ func coroEnterRuntimeContextFrom(task *coro.G, currentRaw unsafe.Pointer) (coroR
 			borrowed: true,
 		}, true
 	}
-	if current == nil || current.context == nil || current.startarg != nil ||
+	if current == nil || current.context == nil || current.contextKind != runtimeContextNative || current.startarg != nil ||
 		gp.m != nil || readgstatus(gp) != _Grunnable ||
 		current.m == nil || current.m.curg != current || current.m.p == nil ||
 		current.m.p.m != current.m || readgstatus(current) != _Grunning ||
@@ -339,7 +341,7 @@ func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivati
 	}
 	previous := anchor
 	mp := gp.m
-	if previous == nil || previous == gp || previous.context == nil || previous.startarg != nil ||
+	if previous == nil || previous == gp || previous.context == nil || previous.contextKind != runtimeContextNative || previous.startarg != nil ||
 		previous.m != mp || readgstatus(previous) != _Grunning {
 		return false
 	}
@@ -361,7 +363,7 @@ func coroReleaseRuntimeContext(task *coro.G, raw unsafe.Pointer) bool {
 	if gp.m != nil || readgstatus(gp) != _Grunnable {
 		return false
 	}
-	embedded := ctx.g.coroEmbedded
+	embedded := ctx.g.contextKind == runtimeContextCoroEmbedded
 	if gp.localContext != nil {
 		releaseLocalBlocks(gp.localContext)
 		gp.localContext = nil
@@ -372,7 +374,7 @@ func coroReleaseRuntimeContext(task *coro.G, raw unsafe.Pointer) bool {
 	}
 	releasePanicPCStore(gp)
 	gp.startarg = nil
-	gp.coroEmbedded = false
+	gp.contextKind = runtimeContextNative
 	casgstatus(gp, _Grunnable, _Gdead)
 	gp.context = nil
 	releaseGAndCheckDeadlock()
@@ -392,7 +394,7 @@ func discardCoroRuntimeContext(ctx *coroRuntimeContext, freeContext bool) {
 	}
 	releasePanicPCStore(&ctx.g)
 	ctx.g.context = nil
-	ctx.g.coroEmbedded = false
+	ctx.g.contextKind = runtimeContextNative
 	releaseG()
 	if freeContext {
 		FreeRoot(unsafe.Pointer(ctx))

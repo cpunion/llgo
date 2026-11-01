@@ -55,11 +55,22 @@ type panicPCStore struct {
 	pcs    [64]uintptr
 }
 
-// g holds state owned by one LLGo goroutine.
-//
-// The current host-thread backend gives every G its own M and P. Fields that only
-// make sense once LLGo can suspend and resume a G (saved registers, wait state,
-// and stack roots) belong here when those facilities are added.
+// runtimeContextKind binds startarg's interpretation and the context's physical
+// storage ownership. Zero remains the native/unused state of a cleared context.
+type runtimeContextKind uint8
+
+const (
+	runtimeContextNative runtimeContextKind = iota
+	runtimeContextCoroRoot
+	runtimeContextCoroEmbedded
+)
+
+func (kind runtimeContextKind) isCoro() bool {
+	return kind == runtimeContextCoroRoot || kind == runtimeContextCoroEmbedded
+}
+
+// g holds state owned by one LLGo goroutine. Native contexts own an M/P;
+// stackless logical contexts borrow their executor's M/P only while resumed.
 type g struct {
 	defer_       *Defer
 	panic_       unsafe.Pointer
@@ -69,10 +80,16 @@ type g struct {
 	m            *m
 
 	atomicstatus uint32
-	goid         uint64
-	parentGoid   uint64
+	goexit       bool
+	isMain       bool
+	paniconfault bool
+	// contextKind distinguishes native contexts from independently rooted and
+	// embedded logical contexts before startarg can be interpreted as a task.
+	// These four scalar bytes fill atomicstatus's 64-bit alignment gap.
+	contextKind runtimeContextKind
+	goid        uint64
+	parentGoid  uint64
 
-	startfn goroutineFunc
 	// startarg belongs to the pthread entry only until mstart consumes and
 	// clears it. A stackless logical G has no such entry, so its runtime sidecar
 	// phase-overlays this otherwise idle pointer with the scheduler G identity.
@@ -83,14 +100,6 @@ type g struct {
 	// stack-owned context at its outer Go entry; the stackless scheduler points
 	// this field at the context embedded in the task's runtime sidecar.
 	localContext *LocalContext
-
-	goexit       bool
-	isMain       bool
-	paniconfault bool
-	// coroEmbedded occupies existing tail padding. It distinguishes a runtime
-	// context stored in a spawned task envelope from independently rooted
-	// pthread/bootstrap contexts without retaining a redundant root pointer.
-	coroEmbedded bool
 }
 
 // m represents the host execution resource running Go code. Platform-specific
