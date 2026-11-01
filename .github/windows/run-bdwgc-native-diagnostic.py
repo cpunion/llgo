@@ -65,6 +65,8 @@ diagnostic = diagnostic.replace(
     "    if (event == GC_EVENT_PRE_STOP_WORLD",
 ).replace(
     "    SetEvent(collector_ready);",
+    "    if (GetEnvironmentVariableA(\"LLGO_GC_WARM_SIGNAL\", NULL, 0))\n"
+    "        signal(SIGSEGV, SIG_DFL);\n"
     "    InterlockedExchange(&diag_collect_phase, 1);\n    SetEvent(collector_ready);",
 ).replace(
     "    GC_gcollect();\n    SetEvent(release_heap);",
@@ -109,9 +111,10 @@ metadata = {"head": head, "compiler_sha256": sha(COMPILER),
             "thread_dump_scope": "only the exact owned child executable; original suspension counts restored"}
 (OUT / "inputs.json").write_text(json.dumps(metadata, indent=2) + "\n")
 results = []
-cases = [("bare", "default", 100), ("diagnostic", "default", 100),
-         ("diagnostic", "one-marker", 20), ("diagnostic", "four-markers", 20),
-         ("diagnostic", "no-heap", 10)]
+cases = [("bare", "default", 5), ("diagnostic", "default", 5),
+         ("diagnostic", "warm-signal", 20),
+         ("diagnostic", "one-marker", 2), ("diagnostic", "four-markers", 2),
+         ("diagnostic", "no-heap", 2)]
 for binary, mode, count in cases:
     for index in range(count):
         label = f"{binary}-{mode}-{index}"
@@ -124,6 +127,8 @@ for binary, mode, count in cases:
             env["GC_MARKERS"] = "4"
         elif mode == "no-heap":
             env["LLGO_GC_NO_HEAP"] = "1"
+        elif mode == "warm-signal":
+            env["LLGO_GC_WARM_SIGNAL"] = "1"
         executable = (OUT / (binary + ".exe")).resolve()
         started = time.monotonic()
         record = {"binary": binary, "mode": mode, "index": index}
