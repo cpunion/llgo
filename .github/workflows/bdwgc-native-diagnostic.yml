@@ -1,4 +1,4 @@
-name: BDWGC native diagnostic
+name: Windows release native diagnostic
 
 on:
   push:
@@ -11,14 +11,15 @@ jobs:
   win32:
     if: github.repository == 'cpunion/llgo'
     runs-on: windows-2022
-    timeout-minutes: 35
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-go@v7
         with:
-          python-version: '3.12'
+          go-version: '1.27.3'
           architecture: x86
-      - name: Install the pinned llvm-mingw toolchain
+          cache: false
+      - name: Install the pinned LLVM 22 toolchain
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -32,39 +33,32 @@ jobs:
           $target = Join-Path $env:RUNNER_TEMP 'llvm-mingw'
           Expand-Archive $archive $target
           $root = Get-ChildItem $target -Directory | Select-Object -First 1
-          "BDWGC_LLVM_MINGW=$($root.FullName)" >> $env:GITHUB_ENV
+          "RELEASE_LLVM_MINGW=$($root.FullName)" >> $env:GITHUB_ENV
           "$($root.FullName)\bin" >> $env:GITHUB_PATH
-      - name: Build the same pinned BDWGC overlay
+      - name: Exercise the actual release cgo linker and debug contract
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $source = Join-Path $env:RUNNER_TEMP 'vcpkg'
-          git init $source
-          git -C $source remote add origin https://github.com/microsoft/vcpkg.git
-          git -C $source fetch --depth 1 origin ddd0023b0eee70986e42ed49d9d4afb8098f212e
-          git -C $source checkout --detach FETCH_HEAD
-          if ($LASTEXITCODE -ne 0) { throw 'pinned vcpkg checkout failed' }
-          & "$source\bootstrap-vcpkg.bat" -disableMetrics
-          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
-          $manifest = Join-Path $env:RUNNER_TEMP 'gc-manifest'
-          New-Item $manifest -ItemType Directory -Force | Out-Null
-          '{"name":"llgo-gc-diagnostic","version":"1","builtin-baseline":"ddd0023b0eee70986e42ed49d9d4afb8098f212e","dependencies":["bdwgc"]}' | Set-Content "$manifest\vcpkg.json"
-          $overlay = Join-Path $env:RUNNER_TEMP 'gc-overlay'
-          python .github/windows/prepare-bdwgc-port.py $source $overlay
-          if ($LASTEXITCODE -ne 0) { throw 'BDWGC overlay failed' }
-          $prefix = Join-Path $env:RUNNER_TEMP 'gc-install'
-          & "$source\vcpkg.exe" install --triplet=x86-mingw-dynamic --host-triplet=x64-windows "--overlay-ports=$overlay" "--x-manifest-root=$manifest" "--x-install-root=$prefix"
-          if ($LASTEXITCODE -ne 0) { throw 'BDWGC build failed' }
-          "BDWGC_PREFIX=$prefix\x86-mingw-dynamic" >> $env:GITHUB_ENV
-      - name: Run the actual Win32 reproducer and capture stopped threads
-        shell: pwsh
-        run: python .github/windows/run-bdwgc-native-diagnostic.py
-      - name: Retain original reports and bounded dumps
+          $report = '_out/release-native-diagnostic'
+          New-Item $report -ItemType Directory | Out-Null
+          $env:CC = '"' + (Join-Path $env:RELEASE_LLVM_MINGW 'bin/i686-w64-mingw32-clang.exe').Replace('\', '/') + '"'
+          $env:CXX = '"' + (Join-Path $env:RELEASE_LLVM_MINGW 'bin/i686-w64-mingw32-clang++.exe').Replace('\', '/') + '"'
+          $env:GOFLAGS = ''
+          $env:GOTOOLCHAIN = 'local'
+          @{
+            head = (& git rev-parse HEAD).Trim()
+            go = (& go version)
+            clang = (& "$env:RELEASE_LLVM_MINGW/bin/i686-w64-mingw32-clang.exe" --version)
+            library_sha256 = (Get-FileHash .github/windows/release-lib.ps1 -Algorithm SHA256).Hash
+            test_sha256 = (Get-FileHash .github/windows/release-build_test.ps1 -Algorithm SHA256).Hash
+          } | ConvertTo-Json -Depth 4 | Set-Content "$report/inputs.json"
+          & .github/windows/release-build_test.ps1 *>&1 | Tee-Object "$report/native.log"
+      - name: Retain actual native reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: bdwgc-win32-native-diagnostic
-          path: _out/bdwgc-native-diagnostic
+          name: windows-release-native-diagnostic
+          path: _out/release-native-diagnostic
           if-no-files-found: error
           retention-days: 7
 
