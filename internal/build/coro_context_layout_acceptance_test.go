@@ -39,20 +39,23 @@ func TestCoroContextLayoutAcceptance(t *testing.T) {
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 		cmd.Dir = cwd
 		cmd.Env = append(os.Environ(), env...)
+		started := time.Now()
+		t.Logf("context ownership command starts (limit %s): %v", timeout, args)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			t.Fatalf("context ownership command %v: %v\n%s", args, err, output)
+			t.Fatalf("context ownership command %v after %s: %v (context: %v)\n%s", args, time.Since(started), err, ctx.Err(), output)
 		}
+		t.Logf("context ownership command completed in %s", time.Since(started))
 		return string(output)
 	}
 	dir := t.TempDir()
 	layout := filepath.Join(dir, "context-layout")
-	native := filepath.Join(dir, "native-start.test")
+	native := filepath.Join(dir, "native-start")
 	buildEnv := []string{"LLGO_ROOT=" + root, "LLGO_BUILD_CACHE=off", "GOMAXPROCS=2", "GOMEMLIMIT=2GiB"}
 	run(t, filepath.Join(root, "runtime"), 5*time.Minute, buildEnv, compiler,
 		"build", "-p=1", "-Os", "-trimpath", "-tags=coro_context_layout_test", "-o", layout, "./_test/corocontextlayout")
-	run(t, root, 5*time.Minute, buildEnv, compiler, "test", "-c", "-p=1", "-Os", "-trimpath", "-o", native,
-		"test/llgoext/runtime_g_test.go", "test/llgoext/runtime_native_start_test.go")
+	run(t, filepath.Join(root, "runtime"), 5*time.Minute, buildEnv, compiler,
+		"build", "-p=1", "-Os", "-trimpath", "-o", native, "./_test/coronativestart")
 	for _, procs := range []string{"1", "4"} {
 		t.Run("P"+procs, func(t *testing.T) {
 			env := []string{"GOMAXPROCS=" + procs, "GOGC=100", "GOMEMLIMIT=off"}
@@ -64,22 +67,18 @@ func TestCoroContextLayoutAcceptance(t *testing.T) {
 			// Global registered-G assertions need a fresh process, including
 			// between repeats. Other tests may have returned before their last
 			// child or testing.tRunner has physically retired.
-			for _, name := range []string{"NativeStartStorageAndLifetime", "NativeStartRejectsNilEntry"} {
+			for _, name := range []string{"lifetime", "nil-entry"} {
 				for repeat := 0; repeat < 3; repeat++ {
-					output := run(t, root, 90*time.Second, append(env, "LLGO_NATIVE_START_ACCEPTANCE_CHILD=1"),
-						native, "-test.v", "-test.count=1", "-test.timeout=60s", "-test.run=^TestRuntime"+name+"$")
-					if strings.Count(output, "--- PASS: TestRuntime"+name+" ") != 1 || strings.Contains(output, "--- SKIP:") {
+					output := run(t, root, 90*time.Second, env, native, name)
+					if strings.TrimSpace(output) != "native startup ok "+name {
 						t.Fatalf("missing isolated native pass for %s: %s", name, output)
 					}
 					t.Log(output)
 				}
 			}
-			output = run(t, root, 90*time.Second, env, native, "-test.v", "-test.count=3", "-test.timeout=60s",
-				"-test.run=^TestRuntime(GetGIsolation|GMP.*)$")
-			for _, name := range []string{"GMPLinks", "GMPIDBatchAllocation", "GetGIsolation"} {
-				if strings.Count(output, "--- PASS: TestRuntime"+name+" ") != 3 {
-					t.Fatalf("missing three native passes for %s: %s", name, output)
-				}
+			output = run(t, root, 90*time.Second, env, native, "gmp")
+			if strings.TrimSpace(output) != "native startup ok gmp" {
+				t.Fatalf("missing native G/M/P passes: %s", output)
 			}
 			t.Log(output)
 		})
