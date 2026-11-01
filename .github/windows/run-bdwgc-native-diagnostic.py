@@ -83,6 +83,31 @@ diagnostic = diagnostic.replace(
     "    diag_no_heap = GetEnvironmentVariableA(\"LLGO_GC_NO_HEAP\", NULL, 0) != 0;\n"
     "    GC_INIT();\n    diag_parallel = GC_get_parallel();",
 )
+diagnostic = diagnostic.replace(
+    "int main(void)",
+    """static unsigned __stdcall delayed_registered_heap(void *unused)
+{
+    struct GC_stack_base base;
+    unsigned result;
+    Sleep(100);
+    if (GC_get_stack_base(&base) != GC_SUCCESS
+        || GC_register_my_thread(&base) != GC_SUCCESS)
+        TerminateProcess(GetCurrentProcess(), 11);
+    result = hold_heap(unused);
+    GC_unregister_my_thread();
+    return result;
+}
+
+int main(void)""",
+).replace(
+    "    threads[0] = (HANDLE)GC_beginthreadex(NULL, 0, hold_heap, NULL, 0, NULL);",
+    "    if (GetEnvironmentVariableA(\"LLGO_GC_DELAY_REGISTER\", NULL, 0)) {\n"
+    "        GC_allow_register_threads();\n"
+    "        threads[0] = (HANDLE)_beginthreadex(NULL, 0, delayed_registered_heap, NULL, 0, NULL);\n"
+    "    } else {\n"
+    "        threads[0] = (HANDLE)GC_beginthreadex(NULL, 0, hold_heap, NULL, 0, NULL);\n"
+    "    }",
+)
 if diagnostic == source or diagnostic.count("diag_collect_phase, 2") != 1:
     raise RuntimeError("diagnostic source markers do not match the original fixture")
 (OUT / "diagnostic.c").write_text(diagnostic)
@@ -111,10 +136,7 @@ metadata = {"head": head, "compiler_sha256": sha(COMPILER),
             "thread_dump_scope": "only the exact owned child executable; original suspension counts restored"}
 (OUT / "inputs.json").write_text(json.dumps(metadata, indent=2) + "\n")
 results = []
-cases = [("bare", "default", 5), ("diagnostic", "default", 5),
-         ("diagnostic", "warm-signal", 20),
-         ("diagnostic", "one-marker", 2), ("diagnostic", "four-markers", 2),
-         ("diagnostic", "no-heap", 2)]
+cases = [("diagnostic", "delayed-registration", 2)]
 for binary, mode, count in cases:
     for index in range(count):
         label = f"{binary}-{mode}-{index}"
@@ -129,6 +151,8 @@ for binary, mode, count in cases:
             env["LLGO_GC_NO_HEAP"] = "1"
         elif mode == "warm-signal":
             env["LLGO_GC_WARM_SIGNAL"] = "1"
+        elif mode == "delayed-registration":
+            env["LLGO_GC_DELAY_REGISTER"] = "1"
         executable = (OUT / (binary + ".exe")).resolve()
         started = time.monotonic()
         record = {"binary": binary, "mode": mode, "index": index}
