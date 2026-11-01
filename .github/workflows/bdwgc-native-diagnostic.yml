@@ -56,7 +56,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $report = '_out/release-native-diagnostic'
+          $report = Join-Path (Get-Location).Path '_out/release-native-diagnostic'
           New-Item $report -ItemType Directory | Out-Null
           if ('${{ matrix.profile }}'.StartsWith('msvc')) {
             . .github/windows/msvc-target.ps1
