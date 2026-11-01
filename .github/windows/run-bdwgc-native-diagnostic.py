@@ -83,39 +83,19 @@ diagnostic = diagnostic.replace(
     "    diag_no_heap = GetEnvironmentVariableA(\"LLGO_GC_NO_HEAP\", NULL, 0) != 0;\n"
     "    GC_INIT();\n    diag_parallel = GC_get_parallel();",
 )
-diagnostic = diagnostic.replace(
-    "int main(void)",
-    """static unsigned __stdcall delayed_registered_heap(void *unused)
-{
-    struct GC_stack_base base;
-    unsigned result;
-    Sleep(100);
-    if (GC_get_stack_base(&base) != GC_SUCCESS
-        || GC_register_my_thread(&base) != GC_SUCCESS)
-        TerminateProcess(GetCurrentProcess(), 11);
-    result = hold_heap(unused);
-    GC_unregister_my_thread();
-    return result;
-}
-
-int main(void)""",
-).replace(
-    "    threads[0] = (HANDLE)GC_beginthreadex(NULL, 0, hold_heap, NULL, 0, NULL);",
-    "    if (GetEnvironmentVariableA(\"LLGO_GC_DELAY_REGISTER\", NULL, 0)) {\n"
-    "        GC_allow_register_threads();\n"
-    "        threads[0] = (HANDLE)_beginthreadex(NULL, 0, delayed_registered_heap, NULL, 0, NULL);\n"
-    "    } else {\n"
-    "        threads[0] = (HANDLE)GC_beginthreadex(NULL, 0, hold_heap, NULL, 0, NULL);\n"
-    "    }",
-)
 if diagnostic == source or diagnostic.count("diag_collect_phase, 2") != 1:
     raise RuntimeError("diagnostic source markers do not match the original fixture")
 (OUT / "diagnostic.c").write_text(diagnostic)
+barrier = "WaitForMultipleObjects(2, ready, TRUE, 10000)"
+if diagnostic.count(barrier) != 1:
+    raise RuntimeError("the negative control requires the real readiness barrier")
+(OUT / "negative.c").write_text(diagnostic.replace(
+    barrier, "WaitForSingleObject(collector_ready, 10000)"))
 
 include = "-I" + str(PREFIX / "include")
 library = "-L" + str(PREFIX / "lib")
-for name in ("bare", "diagnostic"):
-    command("compile-" + name, [str(COMPILER), "-O2", *(["-g"] if name == "diagnostic" else []),
+for name in ("bare", "diagnostic", "negative"):
+    command("compile-" + name, [str(COMPILER), "-O2", *(["-g"] if name != "bare" else []),
             str(OUT / (name + ".c")), include, library, "-lgc",
             "-o", str(OUT / (name + ".exe"))])
 command("compile-dumper", [str(COMPILER), "-O0", "-g",
@@ -138,9 +118,11 @@ metadata = {"head": head, "compiler_sha256": sha(COMPILER),
 results = []
 cases = [("bare", "default", 50), ("diagnostic", "default", 50),
          ("diagnostic", "warm-signal", 50),
-         ("diagnostic", "delayed-registration", 20),
+         ("bare", "delayed-registration", 20),
+         ("diagnostic", "delayed-registration", 10),
          ("diagnostic", "one-marker", 10), ("diagnostic", "four-markers", 10),
-         ("diagnostic", "no-heap", 5)]
+         ("diagnostic", "no-heap", 5),
+         ("negative", "delayed-registration", 2)]
 for binary, mode, count in cases:
     for index in range(count):
         label = f"{binary}-{mode}-{index}"
@@ -156,7 +138,7 @@ for binary, mode, count in cases:
         elif mode == "warm-signal":
             env["LLGO_GC_WARM_SIGNAL"] = "1"
         elif mode == "delayed-registration":
-            env["LLGO_GC_DELAY_REGISTER"] = "1"
+            env["LLGO_TEST_GC_DELAY_REGISTER"] = "1"
         executable = (OUT / (binary + ".exe")).resolve()
         started = time.monotonic()
         record = {"binary": binary, "mode": mode, "index": index}
@@ -189,7 +171,10 @@ for binary, mode, count in cases:
         results.append(record)
         (OUT / "results.json").write_text(json.dumps(results, indent=2) + "\n")
         print(json.dumps(record), flush=True)
-failed = [row for row in results if row["exit"] != 0 or not row["natural_exit"]]
-print(json.dumps({"executions": len(results), "failed": len(failed),
-                  "this_is_diagnostic_not_a_passing_regression": bool(failed)}))
+positive = [row for row in results if row["binary"] != "negative"]
+negative = [row for row in results if row["binary"] == "negative"]
+failed = [row for row in positive if row["exit"] != 0 or not row["natural_exit"]]
+failed += [row for row in negative if row["exit"] not in (5, 6) or not row["natural_exit"]]
+print(json.dumps({"positive_executions": len(positive), "unexpected_failures": len(failed),
+                  "separate_negative_control_exits": [row["exit"] for row in negative]}))
 raise SystemExit(bool(failed))
