@@ -88,7 +88,7 @@ if diagnostic == source or diagnostic.count("diag_collect_phase, 2") != 1:
 include = "-I" + str(PREFIX / "include")
 library = "-L" + str(PREFIX / "lib")
 for name in ("bare", "diagnostic"):
-    command("compile-" + name, [str(COMPILER), "-O2", "-g",
+    command("compile-" + name, [str(COMPILER), "-O2", *(["-g"] if name == "diagnostic" else []),
             str(OUT / (name + ".c")), include, library, "-lgc",
             "-o", str(OUT / (name + ".exe"))])
 command("compile-dumper", [str(COMPILER), "-O0", "-g",
@@ -109,9 +109,9 @@ metadata = {"head": head, "compiler_sha256": sha(COMPILER),
             "thread_dump_scope": "only the exact owned child executable; original suspension counts restored"}
 (OUT / "inputs.json").write_text(json.dumps(metadata, indent=2) + "\n")
 results = []
-cases = [("bare", "default", 5), ("diagnostic", "default", 3),
-         ("diagnostic", "one-marker", 2), ("diagnostic", "four-markers", 2),
-         ("diagnostic", "no-heap", 2)]
+cases = [("bare", "default", 100), ("diagnostic", "default", 100),
+         ("diagnostic", "one-marker", 20), ("diagnostic", "four-markers", 20),
+         ("diagnostic", "no-heap", 10)]
 for binary, mode, count in cases:
     for index in range(count):
         label = f"{binary}-{mode}-{index}"
@@ -131,7 +131,10 @@ for binary, mode, count in cases:
             child = subprocess.Popen([str(executable)], env=env, cwd=owned,
                                      stdout=stdout, stderr=stderr)
             record["PID"] = child.pid
-            time.sleep(3)
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
             if child.poll() is None:
                 dump = owned / "child.dmp"
                 with (owned / "threads.stdout").open("wb") as so, (owned / "threads.stderr").open("wb") as se:
