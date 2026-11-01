@@ -143,6 +143,45 @@ func coroNativeRotationRequestReturnV1(owner *coroNativeMOwnerV1) bool {
 		(parent.handoff.ReturnRequested(owner.baton) || parent.handoff.RequestClaimedReturn(owner.baton))
 }
 
+// A managed callback can return while its caller retains locked Ms from an
+// earlier replacement. The fresh foreign-call replacement has no rotation of
+// its own. It must return P to that exact parent coordinator before the ready
+// locked M can run; taking over the parent's rotation would also take its
+// retained pthreads across an active native C stack.
+func coroNativeRotationReturnToParentV1(
+	owner *coroNativeMOwnerV1,
+	readySlot uint32,
+	record *coro.OSThreadSuspension,
+) bool {
+	if owner == nil || owner.rotation != nil || !owner.baton.Valid() ||
+		owner.parentSlot == 0 || readySlot == 0 || record == nil {
+		return false
+	}
+	parent, ok := coroNativeMOwnerForSlotV1(owner.parentSlot)
+	if !ok || parent.handle != owner.handle || parent.rotation == nil {
+		return false
+	}
+	rotation := parent.rotation
+	if rotation.active || rotation.rootSlot != owner.parentSlot {
+		return false
+	}
+	current := rotation.retained
+	for depth := uint32(0); current != 0 && depth < coroNativeMDirectoryCapacityV1; depth++ {
+		retained, valid := coroNativeMOwnerForSlotV1(current)
+		if !valid || retained.rotation != rotation || retained.handle != owner.handle ||
+			retained.rotationDispatch == 0 ||
+			coroNativeMOwnerLifecycleLoadV1(retained) != coroNativeMOwnerReturnedV1 {
+			return false
+		}
+		if current == readySlot {
+			return record == &retained.suspension &&
+				coroNativeRotationRequestReturnV1(owner)
+		}
+		current = retained.rotationNext
+	}
+	return false
+}
+
 func coroNativeRotationRemoveRetainedV1(rotation *coroNativeOSThreadRotationV1, slot uint32) bool {
 	if rotation == nil || slot == 0 {
 		return false

@@ -404,16 +404,22 @@ func coroTargetReplacementReturnPossibleV1(
 // slice-entry negative capability above.
 func coroTargetStopForPhysicalReturnV1(driver *coro.ExecutorDriver) (coroRunStopV1, bool) {
 	if coro.OSThreadSuspensionsPresent(driver) && coro.ExecutorResumeHandoffReturnable(driver) {
-		record, _, readyOK := coro.ReadyOSThreadSuspension(driver)
+		record, readySlot, readyOK := coro.ReadyOSThreadSuspension(driver)
 		if !readyOK {
 
 			return coroRunInvalidV1, false
 		}
 		if record != nil {
 			owner, _, slot, _, ok := coroNativeMCurrentOwnerV1(driver)
-			if !ok || owner.rotation == nil {
+			if !ok {
 
 				return coroRunInvalidV1, false
+			}
+			if owner.rotation == nil {
+				if !coroNativeRotationReturnToParentV1(owner, readySlot, record) {
+					return coroRunInvalidV1, false
+				}
+				return coroRunAgainV1, true
 			}
 			if owner.rotation.active && owner.rotation.rootSlot != slot {
 				if !coroNativeRotationRequestReturnV1(owner) {
