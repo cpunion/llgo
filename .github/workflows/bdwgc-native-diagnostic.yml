@@ -1,0 +1,70 @@
+name: BDWGC native diagnostic
+
+on:
+  push:
+    branches: [codex/pr2694-bdwgc-native-debug-20261101]
+
+permissions:
+  contents: read
+
+jobs:
+  win32:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: x86
+      - name: Install the pinned llvm-mingw toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
+          curl.exe --fail --location --retry 3 --output $archive 'https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-ucrt-x86_64.zip'
+          if ($LASTEXITCODE -ne 0) { throw 'llvm-mingw download failed' }
+          $expected = 'b9b68a4d276e16fa25802aaba458e4638f64b3884c290aaccdc2d87083b6ca35'
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $expected) {
+            throw 'llvm-mingw checksum mismatch'
+          }
+          $target = Join-Path $env:RUNNER_TEMP 'llvm-mingw'
+          Expand-Archive $archive $target
+          $root = Get-ChildItem $target -Directory | Select-Object -First 1
+          "BDWGC_LLVM_MINGW=$($root.FullName)" >> $env:GITHUB_ENV
+          "$($root.FullName)\bin" >> $env:GITHUB_PATH
+      - name: Build the same pinned BDWGC overlay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          git init $source
+          git -C $source remote add origin https://github.com/microsoft/vcpkg.git
+          git -C $source fetch --depth 1 origin ddd0023b0eee70986e42ed49d9d4afb8098f212e
+          git -C $source checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'pinned vcpkg checkout failed' }
+          & "$source\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+          $manifest = Join-Path $env:RUNNER_TEMP 'gc-manifest'
+          New-Item $manifest -ItemType Directory -Force | Out-Null
+          '{"name":"llgo-gc-diagnostic","version":"1","builtin-baseline":"ddd0023b0eee70986e42ed49d9d4afb8098f212e","dependencies":["bdwgc"]}' | Set-Content "$manifest\vcpkg.json"
+          $overlay = Join-Path $env:RUNNER_TEMP 'gc-overlay'
+          python .github/windows/prepare-bdwgc-port.py $source $overlay
+          if ($LASTEXITCODE -ne 0) { throw 'BDWGC overlay failed' }
+          $prefix = Join-Path $env:RUNNER_TEMP 'gc-install'
+          & "$source\vcpkg.exe" install --triplet=x86-mingw-dynamic --host-triplet=x64-windows "--overlay-ports=$overlay" "--x-manifest-root=$manifest" "--x-install-root=$prefix"
+          if ($LASTEXITCODE -ne 0) { throw 'BDWGC build failed' }
+          "BDWGC_PREFIX=$prefix\x86-mingw-dynamic" >> $env:GITHUB_ENV
+      - name: Run the actual Win32 reproducer and capture stopped threads
+        shell: pwsh
+        run: python .github/windows/run-bdwgc-native-diagnostic.py
+      - name: Retain original reports and bounded dumps
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bdwgc-win32-native-diagnostic
+          path: _out/bdwgc-native-diagnostic
+          if-no-files-found: error
+          retention-days: 7
+
