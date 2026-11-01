@@ -136,7 +136,11 @@ metadata = {"head": head, "compiler_sha256": sha(COMPILER),
             "thread_dump_scope": "only the exact owned child executable; original suspension counts restored"}
 (OUT / "inputs.json").write_text(json.dumps(metadata, indent=2) + "\n")
 results = []
-cases = [("diagnostic", "delayed-registration", 2)]
+cases = [("bare", "default", 50), ("diagnostic", "default", 50),
+         ("diagnostic", "warm-signal", 50),
+         ("diagnostic", "delayed-registration", 20),
+         ("diagnostic", "one-marker", 10), ("diagnostic", "four-markers", 10),
+         ("diagnostic", "no-heap", 5)]
 for binary, mode, count in cases:
     for index in range(count):
         label = f"{binary}-{mode}-{index}"
