@@ -10,14 +10,31 @@ permissions:
 jobs:
   win32:
     if: github.repository == 'cpunion/llgo'
-    runs-on: windows-2022
+    name: Release metadata (${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: mingw-386
+            runner: windows-2022
+            go-host: x32
+            arch: '386'
+          - profile: msvc-amd64
+            runner: windows-2022
+            go-host: x64
+            arch: amd64
+          - profile: msvc-arm64
+            runner: windows-11-arm
+            go-host: arm64
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.3'
-          architecture: x32
+          architecture: ${{ matrix.go-host }}
           cache: false
       - name: Install the pinned LLVM 22 toolchain
         shell: pwsh
@@ -41,14 +58,26 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $report = '_out/release-native-diagnostic'
           New-Item $report -ItemType Directory | Out-Null
-          $env:CC = '"' + (Join-Path $env:RELEASE_LLVM_MINGW 'bin/i686-w64-mingw32-clang.exe').Replace('\', '/') + '"'
-          $env:CXX = '"' + (Join-Path $env:RELEASE_LLVM_MINGW 'bin/i686-w64-mingw32-clang++.exe').Replace('\', '/') + '"'
+          if ('${{ matrix.profile }}'.StartsWith('msvc')) {
+            . .github/windows/msvc-target.ps1
+            $target = Enter-LLGoVisualStudio -GoArch '${{ matrix.arch }}'
+            $compiler = Join-Path $env:RELEASE_LLVM_MINGW 'bin/clang.exe'
+            $env:CC = '"' + $compiler.Replace('\', '/') + '" --target=' + $target.Triple + ' -fuse-ld=lld -fms-runtime-lib=static'
+            $env:CXX = $env:CC + ' -std=c++17'
+          } else {
+            $compiler = Join-Path $env:RELEASE_LLVM_MINGW 'bin/i686-w64-mingw32-clang.exe'
+            $env:CC = '"' + $compiler.Replace('\', '/') + '"'
+            $env:CXX = '"' + (Join-Path $env:RELEASE_LLVM_MINGW 'bin/i686-w64-mingw32-clang++.exe').Replace('\', '/') + '"'
+          }
+          $env:PATH = (Join-Path $env:RELEASE_LLVM_MINGW 'bin') + ';' + $env:PATH
           $env:GOFLAGS = ''
           $env:GOTOOLCHAIN = 'local'
           @{
             head = (& git rev-parse HEAD).Trim()
             go = (& go version)
-            clang = (& "$env:RELEASE_LLVM_MINGW/bin/i686-w64-mingw32-clang.exe" --version)
+            profile = '${{ matrix.profile }}'
+            clang = (& $compiler --version)
+            cc = $env:CC
             library_sha256 = (Get-FileHash .github/windows/release-lib.ps1 -Algorithm SHA256).Hash
             test_sha256 = (Get-FileHash .github/windows/release-build_test.ps1 -Algorithm SHA256).Hash
           } | ConvertTo-Json -Depth 4 | Set-Content "$report/inputs.json"
@@ -57,7 +86,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: windows-release-native-diagnostic
+          name: windows-release-native-${{ matrix.profile }}
           path: _out/release-native-diagnostic
           if-no-files-found: error
           retention-days: 7
