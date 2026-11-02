@@ -59,15 +59,19 @@ type G struct {
 	// queue owns the continuation. This prevents a stray Enqueue from creating
 	// a second scheduler owner without increasing G's native or wasm32 size.
 	transferState runnableTransferGState
-	root          *Frame
-	active        *Frame
-	frames        *Frame
-	pending       pendingTransition
-	destroyTarget *Frame
-	destroyRoot   bool
-	nextReady     *G
-	queued        bool
-	waiting       bool
+	// These owner-only bytes occupy the native pointer-alignment gap.
+	taskState taskStorageState
+	// Compiler receipts leave a task P-neutral; only the adjacent bounded
+	// selector consumes them. Generic callers keep the complete run validator.
+	initialRunPrepared bool
+	yieldRunPrepared   bool
+	ownerFlags         gOwnerFlags
+	root               *Frame
+	active             *Frame
+	frames             *Frame
+	pending            pendingTransition
+	destroyTarget      *Frame
+	nextReady          *G
 	// park is the common multi-source logical wait cell. It also owns the
 	// one-byte task stop token so park commit cannot forget it.
 	park ParkState
@@ -85,18 +89,9 @@ type G struct {
 	// taskStorage owns the separately allocated scheduler G for a spawned
 	// goroutine. Static bootstrap Gs leave these fields zero. Target allocators
 	// must provide scanned/root memory whenever a collector is enabled.
+	// Creation authenticates the fixed TaskStorageSize; do not store another
+	// copy of that constant on each G.
 	taskStorage unsafe.Pointer
-	taskSize    uintptr
-	taskState   taskStorageState
-	// initialRunPrepared is a compiler-commit receipt for one initial root.
-	// It occupies taskState's pointer-alignment padding and leaves the task
-	// P-neutral. Only the adjacent bounded selector may consume it; arbitrary
-	// callers continue through BeginRunG's complete validator.
-	initialRunPrepared bool
-	// yieldRunPrepared certifies the exact stable compiler/runner yield.
-	// It leaves runAction zero so runnable transfer and locked-owner handoff
-	// retain their existing protocols, without increasing G.
-	yieldRunPrepared bool
 	// taskLocal is one runtime-adapter-owned, scanned logical-task context.
 	// The scheduler never interprets it. Keeping the attachment on G makes
 	// runtime state migrate with the LLVM frame chain without a global map.
@@ -376,11 +371,11 @@ func InitG(g *G) bool {
 		g.runnableAffinity != runnableAnyOwner || g.panicBoundary ||
 		g.frames != nil || g.active != nil || g.root != nil ||
 		g.pending.kind != pendingNone || g.pending.directChannel || g.pending.from != nil || g.pending.target != nil ||
-		g.destroyTarget != nil || g.destroyRoot || g.nextReady != nil || g.queued ||
-		g.waiting || g.runP != nil ||
+		g.destroyTarget != nil || g.destroysRoot() || g.nextReady != nil || g.isQueued() ||
+		g.isWaiting() || g.runP != nil ||
 		g.park != (ParkState{}) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
-		g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageStatic ||
+		g.taskStorage != nil || g.taskState != taskStorageStatic ||
 		g.initialRunPrepared || g.yieldRunPrepared || g.taskLocal != nil ||
 		!emptyPanicRecord(&g.panicRecord) || g.panicUnwind ||
 		g.panicTraceHead != nil || g.panicTraceTail != nil || g.panicTraceCount != 0 {
@@ -401,7 +396,7 @@ func InitG(g *G) bool {
 func BindRunnableOwner(g *G) bool {
 	if !ValidG(g) || g.state != GNew || g.runnableAffinity != runnableAnyOwner ||
 		g.root != nil || g.active != nil || g.frames != nil ||
-		g.queued || g.nextReady != nil || g.waiting || g.runP != nil ||
+		g.isQueued() || g.nextReady != nil || g.isWaiting() || g.runP != nil ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!validLiveTaskStorage(g) {
 		return false
@@ -416,7 +411,7 @@ func BindRunnableOwner(g *G) bool {
 func BindPanicBoundaryCapability(g *G) bool {
 	if !ValidG(g) || g.state != GNew || g.panicBoundary ||
 		g.root != nil || g.active != nil || g.frames != nil ||
-		g.queued || g.nextReady != nil || g.waiting || g.runP != nil ||
+		g.isQueued() || g.nextReady != nil || g.isWaiting() || g.runP != nil ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!validLiveTaskStorage(g) {
 		return false
@@ -631,7 +626,7 @@ func AdoptRoot(g *G, handle unsafe.Pointer) bool {
 	if !ValidG(g) || g.state != GNew || g.root != nil || g.active != nil || g.pending.kind != pendingNone ||
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle ||
 		!gPreemptStateAtDepthZero(g, preemptIdle) ||
-		g.waiting || g.runP != nil {
+		g.isWaiting() || g.runP != nil {
 		return false
 	}
 	root := findFrame(g, handle)
@@ -647,9 +642,9 @@ func AdoptRoot(g *G, handle unsafe.Pointer) bool {
 
 // Enqueue appends a runnable G to p exactly once.
 func Enqueue(p *P, g *G) bool {
-	if p == nil || !ValidG(g) || g.state != GRunnable || g.queued || g.nextReady != nil ||
+	if p == nil || !ValidG(g) || g.state != GRunnable || g.isQueued() || g.nextReady != nil ||
 		!gPreemptEnabledAtDepthZero(g) ||
-		g.waiting || g.runP != nil ||
+		g.isWaiting() || g.runP != nil ||
 		!validRunnableParkState(&g.park) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.transferState != runnableTransferGIdle || !validOSThreadEnqueue(p, g) ||
@@ -666,7 +661,7 @@ func Enqueue(p *P, g *G) bool {
 }
 
 func appendReadyUnchecked(p *P, g *G) {
-	g.queued = true
+	g.setQueued(true)
 	if p.readyTail == nil {
 		p.readyHead = g
 	} else {
@@ -677,7 +672,7 @@ func appendReadyUnchecked(p *P, g *G) {
 }
 
 func prependReadyUnchecked(p *P, g *G) {
-	g.queued = true
+	g.setQueued(true)
 	g.nextReady = p.readyHead
 	p.readyHead = g
 	if p.readyTail == nil {
@@ -705,7 +700,7 @@ func dequeueReadyHeadUnchecked(p *P) *G {
 		p.readyTail = nil
 	}
 	g.nextReady = nil
-	g.queued = false
+	g.setQueued(false)
 	p.readyCount--
 	return g
 }
@@ -739,7 +734,7 @@ func nextOSThreadRunnable(p *P) *G {
 	}
 	switch p.osThreadSuspend {
 	case osThreadSuspendAttached:
-		if owner.osThreadLockDepth == 0 || !owner.queued {
+		if owner.osThreadLockDepth == 0 || !owner.isQueued() {
 			return nil
 		}
 		return owner
@@ -797,7 +792,7 @@ func dequeueSelectedOSThreadRunnableWithTransfer(p *P, selected *G) (*G, bool) {
 			p.readyTail = previous
 		}
 		current.nextReady = nil
-		current.queued = false
+		current.setQueued(false)
 		p.readyCount--
 		if current.transferState == runnableTransferGImported {
 			current.transferState = runnableTransferGIdle
@@ -816,8 +811,8 @@ func dequeueOSThreadRunnable(p *P) *G {
 
 func enqueueParkSet(p *P, g *G) bool {
 	if p == nil || !ValidG(g) || g.active == nil || g.active.parkWait == nil ||
-		g.state != GWaiting || g.waiting ||
-		g.queued || g.nextReady != nil || g.runP != nil || g.transferState != runnableTransferGIdle ||
+		g.state != GWaiting || g.isWaiting() ||
+		g.isQueued() || g.nextReady != nil || g.runP != nil || g.transferState != runnableTransferGIdle ||
 		!gPreemptEnabledAtDepthZero(g) ||
 		!validParkState(&g.park) || g.park.phase != parkParked {
 		return false
@@ -851,9 +846,9 @@ func validRunnableRunAction(g *G) bool {
 	}
 	switch g.runAction {
 	case ActionInvalid:
-		return g.destroyTarget == nil && !g.destroyRoot
+		return g.destroyTarget == nil && !g.destroysRoot()
 	case ActionCheckResume:
-		return g.destroyTarget == nil && !g.destroyRoot && !g.panicUnwind &&
+		return g.destroyTarget == nil && !g.destroysRoot() && !g.panicUnwind &&
 			g.active != nil && g.active.handle != nil && g.active.header != nil &&
 			(g.active.state == FrameInitialSuspended || g.active.state == FrameSuspended)
 	case ActionCheckDestroy:
@@ -906,7 +901,7 @@ func validReadyQueue(p *P) bool {
 			return false
 		}
 		count++
-		if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting ||
+		if !ValidG(g) || g.state != GRunnable || !g.isQueued() || g.isWaiting() ||
 			!gPreemptEnabledAtDepthZero(g) ||
 			g.runP != nil ||
 			(g.transferState != runnableTransferGIdle &&
@@ -924,7 +919,7 @@ func validReadyQueue(p *P) bool {
 		tail = g
 	}
 	return tail == p.readyTail && count == p.readyCount &&
-		(p.osThreadLockOwner == nil || !p.osThreadLockOwner.queued || ownerSeen)
+		(p.osThreadLockOwner == nil || !p.osThreadLockOwner.isQueued() || ownerSeen)
 }
 
 func validSchedulerWaitQueues(p *P) bool {
@@ -1085,7 +1080,7 @@ func dispatchPending(g *G, resumed *Frame) (destroy *Frame, yielded, directPark,
 		if pending.target != nil || resumed.header == nil ||
 			resumed.header.SuspendReason != uint16(SuspendPark) ||
 			resumed.header.Lifecycle != uint16(FrameSuspended) ||
-			g.waiting {
+			g.isWaiting() {
 			return nil, false, false, false
 		}
 		wait := resumed.parkWait
@@ -1164,8 +1159,8 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		!ValidG(g) || g.state != GRunnable || g.root == nil ||
 		!gPreemptEnabledAtDepthZero(g) ||
-		g.queued || g.nextReady != nil ||
-		g.waiting || g.runP != nil ||
+		g.isQueued() || g.nextReady != nil ||
+		g.isWaiting() || g.runP != nil ||
 		!validRunnableParkState(&g.park) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.transferState != runnableTransferGIdle || !validOSThreadRunOwner(p, g) ||
@@ -1278,7 +1273,7 @@ func beginExecutorRunContinuation(p *P, g *G, peerRunnable bool) (Action, bool) 
 		p.action != (Action{}) || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		p.servicePreemptBudget != 0 || g.magic != gMagic || g.state != GRunnable ||
 		(g.runAction != ActionInvalid || g.park.phase != parkMaterialized) ||
-		g.queued || g.nextReady != nil || g.waiting ||
+		g.isQueued() || g.nextReady != nil || g.isWaiting() ||
 		g.runP != nil || g.transferState != runnableTransferGIdle ||
 		!gPreemptEnabledAtDepthZero(g) || g.active == nil || g.active.handle == nil ||
 		g.active.header == nil ||
@@ -1368,7 +1363,7 @@ func pauseExecutorRunAction(p *P, g *G, action Action, placement executorRunQueu
 		p.inlineAwaitDepth != 0 ||
 		p.action != action || action.Handle == nil || g.runAction != ActionInvalid ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget == 0 ||
-		g.queued || g.nextReady != nil || g.waiting || !validRunnableParkState(&g.park) ||
+		g.isQueued() || g.nextReady != nil || g.isWaiting() || !validRunnableParkState(&g.park) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.transferState != runnableTransferGIdle || !gPreemptEnabledAtDepthZero(g) ||
 		!validReadyQueueHeader(p) || p.readyCount == ^uint32(0) ||
@@ -1384,7 +1379,7 @@ func pauseExecutorRunAction(p *P, g *G, action Action, placement executorRunQueu
 		if placement == executorRunQueueCommandRootDestroy {
 			return false
 		}
-		if g.state != GRunning || g.destroyTarget != nil || g.destroyRoot || g.active == nil ||
+		if g.state != GRunning || g.destroyTarget != nil || g.destroysRoot() || g.active == nil ||
 			g.active.handle != action.Handle || g.active.header == nil ||
 			(g.active.state != FrameInitialSuspended && g.active.state != FrameSuspended) {
 			return false
@@ -1633,7 +1628,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		// BeginRunG guarantees that a running G has no ready-queue link. Check
 		// the remaining queue invariants before committing any state so a
 		// corrupted queue cannot leave a half-requeued G behind.
-		if g.queued || g.nextReady != nil || !validReadyQueueHeader(p) {
+		if g.isQueued() || g.nextReady != nil || !validReadyQueueHeader(p) {
 			return Action{}, false
 		}
 		if !acknowledgeSuspendedGPreempt(g) {
@@ -1650,7 +1645,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		return Action{Kind: ActionYield}, true
 	}
 	if g.park.phase == parkParked {
-		if g.queued || g.nextReady != nil || !validParkWaitQueueHeader(p) ||
+		if g.isQueued() || g.nextReady != nil || !validParkWaitQueueHeader(p) ||
 			!validAffectedWaitQueueHeader(p) || !canAccountWaitSetExternal(p, g, g.active.parkWait) {
 			return Action{}, false
 		}
@@ -1675,7 +1670,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 	if destroy != nil {
 		// Cache root identity before llvm.coro.destroy synchronously releases
 		// the combined allocation. Destroyed must never dereference it.
-		g.destroyRoot = destroy == g.root
+		g.setDestroysRoot(destroy == g.root)
 		return setAction(p, ActionCheckDestroy, destroy.handle)
 	}
 	g.state = GRunning
@@ -1692,14 +1687,14 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 		g.destroyTarget != nil {
 		return Action{}, false
 	}
-	isRoot := g.destroyRoot
+	isRoot := g.destroysRoot()
 	if g.panicUnwind {
 		return commitInitialPanicDestroyed(p, g, isRoot)
 	}
 	if isRoot {
 		return commitRootDestroyedCompatibility(p, g, ActionDestroy)
 	}
-	g.destroyRoot = false
+	g.setDestroysRoot(false)
 	g.state = GRunning
 	if g.active == nil {
 		return Action{}, false
@@ -1742,7 +1737,7 @@ func validRootDestroyedCommitMarker(p *P, g *G, kind ActionKind) bool {
 // the same state transition.
 func commitRootDestroyedCompatibility(p *P, g *G, kind ActionKind) (Action, bool) {
 	if p == nil || g == nil || p.current != g || p.inResume || p.inlineAwaitDepth != 0 || g.runP != p ||
-		g.destroyTarget != nil || !g.destroyRoot || g.active != nil || g.frames != nil ||
+		g.destroyTarget != nil || !g.destroysRoot() || g.active != nil || g.frames != nil ||
 		!gPreemptDepthZero(g) ||
 		!validRootDestroyedCommitMarker(p, g, kind) ||
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
@@ -1784,7 +1779,7 @@ func commitRootDestroyedCompatibility(p *P, g *G, kind ActionKind) (Action, bool
 		return Action{}, false
 	}
 	flags |= physicalOwnerRetireFlags(retireOwner)
-	g.destroyRoot = false
+	g.setDestroysRoot(false)
 	g.root = nil
 	if panicking {
 		g.panicUnwind = false
@@ -1849,7 +1844,7 @@ func finishBoundedRootDestroy(p *P, g *G, wasRoot, panicking bool) (Action, bool
 		return receipt, true
 	}
 
-	g.destroyRoot = false
+	g.setDestroysRoot(false)
 	if panicking {
 		g.panicUnwind = false
 	}
@@ -1882,7 +1877,7 @@ func DestroyedBounded(p *P, g *G, action Action) (Action, bool) {
 		g.destroyTarget != nil || g.runAction != ActionInvalid {
 		return Action{}, false
 	}
-	isRoot := g.destroyRoot
+	isRoot := g.destroysRoot()
 	if g.panicUnwind {
 		if !publishedPanicRecord(&g.panicRecord) {
 			return Action{}, false
@@ -1891,7 +1886,7 @@ func DestroyedBounded(p *P, g *G, action Action) (Action, bool) {
 			if isRoot {
 				return Action{}, false
 			}
-			g.destroyRoot = false
+			g.setDestroysRoot(false)
 			g.state = GPanicking
 			return preparePanicAncestor(p, g, g.active)
 		}
@@ -1901,7 +1896,7 @@ func DestroyedBounded(p *P, g *G, action Action) (Action, bool) {
 	if isRoot {
 		return finishBoundedRootDestroy(p, g, true, false)
 	}
-	g.destroyRoot = false
+	g.setDestroysRoot(false)
 	if record := p.foreignReentry; record != nil &&
 		record.task == g && record.child == action.Handle {
 		return foreignReentryDestroyedBounded(p, g)
@@ -1918,7 +1913,7 @@ func validDestroyCommitReceipt(p *P, g *G, receipt Action) bool {
 		p.current != g || p.action != receipt || p.inResume || p.inlineAwaitDepth != 0 || p.runDecision != (RunDecision{}) ||
 		p.runDecisionTaken || p.servicePreemptBudget == 0 || !ValidG(g) || g.runP != p ||
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle ||
-		g.destroyTarget != nil || !g.destroyRoot ||
+		g.destroyTarget != nil || !g.destroysRoot() ||
 		g.root != nil || g.active != nil || g.frames != nil ||
 		!validReadyQueueHeader(p) || !validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
 		return false
@@ -1950,7 +1945,7 @@ func CommitDestroyedReceiptCompatibility(p *P, g *G, receipt Action) (Action, bo
 func acknowledgeRootTerminalSchedule(p *P, g *G, kind ActionKind) bool {
 	if p == nil || g == nil || p.current != g || p.inResume || p.inlineAwaitDepth != 0 || g.runP != p ||
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil || p.channelSource != nil ||
-		g.destroyTarget != nil || !g.destroyRoot || g.active != nil || g.frames != nil ||
+		g.destroyTarget != nil || !g.destroysRoot() || g.active != nil || g.frames != nil ||
 		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
 		return false
@@ -1975,7 +1970,7 @@ func acknowledgeRootTerminalSchedule(p *P, g *G, kind ActionKind) bool {
 func AcknowledgeTerminalSchedule(p *P, g *G, action Action) bool {
 	return expectedAction(p, g, action, ActionDestroy) && !p.inResume && p.inlineAwaitDepth == 0 &&
 		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil && p.channelSource == nil &&
-		g.state == GDispatching && g.destroyTarget == nil && g.destroyRoot &&
+		g.state == GDispatching && g.destroyTarget == nil && g.destroysRoot() &&
 		g.active == nil && g.frames == nil && p.readyHead == nil && p.readyTail == nil &&
 		emptySchedulerWaitQueues(p) && validReadyQueue(p) && validSchedulerWaitQueues(p) &&
 		preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
@@ -1997,8 +1992,8 @@ func TerminalG(p *P, g *G) bool {
 		g.taskControlLeases == 0 && g.runAction == ActionInvalid && g.transferState == runnableTransferGIdle &&
 		g.osThreadLockDepth == 0 &&
 		g.pending.kind == pendingNone && !g.pending.directChannel && g.pending.from == nil && g.pending.target == nil &&
-		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
-		!g.waiting && g.runP == nil &&
+		g.destroyTarget == nil && !g.destroysRoot() && g.nextReady == nil && !g.isQueued() &&
+		!g.isWaiting() && g.runP == nil &&
 		releasableParkState(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validTerminalTaskStorage(g) &&
 		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind &&

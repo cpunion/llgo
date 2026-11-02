@@ -39,7 +39,7 @@ func attachWaitingTaskCancelFixture(p *P, g *G) {
 	record := &WaitSetRecord{g: g, ticket: g.park.ticket, state: waitSetRecordActive}
 	frame := &Frame{owner: g, parkWait: record}
 	g.state = GWaiting
-	g.waiting = true
+	g.setWaiting(true)
 	g.active = frame
 	p.parkWaitHead = record
 	p.parkWaitTail = record
@@ -58,7 +58,7 @@ func detachWaitingTaskCancelFixture(p *P, g *G) {
 	g.active.parkWait = nil
 	g.active = nil
 	*record = WaitSetRecord{}
-	g.waiting = false
+	g.setWaiting(false)
 }
 
 func resumeTaskCancelFixture(t *testing.T, p *P, g *G) {

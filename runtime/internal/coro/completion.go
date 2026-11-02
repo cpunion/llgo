@@ -266,8 +266,8 @@ func prepareChildPanic(
 		header.Lifecycle != uint16(FrameFinalSuspended) ||
 		g.state != GRunning || g.runP == nil || g.pending.kind != pendingNone ||
 		g.pending.from != nil || g.pending.target != nil ||
-		g.destroyTarget != nil || g.destroyRoot || g.queued || g.nextReady != nil ||
-		g.waiting ||
+		g.destroyTarget != nil || g.destroysRoot() || g.isQueued() || g.nextReady != nil ||
+		g.isWaiting() ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelPhase == taskCancelRequested ||
 		g.panicUnwind || !emptyPanicRecord(&g.panicRecord) ||

@@ -747,7 +747,7 @@ func TestExplicitPanicTerminalScheduleRaceDoesNotRedestroy(t *testing.T) {
 					}
 				} else {
 					if !requested || preemptLoad(&fixture.p.schedule) != scheduleRequested ||
-						!fixture.g.destroyRoot || fixture.g.frames != nil || fixture.g.active != nil {
+						!fixture.g.destroysRoot() || fixture.g.frames != nil || fixture.g.active != nil {
 						t.Fatalf("iteration %d: request winner partially committed terminal state", iteration)
 					}
 					if !fixture.acknowledgeTerminalSchedule(action) {

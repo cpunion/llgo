@@ -86,8 +86,8 @@ func ResumePanicBoundaryReturning(g *G, handle unsafe.Pointer) bool {
 // invariants cannot be abandoned by a signal landing.
 func ResumePanicBoundaryMayLand(g *G, handle unsafe.Pointer) bool {
 	return ResumePanicBoundaryActive(g, handle) && resumeGateTaken(g) &&
-		g.pending == (pendingTransition{}) && g.destroyTarget == nil && !g.destroyRoot &&
-		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && !g.waiting
+		g.pending == (pendingTransition{}) && g.destroyTarget == nil && !g.destroysRoot() &&
+		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && !g.isWaiting()
 }
 
 // ResumePanicBoundaryActiveCompiler consumes the private pendingInlineStart

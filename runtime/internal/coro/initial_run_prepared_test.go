@@ -36,8 +36,8 @@ func newInitialRunFixture(t *testing.T) initialRunFixture {
 func TestInitialRunReceiptDispatchAndSize(t *testing.T) {
 	f := newInitialRunFixture(t)
 	defer runtime.KeepAlive(f.root.memory)
-	if unsafe.Sizeof(uintptr(0)) == 8 && TaskStorageSize() != 264 {
-		t.Fatalf("G storage grew to %d", TaskStorageSize())
+	if TaskStorageSize() != wantSchedulerGSize {
+		t.Fatalf("G storage size=%d want=%d", TaskStorageSize(), wantSchedulerGSize)
 	}
 	if !f.child.initialRunPrepared || f.child.runAction != ActionInvalid {
 		t.Fatal("initial child lost P-neutral publication")
@@ -63,7 +63,7 @@ func TestInitialRunReceiptRejectsMalformedCancelAndRestoresQueue(t *testing.T) {
 	f := newInitialRunFixture(t)
 	defer runtime.KeepAlive(f.root.memory)
 	f.child.park.taskCancelPhase = taskCancelRequested
-	if _, ok := dispatchExecutorRunReadyAction(&ExecutorDriver{p: f.p}, f.child, true); ok || f.p.current != nil || f.p.readyHead != f.child || f.child.nextReady != f.parent.g || f.p.readyCount != 2 || !f.child.queued || !f.child.initialRunPrepared {
+	if _, ok := dispatchExecutorRunReadyAction(&ExecutorDriver{p: f.p}, f.child, true); ok || f.p.current != nil || f.p.readyHead != f.child || f.child.nextReady != f.parent.g || f.p.readyCount != 2 || !f.child.isQueued() || !f.child.initialRunPrepared {
 		t.Fatal("invalid cancellation bypassed full validator or lost ready ownership")
 	}
 }
@@ -82,7 +82,7 @@ func TestInitialRunReceiptRetainsScheduleRejection(t *testing.T) {
 	f := newInitialRunFixture(t)
 	defer runtime.KeepAlive(f.root.memory)
 	preemptStore(&f.p.schedule, ^uint32(0))
-	if _, ok := dispatchExecutorRunReadyAction(&ExecutorDriver{p: f.p}, f.child, true); ok || f.p.current != nil || f.p.readyHead != f.child || !f.child.queued || !f.child.initialRunPrepared {
+	if _, ok := dispatchExecutorRunReadyAction(&ExecutorDriver{p: f.p}, f.child, true); ok || f.p.current != nil || f.p.readyHead != f.child || !f.child.isQueued() || !f.child.initialRunPrepared {
 		t.Fatal("bad schedule consumed initial receipt or ready ownership")
 	}
 }

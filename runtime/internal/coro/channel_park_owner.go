@@ -162,7 +162,7 @@ func PrepareCurrentChannelParkCleanup(
 		base.State = CurrentChannelParkPreparationPrepared
 		return base
 	}
-	if g.pending.kind != pendingNone || g.spawnChild != nil || g.waiting ||
+	if g.pending.kind != pendingNone || g.spawnChild != nil || g.isWaiting() ||
 		!validReusableSingleParkState(&g.park) ||
 		g.park.attached != 0 || g.park.head != nil {
 		return CurrentChannelParkPreparation{}
@@ -561,7 +561,7 @@ func prepareSingleChannelParkOrdinary(
 	if !ValidG(g) || handle == nil || header == nil || source == nil || wait == nil || claim == nil ||
 		*wait != (WaitSetRecord{}) || *claim != (SelectClaim{}) || caseID == 0 ||
 		!resumeGateTaken(g) || g.runP == nil || g.pending.kind != pendingNone ||
-		g.spawnChild != nil || g.waiting || g.park.taskCancelKind != TaskCancelNone ||
+		g.spawnChild != nil || g.isWaiting() || g.park.taskCancelKind != TaskCancelNone ||
 		g.park.taskCancelPhase != taskCancelIdle || !validReusableSingleParkState(&g.park) ||
 		g.park.attached != 0 || g.park.head != nil {
 		return ParkTicket{}, OperationID{}, false

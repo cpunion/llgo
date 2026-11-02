@@ -212,13 +212,13 @@ func pNeutralRunnableHeader(g *G, queued bool) bool {
 	if !queued {
 		wantTransfer, wantPreempt = runnableTransferGPublished, preemptDisabled
 	}
-	if !ValidG(g) || g.state != GRunnable || g.queued != queued ||
+	if !ValidG(g) || g.state != GRunnable || g.isQueued() != queued ||
 		(!queued && g.nextReady != nil) || g.transferState != wantTransfer ||
 		g.runnableAffinity != runnableAnyOwner ||
 		!gPreemptStateAtDepthZero(g, wantPreempt) ||
 		g.taskControlLeases != 0 || g.runAction != ActionInvalid || g.osThreadLockDepth != 0 ||
-		g.pending != (pendingTransition{}) || g.destroyTarget != nil || g.destroyRoot ||
-		g.waiting || g.runP != nil ||
+		g.pending != (pendingTransition{}) || g.destroyTarget != nil || g.destroysRoot() ||
+		g.isWaiting() || g.runP != nil ||
 		!pNeutralRunnableParkState(&g.park) || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!validLiveTaskStorage(g) || !emptyPanicRecord(&g.panicRecord) || g.panicUnwind {
 		return false

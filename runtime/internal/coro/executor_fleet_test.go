@@ -555,7 +555,7 @@ func TestExecutorFleetTransferUsesRouteAdmissionAndRequiresEmptyMailbox(t *testi
 	stale := first.handle
 	stale.Executor.Generation++
 	if staleID, staleRequest, staleOK := fleet.PublishPNeutralRunnableAndRequest(stale, staleSource, staleTask.g); staleOK || staleID != (RunnableTransferID{}) || staleRequest != ExecutorRequestStale ||
-		staleSource.readyHead != staleTask.g || !staleTask.g.queued {
+		staleSource.readyHead != staleTask.g || !staleTask.g.isQueued() {
 		t.Fatalf("stale fleet transfer mutated source = (%+v, %d, %t)", staleID, staleRequest, staleOK)
 	}
 	if !BeginExecutorFleetClose(fleet, first.handle) {
@@ -672,10 +672,10 @@ func TestExecutorFleetDemandSharesSingleInitialButKeepsSingleYieldedLocal(t *tes
 		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
 		if !ok || !distribution.Valid() || distribution.Target != target.handle ||
 			distribution.Count != 1 || source.p.readyHead != nil || source.p.readyTail != nil ||
-			source.p.readyCount != 0 || task.g.queued {
+			source.p.readyCount != 0 || task.g.isQueued() {
 			t.Fatalf("single initial distribution = %+v/%t source=(%p,%p,%d) queued=%t",
 				distribution, ok, source.p.readyHead, source.p.readyTail, source.p.readyCount,
-				task.g.queued)
+				task.g.isQueued())
 		}
 		if validExecutorDriver(source.driver) ||
 			!CommitExecutorRunActionDistribution(source.driver, true) ||
@@ -684,9 +684,9 @@ func TestExecutorFleetDemandSharesSingleInitialButKeepsSingleYieldedLocal(t *tes
 				source.driver.run, validExecutorDriver(source.driver))
 		}
 		if !fleet.ImportPNeutralRunnable(target.handle, target.p, distribution.Transfer) ||
-			target.p.readyHead != task.g || target.p.readyTail != task.g || !task.g.queued {
+			target.p.readyHead != task.g || target.p.readyTail != task.g || !task.g.isQueued() {
 			t.Fatalf("import single initial distribution: target=(%p,%p) queued=%t",
-				target.p.readyHead, target.p.readyTail, task.g.queued)
+				target.p.readyHead, target.p.readyTail, task.g.isQueued())
 		}
 	})
 	t.Run("initial-without-demand", func(t *testing.T) {
@@ -699,7 +699,7 @@ func TestExecutorFleetDemandSharesSingleInitialButKeepsSingleYieldedLocal(t *tes
 		}
 		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
 		if !ok || distribution != (RunnableDistribution{}) ||
-			source.p.readyHead != task.g || source.p.readyTail != task.g || !task.g.queued {
+			source.p.readyHead != task.g || source.p.readyTail != task.g || !task.g.isQueued() {
 			t.Fatalf("single initial moved without demand = %+v/%t source=(%p,%p)",
 				distribution, ok, source.p.readyHead, source.p.readyTail)
 		}
@@ -717,7 +717,7 @@ func TestExecutorFleetDemandSharesSingleInitialButKeepsSingleYieldedLocal(t *tes
 		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
 		if !ok || distribution != (RunnableDistribution{}) ||
 			source.p.readyHead != first.g || source.p.readyTail != second.g ||
-			source.p.readyCount != 2 || !first.g.queued || !second.g.queued {
+			source.p.readyCount != 2 || !first.g.isQueued() || !second.g.isQueued() {
 			t.Fatalf("initial surplus moved without physical-service demand = %+v/%t source=(%p,%p,%d)",
 				distribution, ok, source.p.readyHead, source.p.readyTail, source.p.readyCount)
 		}
@@ -734,9 +734,9 @@ func TestExecutorFleetDemandSharesSingleInitialButKeepsSingleYieldedLocal(t *tes
 		}
 		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
 		if !ok || distribution != (RunnableDistribution{}) ||
-			source.p.readyHead != task.g || source.p.readyTail != task.g || !task.g.queued {
+			source.p.readyHead != task.g || source.p.readyTail != task.g || !task.g.isQueued() {
 			t.Fatalf("single yielded bounced = %+v/%t source=(%p,%p) queued=%t",
-				distribution, ok, source.p.readyHead, source.p.readyTail, task.g.queued)
+				distribution, ok, source.p.readyHead, source.p.readyTail, task.g.isQueued())
 		}
 		if inflight, cancelOK := fleet.CancelPNeutralRunnableRequest(target.handle, target.p); !cancelOK || inflight {
 			t.Fatalf("cancel yielded demand = (%t,%t)", inflight, cancelOK)

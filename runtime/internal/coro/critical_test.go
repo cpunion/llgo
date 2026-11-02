@@ -299,7 +299,7 @@ func TestCriticalDepthRejectsSuspendTransferAndTerminalPaths(t *testing.T) {
 		t.Fatal("bind transfer rejection mailbox")
 	}
 	if id, ok := PublishPNeutralRunnable(&mailbox, source, transfer.g); ok || id != (RunnableTransferID{}) ||
-		source.readyHead != transfer.g || !transfer.g.queued || mailbox.count != 0 {
+		source.readyHead != transfer.g || !transfer.g.isQueued() || mailbox.count != 0 {
 		t.Fatal("non-zero-depth G crossed P-neutral transfer")
 	}
 

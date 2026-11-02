@@ -112,13 +112,13 @@ func TestSinglePRoundRobinTwoGYield(t *testing.T) {
 				releaseTestFrame(t, g, task.frame)
 				action, ok = Destroyed(p, g, action)
 			case ActionYield:
-				if action.Handle != nil || p.current != nil || g.state != GRunnable || !g.queued ||
+				if action.Handle != nil || p.current != nil || g.state != GRunnable || !g.isQueued() ||
 					g.active == nil || g.active.handle != task.handle || g.active.state != FrameSuspended {
-					t.Fatalf("yielded G %s retained invalid state: action=%+v current=%p state=%d queued=%t active=%p", task.name, action, p.current, g.state, g.queued, g.active)
+					t.Fatalf("yielded G %s retained invalid state: action=%+v current=%p state=%d queued=%t active=%p", task.name, action, p.current, g.state, g.isQueued(), g.active)
 				}
 				break runSlice
 			case ActionComplete:
-				if g.state != GDead || p.current != nil || g.queued || g.active != nil || g.frames != nil {
+				if g.state != GDead || p.current != nil || g.isQueued() || g.active != nil || g.frames != nil {
 					t.Fatalf("completed G %s retained scheduler state", task.name)
 				}
 				break runSlice

@@ -109,11 +109,11 @@ func TestCompilerSpawnUsesAdjacentTransactionCertificates(t *testing.T) {
 		t.Fatal("begin compiler spawn")
 	}
 	if parent.g.spawnChild != child || child.spawnParent != parent.g || child.spawnP != p ||
-		child.taskStorage != unsafe.Pointer(child) || child.taskSize != TaskStorageSize() ||
+		child.taskStorage != unsafe.Pointer(child) ||
 		child.taskState != taskStorageOwned || TaskLocal(child) != local ||
 		!gPreemptStateAtDepthZero(child, preemptIdle) {
-		t.Fatalf("compiler spawn begin state: parent-child=%p child-parent=%p child-p=%p storage=%p size=%d state=%d",
-			parent.g.spawnChild, child.spawnParent, child.spawnP, child.taskStorage, child.taskSize, child.taskState)
+		t.Fatalf("compiler spawn begin state: parent-child=%p child-parent=%p child-p=%p storage=%p state=%d",
+			parent.g.spawnChild, child.spawnParent, child.spawnP, child.taskStorage, child.taskState)
 	}
 	handle := unsafe.Pointer(new(byte))
 	root, _ := newSpawnTestFrame(t, child, handle, 0, 1)
@@ -123,7 +123,7 @@ func TestCompilerSpawnUsesAdjacentTransactionCertificates(t *testing.T) {
 	metadata := FrameFromStorage(root.storage)
 	if child.root != metadata || child.active != metadata || child.frames != metadata ||
 		child.state != GRunnable || child.runAction != ActionInvalid ||
-		!child.queued || p.readyHead != child || p.readyTail != child ||
+		!child.isQueued() || p.readyHead != child || p.readyTail != child ||
 		p.readyCount != 1 || parent.g.spawnChild != nil || child.spawnParent != nil || child.spawnP != nil {
 		t.Fatalf("compiler spawn commit state: child=%+v p=(%p,%p,%d) parent-child=%p",
 			child, p.readyHead, p.readyTail, p.readyCount, parent.g.spawnChild)
@@ -138,12 +138,12 @@ func TestCompilerSpawnUsesAdjacentTransactionCertificates(t *testing.T) {
 		t.Fatal("bind compiler-spawn transfer mailbox")
 	}
 	id, ok := PublishPNeutralRunnable(&mailbox, p, child)
-	if !ok || !id.Valid() || p.readyHead != parent.g || child.queued {
+	if !ok || !id.Valid() || p.readyHead != parent.g || child.isQueued() {
 		t.Fatalf("publish compiler-spawn child = (%+v, %t), source head=%p queued=%t",
-			id, ok, p.readyHead, child.queued)
+			id, ok, p.readyHead, child.isQueued())
 	}
-	if !ImportPNeutralRunnable(&mailbox, target, id) || target.readyHead != child || !child.queued {
-		t.Fatalf("import compiler-spawn child: target head=%p queued=%t", target.readyHead, child.queued)
+	if !ImportPNeutralRunnable(&mailbox, target, id) || target.readyHead != child || !child.isQueued() {
+		t.Fatalf("import compiler-spawn child: target head=%p queued=%t", target.readyHead, child.isQueued())
 	}
 	runtime.KeepAlive(parent.frame.memory)
 	runtime.KeepAlive(root.memory)
@@ -279,6 +279,53 @@ func TestSpawnOwnerGateIsConstantTimeAndChecksLocalHeaders(t *testing.T) {
 	}
 }
 
+func TestSpawnFixedStorageSizeValidatedBeforePublication(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		begin func(parent, child *G, storage unsafe.Pointer, size uintptr) bool
+	}{
+		{name: "validated", begin: BeginSpawn},
+		{name: "compiler", begin: BeginSpawnCompiler},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := new(P)
+			parent := newYieldingTestG(t, "fixed-size-parent")
+			if !Enqueue(p, parent.g) {
+				t.Fatal("enqueue fixed-size parent")
+			}
+			if got, ok := NextRunnable(p); !ok || got != parent.g {
+				t.Fatal("dequeue fixed-size parent")
+			}
+			action := beginSpawnTestResume(t, p, parent)
+			for _, size := range []uintptr{0, TaskStorageSize() - 1, TaskStorageSize() + 1, ^uintptr(0)} {
+				child := new(G)
+				if test.begin(parent.g, child, unsafe.Pointer(child), size) ||
+					*child != (G{}) || parent.g.spawnChild != nil {
+					t.Fatalf("size %d accepted or mutated a creation transaction", size)
+				}
+			}
+			child := new(G)
+			if !test.begin(parent.g, child, unsafe.Pointer(child), TaskStorageSize()) {
+				t.Fatal("exact fixed-size creation rejected")
+			}
+			raw, size, ok := RollbackSpawn(parent.g, child)
+			if !ok || raw != unsafe.Pointer(child) || size != TaskStorageSize() ||
+				child.taskState != taskStorageReleased || child.taskStorage != nil || parent.g.spawnChild != nil {
+				t.Fatalf("fixed-size rollback=(%p,%d,%t)", raw, size, ok)
+			}
+			if _, _, ok := RollbackSpawn(parent.g, child); ok {
+				t.Fatal("fixed-size allocation returned twice")
+			}
+			completeSpawnTestG(t, p, parent.g, parent.frame, action)
+			if !TerminalG(p, parent.g) {
+				t.Fatal("fixed-size parent did not retire")
+			}
+			runtime.KeepAlive(parent.frame.memory)
+			runtime.KeepAlive(child)
+		})
+	}
+}
+
 func TestSpawnBeginRollbackIsExactlyOnce(t *testing.T) {
 	p := new(P)
 	parent := newYieldingTestG(t, "rollback-parent")
@@ -301,7 +348,7 @@ func TestSpawnBeginRollbackIsExactlyOnce(t *testing.T) {
 	if BeginSpawn(parent.g, other, unsafe.Pointer(other), TaskStorageSize()) || ValidG(other) {
 		t.Fatal("rejected nested spawn initialized another child")
 	}
-	if CommitSpawn(parent.g, child, nil) || child.root != nil || child.state != GNew || child.queued || p.readyHead != nil {
+	if CommitSpawn(parent.g, child, nil) || child.root != nil || child.state != GNew || child.isQueued() || p.readyHead != nil {
 		t.Fatal("invalid commit partially adopted or queued child")
 	}
 	raw, size, ok := RollbackSpawn(parent.g, child)
@@ -378,7 +425,7 @@ func TestSpawnCommitDiscardedResultAtomicAndTaskReclaim(t *testing.T) {
 	if CommitSpawn(parent.g, child, handle) {
 		t.Fatal("invalid result layout accepted")
 	}
-	if child.root != nil || child.active != nil || child.state != GNew || child.queued ||
+	if child.root != nil || child.active != nil || child.state != GNew || child.isQueued() ||
 		p.readyHead != nil || parent.g.spawnChild != child || preemptLoad(preemptAddress(parent.g)) != preemptIdle {
 		t.Fatal("rejected result layout partially committed spawn")
 	}
@@ -397,7 +444,7 @@ func TestSpawnCommitDiscardedResultAtomicAndTaskReclaim(t *testing.T) {
 		t.Fatal("commit goroutine root with discarded result")
 	}
 	if parent.g.spawnChild != nil || child.root == nil || child.active != child.root || child.state != GRunnable ||
-		child.root.header.ResultSlot != nil || !child.queued ||
+		child.root.header.ResultSlot != nil || !child.isQueued() ||
 		p.readyHead != child || p.readyTail != child || preemptLoad(preemptAddress(parent.g)) != preemptIdle {
 		t.Fatal("committed spawn state is incomplete")
 	}
@@ -449,7 +496,6 @@ func TestCompletedTaskTransfersContextAndStorageAfterOneTerminalAudit(t *testing
 		t.Fatal("initialize completed task transfer G")
 	}
 	g.taskStorage = unsafe.Pointer(g)
-	g.taskSize = TaskStorageSize()
 	g.taskState = taskStorageOwned
 	local := unsafe.Pointer(new(byte))
 	if !BindTaskLocal(g, local) {
@@ -467,7 +513,7 @@ func TestCompletedTaskTransfersContextAndStorageAfterOneTerminalAudit(t *testing
 
 	releasedLocal, raw, size, owned, ok := ReleaseCompletedTaskCompiler(g)
 	if !ok || !owned || releasedLocal != local || raw != unsafe.Pointer(g) || size != TaskStorageSize() ||
-		g.taskLocal != nil || g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageReleased {
+		g.taskLocal != nil || g.taskStorage != nil || g.taskState != taskStorageReleased {
 		t.Fatalf("completed task transfer = local:%p raw:%p size:%d owned:%t ok:%t state:%d",
 			releasedLocal, raw, size, owned, ok, g.taskState)
 	}
@@ -482,7 +528,6 @@ func TestCompletedTaskReceiptTransfersCleanAttachmentOnce(t *testing.T) {
 		t.Fatal("initialize completed task receipt G")
 	}
 	g.taskStorage = unsafe.Pointer(g)
-	g.taskSize = TaskStorageSize()
 	g.taskState = taskStorageOwned
 	local := unsafe.Pointer(new(byte))
 	if !BindTaskLocal(g, local) {
@@ -496,7 +541,7 @@ func TestCompletedTaskReceiptTransfersCleanAttachmentOnce(t *testing.T) {
 	g.taskControlLeases = 0
 	releasedLocal, raw, size, owned, ok := ReleaseCompletedTaskReceipt(receipt)
 	if !ok || !owned || releasedLocal != local || raw != unsafe.Pointer(g) || size != TaskStorageSize() ||
-		g.taskLocal != nil || g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageReleased {
+		g.taskLocal != nil || g.taskStorage != nil || g.taskState != taskStorageReleased {
 		t.Fatalf("receipt transfer = local:%p raw:%p size:%d owned:%t ok:%t state:%d",
 			releasedLocal, raw, size, owned, ok, g.taskState)
 	}

@@ -148,8 +148,8 @@ func PrepareExplicitStatus(
 	if status != ExplicitStatusPanic || typeWord == nil || handle == nil || header == nil ||
 		g.state != GRunning || g.active == nil || g.root == nil || g.runP == nil ||
 		g.pending.kind != pendingNone || g.pending.directChannel || g.pending.from != nil || g.pending.target != nil ||
-		g.destroyTarget != nil || g.destroyRoot || g.queued || g.nextReady != nil ||
-		g.waiting || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		g.destroyTarget != nil || g.destroysRoot() || g.isQueued() || g.nextReady != nil ||
+		g.isWaiting() || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelPhase == taskCancelRequested || g.panicUnwind {
 		return reject()
 	}
@@ -195,7 +195,7 @@ func preparePanicAncestor(p *P, g *G, frame *Frame) (Action, bool) {
 	}
 	handle := frame.handle
 	g.active = frame.parent
-	g.destroyRoot = frame == g.root
+	g.setDestroysRoot(frame == g.root)
 	frame.state = FrameDestroyPending
 	frame.header.Lifecycle = uint16(FrameDestroyPending)
 	g.destroyTarget = frame
@@ -225,7 +225,7 @@ func commitInitialPanicDestroyed(p *P, g *G, wasRoot bool) (Action, bool) {
 		if wasRoot {
 			return Action{}, false
 		}
-		g.destroyRoot = false
+		g.setDestroysRoot(false)
 		g.state = GPanicking
 		return preparePanicAncestor(p, g, g.active)
 	}
@@ -241,12 +241,12 @@ func PanicDestroyed(p *P, g *G, action Action) (Action, bool) {
 		g.destroyTarget != nil {
 		return Action{}, false
 	}
-	wasRoot := g.destroyRoot
+	wasRoot := g.destroysRoot()
 	if g.active != nil {
 		if wasRoot {
 			return Action{}, false
 		}
-		g.destroyRoot = false
+		g.setDestroysRoot(false)
 		return preparePanicAncestor(p, g, g.active)
 	}
 	return finishPanicG(p, g, wasRoot)
@@ -262,12 +262,12 @@ func PanicDestroyedBounded(p *P, g *G, action Action) (Action, bool) {
 		g.destroyTarget != nil || g.runAction != ActionInvalid {
 		return Action{}, false
 	}
-	wasRoot := g.destroyRoot
+	wasRoot := g.destroysRoot()
 	if g.active != nil {
 		if wasRoot {
 			return Action{}, false
 		}
-		g.destroyRoot = false
+		g.setDestroysRoot(false)
 		return preparePanicAncestor(p, g, g.active)
 	}
 	return finishBoundedRootDestroy(p, g, wasRoot, true)
@@ -281,7 +281,7 @@ func AcknowledgePanicTerminalSchedule(p *P, g *G, action Action) bool {
 	return expectedAction(p, g, action, ActionPanicDestroy) && !p.inResume && p.inlineAwaitDepth == 0 &&
 		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil && p.channelSource == nil &&
 		g.state == GPanicking && g.panicUnwind && publishedPanicRecord(&g.panicRecord) &&
-		g.destroyTarget == nil && g.destroyRoot && g.active == nil && g.frames == nil &&
+		g.destroyTarget == nil && g.destroysRoot() && g.active == nil && g.frames == nil &&
 		p.readyHead == nil && p.readyTail == nil && emptySchedulerWaitQueues(p) &&
 		validReadyQueue(p) && validSchedulerWaitQueues(p) &&
 		preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)

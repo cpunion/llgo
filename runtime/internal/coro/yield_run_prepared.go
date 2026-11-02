@@ -38,7 +38,7 @@ func resumedExecutorCompilerYield(driver *ExecutorDriver, p *P, g *G, action Act
 		action.Kind != ActionResume || action.Flags != 0 || action.Handle == nil || frame == nil ||
 		frame != g.active || frame != g.frames || frame.owner != g || frame.handle != action.Handle ||
 		frame.state != FrameActive || g.pending.target != nil || g.pending.directChannel ||
-		g.queued || g.nextReady != nil || g.waiting || g.runAction != ActionInvalid ||
+		g.isQueued() || g.nextReady != nil || g.isWaiting() || g.runAction != ActionInvalid ||
 		!validReadyQueueHeader(p) || p.readyCount == ^uint32(0) || !validOSThreadEnqueue(p, g) {
 		return Action{}, false
 	}

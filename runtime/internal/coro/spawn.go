@@ -43,7 +43,7 @@ func TaskStorageSize() uintptr {
 func BindTaskLocal(g *G, local unsafe.Pointer) bool {
 	if !ValidG(g) || g.state != GNew || local == nil || g.taskLocal != nil ||
 		g.root != nil || g.active != nil || g.frames != nil ||
-		g.queued || g.nextReady != nil || g.waiting || g.runP != nil ||
+		g.isQueued() || g.nextReady != nil || g.isWaiting() || g.runP != nil ||
 		!validLiveTaskStorage(g) {
 		return false
 	}
@@ -77,9 +77,9 @@ func validLiveTaskStorage(g *G) bool {
 	}
 	switch g.taskState {
 	case taskStorageStatic:
-		return g.taskStorage == nil && g.taskSize == 0
+		return g.taskStorage == nil
 	case taskStorageOwned:
-		return g.taskStorage == unsafe.Pointer(g) && g.taskSize == TaskStorageSize()
+		return g.taskStorage == unsafe.Pointer(g)
 	default:
 		return false
 	}
@@ -91,11 +91,11 @@ func validTerminalTaskStorage(g *G) bool {
 	}
 	switch g.taskState {
 	case taskStorageStatic:
-		return g.taskStorage == nil && g.taskSize == 0
+		return g.taskStorage == nil
 	case taskStorageOwned:
-		return g.taskStorage == unsafe.Pointer(g) && g.taskSize == TaskStorageSize()
+		return g.taskStorage == unsafe.Pointer(g)
 	case taskStorageReleased:
-		return g.taskStorage == nil && g.taskSize == 0
+		return g.taskStorage == nil
 	default:
 		return false
 	}
@@ -111,8 +111,8 @@ func runningSpawnContext(parent *G) (*P, bool) {
 		parent.active.header.SuspendReason != uint16(SuspendNone) ||
 		parent.active.header.Lifecycle != uint16(FrameActive) ||
 		parent.pending.kind != pendingNone || parent.pending.from != nil || parent.pending.target != nil ||
-		parent.destroyTarget != nil || parent.destroyRoot || parent.queued || parent.nextReady != nil ||
-		parent.waiting ||
+		parent.destroyTarget != nil || parent.destroysRoot() || parent.isQueued() || parent.nextReady != nil ||
+		parent.isWaiting() ||
 		!releasableParkState(&parent.park) ||
 		parent.spawnParent != nil || parent.spawnP != nil ||
 		parent.transferState != runnableTransferGIdle || !validLiveTaskStorage(parent) {
@@ -160,7 +160,6 @@ func BeginSpawn(parent, child *G, storage unsafe.Pointer, size uintptr) bool {
 	}
 	child.panicBoundary = parent.panicBoundary
 	child.taskStorage = storage
-	child.taskSize = size
 	child.taskState = taskStorageOwned
 	child.spawnParent = parent
 	child.spawnP = p
@@ -218,7 +217,6 @@ func beginSpawnCompiler(
 	child.magic = gMagic
 	child.panicBoundary = parent.panicBoundary
 	child.taskStorage = storage
-	child.taskSize = size
 	child.taskState = taskStorageOwned
 	if bindLocal {
 		child.taskLocal = local
@@ -302,12 +300,12 @@ func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
 	if !ok || handle == nil ||
 		!ValidG(child) || child.state != GNew || child.root != nil || child.active != nil ||
 		child.pending.kind != pendingNone || child.pending.from != nil || child.pending.target != nil ||
-		child.destroyTarget != nil || child.destroyRoot || child.nextReady != nil || child.queued ||
-		child.waiting || child.runP != nil ||
+		child.destroyTarget != nil || child.destroysRoot() || child.nextReady != nil || child.isQueued() ||
+		child.isWaiting() || child.runP != nil ||
 		child.spawnChild != nil ||
 		child.transferState != runnableTransferGIdle ||
 		child.taskState != taskStorageOwned || child.taskStorage != unsafe.Pointer(child) ||
-		child.taskSize != TaskStorageSize() || !gPreemptStateAtDepthZero(child, preemptIdle) {
+		!gPreemptStateAtDepthZero(child, preemptIdle) {
 		return false
 	}
 	root, ok := validDiscardResultSpawnRoot(child, handle)
@@ -392,12 +390,12 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 	_, ok := activeSpawnTransaction(parent, child)
 	if !ok || !ValidG(child) || child.spawnChild != nil ||
 		child.state != GNew || child.root != nil || child.active != nil || child.frames != nil ||
-		child.pending.kind != pendingNone || child.destroyTarget != nil || child.destroyRoot ||
-		child.nextReady != nil || child.queued || child.waiting || child.runP != nil ||
+		child.pending.kind != pendingNone || child.destroyTarget != nil || child.destroysRoot() ||
+		child.nextReady != nil || child.isQueued() || child.isWaiting() || child.runP != nil ||
 		!releasableParkState(&child.park) || child.park.taskCancelKind != TaskCancelNone ||
 		child.transferState != runnableTransferGIdle ||
 		child.taskState != taskStorageOwned || child.taskStorage != unsafe.Pointer(child) ||
-		child.taskSize != TaskStorageSize() || !gPreemptStateAtDepthZero(child, preemptIdle) {
+		!gPreemptStateAtDepthZero(child, preemptIdle) {
 		return nil, 0, false
 	}
 	if !disableGPreempt(child) {
@@ -406,12 +404,11 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 	if ExecutionDomainEnabled() && !retireExecutionDomainTask(child) {
 		return nil, 0, false
 	}
-	raw, size := child.taskStorage, child.taskSize
+	raw, size := child.taskStorage, TaskStorageSize()
 	parent.spawnChild = nil
 	child.spawnParent = nil
 	child.spawnP = nil
 	child.taskStorage = nil
-	child.taskSize = 0
 	child.taskState = taskStorageReleased
 	child.state = GDead
 	return raw, size, true
@@ -428,8 +425,8 @@ func ReclaimableG(g *G) bool {
 		g.osThreadLockDepth == 0 &&
 		g.root == nil && g.active == nil && g.frames == nil &&
 		g.pending.kind == pendingNone && !g.pending.directChannel && g.pending.from == nil && g.pending.target == nil &&
-		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
-		!g.waiting && g.runP == nil &&
+		g.destroyTarget == nil && !g.destroysRoot() && g.nextReady == nil && !g.isQueued() &&
+		!g.isWaiting() && g.runP == nil &&
 		releasableParkState(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validLiveTaskStorage(g) &&
 		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind &&
@@ -445,9 +442,9 @@ func TaskStorageOwned(g *G) (owned bool, ok bool) {
 	}
 	switch g.taskState {
 	case taskStorageStatic:
-		return false, g.taskStorage == nil && g.taskSize == 0
+		return false, g.taskStorage == nil
 	case taskStorageOwned:
-		return true, g.taskStorage == unsafe.Pointer(g) && g.taskSize == TaskStorageSize()
+		return true, g.taskStorage == unsafe.Pointer(g)
 	default:
 		return false, false
 	}
@@ -463,9 +460,8 @@ func ReleaseTaskStorage(g *G) (raw unsafe.Pointer, size uintptr, ok bool) {
 	if !valid || !owned {
 		return nil, 0, false
 	}
-	raw, size = g.taskStorage, g.taskSize
+	raw, size = g.taskStorage, TaskStorageSize()
 	g.taskStorage = nil
-	g.taskSize = 0
 	g.taskState = taskStorageReleased
 	return raw, size, true
 }
@@ -487,16 +483,15 @@ func releaseCompletedTaskAttachment(g *G) (local, raw unsafe.Pointer, size uintp
 	local = g.taskLocal
 	switch g.taskState {
 	case taskStorageStatic:
-		if g.taskStorage != nil || g.taskSize != 0 {
+		if g.taskStorage != nil {
 			return nil, nil, 0, false, false
 		}
 	case taskStorageOwned:
-		if g.taskStorage != unsafe.Pointer(g) || g.taskSize != TaskStorageSize() {
+		if g.taskStorage != unsafe.Pointer(g) {
 			return nil, nil, 0, false, false
 		}
-		raw, size, owned = g.taskStorage, g.taskSize, true
+		raw, size, owned = g.taskStorage, TaskStorageSize(), true
 		g.taskStorage = nil
-		g.taskSize = 0
 		g.taskState = taskStorageReleased
 	default:
 		return nil, nil, 0, false, false
@@ -548,13 +543,13 @@ func ReleaseCompletedTaskCompiler(g *G) (local, raw unsafe.Pointer, size uintptr
 		g.state == GDead && g.taskControlLeases == 0 && g.runAction == ActionInvalid &&
 		g.transferState == runnableTransferGIdle && g.osThreadLockDepth == 0 &&
 		g.root == nil && g.active == nil && g.frames == nil && g.pending == (pendingTransition{}) &&
-		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued && !g.waiting &&
+		g.destroyTarget == nil && !g.destroysRoot() && g.nextReady == nil && !g.isQueued() && !g.isWaiting() &&
 		g.runP == nil && g.park == (ParkState{}) &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil &&
 		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind &&
 		g.panicTraceHead == nil && g.panicTraceTail == nil && g.panicTraceCount == 0 &&
 		g.taskLocal != nil && g.taskState == taskStorageOwned &&
-		g.taskStorage == unsafe.Pointer(g) && g.taskSize == TaskStorageSize() {
+		g.taskStorage == unsafe.Pointer(g) {
 		return releaseCompletedTaskAttachment(g)
 	}
 	return ReleaseCompletedTask(g)

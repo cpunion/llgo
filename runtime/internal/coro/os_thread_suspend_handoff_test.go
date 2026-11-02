@@ -326,9 +326,9 @@ func TestOSThreadParkHandoffReturnsAfterSourcePromotion(t *testing.T) {
 		}
 	}
 	if detached, returnable, valid := OSThreadSuspendHandoffStatus(driver); !valid ||
-		!detached || !returnable || !owner.g.queued || wait != (WaitSetRecord{}) {
+		!detached || !returnable || !owner.g.isQueued() || wait != (WaitSetRecord{}) {
 		t.Fatalf("promoted locked-park status = (%t, %t, %t), queued=%t wait=%+v",
-			detached, returnable, valid, owner.g.queued, wait)
+			detached, returnable, valid, owner.g.isQueued(), wait)
 	}
 	if !RestoreOSThreadSuspendHandoff(driver, owner.g) {
 		t.Fatal("restore locked-park owner")

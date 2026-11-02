@@ -135,11 +135,11 @@ func TestSchedulerPromotesZeroCandidateDefaultAsLeaseFreeRunDecision(t *testing.
 		t.Fatal("commit scheduler default park")
 	}
 	action, ok = Resumed(p, task.g, action)
-	if !ok || action.Kind != ActionPark || task.g.state != GWaiting || !task.g.waiting {
-		t.Fatalf("park default task = (%+v, %t), state=%d waiting=%t", action, ok, task.g.state, task.g.waiting)
+	if !ok || action.Kind != ActionPark || task.g.state != GWaiting || !task.g.isWaiting() {
+		t.Fatalf("park default task = (%+v, %t), state=%d waiting=%t", action, ok, task.g.state, task.g.isWaiting())
 	}
-	if count, pollOK := PollReady(p); !pollOK || count != 1 || !task.g.queued || task.g.park.phase != parkReady {
-		t.Fatalf("promote default task = (%d, %t), queued=%t phase=%d", count, pollOK, task.g.queued, task.g.park.phase)
+	if count, pollOK := PollReady(p); !pollOK || count != 1 || !task.g.isQueued() || task.g.park.phase != parkReady {
+		t.Fatalf("promote default task = (%d, %t), queued=%t phase=%d", count, pollOK, task.g.isQueued(), task.g.park.phase)
 	}
 	if g, runnableOK := NextRunnable(p); !runnableOK || g != task.g {
 		t.Fatal("dequeue promoted default task")
@@ -315,8 +315,8 @@ func commitSchedulerParkV2(
 		t.Fatal("prepare scheduler park-set")
 	}
 	action, ok := Resumed(p, task.g, action)
-	if !ok || action.Kind != ActionPark || action.Handle != nil || task.g.state != GWaiting || !task.g.waiting || !HasWaiting(p) {
-		t.Fatalf("commit scheduler park-set = (%+v, %t), state=%d waiting=%t", action, ok, task.g.state, task.g.waiting)
+	if !ok || action.Kind != ActionPark || action.Handle != nil || task.g.state != GWaiting || !task.g.isWaiting() || !HasWaiting(p) {
+		t.Fatalf("commit scheduler park-set = (%+v, %t), state=%d waiting=%t", action, ok, task.g.state, task.g.isWaiting())
 	}
 }
 
@@ -356,8 +356,8 @@ func TestSchedulerParkSetEarlyCompletionDetachGateAndRunDecision(t *testing.T) {
 	if !ParkReady(&task.g.park, operations.ticket) {
 		t.Fatal("final source detach did not publish ParkReady")
 	}
-	if count, ok := PollReady(p); !ok || count != 1 || HasWaiting(p) || !task.g.queued || task.g.park.phase != parkReady {
-		t.Fatalf("promote ready park-set = (%d, %t), waiting=%t queued=%t phase=%d", count, ok, HasWaiting(p), task.g.queued, task.g.park.phase)
+	if count, ok := PollReady(p); !ok || count != 1 || HasWaiting(p) || !task.g.isQueued() || task.g.park.phase != parkReady {
+		t.Fatalf("promote ready park-set = (%d, %t), waiting=%t queued=%t phase=%d", count, ok, HasWaiting(p), task.g.isQueued(), task.g.park.phase)
 	}
 
 	if g, ok := NextRunnable(p); !ok || g != task.g {
@@ -520,8 +520,8 @@ func TestSchedulerParkSetReadyTaskCancelSuppressesCaseAndKeepsLease(t *testing.T
 		t.Fatalf("resolve late-cancel winner = (%d, %t), phase=%d", count, ok, task.g.park.phase)
 	}
 	detachSchedulerParkV2(t, p, task.g, operations, 0)
-	if count, ok := PollReady(p); !ok || count != 1 || !task.g.queued || task.g.park.phase != parkReady {
-		t.Fatalf("promote late-cancel winner = (%d, %t), queued=%t phase=%d", count, ok, task.g.queued, task.g.park.phase)
+	if count, ok := PollReady(p); !ok || count != 1 || !task.g.isQueued() || task.g.park.phase != parkReady {
+		t.Fatalf("promote late-cancel winner = (%d, %t), queued=%t phase=%d", count, ok, task.g.isQueued(), task.g.park.phase)
 	}
 	if !RequestTaskCancellation(p, task.g, TaskCancelAbort) {
 		t.Fatal("request task cancellation after winner became ready")
@@ -590,8 +590,8 @@ func TestSchedulerTaskCancelAfterDeliveredParkIsObservedAtNextResumeGate(t *test
 		t.Fatal("prepare yield after delivered park cancellation")
 	}
 	action, ok = Resumed(p, task.g, action)
-	if !ok || action.Kind != ActionYield || !task.g.queued || task.g.park.taskCancelPhase != taskCancelRequested {
-		t.Fatalf("yield after delivered park cancellation = (%+v, %t), queued=%t phase=%d", action, ok, task.g.queued, task.g.park.taskCancelPhase)
+	if !ok || action.Kind != ActionYield || !task.g.isQueued() || task.g.park.taskCancelPhase != taskCancelRequested {
+		t.Fatalf("yield after delivered park cancellation = (%+v, %t), queued=%t phase=%d", action, ok, task.g.isQueued(), task.g.park.taskCancelPhase)
 	}
 	if g, nextOK := NextRunnable(p); !nextOK || g != task.g {
 		t.Fatal("dequeue post-delivery canceled task")
@@ -706,8 +706,8 @@ func TestSchedulerTaskOnlyCancelDecisionAllowsCleanupPark(t *testing.T) {
 	if !RequestWaitSetCancel(p, &cleanupPark.wait, ParkCancelOperation) {
 		t.Fatal("cancel cleanup park operation")
 	}
-	if count, ok := PollReady(p); !ok || count != 1 || !task.g.queued || task.g.park.phase != parkReady {
-		t.Fatalf("promote cleanup park = (%d, %t), queued=%t phase=%d", count, ok, task.g.queued, task.g.park.phase)
+	if count, ok := PollReady(p); !ok || count != 1 || !task.g.isQueued() || task.g.park.phase != parkReady {
+		t.Fatalf("promote cleanup park = (%d, %t), queued=%t phase=%d", count, ok, task.g.isQueued(), task.g.park.phase)
 	}
 	if g, ok := NextRunnable(p); !ok || g != task.g {
 		t.Fatal("dequeue cleanup park")
@@ -771,8 +771,8 @@ func TestPrepareParkSetFailsClosedForUnsealedStaleAndDuplicate(t *testing.T) {
 	if !RequestWaitSetCancel(p, &wait, ParkCancelOperation) {
 		t.Fatal("cancel zero-candidate rejected-test park")
 	}
-	if count, ok := PollReady(p); !ok || count != 1 || !task.g.queued || task.g.park.phase != parkReady {
-		t.Fatalf("promote rejected-test park = (%d, %t), queued=%t phase=%d", count, ok, task.g.queued, task.g.park.phase)
+	if count, ok := PollReady(p); !ok || count != 1 || !task.g.isQueued() || task.g.park.phase != parkReady {
+		t.Fatalf("promote rejected-test park = (%d, %t), queued=%t phase=%d", count, ok, task.g.isQueued(), task.g.park.phase)
 	}
 	if g, ok := NextRunnable(p); !ok || g != task.g {
 		t.Fatal("dequeue rejected-test park")

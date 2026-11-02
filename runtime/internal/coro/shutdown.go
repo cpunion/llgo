@@ -52,12 +52,12 @@ func validCancelFrame(frame *Frame, g *G) bool {
 // target exactly once. Parked/opaque states are rejected before command
 // shutdown changes P.schedule.
 func validCancelableReadyG(g *G) bool {
-	if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.runP != nil || g.root == nil ||
+	if !ValidG(g) || g.state != GRunnable || !g.isQueued() || g.isWaiting() || g.runP != nil || g.root == nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelKind != TaskCancelNone ||
 		g.pending.kind != pendingNone || g.pending.directChannel || g.pending.from != nil || g.pending.target != nil ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.taskControlLeases != 0 ||
-		g.taskState != taskStorageOwned || g.taskStorage != unsafe.Pointer(g) || g.taskSize != TaskStorageSize() {
+		g.taskState != taskStorageOwned || g.taskStorage != unsafe.Pointer(g) {
 		return false
 	}
 	if !gPreemptEnabledAtDepthZero(g) {
@@ -87,18 +87,18 @@ func validCancelableReadyG(g *G) bool {
 	continuation := g.runAction
 	switch continuation {
 	case ActionInvalid:
-		if leaf == nil || g.destroyTarget != nil || g.destroyRoot || g.panicUnwind ||
+		if leaf == nil || g.destroyTarget != nil || g.destroysRoot() || g.panicUnwind ||
 			!emptyPanicRecord(&g.panicRecord) {
 			return false
 		}
 	case ActionCheckResume:
-		if leaf == nil || g.destroyTarget != nil || g.destroyRoot || g.panicUnwind ||
+		if leaf == nil || g.destroyTarget != nil || g.destroysRoot() || g.panicUnwind ||
 			!emptyPanicRecord(&g.panicRecord) {
 			return false
 		}
 	case ActionCheckDestroy, ActionPanicDestroy:
 		leaf = g.destroyTarget
-		if leaf == nil || g.active != leaf.parent || g.destroyRoot != (leaf == g.root) ||
+		if leaf == nil || g.active != leaf.parent || g.destroysRoot() != (leaf == g.root) ||
 			leaf.state != FrameDestroyPending || leaf.header == nil ||
 			leaf.header.Lifecycle != uint16(FrameDestroyPending) {
 			return false
@@ -304,7 +304,7 @@ func prepareCancelFrame(p *P, g *G, frame *Frame) (Action, bool) {
 	}
 	handle := frame.handle
 	g.active = frame.parent
-	g.destroyRoot = frame == g.root
+	g.setDestroysRoot(frame == g.root)
 	frame.state = FrameDestroyPending
 	frame.header.Lifecycle = uint16(FrameDestroyPending)
 	g.destroyTarget = frame
@@ -369,12 +369,12 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 		!gPreemptEnabledAtDepthZero(g) {
 		return Action{}, false
 	}
-	wasRoot := g.destroyRoot
+	wasRoot := g.destroysRoot()
 	if g.active != nil {
 		if wasRoot {
 			return Action{}, false
 		}
-		g.destroyRoot = false
+		g.setDestroysRoot(false)
 		return prepareCancelFrame(p, g, g.active)
 	}
 	if !wasRoot || g.frames != nil || g.runAction != ActionInvalid ||
@@ -400,7 +400,7 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 	if !released || !disableGPreempt(g) {
 		return Action{}, false
 	}
-	g.destroyRoot = false
+	g.setDestroysRoot(false)
 	g.root = nil
 	if ExecutionDomainEnabled() && !retireExecutionDomainTask(g) {
 		return Action{}, false

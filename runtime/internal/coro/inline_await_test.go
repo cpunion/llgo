@@ -291,9 +291,9 @@ func TestCompilerInlineAwaitSlowYieldUsesCheckedDispatch(t *testing.T) {
 	}
 	action, ok := Resumed(fixture.p, fixture.g, fixture.action)
 	if !ok || action.Kind != ActionYield || action.Handle != nil ||
-		fixture.g.state != GRunnable || !fixture.g.queued {
+		fixture.g.state != GRunnable || !fixture.g.isQueued() {
 		t.Fatalf("dispatch compiler inline yield = (%+v, %t), state=%d queued=%t",
-			action, ok, fixture.g.state, fixture.g.queued)
+			action, ok, fixture.g.state, fixture.g.isQueued())
 	}
 	runtime.KeepAlive(fixture.parent.memory)
 	runtime.KeepAlive(fixture.child.memory)
@@ -376,9 +376,9 @@ func TestInlineAwaitSlowYieldUnwindsBeforeSchedulerDispatch(t *testing.T) {
 	}
 	action, ok := Resumed(fixture.p, fixture.g, fixture.action)
 	if !ok || action.Kind != ActionYield || action.Handle != nil ||
-		fixture.g.state != GRunnable || !fixture.g.queued {
+		fixture.g.state != GRunnable || !fixture.g.isQueued() {
 		t.Fatalf("dispatch unwound inline yield = (%+v, %t), state=%d queued=%t",
-			action, ok, fixture.g.state, fixture.g.queued)
+			action, ok, fixture.g.state, fixture.g.isQueued())
 	}
 	runtime.KeepAlive(fixture.parent.memory)
 	runtime.KeepAlive(fixture.child.memory)

@@ -105,13 +105,13 @@ func pOwnsTaskCancellation(p *P, g *G) bool {
 	}
 	switch g.state {
 	case GRunnable:
-		return g.queued && pQueueContainsReady(p, g)
+		return g.isQueued() && pQueueContainsReady(p, g)
 	case GRunning, GDispatching:
 		return p.current == g && g.runP == p
 	case GForeignWaiting:
 		return validForeignWaitingExecutorTask(p, g)
 	case GWaiting:
-		return g.waiting && g.active != nil && g.active.parkWait != nil &&
+		return g.isWaiting() && g.active != nil && g.active.parkWait != nil &&
 			validActiveWaitSetRecordFast(p, g.active.parkWait)
 	default:
 		return false
@@ -284,20 +284,20 @@ func pOwnsRegisteredTaskCancellation(p *P, g *G) bool {
 	}
 	switch g.state {
 	case GRunnable:
-		return g.queued && !g.waiting && g.runP == nil &&
+		return g.isQueued() && !g.isWaiting() && g.runP == nil &&
 			validRegisteredRunnableParkHeader(&g.park) &&
 			g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil &&
 			(g.active == nil || g.active.parkWait == nil) &&
 			p.readyHead != nil && p.readyTail != nil
 	case GRunning, GDispatching:
-		return p.current == g && g.runP == p && !g.queued && g.nextReady == nil &&
-			!g.waiting &&
+		return p.current == g && g.runP == p && !g.isQueued() && g.nextReady == nil &&
+			!g.isWaiting() &&
 			validRegisteredRunningParkHeader(&g.park)
 	case GForeignWaiting:
 		return validForeignWaitingExecutorTask(p, g) &&
 			validRegisteredRunningParkHeader(&g.park)
 	case GWaiting:
-		if !g.waiting || g.queued || g.nextReady != nil || g.runP != nil ||
+		if !g.isWaiting() || g.isQueued() || g.nextReady != nil || g.runP != nil ||
 			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil {
 			return false
 		}
@@ -506,9 +506,9 @@ func AcknowledgeTaskCancellation(g *G, kind TaskCancelKind) bool {
 		g.state != GDead || !gPreemptStateAtDepthZero(g, preemptDisabled) ||
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle ||
 		g.root != nil || g.active != nil || g.frames != nil || g.runP != nil ||
-		g.nextReady != nil || g.queued || g.waiting ||
+		g.nextReady != nil || g.isQueued() || g.isWaiting() ||
 		g.pending.kind != pendingNone || g.pending.directChannel || g.pending.from != nil || g.pending.target != nil ||
-		g.destroyTarget != nil || g.destroyRoot ||
+		g.destroyTarget != nil || g.destroysRoot() ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!releasableParkState(&g.park) {
 		return false

@@ -119,23 +119,23 @@ func validOSThreadOwnerHeader(p *P) bool {
 	switch p.osThreadSuspend {
 	case osThreadSuspendAttached:
 		if g.runP != nil {
-			return g.runP == p && p.current == g && !g.queued && !g.waiting
+			return g.runP == p && p.current == g && !g.isQueued() && !g.isWaiting()
 		}
 	case osThreadSuspendPark:
 		if g.runP != nil || p.current == g {
 			return false
 		}
 	case osThreadSuspendYieldNeedsPeer, osThreadSuspendYieldPeerServiced:
-		if g.runP != nil || p.current == g || !g.queued {
+		if g.runP != nil || p.current == g || !g.isQueued() {
 			return false
 		}
 	default:
 		return false
 	}
-	if g.queued {
-		return g.state == GRunnable && !g.waiting
+	if g.isQueued() {
+		return g.state == GRunnable && !g.isWaiting()
 	}
-	return g.state == GWaiting && g.waiting
+	return g.state == GWaiting && g.isWaiting()
 }
 
 // EnterOSThreadLock binds the currently executing logical G to its current
@@ -425,7 +425,7 @@ func OSThreadSuspendHandoffStatus(
 		return true, false, true
 	}
 	owner := p.osThreadLockOwner
-	if owner == nil || !owner.queued || owner.state != GRunnable {
+	if owner == nil || !owner.isQueued() || owner.state != GRunnable {
 		return true, false, true
 	}
 	switch p.osThreadSuspend {

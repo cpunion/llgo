@@ -67,7 +67,7 @@ func PrepareInlineAwaitCompiler(
 	// payload is a separately supplied language transaction.
 	if recoverType == nil && recoverData == nil && ValidG(g) &&
 		parentHandle != nil && childHandle != nil && g.runP != nil &&
-		g.pending.kind == pendingNone && g.destroyTarget == nil && !g.destroyRoot {
+		g.pending.kind == pendingNone && g.destroyTarget == nil && !g.destroysRoot() {
 		p := g.runP
 		parent, child := g.active, g.frames
 		preempt := preemptLoad(&g.preempt)
@@ -116,9 +116,9 @@ func PrepareInlineAwaitCompiler(
 	if ValidG(g) && parentHandle != nil && childHandle != nil &&
 		recoverType != nil && resumeGateTaken(g) &&
 		g.runP != nil && g.pending.kind == pendingNone &&
-		g.destroyTarget == nil && !g.destroyRoot &&
+		g.destroyTarget == nil && !g.destroysRoot() &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil &&
-		!g.waiting && compilerReleasableParkState(&g.park) {
+		!g.isWaiting() && compilerReleasableParkState(&g.park) {
 		p := g.runP
 		parent, child := g.active, g.frames
 		if parent != nil && child != nil && parent != child &&
@@ -291,9 +291,9 @@ func compilerInlineAwaitParentDepth(g *G, frame *Frame, depth uint8) bool {
 // depth refusal does not mutate the ordinary scheduler transaction.
 func BeginInlineAwait(g *G, parentHandle, childHandle unsafe.Pointer) InlineAwaitDisposition {
 	if !ValidG(g) || parentHandle == nil || childHandle == nil || !resumeGateTaken(g) ||
-		g.runP == nil || g.destroyTarget != nil || g.destroyRoot ||
+		g.runP == nil || g.destroyTarget != nil || g.destroysRoot() ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
-		g.waiting || !releasableParkState(&g.park) {
+		g.isWaiting() || !releasableParkState(&g.park) {
 		return InlineAwaitInvalid
 	}
 	p := g.runP
@@ -327,9 +327,9 @@ func BeginInlineAwait(g *G, parentHandle, childHandle unsafe.Pointer) InlineAwai
 // graph audit on the ordinary synchronous call path.
 func BeginInlineAwaitCompiler(g *G, parentHandle, childHandle unsafe.Pointer) InlineAwaitDisposition {
 	if ValidG(g) && parentHandle != nil && childHandle != nil && resumeGateTaken(g) &&
-		g.runP != nil && g.destroyTarget == nil && !g.destroyRoot &&
+		g.runP != nil && g.destroyTarget == nil && !g.destroysRoot() &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil &&
-		!g.waiting && compilerReleasableParkState(&g.park) {
+		!g.isWaiting() && compilerReleasableParkState(&g.park) {
 		p := g.runP
 		pending := g.pending
 		parent, child := pending.from, pending.target
@@ -438,7 +438,7 @@ func FinishInlineAwait(
 		g.state != GRunning || !p.runDecisionTaken ||
 		p.runDecision != (RunDecision{}) ||
 		!expectedAction(p, g, p.action, ActionResume) ||
-		g.destroyTarget != nil || g.destroyRoot ||
+		g.destroyTarget != nil || g.destroysRoot() ||
 		!validInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth-1) {
 		return InlineAwaitInvalid
 	}
@@ -493,7 +493,7 @@ func FinishInlineAwaitReturnCompiler(
 				parent.handle == parentHandle && child.handle == childHandle &&
 				pending.kind == pendingComplete && pending.from == child && pending.target == nil &&
 				p.inlineAwaitDepth != 0 &&
-				g.destroyTarget == nil && !g.destroyRoot &&
+				g.destroyTarget == nil && !g.destroysRoot() &&
 				record.child == childHandle && record.status == CompletionReturn &&
 				record.typeWord == nil && record.dataWord == nil {
 				g.active = parent
@@ -544,7 +544,7 @@ func CommitInlineAwaitDestroy(g *G, parentHandle, childHandle unsafe.Pointer) bo
 		!p.runDecisionTaken || p.runDecision != (RunDecision{}) ||
 		!expectedAction(p, g, p.action, ActionResume) ||
 		g.pending != (pendingTransition{}) || g.destroyTarget != nil ||
-		g.destroyRoot || findFrame(g, childHandle) != nil ||
+		g.destroysRoot() || findFrame(g, childHandle) != nil ||
 		!terminalInlineCompletion(&parent.completion, childHandle) ||
 		!validInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth) {
 		return false
@@ -571,7 +571,7 @@ func CommitInlineAwaitDestroyCompiler(g *G, parentHandle, childHandle unsafe.Poi
 			p.runDecisionTaken && p.runDecision == (RunDecision{}) &&
 			p.action.Kind == ActionResume && p.action.Flags == 0 &&
 			g.pending == (pendingTransition{}) && g.destroyTarget == nil &&
-			!g.destroyRoot && parent.completion.child == childHandle &&
+			!g.destroysRoot() && parent.completion.child == childHandle &&
 			parent.completion.status == CompletionReturn &&
 			parent.completion.typeWord == nil && parent.completion.dataWord == nil &&
 			compilerInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth) {
@@ -599,7 +599,7 @@ func CommitInlineAwaitDestroyCompiler(g *G, parentHandle, childHandle unsafe.Poi
 func CommitInlineAwaitReturnPhysicalDestroyCompiler(
 	g *G, parentHandle, childHandle unsafe.Pointer,
 ) bool {
-	if ValidG(g) && parentHandle != nil && childHandle != nil && !g.destroyRoot {
+	if ValidG(g) && parentHandle != nil && childHandle != nil && !g.destroysRoot() {
 		pending := g.pending
 		parent := pending.from
 		if parent != nil && parent.handle == parentHandle && parent.owner == g &&

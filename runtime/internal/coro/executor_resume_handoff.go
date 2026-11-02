@@ -90,9 +90,9 @@ func validForeignWaitingExecutorTask(p *P, task *G) bool {
 	if p == nil || !ValidG(task) || task.state != GForeignWaiting ||
 		task.runP != p || task.runAction != ActionInvalid ||
 		task.transferState != runnableTransferGIdle ||
-		task.queued || task.nextReady != nil ||
-		task.waiting || task.spawnChild != nil || task.spawnParent != nil ||
-		task.spawnP != nil || task.destroyTarget != nil || task.destroyRoot ||
+		task.isQueued() || task.nextReady != nil ||
+		task.isWaiting() || task.spawnChild != nil || task.spawnParent != nil ||
+		task.spawnP != nil || task.destroyTarget != nil || task.destroysRoot() ||
 		task.pending.kind != pendingNone || task.pending.from != nil ||
 		task.pending.target != nil || !gPreemptEnabledAtDepthZero(task) ||
 		!releasableParkState(&task.park) || !validLiveTaskStorage(task) {
@@ -133,9 +133,9 @@ func detachExecutorResumeCertified(
 		(!locked && p.osThreadLockOwner != nil) ||
 		(mode == ExecutorResumeHandoffLockedForeign && !locked) ||
 		p.osThreadSuspend != osThreadSuspendAttached ||
-		task.runAction != ActionInvalid || task.queued || task.nextReady != nil ||
-		task.waiting || task.spawnParent != nil || task.spawnP != nil ||
-		task.destroyTarget != nil || task.destroyRoot ||
+		task.runAction != ActionInvalid || task.isQueued() || task.nextReady != nil ||
+		task.isWaiting() || task.spawnParent != nil || task.spawnP != nil ||
+		task.destroyTarget != nil || task.destroysRoot() ||
 		p.action.Kind != ActionResume || p.action.Handle == nil ||
 		task.active == nil || !activeResumeOwnedByAction(task) ||
 		p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||

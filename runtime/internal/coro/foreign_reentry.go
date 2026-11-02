@@ -230,7 +230,7 @@ func validRunningForeignReentryRecordAfterDestroy(
 		record.parent.header.Lifecycle != uint16(FrameSuspended) ||
 		record.child == nil || findFrame(task, record.child) != nil ||
 		record.parent.completion.child != record.child ||
-		task.destroyRoot || task.destroyTarget != nil ||
+		task.destroysRoot() || task.destroyTarget != nil ||
 		!osThreadForeignReentryAffined(task) ||
 		p.osThreadLockOwner != task ||
 		p.osThreadSuspend != osThreadSuspendAttached {
@@ -261,8 +261,8 @@ func commitForeignReentryCompletion(
 		p.servicePreemptBudget == 0 || task.runP != p ||
 		task.state != GDispatching || task.runAction != ActionInvalid ||
 		task.active != record.parent || task.pending != (pendingTransition{}) ||
-		task.destroyTarget != nil || task.destroyRoot ||
-		task.queued || task.nextReady != nil || task.waiting ||
+		task.destroyTarget != nil || task.destroysRoot() ||
+		task.isQueued() || task.nextReady != nil || task.isWaiting() ||
 		task.spawnChild != nil || task.spawnParent != nil || task.spawnP != nil ||
 		!osThreadForeignReentryAffined(task) ||
 		p.osThreadLockOwner != task ||

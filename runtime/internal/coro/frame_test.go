@@ -572,10 +572,10 @@ func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
 		{"pending from", func(g *G) { g.pending.from = dummyFrame }},
 		{"pending target", func(g *G) { g.pending.target = dummyFrame }},
 		{"destroy target", func(g *G) { g.destroyTarget = dummyFrame }},
-		{"destroy root", func(g *G) { g.destroyRoot = true }},
+		{"destroy root", func(g *G) { g.setDestroysRoot(true) }},
 		{"ready link", func(g *G) { g.nextReady = dummyG }},
-		{"queued", func(g *G) { g.queued = true }},
-		{"waiting", func(g *G) { g.waiting = true }},
+		{"queued", func(g *G) { g.setQueued(true) }},
+		{"waiting", func(g *G) { g.setWaiting(true) }},
 		{"running P", func(g *G) { g.runP = new(P) }},
 	}
 	for _, test := range tests {
@@ -725,8 +725,8 @@ func runSchedulerScenario(t *testing.T) {
 			t.Fatalf("events = %v, want %v", events, want)
 		}
 	}
-	if g.state != GDead || g.root != nil || g.active != nil || g.frames != nil || g.destroyTarget != nil || g.destroyRoot {
-		t.Fatalf("completed G retained state: state=%d root=%p active=%p frames=%p destroy=%p destroyRoot=%t", g.state, g.root, g.active, g.frames, g.destroyTarget, g.destroyRoot)
+	if g.state != GDead || g.root != nil || g.active != nil || g.frames != nil || g.destroyTarget != nil || g.destroysRoot() {
+		t.Fatalf("completed G retained state: state=%d root=%p active=%p frames=%p destroy=%p destroyRoot=%t", g.state, g.root, g.active, g.frames, g.destroyTarget, g.destroysRoot())
 	}
 	if !TerminalG(p, g) {
 		t.Fatal("completed G failed strict terminal-state validation")

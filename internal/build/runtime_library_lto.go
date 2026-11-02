@@ -22,7 +22,7 @@ import (
 	"runtime"
 )
 
-const runtimeLibraryOptimizationVersion = "darwin-arm64-runtime-o2-os-poll-os-lto-v1"
+const runtimeLibraryOptimizationVersion = "darwin-arm64-runtime-o2-os-poll-os-scheduler-g-owner-flags-v1"
 
 // The three private implementation modules use O2 bitcode; os and internal/poll
 // retain Os bitcode to expose their wrappers to the same link optimizer. All

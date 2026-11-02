@@ -321,7 +321,7 @@ func prepareCurrentDirectChannelParkCompatibility(
 		!driver.route.Valid() || action.Kind != ActionResume || action.Flags != 0 ||
 		action.Handle == nil || p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
 		!gPreemptEnabledAtDepthZero(g) || g.pending.kind != pendingNone ||
-		g.spawnChild != nil || g.waiting || g.park.resolving ||
+		g.spawnChild != nil || g.isWaiting() || g.park.resolving ||
 		!taskCancelParkMayComplete(&g.park) ||
 		(wait.state != waitSetRecordUnused || wait.resume != nil) ||
 		directChannelCompletionState(preemptLoad(&completion.state)) != directChannelCompletionUnused {
@@ -463,7 +463,7 @@ func FinishDirectChannelCompletion(
 func validActiveDirectChannelWaitHeader(p *P, record *WaitSetRecord) bool {
 	if p == nil || record == nil || record.state != waitSetRecordActive ||
 		!validParkTicket(record.ticket) || record.g == nil || record.g.magic != gMagic ||
-		record.g.state != GWaiting || !record.g.waiting || record.g.queued ||
+		record.g.state != GWaiting || !record.g.isWaiting() || record.g.isQueued() ||
 		record.g.nextReady != nil || record.g.runP != nil ||
 		record.g.transferState != runnableTransferGIdle || record.g.active == nil ||
 		record.g.active.parkWait != record {

@@ -978,7 +978,7 @@ func ConfirmExecutorClose(driver *ExecutorDriver) bool {
 func terminalExecutorRootPending(p *P, g *G, kind ActionKind) bool {
 	if p == nil || g == nil || p.current != g || p.inResume || p.inlineAwaitDepth != 0 ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
-		!ValidG(g) || !gPreemptDepthZero(g) || g.runP != p || g.destroyTarget != nil || !g.destroyRoot ||
+		!ValidG(g) || !gPreemptDepthZero(g) || g.runP != p || g.destroyTarget != nil || !g.destroysRoot() ||
 		g.active != nil || g.frames != nil ||
 		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || preemptLoad(&p.schedule) != scheduleIdle {

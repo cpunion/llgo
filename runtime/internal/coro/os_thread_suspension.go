@@ -73,11 +73,11 @@ func validOSThreadSuspensions(p *P) bool {
 			(record.phase != osThreadSuspendPark && record.phase != osThreadSuspendYieldNeedsPeer && record.phase != osThreadSuspendYieldPeerServiced) {
 			return false
 		}
-		if g.queued {
-			if g.state != GRunnable || g.waiting {
+		if g.isQueued() {
+			if g.state != GRunnable || g.isWaiting() {
 				return false
 			}
-		} else if g.state != GWaiting || !g.waiting {
+		} else if g.state != GWaiting || !g.isWaiting() {
 			return false
 		}
 	}
@@ -164,7 +164,7 @@ func nextReadyOSThreadSuspension(p *P) *OSThreadSuspension {
 	for task := p.readyHead; task != nil; task = task.nextReady {
 		record := suspendedOSThreadTask(p, task)
 		if record != nil && record.driver != nil && record.driver.p == p && record.owner != 0 &&
-			task.queued && task.state == GRunnable && task.runP == nil && task.osThreadLockDepth != 0 &&
+			task.isQueued() && task.state == GRunnable && task.runP == nil && task.osThreadLockDepth != 0 &&
 			(record.phase == osThreadSuspendPark || record.phase == osThreadSuspendYieldPeerServiced) {
 			return record
 		}
@@ -215,7 +215,7 @@ func restoreOSThreadSuspension(driver *ExecutorDriver, record *OSThreadSuspensio
 		}
 		p.osThreadLockOwner, p.osThreadSuspend = record.task, osThreadSuspendAttached
 		*record = OSThreadSuspension{}
-		driver.run.readyDebt = p.osThreadLockOwner.queued
+		driver.run.readyDebt = p.osThreadLockOwner.isQueued()
 		return true
 	}
 	return false
