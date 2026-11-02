@@ -80,8 +80,8 @@ type publishedEpochResolveStep struct {
 func validPublishedEpochResolvingWait(p *P, wait *WaitSetRecord) bool {
 	if p == nil || wait == nil || wait.state != waitSetRecordActive ||
 		(wait.work != waitSetWorkResolving && wait.work != waitSetWorkResolvingDirty) ||
-		wait.g == nil || !ValidG(wait.g) || wait.g.state != GWaiting || !wait.g.waiting ||
-		wait.g.queued || wait.g.nextReady != nil || wait.g.runP != nil || wait.g.active == nil ||
+		wait.g == nil || !ValidG(wait.g) || wait.g.state != GWaiting || !wait.g.isWaiting() ||
+		wait.g.isQueued() || wait.g.nextReady != nil || wait.g.runP != nil || wait.g.active == nil ||
 		wait.g.active.parkWait != wait || wait.ticket != wait.g.park.ticket || !wait.g.park.resolving {
 		return false
 	}

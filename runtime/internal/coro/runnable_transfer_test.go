@@ -46,8 +46,8 @@ func yieldRunnableForTransfer(t *testing.T, p *P, task *yieldingTestG) {
 		t.Fatal("prepare transfer yield task")
 	}
 	action, ok = Resumed(p, g, action)
-	if !ok || action != (Action{Kind: ActionYield}) || !g.queued || p.readyHead != g {
-		t.Fatalf("commit transfer yield task = (%+v, %t), queued=%t head=%p", action, ok, g.queued, p.readyHead)
+	if !ok || action != (Action{Kind: ActionYield}) || !g.isQueued() || p.readyHead != g {
+		t.Fatalf("commit transfer yield task = (%+v, %t), queued=%t head=%p", action, ok, g.isQueued(), p.readyHead)
 	}
 }
 
@@ -72,17 +72,17 @@ func TestRunnableTransferInitialAndYielded(t *testing.T) {
 
 			id, ok := PublishPNeutralRunnable(&mailbox, source, task.g)
 			if !ok || !id.Valid() || source.readyHead != nil || source.readyTail != nil ||
-				task.g.queued || task.g.nextReady != nil || mailbox.count != 1 ||
+				task.g.isQueued() || task.g.nextReady != nil || mailbox.count != 1 ||
 				mailbox.slots[id.Slot-1].g != task.g || target.readyHead != nil {
 				t.Fatalf("publish %s transfer = (%+v, %t), source=(%p,%p) queued=%t slot=%p target=%p",
-					name, id, ok, source.readyHead, source.readyTail, task.g.queued,
+					name, id, ok, source.readyHead, source.readyTail, task.g.isQueued(),
 					mailbox.slots[id.Slot-1].g, target.readyHead)
 			}
 			if !ImportPNeutralRunnable(&mailbox, target, id) || target.readyHead != task.g ||
-				target.readyTail != task.g || !task.g.queued || mailbox.count != 0 ||
+				target.readyTail != task.g || !task.g.isQueued() || mailbox.count != 0 ||
 				mailbox.slots[id.Slot-1].g != nil {
 				t.Fatalf("import %s transfer: head=%p tail=%p queued=%t count=%d slot=%p",
-					name, target.readyHead, target.readyTail, task.g.queued, mailbox.count,
+					name, target.readyHead, target.readyTail, task.g.isQueued(), mailbox.count,
 					mailbox.slots[id.Slot-1].g)
 			}
 			if ImportPNeutralRunnable(&mailbox, target, id) {
@@ -203,9 +203,9 @@ func TestRunnableTransferEligibilityFailsClosed(t *testing.T) {
 				t.Fatalf("ineligible transfer published = (%+v, %t)", id, ok)
 			}
 			if mailbox != before || source.readyHead != task.g || source.readyTail != task.g ||
-				!task.g.queued || task.g.nextReady != nil || task.g.transferState != runnableTransferGIdle {
+				!task.g.isQueued() || task.g.nextReady != nil || task.g.transferState != runnableTransferGIdle {
 				t.Fatalf("rejected transfer mutated ownership: mailbox=%+v source=(%p,%p) queued=%t next=%p",
-					mailbox, source.readyHead, source.readyTail, task.g.queued, task.g.nextReady)
+					mailbox, source.readyHead, source.readyTail, task.g.isQueued(), task.g.nextReady)
 			}
 		})
 	}
@@ -293,11 +293,11 @@ func TestRunnableTransferBatchSharesHalfAndLeavesLocalWork(t *testing.T) {
 	for index := uint32(0); index < count; index++ {
 		task := tasks[index].g
 		slot := &mailbox.slots[index]
-		if task.transferState != runnableTransferGPublished || task.queued ||
+		if task.transferState != runnableTransferGPublished || task.isQueued() ||
 			slot.g != task || slot.source != source ||
 			slot.state != runnableTransferSlotPublished {
 			t.Fatalf("batch slot %d = task:%d queued:%t slot:%+v",
-				index, task.transferState, task.queued, *slot)
+				index, task.transferState, task.isQueued(), *slot)
 		}
 	}
 
@@ -410,10 +410,10 @@ func TestRunnableTransferFullDoesNotLoseSourceRoot(t *testing.T) {
 		t.Fatalf("full mailbox accepted transfer = (%+v, %t)", id, ok)
 	}
 	if mailbox != before || mailbox.count != RunnableTransferMailboxCapacity ||
-		source.readyHead != overflow.g || source.readyTail != overflow.g || !overflow.g.queued ||
+		source.readyHead != overflow.g || source.readyTail != overflow.g || !overflow.g.isQueued() ||
 		overflow.g.transferState != runnableTransferGIdle || preemptLoad(preemptAddress(overflow.g)) != preemptIdle {
 		t.Fatalf("full rejection lost ownership: count=%d source=(%p,%p) queued=%t",
-			mailbox.count, source.readyHead, source.readyTail, overflow.g.queued)
+			mailbox.count, source.readyHead, source.readyTail, overflow.g.isQueued())
 	}
 	moved, more, ok := DrainPNeutralRunnables(&mailbox, target, RunnableTransferMailboxCapacity)
 	if !ok || moved != RunnableTransferMailboxCapacity || more || mailbox.count != 0 {
@@ -444,7 +444,7 @@ func TestRunnableTransferPublishedRejectsThirdPOwnership(t *testing.T) {
 			mailbox.count, mailbox.slots[id.Slot-1].g)
 	}
 	if !ImportPNeutralRunnable(&mailbox, target, id) || task.g.transferState != runnableTransferGImported ||
-		preemptLoad(preemptAddress(task.g)) != preemptIdle || target.readyHead != task.g || !task.g.queued ||
+		preemptLoad(preemptAddress(task.g)) != preemptIdle || target.readyHead != task.g || !task.g.isQueued() ||
 		mailbox.slots[id.Slot-1].g != nil {
 		t.Fatal("owner import did not complete unique handoff")
 	}
@@ -504,19 +504,19 @@ func TestRunnableTransferConcurrentTryPublishIsBounded(t *testing.T) {
 		if result.ok {
 			succeeded++
 			if !result.id.Valid() || ids[result.id] || sources[index].readyHead != nil ||
-				tasks[index].g.queued || tasks[index].g.transferState != runnableTransferGPublished {
+				tasks[index].g.isQueued() || tasks[index].g.transferState != runnableTransferGPublished {
 				t.Fatalf("invalid successful concurrent try %d: id=%+v source=%p queued=%t state=%d",
-					index, result.id, sources[index].readyHead, tasks[index].g.queued, tasks[index].g.transferState)
+					index, result.id, sources[index].readyHead, tasks[index].g.isQueued(), tasks[index].g.transferState)
 			}
 			ids[result.id] = true
 			continue
 		}
 		if result.id != (RunnableTransferID{}) || sources[index].readyHead != tasks[index].g ||
-			sources[index].readyTail != tasks[index].g || !tasks[index].g.queued ||
+			sources[index].readyTail != tasks[index].g || !tasks[index].g.isQueued() ||
 			tasks[index].g.transferState != runnableTransferGIdle ||
 			preemptLoad(preemptAddress(tasks[index].g)) != preemptIdle {
 			t.Fatalf("contended try %d lost source ownership: id=%+v source=(%p,%p) queued=%t state=%d preempt=%d",
-				index, result.id, sources[index].readyHead, sources[index].readyTail, tasks[index].g.queued,
+				index, result.id, sources[index].readyHead, sources[index].readyTail, tasks[index].g.isQueued(),
 				tasks[index].g.transferState, preemptLoad(preemptAddress(tasks[index].g)))
 		}
 	}
@@ -593,10 +593,10 @@ func TestRunnableTransferConcurrentPublishImportNoLoss(t *testing.T) {
 	}
 	for index, task := range tasks {
 		if !seen[task.g] || sources[index].readyHead != nil || sources[index].readyTail != nil ||
-			!task.g.queued || task.g.transferState != runnableTransferGImported ||
+			!task.g.isQueued() || task.g.transferState != runnableTransferGImported ||
 			preemptLoad(preemptAddress(task.g)) != preemptIdle {
 			t.Fatalf("interleaved task %d lost/duplicated: seen=%t source=(%p,%p) queued=%t state=%d preempt=%d",
-				index, seen[task.g], sources[index].readyHead, sources[index].readyTail, task.g.queued,
+				index, seen[task.g], sources[index].readyHead, sources[index].readyTail, task.g.isQueued(),
 				task.g.transferState, preemptLoad(preemptAddress(task.g)))
 		}
 	}
@@ -657,9 +657,9 @@ func TestRunnableTransferGateContentionFailsImmediately(t *testing.T) {
 	}
 	if id, ok := PublishPNeutralRunnable(&mailbox, source, task.g); ok || id != (RunnableTransferID{}) ||
 		preemptLoad(&mailbox.gate) != runnableTransferGateHeld || source.readyHead != task.g ||
-		!task.g.queued || task.g.transferState != runnableTransferGIdle {
+		!task.g.isQueued() || task.g.transferState != runnableTransferGIdle {
 		t.Fatalf("contended publish mutated state: id=%+v ok=%t gate=%d source=%p queued=%t state=%d",
-			id, ok, preemptLoad(&mailbox.gate), source.readyHead, task.g.queued, task.g.transferState)
+			id, ok, preemptLoad(&mailbox.gate), source.readyHead, task.g.isQueued(), task.g.transferState)
 	}
 	releaseRunnableTransferGate(&mailbox)
 	id, ok := PublishPNeutralRunnable(&mailbox, source, task.g)

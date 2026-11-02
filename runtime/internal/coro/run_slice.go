@@ -827,10 +827,10 @@ func completedExecutorRunAction(p *P, g *G, action Action) bool {
 	}
 	switch action.Kind {
 	case ActionYield:
-		return action.Flags == 0 && gPreemptEnabledAtDepthZero(g) && g.state == GRunnable && g.queued
+		return action.Flags == 0 && gPreemptEnabledAtDepthZero(g) && g.state == GRunnable && g.isQueued()
 	case ActionPark:
 		return action.Flags == 0 && gPreemptEnabledAtDepthZero(g) && g.state == GWaiting &&
-			(g.waiting || g.active != nil && g.active.parkWait != nil)
+			(g.isWaiting() || g.active != nil && g.active.parkWait != nil)
 	case ActionComplete:
 		return gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead && !g.panicUnwind
 	case ActionPanicComplete:
@@ -914,7 +914,7 @@ func ResumedExecutorRun(
 		frame.state = FrameDestroyPending
 		frame.header.Lifecycle = uint16(FrameDestroyPending)
 		g.destroyTarget = frame
-		g.destroyRoot = true
+		g.setDestroysRoot(true)
 		next = Action{Kind: ActionCheckDestroy, Handle: action.Handle}
 		p.action = next
 		return next, false, true
@@ -1181,7 +1181,7 @@ func CommitExecutorRunDomainDestroy(driver *ExecutorDriver, g *G, receipt Action
 		return Action{}, false
 	}
 	flags |= physicalOwnerRetireFlags(retireOwner)
-	g.destroyRoot = false
+	g.setDestroysRoot(false)
 	if panicking {
 		g.panicUnwind = false
 	}
@@ -1219,12 +1219,12 @@ func CommitExecutorRunCommandBootstrapDirectChildHandoff(driver *ExecutorDriver,
 		target := g.destroyTarget
 		if driver.run.issued != ActionCheckResume || g.state != GDispatching || target == nil ||
 			target == g.root || target.parent != g.root || target.handle != next.Handle ||
-			target.state != FrameDestroyPending || g.destroyRoot {
+			target.state != FrameDestroyPending || g.destroysRoot() {
 			return false
 		}
 	case ActionCheckResume:
 		if driver.run.issued != ActionCheckDestroy || g.state != GRunning ||
-			g.destroyTarget != nil || g.destroyRoot || g.root.handle != next.Handle ||
+			g.destroyTarget != nil || g.destroysRoot() || g.root.handle != next.Handle ||
 			(g.root.state != FrameInitialSuspended && g.root.state != FrameSuspended) {
 			return false
 		}
@@ -1243,7 +1243,7 @@ func CommitExecutorRunCommandBootstrapDirectChildHandoff(driver *ExecutorDriver,
 // remains a separately charged later reduction.
 func CommitExecutorRunCommandRootDestroy(driver *ExecutorDriver, g *G, next Action) bool {
 	if g == nil || next.Kind != ActionCheckDestroy || g.destroyTarget == nil ||
-		g.destroyTarget != g.root || !g.destroyRoot || g.active != nil || g.panicUnwind ||
+		g.destroyTarget != g.root || !g.destroysRoot() || g.active != nil || g.panicUnwind ||
 		!emptyPanicRecord(&g.panicRecord) {
 		return false
 	}

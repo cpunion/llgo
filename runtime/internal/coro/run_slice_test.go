@@ -196,10 +196,10 @@ func TestExecutorRunFusesCompletionBeforeReadyPeer(t *testing.T) {
 		t.Fatalf("commit completion before peer = (%+v, %t)", completed, ok)
 	}
 	if task.g.state != GDead || task.g.runP != nil || p.current != nil || !driver.run.readyDebt ||
-		!peer.g.queued || p.readyHead != peer.g || p.readyTail != peer.g {
+		!peer.g.isQueued() || p.readyHead != peer.g || p.readyTail != peer.g {
 		t.Fatalf("fused completion disturbed peer: task=(state:%d runP:%p) current=%p debt=%t peer=(queued:%t head:%p tail:%p)",
 			task.g.state, task.g.runP, p.current, driver.run.readyDebt,
-			peer.g.queued, p.readyHead, p.readyTail)
+			peer.g.isQueued(), p.readyHead, p.readyTail)
 	}
 	step, ok := NextExecutorRunStep(driver)
 	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != peer.g ||
@@ -853,10 +853,10 @@ func TestPauseExecutorRunActionFailureIsAtomic(t *testing.T) {
 	}
 	if p.current != task.g || p.action != action || p.readyHead != nil || p.readyTail != nil ||
 		task.g.state != GRunning || task.g.runP != p || task.g.runAction != ActionInvalid ||
-		task.g.queued || task.g.nextReady != nil || p.servicePreemptBudget != servicePreemptSafepointBudget {
+		task.g.isQueued() || task.g.nextReady != nil || p.servicePreemptBudget != servicePreemptSafepointBudget {
 		t.Fatalf("failed pause partially committed: current=%p action=%+v head=%p tail=%p state=%d runP=%p runAction=%d queued=%t budget=%d",
 			p.current, p.action, p.readyHead, p.readyTail, task.g.state, task.g.runP,
-			task.g.runAction, task.g.queued, p.servicePreemptBudget)
+			task.g.runAction, task.g.isQueued(), p.servicePreemptBudget)
 	}
 	runtime.KeepAlive(task.frame.memory)
 }
@@ -878,12 +878,12 @@ func TestExecutorRunDispatchFailureRestoresReadyHead(t *testing.T) {
 	if step, ok := NextExecutorRunStep(driver); ok || step != (ExecutorRunStep{}) {
 		t.Fatalf("invalid ready head dispatched = (%+v, %t)", step, ok)
 	}
-	if p.readyHead != a.g || p.readyTail != b.g || !a.g.queued || a.g.nextReady != b.g ||
+	if p.readyHead != a.g || p.readyTail != b.g || !a.g.isQueued() || a.g.nextReady != b.g ||
 		a.g.transferState != runnableTransferGImported ||
-		!b.g.queued || b.g.nextReady != nil || p.current != nil || p.action != (Action{}) {
+		!b.g.isQueued() || b.g.nextReady != nil || p.current != nil || p.action != (Action{}) {
 		t.Fatalf("failed dispatch mutated queue: head=%p tail=%p a={queued:%t next:%p transfer:%d} b={queued:%t next:%p} current=%p action=%+v",
-			p.readyHead, p.readyTail, a.g.queued, a.g.nextReady, a.g.transferState,
-			b.g.queued, b.g.nextReady, p.current, p.action)
+			p.readyHead, p.readyTail, a.g.isQueued(), a.g.nextReady, a.g.transferState,
+			b.g.isQueued(), b.g.nextReady, p.current, p.action)
 	}
 	runtime.KeepAlive(a.frame.memory)
 	runtime.KeepAlive(b.frame.memory)
@@ -1309,12 +1309,12 @@ func TestExecutorRunTaskControlBlocksQueuedDestroy(t *testing.T) {
 			}
 			if advanced || step != (ExecutorRunStep{}) || destroyCount != 0 ||
 				p.current != nil || p.action != (Action{}) || driver.run.issued != ActionInvalid ||
-				p.readyHead != task.g || p.readyTail != task.g || !task.g.queued || task.g.nextReady != nil ||
+				p.readyHead != task.g || p.readyTail != task.g || !task.g.isQueued() || task.g.nextReady != nil ||
 				task.g.runAction != kind || task.g.destroyTarget != target || target.handle == nil ||
 				target.state != FrameDestroyPending {
 				t.Fatalf("late cancellation crossed queued destroy: step=(%+v,%t) destroys=%d current=%p action=%+v cursor=%+v head=%p tail=%p queued=%t runAction=%d target=%p state=%d",
 					step, advanced, destroyCount, p.current, p.action, driver.run, p.readyHead, p.readyTail,
-					task.g.queued, task.g.runAction, task.g.destroyTarget, target.state)
+					task.g.isQueued(), task.g.runAction, task.g.destroyTarget, target.state)
 			}
 			closeTaskControlFixture(t, control, p, controlID)
 			runtime.KeepAlive(task.frame.memory)
@@ -1461,9 +1461,9 @@ func TestExecutorRun2048SynchronousAwaitsAreIterative(t *testing.T) {
 		resumes++
 	}
 	if resumes != resumeCount || driver.run.issued != ActionInvalid || p.current != nil ||
-		!g.queued || g.runAction != ActionInvalid {
+		!g.isQueued() || g.runAction != ActionInvalid {
 		t.Fatalf("deep runner result = resumes:%d steps:%d cursor:%+v current:%p queued:%t runAction:%d",
-			resumes, steps, driver.run, p.current, g.queued, g.runAction)
+			resumes, steps, driver.run, p.current, g.isQueued(), g.runAction)
 	}
 	for _, frame := range frames {
 		runtime.KeepAlive(frame.memory)
@@ -1531,11 +1531,11 @@ func TestExecutorRunDestroyReceiptIsStableAndHandleFree(t *testing.T) {
 		t.Fatalf("bounded destroy receipt = (%+v, %t)", receipt, ok)
 	}
 	if oldHandle == nil || task.g.root != nil || task.g.destroyTarget != nil || p.current != task.g ||
-		p.action != receipt || p.readyHead != nil || p.readyTail != nil || task.g.queued ||
+		p.action != receipt || p.readyHead != nil || p.readyTail != nil || task.g.isQueued() ||
 		task.g.runAction != ActionInvalid {
 		t.Fatalf("post-destroy stable state retained handle/queue: old=%p root=%p target=%p current=%p action=%+v head=%p tail=%p queued=%t runAction=%d",
 			oldHandle, task.g.root, task.g.destroyTarget, p.current, p.action, p.readyHead, p.readyTail,
-			task.g.queued, task.g.runAction)
+			task.g.isQueued(), task.g.runAction)
 	}
 	first, ok := NextExecutorRunStep(driver)
 	if !ok || first.Kind != ExecutorRunStepDestroyCommit || first.Action != receipt {

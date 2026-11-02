@@ -53,7 +53,7 @@ func TestCompilerRootCompletionCarriesIssuedReceipt(t *testing.T) {
 		t.Fatalf("compiler return did not publish root receipt, got%d", task.g.pending.kind)
 	}
 	next, committed, ok := ResumedExecutorRun(driver, p, task.g, resume)
-	if !ok || committed || next.Kind != ActionCheckDestroy || next.Handle != task.handle || task.g.pending != (pendingTransition{}) || task.g.active != nil || task.g.destroyTarget != FrameFromStorage(task.frame.storage) || !task.g.destroyRoot || p.inResume || p.runDecisionTaken || task.g.state != GDispatching {
+	if !ok || committed || next.Kind != ActionCheckDestroy || next.Handle != task.handle || task.g.pending != (pendingTransition{}) || task.g.active != nil || task.g.destroyTarget != FrameFromStorage(task.frame.storage) || !task.g.destroysRoot() || p.inResume || p.runDecisionTaken || task.g.state != GDispatching {
 		t.Fatalf("root return did not close exact issued episode: %+v %t %t", next, committed, ok)
 	}
 	if !PrepareIssuedExecutorDestroyAfterResume(driver, task.g, next) {

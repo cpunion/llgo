@@ -64,7 +64,7 @@ func commitTimerV2TestPark(t *testing.T, p *P, park *timerV2TestPark) {
 		t.Fatal("prepare scheduler timer V2 park")
 	}
 	action, ok := Resumed(p, park.task.g, park.action)
-	if !ok || action.Kind != ActionPark || park.task.g.state != GWaiting || !park.task.g.waiting {
+	if !ok || action.Kind != ActionPark || park.task.g.state != GWaiting || !park.task.g.isWaiting() {
 		t.Fatalf("commit timer V2 park = (%+v, %t)", action, ok)
 	}
 }
@@ -176,7 +176,7 @@ func TestTimerRegistrationV2DueEpochDetachLeaseAndUnrelatedSlot(t *testing.T) {
 	}
 	dueSlot, _ := timerRegistrationSlotFor(timers, handle)
 	if dueSlot.state != timerRegistrationDelivered || !operationCandidateIsPublished(&dueSlot.record) ||
-		park.task.g.state != GWaiting || !park.task.g.waiting {
+		park.task.g.state != GWaiting || !park.task.g.isWaiting() {
 		t.Fatal("timer V2 publication resolved or promoted before the common epoch phase")
 	}
 	if promoted, visits, resolved := sources.resolvePublishedEpoch(p); !resolved || promoted != 1 || visits != 1 {

@@ -45,7 +45,7 @@ func validRecoverActiveFrame(g *G, child *Frame) bool {
 func validRecoverTaskActivation(g *G) bool {
 	return ValidG(g) && resumeGateTaken(g) && g.state == GRunning &&
 		g.runP != nil && g.pending == (pendingTransition{}) && g.destroyTarget == nil &&
-		!g.destroyRoot && g.spawnChild == nil && releasableParkState(&g.park) &&
+		!g.destroysRoot() && g.spawnChild == nil && releasableParkState(&g.park) &&
 		validRecoverActiveFrame(g, g.active)
 }
 

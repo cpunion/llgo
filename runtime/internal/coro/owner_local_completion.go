@@ -93,8 +93,8 @@ func ownerLocalDirectChannelCleanupState(
 ) (*WaitSetRecord, *ResumeCleanupPlan, *OperationID, bool) {
 	wait, plan, id, headerOK := ownerLocalDirectChannelCleanupHeader(cursor)
 	if !headerOK || !ValidG(wait.g) || wait.ticket != wait.g.park.ticket ||
-		!validParkTicket(wait.ticket) || wait.g.state != GWaiting || !wait.g.waiting ||
-		wait.g.queued || wait.g.nextReady != nil || wait.g.runP != nil ||
+		!validParkTicket(wait.ticket) || wait.g.state != GWaiting || !wait.g.isWaiting() ||
+		wait.g.isQueued() || wait.g.nextReady != nil || wait.g.runP != nil ||
 		wait.g.transferState != runnableTransferGIdle || wait.g.active == nil ||
 		wait.g.active.parkWait != wait {
 		return nil, nil, nil, false
@@ -290,7 +290,7 @@ func ownerLocalAuditedCompletionAdmissionForCurrent(
 	if driver == nil || driver.p == nil || record == nil ||
 		!emptyOwnerLocalCompletion(&driver.local) || record.state != waitSetRecordActive ||
 		!validParkTicket(record.ticket) || record.g == nil || !ValidG(record.g) ||
-		record.g.state != GWaiting || !record.g.waiting || record.g.queued ||
+		record.g.state != GWaiting || !record.g.isWaiting() || record.g.isQueued() ||
 		record.g.nextReady != nil || record.g.runP != nil ||
 		record.g.transferState != runnableTransferGIdle || record.g.active == nil ||
 		record.g.active.parkWait != record {
@@ -375,7 +375,7 @@ func completeOwnerLocalDirectChannelInline(
 	p, g := driver.p, wait.g
 	state, frame := &g.park, g.active
 	if !wait.directChannel || wait.state != waitSetRecordActive ||
-		g.state != GWaiting || !g.waiting || g.queued || g.nextReady != nil || g.runP != nil ||
+		g.state != GWaiting || !g.isWaiting() || g.isQueued() || g.nextReady != nil || g.runP != nil ||
 		g.transferState != runnableTransferGIdle || frame == nil || frame.parkWait != wait ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		state.phase != parkParked || state.resolving || state.ticket != wait.ticket ||
@@ -503,7 +503,7 @@ func completeOwnerLocalDirectChannelInline(
 	}
 	frame.parkWait = nil
 	*wait = WaitSetRecord{}
-	g.waiting = false
+	g.setWaiting(false)
 	if ExecutionDomainEnabled() {
 		resumeExecutionDomainTask(g)
 	}

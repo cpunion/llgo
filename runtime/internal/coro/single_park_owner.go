@@ -41,7 +41,7 @@ func preflightSingleParkPreparation(
 ) (singleParkPreparation, bool) {
 	if !ValidG(g) || handle == nil || header == nil || wait == nil ||
 		*wait != (WaitSetRecord{}) || !resumeGateTaken(g) || g.runP == nil ||
-		g.pending.kind != pendingNone || g.spawnChild != nil || g.waiting ||
+		g.pending.kind != pendingNone || g.spawnChild != nil || g.isWaiting() ||
 		!validReusableSingleParkState(&g.park) || g.park.attached != 0 || g.park.head != nil {
 		return singleParkPreparation{}, false
 	}

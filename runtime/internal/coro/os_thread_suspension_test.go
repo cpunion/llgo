@@ -198,7 +198,7 @@ func TestOSThreadSuspensionParkPromotesOnlyThroughSourceReduction(t *testing.T) 
 	if ready, _, ok := ReadyOSThreadSuspension(driver); !ok || ready != nil {
 		t.Fatal("waiting owner selected")
 	}
-	for i := 0; i < 64 && !task.g.queued; i++ {
+	for i := 0; i < 64 && !task.g.isQueued(); i++ {
 		step, ok := NextExecutorRunStep(driver)
 		if !ok || step.Kind != ExecutorRunStepSource {
 			t.Fatalf("source reduction %d = %+v %t", i, step, ok)
@@ -290,7 +290,7 @@ func TestOSThreadSuspensionRoutedChannelPreservesReadyDebt(t *testing.T) {
 	if !ok || node != &storage.Completion || !CommitDirectChannelCompletion(node, 3) {
 		t.Fatal("materialize external channel result")
 	}
-	if !driver.run.readyDebt || !task.g.queued {
+	if !driver.run.readyDebt || !task.g.isQueued() {
 		t.Fatal("external materialization lost logical readiness")
 	}
 	if !validExecutorDriverHeader(driver) {
@@ -407,7 +407,7 @@ func TestOSThreadSuspensionAbortWaitingParkHasNoReadyDebt(t *testing.T) {
 	if !AbortOSThreadSuspension(driver, record, 1) {
 		t.Fatal("abort before physical claimant")
 	}
-	if driver.run.readyDebt || !validExecutorDriverHeader(driver) || p.osThreadLockOwner != owner.g || owner.g.queued {
+	if driver.run.readyDebt || !validExecutorDriverHeader(driver) || p.osThreadLockOwner != owner.g || owner.g.isQueued() {
 		t.Fatal("aborted waiting owner received an impossible runnable debt")
 	}
 	runtime.KeepAlive(owner.frame.memory)

@@ -161,8 +161,8 @@ func validActiveWaitSetRecordFast(p *P, record *WaitSetRecord) bool {
 	}
 	external, externalOK := waitSetExternalCount(record.g, record)
 	if p == nil || record.state != waitSetRecordActive || !validParkTicket(record.ticket) ||
-		record.g == nil || !ValidG(record.g) || record.g.state != GWaiting || !record.g.waiting ||
-		record.g.queued || record.g.nextReady != nil || record.g.runP != nil ||
+		record.g == nil || !ValidG(record.g) || record.g.state != GWaiting || !record.g.isWaiting() ||
+		record.g.isQueued() || record.g.nextReady != nil || record.g.runP != nil ||
 		record.g.transferState != runnableTransferGIdle || record.g.active == nil ||
 		record.g.active.parkWait != record || !externalOK || external > p.externalWaitCount ||
 		!validActiveParkStateHeader(&record.g.park, record.ticket) ||
@@ -310,8 +310,8 @@ func RequestWaitSetCancel(p *P, record *WaitSetRecord, kind ParkCancelKind) bool
 
 func activateWaitSetRecord(p *P, g *G, record *WaitSetRecord) bool {
 	if !validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) ||
-		!validCommittedWaitSetRecord(record, g, g.active) || g.state != GWaiting || g.waiting ||
-		g.queued || g.nextReady != nil || g.runP != nil ||
+		!validCommittedWaitSetRecord(record, g, g.active) || g.state != GWaiting || g.isWaiting() ||
+		g.isQueued() || g.nextReady != nil || g.runP != nil ||
 		!validParkState(&g.park) || g.park.phase != parkParked ||
 		!canAccountWaitSetExternal(p, g, record) {
 		return false
@@ -342,7 +342,7 @@ func activateWaitSetRecordUnchecked(p *P, g *G, record *WaitSetRecord) {
 	p.externalWaitCount += count
 	record.activePrev = p.parkWaitTail
 	record.state = waitSetRecordActive
-	g.waiting = true
+	g.setWaiting(true)
 	if p.parkWaitTail == nil {
 		p.parkWaitHead = record
 	} else {
@@ -513,7 +513,7 @@ func promoteReadyWaitSetUnchecked(p *P, record *WaitSetRecord) {
 		next.activePrev = previous
 	}
 	frame.parkWait = nil
-	g.waiting = false
+	g.setWaiting(false)
 	g.state = GRunnable
 	appendRunnableUnchecked(p, g)
 	*record = WaitSetRecord{}

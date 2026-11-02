@@ -23,7 +23,9 @@ import (
 	"unsafe"
 )
 
-const wantSchedulerGSize = 152 + 2*unsafe.Sizeof(uintptr(0)) + (unsafe.Sizeof(uintptr(0))/4-1)*96
+// Group owner-only bytes and derive the fixed storage size while preserving
+// the atomic prefix: 152 bytes on 32-bit targets and 240 bytes on 64-bit targets.
+const wantSchedulerGSize = 148 + (unsafe.Sizeof(uintptr(0))/4-1)*84
 
 var (
 	_ [wantSchedulerGSize - unsafe.Sizeof(G{})]byte
@@ -353,7 +355,7 @@ func TestTaskControlRegisteredDeliveryProofFailsClosed(t *testing.T) {
 			case "task-state":
 				task.state = GNew
 			case "task-local-fields":
-				task.queued = false
+				task.setQueued(false)
 			default:
 				t.Fatalf("unknown proof case %q", name)
 			}
@@ -376,12 +378,12 @@ func TestTaskControlLeaseUsesExistingGAlignmentPadding(t *testing.T) {
 	pointerAlign := unsafe.Alignof(uintptr(0))
 	align := func(offset uintptr) uintptr { return (offset + pointerAlign - 1) &^ (pointerAlign - 1) }
 	rootOffset := unsafe.Offsetof(G{}.root)
-	wantRootOffset := uintptr(12)
-	if pointerAlign == 8 {
-		wantRootOffset = 16
-	}
+	flagsEnd := unsafe.Offsetof(G{}.ownerFlags) + unsafe.Sizeof(G{}.ownerFlags)
+	wantRootOffset := uintptr(16)
 	if unsafe.Offsetof(G{}.state) != 8 || leaseOffset != 9 || runActionOffset != 10 ||
-		leaseOffset != stateEnd || align(stateEnd) != rootOffset || align(leaseEnd+2) != rootOffset ||
+		leaseOffset != stateEnd || unsafe.Offsetof(G{}.taskState) != 12 ||
+		unsafe.Offsetof(G{}.initialRunPrepared) != 13 || unsafe.Offsetof(G{}.yieldRunPrepared) != 14 ||
+		unsafe.Offsetof(G{}.ownerFlags) != 15 || align(flagsEnd) != rootOffset ||
 		rootOffset != wantRootOffset || unsafe.Sizeof(G{}) != wantSchedulerGSize {
 		t.Fatalf("G scalar padding/layout changed: state=%d lease=%d..%d runAction=%d root=%d size=%d align=%d",
 			unsafe.Offsetof(G{}.state), leaseOffset, leaseEnd, runActionOffset, rootOffset, unsafe.Sizeof(G{}), pointerAlign)

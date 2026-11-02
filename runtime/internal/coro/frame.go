@@ -949,7 +949,7 @@ func PrepareYield(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
 // callback receives G, ParkState, or an LLVM handle.
 func PrepareParkSet(g *G, handle unsafe.Pointer, header *HeaderV1, ticket ParkTicket, record *WaitSetRecord) bool {
 	if !ValidG(g) || !resumeGateTaken(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
-		g.waiting ||
+		g.isWaiting() ||
 		!validParkState(&g.park) || g.park.phase != parkSealed || ticket != g.park.ticket ||
 		!validPreparingWaitSetRecord(record, &g.park, ticket) {
 		return false
@@ -1150,8 +1150,8 @@ func LogicalPanicTraceFrameAllocationSize() uintptr {
 
 func activeLogicalPanicTraceCarrier(g *G) (*Frame, bool) {
 	if !ValidG(g) || !resumeGateTaken(g) || g.state != GRunning ||
-		g.pending != (pendingTransition{}) || g.destroyTarget != nil || g.destroyRoot ||
-		g.queued || g.nextReady != nil || g.waiting ||
+		g.pending != (pendingTransition{}) || g.destroyTarget != nil || g.destroysRoot() ||
+		g.isQueued() || g.nextReady != nil || g.isWaiting() ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!releasableParkState(&g.park) || g.panicUnwind ||
 		!emptyPanicRecord(&g.panicRecord) {
@@ -1324,7 +1324,7 @@ func activeTraceFrameSnapshot(g *G, frame *Frame, active bool) (PanicTraceFrameS
 func activeTraceOwner(g *G) bool {
 	return ValidG(g) && resumeGateTaken(g) && g.state == GRunning &&
 		g.active != nil && g.pending == (pendingTransition{}) && g.destroyTarget == nil &&
-		!g.destroyRoot && g.spawnChild == nil
+		!g.destroysRoot() && g.spawnChild == nil
 }
 
 func physicalTraceFrames(
@@ -1437,8 +1437,8 @@ func stagePanicTraceDiscard(g *G) bool {
 // generated code.
 func ReplacePanicTrace(g *G, handle unsafe.Pointer) bool {
 	if !ValidG(g) || !resumeGateTaken(g) || handle == nil ||
-		g.pending != (pendingTransition{}) || g.destroyTarget != nil || g.destroyRoot ||
-		g.queued || g.nextReady != nil || g.waiting ||
+		g.pending != (pendingTransition{}) || g.destroyTarget != nil || g.destroysRoot() ||
+		g.isQueued() || g.nextReady != nil || g.isWaiting() ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!releasableParkState(&g.park) || g.panicUnwind ||
 		!emptyPanicRecord(&g.panicRecord) {

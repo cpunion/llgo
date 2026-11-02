@@ -20,7 +20,7 @@ func TestResumeHasReadyPeerDoesNotConsumeOrGrantOwnership(t *testing.T) {
 		if !ResumeHasReadyPeer(fixture.g) {
 			t.Fatal("active unlocked resume did not observe its local peer")
 		}
-		if fixture.p.readyHead != head || fixture.p.readyTail != tail || fixture.p.readyCount != count || !peer.g.queued {
+		if fixture.p.readyHead != head || fixture.p.readyTail != tail || fixture.p.readyCount != count || !peer.g.isQueued() {
 			t.Fatal("readiness hint consumed or rewrote the local queue")
 		}
 	}

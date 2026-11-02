@@ -144,7 +144,7 @@ func TestOSThreadLockedGCannotCrossPNeutralTransfer(t *testing.T) {
 	}
 	if id, ok := PublishPNeutralRunnable(&mailbox, source, task.g); ok ||
 		id != (RunnableTransferID{}) || source.readyHead != task.g ||
-		source.readyTail != task.g || !task.g.queued || mailbox.count != 0 {
+		source.readyTail != task.g || !task.g.isQueued() || mailbox.count != 0 {
 		t.Fatalf("locked task crossed P-neutral transfer: id=%+v ok=%t head=%p count=%d",
 			id, ok, source.readyHead, mailbox.count)
 	}
