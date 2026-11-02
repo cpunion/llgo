@@ -4906,15 +4906,11 @@ func (p *context) localGenericTypeContext(t *types.Named) *context {
 	if p == nil || p.goFn == nil || t == nil || t.Obj() == nil {
 		return nil
 	}
-	ctx := *p
+	obj := t.Obj()
+	if !p.isLocalType(obj) {
+		return nil
+	}
 	for fn := p.goFn; fn != nil; fn = fn.Parent() {
-		if len(fn.TypeArgs()) == 0 {
-			continue
-		}
-		ctx.goFn = fn
-		if !ctx.isGenericLocalType(t.Obj()) {
-			continue
-		}
 		// Instantiated closures inherit their enclosing generic function's
 		// type arguments. That does not make a closure the definition owner of
 		// a local type declared outside the literal. Prefer the innermost source
@@ -4922,12 +4918,26 @@ func (p *context) localGenericTypeContext(t *types.Named) *context {
 		// known, non-containing syntax is only a consumer. This also keeps a
 		// local type passed to an unrelated generic helper on the frozen-registry
 		// path instead of assigning the helper a false definition ownership.
-		if pos := t.Obj().Pos(); pos.IsValid() {
+		if pos := obj.Pos(); pos.IsValid() {
 			syntax := sourceFunctionSyntax(fn)
 			if syntax == nil || pos < syntax.Pos() || pos > syntax.End() {
 				continue
 			}
 		}
+		// TypeArgs concatenates receiver and function substitutions. Reject
+		// unrelated lexical scopes before asking it to allocate that slice.
+		if len(fn.TypeArgs()) == 0 {
+			continue
+		}
+		// A scope walk may allocate its sorted name list. Only inspect it
+		// after an instantiated function can actually own the declaration.
+		// The scoped predicate is independent of the candidate function;
+		// parentless x/tools objects are covered by containment above.
+		if obj.Parent() != nil && !p.isGenericLocalType(obj) {
+			return nil
+		}
+		ctx := *p
+		ctx.goFn = fn
 		return &ctx
 	}
 	return nil

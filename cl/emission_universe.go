@@ -9542,14 +9542,29 @@ func sortEmissionFunctionsByFrozenKey(
 }
 
 func framedEmissionKey(fields ...string) string {
-	var out strings.Builder
+	size := 0
 	for _, field := range fields {
-		out.WriteString(strconv.Itoa(len(field)))
+		size += framedEmissionFieldSize(len(field))
+	}
+	var out strings.Builder
+	out.Grow(size)
+	var length [20]byte
+	for _, field := range fields {
+		out.Write(strconv.AppendInt(length[:0], int64(len(field)), 10))
 		out.WriteByte(':')
 		out.WriteString(field)
 		out.WriteByte(';')
 	}
 	return out.String()
+}
+
+func framedEmissionFieldSize(length int) int {
+	size := length + 3 // one decimal digit, colon and semicolon
+	for length >= 10 {
+		length /= 10
+		size++
+	}
+	return size
 }
 
 func emissionFunctionSortKey(fn *ssa.Function) string {
