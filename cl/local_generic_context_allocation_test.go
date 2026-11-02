@@ -6,8 +6,10 @@ import (
 	"go/token"
 	"go/types"
 	"reflect"
+	"strings"
 	"testing"
 
+	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
@@ -126,5 +128,62 @@ func TestLocalGenericContextUnownedQueriesAllocateZero(t *testing.T) {
 				t.Fatalf("unowned query from %s allocated %v times", fn, n)
 			}
 		}
+	}
+}
+
+func TestLocalGenericContextScopedUnownedQueriesAllocateZero(t *testing.T) {
+	pkg := buildSSAPackage(t, `package foo
+ func plain() any {
+  type Local struct { N int }
+  closure := func() any { return Local{7} }
+  return closure()
+ }
+ func consume[T any](value T) any { return value }
+ func use() { _ = plain(); _ = consume(1) }
+ `)
+	var local *types.Named
+	var consumers []*ssa.Function
+	for fn := range ssautil.AllFunctions(pkg.Prog) {
+		if fn == nil {
+			continue
+		}
+		if len(fn.TypeArgs()) != 0 && strings.HasPrefix(fn.Name(), "consume") {
+			consumers = append(consumers, fn)
+		}
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				if value, ok := instruction.(*ssa.MakeInterface); ok {
+					if named := findLocalNamed(value.X.Type(), pkg.Pkg); named != nil && named.Obj().Name() == "Local" {
+						local = named
+					}
+				}
+			}
+		}
+	}
+	if local == nil || local.Obj().Parent() == nil {
+		t.Fatal("fixture must use a real scope-owned local declaration")
+	}
+	plain := pkg.Func("plain")
+	if plain == nil || len(plain.AnonFuncs) == 0 || len(consumers) == 0 {
+		t.Fatal("fixture omitted plain, closure, or instantiated consumer")
+	}
+	functions := append([]*ssa.Function{plain}, plain.AnonFuncs...)
+	functions = append(functions, consumers...)
+	for _, fn := range functions {
+		t.Run(fn.String(), func(t *testing.T) {
+			ctx := &context{goFn: fn, goTyps: pkg.Pkg, goPkg: pkg, fset: pkg.Prog.Fset}
+			if legacyLocalGenericTypeContext(ctx, local) != nil || ctx.localGenericTypeContext(local) != nil {
+				t.Fatal("nongeneric scoped declaration acquired a generic owner")
+			}
+			allocations := testing.AllocsPerRun(100, func() {
+				if ctx.localGenericTypeContext(local) != nil {
+					panic("unexpected generic owner")
+				}
+			})
+			t.Logf("scoped unowned query allocated %v times", allocations)
+			if allocations != 0 {
+				t.Fatalf("scoped unowned query allocated %v times, want zero", allocations)
+			}
+		})
 	}
 }

@@ -4910,12 +4910,6 @@ func (p *context) localGenericTypeContext(t *types.Named) *context {
 	if !p.isLocalType(obj) {
 		return nil
 	}
-	// Scoped objects answer this without consulting the current function.
-	// Parentless x/tools objects are checked against each candidate's syntax
-	// below. Do not allocate a copied context for an unsuccessful query.
-	if obj.Parent() != nil && !p.isGenericLocalType(obj) {
-		return nil
-	}
 	for fn := p.goFn; fn != nil; fn = fn.Parent() {
 		if len(fn.TypeArgs()) == 0 {
 			continue
@@ -4932,6 +4926,13 @@ func (p *context) localGenericTypeContext(t *types.Named) *context {
 			if syntax == nil || pos < syntax.Pos() || pos > syntax.End() {
 				continue
 			}
+		}
+		// A scope walk may allocate its sorted name list. Only inspect it
+		// after an instantiated function can actually own the declaration.
+		// The scoped predicate is independent of the candidate function;
+		// parentless x/tools objects are covered by containment above.
+		if obj.Parent() != nil && !p.isGenericLocalType(obj) {
+			return nil
 		}
 		ctx := *p
 		ctx.goFn = fn
