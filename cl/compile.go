@@ -4911,9 +4911,6 @@ func (p *context) localGenericTypeContext(t *types.Named) *context {
 		return nil
 	}
 	for fn := p.goFn; fn != nil; fn = fn.Parent() {
-		if len(fn.TypeArgs()) == 0 {
-			continue
-		}
 		// Instantiated closures inherit their enclosing generic function's
 		// type arguments. That does not make a closure the definition owner of
 		// a local type declared outside the literal. Prefer the innermost source
@@ -4926,6 +4923,11 @@ func (p *context) localGenericTypeContext(t *types.Named) *context {
 			if syntax == nil || pos < syntax.Pos() || pos > syntax.End() {
 				continue
 			}
+		}
+		// TypeArgs concatenates receiver and function substitutions. Reject
+		// unrelated lexical scopes before asking it to allocate that slice.
+		if len(fn.TypeArgs()) == 0 {
+			continue
 		}
 		// A scope walk may allocate its sorted name list. Only inspect it
 		// after an instantiated function can actually own the declaration.
