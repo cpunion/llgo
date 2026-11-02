@@ -17,6 +17,8 @@
 package cl
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strconv"
 	"sync"
 
@@ -414,6 +416,9 @@ type emissionTypeGraphDigester struct {
 	cyclic     []bool
 	digests    map[int]string
 	active     map[int]bool
+	// Children finish before their parent's fields are hashed. One buffer can
+	// therefore serve every node without retaining its temporary serialization.
+	scratch []byte
 }
 
 func newEmissionTypeGraphDigester(nodes []emissionTypeGraphNode, schema string) *emissionTypeGraphDigester {
@@ -449,16 +454,54 @@ func (d *emissionTypeGraphDigester) digestNode(node int) string {
 	d.active[component] = true
 	var fields []string
 	if !d.cyclic[component] {
-		fields = []string{"acyclic-node-v1"}
+		fields = make([]string, 1, 3+2*len(d.nodes[node].tokens))
+		fields[0] = "acyclic-node-v1"
 		d.appendAcyclicNode(&fields, node)
 	} else {
-		fields = []string{"cyclic-component-v1"}
+		capacity := 1 + 3*len(d.components[component])
+		for _, member := range d.components[component] {
+			capacity += 2 * len(d.nodes[member].tokens)
+		}
+		fields = make([]string, 1, capacity)
+		fields[0] = "cyclic-component-v1"
 		d.appendCyclicComponent(&fields, component, node)
 	}
 	delete(d.active, component)
-	digest := emissionDigest(framedEmissionKey(d.schema, framedEmissionKey(fields...)))
+	digest := d.digestFields(fields)
 	d.digests[node] = digest
 	return digest
+}
+
+// digestFields hashes exactly framedEmissionKey(schema, framedEmissionKey(fields...)).
+// All child digests already exist, so no recursive call can overwrite scratch.
+func (d *emissionTypeGraphDigester) digestFields(fields []string) string {
+	innerSize := 0
+	for _, field := range fields {
+		innerSize += framedEmissionFieldSize(len(field))
+	}
+	size := framedEmissionFieldSize(len(d.schema)) + framedEmissionFieldSize(innerSize)
+	data := d.scratch[:0]
+	if cap(data) < size {
+		data = make([]byte, 0, size)
+	}
+	appendField := func(field string) {
+		data = strconv.AppendInt(data, int64(len(field)), 10)
+		data = append(data, ':')
+		data = append(data, field...)
+		data = append(data, ';')
+	}
+	appendField(d.schema)
+	data = strconv.AppendInt(data, int64(innerSize), 10)
+	data = append(data, ':')
+	for _, field := range fields {
+		appendField(field)
+	}
+	data = append(data, ';')
+	sum := sha256.Sum256(data)
+	d.scratch = data[:0]
+	var encoded [sha256.Size * 2]byte
+	hex.Encode(encoded[:], sum[:])
+	return string(encoded[:])
 }
 
 func (d *emissionTypeGraphDigester) appendAcyclicNode(fields *[]string, node int) {

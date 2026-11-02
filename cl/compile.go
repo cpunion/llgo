@@ -4906,13 +4906,18 @@ func (p *context) localGenericTypeContext(t *types.Named) *context {
 	if p == nil || p.goFn == nil || t == nil || t.Obj() == nil {
 		return nil
 	}
-	ctx := *p
+	obj := t.Obj()
+	if !p.isLocalType(obj) {
+		return nil
+	}
+	// Scoped objects answer this without consulting the current function.
+	// Parentless x/tools objects are checked against each candidate's syntax
+	// below. Do not allocate a copied context for an unsuccessful query.
+	if obj.Parent() != nil && !p.isGenericLocalType(obj) {
+		return nil
+	}
 	for fn := p.goFn; fn != nil; fn = fn.Parent() {
 		if len(fn.TypeArgs()) == 0 {
-			continue
-		}
-		ctx.goFn = fn
-		if !ctx.isGenericLocalType(t.Obj()) {
 			continue
 		}
 		// Instantiated closures inherit their enclosing generic function's
@@ -4922,12 +4927,14 @@ func (p *context) localGenericTypeContext(t *types.Named) *context {
 		// known, non-containing syntax is only a consumer. This also keeps a
 		// local type passed to an unrelated generic helper on the frozen-registry
 		// path instead of assigning the helper a false definition ownership.
-		if pos := t.Obj().Pos(); pos.IsValid() {
+		if pos := obj.Pos(); pos.IsValid() {
 			syntax := sourceFunctionSyntax(fn)
 			if syntax == nil || pos < syntax.Pos() || pos > syntax.End() {
 				continue
 			}
 		}
+		ctx := *p
+		ctx.goFn = fn
 		return &ctx
 	}
 	return nil
