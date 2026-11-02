@@ -2749,6 +2749,7 @@ func TestCoroNativeFleetMultipleLockedParkAcrossForeignReturnE2E(t *testing.T) {
 
 const coroNativeFleetLockedPeerManagedCallbackE2ESource = `package main
 import _ "unsafe"
+const CallbackRounds=8
 var Ready chan int32
 var Done chan uint32
 var Failed uint32
@@ -2777,10 +2778,12 @@ func Setup(){Ready=make(chan int32);Done=make(chan uint32,1);Failed=0}
 func sender(){
  osThreadLock();osThreadLock()
  id:=threadID();tlsSet(0x8d101)
- Ready<-10
- Ready<-20
  failure:=uint32(0)
- if threadID()!=id||tlsGet()!=0x8d101 {failure=221}
+ for i:=0;i<CallbackRounds;i++{
+  Ready<-10
+  Ready<-20
+  if threadID()!=id||tlsGet()!=0x8d101 {failure=221}
+ }
  osThreadUnlock();osThreadUnlock();Done<-failure
 }
 func callback(value int32) int32 {
@@ -2790,7 +2793,7 @@ func callback(value int32) int32 {
  tlsSet(saved)
  return result
 }
-func main(){go sender();result:=foreignReentry(callback,1);failure:=<-Done;if failure!=0{Failed=failure};if result!=33{Failed=223};witness(Failed)}
+func main(){go sender();for i:=0;i<CallbackRounds;i++{if result:=foreignReentry(callback,1);result!=33{Failed=223}};failure:=<-Done;if failure!=0{Failed=failure};witness(Failed)}
 func Check()int32{return int32(Failed)}
 `
 

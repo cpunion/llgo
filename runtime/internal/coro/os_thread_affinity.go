@@ -364,6 +364,10 @@ func prepareOSThreadSuspendHandoff(driver *ExecutorDriver, task *G, kind ActionK
 	default:
 		return false, true
 	}
+	// The attached owner's debt cannot select that G on the replacement M.
+	// Retain it only when a peer remains eligible after the phase change;
+	// physical return can require detaching a sole yielding owner.
+	driver.run.readyDebt = driver.run.readyDebt && runnableForOSThreadOwner(p)
 	return true, validOSThreadOwnerHeader(p)
 }
 
