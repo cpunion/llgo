@@ -24,11 +24,46 @@ package build
 // depending on a second copy of the LLVM development-header configuration.
 typedef struct LLVMOpaqueTargetMachine *LLVMTargetMachineRef;
 typedef struct LLVMOpaqueModule *LLVMModuleRef;
+typedef struct LLVMOpaqueValue *LLVMValueRef;
+typedef struct LLVMOpaqueBasicBlock *LLVMBasicBlockRef;
 typedef enum { LLVMAssemblyFile, LLVMObjectFile } LLVMCodeGenFileType;
 extern int LLVMTargetMachineEmitToFile(LLVMTargetMachineRef, LLVMModuleRef,
     const char *, LLVMCodeGenFileType, char **);
 extern void LLVMDisposeMessage(char *);
 extern void LLVMSetTargetMachineMachineOutliner(LLVMTargetMachineRef, int);
+extern const char *LLVMGetModuleInlineAsm(LLVMModuleRef, size_t *);
+extern const char *LLVMGetInlineAsmAsmString(LLVMValueRef, size_t *);
+extern LLVMValueRef LLVMGetFirstFunction(LLVMModuleRef);
+extern LLVMValueRef LLVMGetNextFunction(LLVMValueRef);
+extern LLVMBasicBlockRef LLVMGetFirstBasicBlock(LLVMValueRef);
+extern LLVMBasicBlockRef LLVMGetNextBasicBlock(LLVMBasicBlockRef);
+extern LLVMValueRef LLVMGetFirstInstruction(LLVMBasicBlockRef);
+extern LLVMValueRef LLVMGetNextInstruction(LLVMValueRef);
+extern int LLVMGetNumOperands(LLVMValueRef);
+extern LLVMValueRef LLVMGetOperand(LLVMValueRef, unsigned);
+extern LLVMValueRef LLVMIsAInlineAsm(LLVMValueRef);
+
+static int llgo_static_map_opaque_assembly(LLVMModuleRef module) {
+    size_t size = 0;
+    LLVMGetModuleInlineAsm(module, &size);
+    if (size != 0) return 1;
+    for (LLVMValueRef fn = LLVMGetFirstFunction(module); fn; fn = LLVMGetNextFunction(fn)) {
+        for (LLVMBasicBlockRef bb = LLVMGetFirstBasicBlock(fn); bb; bb = LLVMGetNextBasicBlock(bb)) {
+            for (LLVMValueRef inst = LLVMGetFirstInstruction(bb); inst; inst = LLVMGetNextInstruction(inst)) {
+                int count = LLVMGetNumOperands(inst);
+                for (int i = 0; i < count; i++) {
+                    LLVMValueRef operand = LLVMGetOperand(inst, (unsigned)i);
+                    LLVMValueRef assembly = operand ? LLVMIsAInlineAsm(operand) : NULL;
+                    if (assembly) {
+                        LLVMGetInlineAsmAsmString(assembly, &size);
+                        if (size != 0) return 1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
 */
 import "C"
 
@@ -71,4 +106,12 @@ func setNativeMachineOutliner(machine llvm.TargetMachine, enabled bool) {
 		flag = 1
 	}
 	C.LLVMSetTargetMachineMachineOutliner(C.LLVMTargetMachineRef(unsafe.Pointer(machine.C)), flag)
+}
+
+// Empty compiler identity barriers use only their explicit SSA operands.
+// Nonempty assembly and linker metadata need an independent raw-input proof.
+func staticMapGoModuleClosed(mod llvm.Module) bool {
+	return !mod.IsNil() && len(mod.NamedMetadataOperands("llvm.linker.options")) == 0 &&
+		len(mod.NamedMetadataOperands("llvm.dependent-libraries")) == 0 &&
+		C.llgo_static_map_opaque_assembly(C.LLVMModuleRef(unsafe.Pointer(mod.C))) == 0
 }

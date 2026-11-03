@@ -12,6 +12,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/xgo-dev/llgo/internal/packages"
 	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
@@ -179,4 +180,79 @@ func TestStaticMapNativeArchiveActualCompilerRuntime(t *testing.T) {
 		t.Fatalf("incomplete actual compiler runtime inventory: %+v", result)
 	}
 	t.Logf("compiler runtime: %d ARM64 members, %d distinct symbols, sha256 %s", result.Members, len(result.Mentions), result.SHA256)
+}
+
+func TestStaticMapNativeGoModuleOpaqueInputs(t *testing.T) {
+	for _, name := range []string{"plain", "empty-identity-asm", "named-asm", "module-asm", "linker-options", "dependent-library"} {
+		t.Run(name, func(t *testing.T) {
+			program := llssa.NewProgram(nil)
+			defer program.Dispose()
+			mod := program.NewPackage("opaque", "opaque").Module()
+			ctx := mod.Context()
+			switch name {
+			case "module-asm":
+				mod.SetInlineAsm(".globl _unicode.Scripts")
+			case "linker-options", "dependent-library":
+				key := "llvm.linker.options"
+				if name == "dependent-library" {
+					key = "llvm.dependent-libraries"
+				}
+				mod.AddNamedMetadataOperand(key, ctx.MDNode([]llvm.Metadata{ctx.MDString("foreign-library")}))
+			case "empty-identity-asm", "named-asm":
+				body := ""
+				if name == "named-asm" {
+					body = "nop"
+				}
+				typ := llvm.FunctionType(ctx.VoidType(), nil, false)
+				fn := llvm.AddFunction(mod, "probe", typ)
+				builder := ctx.NewBuilder()
+				defer builder.Dispose()
+				builder.SetInsertPointAtEnd(ctx.AddBasicBlock(fn, "entry"))
+				assembly := llvm.InlineAsm(typ, body, "", true, false, llvm.InlineAsmDialectATT, false)
+				builder.CreateCall(typ, assembly, nil, "")
+				builder.CreateRetVoid()
+			}
+			want := name == "plain" || name == "empty-identity-asm"
+			if got := staticMapGoModuleClosed(mod); got != want {
+				t.Fatalf("module closed=%v; want %v", got, want)
+			}
+		})
+	}
+	if staticMapGoModuleClosed(llvm.Module{}) {
+		t.Fatal("missing LLVM module acquired a closure proof")
+	}
+}
+
+func TestStaticMapNativeProducerBindsActualArchiveMembers(t *testing.T) {
+	own := staticMapNativeObjectFixture(t, "_owner.M", true)
+	raw := staticMapNativeObjectFixture(t, "_unicode.Scripts", false)
+	archive := writeCoroArchiveTestFile(t, coroArchiveTestMember{"own.o", own}, coroArchiveTestMember{"raw.o", raw})
+	pkg := &aPackage{Package: &packages.Package{ID: "example.com/native", PkgPath: "example.com/native"},
+		Fingerprint: digestBytes([]byte("configuration")), StaticMapInitCaptured: true, StaticMapInitGoModuleClosed: true}
+	if err := recordStaticMapGoObject(pkg, "", own); err != nil {
+		t.Fatal(err)
+	}
+	compiler := digestBytes([]byte("compiler"))
+	data, err := encodeStaticMapInitFragment(pkg, compiler, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragment, err := decodeStaticMapInitFragment(data)
+	if err != nil || !fragment.NativeInputsClosed || !slices.Contains(fragment.NativeMentions, "_unicode.Scripts") {
+		t.Fatalf("actual raw reference was lost: %+v %v", fragment, err)
+	}
+	// Unknown raw members keep the normal producer cache usable, while
+	// refusing any native-input closure claim.
+	opaque := writeCoroArchiveTestFile(t, coroArchiveTestMember{"own.o", own}, coroArchiveTestMember{"raw.bc", []byte("BC\xc0\xdeopaque")})
+	data, err = encodeStaticMapInitFragment(pkg, compiler, opaque)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragment, err = decodeStaticMapInitFragment(data)
+	if err != nil || fragment.NativeInputsClosed || fragment.NativeBlocker == "" {
+		t.Fatalf("opaque native input did not retain: %+v %v", fragment, err)
+	}
+	if err := recordStaticMapGoObject(pkg, "", own); err == nil {
+		t.Fatal("accepted a second compiler-owned body")
+	}
 }

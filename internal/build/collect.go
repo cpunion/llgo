@@ -604,6 +604,8 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 		}
 		pkg.StaticMapInitProducers = fragment.Producers
 		pkg.StaticMapInitCaptured = true
+		pkg.StaticMapInitGoModuleClosed = fragment.GoModuleClosed
+		pkg.StaticMapInitOwnObjects = fragment.OwnObjects
 	}
 	// Use the .a archive directly for linking (no extraction needed)
 	if c.buildConf.stagedMethodDCEEnabled() {

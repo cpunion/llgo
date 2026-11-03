@@ -9373,6 +9373,15 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 			} else {
 				aPkg.ObjBuffers = append(aPkg.ObjBuffers, exportBuffer)
 			}
+			if ctx.staticMapInitGatesEnabled() {
+				var data []byte
+				if exportFile == "" {
+					data = exportBuffer.buffer.Bytes()
+				}
+				if err := recordStaticMapGoObject(aPkg, exportFile, data); err != nil {
+					return err
+				}
+			}
 		}
 		if debugBuild || verbose {
 			fmt.Fprintf(os.Stderr, "==> Export %s: %s\n", aPkg.PkgPath, pkg.ExportFile)
@@ -9685,6 +9694,11 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 	} else if err := emitNativeObjectFile(backend.TargetMachine(), mod, name); err != nil {
 		_ = os.Remove(name)
 		return "", err
+	}
+	if ctx.staticMapInitGatesEnabled() {
+		if err := recordStaticMapGoObject(pkg, name, nil); err != nil {
+			return "", err
+		}
 	}
 	return name, nil
 }
@@ -10278,12 +10292,14 @@ type aPackage struct {
 	// LinkSnapshot survives disposal of the package LLVM module. StagedBitcode
 	// is the verified presplit frontend result; coroutine/default lowering
 	// consumes it only after compilation-wide SSA state has been released.
-	LinkSnapshot           *packageLinkSnapshot
-	sourceSelection        *packageSourceSelection
-	StagedBitcode          string
-	MethodTypeFragment     []byte // compact constants only; no source LLVM ownership
-	StaticMapInitProducers []cl.StaticMapInitProducer
-	StaticMapInitCaptured  bool
+	LinkSnapshot                *packageLinkSnapshot
+	sourceSelection             *packageSourceSelection
+	StagedBitcode               string
+	MethodTypeFragment          []byte // compact constants only; no source LLVM ownership
+	StaticMapInitProducers      []cl.StaticMapInitProducer
+	StaticMapInitCaptured       bool
+	StaticMapInitGoModuleClosed bool
+	StaticMapInitOwnObjects     []staticMapObjectDigest
 
 	// CoroLibraryEffectRecords is producer-owned package metadata copied from
 	// cl before object emission. The package archiver publishes it through a
