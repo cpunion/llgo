@@ -21,6 +21,27 @@ func staticMapProducerFixture(identity string) cl.StaticMapInitProducer {
 		ConstructorID: id, GateSymbol: "__llgo_static_map_init_live_v1_" + id, Entries: 2}
 }
 
+func TestStaticMapInitProducerManifestOnlyCapabilities(t *testing.T) {
+	base := newManifestBuilder().Fingerprint()
+	for _, kind := range []string{"map-schema", "compiler-bytes", "method-schema"} {
+		t.Run(kind, func(t *testing.T) {
+			manifest := newManifestBuilder()
+			switch kind {
+			case "map-schema":
+				manifest.common.StaticMapInitFragments = staticMapInitFragmentVersion
+			case "compiler-bytes":
+				manifest.common.StaticMapCompilerSHA256 = strings.Repeat("a", 64)
+			case "method-schema":
+				manifest.common.MethodTypeFragments = methodTypeFragmentVersion
+			}
+			decoded, err := decodeManifest(manifest.Build())
+			if err != nil || decoded.Common == nil || manifest.Fingerprint() == base {
+				t.Fatalf("capability disappeared from the manifest: %s, %v", manifest.Build(), err)
+			}
+		})
+	}
+}
+
 func TestStaticMapInitProducerFragmentBinding(t *testing.T) {
 	dir := t.TempDir()
 	archive, sidecar := filepath.Join(dir, "pkg.a"), filepath.Join(dir, "pkg.staticmaps")

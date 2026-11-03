@@ -179,7 +179,8 @@ type commonSection struct {
 }
 
 func (s *commonSection) empty() bool {
-	return s.RuntimeLibraryCodegen == "" && s.AbiMode == "" && len(s.BuildTags) == 0 && s.Target == "" && s.RuntimeGC == "" && s.LLVMCPU == "" &&
+	return s.StaticMapInitFragments == 0 && s.StaticMapCompilerSHA256 == "" && s.MethodTypeFragments == 0 &&
+		s.RuntimeLibraryCodegen == "" && s.AbiMode == "" && len(s.BuildTags) == 0 && s.Target == "" && s.RuntimeGC == "" && s.LLVMCPU == "" &&
 		s.LLVMFeatures == "" && s.TargetABI == "" && s.PlatformABI == "" && s.ObjectFormat == "" &&
 		s.DriverFlavor == "" && s.LinkerFlavor == "" && s.TargetTriple == "" && s.CRTFlavor == "" &&
 		s.CXXRuntime == "" && s.SDKVersion == "" && s.CRTVersion == "" && s.ToolsetVersion == "" &&
