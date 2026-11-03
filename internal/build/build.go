@@ -7551,10 +7551,13 @@ type context struct {
 	output         bool
 	passOpt        bool
 
-	buildConf       *Config
-	crossCompile    crosscompile.Export
-	commands        commandEnv
-	frontendOptions cl.Options
+	buildConf               *Config
+	crossCompile            crosscompile.Export
+	commands                commandEnv
+	frontendOptions         cl.Options
+	staticMapCompilerOnce   sync.Once
+	staticMapCompilerSHA256 string
+	staticMapCompilerError  error
 
 	cTransformer *cabi.Transformer
 
@@ -9185,6 +9188,11 @@ func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string,
 	if hook := ctx.buildConf.ModuleHook; hook != nil {
 		hook(aPkg)
 	}
+	if !aPkg.CacheHit && ctx.staticMapInitGatesEnabled() {
+		if err := captureStaticMapInitProducers(aPkg); err != nil {
+			return nil, fmt.Errorf("capture static map producers for %s: %w", pkgPath, err)
+		}
+	}
 
 	// A cache hit reconstructed frontend registrations and link-time metadata;
 	// the archived module already owns C ABI transformation, optimization, and
@@ -10270,10 +10278,12 @@ type aPackage struct {
 	// LinkSnapshot survives disposal of the package LLVM module. StagedBitcode
 	// is the verified presplit frontend result; coroutine/default lowering
 	// consumes it only after compilation-wide SSA state has been released.
-	LinkSnapshot       *packageLinkSnapshot
-	sourceSelection    *packageSourceSelection
-	StagedBitcode      string
-	MethodTypeFragment []byte // compact constants only; no source LLVM ownership
+	LinkSnapshot           *packageLinkSnapshot
+	sourceSelection        *packageSourceSelection
+	StagedBitcode          string
+	MethodTypeFragment     []byte // compact constants only; no source LLVM ownership
+	StaticMapInitProducers []cl.StaticMapInitProducer
+	StaticMapInitCaptured  bool
 
 	// CoroLibraryEffectRecords is producer-owned package metadata copied from
 	// cl before object emission. The package archiver publishes it through a

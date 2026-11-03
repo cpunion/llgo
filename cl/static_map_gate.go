@@ -89,9 +89,12 @@ func (p *context) staticMapGateRegions(block *ssa.BasicBlock, start, count int) 
 	return regions
 }
 
-func validateStaticMapProducer(producer StaticMapInitProducer) error {
+// ValidateStaticMapInitProducer checks a producer's canonical identity. It
+// confers no authority to omit the constructor.
+func ValidateStaticMapInitProducer(producer StaticMapInitProducer) error {
 	digest, err := hex.DecodeString(producer.ConstructorID)
-	if err != nil || len(digest) != 32 || producer.Version != 1 || producer.PackageIdentity == "" ||
+	if err != nil || len(digest) != 32 || hex.EncodeToString(digest) != producer.ConstructorID ||
+		producer.Version != 1 || producer.PackageIdentity == "" ||
 		producer.PhysicalSymbol == "" || producer.Entries <= 0 || producer.Entries > maxStaticMapInitEntries ||
 		producer.GateSymbol != "__llgo_static_map_init_live_v1_"+producer.ConstructorID {
 		return fmt.Errorf("invalid canonical map initializer producer")
@@ -135,7 +138,7 @@ func StaticMapInitProducers(pkg llssa.Package) ([]StaticMapInitProducer, error) 
 		if err != nil || string(canonical) != data {
 			return nil, fmt.Errorf("noncanonical map initializer producer metadata")
 		}
-		if err := validateStaticMapProducer(producer); err != nil {
+		if err := ValidateStaticMapInitProducer(producer); err != nil {
 			return nil, err
 		}
 		if seen[producer.GateSymbol] {
@@ -153,7 +156,7 @@ func StaticMapInitProducers(pkg llssa.Package) ([]StaticMapInitProducer, error) 
 
 func (p *context) beginStaticMapGate(b llssa.Builder, gate *staticMapGateRegion) {
 	producer := gate.producer
-	if err := validateStaticMapProducer(producer); err != nil {
+	if err := ValidateStaticMapInitProducer(producer); err != nil {
 		panic(err)
 	}
 	mod := p.pkg.Module()
