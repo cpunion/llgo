@@ -107,7 +107,11 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 		// The primordial-thread exit wrapper combines native thread identity
 		// with GC unregister. It must run on the retiring M; dispatching that
 		// collector operation to a worker would unregister the wrong thread.
-		"sync": 38,
+		// Two exact keyed-storage C leaves map zero-filled POD pages and unmap
+		// only unpublished CAS losers. They may enter the OS, but return on the
+		// calling physical thread without Go callbacks or scheduler suspension.
+		// Their Go allocation/publication callers carry no effect directives.
+		"sync": 40,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf(
@@ -124,8 +128,9 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 	// boundaries, not Go caller coloring. The Darwin clock contract covers one
 	// shared managed/raw declaration. Initial-thread exit adds only the exact
 	// foreign GC wrapper, rather than a contract on its Go caller. This freezes
-	// the reviewed 8/40/38 set.
-	const wantManifestSHA256 = "bcb386feacf9d8efcb812fa6cc1174c34d25fa24c82dc0bf49b23d3c5d8785db"
+	// the reviewed 8/40/40 set, including only the two bodyless keyed-storage
+	// foreign declarations added for anonymous mapping and unpublished release.
+	const wantManifestSHA256 = "c0cd4f438a8bbf599c8514292cac9fbaaafede20db3913f433648ce7238f4949"
 	manifestSHA256 := fmt.Sprintf(
 		"%x", sha256.Sum256([]byte(strings.Join(manifest, "\n"))),
 	)

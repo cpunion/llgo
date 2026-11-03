@@ -128,3 +128,19 @@ func buildCoroNativeFleetOwnerObject(t *testing.T, temp string) string {
 	}
 	return object
 }
+
+// buildCoroNativeKeyedStorageObject closes the mapped-registry C dependency
+// for fleet source islands, which emit LLVM modules without LLGoFiles linking.
+func buildCoroNativeKeyedStorageObject(t *testing.T, temp string) string {
+	t.Helper()
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Skip("clang is unavailable")
+	}
+	source := filepath.Join("..", "..", "runtime", "internal", "runtime", "_wrap", "coro_keyed_storage.c")
+	object := filepath.Join(temp, "coro-keyed-storage.o")
+	if output, err := exec.Command(clang, "-std=c11", "-O2", "-c", source, "-o", object).CombinedOutput(); err != nil {
+		t.Fatalf("compile native coroutine keyed-storage leaf: %v\n%s", err, output)
+	}
+	return object
+}

@@ -262,6 +262,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_execution_quota_native_llgo.go":          false,
 		"coro_executor_driver_timer_llgo.go":           false,
 		"coro_keyed_registry_atomic_llgo.go":           false,
+		"coro_keyed_storage_native_llgo.go":            false,
 		"coro_native_fleet.go":                         false,
 		"coro_native_fleet_owner_llgo.go":              false,
 		"coro_native_fleet_program_llgo.go":            false,
@@ -285,6 +286,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_worker_result_llgo.go":                   false,
 	}
 	forbidden := map[string]bool{
+		"coro_keyed_storage_fallback_llgo.go":    false,
 		"coro_execution_quota_default.go":        false,
 		"coro_gomaxprocs_single_llgo.go":         false,
 		"coro_executor_driver_legacy.go":         false,

@@ -2385,6 +2385,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_result_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_completion_fleet_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_keyed_registry_atomic_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_keyed_storage_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_resume_materialize.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_coro.go"),
@@ -2398,6 +2399,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_completion_window_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_result_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_keyed_registry_atomic_llgo.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_keyed_storage_native_llgo.go")
 	files = append(files, filepath.Join("testdata", "coro_native_fleet_rotation_control_runtime.go"))
 	files = append(files, filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_initial_thread_exit_nogc_llgo.go"))
 	files = append(files, filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_m_retirement_llgo.go"))
@@ -2466,10 +2468,11 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		buildCoroCurrentGTLSObject(t, temp),
 		buildCoroNativePollObject(t, temp),
 		buildCoroNativeFleetOwnerObject(t, temp),
+		buildCoroNativeKeyedStorageObject(t, temp),
 	)
 	prog.Dispose()
-	if len(objects) != len(allowed)+7 {
-		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus fault-string, allocation-cache, worker, doorbell, current-G TLS, poll, and fleet-owner leaves", len(objects), len(allowed))
+	if len(objects) != len(allowed)+8 {
+		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus fault-string, allocation-cache, worker, doorbell, current-G TLS, poll, fleet-owner, and keyed-storage leaves", len(objects), len(allowed))
 	}
 	return objects
 }
