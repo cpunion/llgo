@@ -135,12 +135,42 @@ func (c *Cmd) Compile(args ...string) error {
 
 // Link executes a linking command with merged flags.
 func (c *Cmd) Link(args ...string) error {
+	return c.exec(c.linkArguments(args)...)
+}
+
+func (c *Cmd) linkArguments(args []string) []string {
 	flags := c.mergeLinkerFlags()
 	allArgs := make([]string, 0, len(flags)+len(args))
 	allArgs = append(allArgs, flags...)
 	allArgs = append(allArgs, args...)
 	allArgs = resolveMSVCImportLibraries(c.Dir, allArgs)
-	return c.exec(allArgs...)
+	return allArgs
+}
+
+// PrepareLink snapshots a regular-argv link command, including configured
+// prefixes, merged flags, working directory, environment and streams. The
+// caller may inspect it and then execute that exact command. Large commands
+// requiring response-file transport continue through Link instead.
+func (c *Cmd) PrepareLink(args ...string) (*exec.Cmd, error) {
+	allArgs := append(slices.Clone(c.prefixArgs), c.linkArguments(args)...)
+	if useResponseFile(c.app, allArgs) {
+		return nil, fmt.Errorf("prepared link requires response-file transport")
+	}
+	cmd := exec.Command(c.app, allArgs...)
+	cmd.Dir = c.Dir
+	if cmd.Dir == "" {
+		var err error
+		cmd.Dir, err = os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+	}
+	cmd.Env = slices.Clone(c.Env)
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = c.Stdin, c.Stdout, c.Stderr
+	return cmd, nil
 }
 
 // resolveMSVCImportLibraries lets clang's MSVC driver consume library names

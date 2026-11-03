@@ -3837,11 +3837,12 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 	}
 	emitDebugInfo := shouldEmitDebugInfo(conf, &export)
 	frontendOptions := cl.Options{
-		Debug:        emitDebugInfo,
-		DebugSymbols: emitDebugInfo,
-		Trace:        IsTraceEnabled(),
-		ExportRename: conf.Target != "",
-		ShadowStack:  isEnvOn(llgoShadowStack, false),
+		CanonicalStaticMapInits: staticMapNativeCandidateEnabled(conf, emitDebugInfo),
+		Debug:                   emitDebugInfo,
+		DebugSymbols:            emitDebugInfo,
+		Trace:                   IsTraceEnabled(),
+		ExportRename:            conf.Target != "",
+		ShadowStack:             isEnvOn(llgoShadowStack, false),
 	}
 	preloadOptions := frontendOptions
 	llssaInitOnce.Do(func() {
@@ -7274,6 +7275,14 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage, library *co
 	if err != nil {
 		return err
 	}
+	if ctx.staticMapInitGatesEnabled() {
+		facts, err := emission.StaticMapInitializers()
+		if err != nil {
+			return err
+		}
+		ctx.staticMapConsumerFacts = facts
+		ctx.staticMapConsumerFactsFrozen = true
+	}
 	ssaEmission, err := coro.NewSSAEmissionUniverse(ctx.progSSA, emission.Functions())
 	if err != nil {
 		return err
@@ -7551,13 +7560,16 @@ type context struct {
 	output         bool
 	passOpt        bool
 
-	buildConf               *Config
-	crossCompile            crosscompile.Export
-	commands                commandEnv
-	frontendOptions         cl.Options
-	staticMapCompilerOnce   sync.Once
-	staticMapCompilerSHA256 string
-	staticMapCompilerError  error
+	buildConf                    *Config
+	crossCompile                 crosscompile.Export
+	commands                     commandEnv
+	frontendOptions              cl.Options
+	staticMapCompilerOnce        sync.Once
+	staticMapCompilerSHA256      string
+	staticMapCompilerError       error
+	staticMapConsumerFacts       []cl.StaticMapInitializer
+	staticMapConsumerFactsFrozen bool
+	staticMapLinkPackages        []*aPackage
 
 	cTransformer *cabi.Transformer
 
@@ -8489,7 +8501,9 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	linkArgs = append(linkArgs, darwinSymbols.linkerArgs...)
 	ctx.stripDarwinLocals = darwinSymbols.stripLocals
 
+	ctx.staticMapLinkPackages = linkedOrder
 	err = linkObjFiles(ctx, outputPath, linkInputs, linkArgs, verbose)
+	ctx.staticMapLinkPackages = nil
 	if err != nil {
 		return err
 	}
@@ -8812,8 +8826,34 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 
 	cmd := ctx.linker()
 	cmd.Verbose = printCmds
-	if err := cmd.Link(buildArgs...); err != nil {
-		return err
+	linked := false
+	if ctx.staticMapInitGatesEnabled() {
+		driver, err := cmd.PrepareLink(buildArgs...)
+		if err == nil {
+			prepared, proofErr := ctx.prepareStaticMapLink(driver, objFiles)
+			if proofErr != nil && printCmds {
+				fmt.Fprintln(os.Stderr, "# retain static map initializers:", proofErr)
+			}
+			if prepared != nil {
+				defer prepared.cleanup()
+				// Check the exact immutable command and every actual file again
+				// immediately before executing the job carrying the zero gates.
+				if err := prepared.certificate.verify(prepared.command); err == nil {
+					if printCmds {
+						fmt.Fprintf(os.Stderr, "# omitted %d proven-unread static map initializers\n%v\n", prepared.omitted, prepared.command)
+					}
+					if err := prepared.command.Run(); err != nil {
+						return err
+					}
+					linked = true
+				}
+			}
+		}
+	}
+	if !linked {
+		if err := cmd.Link(buildArgs...); err != nil {
+			return err
+		}
 	}
 	if !moveExactWindowsOutput {
 		return nil
