@@ -586,6 +586,7 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 		return false
 	}
 
+	var staticMaps *staticMapInitFragment
 	if c.staticMapInitGatesEnabled() {
 		compiler, err := c.staticMapInitCompilerIdentity()
 		if err != nil {
@@ -602,12 +603,10 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 			}
 			return false
 		}
-		pkg.StaticMapInitProducers = fragment.Producers
-		pkg.StaticMapInitCaptured = true
-		pkg.StaticMapInitGoModuleClosed = fragment.GoModuleClosed
-		pkg.StaticMapInitOwnObjects = fragment.OwnObjects
+		staticMaps = fragment
 	}
 	// Use the .a archive directly for linking (no extraction needed)
+	var methodTypes []byte
 	if c.buildConf.stagedMethodDCEEnabled() {
 		fragment, err := readCachedMethodTypes(paths.MethodTypes, meta.MethodTypesHash)
 		if err != nil {
@@ -616,7 +615,18 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 			}
 			return false
 		}
-		pkg.MethodTypeFragment = fragment
+		methodTypes = fragment
+	}
+	// Publish capabilities only after all required fragments have loaded.
+	// A later cache miss must leave fresh frontend object capture untouched.
+	if staticMaps != nil {
+		pkg.StaticMapInitProducers = staticMaps.Producers
+		pkg.StaticMapInitCaptured = true
+		pkg.StaticMapInitGoModuleClosed = staticMaps.GoModuleClosed
+		pkg.StaticMapInitOwnObjects = staticMaps.OwnObjects
+	}
+	if methodTypes != nil {
+		pkg.MethodTypeFragment = methodTypes
 	}
 	pkg.ArchiveFile = paths.Archive
 	pkg.LinkArgs = meta.LinkArgs

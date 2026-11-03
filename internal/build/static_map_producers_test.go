@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/xgo-dev/llgo/cl"
 	"github.com/xgo-dev/llgo/internal/crosscompile"
+	"github.com/xgo-dev/llgo/internal/meta"
 	"github.com/xgo-dev/llgo/internal/packages"
 	llssa "github.com/xgo-dev/llgo/ssa"
 )
@@ -228,5 +230,80 @@ func TestStaticMapInitProducerProductionCacheRepair(t *testing.T) {
 	ctx.collectCommonInputs(without)
 	if base.Fingerprint() == without.Fingerprint() {
 		t.Fatal("canonical gate capability did not separate the cache fingerprint")
+	}
+}
+
+func TestStaticMapInitProducerMethodTypesCacheMissKeepsFreshCapture(t *testing.T) {
+	t.Setenv("LLGO_BUILD_CACHE", "on")
+	dir := t.TempDir()
+	previous := cacheRootFunc
+	cacheRootFunc = func() string { return dir }
+	defer func() { cacheRootFunc = previous }()
+	ctx := &context{conf: &packages.Config{},
+		buildConf:       &Config{Goos: runtime.GOOS, Goarch: runtime.GOARCH, BuildMode: BuildModeExe},
+		crossCompile:    crosscompile.Export{LLVMTarget: "arm64-apple-darwin"},
+		frontendOptions: cl.Options{CanonicalStaticMapInits: true}}
+	activateCoroPackageCacheTest(t, ctx)
+	if !ctx.buildConf.stagedMethodDCEEnabled() {
+		t.Fatal("fixture requires both cache fragment contracts")
+	}
+	archive := filepath.Join(dir, "producer.a")
+	if err := os.WriteFile(archive, []byte("retained native archive"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	methodTypes, err := json.Marshal(methodTypeFragment{Version: methodTypeFragmentVersion, Unavailable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageMeta, err := meta.NewBuilder().Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer packageMeta.Close()
+	pkg := &aPackage{Package: &packages.Package{ID: "example.com/cache-miss", PkgPath: "example.com/cache-miss", Name: "cachemiss"},
+		ArchiveFile: archive, Meta: packageMeta, MethodTypeFragment: methodTypes, StaticMapInitCaptured: true,
+		StaticMapInitProducers:  []cl.StaticMapInitProducer{staticMapProducerFixture("example.com/cache-miss")},
+		StaticMapInitOwnObjects: []staticMapObjectDigest{{SHA256: digestBytes([]byte("old native object")), Bytes: 17}}}
+	setCoroPackageCacheManifest(t, ctx, pkg)
+	load := func() *aPackage {
+		return &aPackage{Package: pkg.Package, Fingerprint: pkg.Fingerprint, Manifest: pkg.Manifest}
+	}
+	paths := ctx.ensureCacheManager().PackagePaths(ctx.targetTriple(), pkg.PkgPath, pkg.Fingerprint)
+	for _, name := range []string{"missing-methodtypes", "corrupt-methodtypes"} {
+		t.Run(name, func(t *testing.T) {
+			if err := ctx.saveToCache(pkg); err != nil {
+				t.Fatal(err)
+			}
+			valid := load()
+			if !ctx.tryLoadFromCache(valid) || !valid.StaticMapInitCaptured || len(valid.StaticMapInitOwnObjects) != 1 || len(valid.MethodTypeFragment) == 0 {
+				t.Fatal("valid coexisting fragments did not load")
+			}
+			if valid.Meta != nil {
+				defer valid.Meta.Close()
+			}
+			if name == "missing-methodtypes" {
+				if err := os.Remove(paths.MethodTypes); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(paths.MethodTypes, []byte("corrupt"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			bad := load()
+			if ctx.tryLoadFromCache(bad) || bad.CacheHit {
+				t.Fatal("invalid method types did not reject the cache entry")
+			}
+			if bad.StaticMapInitCaptured || len(bad.StaticMapInitProducers) != 0 || len(bad.StaticMapInitOwnObjects) != 0 || len(bad.MethodTypeFragment) != 0 {
+				t.Fatal("cache miss published partial producer state")
+			}
+			program := llssa.NewProgram(nil)
+			defer program.Dispose()
+			bad.LPkg = program.NewPackage("cachemiss", pkg.PkgPath)
+			if err := captureStaticMapInitProducers(bad); err != nil {
+				t.Fatal(err)
+			}
+			if err := recordStaticMapGoObject(bad, "", []byte("fresh native object")); err != nil {
+				t.Fatalf("recompile after cache miss: %v", err)
+			}
+		})
 	}
 }
