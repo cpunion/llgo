@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/packages"
@@ -183,7 +184,8 @@ func TestStaticMapNativeArchiveActualCompilerRuntime(t *testing.T) {
 }
 
 func TestStaticMapNativeGoModuleOpaqueInputs(t *testing.T) {
-	for _, name := range []string{"plain", "empty-identity-asm", "named-asm", "module-asm", "linker-options", "dependent-library"} {
+	for _, name := range []string{"plain", "empty-identity-asm", "named-asm", "module-asm", "linker-options", "dependent-library",
+		"compiler-pcline", "unmarked-pcline", "extra-reference-pcline", "different-id-pcline", "constraints-pcline", "forged-pcline", "marked-raw"} {
 		t.Run(name, func(t *testing.T) {
 			program := llssa.NewProgram(nil)
 			defer program.Dispose()
@@ -198,21 +200,42 @@ func TestStaticMapNativeGoModuleOpaqueInputs(t *testing.T) {
 					key = "llvm.dependent-libraries"
 				}
 				mod.AddNamedMetadataOperand(key, ctx.MDNode([]llvm.Metadata{ctx.MDString("foreign-library")}))
-			case "empty-identity-asm", "named-asm":
+			case "empty-identity-asm", "named-asm", "compiler-pcline", "unmarked-pcline", "extra-reference-pcline", "different-id-pcline", "constraints-pcline", "forged-pcline", "marked-raw":
 				body := ""
-				if name == "named-asm" {
+				constraints := ""
+				if name == "named-asm" || name == "marked-raw" {
 					body = "nop"
+				}
+				if strings.HasSuffix(name, "-pcline") {
+					body = "L__llgo_pcsite_0123456789abcdef_${:uid}:\n.pushsection __DATA,__llgo_pcl,regular,live_support\n.p2align 3\nl_llgo_pcline_rec_${:uid}:\n.quad L__llgo_pcsite_0123456789abcdef_${:uid}\n.quad 0x0123456789abcdef\n.popsection"
+				}
+				switch name {
+				case "extra-reference-pcline":
+					body += "\n.quad _unicode.Scripts"
+				case "different-id-pcline":
+					body = strings.ReplaceAll(body, "0x0123456789abcdef", "0x1123456789abcdef")
+				case "constraints-pcline":
+					constraints = "~{memory}"
 				}
 				typ := llvm.FunctionType(ctx.VoidType(), nil, false)
 				fn := llvm.AddFunction(mod, "probe", typ)
 				builder := ctx.NewBuilder()
 				defer builder.Dispose()
 				builder.SetInsertPointAtEnd(ctx.AddBasicBlock(fn, "entry"))
-				assembly := llvm.InlineAsm(typ, body, "", true, false, llvm.InlineAsmDialectATT, false)
-				builder.CreateCall(typ, assembly, nil, "")
+				assembly := llvm.InlineAsm(typ, body, constraints, true, false, llvm.InlineAsmDialectATT, false)
+				call := builder.CreateCall(typ, assembly, nil, "")
+				if strings.HasSuffix(name, "-pcline") && name != "unmarked-pcline" || name == "marked-raw" {
+					llssa.MarkCoroAtomicBoundedCompilerCall(ctx, call, llssa.CoroAtomicCompilerDataAnchorV1)
+				}
+				if name == "forged-pcline" {
+					call.SetMetadata(ctx.MDKindID(llssa.CoroAtomicBoundedCompilerCallMetadataName), ctx.MDNode([]llvm.Metadata{
+						llvm.ConstInt(ctx.Int32Type(), 1, false).ConstantAsMetadata(),
+						ctx.MDString(llssa.CoroAtomicCompilerDataAnchorV1), ctx.MDString(strings.Repeat("0", 64)),
+					}))
+				}
 				builder.CreateRetVoid()
 			}
-			want := name == "plain" || name == "empty-identity-asm"
+			want := name == "plain" || name == "empty-identity-asm" || name == "compiler-pcline"
 			if got := staticMapGoModuleClosed(mod); got != want {
 				t.Fatalf("module closed=%v; want %v", got, want)
 			}

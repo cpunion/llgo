@@ -620,6 +620,31 @@ func isCoroAtomicBoundedCompilerCall(call llvm.Value, metadataKind int) (bool, e
 	return true, nil
 }
 
+// IsCoroAtomicCompilerDataAnchor verifies the injected identity and exact
+// content digest for one compiler data-anchor call. Consumers must still
+// validate the assembly's meaning for their own proof; this marker alone
+// says nothing about the foreign symbols that assembly might reference.
+func IsCoroAtomicCompilerDataAnchor(ctx llvm.Context, call llvm.Value) bool {
+	if call.IsNil() || call.InstructionOpcode() != llvm.Call {
+		return false
+	}
+	callee := call.CalledValue()
+	if callee.IsNil() || callee.IsAInlineAsm().IsNil() {
+		return false
+	}
+	kind := ctx.MDKindID(CoroAtomicBoundedCompilerCallMetadataName)
+	node := call.Metadata(kind)
+	if node.IsNil() {
+		return false
+	}
+	fields := node.MDNodeOperands()
+	if len(fields) != 3 || !fields[1].IsAMDString() || fields[1].MDString() != CoroAtomicCompilerDataAnchorV1 {
+		return false
+	}
+	valid, err := isCoroAtomicBoundedCompilerCall(call, kind)
+	return valid && err == nil
+}
+
 func isCoroAtomicLogicalPanicTraceAppendCall(call llvm.Value) bool {
 	callee := call.CalledValue()
 	functionType := call.CalledFunctionType()

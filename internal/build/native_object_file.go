@@ -56,7 +56,7 @@ static int llgo_static_map_opaque_assembly(LLVMModuleRef module) {
                     LLVMValueRef assembly = operand ? LLVMIsAInlineAsm(operand) : NULL;
                     if (assembly) {
                         LLVMGetInlineAsmAsmString(assembly, &size);
-                        if (size != 0) return 1;
+                        if (size != 0) return 2;
                     }
                 }
             }
@@ -69,8 +69,11 @@ import "C"
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"unsafe"
 
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -111,7 +114,56 @@ func setNativeMachineOutliner(machine llvm.TargetMachine, enabled bool) {
 // Empty compiler identity barriers use only their explicit SSA operands.
 // Nonempty assembly and linker metadata need an independent raw-input proof.
 func staticMapGoModuleClosed(mod llvm.Module) bool {
-	return !mod.IsNil() && len(mod.NamedMetadataOperands("llvm.linker.options")) == 0 &&
-		len(mod.NamedMetadataOperands("llvm.dependent-libraries")) == 0 &&
-		C.llgo_static_map_opaque_assembly(C.LLVMModuleRef(unsafe.Pointer(mod.C))) == 0
+	if mod.IsNil() || len(mod.NamedMetadataOperands("llvm.linker.options")) != 0 ||
+		len(mod.NamedMetadataOperands("llvm.dependent-libraries")) != 0 {
+		return false
+	}
+	switch C.llgo_static_map_opaque_assembly(C.LLVMModuleRef(unsafe.Pointer(mod.C))) {
+	case 0:
+		return true
+	case 1:
+		return false
+	}
+	// PC-line records contain only a compiler-local label and a numeric ID.
+	// Check both their injected content receipt and the complete fixed grammar;
+	// a data-anchor marker on arbitrary assembly does not prove raw absence.
+	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
+			for inst := bb.FirstInstruction(); !inst.IsNil(); inst = llvm.NextInstruction(inst) {
+				for i := 0; i < inst.OperandsCount(); i++ {
+					assembly := inst.Operand(i)
+					if assembly.IsAInlineAsm().IsNil() || assembly.InlineAsmString() == "" {
+						continue
+					}
+					if !staticMapCompilerPCLineAnchor(mod.Context(), inst, assembly) {
+						return false
+					}
+				}
+			}
+		}
+	}
+	return true
+}
+
+func staticMapCompilerPCLineAnchor(ctx llvm.Context, call, assembly llvm.Value) bool {
+	if !llssa.IsCoroAtomicCompilerDataAnchor(ctx, call) || call.OperandsCount() != 1 ||
+		assembly.InlineAsmConstraintString() != "" || !assembly.InlineAsmHasSideEffects() ||
+		assembly.InlineAsmNeedsAlignedStack() || assembly.InlineAsmCanThrow() ||
+		assembly.InlineAsmDialect() != llvm.InlineAsmDialectATT {
+		return false
+	}
+	body := assembly.InlineAsmString()
+	const prefix = "L__llgo_pcsite_"
+	if !strings.HasPrefix(body, prefix) || len(body) < len(prefix)+16 {
+		return false
+	}
+	id := body[len(prefix) : len(prefix)+16]
+	for _, char := range id {
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+			return false
+		}
+	}
+	label := prefix + id + "_${:uid}"
+	want := fmt.Sprintf("%s:\n.pushsection __DATA,__llgo_pcl,regular,live_support\n.p2align 3\nl_llgo_pcline_rec_${:uid}:\n.quad %s\n.quad 0x%s\n.popsection", label, label, id)
+	return body == want
 }
