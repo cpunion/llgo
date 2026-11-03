@@ -152,8 +152,48 @@ func TestStaticMapInitializerCanonicalIDAndMutation(t *testing.T) {
 	if _, err := u.StaticMapInitializers(); err == nil || !strings.Contains(err.Error(), "Go references") {
 		t.Fatalf("mutated reference was accepted: %v", err)
 	}
-	if _, err := (*EmissionUniverse)(nil).StaticMapInitializers(); err == nil {
-		t.Fatal("nil universe accepted")
+	if _, err := (*staticMapInitializationPlan)(nil).StaticMapInitializers(); err == nil {
+		t.Fatal("nil map plan accepted")
+	}
+}
+
+func TestStaticMapInitializerTracksAddedFunctionReferences(t *testing.T) {
+	test := newEmissionTestProgram()
+	pkg := test.addPackage(t, "example.com/emission/mapinventory", `package p
+var M = map[string]int{"a": 1}
+var Other map[string]int
+func ReadOther() int { return Other["a"] }
+`)
+	test.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	prog.TypeSizes(types.SizesFor("gc", "arm64"))
+	u, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := u.StaticMapInitializers()
+	if err != nil || len(facts) != 1 || !facts[0].GoUnread {
+		t.Fatalf("initial facts: %+v, %v", facts, err)
+	}
+	extra := *pkg.ssa.Func("ReadOther")
+	extra.Blocks = append([]*ssa.BasicBlock(nil), extra.Blocks...)
+	for i, block := range extra.Blocks {
+		cloned := *block
+		cloned.Instrs = append([]ssa.Instruction(nil), block.Instrs...)
+		for j, instr := range cloned.Instrs {
+			if load, ok := instr.(*ssa.UnOp); ok {
+				newLoad := *load
+				newLoad.X = emissionTestGlobal(t, pkg, "M")
+				cloned.Instrs[j] = &newLoad
+			}
+		}
+		extra.Blocks[i] = &cloned
+	}
+	// Force a fresh backing array as well as a new reference-bearing body.
+	u.functions = append(append([]*ssa.Function(nil), u.functions...), &extra)
+	if _, err := u.StaticMapInitializers(); err == nil || !strings.Contains(err.Error(), "Go references") {
+		t.Fatalf("new function reference was accepted: %v", err)
 	}
 }
 

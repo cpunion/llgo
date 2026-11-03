@@ -61,12 +61,21 @@ type frozenStaticMapInitializer struct {
 	cell         *staticMapDataCell
 }
 
+// staticMapInitializationPlan owns only map-constructor facts. Its read-only
+// inventory view follows the owner's slice header so additions to the frozen
+// source universe invalidate the facts as well as edits to existing bodies.
+type staticMapInitializationPlan struct {
+	sourceFunctions        *[]*ssa.Function
+	staticMapInitializers  []frozenStaticMapInitializer
+	staticMapReferenceHash string
+}
+
 // StaticMapInitializers returns defensive copies and checks that the source
 // interval still has its frozen operands and instruction order. A changed SSA
 // graph must be replanned, never silently matched by a global's source name.
-func (u *EmissionUniverse) StaticMapInitializers() ([]StaticMapInitializer, error) {
+func (u *staticMapInitializationPlan) StaticMapInitializers() ([]StaticMapInitializer, error) {
 	if u == nil {
-		return nil, fmt.Errorf("static map initializers require a frozen emission universe")
+		return nil, fmt.Errorf("static map initializers require a frozen source plan")
 	}
 	if len(u.staticMapInitializers) != 0 && u.staticMapReferenceHash != u.staticMapReferenceFingerprint() {
 		return nil, fmt.Errorf("static map initializers changed their frozen Go references")
@@ -110,7 +119,7 @@ func staticMapGlobalType(global *ssa.Global) bool {
 	return ok
 }
 
-func (u *EmissionUniverse) freezeStaticMapInitializers(
+func (u *staticMapInitializationPlan) freezeStaticMapInitializers(
 	groups map[string][]emissionGlobalPhysicalCandidate,
 	linknameTargets map[string]none,
 	rawAbsent func(string) bool,
@@ -147,7 +156,7 @@ func (u *EmissionUniverse) freezeStaticMapInitializers(
 	var plans []frozenStaticMapInitializer
 	writes := make(map[*staticMapDataCell]int)
 	stores := make(map[*ssa.Store]*staticMapDataCell)
-	for _, function := range u.functions {
+	for _, function := range *u.sourceFunctions {
 		for _, interval := range collectStaticMapInitIntervals(function) {
 			cell := byGlobal[interval.global]
 			if cell == nil || !cell.closed {
@@ -219,7 +228,7 @@ func (u *EmissionUniverse) freezeStaticMapInitializers(
 	observed := make(map[*staticMapDataCell]bool)
 	unknownMapReference := false
 	var operands [8]*ssa.Value
-	for _, function := range u.functions {
+	for _, function := range *u.sourceFunctions {
 		for _, block := range function.Blocks {
 			for _, instr := range block.Instrs {
 				if _, debug := instr.(*ssa.DebugRef); debug {
@@ -265,10 +274,10 @@ func (u *EmissionUniverse) freezeStaticMapInitializers(
 // This process-local fingerprint detects changed read/escape facts; it is not
 // a cache key. Stable canonical constructor IDs deliberately exclude consumers
 // and raw-input eligibility so the retained producer remains reusable.
-func (u *EmissionUniverse) staticMapReferenceFingerprint() string {
+func (u *staticMapInitializationPlan) staticMapReferenceFingerprint() string {
 	hash := sha256.New()
 	var operands [8]*ssa.Value
-	for _, function := range u.functions {
+	for _, function := range *u.sourceFunctions {
 		for _, block := range function.Blocks {
 			for index, instr := range block.Instrs {
 				if _, debug := instr.(*ssa.DebugRef); debug {

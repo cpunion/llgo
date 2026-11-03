@@ -355,8 +355,7 @@ type EmissionUniverse struct {
 	globalPhysicalIDs       map[*ssa.Global]string
 	globalPhysicalGroups    map[string]CoroGlobalPhysicalIdentity
 	globalPhysicalSeen      map[*ssa.Global]none
-	staticMapInitializers   []frozenStaticMapInitializer
-	staticMapReferenceHash  string
+	staticMapInitializationPlan
 
 	// emissionTypeKeys memoizes structural digests only for the lifetime of
 	// this frozen compilation universe. A package-level cache would retain
@@ -8650,6 +8649,7 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 			u.globalPhysicalIDs[member] = id
 		}
 	}
+	u.staticMapInitializationPlan.sourceFunctions = &u.functions
 	u.freezeStaticMapInitializers(byCell, linknameTargets, rawWorldProvesAbsent)
 	return nil
 }
