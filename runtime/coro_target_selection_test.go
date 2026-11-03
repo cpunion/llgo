@@ -69,6 +69,13 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 			if err := json.Unmarshal(output, &pkg); err != nil {
 				t.Fatalf("decode coroutine target package: %v", err)
 			}
+			mappedKeyed := slices.Contains(pkg.GoFiles, "coro_keyed_storage_native_llgo.go")
+			fallbackKeyed := slices.Contains(pkg.GoFiles, "coro_keyed_storage_fallback_llgo.go")
+			tags := strings.Split(test.tags, ",")
+			llgoCoro := slices.Contains(tags, "llgo") && slices.Contains(tags, "llgo_coro")
+			if mappedKeyed != (test.timer && !test.adapter) || fallbackKeyed != (llgoCoro && !mappedKeyed) {
+				t.Fatalf("keyed storage selection: mapped=%t fallback=%t files=%v", mappedKeyed, fallbackKeyed, pkg.GoFiles)
+			}
 			native := slices.Contains(pkg.GoFiles, "coro_target_native_llgo.go") ||
 				slices.Contains(pkg.GoFiles, "coro_target_native_fleet_llgo.go")
 			timer := slices.Contains(pkg.GoFiles, "coro_executor_driver_timer_llgo.go") &&

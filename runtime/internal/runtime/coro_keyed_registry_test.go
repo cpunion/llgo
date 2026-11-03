@@ -256,8 +256,12 @@ func TestCoroKeyedRegistryConcurrentFIFOClaimsRemainLockFreeV2(t *testing.T) {
 
 func TestCoroKeyedRegistrySequenceWrapPreservesFIFOAndGenerationBoundV2(t *testing.T) {
 	registry := new(coroKeyedRegistryV2)
+	slots := registry.ensureSlots()
+	if slots == nil {
+		t.Fatal("allocate sequence-wrap slots")
+	}
 	coroKeyedAtomicStoreUint32(
-		&registry.slots[0].control,
+		&slots[0].control,
 		coroKeyedRegistryControlV2(coroKeyedRegistryMaxGenerationV2, coroKeyedRegistryFreeV2),
 	)
 	coroKeyedAtomicStoreUint32(&registry.sequence, ^uint32(0)-1)
@@ -377,5 +381,69 @@ func TestCoroKeyedPreparedStateAndTicketOrderingV2(t *testing.T) {
 	}
 	if got := unsafe.Sizeof(state); got != wantSize {
 		t.Fatalf("CoroKeyedParkV2 size = %d, want %d", got, wantSize)
+	}
+}
+
+func TestCoroKeyedRegistryColdReadsDoNotAllocateV2(t *testing.T) {
+	registry := new(coroKeyedRegistryV2)
+	id := keyedRegistryOperation(t, 1, 1)
+	allocations := testing.AllocsPerRun(100, func() {
+		if _, _, ok := registry.claimOne(coroKeyedParkSemaphoreV2, 0x10, 0, false); ok {
+			panic("cold claim")
+		}
+		if registry.claimExact(coroKeyedRegistryHandleV2{Slot: 1, Generation: 1}, id) != coroKeyedRegistryClaimInvalidV2 {
+			panic("cold exact claim")
+		}
+		if registry.retire(coroKeyedRegistryHandleV2{Slot: 1, Generation: 1}, id) {
+			panic("cold retire")
+		}
+	})
+	if allocations != 0 || registry.loadSlots() != nil || registry.scanLimit != 0 {
+		t.Fatalf("cold read allocated: %g slots=%p limit=%d", allocations, registry.loadSlots(), registry.scanLimit)
+	}
+	var absent *coroKeyedRegistryV2
+	if absent.ensureSlots() != nil {
+		t.Fatal("nil receiver allocated storage")
+	}
+}
+
+func TestCoroKeyedRegistryConcurrentStoragePublicationV2(t *testing.T) {
+	registry := new(coroKeyedRegistryV2)
+	const contenders = 32
+	start := make(chan struct{})
+	results := make(chan *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2, contenders)
+	for index := 0; index < contenders; index++ {
+		go func() { <-start; results <- registry.ensureSlots() }()
+	}
+	close(start)
+	first := <-results
+	if first == nil {
+		t.Fatal("missing published storage")
+	}
+	for index := 1; index < contenders; index++ {
+		if got := <-results; got != first {
+			t.Fatalf("storage changed: %p != %p", got, first)
+		}
+	}
+	first[coroKeyedRegistryCapacityV2-1].sequence = 123
+	if registry.ensureSlots() != first || registry.loadSlots()[coroKeyedRegistryCapacityV2-1].sequence != 123 {
+		t.Fatal("published storage was replaced or reset")
+	}
+}
+
+func TestCoroKeyedRegistryPublishedStorageReuseDoesNotAllocateV2(t *testing.T) {
+	registry := new(coroKeyedRegistryV2)
+	if registry.ensureSlots() == nil {
+		t.Fatal("allocate storage")
+	}
+	id := keyedRegistryOperation(t, 1, 1)
+	allocations := testing.AllocsPerRun(100, func() {
+		handle, ok := registry.register(coroKeyedParkSemaphoreV2, 0x10, 0, id)
+		if !ok || !registry.retire(handle, id) {
+			panic("register/retire")
+		}
+	})
+	if allocations != 0 {
+		t.Fatalf("published registry allocated %g times", allocations)
 	}
 }

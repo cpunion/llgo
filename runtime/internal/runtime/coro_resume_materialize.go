@@ -113,10 +113,68 @@ type coroKeyedRegistrySlotV2 struct {
 type coroKeyedRegistryV2 struct {
 	sequence  uint32
 	scanLimit uint32
-	slots     [coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2
+	// Published once and never moved or released. Native backends map this
+	// scalar-only array without faulting in its unused pages; other backends
+	// retain a collector-owned typed array through this pointer.
+	slots *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2
 }
 
 var coroProgramKeyedRegistryV2State coroKeyedRegistryV2
+
+// These constraints certify the complete recursive representation, including
+// field names and order. Any added field, including a zero-sized pointer
+// array, must fail compilation rather than silently enter unscanned storage.
+type coroKeyedPODUint32V2[T ~uint32] struct{}
+type coroKeyedPODOperationV2[T interface {
+	~struct {
+		SourceSlot uint32
+		Generation uint32
+	}
+}] struct{}
+type coroKeyedPODSlotV2[T interface {
+	~struct {
+		control   uint32
+		kind      coroKeyedParkKindV2
+		logical   uint32
+		key       uintptr
+		sequence  uint32
+		operation coro.OperationID
+	}
+}] struct{}
+
+type _ coroKeyedPODUint32V2[coroKeyedParkKindV2]
+type _ coroKeyedPODOperationV2[coro.OperationID]
+type _ coroKeyedPODSlotV2[coroKeyedRegistrySlotV2]
+
+func (registry *coroKeyedRegistryV2) loadSlots() *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2 {
+	if registry == nil {
+		return nil
+	}
+	return (*[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2)(
+		coroKeyedAtomicLoadPointer((*unsafe.Pointer)(unsafe.Pointer(&registry.slots))),
+	)
+}
+
+func (registry *coroKeyedRegistryV2) ensureSlots() *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2 {
+	if slots := registry.loadSlots(); slots != nil || registry == nil {
+		return slots
+	}
+	slots := coroKeyedAllocateSlotsV2()
+	if slots == nil {
+		return nil
+	}
+	if coroKeyedAtomicCompareAndSwapPointer(
+		(*unsafe.Pointer)(unsafe.Pointer(&registry.slots)), nil, unsafe.Pointer(slots),
+	) {
+		return slots
+	}
+	// Only the unpublished allocation can be released. The winner remains
+	// stable for stale handles and concurrent claim/retire readers forever.
+	if !coroKeyedReleaseUnpublishedSlotsV2(slots) {
+		panic("cannot release unpublished coroutine keyed registry storage")
+	}
+	return registry.loadSlots()
+}
 
 // CoroKeyedParkV2 is compiler-spilled state for semaphore and notify waits.
 // The old owner retires its private key registry and the route-local Manual
@@ -187,10 +245,14 @@ func coroKeyedRegistrySlotV2For(
 	handle coroKeyedRegistryHandleV2,
 ) (*coroKeyedRegistrySlotV2, bool) {
 	if registry == nil || handle.Slot == 0 || handle.Generation == 0 ||
-		handle.Slot > uint32(len(registry.slots)) {
+		handle.Slot > uint32(coroKeyedRegistryCapacityV2) {
 		return nil, false
 	}
-	return &registry.slots[handle.Slot-1], true
+	slots := registry.loadSlots()
+	if slots == nil {
+		return nil, false
+	}
+	return &slots[handle.Slot-1], true
 }
 
 func coroKeyedRegistryLoadOperationV2(

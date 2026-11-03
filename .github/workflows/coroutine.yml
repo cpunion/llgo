@@ -123,6 +123,7 @@ jobs:
             ./internal/runtime/coro_run_decision_test.go \
             -run '^Test(CoroRunDecisionOutputModeV1|NormalCoroRunDecisionWordsV1|CoroRunDecisionWrapperRejectsMalformedNormalOnlyMode)$' -count=1
           go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerV2SourceABI|TestNativeTimerCapacity|TestTimeSleep|TestCoroGCNotification|TestCallerPCRegistryProductionRace|TestBDWGCInitialMarkerQuota)' -count=1
+          go test . -run '^TestCoroKeyed(NativeMapping|MappedStorage)' -count=1
           go test -race ./internal/lib/runtime/time_coro_gc_llgo.go \
             ./internal/lib/runtime/time_coro_gc_test.go -count=1 -timeout=60s
           # The complete LLGo runtime package intentionally owns symbols that
@@ -885,6 +886,9 @@ jobs:
         run: |
           go build -o "$LLGO_TEST_LLGO" ./cmd/llgo
           go test ./internal/build -run '^TestCoroSynctestAcceptance$' -v -count=1 -timeout=18m
+          "$LLGO_TEST_LLGO" test -c -p=1 -o /tmp/llgo-keyed-gc.test ./test/go/keyed_registry_gc_liveness_test.go
+          GOMAXPROCS=1 /tmp/llgo-keyed-gc.test -test.v -test.count=3 -test.timeout=60s
+          GOMAXPROCS=4 /tmp/llgo-keyed-gc.test -test.v -test.count=3 -test.timeout=60s
 
       - name: Test real standard timers and GC cancellation
         if: matrix.lane == 'timer-gc' && github.repository == 'cpunion/llgo' && github.event.pull_request.base.ref == 'llvm-coro'

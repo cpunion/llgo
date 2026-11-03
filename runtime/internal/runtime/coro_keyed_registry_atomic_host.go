@@ -18,7 +18,27 @@
 
 package runtime
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"unsafe"
+)
+
+func coroKeyedAtomicLoadPointer(address *unsafe.Pointer) unsafe.Pointer {
+	return atomic.LoadPointer(address)
+}
+
+func coroKeyedAtomicCompareAndSwapPointer(address *unsafe.Pointer, old, next unsafe.Pointer) bool {
+	return atomic.CompareAndSwapPointer(address, old, next)
+}
+
+func coroKeyedAllocateSlotsV2() *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2 {
+	return new([coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2)
+}
+
+func coroKeyedReleaseUnpublishedSlotsV2(*[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2) bool {
+	// No registry reference was published; the collector owns reclamation.
+	return true
+}
 
 func coroKeyedAtomicLoadUint32(address *uint32) uint32 {
 	return atomic.LoadUint32(address)
