@@ -48,6 +48,51 @@ def sources():
     }
 
 
+def final_source_evidence():
+    errors = {}
+
+    def observe(name, action):
+        try:
+            value = action()
+            if value is None:
+                errors[name] = 'returned None'
+            return value
+        except BaseException as error:
+            errors[name] = repr(error)
+            return None
+
+    after_source = observe('source', sources)
+    after_status = observe('status', lambda: subprocess.check_output(
+        ['git', 'status', '--porcelain', '--untracked-files=all'], text=True))
+    after_head = observe('head', lambda: subprocess.check_output(
+        ['git', 'rev-parse', 'HEAD'], text=True).strip())
+    after_tools = {path: observe('tool:' + str(path), lambda: sha(path))
+                   for path in tools}
+    tool_missing = [path for path in tools
+                    if observe('tool_exists:' + str(path), lambda: Path(path).is_file()) is False]
+    checks = {
+        'source_captured': bool(source),
+        'source_unchanged': after_source is not None and after_source == source,
+        'status_unchanged': after_status is not None and after_status == source_status,
+        'head_unchanged': after_head is not None and after_head == env.get('SOURCE_REF'),
+        'tools_unchanged': all(after_tools[path] is not None and after_tools[path] == digest
+                               for path, digest in tools.items()),
+    }
+    return {
+        'after_source': after_source,
+        'source_added': sorted(after_source.keys() - source.keys()) if after_source is not None else None,
+        'source_deleted': sorted(source.keys() - after_source.keys()) if after_source is not None else None,
+        'source_changed': sorted(path for path in source.keys() & after_source.keys()
+                                 if source[path] != after_source[path]) if after_source is not None else None,
+        'expected_head': env.get('SOURCE_REF'), 'after_head': after_head,
+        'before_status': source_status, 'after_status': after_status,
+        'after_tools': after_tools, 'tool_missing': tool_missing,
+        'tool_hash_changed': [path for path, digest in tools.items()
+                              if after_tools[path] is not None and after_tools[path] != digest],
+        'errors': errors, 'checks': checks, 'source_frozen': all(checks.values()),
+    }
+
+
 def cancelled(signum, frame):
     raise KeyboardInterrupt('signal ' + str(signum))
 
@@ -324,17 +369,24 @@ finally:
                 if pid in table and table[pid][2] == identity}
     remaining = remove_owned(residual) if residual else {}
     drained = not residual and not remaining and all(row['owned_children_drained'] for row in results)
-    frozen = (bool(source) and sources() == source
-              and subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=all'], text=True) == source_status
-              and subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == env['SOURCE_REF']
-              and all(sha(path) == digest for path, digest in tools.items()))
+    final_source = final_source_evidence()
+    frozen = final_source['source_frozen']
+    final_evidence = {'path': 'final-source-evidence.json',
+                      'checks': final_source['checks'], 'errors': final_source['errors']}
+    try:
+        encoded = json.dumps(final_source, indent=2) + '\n'
+        (OUT / final_evidence['path']).write_text(encoded)
+        final_evidence['sha256'] = hashlib.sha256(encoded.encode()).hexdigest()
+    except BaseException as error:
+        final_evidence['write_error'] = repr(error)
     removed = False
     if owned_tmp is not None and drained:
         shutil.rmtree(owned_tmp)
         removed = not owned_tmp.exists()
     passed = failure is None and frozen and drained and bool(qualification and qualification['execution_complete'])
     report = {'execution_complete': passed, 'qualification': qualification, 'failure': failure,
-              'source_frozen': frozen, 'owned_children_drained': drained,
+              'source_frozen': frozen, 'source_freeze_evidence': final_evidence,
+              'owned_children_drained': drained,
               'owned_residuals_before_cleanup': residual, 'owned_residuals_after_cleanup': remaining,
               'owned_TMP_removed': removed, 'stages': results,
               'boundary': 'Complete package execution and runtime coverage are distinct. Platform/tool skips retain explicit reasons and require counterparts; no skip is promoted to PASS.'}

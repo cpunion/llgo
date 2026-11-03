@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  SOURCE_REF: f739d8d1885025b5aff5fadd72826b6ebfeb84e0
+  SOURCE_REF: 4795739337e4b66b613eda7ff88ed75dcb1e0762
   TRANSLATOR_VERSION: v0.0.0-20261103172948-7abb59775d43
   GOTOOLCHAIN: local
   GOWORK: "off"
@@ -99,7 +99,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: funcval-461ce-${{ matrix.id }}
+          name: funcval-${{ env.SOURCE_REF }}-${{ matrix.id }}
           path: ${{ runner.temp }}/funcval-reports-${{ matrix.id }}
           if-no-files-found: error
           retention-days: 7
