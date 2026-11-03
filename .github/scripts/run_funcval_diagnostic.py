@@ -14,6 +14,7 @@ import struct
 import subprocess
 import tempfile
 import time
+import traceback
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--package', choices=['./cl', './internal/build'], required=True)
@@ -107,7 +108,7 @@ def run(name, command, cwd, deadline):
     disk_before = shutil.disk_usage(HERE)
     minimum_free = disk_before.free
     required_free = int(env.get('LLGO_DIAGNOSTIC_MIN_FREE_BYTES', '0'))
-    assert required_free >= 0
+    assert required_free >= 0, f"explicit disk reserve must be nonnegative, got {required_free}"
     with (OUT / (name + '.stdout')).open('wb') as stdout, (OUT / (name + '.stderr')).open('wb') as stderr:
         try:
             assert disk_before.free >= required_free, 'explicit diagnostic disk reserve reached before spawn'
@@ -168,6 +169,37 @@ def run(name, command, cwd, deadline):
 
 
 
+
+def metadata_command(command):
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        return {"command": command, "exit": result.returncode,
+                "stdout": result.stdout, "stderr": result.stderr}
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"command": command, "exit": None, "error": repr(error)}
+
+
+def write_preflight():
+    snapshot = {
+        "expected_source_ref": env.get("SOURCE_REF"),
+        "expected_translator_pin": env.get("TRANSLATOR_VERSION"),
+        "working_directory": str(SOURCE),
+        "driver_sha256": sha(__file__),
+        "git_head": metadata_command(["git", "rev-parse", "HEAD"]),
+        "git_status": metadata_command([
+            "git", "status", "--porcelain", "--untracked-files=all"]),
+        "tracked_diff": metadata_command(["git", "diff", "--stat", "HEAD"]),
+        "configured_llvm": env.get("LLVM_CONFIG"),
+        "tool_paths": {
+            name: shutil.which(name, path=env.get("PATH"))
+            for name in ["git", "go", "clang", "llvm-config-22",
+                         "qemu-system-riscv32", "qemu-system-xtensa"]
+        },
+    }
+    (OUT / "preflight.json").write_text(json.dumps(snapshot, indent=2) + "\n")
+    return snapshot
+
+
 def audit(inventory, actual):
     roots = {
         line for line in (OUT / 'inventory.stdout').read_text().splitlines()
@@ -215,10 +247,13 @@ def audit(inventory, actual):
 failure = None
 qualification = None
 try:
-    head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-    assert head == env['SOURCE_REF']
-    source_status = subprocess.check_output(['git', 'status', '--porcelain'])
-    assert not source_status
+    preflight = write_preflight()
+    assert preflight['git_head']['exit'] == 0, f"cannot read product Git HEAD: {preflight['git_head']}"
+    head = preflight['git_head']['stdout'].strip()
+    assert head == env.get('SOURCE_REF'), f"product HEAD mismatch: expected {env.get('SOURCE_REF')!r}, actual {head!r}"
+    assert preflight['git_status']['exit'] == 0, f"cannot read product source status: {preflight['git_status']}"
+    source_status = preflight['git_status']['stdout']
+    assert not source_status, f"product source must be clean before compilation; actual status:\n{source_status}"
     source = sources()
     llvm_config = Path(env['LLVM_CONFIG']).resolve()
     llvm_bindir = Path(subprocess.check_output(
@@ -249,12 +284,13 @@ try:
     env['CGO_CXXFLAGS'] = '-std=c++17'
     env['CGO_LDFLAGS'] = subprocess.check_output([env['LLVM_CONFIG'], '--ldflags', '--libs', 'all'], text=True).strip().replace('\n', ' ')
     llvm_version = subprocess.check_output([env['LLVM_CONFIG'], '--version'], text=True).strip()
-    assert llvm_version.split('.')[0] == '22'
+    assert llvm_version.split('.')[0] == '22', f"expected LLVM22, actual {llvm_version!r} via {env['LLVM_CONFIG']}"
     go_version = subprocess.check_output(['go', 'env', 'GOVERSION'], env=env, text=True).strip()
-    assert go_version == 'go' + (SOURCE / '.go-version').read_text().strip()
+    expected_go = 'go' + (SOURCE / '.go-version').read_text().strip()
+    assert go_version == expected_go, f"expected Go {expected_go!r}, actual {go_version!r}"
     selected = json.loads(subprocess.check_output(['go', 'list', '-m', '-json', 'github.com/xgo-dev/plan9asm'], env=env, text=True))
-    assert selected['Replace']['Path'] == 'github.com/cpunion/plan9asm'
-    assert selected['Replace']['Version'] == env['TRANSLATOR_VERSION']
+    assert selected.get('Replace', {}).get('Path') == 'github.com/cpunion/plan9asm', f"expected public fork module replacement, actual {selected!r}"
+    assert selected.get('Replace', {}).get('Version') == env.get('TRANSLATOR_VERSION'), f"translator pin mismatch: expected {env.get('TRANSLATOR_VERSION')!r}, actual {selected.get('Replace')!r}"
     (OUT / 'source-evidence.json').write_text(json.dumps({
         'head': head, 'source': source, 'control_workflow': env['GITHUB_WORKFLOW_REF'],
         'control_sha': env['GITHUB_SHA'], 'driver_sha256': sha(__file__),
@@ -281,6 +317,7 @@ try:
     qualification = audit(inventory, actual)
 except BaseException as error:
     failure = repr(error)
+    (OUT / 'failure-traceback.txt').write_text(traceback.format_exc())
 finally:
     table = process_table()
     residual = {pid: identity for pid, identity in all_seen.items()
@@ -288,7 +325,7 @@ finally:
     remaining = remove_owned(residual) if residual else {}
     drained = not residual and not remaining and all(row['owned_children_drained'] for row in results)
     frozen = (bool(source) and sources() == source
-              and subprocess.check_output(['git', 'status', '--porcelain']) == source_status
+              and subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=all'], text=True) == source_status
               and subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == env['SOURCE_REF']
               and all(sha(path) == digest for path, digest in tools.items()))
     removed = False
