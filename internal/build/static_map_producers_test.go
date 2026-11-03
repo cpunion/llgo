@@ -234,6 +234,9 @@ func TestStaticMapInitProducerProductionCacheRepair(t *testing.T) {
 }
 
 func TestStaticMapInitProducerMethodTypesCacheMissKeepsFreshCapture(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("native staged method fragments require Darwin or Linux")
+	}
 	t.Setenv("LLGO_BUILD_CACHE", "on")
 	dir := t.TempDir()
 	previous := cacheRootFunc
