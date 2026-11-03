@@ -3837,11 +3837,12 @@ func Build(inv Invocation) (result []Package, resultErr error) {
 	}
 	emitDebugInfo := shouldEmitDebugInfo(conf, &export)
 	frontendOptions := cl.Options{
-		Debug:        emitDebugInfo,
-		DebugSymbols: emitDebugInfo,
-		Trace:        IsTraceEnabled(),
-		ExportRename: conf.Target != "",
-		ShadowStack:  isEnvOn(llgoShadowStack, false),
+		CanonicalStaticMapInits: staticMapNativeCandidateEnabled(conf, emitDebugInfo),
+		Debug:                   emitDebugInfo,
+		DebugSymbols:            emitDebugInfo,
+		Trace:                   IsTraceEnabled(),
+		ExportRename:            conf.Target != "",
+		ShadowStack:             isEnvOn(llgoShadowStack, false),
 	}
 	preloadOptions := frontendOptions
 	llssaInitOnce.Do(func() {
@@ -7274,6 +7275,14 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage, library *co
 	if err != nil {
 		return err
 	}
+	if ctx.staticMapInitGatesEnabled() {
+		facts, err := emission.StaticMapInitializers()
+		if err != nil {
+			return err
+		}
+		ctx.staticMapConsumerFacts = facts
+		ctx.staticMapConsumerFactsFrozen = true
+	}
 	ssaEmission, err := coro.NewSSAEmissionUniverse(ctx.progSSA, emission.Functions())
 	if err != nil {
 		return err
@@ -7551,10 +7560,16 @@ type context struct {
 	output         bool
 	passOpt        bool
 
-	buildConf       *Config
-	crossCompile    crosscompile.Export
-	commands        commandEnv
-	frontendOptions cl.Options
+	buildConf                    *Config
+	crossCompile                 crosscompile.Export
+	commands                     commandEnv
+	frontendOptions              cl.Options
+	staticMapCompilerOnce        sync.Once
+	staticMapCompilerSHA256      string
+	staticMapCompilerError       error
+	staticMapConsumerFacts       []cl.StaticMapInitializer
+	staticMapConsumerFactsFrozen bool
+	staticMapLinkPackages        []*aPackage
 
 	cTransformer *cabi.Transformer
 
@@ -8486,7 +8501,9 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	linkArgs = append(linkArgs, darwinSymbols.linkerArgs...)
 	ctx.stripDarwinLocals = darwinSymbols.stripLocals
 
+	ctx.staticMapLinkPackages = linkedOrder
 	err = linkObjFiles(ctx, outputPath, linkInputs, linkArgs, verbose)
+	ctx.staticMapLinkPackages = nil
 	if err != nil {
 		return err
 	}
@@ -8809,8 +8826,34 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 
 	cmd := ctx.linker()
 	cmd.Verbose = printCmds
-	if err := cmd.Link(buildArgs...); err != nil {
-		return err
+	linked := false
+	if ctx.staticMapInitGatesEnabled() {
+		driver, err := cmd.PrepareLink(buildArgs...)
+		if err == nil {
+			prepared, proofErr := ctx.prepareStaticMapLink(driver, objFiles)
+			if proofErr != nil && printCmds {
+				fmt.Fprintln(os.Stderr, "# retain static map initializers:", proofErr)
+			}
+			if prepared != nil {
+				defer prepared.cleanup()
+				// Check the exact immutable command and every actual file again
+				// immediately before executing the job carrying the zero gates.
+				if err := prepared.certificate.verify(prepared.command); err == nil {
+					if printCmds {
+						fmt.Fprintf(os.Stderr, "# omitted %d proven-unread static map initializers\n%v\n", prepared.omitted, prepared.command)
+					}
+					if err := prepared.command.Run(); err != nil {
+						return err
+					}
+					linked = true
+				}
+			}
+		}
+	}
+	if !linked {
+		if err := cmd.Link(buildArgs...); err != nil {
+			return err
+		}
 	}
 	if !moveExactWindowsOutput {
 		return nil
@@ -9185,6 +9228,11 @@ func preparePackageModule(ctx *context, aPkg *aPackage, verbose bool) ([]string,
 	if hook := ctx.buildConf.ModuleHook; hook != nil {
 		hook(aPkg)
 	}
+	if !aPkg.CacheHit && ctx.staticMapInitGatesEnabled() {
+		if err := captureStaticMapInitProducers(aPkg); err != nil {
+			return nil, fmt.Errorf("capture static map producers for %s: %w", pkgPath, err)
+		}
+	}
 
 	// A cache hit reconstructed frontend registrations and link-time metadata;
 	// the archived module already owns C ABI transformation, optimization, and
@@ -9364,6 +9412,15 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 				aPkg.ObjFiles = append(aPkg.ObjFiles, exportFile)
 			} else {
 				aPkg.ObjBuffers = append(aPkg.ObjBuffers, exportBuffer)
+			}
+			if ctx.staticMapInitGatesEnabled() {
+				var data []byte
+				if exportFile == "" {
+					data = exportBuffer.buffer.Bytes()
+				}
+				if err := recordStaticMapGoObject(aPkg, exportFile, data); err != nil {
+					return err
+				}
 			}
 		}
 		if debugBuild || verbose {
@@ -9677,6 +9734,11 @@ func exportStagedPackageObject(ctx *context, pkg *aPackage) (string, error) {
 	} else if err := emitNativeObjectFile(backend.TargetMachine(), mod, name); err != nil {
 		_ = os.Remove(name)
 		return "", err
+	}
+	if ctx.staticMapInitGatesEnabled() {
+		if err := recordStaticMapGoObject(pkg, name, nil); err != nil {
+			return "", err
+		}
 	}
 	return name, nil
 }
@@ -10270,10 +10332,14 @@ type aPackage struct {
 	// LinkSnapshot survives disposal of the package LLVM module. StagedBitcode
 	// is the verified presplit frontend result; coroutine/default lowering
 	// consumes it only after compilation-wide SSA state has been released.
-	LinkSnapshot       *packageLinkSnapshot
-	sourceSelection    *packageSourceSelection
-	StagedBitcode      string
-	MethodTypeFragment []byte // compact constants only; no source LLVM ownership
+	LinkSnapshot                *packageLinkSnapshot
+	sourceSelection             *packageSourceSelection
+	StagedBitcode               string
+	MethodTypeFragment          []byte // compact constants only; no source LLVM ownership
+	StaticMapInitProducers      []cl.StaticMapInitProducer
+	StaticMapInitCaptured       bool
+	StaticMapInitGoModuleClosed bool
+	StaticMapInitOwnObjects     []staticMapObjectDigest
 
 	// CoroLibraryEffectRecords is producer-owned package metadata copied from
 	// cl before object emission. The package archiver publishes it through a

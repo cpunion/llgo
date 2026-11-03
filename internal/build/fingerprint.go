@@ -42,6 +42,7 @@ type manifestMetadata struct {
 	NeedPyInit       bool     `yaml:"need_py_init,omitempty"`
 	CoroRootAnchorV1 string   `yaml:"coro_root_anchor_v1,omitempty"`
 	MethodTypesHash  string   `yaml:"method_types_hash,omitempty"`
+	StaticMapsHash   string   `yaml:"static_maps_hash,omitempty"`
 }
 
 // manifestData is the structured representation of manifest content.
@@ -119,6 +120,8 @@ func (s *envSection) empty() bool {
 
 type commonSection struct {
 	MethodTypeFragments     int          `yaml:"method_type_fragments,omitempty"`
+	StaticMapInitFragments  int          `yaml:"static_map_init_fragments,omitempty"`
+	StaticMapCompilerSHA256 string       `yaml:"static_map_compiler_sha256,omitempty"`
 	RuntimeLibraryCodegen   string       `yaml:"RUNTIME_LIBRARY_OPTIMIZATION,omitempty"`
 	AbiMode                 string       `yaml:"ABI_MODE,omitempty"`
 	BuildTags               []string     `yaml:"BUILD_TAGS,omitempty"`
@@ -176,7 +179,8 @@ type commonSection struct {
 }
 
 func (s *commonSection) empty() bool {
-	return s.RuntimeLibraryCodegen == "" && s.AbiMode == "" && len(s.BuildTags) == 0 && s.Target == "" && s.RuntimeGC == "" && s.LLVMCPU == "" &&
+	return s.StaticMapInitFragments == 0 && s.StaticMapCompilerSHA256 == "" && s.MethodTypeFragments == 0 &&
+		s.RuntimeLibraryCodegen == "" && s.AbiMode == "" && len(s.BuildTags) == 0 && s.Target == "" && s.RuntimeGC == "" && s.LLVMCPU == "" &&
 		s.LLVMFeatures == "" && s.TargetABI == "" && s.PlatformABI == "" && s.ObjectFormat == "" &&
 		s.DriverFlavor == "" && s.LinkerFlavor == "" && s.TargetTriple == "" && s.CRTFlavor == "" &&
 		s.CXXRuntime == "" && s.SDKVersion == "" && s.CRTVersion == "" && s.ToolsetVersion == "" &&

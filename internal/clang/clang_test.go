@@ -54,6 +54,35 @@ func newTestCmd(config Config) *Cmd {
 	return cmd
 }
 
+func TestPrepareLinkFreezesEffectiveCommand(t *testing.T) {
+	t.Setenv("CCFLAGS", "-O2")
+	t.Setenv("LDFLAGS", "-L/environment")
+	cmd := newTestCmd(Config{LDFLAGS: []string{"-L/configured"}})
+	cmd.prefixArgs = []string{"--prefix"}
+	cmd.Dir = t.TempDir()
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	prepared, err := cmd.PrepareLink("file.o")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--prefix -O2 -L/environment -L/configured file.o"
+	if got := strings.Join(prepared.Args[1:], " "); got != want || prepared.Dir != cmd.Dir {
+		t.Fatalf("prepared command: %q in %q", got, prepared.Dir)
+	}
+	// Later configuration mutations cannot alter the already inspected job.
+	t.Setenv("LDFLAGS", "-L/changed")
+	cmd.config.LDFLAGS[0] = "-L/changed-config"
+	cmd.prefixArgs[0] = "--changed-prefix"
+	cmd.Env = nil
+	if err := prepared.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(output.String()) != want {
+		t.Fatalf("executed a different command: %s", output.String())
+	}
+}
+
 func TestConfiguredCommandPrefixes(t *testing.T) {
 	config := Config{
 		CC:         os.Args[0],

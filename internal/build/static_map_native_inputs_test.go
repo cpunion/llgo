@@ -1,0 +1,281 @@
+//go:build !llgo
+
+package build
+
+import (
+	"bytes"
+	"debug/macho"
+	"encoding/binary"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/xgo-dev/llgo/internal/packages"
+	llssa "github.com/xgo-dev/llgo/ssa"
+	"github.com/xgo-dev/llvm"
+)
+
+func staticMapNativeObjectFixture(t *testing.T, symbol string, define bool) []byte {
+	t.Helper()
+	llssa.Initialize(llssa.InitAll)
+	program := llssa.NewProgram(&llssa.Target{GOOS: "darwin", GOARCH: "arm64"})
+	defer program.Dispose()
+	mod := program.NewPackage("native", "native").Module()
+	mod.SetTarget(program.TargetSpec().Triple)
+	mod.SetDataLayout(program.DataLayout())
+	ctx := mod.Context()
+	global := llvm.AddGlobal(mod, ctx.Int64Type(), symbol)
+	if define {
+		global.SetInitializer(llvm.ConstInt(ctx.Int64Type(), 1, false))
+	}
+	function := llvm.AddFunction(mod, "read_"+symbol, llvm.FunctionType(ctx.Int64Type(), nil, false))
+	builder := ctx.NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointAtEnd(ctx.AddBasicBlock(function, "entry"))
+	builder.CreateRet(builder.CreateLoad(ctx.Int64Type(), global, "read"))
+	buffer, err := program.TargetMachine().EmitToMemoryBuffer(mod, llvm.ObjectFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buffer.Dispose()
+	return append([]byte(nil), buffer.Bytes()...)
+}
+
+func TestStaticMapNativeArchiveActualRawReferences(t *testing.T) {
+	// Raw LLVM fixture names are already physical object names; do not rely
+	// on a frontend's target-specific source-symbol prefixing policy.
+	own := staticMapNativeObjectFixture(t, "_owner.M", true)
+	raw := staticMapNativeObjectFixture(t, "_unicode.Scripts", false)
+	path := writeCoroArchiveTestFile(t, coroArchiveTestMember{"own.o", own}, coroArchiveTestMember{"raw.o", raw})
+	owned := staticMapObjectDigest{SHA256: digestBytes(own), Bytes: int64(len(own))}
+	result, err := inspectStaticMapNativeArchive(path, []staticMapObjectDigest{owned})
+	if err != nil || result.OwnObjects != 1 || result.Members != 2 || !slices.Contains(result.Mentions, "_unicode.Scripts") || slices.Contains(result.Mentions, "_owner.M") {
+		t.Fatalf("actual native archive: %+v, %v", result, err)
+	}
+	if all, err := inspectStaticMapNativeArchive(path, nil); err != nil || !slices.Contains(all.Mentions, "_owner.M") {
+		t.Fatalf("foreign library must inventory all members: %+v, %v", all, err)
+	}
+	for _, name := range []string{"changed-digest", "changed-size", "duplicate-receipt", "missing-owned", "duplicate-owned", "opaque-member"} {
+		t.Run(name, func(t *testing.T) {
+			objects := []staticMapObjectDigest{owned}
+			archive := path
+			switch name {
+			case "changed-digest":
+				objects[0].SHA256 = digestBytes([]byte("different object"))
+			case "changed-size":
+				objects[0].Bytes--
+			case "duplicate-receipt":
+				objects = append(objects, owned)
+			case "missing-owned":
+				archive = writeCoroArchiveTestFile(t, coroArchiveTestMember{"raw.o", raw})
+			case "duplicate-owned":
+				archive = writeCoroArchiveTestFile(t, coroArchiveTestMember{"one.o", own}, coroArchiveTestMember{"two.o", own})
+			case "opaque-member":
+				archive = writeCoroArchiveTestFile(t, coroArchiveTestMember{"own.o", own}, coroArchiveTestMember{"opaque.bc", []byte("BC\xc0\xdeunknown raw bitcode")})
+			}
+			if _, err := inspectStaticMapNativeArchive(archive, objects); err == nil {
+				t.Fatal("accepted an unproved native archive")
+			}
+		})
+	}
+	for _, name := range []string{"automatic-link-input", "indirect-alias", "foreign-subtype"} {
+		t.Run(name, func(t *testing.T) {
+			changed := append([]byte(nil), raw...)
+			object, err := macho.NewFile(bytes.NewReader(changed))
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch name {
+			case "automatic-link-input":
+				object.ByteOrder.PutUint32(changed[32:36], 0x2d) // LC_LINKER_OPTION
+			case "indirect-alias":
+				changed[object.Symtab.Symoff+4] = 0x0b // N_INDR | N_EXT
+			case "foreign-subtype":
+				object.ByteOrder.PutUint32(changed[8:12], 2) // arm64e
+			}
+			object.Close()
+			if _, err := staticMapMachOObjectMentions(changed); err == nil {
+				t.Fatal("accepted an unproved native object")
+			}
+		})
+	}
+}
+
+func staticMapUniversalArchiveFixture(t *testing.T) []byte {
+	t.Helper()
+	data := make([]byte, 136)
+	binary.BigEndian.PutUint32(data[:4], 0xcafebabe)
+	binary.BigEndian.PutUint32(data[4:8], 2)
+	for i, cpu := range []macho.Cpu{macho.CpuAmd64, macho.CpuArm64} {
+		h := data[8+i*20 : 28+i*20]
+		binary.BigEndian.PutUint32(h[:4], uint32(cpu))
+		if i == 0 {
+			binary.BigEndian.PutUint32(h[4:8], 3)
+		}
+		offset := uint32(64 + i*64)
+		binary.BigEndian.PutUint32(h[8:12], offset)
+		binary.BigEndian.PutUint32(h[12:16], 8)
+		binary.BigEndian.PutUint32(h[16:20], 6)
+		copy(data[offset:], "!<arch>\n")
+	}
+	return data
+}
+
+func TestStaticMapNativeArchiveUniversalSelectionAndFraming(t *testing.T) {
+	data := staticMapUniversalArchiveFixture(t)
+	if result, err := inspectStaticMapNativeArchiveBytes(data, nil); err != nil || result.Members != 0 || result.SHA256 != digestBytes(data) {
+		t.Fatalf("universal archive: %+v %v", result, err)
+	}
+	for _, name := range []string{"truncated", "arm64e-only", "duplicate-arm64", "overlap", "out-of-range", "bad-alignment", "short-header", "unsupported-archive", "truncated-member", "oversized-name"} {
+		t.Run(name, func(t *testing.T) {
+			changed := append([]byte(nil), data...)
+			switch name {
+			case "truncated":
+				changed = changed[:130]
+			case "arm64e-only":
+				binary.BigEndian.PutUint32(changed[32:36], 2)
+			case "duplicate-arm64":
+				binary.BigEndian.PutUint32(changed[8:12], uint32(macho.CpuArm64))
+				binary.BigEndian.PutUint32(changed[12:16], 0)
+			case "overlap":
+				binary.BigEndian.PutUint32(changed[36:40], 64)
+			case "out-of-range":
+				binary.BigEndian.PutUint32(changed[40:44], 1000)
+			case "bad-alignment":
+				binary.BigEndian.PutUint32(changed[44:48], 31)
+			case "short-header":
+				binary.BigEndian.PutUint32(changed[4:8], 64)
+			case "unsupported-archive":
+				copy(changed[128:], "!<thin>\n")
+			case "truncated-member", "oversized-name":
+				changed = []byte("!<arch>\n" + "x.o/            " + "0           " + "0     " + "0     " + "100644  " + "1         " + "`\n")
+				if name == "oversized-name" {
+					copy(changed[8:24], "#1/999999999    ")
+					changed = append(changed, 'x', '\n')
+				}
+			}
+			if _, err := inspectStaticMapNativeArchiveBytes(changed, nil); err == nil {
+				t.Fatal("accepted malformed universal/native archive framing")
+			}
+		})
+	}
+}
+
+func TestStaticMapNativeArchiveActualCompilerRuntime(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("actual compiler runtime fixture requires native Darwin ARM64")
+	}
+	config := os.Getenv("LLVM_CONFIG")
+	if config == "" {
+		t.Skip("LLVM_CONFIG is not set")
+	}
+	path := filepath.Clean(filepath.Join(filepath.Dir(config), "../lib/clang/22/lib/darwin/libclang_rt.osx.a"))
+	result, err := inspectStaticMapNativeArchive(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Members < 200 || result.OwnObjects != 0 || len(result.Mentions) == 0 || slices.Contains(result.Mentions, "_unicode.Scripts") {
+		t.Fatalf("incomplete actual compiler runtime inventory: %+v", result)
+	}
+	t.Logf("compiler runtime: %d ARM64 members, %d distinct symbols, sha256 %s", result.Members, len(result.Mentions), result.SHA256)
+}
+
+func TestStaticMapNativeGoModuleOpaqueInputs(t *testing.T) {
+	for _, name := range []string{"plain", "empty-identity-asm", "named-asm", "module-asm", "linker-options", "dependent-library",
+		"compiler-pcline", "unmarked-pcline", "extra-reference-pcline", "different-id-pcline", "constraints-pcline", "forged-pcline", "marked-raw"} {
+		t.Run(name, func(t *testing.T) {
+			program := llssa.NewProgram(nil)
+			defer program.Dispose()
+			mod := program.NewPackage("opaque", "opaque").Module()
+			ctx := mod.Context()
+			switch name {
+			case "module-asm":
+				mod.SetInlineAsm(".globl _unicode.Scripts")
+			case "linker-options", "dependent-library":
+				key := "llvm.linker.options"
+				if name == "dependent-library" {
+					key = "llvm.dependent-libraries"
+				}
+				mod.AddNamedMetadataOperand(key, ctx.MDNode([]llvm.Metadata{ctx.MDString("foreign-library")}))
+			case "empty-identity-asm", "named-asm", "compiler-pcline", "unmarked-pcline", "extra-reference-pcline", "different-id-pcline", "constraints-pcline", "forged-pcline", "marked-raw":
+				body := ""
+				constraints := ""
+				if name == "named-asm" || name == "marked-raw" {
+					body = "nop"
+				}
+				if strings.HasSuffix(name, "-pcline") {
+					body = "L__llgo_pcsite_0123456789abcdef_${:uid}:\n.pushsection __DATA,__llgo_pcl,regular,live_support\n.p2align 3\nl_llgo_pcline_rec_${:uid}:\n.quad L__llgo_pcsite_0123456789abcdef_${:uid}\n.quad 0x0123456789abcdef\n.popsection"
+				}
+				switch name {
+				case "extra-reference-pcline":
+					body += "\n.quad _unicode.Scripts"
+				case "different-id-pcline":
+					body = strings.ReplaceAll(body, "0x0123456789abcdef", "0x1123456789abcdef")
+				case "constraints-pcline":
+					constraints = "~{memory}"
+				}
+				typ := llvm.FunctionType(ctx.VoidType(), nil, false)
+				fn := llvm.AddFunction(mod, "probe", typ)
+				builder := ctx.NewBuilder()
+				defer builder.Dispose()
+				builder.SetInsertPointAtEnd(ctx.AddBasicBlock(fn, "entry"))
+				assembly := llvm.InlineAsm(typ, body, constraints, true, false, llvm.InlineAsmDialectATT, false)
+				call := builder.CreateCall(typ, assembly, nil, "")
+				if strings.HasSuffix(name, "-pcline") && name != "unmarked-pcline" || name == "marked-raw" {
+					llssa.MarkCoroAtomicBoundedCompilerCall(ctx, call, llssa.CoroAtomicCompilerDataAnchorV1)
+				}
+				if name == "forged-pcline" {
+					call.SetMetadata(ctx.MDKindID(llssa.CoroAtomicBoundedCompilerCallMetadataName), ctx.MDNode([]llvm.Metadata{
+						llvm.ConstInt(ctx.Int32Type(), 1, false).ConstantAsMetadata(),
+						ctx.MDString(llssa.CoroAtomicCompilerDataAnchorV1), ctx.MDString(strings.Repeat("0", 64)),
+					}))
+				}
+				builder.CreateRetVoid()
+			}
+			want := name == "plain" || name == "empty-identity-asm" || name == "compiler-pcline"
+			if got := staticMapGoModuleClosed(mod); got != want {
+				t.Fatalf("module closed=%v; want %v", got, want)
+			}
+		})
+	}
+	if staticMapGoModuleClosed(llvm.Module{}) {
+		t.Fatal("missing LLVM module acquired a closure proof")
+	}
+}
+
+func TestStaticMapNativeProducerBindsActualArchiveMembers(t *testing.T) {
+	own := staticMapNativeObjectFixture(t, "_owner.M", true)
+	raw := staticMapNativeObjectFixture(t, "_unicode.Scripts", false)
+	archive := writeCoroArchiveTestFile(t, coroArchiveTestMember{"own.o", own}, coroArchiveTestMember{"raw.o", raw})
+	pkg := &aPackage{Package: &packages.Package{ID: "example.com/native", PkgPath: "example.com/native"},
+		Fingerprint: digestBytes([]byte("configuration")), StaticMapInitCaptured: true, StaticMapInitGoModuleClosed: true}
+	if err := recordStaticMapGoObject(pkg, "", own); err != nil {
+		t.Fatal(err)
+	}
+	compiler := digestBytes([]byte("compiler"))
+	data, err := encodeStaticMapInitFragment(pkg, compiler, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragment, err := decodeStaticMapInitFragment(data)
+	if err != nil || !fragment.NativeInputsClosed || !slices.Contains(fragment.NativeMentions, "_unicode.Scripts") {
+		t.Fatalf("actual raw reference was lost: %+v %v", fragment, err)
+	}
+	// Unknown raw members keep the normal producer cache usable, while
+	// refusing any native-input closure claim.
+	opaque := writeCoroArchiveTestFile(t, coroArchiveTestMember{"own.o", own}, coroArchiveTestMember{"raw.bc", []byte("BC\xc0\xdeopaque")})
+	data, err = encodeStaticMapInitFragment(pkg, compiler, opaque)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragment, err = decodeStaticMapInitFragment(data)
+	if err != nil || fragment.NativeInputsClosed || fragment.NativeBlocker == "" {
+		t.Fatalf("opaque native input did not retain: %+v %v", fragment, err)
+	}
+	if err := recordStaticMapGoObject(pkg, "", own); err == nil {
+		t.Fatal("accepted a second compiler-owned body")
+	}
+}

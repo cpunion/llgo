@@ -158,6 +158,12 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 	if c.buildConf.stagedMethodDCEEnabled() {
 		m.common.MethodTypeFragments = methodTypeFragmentVersion
 	}
+	if c.staticMapInitGatesEnabled() {
+		m.common.StaticMapInitFragments = staticMapInitFragmentVersion
+		// The existing development compiler cache identity hashes executable
+		// metadata. Constructor receipts additionally bind the actual bytes.
+		m.common.StaticMapCompilerSHA256, _ = c.staticMapInitCompilerIdentity()
+	}
 	if c.coroPlanDigest != "" {
 		metadata := c.coroPlanMetadata
 		m.common.CoroPlanDigest = c.coroPlanDigest
@@ -580,7 +586,27 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 		return false
 	}
 
+	var staticMaps *staticMapInitFragment
+	if c.staticMapInitGatesEnabled() {
+		compiler, err := c.staticMapInitCompilerIdentity()
+		if err != nil {
+			if pkgMeta != nil {
+				_ = pkgMeta.Close()
+			}
+			return false
+		}
+		fragment, err := readCachedStaticMapInitProducers(paths.StaticMaps, meta.StaticMapsHash, paths.Archive,
+			coroRawPackageIdentity(pkg), pkg.Fingerprint, compiler)
+		if err != nil {
+			if pkgMeta != nil {
+				_ = pkgMeta.Close()
+			}
+			return false
+		}
+		staticMaps = fragment
+	}
 	// Use the .a archive directly for linking (no extraction needed)
+	var methodTypes []byte
 	if c.buildConf.stagedMethodDCEEnabled() {
 		fragment, err := readCachedMethodTypes(paths.MethodTypes, meta.MethodTypesHash)
 		if err != nil {
@@ -589,7 +615,18 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 			}
 			return false
 		}
-		pkg.MethodTypeFragment = fragment
+		methodTypes = fragment
+	}
+	// Publish capabilities only after all required fragments have loaded.
+	// A later cache miss must leave fresh frontend object capture untouched.
+	if staticMaps != nil {
+		pkg.StaticMapInitProducers = staticMaps.Producers
+		pkg.StaticMapInitCaptured = true
+		pkg.StaticMapInitGoModuleClosed = staticMaps.GoModuleClosed
+		pkg.StaticMapInitOwnObjects = staticMaps.OwnObjects
+	}
+	if methodTypes != nil {
+		pkg.MethodTypeFragment = methodTypes
 	}
 	pkg.ArchiveFile = paths.Archive
 	pkg.LinkArgs = meta.LinkArgs
@@ -614,6 +651,7 @@ func parseManifestMetadata(content string) (*cacheArchiveMetadata, error) {
 			meta.NeedPyInit = data.Metadata.NeedPyInit
 			meta.CoroRootAnchorV1 = data.Metadata.CoroRootAnchorV1
 			meta.MethodTypesHash = data.Metadata.MethodTypesHash
+			meta.StaticMapsHash = data.Metadata.StaticMapsHash
 		}
 		return meta, nil
 	}
@@ -671,6 +709,7 @@ type cacheArchiveMetadata struct {
 	NeedPyInit       bool
 	CoroRootAnchorV1 string
 	MethodTypesHash  string
+	StaticMapsHash   string
 }
 
 // saveToCache saves a built package to cache.
@@ -746,7 +785,21 @@ func (c *context) saveToCache(pkg *aPackage) error {
 		}
 		meta.MethodTypesHash = digestBytes(pkg.MethodTypeFragment)
 	}
-	if len(meta.LinkArgs) == 0 && !meta.NeedRt && !meta.NeedPyInit && meta.CoroRootAnchorV1 == "" && meta.MethodTypesHash == "" {
+	if c.staticMapInitGatesEnabled() {
+		compiler, err := c.staticMapInitCompilerIdentity()
+		if err != nil {
+			return err
+		}
+		fragment, err := encodeStaticMapInitFragment(pkg, compiler, paths.Archive)
+		if err != nil {
+			return err
+		}
+		if err := writeManifest(paths.StaticMaps, string(fragment)); err != nil {
+			return err
+		}
+		meta.StaticMapsHash = digestBytes(fragment)
+	}
+	if len(meta.LinkArgs) == 0 && !meta.NeedRt && !meta.NeedPyInit && meta.CoroRootAnchorV1 == "" && meta.MethodTypesHash == "" && meta.StaticMapsHash == "" {
 		data.Metadata = nil
 	} else {
 		data.Metadata = meta

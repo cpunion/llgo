@@ -71,6 +71,9 @@ type Options struct {
 	// PreloadedSyntax means all Program-side source metadata was collected
 	// before lowering and is now shared read-only by backend Programs.
 	PreloadedSyntax bool
+	// CanonicalStaticMapInits emits reusable retained constructor gates. It
+	// never decides that a map is dead or emits an omission override.
+	CanonicalStaticMapInits bool
 }
 
 // SetDebug sets debug flags.
@@ -1380,11 +1383,22 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	isCgoCfunc := isCgoCfunc(fnName) || isCgoCMalloc(fnName)
 	isCgoC2 := isCgoC2func(fnName)
 	isCgoCmacro := isCgoCmacro(fnName)
+	mapGates := p.staticMapGateRegions(block, n, len(instrs))
+	var activeMapGate *staticMapGateRegion
 	for i, instr := range instrs {
+		if gate := mapGates[instr]; gate != nil {
+			if activeMapGate != nil {
+				panic("overlapping canonical map constructor gates")
+			}
+			activeMapGate = gate
+			p.beginStaticMapGate(b, gate)
+		}
 		if _, skip := p.unevaluatedSSA[instr]; skip {
+			finishStaticMapGate(b, instr, &activeMapGate)
 			continue
 		}
 		if p.compileCoroInstructionPrologue(b, instr) {
+			finishStaticMapGate(b, instr, &activeMapGate)
 			continue
 		}
 		if i == 1 && doModInit && p.state == pkgInPatch { // in patch package but no pkgFNoOldInit
@@ -1469,9 +1483,14 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 			}
 		}
 		if isTerminatingInstruction(instr) {
+			finishStaticMapGate(b, instr, &activeMapGate)
 			continue
 		}
 		p.clearDeadAllocs(b, instr)
+		finishStaticMapGate(b, instr, &activeMapGate)
+	}
+	if activeMapGate != nil {
+		panic("unterminated canonical map constructor gate")
 	}
 	// is cgo cfunc but not return yet, some funcs has multiple blocks
 	if (isCgoCfunc || isCgoC2 || isCgoCmacro) && !cgoReturned {
