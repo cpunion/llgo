@@ -71,6 +71,7 @@ int __llgo_coro_worker_create_v1(pthread_t *thread);
 
 bool __llgo_coro_worker_queue_init_v1(void);
 bool __llgo_coro_worker_queue_can_release_v1(void);
+uint32_t __llgo_coro_worker_queue_demand_v1(void);
 size_t __llgo_coro_worker_queue_reserve_v2(void);
 bool __llgo_coro_worker_queue_cancel_reservation_v2(size_t reservation);
 bool __llgo_coro_worker_queue_submit_reserved_v4(

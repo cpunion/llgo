@@ -30,6 +30,7 @@ import (
 const (
 	funcInfoTableSymbol             = "__llgo_funcinfo_table"
 	funcInfoCountSymbol             = "__llgo_funcinfo_count"
+	funcInfoRecordSizeSymbol        = "__llgo_funcinfo_record_size"
 	funcInfoStringsSymbol           = "__llgo_funcinfo_strings"
 	funcInfoStringOffsetsSymbol     = "__llgo_funcinfo_string_offsets"
 	funcInfoStringCountSymbol       = "__llgo_funcinfo_string_count"
@@ -284,6 +285,8 @@ func emitFuncInfoTable(ctx *context, pkg llssa.Package, records []funcInfoRecord
 	}, false)
 
 	tablePtr := llvm.AddGlobal(mod, llvm.PointerType(recordType, 0), funcInfoTableSymbol)
+	recordSize := llvm.AddGlobal(mod, i8Type, funcInfoRecordSizeSymbol)
+	recordSize.SetInitializer(llvm.ConstInt(i8Type, buildfuncinfo.EncodedRecordSize, false))
 	pcLinePtr := llvm.AddGlobal(mod, llvm.PointerType(pcLineRecordType, 0), pcLineTableSymbol)
 	pcSiteStartPtr := llvm.AddGlobal(mod, llvm.PointerType(pcSiteRecordType, 0), pcSiteStartPtrSymbol)
 	pcSiteEndPtr := llvm.AddGlobal(mod, llvm.PointerType(pcSiteRecordType, 0), pcSiteEndPtrSymbol)
@@ -371,18 +374,9 @@ func emitFuncInfoTable(ctx *context, pkg llssa.Package, records []funcInfoRecord
 		return
 	}
 
-	values := make([]llvm.Value, 0, len(encoded.Records))
-	for _, rec := range encoded.Records {
-		values = append(values, llvm.ConstNamedStruct(recordType, []llvm.Value{
-			llvm.ConstInt(i32Type, uint64(rec.SymbolPkg), false),
-			llvm.ConstInt(i32Type, uint64(rec.SymbolName), false),
-			llvm.ConstInt(i32Type, uint64(rec.NamePkg), false),
-			llvm.ConstInt(i32Type, uint64(rec.NameName), false),
-			llvm.ConstInt(i32Type, uint64(rec.FileRoot), false),
-			llvm.ConstInt(i32Type, uint64(rec.FileName), false),
-			llvm.ConstInt(i32Type, uint64(rec.Line), false),
-		}))
-	}
+	recordType, values, size := funcInfoRecordStorage(llvmCtx, encoded.Records,
+		ctx.buildConf.PCLNMode == PCLNEmbedded && runtimeLibraryLTO(ctx.buildConf))
+	recordSize.SetInitializer(llvm.ConstInt(i8Type, uint64(size), false))
 	arrayType := llvm.ArrayType(recordType, len(values))
 	data := llvm.AddGlobal(mod, arrayType, funcInfoDataSymbol)
 	data.SetInitializer(llvm.ConstArray(recordType, values))
@@ -727,8 +721,8 @@ var (
 
 // runtimeEntrySiteSectionInfo isolates the disposable Mach-O carrier only when
 // the linked image will actually pass through the embedded-executable rewrite.
-// Cross-package LTO inlining can then produce a page-scale duplicate tail worth
-// removing. External PCLN and library build modes do not run that rewrite, so
+// Global or private-runtime LTO inlining can produce a page-scale duplicate
+// tail worth removing. External PCLN and library build modes do not run that rewrite, so
 // they keep the carrier in __DATA instead of paying for an unused __LLGO page.
 func runtimeEntrySiteSectionInfo(ctx *context) siteSectionInfo {
 	if shouldCompactRuntimeMachOSites(ctx) {
@@ -741,7 +735,7 @@ func shouldCompactRuntimeMachOSites(ctx *context) bool {
 	return shouldEmitRuntimeMachOSites(ctx) &&
 		ctx.buildConf.BuildMode == BuildModeExe &&
 		ctx.buildConf.PCLNMode == PCLNEmbedded &&
-		ctx.buildConf.ltoEnabled()
+		(ctx.buildConf.ltoEnabled() || runtimeLibraryLTO(ctx.buildConf))
 }
 
 func (s siteSectionInfo) push(format siteObjectFormat, anchor string) string {

@@ -58,6 +58,13 @@ func QueueInit() bool
 //go:linkname QueueCanRelease C.__llgo_coro_worker_queue_can_release_v1
 func QueueCanRelease() bool
 
+// QueueDemand counts reservations, queued calls, and calls whose completion
+// callback has not returned. It reads one lock-free scalar; raw scheduling
+// owners use it only after returning from a physical RunSlice.
+//
+//go:linkname QueueDemand C.__llgo_coro_worker_queue_demand_v1
+func QueueDemand() uint32
+
 // QueueReserve owns one independent sequence slot without publishing it. Exact
 // P owners may reserve concurrently; all participating atomics were proved
 // lock-free by QueueInit, and each token is submitted or canceled inside its

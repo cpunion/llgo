@@ -31,6 +31,7 @@ import (
 	"github.com/xgo-dev/llvm"
 
 	"github.com/xgo-dev/llgo/internal/lto"
+	"github.com/xgo-dev/llgo/internal/optlevel"
 	"github.com/xgo-dev/llgo/internal/packages"
 	llssa "github.com/xgo-dev/llgo/ssa"
 )
@@ -189,12 +190,21 @@ func TestFuncInfoSiteLayoutArgsEligibilityAndCreateFailure(t *testing.T) {
 }
 
 func TestRuntimeEntrySiteSectionInfo(t *testing.T) {
+	t.Setenv("LLGO_AR", "")
+	private := "__DATA,__llgo_fie"
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		private = "__LLGO,__llgo_fie"
+	}
 	tests := []struct {
 		name string
 		ctx  *context
 		want string
 	}{
 		{name: "nil context", want: "__DATA,__llgo_fie"},
+		{name: "private runtime LTO", ctx: &context{buildConf: &Config{Goos: "darwin", Goarch: "arm64", OptLevel: optlevel.Os, BuildMode: BuildModeExe, PCLNMode: PCLNEmbedded, LTO: lto.Off}}, want: private},
+		{name: "private runtime external", ctx: &context{buildConf: &Config{Goos: "darwin", Goarch: "arm64", OptLevel: optlevel.Os, BuildMode: BuildModeExe, PCLNMode: PCLNExternal, LTO: lto.Off}}, want: "__DATA,__llgo_fie"},
+		{name: "private runtime debug", ctx: &context{buildConf: &Config{Goos: "darwin", Goarch: "arm64", OptLevel: optlevel.Os, LinkOptions: LinkOptions{DWARF: DWARFPreserve}, BuildMode: BuildModeExe, PCLNMode: PCLNEmbedded, LTO: lto.Off}}, want: "__DATA,__llgo_fie"},
+		{name: "private runtime named", ctx: &context{buildConf: &Config{Goos: "darwin", Goarch: "arm64", Target: "custom", OptLevel: optlevel.Os, BuildMode: BuildModeExe, PCLNMode: PCLNEmbedded, LTO: lto.Off}}, want: "__DATA,__llgo_fie"},
 		{name: "darwin without LTO", ctx: &context{buildConf: &Config{Goos: "darwin", BuildMode: BuildModeExe, PCLNMode: PCLNEmbedded, LTO: lto.Off}}, want: "__DATA,__llgo_fie"},
 		{name: "darwin embedded executable full LTO", ctx: &context{buildConf: &Config{Goos: "darwin", BuildMode: BuildModeExe, PCLNMode: PCLNEmbedded, LTO: lto.Full}}, want: "__LLGO,__llgo_fie"},
 		{name: "darwin embedded executable thin LTO", ctx: &context{buildConf: &Config{Goos: "darwin", BuildMode: BuildModeExe, PCLNMode: PCLNEmbedded, LTO: lto.Thin}}, want: "__LLGO,__llgo_fie"},

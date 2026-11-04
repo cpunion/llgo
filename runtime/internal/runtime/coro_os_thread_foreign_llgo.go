@@ -613,6 +613,7 @@ func coroNativeForeignReentryRunV1(
 			now,
 			coroNativeFleetRunBudgetV1,
 		)
+		coroTargetEnsureWorkerCapacityV1()
 		switch result.stop {
 		case coroRunSliceBudgetV1, coroRunAgainV1:
 			continue

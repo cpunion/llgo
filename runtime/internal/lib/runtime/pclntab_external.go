@@ -388,6 +388,7 @@ func installExternalPCLN(raw []byte, view externalPCLNView, loadBase uintptr) bo
 		return false
 	}
 
+	runtimeFuncInfoRecordSize = uint8(externalRecordSize)
 	runtimeFuncInfoTable = (*runtimeFuncInfoRecord)(recordBase)
 	runtimeFuncInfoCount = records.count
 	runtimeFuncInfoStrings = (*c.Char)(stringBase)

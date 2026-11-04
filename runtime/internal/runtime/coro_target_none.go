@@ -20,6 +20,8 @@ package runtime
 
 import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
+func coroTargetEnsureWorkerCapacityV1() {}
+
 // The target-neutral production fallback exposes no ingress callback and
 // therefore has nothing physical to join. An already sealed, empty executor
 // can be acknowledged synchronously. Entering a retained wait is deliberately

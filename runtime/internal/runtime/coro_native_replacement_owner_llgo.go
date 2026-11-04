@@ -114,12 +114,14 @@ func coroNativeReplacementRunSliceV1(
 	}
 	budget := coroNativeFleetRunBudgetV1
 	if domain.adopted {
-		return coroRunSlice(
+		result := coroRunSlice(
 			domain.pOwnerV1(),
 			&coroProgramGV1State,
 			driver,
 			budget,
 		)
+		coroTargetEnsureWorkerCapacityV1()
+		return result
 	}
 	return coroNativeFleetRunOwnerEpochV1(
 		owner.handle,

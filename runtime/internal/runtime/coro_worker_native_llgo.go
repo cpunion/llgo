@@ -44,7 +44,7 @@ const (
 
 // coroNativeWorkerPoolV1 is the native target adapter, not another executor.
 // Exact scheduler owners reserve independent lock-free queue cells and submit
-// or cancel them without suspension. Four fixed-stack workers
+// or cancel them without suspension. Up to four fixed-stack workers
 // drain the bounded C11 sequence ring, and each job's existing OperationID
 // route selects its Worker source on completion. Neither ring cells nor
 // workers inspect a G, ParkState, WaitSetRecord, or LLVM coroutine handle. No
@@ -55,7 +55,8 @@ type coroNativeWorkerPoolV1 struct {
 	handle   coro.ExecutorHandle
 	route    coro.RouteID
 
-	created  uint32
+	growth   coro.WorkerGrowth
+	joined   uint32
 	started  bool
 	stopping bool
 }
@@ -67,29 +68,70 @@ func coroNativeWorkerPoolCanReleaseV1() bool {
 		coroworker.QueueCanRelease()
 }
 
-func coroNativeWorkerPoolJoinCreatedV1(state *coroNativeWorkerPoolV1) bool {
-	if state == nil || state.created > coroNativeWorkerThreadCountV1 {
+func coroNativeWorkerPoolJoinCreatedV1(state *coroNativeWorkerPoolV1, created uint32) bool {
+	if state == nil || created > coroNativeWorkerThreadCountV1 || state.joined > created {
 		return false
 	}
-	ok := true
-	for index := uint32(0); index < state.created; index++ {
+	for index := state.joined; index < created; index++ {
 		thread := state.threads[index]
 		if thread == nil || threadpkg.Join(thread, nil) != 0 ||
 			!coroTargetReleasePhysicalThreadV1() {
-			ok = false
+			return false
 		}
 		state.threads[index] = nil
+		state.joined = index + 1
 	}
-	state.created = 0
-	return ok
+	return true
 }
 
 func coroNativeWorkerPoolResetAfterJoinV1(state *coroNativeWorkerPoolV1) bool {
-	if state == nil || state.created != 0 || !state.stopping ||
-		!coroworker.QueueDestroyAfterJoin() {
+	if state == nil || !state.stopping ||
+		!coroworker.QueueDestroyAfterJoin() || !state.growth.ResetAfterJoin(state.joined) {
 		return false
 	}
 	*state = coroNativeWorkerPoolV1{}
+	return true
+}
+
+// The creator lease spans only raw scheduler-owner calls. Thread identity is
+// stored before PublishNext releases its count to another physical owner.
+func coroNativeWorkerPoolCreateNextV1(state *coroNativeWorkerPoolV1, index uint32) bool {
+	if state == nil || index >= coroNativeWorkerThreadCountV1 ||
+		!coroTargetReservePhysicalThreadV1() {
+		return false
+	}
+	if coroworker.Create(&state.threads[index]) != 0 {
+		// pthread_create leaves its result slot undefined on failure.
+		state.threads[index] = nil
+		if !coroTargetReleasePhysicalThreadV1() {
+			coroRuntimeAbort("native coroutine worker create reservation rollback failed")
+		}
+		return false
+	}
+	if !state.growth.PublishNext(index + 1) {
+		coroRuntimeAbort("native coroutine worker identity publication failed")
+		return false
+	}
+	return true
+}
+
+// The caller has sealed creation after every scheduling owner stopped. No
+// worker ID or physical-thread reservation can be published past this point.
+func coroNativeWorkerPoolStopCreatedV1(state *coroNativeWorkerPoolV1, created uint32) bool {
+	if state == nil || state.stopping || !coroworker.QueueStop(created) {
+		coroRuntimeAbort("native coroutine worker stop wake failed")
+		return false
+	}
+	state.stopping = true
+	joined := coroNativeWorkerPoolJoinCreatedV1(state, created)
+	if !joined {
+		coroRuntimeAbort("native coroutine worker stop join failed")
+		return false
+	}
+	if !coroNativeWorkerPoolResetAfterJoinV1(state) {
+		coroRuntimeAbort("native coroutine worker stop destroy after join failed")
+		return false
+	}
 	return true
 }
 
@@ -114,36 +156,72 @@ func coroNativeWorkerPoolStartDeliveryV1(
 	state.handle = handle
 	state.route = route
 	state.started = true
-	for index := uint32(0); index < coroNativeWorkerThreadCountV1; index++ {
-		if !coroTargetReservePhysicalThreadV1() {
-			return false
+	if !state.growth.Start(coroNativeWorkerThreadCountV1) {
+		coroRuntimeAbort("native coroutine worker factory start failed")
+		return false
+	}
+	if _, _, status := state.growth.TryAcquire(); status != coro.WorkerGrowthAcquired {
+		coroRuntimeAbort("native coroutine initial worker lease failed")
+		return false
+	}
+	created := coroNativeWorkerPoolCreateNextV1(state, 0)
+	if !state.growth.Release() {
+		coroRuntimeAbort("native coroutine initial worker lease release failed")
+		return false
+	}
+	if !created {
+		// Startup precedes every user task, so its empty queue is safe to join.
+		count, status := state.growth.TrySeal()
+		if status != coro.WorkerGrowthAcquired || count != 0 ||
+			!coroNativeWorkerPoolStopCreatedV1(state, count) {
+			coroRuntimeAbort("native coroutine initial worker rollback failed")
 		}
-		if coroworker.Create(&state.threads[index]) != 0 {
-			// pthread_create leaves its result slot undefined on failure.
-			state.threads[index] = nil
-			if !coroTargetReleasePhysicalThreadV1() {
-				coroRuntimeAbort("native coroutine worker create reservation rollback failed")
-				return false
-			}
-			if !coroworker.QueueStop(state.created) {
-				coroRuntimeAbort("native coroutine worker start stop failed")
-				return false
-			}
-			state.stopping = true
-			joined := coroNativeWorkerPoolJoinCreatedV1(state)
-			if !joined {
-				coroRuntimeAbort("native coroutine worker start join failed")
-				return false
-			}
-			if !coroNativeWorkerPoolResetAfterJoinV1(state) {
-				coroRuntimeAbort("native coroutine worker start destroy after join failed")
-				return false
-			}
-			return false
-		}
-		state.created++
+		return false
 	}
 	return true
+}
+
+// This hook runs after each physical RunSlice has returned, outside managed
+// producer hooks and certified slice work. A competing raw owner retries Busy:
+// returning to sleep instead could miss demand added while a creator releases.
+func coroTargetEnsureWorkerCapacityV1() {
+	state := &coroNativeWorkerPoolV1State
+	if !state.started {
+		return
+	}
+	created, limit, ok := state.growth.Snapshot()
+	if !ok || created == 0 {
+		coroRuntimeAbort("native coroutine worker factory snapshot failed")
+		return
+	}
+	if created == limit || coroworker.QueueDemand() <= created {
+		return
+	}
+	for {
+		var status coro.WorkerGrowthStatus
+		created, limit, status = state.growth.TryAcquire()
+		if status == coro.WorkerGrowthBusy {
+			continue
+		}
+		if status != coro.WorkerGrowthAcquired {
+			coroRuntimeAbort("native coroutine worker growth lease failed")
+			return
+		}
+		break
+	}
+	for created < limit && coroworker.QueueDemand() > created {
+		if !coroNativeWorkerPoolCreateNextV1(state, created) {
+			// Submitted syscalls may block indefinitely. Do not join that live
+			// pool on creation failure, or report a smaller capacity as success.
+			state.growth.Fail()
+			coroRuntimeAbort("native coroutine worker demand growth failed")
+			return
+		}
+		created++
+	}
+	if !state.growth.Release() {
+		coroRuntimeAbort("native coroutine worker growth lease release failed")
+	}
 }
 
 func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
@@ -243,27 +321,19 @@ func coroNativeWorkerPoolStopDeliveryV1(
 ) bool {
 	state := &coroNativeWorkerPoolV1State
 	if !state.started || state.delivery != delivery || state.handle != handle ||
-		state.created != coroNativeWorkerThreadCountV1 {
+		state.stopping {
 		return false
 	}
-	if state.stopping {
-		return false
+	for {
+		created, status := state.growth.TrySeal()
+		if status == coro.WorkerGrowthBusy {
+			continue
+		}
+		if status != coro.WorkerGrowthAcquired || created == 0 || created > coroNativeWorkerThreadCountV1 {
+			return false
+		}
+		return coroNativeWorkerPoolStopCreatedV1(state, created)
 	}
-	if !coroworker.QueueStop(state.created) {
-		coroRuntimeAbort("native coroutine worker stop wake failed")
-		return false
-	}
-	state.stopping = true
-	joined := coroNativeWorkerPoolJoinCreatedV1(state)
-	if !joined {
-		coroRuntimeAbort("native coroutine worker stop join failed")
-		return false
-	}
-	if !coroNativeWorkerPoolResetAfterJoinV1(state) {
-		coroRuntimeAbort("native coroutine worker stop destroy after join failed")
-		return false
-	}
-	return true
 }
 
 func coroNativeWorkerPoolStopV1(handle coro.ExecutorHandle) bool {

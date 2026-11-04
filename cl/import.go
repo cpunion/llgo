@@ -1344,6 +1344,14 @@ func (p *context) varOf(b llssa.Builder, v *ssa.Global) llssa.Expr {
 func (p *context) ensureLoaded(pkgTypes *types.Package) *types.Package {
 	if p.goTyps != pkgTypes {
 		if _, ok := p.loaded[pkgTypes]; !ok {
+			if p.loadedShared {
+				loaded := make(map[*types.Package]*pkgInfo, len(p.loaded)+1)
+				for pkg, info := range p.loaded {
+					loaded[pkg] = info
+				}
+				p.loaded = loaded
+				p.loadedShared = false
+			}
 			i := &pkgInfo{
 				kind: pkgKindByPath(pkgTypes.Path()),
 			}

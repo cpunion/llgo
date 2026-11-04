@@ -136,6 +136,9 @@ struct llgo_coro_worker_queue_v1 {
     _Atomic uint32_t producer_state;
     _Atomic size_t enqueue_position;
     _Atomic size_t dequeue_position;
+    /* Reserved/queued jobs and calls whose completion callback has not returned.
+       This scalar never retains a payload or changes sequence-cell ownership. */
+    _Atomic uint32_t outstanding;
     /* Exactly one between-job worker may advertise a kernel-free handoff. */
     _Atomic bool handoff_poller;
     llgo_coro_worker_wake_v1 wake;
@@ -357,6 +360,7 @@ bool __llgo_coro_worker_queue_can_release_v1(void) {
         atomic_load_explicit(&queue->producer_state, memory_order_relaxed) == 0 &&
         atomic_load_explicit(&queue->enqueue_position, memory_order_relaxed) == 0 &&
         atomic_load_explicit(&queue->dequeue_position, memory_order_relaxed) == 0 &&
+        atomic_load_explicit(&queue->outstanding, memory_order_relaxed) == 0 &&
         !atomic_load_explicit(&queue->handoff_poller, memory_order_relaxed) &&
         queue->jobs == NULL;
 }
@@ -380,6 +384,7 @@ bool __llgo_coro_worker_queue_init_v1(void) {
     atomic_init(&queue->producer_state, 0);
     atomic_init(&queue->enqueue_position, 0);
     atomic_init(&queue->dequeue_position, 0);
+    atomic_init(&queue->outstanding, 0);
     atomic_init(&queue->handoff_poller, false);
     for (size_t index = 0; index < LLGO_CORO_WORKER_QUEUE_CAPACITY_V1; ++index) {
         atomic_init(&queue->sequence[index], index);
@@ -390,6 +395,7 @@ bool __llgo_coro_worker_queue_init_v1(void) {
         !atomic_is_lock_free(&queue->producer_state) ||
         !atomic_is_lock_free(&queue->enqueue_position) ||
         !atomic_is_lock_free(&queue->dequeue_position) ||
+        !atomic_is_lock_free(&queue->outstanding) ||
         !atomic_is_lock_free(&queue->handoff_poller) ||
         !atomic_is_lock_free(&queue->sequence[0]) ||
         !llgo_coro_worker_wake_init_v1(&queue->wake)) {
@@ -424,6 +430,7 @@ size_t __llgo_coro_worker_queue_reserve_v2(void) {
                     memory_order_relaxed, memory_order_relaxed)) {
                 /* Zero is the failure sentinel; the opaque public token is
                  * decoded by cancel/submit before sequence arithmetic. */
+                atomic_fetch_add_explicit(&queue->outstanding, 1, memory_order_release);
                 return position + 1;
             }
             position = expected;
@@ -587,6 +594,10 @@ uint32_t __llgo_coro_worker_queue_wait_take_v1(
         }
         if (status != LLGO_CORO_WORKER_QUEUE_TAKE_EMPTY_V1) {
             if (status == LLGO_CORO_WORKER_QUEUE_TAKE_CANCELED_V1) {
+                if (atomic_fetch_sub_explicit(
+                        &queue->outstanding, 1, memory_order_acq_rel) == 0) {
+                    abort();
+                }
                 continue;
             }
             return status;
@@ -595,6 +606,11 @@ uint32_t __llgo_coro_worker_queue_wait_take_v1(
             return LLGO_CORO_WORKER_QUEUE_TAKE_INVALID_V1;
         }
     }
+}
+
+uint32_t __llgo_coro_worker_queue_demand_v1(void) {
+    return atomic_load_explicit(
+        &llgo_coro_worker_queue_v1.outstanding, memory_order_acquire);
 }
 
 bool __llgo_coro_worker_queue_stop_v1(uint32_t worker_count) {
@@ -642,6 +658,10 @@ bool __llgo_coro_worker_queue_destroy_after_join_v1(void) {
     }
     atomic_store_explicit(&queue->enqueue_position, 0, memory_order_relaxed);
     atomic_store_explicit(&queue->dequeue_position, 0, memory_order_relaxed);
+    /* Manual transport consumers may retire calls themselves. The existing
+       sealed/drained queue plus the caller's join certifies reset in that mode;
+       outstanding is capacity advice, never authority to destroy a live call. */
+    atomic_store_explicit(&queue->outstanding, 0, memory_order_relaxed);
     atomic_store_explicit(&queue->handoff_poller, false, memory_order_relaxed);
     atomic_store_explicit(&queue->producer_state, 0, memory_order_relaxed);
     atomic_store_explicit(&queue->initialized, false, memory_order_release);
@@ -1035,6 +1055,10 @@ static void *llgo_coro_worker_main_v1(void *unused) {
                 result.fault,
                 result.fault_pc,
                 result.fault_target) != UINT32_C(1)) {
+            abort();
+        }
+        if (atomic_fetch_sub_explicit(
+                &llgo_coro_worker_queue_v1.outstanding, 1, memory_order_acq_rel) == 0) {
             abort();
         }
     }

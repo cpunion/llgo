@@ -39,7 +39,11 @@ func TestExactMissEvictionAndWrap(t *testing.T) {
 			t.Fatal("collision returned a different function")
 		}
 	}
-	for _, entry := range funcForPCCache[funcForPCCacheIndex(first.pc)] {
+	set := funcForPCReadSet(first.pc)
+	if set == nil {
+		t.Fatal("cache insertion did not publish its set")
+	}
+	for _, entry := range *set {
 		if cachedFuncForPC(&entry, first.pc) != nil {
 			t.Fatal("full-set replacement did not evict the oldest entry")
 		}
@@ -47,10 +51,10 @@ func TestExactMissEvictionAndWrap(t *testing.T) {
 	if fn := FuncForPC(first.pc); fn == first || *fn != *first {
 		t.Fatal("evicted lookup did not reconstruct the same symbol")
 	}
-	set := funcForPCCacheIndex(first.pc)
-	funcForPCCacheNext[set] = ^uint32(0)
+	_, next := funcForPCInsertionSet(funcForPCCacheIndex(first.pc))
+	*next = ^uint32(0)
 	pc := collidingPC(2 * funcForPCCacheWays)
-	if fn := FuncForPC(pc); fn.pc != pc || fn.symbol != pc^0x55aa || funcForPCCacheNext[set] != 0 {
+	if fn := FuncForPC(pc); fn.pc != pc || fn.symbol != pc^0x55aa || *next != 0 {
 		t.Fatal("replacement counter wrap changed lookup semantics")
 	}
 	// A stale pointer to a different PC is always a miss, not a partial match.
@@ -74,4 +78,19 @@ func TestConcurrentCollidingLookups(t *testing.T) {
 		})
 	}
 	group.Wait()
+}
+
+// Reads and insertions must identify the same set even for unaligned PCs,
+// wrapped indices and PCs with all upper bits set. The original insertion
+// index API and replacement policy are unchanged.
+func TestReadSetMapsFullWidthPC(t *testing.T) {
+	for _, pc := range []uintptr{0, 1, 15, 16, 31,
+		uintptr(funcForPCCacheSets-1) << 4,
+		uintptr(funcForPCCacheSets-1)<<4 | 15,
+		uintptr(funcForPCCacheSets) << 4, ^uintptr(0)} {
+		want, _ := funcForPCInsertionSet(funcForPCCacheIndex(pc))
+		if got := funcForPCReadSet(pc); got != want {
+			t.Fatalf("PC %#x read set %p does not match insertion set %p", pc, got, want)
+		}
+	}
 }

@@ -162,6 +162,21 @@ type runtimeFuncInfoRecord struct {
 	line       uint32
 }
 
+// The compact embedded form keeps the line and wrapper flag at full width.
+// External metadata and IDs exceeding 65535 retain runtimeFuncInfoRecord.
+type runtimeFuncInfoRecord16 struct {
+	symbolPkg  uint16
+	symbolName uint16
+	namePkg    uint16
+	nameName   uint16
+	fileRoot   uint16
+	fileName   uint16
+	line       uint32
+}
+
+//go:linkname runtimeFuncInfoRecordSize __llgo_funcinfo_record_size
+var runtimeFuncInfoRecordSize uint8
+
 const (
 	runtimeFuncInfoLineWrapper = uint32(1 << 31)
 	runtimeFuncInfoLineMask    = runtimeFuncInfoLineWrapper - 1
@@ -394,9 +409,22 @@ func funcInfoCString(id uint32) *c.Char {
 	return (*c.Char)(unsafe.Add(unsafe.Pointer(runtimeFuncInfoStrings), uintptr(off)))
 }
 
-func funcInfoAt(i uintptr) *runtimeFuncInfoRecord {
-	size := unsafe.Sizeof(*runtimeFuncInfoTable)
-	return (*runtimeFuncInfoRecord)(unsafe.Add(unsafe.Pointer(runtimeFuncInfoTable), i*size))
+func funcInfoAt(i uintptr) runtimeFuncInfoRecord {
+	return decodeRuntimeFuncInfoRecord(unsafe.Pointer(runtimeFuncInfoTable), runtimeFuncInfoRecordSize, i)
+}
+
+// Return the decoded value in caller storage; expanding compact records must
+// not allocate a heap object or introduce a second symbol cache.
+func decodeRuntimeFuncInfoRecord(table unsafe.Pointer, size uint8, i uintptr) runtimeFuncInfoRecord {
+	if size == 16 {
+		rec := (*runtimeFuncInfoRecord16)(unsafe.Add(table, i*unsafe.Sizeof(runtimeFuncInfoRecord16{})))
+		return runtimeFuncInfoRecord{
+			symbolPkg: uint32(rec.symbolPkg), symbolName: uint32(rec.symbolName),
+			namePkg: uint32(rec.namePkg), nameName: uint32(rec.nameName),
+			fileRoot: uint32(rec.fileRoot), fileName: uint32(rec.fileName), line: rec.line,
+		}
+	}
+	return *(*runtimeFuncInfoRecord)(unsafe.Add(table, i*unsafe.Sizeof(runtimeFuncInfoRecord{})))
 }
 
 func pcLineAt(i uintptr) *runtimePCLineRecord {
@@ -417,7 +445,7 @@ func funcInfoHashString(s string) uintptr {
 	return uintptr(h)
 }
 
-func funcInfoSymbolEqual(rec *runtimeFuncInfoRecord, symbol string) bool {
+func funcInfoSymbolEqual(rec runtimeFuncInfoRecord, symbol string) bool {
 	pkg := funcInfoCString(rec.symbolPkg)
 	name := funcInfoCString(rec.symbolName)
 	pkgLen := cStringLen(pkg)
@@ -521,69 +549,63 @@ func symbolPCFuncInfoName(buf []byte, pkgID, nameID uint32) uintptr {
 	return symbolPCBytes(name)
 }
 
-func funcInfoFunctionName(fn *runtimeFuncInfoRecord) string {
-	if fn == nil {
-		return ""
-	}
+func funcInfoFunctionName(fn runtimeFuncInfoRecord) string {
 	if function := publicFunctionName(funcInfoJoinName(fn.namePkg, fn.nameName)); function != "" {
 		return function
 	}
 	return publicFunctionName(funcInfoJoinName(fn.symbolPkg, fn.symbolName))
 }
 
-func funcInfoFileName(fn *runtimeFuncInfoRecord) string {
-	if fn == nil {
-		return ""
-	}
+func funcInfoFileName(fn runtimeFuncInfoRecord) string {
 	return funcInfoJoinFile(fn.fileRoot, fn.fileName)
 }
 
-func funcInfoForSymbol(symbol string) *runtimeFuncInfoRecord {
+func funcInfoForSymbol(symbol string) (runtimeFuncInfoRecord, bool) {
 	if symbol == "" || runtimeFuncInfoTable == nil || runtimeFuncInfoCount == 0 {
-		return nil
+		return runtimeFuncInfoRecord{}, false
 	}
 	if runtimeFuncInfoStrings == nil || runtimeFuncInfoStringOffsets == nil || runtimeFuncInfoCount > 1<<20 || runtimeFuncInfoHashMask > 1<<22 {
-		return nil
+		return runtimeFuncInfoRecord{}, false
 	}
 	if runtimeFuncInfoHash != nil && runtimeFuncInfoHashMask != 0 {
 		slot := funcInfoHashString(symbol) & runtimeFuncInfoHashMask
 		for probes := uintptr(0); probes <= runtimeFuncInfoHashMask; probes++ {
 			idx := *(*uint16)(unsafe.Add(unsafe.Pointer(runtimeFuncInfoHash), slot*unsafe.Sizeof(*runtimeFuncInfoHash)))
 			if idx == 0 {
-				return nil
+				return runtimeFuncInfoRecord{}, false
 			}
 			if uintptr(idx) <= runtimeFuncInfoCount {
 				rec := funcInfoAt(uintptr(idx) - 1)
 				if funcInfoSymbolEqual(rec, symbol) {
-					return rec
+					return rec, true
 				}
 			}
 			slot = (slot + 1) & runtimeFuncInfoHashMask
 		}
-		return nil
+		return runtimeFuncInfoRecord{}, false
 	}
 	for i := uintptr(0); i < runtimeFuncInfoCount; i++ {
 		rec := funcInfoAt(i)
 		if funcInfoSymbolEqual(rec, symbol) {
-			return rec
+			return rec, true
 		}
 	}
-	return nil
+	return runtimeFuncInfoRecord{}, false
 }
 
-func funcInfoForRuntimeSymbol(symbol string) *runtimeFuncInfoRecord {
+func funcInfoForRuntimeSymbol(symbol string) (runtimeFuncInfoRecord, bool) {
 	return funcInfoForSymbol(symbol)
 }
 
 func applyFuncInfo(sym *pcSymbol, rawFunction string) {
-	rec := funcInfoForRuntimeSymbol(rawFunction)
-	if rec == nil {
+	rec, ok := funcInfoForRuntimeSymbol(rawFunction)
+	if !ok {
 		public := publicFunctionName(rawFunction)
 		if public != rawFunction {
-			rec = funcInfoForRuntimeSymbol(public)
+			rec, ok = funcInfoForRuntimeSymbol(public)
 		}
 	}
-	if rec == nil {
+	if !ok {
 		return
 	}
 	if name := funcInfoJoinName(rec.namePkg, rec.nameName); name != "" {
@@ -785,22 +807,47 @@ var runtimePrebuiltEntriesOnce uint32
 // lookups. The set-associative pc cache in FuncForPC thrashes once the live
 // pc population outgrows it (thousands of distinct functions queried in a
 // loop); this cache is keyed by table row, so batch workloads stay O(search)
-// after the first pass regardless of scale. Atomic pointer publication keeps
-// concurrently created Func values fully initialized before readers use them.
-var runtimePrebuiltFuncs []unsafe.Pointer
+// after the first pass regardless of scale. Allocate it on the first stored
+// Func, not when adopting the table at startup. Publish the first element of
+// the typed pointer array directly; its allocation remains visible to the
+// collector without a separate heap slice header. The prebuilt table's extent
+// is immutable before either embedded or external initialization publishes
+// readiness, and every production caller observes that publication first.
+var runtimePrebuiltFuncs unsafe.Pointer // first element of []unsafe.Pointer
 
 func prebuiltFuncCacheLoad(idx int) unsafe.Pointer {
-	if idx < 0 || idx >= len(runtimePrebuiltFuncs) {
+	cache := latomic.LoadPointer(&runtimePrebuiltFuncs)
+	if cache == nil || idx < 0 || idx >= len(runtimePrebuiltFtab) {
 		return nil
 	}
-	return latomic.LoadPointer(&runtimePrebuiltFuncs[idx])
+	slot := (*unsafe.Pointer)(unsafe.Add(cache, uintptr(idx)*unsafe.Sizeof(cache)))
+	return latomic.LoadPointer(slot)
 }
 
 func prebuiltFuncCacheStore(idx int, fn unsafe.Pointer) {
-	if idx < 0 || idx >= len(runtimePrebuiltFuncs) {
+	// The prebuilt table is immutable after the function-table initializer
+	// publishes its done state. Keep every row, including the sentinel slot,
+	// exactly as the eagerly allocated cache did.
+	if idx < 0 || idx >= len(runtimePrebuiltFtab) {
 		return
 	}
-	latomic.StorePointer(&runtimePrebuiltFuncs[idx], fn)
+	cache := latomic.LoadPointer(&runtimePrebuiltFuncs)
+	if cache == nil {
+		if fn == nil {
+			return
+		}
+		candidate := make([]unsafe.Pointer, len(runtimePrebuiltFtab))
+		// A valid idx proved this immutable extent is non-empty. Keeping the
+		// element pointer typed preserves the entire backing allocation.
+		data := unsafe.Pointer(&candidate[0])
+		if latomic.CompareAndSwapPointer(&runtimePrebuiltFuncs, nil, data) {
+			cache = data
+		} else {
+			cache = latomic.LoadPointer(&runtimePrebuiltFuncs)
+		}
+	}
+	slot := (*unsafe.Pointer)(unsafe.Add(cache, uintptr(idx)*unsafe.Sizeof(cache)))
+	latomic.StorePointer(slot, fn)
 }
 
 // prebuiltFrameIndexForEntry returns the ftab row whose entry is exactly pc,
@@ -868,7 +915,6 @@ func adoptPrebuiltFuncPCTable() bool {
 	}
 	runtimeFuncPCFramesPrebuilt = true
 	runtimeFuncPCFramesFromSites = true
-	runtimePrebuiltFuncs = make([]unsafe.Pointer, count)
 	return true
 }
 

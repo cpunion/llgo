@@ -26,6 +26,7 @@ jobs:
           - { llvm: 22, go: "1.27.0", lane: "integration", check: "test integration (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "fault-e2e", timeout: 25, check: "test native fault landing E2E (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "cold-symbol-e2e", check: "test cold symbol storage E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "archive-e2e", timeout: 30, check: "test independent archive E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "reflect-e2e", timeout: 30, check: "test reflected resource handoff E2E (LLVM 22, Go 1.27.0)" }
@@ -90,6 +91,23 @@ jobs:
           go test ./internal/build -run '^TestCoroInlineNativeFaultAcceptance$' -count=1 -v
           go test ./internal/build -run '^TestPCLNModeNativeIntegration$/^(packaging|fault-signal-does-not-load)$/^external$' -count=1 -v
 
+      - name: Test compact records and precise collector cache ownership
+        if: matrix.lane == 'cold-symbol-e2e'
+        run: |
+          go test -p=1 ./internal/build -run '^Test(FuncInfoRecord(Storage|Encoding)|FuncForPCCacheStorageContract|RuntimeEntrySiteSectionInfo)' -count=1 -v
+          (cd runtime && go test -p=1 . -run '^(TestFuncForPCCache|TestPrebuiltFuncCache)' -count=1 -v)
+
+      - name: Test concurrent first use of compact native symbol caches
+        if: matrix.lane == 'cold-symbol-e2e'
+        run: |
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 go build -p=1 -o /tmp/llgo-cold-symbol ./cmd/llgo
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            LLGO_TEST_LLGO=/tmp/llgo-cold-symbol LLGO_FUNCINFO_RECORD_ACCEPTANCE=1 \
+            go test -p=1 ./internal/build -run '^TestFuncInfoRecordNativeDecodeAcceptance$' -timeout=18m -count=1 -v
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
+            LLGO_TEST_LLGO=/tmp/llgo-cold-symbol \
+            go test -p=1 ./test/go -run '^TestRuntimePrebuiltFuncCacheConcurrentFirstUse$' -timeout=5m -count=1 -v
+
       - name: Test lazy unwind scratch and actual fault contexts
         if: matrix.lane == 'compat'
         run: |
@@ -106,6 +124,7 @@ jobs:
           go test -race -shuffle=on ./internal/coro -count=1
           go test -race -shuffle=on ./internal/corodoorbell -count=1
           go test -race -shuffle=on ./internal/coroworker -count=3
+          go test . -run '^TestRuntimeCoroWorkerCreationFailureWithNativeQueue$' -count=1 -v -timeout=10m
           go test -race -tags=coro_gc_observer_test \
             ./internal/runtime/coro_gc_observer_llgo.go \
             ./internal/runtime/coro_gc_observer_test.go -count=1

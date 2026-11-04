@@ -20,6 +20,8 @@ package runtime
 
 import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
+func coroTargetEnsureWorkerCapacityV1() {}
+
 type coroProgramTestTargetModeV1 uint8
 
 const (

@@ -857,7 +857,9 @@ func coroNativeFleetRunOwnerEpochV1(
 	if p == nil || driver == nil {
 		return coroRunResultV1{}
 	}
-	return coroRunSliceAtV1(p, driver, now, budget)
+	result := coroRunSliceAtV1(p, driver, now, budget)
+	coroTargetEnsureWorkerCapacityV1()
+	return result
 }
 
 // coroNativeFleetCommitOwnerDestroyV1 settles an ordinary G's final-root

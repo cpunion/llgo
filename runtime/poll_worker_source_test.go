@@ -863,9 +863,10 @@ func TestRuntimeCoroWorkerDestroyCapabilityIsAfterJoinScoped(t *testing.T) {
 	native := readRuntimePollFile(t, runtimeCoroNativeWorkerSource)
 	for _, required := range []string{
 		"func coroNativeWorkerPoolResetAfterJoinV1(state *coroNativeWorkerPoolV1) bool",
-		"state.created != 0 || !state.stopping",
+		"state == nil || !state.stopping",
+		"state.growth.ResetAfterJoin(state.joined)",
 		"coroworker.QueueDestroyAfterJoin()",
-		"joined := coroNativeWorkerPoolJoinCreatedV1(state)",
+		"joined := coroNativeWorkerPoolJoinCreatedV1(state, created)",
 	} {
 		if !strings.Contains(native, required) {
 			t.Errorf("%s lacks after-join destroy invariant %q", runtimeCoroNativeWorkerSource, required)

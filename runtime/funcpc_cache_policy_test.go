@@ -49,8 +49,30 @@ func TestFuncForPCCacheTargetPolicy(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				value := file.Decls[0].(*ast.GenDecl).Specs[0].(*ast.ValueSpec)
-				sets, err := strconv.Atoi(value.Values[0].(*ast.BasicLit).Value)
+				var literal *ast.BasicLit
+				for _, declaration := range file.Decls {
+					group, ok := declaration.(*ast.GenDecl)
+					if !ok || group.Tok != token.CONST {
+						continue
+					}
+					for _, spec := range group.Specs {
+						value, ok := spec.(*ast.ValueSpec)
+						if !ok || len(value.Names) != 1 || value.Names[0].Name != "funcForPCCacheSets" {
+							continue
+						}
+						if literal != nil || len(value.Values) != 1 {
+							t.Fatal("cache set count must have one constant declaration")
+						}
+						literal, ok = value.Values[0].(*ast.BasicLit)
+						if !ok || literal.Kind != token.INT {
+							t.Fatal("cache set count must be an integer constant")
+						}
+					}
+				}
+				if literal == nil {
+					t.Fatal("missing cache set count")
+				}
+				sets, err := strconv.Atoi(literal.Value)
 				if err != nil || sets != profile.sets || sets <= 0 || sets&(sets-1) != 0 {
 					t.Fatalf("%s: invalid cache sets %d (%v), want %d", name, sets, err, profile.sets)
 				}
@@ -72,8 +94,7 @@ func TestFuncForPCCacheProductionCollisionAndRace(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := map[string]bool{
-		"funcForPCCacheWays": true, "funcForPCCache": true,
-		"funcForPCCacheNext": true, "funcForPCLast": true,
+		"funcForPCCacheWays": true, "funcForPCLast": true,
 		"cachedFuncForPC": true, "FuncForPC": true,
 		"cacheFuncForPC": true, "funcForPCCacheIndex": true,
 	}

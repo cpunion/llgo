@@ -570,16 +570,18 @@ func coroProgramDriveStepV2(budget uint32) coroProgramDriveOutcomeV2 {
 		coroProgramContinuationV1State != coroProgramContinuationNoneV1 {
 		return coroProgramFailOutcomeV2()
 	}
+	slice := coroRunSlice(
+		&coroProgramPV1State,
+		&coroProgramGV1State,
+		&coroProgramExecutorDriverV1State,
+		budget,
+	)
+	coroTargetEnsureWorkerCapacityV1()
 	result := coroFinishRunSliceCompatibility(
 		&coroProgramPV1State,
 		&coroProgramGV1State,
 		&coroProgramExecutorDriverV1State,
-		coroRunSlice(
-			&coroProgramPV1State,
-			&coroProgramGV1State,
-			&coroProgramExecutorDriverV1State,
-			budget,
-		),
+		slice,
 	)
 	outcome := coroProgramDriveOutcomeV2{
 		result:   coroProgramRunResultV2{Used: result.used},

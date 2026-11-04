@@ -279,9 +279,8 @@ type EmissionUniverse struct {
 	byPath             map[string]*preparedEmissionPackage
 	pathDup            map[string]bool
 	// loadedPackageSnapshot is frozen after every input package has been
-	// registered. Effective-type projection is read-only, so its short-lived
-	// contexts share this map instead of rebuilding the complete package index
-	// once per interface candidate.
+	// registered. Short-lived contexts share this immutable index and detach
+	// it only if ensureLoaded imports a package outside the frozen universe.
 	loadedPackageSnapshot map[*types.Package]*pkgInfo
 
 	// libraryEffects is the narrow immutable producer/consumer view for
@@ -1039,7 +1038,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			u.byPath[pkgPath] = prepared
 		}
 	}
-	u.loadedPackageSnapshot = u.loadedPackages(false)
+	u.loadedPackageSnapshot = u.loadedPackages()
 	if options.CompleteRuntimeABI {
 		if prog == nil {
 			return nil, fmt.Errorf("prepare emission universe: complete runtime ABI requires an LLVM SSA program")
@@ -6539,7 +6538,8 @@ func (u *EmissionUniverse) classifiedManagedSymbol(prepared *preparedEmissionPac
 		goTyps:           prepared.pkgTypes,
 		goPkg:            prepared.ssa,
 		patches:          u.patches,
-		loaded:           u.loadedPackages(true),
+		loaded:           u.loadedPackages(),
+		loadedShared:     true,
 		linkOnceFns:      make(map[*ssa.Function]none),
 		state:            state,
 		emissionUniverse: u,
@@ -7590,27 +7590,28 @@ func (u *EmissionUniverse) isIntrinsic(fn *ssa.Function, owner *preparedEmission
 		return false
 	}
 	ctx := &context{
-		prog:        u.prog,
-		fset:        u.goProg.Fset,
-		goProg:      u.goProg,
-		goTyps:      owner.pkgTypes,
-		goPkg:       owner.ssa,
-		patches:     u.patches,
-		loaded:      u.loadedPackages(true),
-		linkOnceFns: make(map[*ssa.Function]none),
+		prog:         u.prog,
+		fset:         u.goProg.Fset,
+		goProg:       u.goProg,
+		goTyps:       owner.pkgTypes,
+		goPkg:        owner.ssa,
+		patches:      u.patches,
+		loaded:       u.loadedPackages(),
+		loadedShared: true,
+		linkOnceFns:  make(map[*ssa.Function]none),
 	}
 	_, _, ftype := ctx.funcName(fn)
 	return ftype == llgoInstr
 }
 
-// loadedPackages returns the frozen package index, cloning it only for legacy
-// context paths which may extend their local view. Keeping both views behind
-// one entry point prevents cache mechanics from expanding universe authority.
-func (u *EmissionUniverse) loadedPackages(writable bool) map[*types.Package]*pkgInfo {
-	snapshot := map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
+// loadedPackages returns the immutable package index. Contexts borrowing it
+// must set loadedShared so ensureLoaded preserves private import extensions.
+func (u *EmissionUniverse) loadedPackages() map[*types.Package]*pkgInfo {
 	if u != nil && u.loadedPackageSnapshot != nil {
-		snapshot = u.loadedPackageSnapshot
-	} else if u != nil && u.goProg != nil {
+		return u.loadedPackageSnapshot
+	}
+	snapshot := map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
+	if u != nil && u.goProg != nil {
 		for _, pkg := range u.goProg.AllPackages() {
 			if pkg == nil || pkg.Pkg == nil {
 				continue
@@ -7625,14 +7626,7 @@ func (u *EmissionUniverse) loadedPackages(writable bool) map[*types.Package]*pkg
 			}
 		}
 	}
-	if !writable {
-		return snapshot
-	}
-	loaded := make(map[*types.Package]*pkgInfo, len(snapshot))
-	for pkg, info := range snapshot {
-		loaded[pkg] = info
-	}
-	return loaded
+	return snapshot
 }
 
 func (u *EmissionUniverse) typeProvenance(owner *preparedEmissionPackage, typ types.Type) (pkgState, bool, bool) {
@@ -7752,7 +7746,8 @@ func (u *EmissionUniverse) effectiveTypeContext(owner *preparedEmissionPackage, 
 		goTyps:           owner.pkgTypes,
 		goPkg:            owner.ssa,
 		patches:          u.patches,
-		loaded:           u.loadedPackages(false),
+		loaded:           u.loadedPackages(),
+		loadedShared:     true,
 		linkOnceFns:      make(map[*ssa.Function]none),
 		emissionUniverse: u,
 	}
@@ -8460,7 +8455,8 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 			goTyps:           prepared.pkgTypes,
 			goPkg:            prepared.ssa,
 			patches:          u.patches,
-			loaded:           u.loadedPackages(true),
+			loaded:           u.loadedPackages(),
+			loadedShared:     true,
 			linkOnceFns:      make(map[*ssa.Function]none),
 			state:            state,
 			emissionUniverse: u,
@@ -9495,14 +9491,15 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 	owner := u.ownerOf(fn)
 	if owner != nil {
 		ctx := &context{
-			prog:        u.prog,
-			fset:        u.goProg.Fset,
-			goProg:      u.goProg,
-			goTyps:      owner.pkgTypes,
-			goPkg:       owner.ssa,
-			patches:     u.patches,
-			loaded:      u.loadedPackages(true),
-			linkOnceFns: make(map[*ssa.Function]none),
+			prog:         u.prog,
+			fset:         u.goProg.Fset,
+			goProg:       u.goProg,
+			goTyps:       owner.pkgTypes,
+			goPkg:        owner.ssa,
+			patches:      u.patches,
+			loaded:       u.loadedPackages(),
+			loadedShared: true,
+			linkOnceFns:  make(map[*ssa.Function]none),
 		}
 		_, name, ftype := ctx.funcName(fn)
 		sig := ""

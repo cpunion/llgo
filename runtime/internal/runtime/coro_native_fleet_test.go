@@ -39,6 +39,10 @@ func coroMaterializeResumeCleanupStepV1(coro.ResumeCleanupStep) bool { return fa
 // Valid paths never call this non-returning test-island stand-in.
 func coroRuntimeAbort(message string) { panic(message) }
 
+// This host island has no physical worker factory. The native linked controls
+// separately exercise actual thread creation after its slice boundary.
+func coroTargetEnsureWorkerCapacityV1() {}
+
 type coroNativeFleetTestTask struct {
 	g           *coro.G
 	handle      unsafe.Pointer

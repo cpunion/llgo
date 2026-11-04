@@ -352,11 +352,13 @@ func coroFinishRunSliceCompatibility(
 // preparation and terminal-close boundaries.
 func coroRun(p *coroP, main *coroG, driver *coro.ExecutorDriver) coroRunResultV1 {
 	for {
+		slice := coroRunSlice(p, main, driver, coroCompatibilityRunBudgetV1)
+		coroTargetEnsureWorkerCapacityV1()
 		result := coroFinishRunSliceCompatibility(
 			p,
 			main,
 			driver,
-			coroRunSlice(p, main, driver, coroCompatibilityRunBudgetV1),
+			slice,
 		)
 		switch result.stop {
 		case coroRunSliceBudgetV1, coroRunAgainV1:

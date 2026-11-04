@@ -20,6 +20,9 @@ package runtime
 
 import "github.com/xgo-dev/llgo/runtime/internal/coro"
 
+// Host profiles supply their own operation service and create no native workers.
+func coroTargetEnsureWorkerCapacityV1() {}
+
 // The host profile is a pull ABI, not a platform import masquerading as one.
 // JS/WASM wrappers, WASI reactors, RTOS tasks, and embedded main loops consume
 // the same pointer-free actions but provide their own scheduling/alarm glue.

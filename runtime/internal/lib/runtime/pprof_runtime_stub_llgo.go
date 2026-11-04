@@ -96,8 +96,6 @@ const funcForPCCacheWays = 4
 // Cache immutable Func pointers as single atomic words. The queried pc lives
 // in Func itself, so concurrent replacement cannot combine fields from two
 // different cache entries.
-var funcForPCCache [funcForPCCacheSets][funcForPCCacheWays]unsafe.Pointer
-var funcForPCCacheNext [funcForPCCacheSets]uint32
 var funcForPCLast unsafe.Pointer
 
 func cachedFuncForPC(entry *unsafe.Pointer, pc uintptr) *Func {
@@ -121,11 +119,12 @@ func FuncForPC(pc uintptr) *Func {
 	if fn := cachedFuncForPC(&funcForPCLast, pc); fn != nil {
 		return fn
 	}
-	set := &funcForPCCache[funcForPCCacheIndex(pc)]
-	for i := 0; i < funcForPCCacheWays; i++ {
-		if fn := cachedFuncForPC(&set[i], pc); fn != nil {
-			latomic.StorePointer(&funcForPCLast, unsafe.Pointer(fn))
-			return fn
+	if set := funcForPCReadSet(pc); set != nil {
+		for i := 0; i < funcForPCCacheWays; i++ {
+			if fn := cachedFuncForPC(&set[i], pc); fn != nil {
+				latomic.StorePointer(&funcForPCLast, unsafe.Pointer(fn))
+				return fn
+			}
 		}
 	}
 	return funcForPCSlow(pc)
@@ -243,10 +242,11 @@ func frameFuncForPC(pc uintptr, sym pcSymbol, name string) *Func {
 	if fn := cachedFuncForPC(&funcForPCLast, pc); fn != nil {
 		return fn
 	}
-	set := &funcForPCCache[funcForPCCacheIndex(pc)]
-	for i := 0; i < funcForPCCacheWays; i++ {
-		if fn := cachedFuncForPC(&set[i], pc); fn != nil {
-			return fn
+	if set := funcForPCReadSet(pc); set != nil {
+		for i := 0; i < funcForPCCacheWays; i++ {
+			if fn := cachedFuncForPC(&set[i], pc); fn != nil {
+				return fn
+			}
 		}
 	}
 	fn := &Func{
@@ -267,7 +267,7 @@ func frameFuncForPC(pc uintptr, sym pcSymbol, name string) *Func {
 
 func cacheFuncForPC(pc uintptr, fn *Func) {
 	setIndex := funcForPCCacheIndex(pc)
-	set := &funcForPCCache[setIndex]
+	set, next := funcForPCInsertionSet(setIndex)
 	for i := 0; i < funcForPCCacheWays; i++ {
 		p := latomic.LoadPointer(&set[i])
 		if p == nil || (*Func)(p).pc == pc {
@@ -276,7 +276,7 @@ func cacheFuncForPC(pc uintptr, fn *Func) {
 			return
 		}
 	}
-	way := (latomic.AddUint32(&funcForPCCacheNext[setIndex], 1) - 1) & (funcForPCCacheWays - 1)
+	way := (latomic.AddUint32(next, 1) - 1) & (funcForPCCacheWays - 1)
 	latomic.StorePointer(&set[way], unsafe.Pointer(fn))
 	latomic.StorePointer(&funcForPCLast, unsafe.Pointer(fn))
 }
