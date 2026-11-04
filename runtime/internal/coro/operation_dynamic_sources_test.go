@@ -23,11 +23,11 @@ import (
 
 func TestOperationDynamicPageDirectoryIsSparseAndPublishesCompleteBlocks(t *testing.T) {
 	pointerSize := unsafe.Sizeof(uintptr(0))
-	wantRoots := uint32(8)
-	if operationCatalogPageCapacity == 16 {
-		wantRoots = 32
+	wantRoots, wantBlock := uint32(8), uint32(64)
+	if operationCatalogPageCapacity == 4 {
+		wantRoots, wantBlock = 32, 256
 	}
-	if operationPageDirectoryBlockCapacity != 64 || operationPageDirectoryBlockCount != wantRoots ||
+	if operationPageDirectoryBlockCapacity != wantBlock || operationPageDirectoryBlockCount != wantRoots ||
 		unsafe.Sizeof(operationDynamicPageDirectory{}) > uintptr(wantRoots+1)*pointerSize {
 		t.Fatalf("dynamic directory layout: block=%d roots=%d size=%d pointer=%d",
 			operationPageDirectoryBlockCapacity, operationPageDirectoryBlockCount,
@@ -172,5 +172,36 @@ func TestOperationSourcesRejectNonPristineDynamicPages(t *testing.T) {
 	dirtyWorker.slots[0].submitted = true
 	if !BindWorkerOperationSource(worker, p) || AttachWorkerOperationPage(worker, p, dirtyWorker, new(OperationPageDirectoryBlock)) {
 		t.Fatal("worker accepted non-pristine dynamic page")
+	}
+}
+
+// Every directory root and the partial final block must remain reachable after
+// shrinking physical source pages. Overflow must leave all published handles
+// intact, including a producer's already-retained first page.
+func TestOperationDynamicDirectoryRetainsFullLogicalCapacity(t *testing.T) {
+	directory := new(operationDynamicPageDirectory)
+	first := unsafe.Pointer(new(byte))
+	last := first
+	for index := uint32(0); index < operationDynamicPageCapacity; index++ {
+		page := first
+		if index != 0 {
+			page = unsafe.Pointer(new(byte))
+		}
+		var block *OperationPageDirectoryBlock
+		if index%operationPageDirectoryBlockCapacity == 0 {
+			block = new(OperationPageDirectoryBlock)
+		}
+		if !directory.publish(page, block) || directory.page(index) != page || directory.published() != index+1 {
+			t.Fatalf("published page %d is not stable", index)
+		}
+		last = page
+	}
+	if directory.publish(unsafe.Pointer(new(byte)), nil) || directory.published() != operationDynamicPageCapacity ||
+		directory.page(0) != first || directory.page(operationDynamicPageCapacity-1) != last ||
+		directory.page(operationDynamicPageCapacity) != nil {
+		t.Fatal("directory overflow changed the published logical capacity")
+	}
+	if (directory.published()+1)*operationCatalogPageCapacity != 32704 {
+		t.Fatal("logical source-local limit changed")
 	}
 }
