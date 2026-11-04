@@ -3,6 +3,7 @@ package gotest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -21,6 +22,11 @@ import (
 func rowLoad(int) unsafe.Pointer
 //go:linkname rowStore runtime.prebuiltFuncCacheStore
 func rowStore(int, unsafe.Pointer)
+
+//go:linkname initRows runtime.initRuntimeFuncPCFrames
+func initRows()
+//go:linkname rowCount runtime.prebuiltFrameCount
+func rowCount() int
 
 //go:noinline
 func mark0() int { return 0 }
@@ -101,6 +107,14 @@ func checkSymbols(markers []func() int) {
 }
 
 func main() {
+ // Production cache callers initialize the immutable frame table first.
+ // Initialize that extent without a FuncForPC lookup, which would retain
+ // objects in another cache and mask a missing row-cache root.
+ before := rowCount()
+ initRows()
+ rows := rowCount()
+ println("prebuilt row test extent", before, rows)
+ if rows < 8 { panic("prebuilt row test has no initialized table extent") }
  for _, index := range []int{-1, 0, int(^uint(0)>>1)} {
   if rowLoad(index) != nil { panic("cold row read returned a Func") }
   rowStore(index, nil)
@@ -139,7 +153,12 @@ func TestRuntimePrebuiltFuncCacheConcurrentFirstUse(t *testing.T) {
 	root := findRepoRoot(t)
 	t.Setenv("LLGO_ROOT", root)
 	cmd := commandForTest(t, root, "go", "run", "./cmd/llgo", "run", "-a", file)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("prebuilt row-cache probe failed: %v\n%s", err, output)
 	}
+	if !strings.Contains(string(output), "prebuilt row cache cold publication and GC ok") {
+		t.Fatalf("prebuilt row-cache probe did not finish: %s", output)
+	}
+	t.Logf("%s", output)
 }

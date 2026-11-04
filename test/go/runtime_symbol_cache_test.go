@@ -7,6 +7,7 @@ package gotest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -88,6 +89,7 @@ func main() {
   }
  }
  if atomic.LoadUint32(&controlFinalized)==0 { panic("positive finalizer control did not run") }
+ println("fallback symbol cache publication and GC ok")
 }
 `
 
@@ -100,7 +102,12 @@ func TestRuntimeFallbackSymbolCacheConcurrentFirstUse(t *testing.T) {
 	root := findRepoRoot(t)
 	t.Setenv("LLGO_ROOT", root)
 	cmd := commandForTest(t, root, "go", "run", "./cmd/llgo", "run", "-a", file)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("llgo fallback symbol cache probe failed: %v\n%s", err, out)
 	}
+	if !strings.Contains(string(out), "fallback symbol cache publication and GC ok") {
+		t.Fatalf("fallback symbol-cache probe did not finish: %s", out)
+	}
+	t.Logf("%s", out)
 }

@@ -106,7 +106,7 @@ jobs:
             go test -p=1 ./internal/build -run '^TestFuncInfoRecordNativeDecodeAcceptance$' -timeout=18m -count=1 -v
           GOMAXPROCS=2 GOMEMLIMIT=2GiB GOFLAGS=-p=1 LLGO_BUILD_CACHE=off \
             LLGO_TEST_LLGO=/tmp/llgo-cold-symbol \
-            go test -p=1 ./test/go -run '^TestRuntimePrebuiltFuncCacheConcurrentFirstUse$' -timeout=5m -count=1 -v
+            go test -p=1 ./test/go -run '^TestRuntime(PrebuiltFunc|FallbackSymbol)CacheConcurrentFirstUse$' -timeout=5m -count=1 -v
 
       - name: Test lazy unwind scratch and actual fault contexts
         if: matrix.lane == 'compat'
