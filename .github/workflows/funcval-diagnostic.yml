@@ -1,15 +1,15 @@
-name: Function-value complete package diagnostic
+name: Function-value complete CL diagnostic
 
 on:
   push:
-    branches: [codex/funcval-main-ci-20261104]
+    branches: [codex/funcval-ifaceprom-ci-20261104]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  SOURCE_REF: 98e2acc1184af43e9d9695efd7210125b20c07ff
+  SOURCE_REF: 8fa9df11fdbc58eb9d0f7e4aa8117258ca483ca2
   TRANSLATOR_VERSION: v0.0.0-20261103223044-14e9b3d7b735
   GOTOOLCHAIN: local
   GOWORK: "off"
@@ -39,8 +39,6 @@ jobs:
         include:
           - id: cl
             package: ./cl
-          - id: build
-            package: ./internal/build
     steps:
       - name: Check out diagnostic control
         uses: actions/checkout@v7

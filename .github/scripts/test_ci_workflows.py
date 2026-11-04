@@ -1055,7 +1055,7 @@ elif args[0] == "test" and any(a.endswith("/test/std/bytes") for a in args):
         events = workflow.get("on", {})
         self.assertEqual(set(events), {"push", "workflow_dispatch"})
         self.assertEqual(events["push"], {
-            "branches": ["codex/funcval-main-ci-20261104"],
+            "branches": ["codex/funcval-ifaceprom-ci-20261104"],
         })
         self.assertIn(events["workflow_dispatch"], (None, "", {}))
         environment = workflow.get("env", {})
@@ -1072,7 +1072,6 @@ elif args[0] == "test" and any(a.endswith("/test/std/bytes") for a in args):
         self.assertNotIn("max-parallel", strategy)
         self.assertEqual(strategy.get("matrix"), {"include": [
             {"id": "cl", "package": "./cl"},
-            {"id": "build", "package": "./internal/build"},
         ]})
         steps = job.get("steps", [])
         source = [step for step in steps
