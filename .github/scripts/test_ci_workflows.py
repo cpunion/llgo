@@ -1094,10 +1094,120 @@ elif args[0] == "test" and any(a.endswith("/test/std/bytes") for a in args):
                     self.assertIn("prepare", needs(job))
                     self.assertIn(f"needs.prepare.outputs.{flag} == 'true'", job["if"])
 
+    def assert_isolated_funcval_diagnostic(self, workflow):
+        events = workflow.get("on", {})
+        self.assertEqual(set(events), {"push", "workflow_dispatch"})
+        self.assertEqual(events["push"], {
+            "branches": ["codex/funcval-final-bool-tail-ci-20261105"],
+        })
+        self.assertIn(events["workflow_dispatch"], (None, "", {}))
+        environment = workflow.get("env", {})
+        self.assertRegex(environment.get("SOURCE_REF", ""), r"^[0-9a-f]{40}$")
+        self.assertRegex(environment.get("TRANSLATOR_VERSION", ""),
+                         r"^v0\.0\.0-[0-9]{14}-[0-9a-f]{12}$")
+        expected = {
+            "affected-adapter": [{"id": "adapter", "package": "./internal/plan9asm"}],
+            "complete-package": [
+                {"id": "build", "package": "./internal/build"},
+                {"id": "cl", "package": "./cl"},
+            ],
+        }
+        jobs = workflow.get("jobs", {})
+        self.assertEqual(set(jobs), set(expected))
+        self.assertEqual(needs(jobs["affected-adapter"]), [])
+        self.assertEqual(needs(jobs["complete-package"]), ["affected-adapter"])
+        for name, entries in expected.items():
+            job = jobs[name]
+            self.assertEqual(job.get("if"),
+                             "${{ !cancelled() && github.repository == 'cpunion/llgo' }}")
+            self.assertEqual(job.get("name"), "Complete owner execution ${{ matrix.package }}")
+            self.assertEqual(job.get("runs-on"), "ubuntu-24.04")
+            self.assertEqual(job.get("timeout-minutes"), "90")
+            self.assertNotIn("continue-on-error", job)
+            strategy = job.get("strategy", {})
+            self.assertEqual(strategy.get("fail-fast"), "false")
+            self.assertNotIn("max-parallel", strategy)
+            self.assertEqual(strategy.get("matrix"), {"include": entries})
+            steps = job.get("steps", [])
+            source = [step for step in steps
+                      if step.get("with", {}).get("ref") == "${{ env.SOURCE_REF }}"]
+            self.assertEqual(len(source), 1)
+            self.assertEqual(source[0].get("with", {}).get("repository"), "cpunion/llgo")
+            llvm = [step for step in steps
+                    if step.get("uses") == "./.github/actions/setup-deps"]
+            self.assertEqual(len(llvm), 1)
+            self.assertEqual(llvm[0].get("with", {}).get("llvm-version"), "22")
+            self.assertTrue(all("continue-on-error" not in step for step in steps))
+            run = [step for step in steps
+                   if "--package '${{ matrix.package }}'" in step.get("run", "")]
+            self.assertEqual(len(run), 1)
+            self.assertEqual(run[0].get("timeout-minutes"), "75")
+            expected_run = "\n".join([
+                'set -euo pipefail',
+                'python3 "$RUNNER_TEMP/run_funcval_diagnostic.py" \\',
+                "  --package '${{ matrix.package }}' \\",
+                '  --reports "$RUNNER_TEMP/funcval-reports-${{ matrix.id }}"',
+                '',
+            ])
+            self.assertEqual(run[0]["run"], expected_run)
+            uploads = [step for step in steps
+                       if step.get("uses") == "actions/upload-artifact@v7"]
+            self.assertEqual(len(uploads), 1)
+            self.assertEqual(uploads[0].get("if"), "always()")
+            self.assertEqual(uploads[0].get("with", {}).get("name"),
+                             "funcval-${{ env.SOURCE_REF }}-${{ matrix.id }}")
+            self.assertEqual(uploads[0].get("with", {}).get("if-no-files-found"), "error")
+        self.assertEqual(jobs["affected-adapter"]["steps"], jobs["complete-package"]["steps"])
+
+    def test_fork_funcval_diagnostic_rejects_unisolated_mutations(self):
+        original = load("funcval-diagnostic.yml")
+        self.assert_isolated_funcval_diagnostic(original)
+        cases = [
+            ("main", lambda value: value["on"]["push"]["branches"].append("main")),
+            ("pull-request", lambda value: value["on"].update({"pull_request": {}})),
+            ("floating-ref", lambda value: value["env"].update({"SOURCE_REF": "main"})),
+            ("filesystem-pin", lambda value: value["env"].update({
+                "TRANSLATOR_VERSION": "../plan9asm"})),
+            ("missing-adapter", lambda value: value["jobs"].pop("affected-adapter")),
+            ("missing-dependency", lambda value: value["jobs"]["complete-package"].pop("needs")),
+            ("dependency-cycle", lambda value: value["jobs"]["affected-adapter"].update({
+                "needs": "complete-package"})),
+            ("duplicate-ID", lambda value: value["jobs"]["complete-package"]
+                ["strategy"]["matrix"]["include"][1].update({"id": "build"})),
+        ]
+        for job_name in ("affected-adapter", "complete-package"):
+            cases.extend([
+                ("upstream-owner-" + job_name, lambda value, name=job_name: value["jobs"][name].update({
+                    "if": "${{ !cancelled() && github.repository == 'xgo-dev/llgo' }}"})),
+                ("missing-guard-" + job_name, lambda value, name=job_name: value["jobs"][name].pop("if")),
+                ("implicit-success-" + job_name, lambda value, name=job_name: value["jobs"][name].update({
+                    "if": "github.repository == 'cpunion/llgo'"})),
+                ("missing-package-" + job_name, lambda value, name=job_name: value["jobs"][name]
+                    ["strategy"]["matrix"]["include"].pop()),
+                ("self-hosted-" + job_name, lambda value, name=job_name: value["jobs"][name].update({
+                    "runs-on": ["self-hosted"]})),
+                ("wrong-llvm-" + job_name, lambda value, name=job_name: next(step for step in value["jobs"]
+                    [name]["steps"] if step.get("uses") == "./.github/actions/setup-deps")
+                    ["with"].update({"llvm-version": "23"})),
+                ("parallel-cap-" + job_name, lambda value, name=job_name: value["jobs"][name]
+                    ["strategy"].update({"max-parallel": "1"})),
+                ("continue-on-error-" + job_name, lambda value, name=job_name: value["jobs"][name].update({
+                    "continue-on-error": "true"})),
+            ])
+        for name, mutate in cases:
+            with self.subTest(case=name):
+                changed = copy.deepcopy(original)
+                mutate(changed)
+                with self.assertRaises(AssertionError):
+                    self.assert_isolated_funcval_diagnostic(changed)
+
     def test_pr_and_main_concurrency_groups_are_isolated(self):
         for path in workflow_paths():
             workflow = load(path.name)
             events = workflow.get("on", {})
+            if path.name == "funcval-diagnostic.yml":
+                self.assert_isolated_funcval_diagnostic(workflow)
+                continue
             if "push" not in events and "pull_request" not in events:
                 continue
             with self.subTest(workflow=path.name):
