@@ -86,9 +86,10 @@ jobs:
         env:
           LLGO_CORO_INLINE_FAULT_ACCEPTANCE: "1"
         run: |
+          go test ./internal/build -run '^TestFuncInfoSiteLayoutArgs' -count=1 -v
           go test ./cl -run '^TestCoro(InlineFaultActivationBelongsToDirectCaller|NativeDefaultFaultBoundaryIsFunctionLocal|NativePanicBoundaryAddsNoCoroutineFrameStorage|NativeFault.*)$' -count=1 -v
           go test ./internal/build -run '^TestCoroInlineNativeFaultAcceptance$' -count=1 -v
-          go test ./internal/build -run '^TestPCLNModeNativeIntegration$/^(packaging|fault-signal-does-not-load)$/^external$' -count=1 -v
+          go test ./internal/build -run '^TestPCLNModeNativeIntegration$/^(packaging|fault-signal-does-not-load)$/^(embedded|external)$' -count=1 -v
 
       - name: Test lazy unwind scratch and actual fault contexts
         if: matrix.lane == 'compat'

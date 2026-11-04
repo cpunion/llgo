@@ -52,6 +52,12 @@ import (
 	"unsafe"
 )
 
+//go:linkname initPCLNFrames runtime.initRuntimeFuncPCFrames
+func initPCLNFrames()
+
+//go:linkname prebuiltPCLNFrameCount runtime.prebuiltFrameCount
+func prebuiltPCLNFrameCount() int
+
 //go:noinline
 func pclnTarget() uintptr {
 	pc, _, _, ok := runtime.Caller(0)
@@ -198,6 +204,9 @@ func main() {
 		panic("missing scenario")
 	}
 	switch os.Args[1] {
+	case "prebuilt":
+		initPCLNFrames()
+		fmt.Println(prebuiltPCLNFrameCount() > 0)
 	case "once":
 		fmt.Println(pclnState())
 	case "chdir-once":
@@ -294,6 +303,11 @@ func TestPCLNModeNativeIntegration(t *testing.T) {
 				}
 				if got := runPCLNIntegrationBinary(t, bin, "apis"); got != tt.wantAPIs {
 					t.Fatalf("runtime API states = %q, want %q", got, tt.wantAPIs)
+				}
+				if runtime.GOOS == "linux" && tt.mode == PCLNEmbedded {
+					if got := runPCLNIntegrationBinary(t, bin, "prebuilt"); got != "true\n" {
+						t.Fatalf("embedded ELF did not adopt its prebuilt table: %q", got)
+					}
 				}
 				panicOut := runPCLNIntegrationBinaryFailure(t, bin, "panic")
 				if !strings.Contains(panicOut, "pcln panic") {
