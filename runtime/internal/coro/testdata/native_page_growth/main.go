@@ -41,23 +41,22 @@ func main() {
 		panic("growth capacity")
 	}
 	runtime.GC()
-	churn := make([][]byte, 1000)
+	// The published directory must be the only root for the attached pages.
+	// Churn uses the same page type and writes only its frozen uint32 prefix;
+	// pointer fields stay zero so every churn object remains GC-valid.
+	churn := make([]*coro.ManualOperationPage, 1000)
 	for index := range churn {
-		churn[index] = make([]byte, int(unsafe.Sizeof(coro.ManualOperationPage{})))
-		for j := range churn[index] {
-			churn[index][j] = 0xa5
-		}
+		churn[index] = new(coro.ManualOperationPage)
+		*(*uint32)(unsafe.Pointer(churn[index])) = 0x5a5a5a5a
 	}
 	runtime.GC()
 	if coro.ManualOperationConfiguredCapacity(source) != capacity || !coro.UnbindManualOperationSource(source, owner) || !source.CanRelease() {
 		panic("expanded page GC or release")
 	}
-	sum := 0
-	for _, bytes := range churn {
-		sum += int(bytes[0]) + int(bytes[len(bytes)-1])
+	for _, page := range churn {
+		if *(*uint32)(unsafe.Pointer(page)) != 0x5a5a5a5a {
+			panic("same-kind churn canary")
+		}
 	}
-	if sum != 330000 {
-		panic("churn checksum")
-	}
-	fmt.Println("page growth gc ok page", page, "block", block, "capacity", capacity)
+	fmt.Println("page growth gc ok page", page, "block", block, "capacity", capacity, "same-kind")
 }

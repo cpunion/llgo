@@ -38,16 +38,18 @@ func TestCoroNativeOperationPageGrowthAcceptance(t *testing.T) {
 		t.Fatalf("page growth build: %v\n%s", err, output)
 	}
 	for _, procs := range []string{"1", "4"} {
-		t.Run("P"+procs, func(t *testing.T) {
-			ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 60*time.Second)
-			defer cancel()
-			run := exec.CommandContext(ctx, image)
-			run.Env = append(os.Environ(), "GOMAXPROCS="+procs, "GOGC=100", "GOMEMLIMIT=off")
-			if output, err := run.CombinedOutput(); err != nil || !strings.Contains(string(output), "page growth gc ok page 4 block 256 capacity 1032") {
-				t.Fatalf("page growth GC run: %v\n%s", err, output)
-			} else {
-				t.Logf("%s", output)
-			}
-		})
+		for _, trial := range []string{"1", "2", "3"} {
+			t.Run("P"+procs+"/trial"+trial, func(t *testing.T) {
+				ctx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 60*time.Second)
+				defer cancel()
+				run := exec.CommandContext(ctx, image)
+				run.Env = append(os.Environ(), "GOMAXPROCS="+procs, "GOGC=100", "GOMEMLIMIT=off")
+				if output, err := run.CombinedOutput(); err != nil || !strings.Contains(string(output), "page growth gc ok page 4 block 256 capacity 1032 same-kind") {
+					t.Fatalf("page growth GC run: %v\n%s", err, output)
+				} else {
+					t.Logf("%s", output)
+				}
+			})
+		}
 	}
 }
