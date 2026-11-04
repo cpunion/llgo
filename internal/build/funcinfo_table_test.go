@@ -189,6 +189,45 @@ func TestFuncInfoSiteLayoutArgsEligibilityAndCreateFailure(t *testing.T) {
 	}
 }
 
+func TestFuncInfoSiteLayoutArgsAfterFrontendRelease(t *testing.T) {
+	for _, emitted := range []bool{false, true} {
+		ctx := &context{
+			buildConf:             &Config{Goos: "linux", Goarch: "amd64", BuildMode: BuildModeExe},
+			stagedBackendDetached: true,
+			stagedFuncInfoSites:   emitted,
+		}
+		args, cleanup, err := funcInfoSiteLayoutArgs(ctx, filepath.Join(t.TempDir(), "app"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !emitted {
+			cleanup()
+			if len(args) != 0 {
+				t.Fatalf("disabled site snapshot enabled ELF layout: %#v", args)
+			}
+			continue
+		}
+		if len(args) != 1 || !strings.HasPrefix(args[0], "-Wl,-T,") {
+			cleanup()
+			t.Fatalf("released frontend lost ELF site layout: %#v", args)
+		}
+		script := strings.TrimPrefix(args[0], "-Wl,-T,")
+		raw, err := os.ReadFile(script)
+		cleanup()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"llgo_funcinfo_entry", "INSERT BEFORE .bss"} {
+			if !strings.Contains(string(raw), want) {
+				t.Fatalf("released frontend linker script missing %q:\n%s", want, raw)
+			}
+		}
+		if _, err := os.Stat(script); !os.IsNotExist(err) {
+			t.Fatalf("released frontend linker script was not removed: %v", err)
+		}
+	}
+}
+
 func TestRuntimeEntrySiteSectionInfo(t *testing.T) {
 	t.Setenv("LLGO_AR", "")
 	private := "__DATA,__llgo_fie"

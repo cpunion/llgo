@@ -94,7 +94,7 @@ jobs:
       - name: Test compact records and precise collector cache ownership
         if: matrix.lane == 'cold-symbol-e2e'
         run: |
-          go test -p=1 ./internal/build -run '^Test(FuncInfoRecord(Storage|Encoding)|FuncForPCCacheStorageContract|RuntimeEntrySiteSectionInfo)' -count=1 -v
+          go test -p=1 ./internal/build -run '^Test(FuncInfoRecord(Storage|Encoding)|FuncInfoSiteLayoutArgs|FuncForPCCacheStorageContract|RuntimeEntrySiteSectionInfo)' -count=1 -v
           (cd runtime && go test -p=1 . -run '^(TestFuncForPCCache|TestPrebuiltFuncCache)' -count=1 -v)
 
       - name: Test concurrent first use of compact native symbol caches
