@@ -1051,10 +1051,79 @@ elif args[0] == "test" and any(a.endswith("/test/std/bytes") for a in args):
                     self.assertIn("prepare", needs(job))
                     self.assertIn(f"needs.prepare.outputs.{flag} == 'true'", job["if"])
 
+    def assert_isolated_funcval_diagnostic(self, workflow):
+        events = workflow.get("on", {})
+        self.assertEqual(set(events), {"push", "workflow_dispatch"})
+        self.assertEqual(events["push"], {
+            "branches": ["codex/funcval-build-ci-20261104"],
+        })
+        self.assertIn(events["workflow_dispatch"], (None, "", {}))
+        environment = workflow.get("env", {})
+        self.assertRegex(environment.get("SOURCE_REF", ""), r"^[0-9a-f]{40}$")
+        self.assertRegex(environment.get("TRANSLATOR_VERSION", ""),
+                         r"^v0\.0\.0-[0-9]{14}-[0-9a-f]{12}$")
+        self.assertEqual(set(workflow.get("jobs", {})), {"complete-package"})
+        job = workflow["jobs"]["complete-package"]
+        self.assertEqual(job.get("if"), "github.repository == 'cpunion/llgo'")
+        self.assertEqual(job.get("runs-on"), "ubuntu-24.04")
+        self.assertNotIn("continue-on-error", job)
+        strategy = job.get("strategy", {})
+        self.assertEqual(strategy.get("fail-fast"), "false")
+        self.assertNotIn("max-parallel", strategy)
+        self.assertEqual(strategy.get("matrix"), {"include": [
+            {"id": "build", "package": "./internal/build"},
+        ]})
+        steps = job.get("steps", [])
+        source = [step for step in steps
+                  if step.get("with", {}).get("ref") == "${{ env.SOURCE_REF }}"]
+        self.assertEqual(len(source), 1)
+        self.assertEqual(source[0].get("with", {}).get("repository"), "cpunion/llgo")
+        llvm = [step for step in steps
+                if step.get("uses") == "./.github/actions/setup-deps"]
+        self.assertEqual(len(llvm), 1)
+        self.assertEqual(llvm[0].get("with", {}).get("llvm-version"), "22")
+        self.assertTrue(all("continue-on-error" not in step for step in steps))
+        run = [step for step in steps
+               if "--package '${{ matrix.package }}'" in step.get("run", "")]
+        self.assertEqual(len(run), 1)
+        self.assertIn('python3 "$RUNNER_TEMP/run_funcval_diagnostic.py"', run[0]["run"])
+
+    def test_fork_funcval_diagnostic_rejects_unisolated_mutations(self):
+        original = load("funcval-diagnostic.yml")
+        self.assert_isolated_funcval_diagnostic(original)
+        cases = [
+            ("main", lambda value: value["on"]["push"]["branches"].append("main")),
+            ("pull-request", lambda value: value["on"].update({"pull_request": {}})),
+            ("upstream-owner", lambda value: value["jobs"]["complete-package"].update({
+                "if": "github.repository == 'xgo-dev/llgo'"})),
+            ("missing-guard", lambda value: value["jobs"]["complete-package"].pop("if")),
+            ("floating-ref", lambda value: value["env"].update({"SOURCE_REF": "main"})),
+            ("filesystem-pin", lambda value: value["env"].update({
+                "TRANSLATOR_VERSION": "../plan9asm"})),
+            ("missing-package", lambda value: value["jobs"]["complete-package"]
+                ["strategy"]["matrix"]["include"].pop()),
+            ("self-hosted", lambda value: value["jobs"]["complete-package"].update({
+                "runs-on": ["self-hosted"]})),
+            ("wrong-llvm", lambda value: next(step for step in value["jobs"]
+                ["complete-package"]["steps"] if step.get("uses") ==
+                "./.github/actions/setup-deps")["with"].update({"llvm-version": "23"})),
+            ("parallel-cap", lambda value: value["jobs"]["complete-package"]
+                ["strategy"].update({"max-parallel": "1"})),
+        ]
+        for name, mutate in cases:
+            with self.subTest(case=name):
+                changed = copy.deepcopy(original)
+                mutate(changed)
+                with self.assertRaises(AssertionError):
+                    self.assert_isolated_funcval_diagnostic(changed)
+
     def test_pr_and_main_concurrency_groups_are_isolated(self):
         for path in workflow_paths():
             workflow = load(path.name)
             events = workflow.get("on", {})
+            if path.name == "funcval-diagnostic.yml":
+                self.assert_isolated_funcval_diagnostic(workflow)
+                continue
             if "push" not in events and "pull_request" not in events:
                 continue
             with self.subTest(workflow=path.name):
