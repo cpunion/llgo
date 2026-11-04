@@ -90,6 +90,7 @@ jobs:
           go test ./cl -run '^TestCoro(InlineFaultActivationBelongsToDirectCaller|NativeDefaultFaultBoundaryIsFunctionLocal|NativePanicBoundaryAddsNoCoroutineFrameStorage|NativeFault.*)$' -count=1 -v
           go test ./internal/build -run '^TestCoroInlineNativeFaultAcceptance$' -count=1 -v
           go test ./internal/build -run '^TestPCLNModeNativeIntegration$/^(packaging|fault-signal-does-not-load)$/^(embedded|external)$' -count=1 -v
+          go test ./internal/build -run '^TestELFPrebuiltLayoutAfterFrontendRelease$' -count=1 -v
 
       - name: Test lazy unwind scratch and actual fault contexts
         if: matrix.lane == 'compat'
