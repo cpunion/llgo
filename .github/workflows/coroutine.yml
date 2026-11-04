@@ -24,6 +24,7 @@ jobs:
         include:
           - { llvm: 22, go: "1.27.0", lane: "compat", check: "test (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "integration", check: "test integration (LLVM 22, Go 1.27.0)" }
+          - { llvm: 22, go: "1.27.0", lane: "elf-layout-e2e", check: "test ELF metadata layout E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "integration-build", check: "test production build plan (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "fault-e2e", timeout: 25, check: "test native fault landing E2E (LLVM 22, Go 1.27.0)" }
           - { llvm: 22, go: "1.27.0", lane: "native-e2e", check: "test native linked E2E (LLVM 22, Go 1.27.0)" }
@@ -86,9 +87,14 @@ jobs:
         env:
           LLGO_CORO_INLINE_FAULT_ACCEPTANCE: "1"
         run: |
-          go test ./internal/build -run '^TestFuncInfoSiteLayoutArgs' -count=1 -v
           go test ./cl -run '^TestCoro(InlineFaultActivationBelongsToDirectCaller|NativeDefaultFaultBoundaryIsFunctionLocal|NativePanicBoundaryAddsNoCoroutineFrameStorage|NativeFault.*)$' -count=1 -v
           go test ./internal/build -run '^TestCoroInlineNativeFaultAcceptance$' -count=1 -v
+          go test ./internal/build -run '^TestPCLNModeNativeIntegration$/^(packaging|fault-signal-does-not-load)$/^external$' -count=1 -v
+
+      - name: Test released frontend ELF metadata layout and table adoption
+        if: matrix.lane == 'elf-layout-e2e'
+        run: |
+          go test ./internal/build -run '^TestFuncInfoSiteLayoutArgs' -count=1 -v
           go test ./internal/build -run '^TestPCLNModeNativeIntegration$/^(packaging|fault-signal-does-not-load)$/^(embedded|external)$' -count=1 -v
           go test ./internal/build -run '^TestELFPrebuiltLayoutAfterFrontendRelease$' -count=1 -v
 
