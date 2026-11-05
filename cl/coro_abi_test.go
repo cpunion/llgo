@@ -584,6 +584,9 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	if got := strings.Count(ir, "call void @"+coroCompletePrepareHookV2); got != 2 {
 		t.Fatalf("v1 completion preparations = %d, want Parent + Child:\n%s", got, ir)
 	}
+	if got := strings.Count(ir, "call void @"+coroFrameBorrowedFreeHookV1); got != 2 {
+		t.Fatalf("borrowed frame frees = %d, want Parent + Child:\n%s", got, ir)
+	}
 	if got := strings.Count(ir, "call void @"+coroFrameFreeHookV1); got != 2 {
 		t.Fatalf("task-aware v1 frame frees = %d, want Parent + Child:\n%s", got, ir)
 	}

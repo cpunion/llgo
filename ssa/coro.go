@@ -26,9 +26,9 @@ import (
 
 // CoroFrameOps emits target-independent coroutine frame allocation calls.
 //
-// The callbacks run at the builder's current insertion point. They deliberately
-// receive both llvm.coro.size and the effective required allocation alignment
-// so a later runtime can capture a frame descriptor without this package fixing
+// The callbacks run at the builder's current insertion point.
+// Alloc and Free receive llvm.coro.size and the effective required allocation
+// alignment so a runtime can capture a descriptor without this package fixing
 // that runtime's ABI. The alignment is at least llvm.coro.align and at least the
 // guarantee declared by CoroOptions.AllocationAlign. Free is called only when
 // llvm.coro.free returns a non-null allocation pointer. Each callback may append
@@ -39,6 +39,10 @@ import (
 type CoroFrameOps struct {
 	Alloc func(b Builder, size, align Expr) Expr
 	Free  func(b Builder, frame, size, align Expr)
+	// FreeBorrowed runs during destruction when coro.free returns nil. The
+	// callback receives the borrowed LLVM frame handle, its exact extent, and
+	// LLVM's required frame alignment, without the heap allocation guarantee.
+	FreeBorrowed func(b Builder, frame, size, align Expr)
 }
 
 // CoroOptions configures one LLVM switched-resume coroutine.
@@ -1211,7 +1215,11 @@ func (c *CoroBuilder) Finish() {
 	freeBlk := fn.MakeBlock()
 	afterFreeBlk := fn.MakeBlock()
 	nonNull := llvm.CreateICmp(b.impl, llvm.IntNE, frame.impl, prog.Nil(prog.VoidPtr()).impl)
-	b.If(Expr{nonNull, prog.Bool()}, freeBlk, afterFreeBlk)
+	borrowedFreeBlk := afterFreeBlk
+	if c.frame.FreeBorrowed != nil {
+		borrowedFreeBlk = fn.MakeBlock()
+	}
+	b.If(Expr{nonNull, prog.Bool()}, freeBlk, borrowedFreeBlk)
 
 	b.SetBlock(freeBlk)
 	size, align := b.coroFrameLayout(c.allocationAlign)
@@ -1219,6 +1227,17 @@ func (c *CoroBuilder) Finish() {
 	c.frame.Free(b, frame, size, align)
 	freeCallbackPoint.ensureContinuation(b, "free")
 	b.Jump(afterFreeBlk)
+
+	if c.frame.FreeBorrowed != nil {
+		b.SetBlock(borrowedFreeBlk)
+		// LLVM's borrowed buffer has the frame's required alignment. The heap
+		// allocator's stronger coro.id guarantee does not apply to that buffer.
+		size, align := b.coroFrameLayout(1)
+		borrowedCallbackPoint := captureCoroFrameCallbackPoint(b)
+		c.frame.FreeBorrowed(b, c.handle, size, align)
+		borrowedCallbackPoint.ensureContinuation(b, "borrowed free")
+		b.Jump(afterFreeBlk)
+	}
 
 	b.SetBlock(afterFreeBlk)
 	b.Jump(c.suspendBlk)

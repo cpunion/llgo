@@ -592,6 +592,7 @@ func __llgo_coro_critical_exit_v1(g unsafe.Pointer) bool { return false }
 func __llgo_coro_os_thread_lock_v1(g unsafe.Pointer) {}
 func __llgo_coro_os_thread_unlock_v1(g unsafe.Pointer) {}
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_frame_free_borrowed_v1(g, handle unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {}
 func __llgo_coro_chan_send_buffer_try_v1(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 { return 0 }
 func __llgo_coro_chan_recv_buffer_try_v1(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 { return 0 }
 func __llgo_coro_chan_send_try_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uint32, uint32) uint32 { return 0 }
@@ -663,6 +664,19 @@ func atomicExchange(*uint32, uint32) uint32
 	if len(directPlain) != 0 {
 		t.Fatalf("required direct-plain C callbacks = %d, want none", len(directPlain))
 	}
+	borrowedFreeFn := ssaPkg.Func("__llgo_coro_frame_free_borrowed_v1")
+	if borrowedFreeFn == nil {
+		t.Fatal("borrowed frame release hook is absent from the runtime fixture")
+	}
+	originalBorrowedSignature := borrowedFreeFn.Signature
+	borrowedFreeFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, nil, "handle", types.Typ[types.UnsafePointer])),
+		types.NewTuple(), false)
+	_, _, _, _, invalidBorrowedFreeErr := requiredCoroProgramRuntimePlan(ctx)
+	borrowedFreeFn.Signature = originalBorrowedSignature
+	if invalidBorrowedFreeErr == nil || !strings.Contains(invalidBorrowedFreeErr.Error(), "borrowed coroutine frame release ABI") {
+		t.Fatalf("invalid borrowed frame release ABI error = %v", invalidBorrowedFreeErr)
+	}
 	continueFn := ssaPkg.Func(coroProgramContinueSymbolV1)
 	originalContinueSignature := continueFn.Signature
 	continueFn.Signature = types.NewSignatureType(nil, nil, nil,
@@ -715,6 +729,7 @@ func atomicExchange(*uint32, uint32) uint32
 		coroRunDecisionTakeZeroSymbolV1,
 		"__llgo_coro_complete_prepare_v1",
 		"__llgo_coro_frame_free_v1",
+		"__llgo_coro_frame_free_borrowed_v1",
 		"__llgo_coro_await_prepare_inline_v4",
 		"__llgo_coro_await_inline_destroy_consume_v4",
 		"__llgo_coro_await_consume_v1",
@@ -1519,6 +1534,7 @@ func __llgo_coro_critical_exit_v1(g unsafe.Pointer) bool { return false }
 func __llgo_coro_os_thread_lock_v1(g unsafe.Pointer) {}
 func __llgo_coro_os_thread_unlock_v1(g unsafe.Pointer) {}
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_frame_free_borrowed_v1(g, handle unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {}
 func __llgo_coro_chan_send_buffer_try_v1(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 { return 0 }
 func __llgo_coro_chan_recv_buffer_try_v1(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 { return 0 }
 func __llgo_coro_chan_send_try_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uint32, uint32) uint32 { return 0 }
@@ -2218,6 +2234,7 @@ func __llgo_coro_run_decision_take_v1(unsafe.Pointer, uint32, uint32, *uint32, *
 func __llgo_coro_run_decision_take_zero_v1(unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_frame_free_borrowed_v1(g, handle unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {}
 func __llgo_coro_chan_send_buffer_try_v1(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 { return 0 }
 func __llgo_coro_chan_recv_buffer_try_v1(unsafe.Pointer, unsafe.Pointer, uintptr) uint32 { return 0 }
 func __llgo_coro_chan_send_try_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uint32, uint32) uint32 { return 0 }

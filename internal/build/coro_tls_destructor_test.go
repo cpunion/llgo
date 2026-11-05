@@ -542,6 +542,7 @@ func __llgo_coro_run_decision_take_v1(unsafe.Pointer, uint32, uint32, *uint32, *
 func __llgo_coro_run_decision_take_zero_v1(unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_frame_free_borrowed_v1(g, handle unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {}
 ` + body
 	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, source, nil)
 	prog := llssa.NewProgram(nil)

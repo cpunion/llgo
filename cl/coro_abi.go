@@ -167,6 +167,7 @@ const (
 	coroSpawnCommitHookV1                      = "__llgo_coro_spawn_commit_v1"
 	coroCompletePrepareHookV2                  = "__llgo_coro_complete_prepare_v2"
 	coroFrameFreeHookV1                        = "__llgo_coro_frame_free_v1"
+	coroFrameBorrowedFreeHookV1                = "__llgo_coro_frame_free_borrowed_v1"
 	coroDescriptorPrefixV1                     = "__llgo_coro_frame_descriptor_v1."
 )
 
@@ -679,6 +680,16 @@ func (p *context) beginCoroBody(
 			}
 			b.Call(free.Expr, storage, size, align, descriptorPtr)
 		},
+	}
+	if abi.version >= coroPhysicalABIVersionV1 {
+		// Borrowed frames still contain GC-visible LLVM spills after destroy.
+		// A distinct versioned release hook validates their exact extent and clears
+		// the payload while retaining any diagnostic panic metadata separately.
+		borrowedFree := p.pkg.NewFunc(coroFrameBorrowedFreeHookV1, freeSig, llssa.InC)
+		frame.FreeBorrowed = func(b llssa.Builder, handle, size, align llssa.Expr) {
+			b.KeepAlive(borrowedFrameMetadata)
+			b.Call(borrowedFree.Expr, task, handle, size, align, descriptorPtr)
+		}
 	}
 	body := &coroBodyContext{
 		abi:                  abi,
