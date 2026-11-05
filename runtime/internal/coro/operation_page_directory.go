@@ -22,16 +22,15 @@ import "unsafe"
 // storage. Other profiles retain their original 64-slot pages. Both keep the
 // historical 32,704-slot limit and the existing two-word OperationID codec.
 const (
-	operationCatalogMaximumSlots        = operationLocalMask / 64 * 64
-	operationCatalogMaximumPageCount    = operationCatalogMaximumSlots / operationCatalogPageCapacity
-	operationDynamicPageCapacity        = operationCatalogMaximumPageCount - 1
-	operationPageDirectoryBlockCapacity = uint32(64)
-	operationPageDirectoryBlockCount    = (operationDynamicPageCapacity + operationPageDirectoryBlockCapacity - 1) /
+	operationCatalogMaximumSlots     = operationLocalMask / 64 * 64
+	operationCatalogMaximumPageCount = operationCatalogMaximumSlots / operationCatalogPageCapacity
+	operationDynamicPageCapacity     = operationCatalogMaximumPageCount - 1
+	operationPageDirectoryBlockCount = (operationDynamicPageCapacity + operationPageDirectoryBlockCapacity - 1) /
 		operationPageDirectoryBlockCapacity
 )
 
-// OperationPageDirectoryBlock is stable target-owned storage for 64 dynamic
-// page pointers. Targets supply a pristine block only when an Attach operation
+// OperationPageDirectoryBlock is stable target-owned storage for a configured block
+// of dynamic page pointers. Targets supply a pristine block only when an Attach operation
 // crosses a block boundary. Its fields remain private so only the monotonic
 // directory publication protocol can mutate them.
 type OperationPageDirectoryBlock struct {
@@ -44,7 +43,7 @@ type OperationPageDirectoryBlock struct {
 // heap, arena, or static pages while the source is bound.
 //
 // blocks and their pages are pointer-typed so a tracing runtime keeps target-
-// allocated storage rooted. Targets attach one block per 64 dynamic pages;
+// allocated storage rooted. Targets attach one block per configured group of dynamic pages;
 // only the directory's bounded root pointer array is stored inline. The owner
 // writes a complete block/page path before release-publishing count. Producers acquire
 // count before reading those immutable pointers.
