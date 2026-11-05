@@ -705,10 +705,10 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		values = append(values, tfn)
 		fields[i] = prog.constStructValue(ft, values)
 		if prog.target.usesWasmReflectBridges() {
-			// Type.Method constructs a method-expression signature at runtime.
-			// Retain that descriptor with the method wrapper only when reflection
-			// can expose it.
-			expression := methodExprSignature(m.Type().(*types.Signature))
+			// Type.Method uses FuncOf to construct a Go callable at runtime.
+			// Retain that Go-role descriptor with the method wrapper, rather
+			// than the otherwise identical native code-pointer signature.
+			expression := funcType(prog, methodExprSignature(m.Type().(*types.Signature)))
 			b.abiType(expression)
 			if mb := b.Pkg.metaBuilder; mb != nil {
 				expressionName, _ := prog.abi.TypeName(expression)
