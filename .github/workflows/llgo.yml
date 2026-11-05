@@ -36,7 +36,7 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - macos-latest
+          - macos-15
           - ubuntu-latest
         llvm: [22]
     runs-on: ${{ startsWith(matrix.os, 'ubuntu') && fromJSON(needs.prepare.outputs.linux_large_runner) || matrix.os }}
@@ -161,7 +161,7 @@ jobs:
         include:
           - os: ubuntu-latest
             llvm: 22
-          - os: macos-latest
+          - os: macos-15
             llvm: 22
           - os: windows-2022
             llvm: 22

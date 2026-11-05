@@ -313,7 +313,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(matrix_size(core), 8)
         self.assertEqual(integration["strategy"], core["strategy"])
         self.assertEqual(simd["strategy"]["matrix"]["include"],
-                         [entry for entry in entries if entry.get("windows_arch") != "386"])
+                         [{**entry, "os": "macos-latest"} if entry["os"] == "macos-15" else entry
+                          for entry in entries if entry.get("windows_arch") != "386"])
         self.assertEqual(matrix_size(simd), 6)
         for job in (core, integration, simd):
             self.assertEqual(needs(job), ["prepare"])
@@ -673,6 +674,19 @@ sys.exit(subprocess.call(command + ['./internal/build']))
         jobs = load("go.yml")["jobs"]
         self.assertEqual(jobs["macos-build"]["runs-on"], "macos-15")
         self.assertEqual(jobs["macos-build"]["strategy"]["matrix"]["part"], ["0", "1"])
+
+    def test_capacity_blocked_native_jobs_keep_shared_arm64_image(self):
+        jobs = load("llgo.yml")["jobs"]
+        for role in ("self-host", "llgo", "native-integration"):
+            with self.subTest(role=role):
+                matrix = jobs[role]["strategy"]["matrix"]
+                entries = matrix.get("include", [{"os": os} for os in matrix.get("os", [])])
+                self.assertEqual([entry["os"] for entry in entries
+                                  if entry["os"].startswith("macos")], ["macos-15"])
+        self.assertIs(jobs["llgo"]["strategy"], jobs["native-integration"]["strategy"])
+        simd = jobs["native-simd"]["strategy"]["matrix"]["include"]
+        self.assertEqual([entry["os"] for entry in simd
+                          if entry["os"].startswith("macos")], ["macos-latest"])
 
     def test_macos_build_suite_requires_arm64_native_atomic_acceptance(self):
         jobs = load("go.yml")["jobs"]
