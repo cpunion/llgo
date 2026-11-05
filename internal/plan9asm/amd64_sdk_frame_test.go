@@ -116,6 +116,15 @@ func TestTranslateAMD64SDKABI0SourceGuards(t *testing.T) {
 		t.Run(mutation, func(t *testing.T) {
 			pkg, directory := amd64SDKFrameFixture(t)
 			opt := TranslateOptions{GOROOT: runtime.GOROOT(), GOAMD64: "v1"}
+			baseline, err := TranslateSourceModuleForPkgWithOptions(pkg, "copy_amd64.s", []byte(amd64SDKFrameAssembly), "linux", "amd64", opt)
+			if err != nil || baseline == nil {
+				t.Fatalf("actual SDK/private frame baseline before mutation: %v", err)
+			}
+			callee := baseline.Signatures["runtime.memmove"]
+			baseline.Module.Dispose()
+			if callee.Ret != extplan9asm.Void || len(callee.Frame.Params) != 3 {
+				t.Fatal("baseline did not use the actual SDK ABI0 callee")
+			}
 			source := amd64SDKFrameAssembly
 			switch mutation {
 			case "overlay":
