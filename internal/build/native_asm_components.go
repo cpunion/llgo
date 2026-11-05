@@ -16,8 +16,9 @@ import (
 )
 
 type plan9AsmSource struct {
-	path   string
-	source []byte
+	path      string
+	source    []byte
+	dynimport bool // completely supplied by buildGoCgoAliasObjects
 }
 
 type nativeAsmPlan struct {
@@ -41,7 +42,14 @@ func captureSelectedPlan9Asm(ctx *context, pkg *packages.Package, files []string
 		if err != nil {
 			return nil, fmt.Errorf("%s: preprocess %s: %w", pkg.PkgPath, path, err)
 		}
-		sources = append(sources, plan9AsmSource{path, source})
+		sources = append(sources, plan9AsmSource{path: path, source: source})
+	}
+	owned, err := darwinDynimportTrampolineSources(ctx, pkg, sources)
+	if err != nil {
+		return nil, err
+	}
+	for index := range sources {
+		sources[index].dynimport = owned[sources[index].path]
 	}
 	return sources, nil
 }
@@ -63,6 +71,9 @@ func planNativeAsmComponents(ctx *context, pkg *packages.Package, sources []plan
 		return extplan9asm.NativeOptions{GOOS: ctx.buildConf.Goos, GOARCH: ctx.buildConf.Goarch, PackagePath: abi.PathOf(pkg.Types), Imports: make(map[string]string), CodeEntries: make(map[string]string)}
 	}
 	for _, source := range sources {
+		if source.dynimport {
+			continue
+		}
 		imports, native, err := foreignNativeImports(ctx, pkg, source.source)
 		if err != nil {
 			return nil, err

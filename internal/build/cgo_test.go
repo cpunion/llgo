@@ -1059,19 +1059,12 @@ func TestSplitWindowsCgoImportAlias(t *testing.T) {
 }
 
 func TestShouldSkipDarwinDynimportTrampolineAsm(t *testing.T) {
-	src := []byte("TEXT _trampoline<>(SB),$0-0\nDATA _trampoline_addr(SB)/8,$0\n")
-	fileSrc := `package unix
-//go:cgo_import_dynamic libc_read read
-`
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "unix.go", fileSrc, parser.ParseComments)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := &context{buildConf: &Config{Goos: "darwin", Goarch: "arm64"}}
-	pkg := &packages.Package{PkgPath: "golang.org/x/sys/unix", Syntax: []*ast.File{file}}
-	enabled := shouldCheckDarwinDynimportTrampolineAsm(ctx, pkg)
-	if !shouldSkipDarwinDynimportTrampolineAsm(enabled, "zsyscall_darwin_arm64.s", src) {
-		t.Fatal("expected generated dynimport trampoline asm to be skipped")
+	// A generated filename and two substrings cannot establish ownership.
+	ctx, pkg := nativeAddressFixturePackageAtPath(t, dynimportTrampolineFiles(),
+		"example.com/nativebridge", "darwin", "arm64", "arm64-apple-darwin")
+	source := plan9AsmSource{path: "zsyscall_darwin_arm64.s", source: []byte("TEXT _trampoline<>(SB),$0-0\nDATA _trampoline_addr(SB)/8,$0\n")}
+	owned, err := darwinDynimportTrampolineSources(ctx, pkg.Package, []plan9AsmSource{source})
+	if err != nil || owned[source.path] {
+		t.Fatalf("unowned generated-looking source: %v, %v", owned, err)
 	}
 }

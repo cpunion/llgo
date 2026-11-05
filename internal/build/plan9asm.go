@@ -1,7 +1,6 @@
 package build
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -93,7 +92,6 @@ func compileSelectedPkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Packag
 	if err := bindNativeAsmExports(ctx, aPkg, pkg, nativePlan); err != nil {
 		return nil, err
 	}
-	skipDarwinDynimportTrampolines := shouldCheckDarwinDynimportTrampolineAsm(ctx, pkg)
 	objFiles := make([]string, 0, len(sfiles))
 	for _, input := range sources {
 		sfile, src := input.path, input.source
@@ -101,7 +99,7 @@ func compileSelectedPkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Packag
 		// Native routing, the trampoline filter and typed translation must all
 		// see the same source. Do not expand macro output a second time.
 		opt.SourcePreprocessed = true
-		if shouldSkipDarwinDynimportTrampolineAsm(skipDarwinDynimportTrampolines, sfile, src) {
+		if input.dynimport {
 			continue
 		}
 		var mod gllvm.Module
@@ -234,32 +232,6 @@ func externalizePlan9DataGlobals(goMod, asmMod gllvm.Module, td gllvm.TargetData
 	return nil
 }
 
-func shouldCheckDarwinDynimportTrampolineAsm(ctx *context, pkg *packages.Package) bool {
-	if ctx == nil || ctx.buildConf == nil || ctx.buildConf.Goos != "darwin" {
-		return false
-	}
-	// golang.org/x/sys/unix ships zsyscall_darwin_*.s files that define
-	// trampolines for its go:cgo_import_dynamic symbols. llgo already emits
-	// equivalent trampolines from those pragmas, so the generated asm
-	// trampolines must be skipped here to avoid duplicate symbols.
-	if pkg == nil || pkg.PkgPath != "golang.org/x/sys/unix" {
-		return false
-	}
-	_, dynimports := collectGoCgoPragmas(pkg.Syntax)
-	return len(dynimports) != 0
-}
-
-func shouldSkipDarwinDynimportTrampolineAsm(enabled bool, sfile string, src []byte) bool {
-	if !enabled {
-		return false
-	}
-	if !strings.HasPrefix(filepath.Base(sfile), "zsyscall_darwin_") {
-		return false
-	}
-	return bytes.Contains(src, []byte("_trampoline<>(SB)")) &&
-		bytes.Contains(src, []byte("_trampoline_addr(SB)"))
-}
-
 func archSupportsPlan9AsmDefaults(goarch string) bool {
 	return goarch == "386" || goarch == "arm64" || goarch == "amd64" || goarch == "wasm"
 }
@@ -353,6 +325,9 @@ func plan9asmSigsForPkg(ctx *context, pkgPath string) (map[string]struct{}, erro
 		return nil, err
 	}
 	for _, input := range sources {
+		if input.dynimport {
+			continue
+		}
 		sfile, src := input.path, input.source
 		opt := plan9asmTranslateOptions(ctx)
 		if nativeOptions, native := nativePlan.files[sfile]; native {
