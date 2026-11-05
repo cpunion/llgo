@@ -2324,7 +2324,37 @@ func toFFIArg(v Value, typ *abi.Type) unsafe.Pointer {
 	panic("reflect.toFFIArg unsupport type " + v.typ().String())
 }
 
-func toFFIType(typ *abi.Type) *ffi.Type {
+func toFFIArgForType(v Value, typ *abi.Type, ffiType *ffi.Type) unsafe.Pointer {
+	if typ.Kind() == abi.Uintptr && ffiType.Size < typ.Size_ && v.Uint()>>(ffiType.Size*8) != 0 {
+		panic("reflect: WebAssembly ABI integer conversion out of range")
+	}
+	if typ.Kind() == abi.Array && (ffiType.Size != typ.Size_ || ffiType.Alignment < uint16(typ.Align_)) {
+		storage := runtime.AllocZAligned(ffiType.Size, uintptr(ffiType.Alignment))
+		var offset uintptr
+		for i := 0; i < int(typ.ArrayType().Len); i++ {
+			field, fieldOffset, next := ffiResultField(ffiType, i, offset)
+			memmove(add(storage, fieldOffset, ""), toFFIArgForType(v.Index(i), typ.Elem(), field), field.Size)
+			offset = next
+		}
+		return storage
+	}
+	return toFFIArg(v, typ)
+}
+
+func validateNativeFFIWords(v Value, typ *abi.Type) {
+	switch typ.Kind() {
+	case abi.Uintptr:
+		if size := ffi.NativeUintptrType().Size; size < typ.Size_ && v.Uint()>>(size*8) != 0 {
+			panic("reflect: WebAssembly ABI integer conversion out of range")
+		}
+	case abi.Array:
+		for i := 0; i < int(typ.ArrayType().Len); i++ {
+			validateNativeFFIWords(v.Index(i), typ.Elem())
+		}
+	}
+}
+
+func toFFIType(typ *abi.Type, native bool) *ffi.Type {
 	// Vector storage (including zero-length arrays and enclosing aggregates)
 	// has alignment above the ordinary Go maximum of 8. libffi's scalar/struct
 	// descriptions cannot represent its vector calling convention. Check before
@@ -2333,6 +2363,9 @@ func toFFIType(typ *abi.Type) *ffi.Type {
 		panic("reflect: libffi calls with vector storage are not supported")
 	}
 	kind := typ.Kind()
+	if native && kind == abi.Uintptr {
+		return ffi.NativeUintptrType()
+	}
 	switch kind {
 	case abi.Bool, abi.Int, abi.Int8, abi.Int16, abi.Int32, abi.Int64,
 		abi.Uint, abi.Uint8, abi.Uint16, abi.Uint32, abi.Uint64, abi.Uintptr,
@@ -2340,16 +2373,13 @@ func toFFIType(typ *abi.Type) *ffi.Type {
 		return ffi.Typ[kind]
 	case abi.Array:
 		st := typ.ArrayType()
-		return ffi.ArrayOf(toFFIType(st.Elem), int(st.Len))
-	case abi.Chan:
-		return ffi.TypePointer
-	case abi.Func:
-		return ffi.TypePointer
+		return ffi.ArrayOf(toFFIType(st.Elem, native), int(st.Len))
 	case abi.Interface:
 		return ffi.TypeInterface
-	case abi.Map:
-		return ffi.TypePointer
-	case abi.Pointer:
+	case abi.Chan, abi.Func, abi.Map, abi.Pointer, abi.UnsafePointer:
+		if native {
+			return ffi.NativePointerType()
+		}
 		return ffi.TypePointer
 	case abi.Slice:
 		return ffi.TypeSlice
@@ -2357,8 +2387,6 @@ func toFFIType(typ *abi.Type) *ffi.Type {
 		return ffi.TypeString
 	case abi.Struct:
 		return toFFIStructType(typ)
-	case abi.UnsafePointer:
-		return ffi.TypePointer
 	}
 	panic("reflect.toFFIType unsupport type " + typ.String())
 }
@@ -2374,7 +2402,9 @@ func toFFIStructType(typ *abi.Type) *ffi.Type {
 		if fs.Typ.Size_ == 0 {
 			continue
 		}
-		fields = append(fields, toFFIType(fs.Typ))
+		// Struct fields retain their own declared layout; the callable's
+		// native role does not turn an ordinary Go struct into a C struct.
+		fields = append(fields, toFFIType(fs.Typ, false))
 		off = fs.Offset + fs.Typ.Size_
 	}
 	// Do not pad to typ.Size_: trailing zero-sized fields can enlarge the
@@ -2406,24 +2436,25 @@ func appendFFIPadding(fields []*ffi.Type, off, size uintptr) ([]*ffi.Type, uintp
 	return fields, off
 }
 
-func toFFISig(tin, tout []*abi.Type) (*ffi.Signature, error) {
-	args := make([]*ffi.Type, len(tin))
-	for i, in := range tin {
-		args[i] = toFFIType(in)
+func toFFISig(ft *funcType) (*ffi.Signature, error) {
+	native := !ft.IsClosure()
+	args := make([]*ffi.Type, len(ft.In))
+	for i, in := range ft.In {
+		args[i] = toFFIType(in, native)
 	}
-	return ffi.NewSignature(toFFIRetType(tout), args...)
+	return ffi.NewSignature(toFFIRetType(ft.Out, native), args...)
 }
 
-func toFFIRetType(tout []*abi.Type) *ffi.Type {
+func toFFIRetType(tout []*abi.Type, native bool) *ffi.Type {
 	switch n := len(tout); n {
 	case 0:
 		return ffi.TypeVoid
 	case 1:
-		return toFFIType(tout[0])
+		return toFFIType(tout[0], native)
 	default:
 		fields := make([]*ffi.Type, n)
 		for i, out := range tout {
-			fields[i] = toFFIType(out)
+			fields[i] = toFFIType(out, native)
 		}
 		return ffi.StructOf(fields...)
 	}
@@ -2542,8 +2573,9 @@ func (v Value) call(op string, in []Value) (out []Value) {
 	}
 
 	ffiArgs := make([]*ffi.Type, 0, len(tin)+4)
+	native := !ft.IsClosure()
 	for i := 0; i < ioff; i++ {
-		ffiArgs = append(ffiArgs, toFFIType(tin[i]))
+		ffiArgs = append(ffiArgs, toFFIType(tin[i], native))
 	}
 	for i, arg := range in {
 		typ := tin[ioff+i]
@@ -2553,13 +2585,25 @@ func (v Value) call(op string, in []Value) (out []Value) {
 			args = append(args, unsafe.Pointer(&h.Data), unsafe.Pointer(&h.Len), unsafe.Pointer(&h.Cap))
 			continue
 		}
-		ffiArgs = append(ffiArgs, toFFIType(typ))
-		args = append(args, toFFIArg(arg, typ))
+		ffiArgs = append(ffiArgs, toFFIType(typ, native))
+		args = append(args, nil)
 	}
 
-	sig, err := ffi.NewSignature(toFFIRetType(ft.Out), ffiArgs...)
+	sig, err := ffi.NewSignature(toFFIRetType(ft.Out, native), ffiArgs...)
 	if err != nil {
 		panic(err)
+	}
+	// Aggregate sizes/alignments are finalized by ffi_prep_cif. Marshal only
+	// after that point, using the exact types retained by the prepared CIF.
+	index := ioff
+	for i, arg := range in {
+		typ := tin[ioff+i]
+		if ffiCallSliceAsTriple && typ.Kind() == abi.Slice {
+			index += 3
+			continue
+		}
+		args[index] = toFFIArgForType(arg, typ, ffiArgs[index])
+		index++
 	}
 	if sig.RType != ffi.TypeVoid {
 		v := runtime.AllocZAligned(sig.RType.Size, uintptr(sig.RType.Alignment))
@@ -2586,6 +2630,16 @@ func (v Value) call(op string, in []Value) (out []Value) {
 }
 
 func valueFromFFIResult(ptr unsafe.Pointer, typ *abi.Type, ffiType *ffi.Type) Value {
+	if typ.Kind() == abi.Array && (ffiType.Size != typ.Size_ || ffiType.Alignment < uint16(typ.Align_)) {
+		out := New(toType(typ)).Elem()
+		var offset uintptr
+		for i := 0; i < int(typ.ArrayType().Len); i++ {
+			field, fieldOffset, next := ffiResultField(ffiType, i, offset)
+			out.Index(i).Set(valueFromFFIResult(add(ptr, fieldOffset, ""), typ.Elem(), field))
+			offset = next
+		}
+		return out
+	}
 	if ffiType.Size != typ.Size_ || ffiType.Alignment < uint16(typ.Align_) {
 		storage := runtime.AllocZAligned(typ.Size_, uintptr(typ.Align_))
 		size := ffiType.Size

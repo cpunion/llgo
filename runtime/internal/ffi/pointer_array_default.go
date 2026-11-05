@@ -4,6 +4,10 @@ package ffi
 
 import "unsafe"
 
+func NativeUintptrType() *Type { return TypeUintptr }
+
+func NativePointerType() *Type { return TypePointer }
+
 type signatureStorage struct {
 	cif  Signature
 	ret  *Type

@@ -46,7 +46,7 @@ func invokeJSMakeFunc(args *unsafe.Pointer, userdata unsafe.Pointer) unsafe.Poin
 	fd := (*funcData)(userdata)
 	ins := make([]Value, fd.nin)
 	for i := 0; i < fd.nin; i++ {
-		ins[i] = makeFuncArgValue(ffi.Index(args, uintptr(i)), fd.ftyp.In[i])
+		ins[i] = makeFuncFFIArgValue(fd, i, ffi.Index(args, uintptr(i)))
 	}
 	out := fd.call(ins)
 	if len(fd.tout) != 0 {

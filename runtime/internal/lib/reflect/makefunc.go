@@ -32,10 +32,11 @@ import (
 )
 
 type funcData struct {
-	ftyp *funcType
-	tout []*abi.Type
-	fn   func(args []Value) (results []Value)
-	nin  int
+	ftyp   *funcType
+	ffiSig *ffi.Signature
+	tout   []*abi.Type
+	fn     func(args []Value) (results []Value)
+	nin    int
 
 	recoverFrom unsafe.Pointer
 	recoverTo   unsafe.Pointer
@@ -78,6 +79,9 @@ func validateMakeFuncResults(out []Value, ftyp *abi.FuncType, touts []*abi.Type)
 			panic("reflect: function created by MakeFunc returned value obtained from unexported field")
 		}
 		out[i] = v.assignTo("reflect: function created by MakeFunc", typ, nil)
+		if !ftyp.IsClosure() {
+			validateNativeFFIWords(out[i], typ)
+		}
 	}
 	return out
 }
@@ -95,7 +99,7 @@ func storeMakeFuncFFIResult(ret unsafe.Pointer, v Value, typ *abi.Type, ffiType 
 		size = ffiType.Size
 	}
 	if size != 0 {
-		c.Memmove(ret, toFFIArg(v, typ), size)
+		c.Memmove(ret, toFFIArgForType(v, typ, ffiType), size)
 	}
 }
 
