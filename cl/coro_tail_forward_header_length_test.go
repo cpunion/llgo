@@ -4,10 +4,13 @@ package cl
 
 import (
 	"go/constant"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/xgo-dev/llgo/internal/goembed"
+	llssa "github.com/xgo-dev/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -55,16 +58,25 @@ func SideEffect(value []byte) int { return Child(len(append(value, 1))) }
 func TestCoroHeaderLengthTailForwardReusesTargetFrame(t *testing.T) {
 	for _, test := range []struct {
 		name, parameter, argument string
+		target                    *llssa.Target
+		intIR                     string
 	}{
-		{"slice", "[]byte", "value"},
-		{"string", "string", "value"},
-		{"field", "struct { Prefix int; Data []byte }", "value.Data"},
+		{"slice", "[]byte", "value", nil, ""},
+		{"string", "string", "value", nil, ""},
+		{"field", "struct { Prefix int; Data []byte }", "value.Data", nil, ""},
+		{"wasm32-slice", "[]byte", "value", &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, "i32"},
+		{"wasm32-string", "string", "value", &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, "i32"},
+		{"wasm32-field", "struct { Prefix int; Data []byte }", "value.Data", &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, "i32"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			source := "package foo\nfunc Child(length int) int { return length }\n" +
 				"func Parent(value " + test.parameter + ") int { return Child(len(" + test.argument + ")) }\n"
-			prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABISource(t, nil, source)
+			prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABISource(t, test.target, source)
 			defer prog.Dispose()
+			wantIntIR := test.intIR
+			if wantIntIR == "" {
+				wantIntIR = "i" + strconv.Itoa(prog.PointerSize()*8)
+			}
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 			enableCoroChildAwaitCompilation(compilation)
 			pkg, _, err := NewPackageExWithEmbedOptions(
@@ -90,6 +102,10 @@ func TestCoroHeaderLengthTailForwardReusesTargetFrame(t *testing.T) {
 			if !strings.Contains(body, "extractvalue") || strings.Count(body, "call ptr") != 1 {
 				t.Fatalf("wrapper is not one header projection and target call:\n%s", body)
 			}
+			argumentWidth := regexp.MustCompile(`call ptr @"?foo\.Child\$coro"?\(ptr [^,]+, ptr [^,]+, ` + wantIntIR + ` [^)]*\)`)
+			if !argumentWidth.MatchString(body) {
+				t.Fatalf("header length does not use target int width %s:\n%s", wantIntIR, body)
+			}
 			// A corrupted frozen recipe must not turn an ordinary integer
 			// parameter or constant into a header read.
 			bad := *physical.tailForward
@@ -103,6 +119,41 @@ func TestCoroHeaderLengthTailForwardReusesTargetFrame(t *testing.T) {
 			if !module.NamedFunction("foo.Parent$coro.resume").IsNil() ||
 				!module.NamedFunction("foo.Parent$coro.destroy").IsNil() {
 				t.Fatal("header-only forwarding ramp acquired a frame lifetime")
+			}
+		})
+	}
+}
+
+func TestCoroHeaderLengthTailForwardKeepsBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name, result, child, directive string
+	}{
+		{"noinline", "int", "return length", "//go:noinline\n"},
+		{"recover", "any", "return recover()", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := "package foo\nfunc Child(length int) " + test.result + " { " + test.child + " }\n" +
+				test.directive + "func Parent(value []byte) " + test.result + " { return Child(len(value)) }\n"
+			prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABISource(t, nil, source)
+			defer prog.Dispose()
+			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+			enableCoroChildAwaitCompilation(compilation)
+			pkg, _, err := NewPackageExWithEmbedOptions(
+				prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+				PackageOptions{Compilation: compilation},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			module := pkg.Module()
+			defer module.Dispose()
+			parent := ssaPkg.Func("Parent")
+			physical, err := universe.coroProgramIR.physicalFunctionPlan(parent, universe.ownerOf(parent))
+			if err != nil || physical.tailForward != nil {
+				t.Fatalf("%s boundary acquired a frame-free recipe: %+v, error=%v", test.name, physical, err)
+			}
+			if body := requireCoroPhysicalFunction(t, module, "foo.Parent").String(); !strings.Contains(body, coroFrameAllocHookV1) {
+				t.Fatalf("%s boundary lost its physical frame:\n%s", test.name, body)
 			}
 		})
 	}
