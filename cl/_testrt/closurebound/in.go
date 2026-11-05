@@ -1,4 +1,4 @@
-// LITTEST darwin/arm64 linux/amd64
+// LITTEST darwin/arm64 linux/amd64 windows/amd64
 package main
 
 var my = demo2{}.encode
@@ -25,7 +25,11 @@ func main() {
 	}
 }
 
-// CHECK: [[GLOBAL_METHOD_DESCRIPTOR:@"_llgo_funcval\$[0-9a-f]+"]] = linkonce_odr constant { ptr, ptr } { ptr @"main.demo2.encode$bound", ptr @"__llgo.moduleZeroSizedAlloc$" }
+// CHECK: [[GLOBAL_METHOD_DESCRIPTOR:@"_llgo_funcval\$[0-9a-f]+"]] =
+// WINDOWS-SAME: private constant
+// DARWIN-SAME: linkonce_odr constant
+// LINUX-SAME: linkonce_odr constant
+// CHECK-SAME: { ptr, ptr } { ptr @"main.demo2.encode$bound", ptr @"__llgo.moduleZeroSizedAlloc$" }
 
 // Pointer receiver wrappers must guard nil before calling the value receiver.
 // CHECK-LABEL: define i64 @"main.(*demo1).encode"(ptr %0){{.*}} {
