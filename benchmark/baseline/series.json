@@ -46,6 +46,17 @@
     },
     {
       "kind": "branch",
+      "id": "33b6daf0333d6642",
+      "label": "Branch codex/full-pr-ci-repairs-20261105",
+      "path": "series/branch/33b6daf0333d6642/summary.json",
+      "configPath": "series/branch/33b6daf0333d6642/config.json",
+      "commitPath": "commits/ecdedc7072a69847d322ada6f83b927c41d8b96d.json",
+      "sha": "ecdedc7072a69847d322ada6f83b927c41d8b96d",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/ecdedc7072a69847d322ada6f83b927c41d8b96d",
+      "updatedAt": "2026-11-05T19:29:54.306Z"
+    },
+    {
+      "kind": "branch",
       "id": "ded370a5eb4ae501",
       "label": "Branch codex/runtime-timer-reuse-go127-20260830",
       "path": "series/branch/ded370a5eb4ae501/summary.json",
@@ -393,6 +404,17 @@
       "sha": "5813c3e80cbc3b58dc6c43e2dae252f63efc2564",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/5813c3e80cbc3b58dc6c43e2dae252f63efc2564",
       "updatedAt": "2026-09-12T04:41:25.618Z"
+    },
+    {
+      "kind": "pull",
+      "id": "354",
+      "label": "PR #354",
+      "path": "series/pull/354/summary.json",
+      "configPath": "series/pull/354/config.json",
+      "commitPath": "commits/ecdedc7072a69847d322ada6f83b927c41d8b96d.json",
+      "sha": "ecdedc7072a69847d322ada6f83b927c41d8b96d",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/ecdedc7072a69847d322ada6f83b927c41d8b96d",
+      "updatedAt": "2026-11-05T19:29:54.193Z"
     }
   ]
 }
