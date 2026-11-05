@@ -104,7 +104,7 @@
         }
       },
       "function": {
-        "type_pattern": "^(?:struct\\{\\$f func.*; \\$data unsafe\\.Pointer\\}|\\*?\\$llgo\\.funcval(?: \\*)?)$",
+        "type_pattern": "^(struct\\{\\$f func.*; \\$data unsafe\\.Pointer\\}|\\*?\\$llgo\\.funcval( \\*)?)$",
         "storage": "descriptor_pointer",
         "code": "code",
         "data": "env",
