@@ -28,6 +28,8 @@ github.com/cpunion/plan9asm v0.0.0-20261104192812-0c64fd02531d h1:3XanFCYnFyeXwH
 github.com/cpunion/plan9asm v0.0.0-20261104192812-0c64fd02531d/go.mod h1:e9DuBbC3zOC3rZ4Dvta9MUOW8aJK4hRLvNqS16EdU9o=
 github.com/cpunion/plan9asm v0.0.0-20261105032201-b684ed6522e2 h1:u1kHbRKgxLTKAnVfBXlRQpeD7KEDcda44BDFjteEYNA=
 github.com/cpunion/plan9asm v0.0.0-20261105032201-b684ed6522e2/go.mod h1:e9DuBbC3zOC3rZ4Dvta9MUOW8aJK4hRLvNqS16EdU9o=
+github.com/cpunion/plan9asm v0.0.0-20261105045801-a461833e4334 h1:+Uh5D4mC+qer+CY0IqEwN5vFJvsXDlSNVwHvHZqUgak=
+github.com/cpunion/plan9asm v0.0.0-20261105045801-a461833e4334/go.mod h1:e9DuBbC3zOC3rZ4Dvta9MUOW8aJK4hRLvNqS16EdU9o=
 github.com/creack/goselect v0.1.2 h1:2DNy14+JPjRBgPzAd1thbQp4BSIihxcBf0IXhQXDRa0=
 github.com/creack/goselect v0.1.2/go.mod h1:a/NhLweNvqIYMuxcMOuWY516Cimucms3DglDzQP3hKY=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
