@@ -1,0 +1,108 @@
+name: Focused Wasm Go-role repairs
+on:
+  push:
+    branches: [codex/focused-wasm-ci-repairs-20261105]
+permissions:
+  contents: read
+env:
+  SOURCE_SHA: cfd602e92333d4821c5f8bb1d917618322844afc
+jobs:
+  wasm-go-role:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+      - name: Record exact source
+        shell: python {0}
+        run: &source |
+          import json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'focused-wasm';out.mkdir(exist_ok=True)
+          head=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          status=subprocess.check_output(['git','status','--porcelain'],text=True)
+          record={'head':head,'status':status,'expected':os.environ['SOURCE_SHA']}
+          (out/('source-'+os.environ.get('PHASE','before')+'.json')).write_text(json.dumps(record,indent=2))
+          assert head==os.environ['SOURCE_SHA'] and status=='',record
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+      - uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '6.0.8'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: ./.github/actions/setup-binaryen
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: '1.27.3'
+      - uses: ./.github/actions/setup-llgo-cache
+        with:
+          build-cache-scope: wasm-workers
+          build-cache-mode: readwrite
+          crosscompile-cache-mode: readwrite
+          wasmer-cache-mode: 'off'
+      - uses: bytecodealliance/actions/wasm-tools/setup@v1
+        with:
+          version: '1.243.0'
+      - name: Build original CI tools and record actual tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          go version -m "$RUNNER_TEMP/llgo-bin/llgo" > "$RUNNER_TEMP/focused-wasm/compiler.txt"
+          sha256sum "$RUNNER_TEMP/llgo-bin/llgo" > "$RUNNER_TEMP/focused-wasm/compiler.sha256"
+          { go version; node --version; emcc --version; wasm-opt --version; wasm-tools --version; } > "$RUNNER_TEMP/focused-wasm/tools.txt"
+      - name: Execute complete SSA owners with default vet
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -list . ./ssa > "$RUNNER_TEMP/focused-wasm/ssa-inventory.txt"
+          set +e
+          go test -json -count=1 -timeout=15m ./ssa > "$RUNNER_TEMP/focused-wasm/ssa.jsonl" 2> "$RUNNER_TEMP/focused-wasm/ssa.stderr"
+          code=$?; echo "$code" > "$RUNNER_TEMP/focused-wasm/ssa.exit"; exit "$code"
+      - name: Execute five real Go-callable roots on EC32 and EC64
+        shell: bash
+        env:
+          LLGO_BUILD_CACHE: '1'
+        run: |
+          set -euo pipefail
+          selector='^(TestReflectGoVariadicMakeFunc|TestRuntimeWasmFinalizerResultDispatcher|TestReflectGoWordCallBridge|TestReflectGoWordMakeBridge|TestReflectGoPointerMakeBridge)$'
+          for target in emscripten emscripten-memory64; do
+            LLGO_WASM_WORKERS=2 python3 dev/run_logged_command.py --timeout 600 --label "five actual Wasm roots $target" "$RUNNER_TEMP/focused-wasm/$target.log" "$RUNNER_TEMP/llgo-bin/llgo" test -target "$target" -emulator -v -count=1 -timeout=480s -run "$selector" ./test/go
+            go tool test2json -p github.com/xgo-dev/llgo/test/go < "$RUNNER_TEMP/focused-wasm/$target.log" > "$RUNNER_TEMP/focused-wasm/$target.jsonl"
+          done
+      - name: Require complete SSA and both actual five-root scopes without SKIP
+        shell: python {0}
+        run: |
+          import collections,json,os,pathlib
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'focused-wasm'
+          five={'TestReflectGoVariadicMakeFunc','TestRuntimeWasmFinalizerResultDispatcher','TestReflectGoWordCallBridge','TestReflectGoWordMakeBridge','TestReflectGoPointerMakeBridge'}
+          inventory={n for n in (out/'ssa-inventory.txt').read_text().splitlines() if n.startswith('Test')}
+          expected={'ssa':inventory,'emscripten':five,'emscripten-memory64':five};summary={}
+          for name,roots in expected.items():
+            actions=collections.defaultdict(list);package=[]
+            for line in (out/(name+'.jsonl')).read_text().splitlines():
+              e=json.loads(line);action=e['Action'];test=e.get('Test')
+              if test and action in ('run','pass','fail','skip'):actions[test].append(action)
+              if not test and action in ('pass','fail','skip'):package.append(action)
+            assert {n for n in actions if '/' not in n}==roots,(name,roots,actions)
+            assert actions and all(a==['run','pass'] for a in actions.values()),(name,actions)
+            assert package==['pass'],(name,package)
+            summary[name]={'roots':sorted(roots),'unique_PASS_nodes':sorted(actions),'SKIP':0}
+          (out/'actual-acceptance.json').write_text(json.dumps(summary,indent=2))
+      - name: Require final source unchanged
+        if: always()
+        shell: python {0}
+        env:
+          PHASE: after
+        run: *source
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: focused-wasm-go-role
+          path: ${{ runner.temp }}/focused-wasm
+          if-no-files-found: error
