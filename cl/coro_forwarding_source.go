@@ -49,7 +49,41 @@ type coroForwardingSourceArgument struct {
 	valueType     types.Type
 	projectedType types.Type
 	fieldPath     []int
-	direct        bool
+	// headerLength reads only a previously evaluated slice/string header,
+	// after fieldPath. It never reads a pointee or a map/channel's state.
+	headerLength bool
+	direct       bool
+}
+
+func coroForwardingHeaderHasLength(source types.Type) bool {
+	if source == nil {
+		return false
+	}
+	switch source := types.Unalias(source).Underlying().(type) {
+	case *types.Slice:
+		return true
+	case *types.Basic:
+		return source.Kind() == types.String
+	}
+	return false
+}
+
+// This observes the exact builtin use; permission to eliminate its activation
+// still belongs to the frozen physical instruction and call recipes.
+func coroForwardingHeaderLengthInput(value ssa.Value) ssa.Value {
+	call, ok := value.(*ssa.Call)
+	if !ok || call.Common() == nil || len(call.Common().Args) != 1 {
+		return nil
+	}
+	builtin, ok := call.Common().Value.(*ssa.Builtin)
+	if !ok || builtin.Name() != "len" {
+		return nil
+	}
+	input := call.Common().Args[0]
+	if !coroForwardingHeaderHasLength(input.Type()) {
+		return nil
+	}
+	return input
 }
 
 func coroForwardingProjectedType(source types.Type, fields []int) (types.Type, bool) {
@@ -94,6 +128,13 @@ scanAdapters:
 			value = adapter.X
 		case *ssa.Convert:
 			value = adapter.X
+		case *ssa.Call:
+			if coroForwardingHeaderLengthInput(adapter) == nil {
+				break scanAdapters
+			}
+			valueProjections[adapter] = none{}
+			callIndex++
+			continue
 		case *ssa.Field, *ssa.FieldAddr, *ssa.Alloc, *ssa.Store:
 			// A local copy of an evaluated aggregate is not a pointee read.
 			// Every instruction must belong to a proven parameter path below.
@@ -192,34 +233,51 @@ scanAdapters:
 	usedAdapters := make(map[ssa.Value]none, len(adapterParameters))
 	projections := make(map[ssa.Instruction]none)
 	for index, value := range call.Common().Args {
-		parameter, direct := value.(*ssa.Parameter)
+		projectedValue := value
+		headerLength := false
+		if input := coroForwardingHeaderLengthInput(value); input != nil {
+			projectedValue, headerLength = input, true
+			projections[value.(ssa.Instruction)] = none{}
+		}
+		parameter, direct := projectedValue.(*ssa.Parameter)
 		var fieldPath []int
-		if !direct && adapterParameters[value] == nil {
+		if !direct && adapterParameters[projectedValue] == nil {
 			var consumed map[ssa.Instruction]none
 			var projected bool
-			parameter, fieldPath, consumed, projected = deriveCoroForwardingValueProjection(function, value)
+			parameter, fieldPath, consumed, projected = deriveCoroForwardingValueProjection(function, projectedValue)
 			if projected {
 				for instruction := range consumed {
 					projections[instruction] = none{}
 				}
-				direct = len(fieldPath) == 0 && value == parameter
+				direct = len(fieldPath) == 0 && projectedValue == parameter
 			}
 		} else if !direct {
-			parameter = adapterParameters[value]
+			parameter = adapterParameters[projectedValue]
 		}
-		argument := coroForwardingSourceArgument{sourceParameter: -1, valueType: value.Type(), direct: direct}
+		argument := coroForwardingSourceArgument{
+			sourceParameter: -1, valueType: value.Type(),
+			direct: direct && !headerLength, headerLength: headerLength,
+		}
 		if parameter != nil {
 			sourceIndex, owned := parameterIndex[parameter]
 			projectedType, projected := coroForwardingProjectedType(parameter.Type(), fieldPath)
 			if !owned || !projected {
 				return nil
 			}
+			if headerLength {
+				if !coroForwardingHeaderHasLength(projectedType) {
+					return nil
+				}
+				projectedType = types.Typ[types.Int]
+			}
 			argument.sourceParameter = sourceIndex
 			argument.projectedType = projectedType
 			argument.fieldPath = append([]int(nil), fieldPath...)
-			if adapterParameters[value] != nil {
-				usedAdapters[value] = none{}
+			if adapterParameters[projectedValue] != nil {
+				usedAdapters[projectedValue] = none{}
 			}
+		} else if headerLength {
+			return nil // Only an evaluated parameter/value-field header is supported.
 		} else if capture, exact := value.(*ssa.FreeVar); exact && capture.Parent() == function {
 			owned := false
 			for _, free := range function.FreeVars {
