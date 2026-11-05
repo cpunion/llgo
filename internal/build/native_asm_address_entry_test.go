@@ -204,12 +204,15 @@ func TestPlan9AsmAddressOnlyNativeEntryRejectsUnprovedSources(t *testing.T) {
 		{"interior PC", base["main.go"], strings.Replace(base["entry.s"], "$rawEntry(SB)", "$rawEntry+1(SB)", 1)},
 		{"Go argument frame", base["main.go"], strings.Replace(base["entry.s"], "$0-0", "$0-8", 1)},
 		{"FP access", base["main.go"], strings.Replace(base["entry.s"], "\tRET", "\tMOVQ argument+0(FP), AX\n\tRET", 1)},
-		{"aliased DATA owner", strings.Replace(base["main.go"], "package main\n", "package main\nimport _ \"unsafe\"\n//go:linkname entry example.com/other.entry\n", 1), base["entry.s"]},
+		{"aliased DATA owner", strings.Replace(base["main.go"], "package main", "package main\nimport _ \"unsafe\"\n//go:linkname entry example.com/other.entry\n", 1), base["entry.s"]},
 		{"typed CALL does not supply a native ABI", base["main.go"] + "\nfunc Invoke()\n", base["entry.s"] + "\nTEXT ·Invoke(SB), NOSPLIT|NOFRAME, $0-0\nCALL rawEntry(SB)\nRET\n"},
 		{"unselected cross-file relocation", base["main.go"], "#include \"textflag.h\"\nTEXT rawEntry(SB), NOSPLIT|NOFRAME, $0-0\nRET\n"},
 		{"unowned sibling", base["main.go"], base["entry.s"] + "\nTEXT unknownEntry(SB), NOSPLIT|NOFRAME, $0-0\nRET\n"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			if row.goSource == base["main.go"] && row.assembly == base["entry.s"] {
+				t.Fatal("negative fixture did not modify its source")
+			}
 			files := map[string]string{"go.mod": base["go.mod"], "main.go": row.goSource, "entry.s": row.assembly}
 			if row.name == "pointer is not uintptr" {
 				files["main.go"] = strings.Replace(files["main.go"], "entry == 0", "entry == nil", 1)
