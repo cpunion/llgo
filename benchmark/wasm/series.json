@@ -14,6 +14,17 @@
     },
     {
       "kind": "branch",
+      "id": "33b6daf0333d6642",
+      "label": "Branch codex/full-pr-ci-repairs-20261105",
+      "path": "series/branch/33b6daf0333d6642/summary.json",
+      "configPath": "series/branch/33b6daf0333d6642/config.json",
+      "commitPath": "commits/ecdedc7072a69847d322ada6f83b927c41d8b96d.json",
+      "sha": "ecdedc7072a69847d322ada6f83b927c41d8b96d",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/ecdedc7072a69847d322ada6f83b927c41d8b96d",
+      "updatedAt": "2026-11-05T19:29:36.197Z"
+    },
+    {
+      "kind": "branch",
       "id": "c3053fe8d494a9f9",
       "label": "Branch codex/wasm-r4-stdlib-text-io-20260905",
       "path": "series/branch/c3053fe8d494a9f9/summary.json",
@@ -55,6 +66,17 @@
       "sha": "888967444d3fd692628a625d7641b040d6e9e62c",
       "sourceUrl": "https://github.com/cpunion/llgo/commit/888967444d3fd692628a625d7641b040d6e9e62c",
       "updatedAt": "2026-09-11T02:54:27.204Z"
+    },
+    {
+      "kind": "pull",
+      "id": "354",
+      "label": "PR #354",
+      "path": "series/pull/354/summary.json",
+      "configPath": "series/pull/354/config.json",
+      "commitPath": "commits/ecdedc7072a69847d322ada6f83b927c41d8b96d.json",
+      "sha": "ecdedc7072a69847d322ada6f83b927c41d8b96d",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/ecdedc7072a69847d322ada6f83b927c41d8b96d",
+      "updatedAt": "2026-11-05T19:29:36.187Z"
     }
   ]
 }
