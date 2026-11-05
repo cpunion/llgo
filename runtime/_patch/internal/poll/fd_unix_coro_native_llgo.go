@@ -89,8 +89,11 @@ func (fd *FD) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if err := fd.pd.prepareRead(fd.isFile); err != nil {
-		return 0, err
+	// A descriptor without poll state has nothing to reset before the syscall.
+	if fd.pd.runtimeCtx != 0 {
+		if err := fd.pd.prepareRead(fd.isFile); err != nil {
+			return 0, err
+		}
 	}
 	if fd.IsStream && len(p) > maxRW {
 		p = p[:maxRW]
@@ -120,8 +123,10 @@ func (fd *FD) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	defer fd.writeUnlock()
-	if err := fd.pd.prepareWrite(fd.isFile); err != nil {
-		return 0, err
+	if fd.pd.runtimeCtx != 0 {
+		if err := fd.pd.prepareWrite(fd.isFile); err != nil {
+			return 0, err
+		}
 	}
 	var nn int
 	for {
