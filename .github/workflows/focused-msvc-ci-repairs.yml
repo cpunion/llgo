@@ -1,0 +1,84 @@
+name: Focused MSVC original Go owners
+on:
+  push:
+    branches: [codex/focused-msvc-ci-repairs-20261105]
+permissions:
+  contents: read
+env:
+  SOURCE_SHA: cfd602e92333d4821c5f8bb1d917618322844afc
+jobs:
+  windows-address-msvc:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Require normal CRLF checkout
+        shell: pwsh
+        run: git config --global core.autocrlf true
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+      - name: Record exact source and actual CRLF fixture
+        shell: python {0}
+        run: &source |
+          import hashlib,json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'focused';out.mkdir(exist_ok=True)
+          head=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          status=subprocess.check_output(['git','status','--porcelain'],text=True)
+          record={'head':head,'status':status,'expected':os.environ['SOURCE_SHA'],'fixture':{}}
+          if os.name=='nt':
+            for name in ('main.go','entry.s','go.mod'):
+              data=pathlib.Path('internal/build/testdata/plan9asm-native-address',name).read_bytes()
+              record['fixture'][name]={'sha256':hashlib.sha256(data).hexdigest(),'CRLF':data.count(b'\r\n'),'bareLF':data.replace(b'\r\n',b'').count(b'\n')}
+            assert all(v['CRLF']>0 and v['bareLF']==0 for v in record['fixture'].values()),record
+          (out/('source-'+os.environ.get('PHASE','before')+'.json')).write_text(json.dumps(record,indent=2))
+          assert head==os.environ['SOURCE_SHA'] and status=='',record
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+          windows-abi: msvc
+          windows-arch: amd64
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: '1.27.3'
+          architecture: x64
+      - name: Execute five original nonconditional object and source owners
+        shell: python {0}
+        run: |
+          import json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'focused'
+          command=['go','test','-json','-count=1','-timeout=15m','-run','^TestPlan9AsmAddressOnlyNativeEntry(Objects|RejectsUnprovedSources|KeepsGoDeclaration|SourceRole|AliasRoles)$','./internal/build']
+          with (out/'owners.jsonl').open('wb') as stdout,(out/'owners.stderr').open('wb') as stderr:
+            child=subprocess.run(command,stdout=stdout,stderr=stderr,timeout=1200)
+          (out/'owners-command.json').write_text(json.dumps({'command':command,'exit':child.returncode}))
+          raise SystemExit(child.returncode)
+      - name: Require all five roots and every child actual PASS without SKIP
+        shell: python {0}
+        env:
+          EXPECTED_JSON: '{"owners.jsonl":["TestPlan9AsmAddressOnlyNativeEntryObjects","TestPlan9AsmAddressOnlyNativeEntryRejectsUnprovedSources","TestPlan9AsmAddressOnlyNativeEntryKeepsGoDeclaration","TestPlan9AsmAddressOnlyNativeEntrySourceRole","TestPlan9AsmAddressOnlyNativeEntryAliasRoles"]}'
+        run: |
+          import collections,json,os,pathlib
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'focused';summary={}
+          for name,expected in json.loads(os.environ['EXPECTED_JSON']).items():
+            actions=collections.defaultdict(list);package=[]
+            for line in (out/name).read_text().splitlines():
+              event=json.loads(line);action=event['Action'];test=event.get('Test')
+              if test and action in ('run','pass','fail','skip'):actions[test].append(action)
+              if not test and action in ('pass','fail','skip'):package.append(action)
+            assert {n for n in actions if '/' not in n}==set(expected),(name,actions)
+            assert actions and all(a==['run','pass'] for a in actions.values()),(name,actions)
+            assert package==['pass'],(name,package)
+            summary[name]={'roots':expected,'unique_PASS_nodes':sorted(actions),'SKIP':0}
+          (out/'actual-acceptance.json').write_text(json.dumps(summary,indent=2))
+      - name: Require final source unchanged
+        if: always()
+        shell: python {0}
+        env:
+          PHASE: after
+        run: *source
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: focused-windows-address-msvc
+          path: ${{ runner.temp }}/focused
+          if-no-files-found: error
