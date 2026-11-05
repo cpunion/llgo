@@ -81,6 +81,10 @@ jobs:
         if: matrix.lane == 'integration'
         run: go test ./cl -run '^TestCoroInlineAwaitPreservesCallerPreemptCountdown$' -count=1
 
+      - name: Test evaluated header-length coroutine forwarding
+        if: matrix.lane == 'integration'
+        run: go test ./cl -run '^TestCoro(HeaderLength.*|ForwardingShapeHasOneSourceOwnerAndNoLateBodyWalk|TailForwardPreservesNestedRecoverBoundary)$' -count=1 -v
+
       - name: Test inline child native fault activation
         if: matrix.lane == 'integration'
         env:
@@ -601,7 +605,8 @@ jobs:
               test/go/runtime_caller_exhaustion_test.go \
               test/go/recover_defer_go126_test.go \
               test/go/bound_method_direct_test.go \
-              test/go/field_guard_memory_test.go
+              test/go/field_guard_memory_test.go \
+              test/go/tail_forward_header_length_test.go
           for procs in 1 4; do
             GOMAXPROCS="$procs" timeout 90s /tmp/llgo-local-channel-gate \
               -test.v -test.count=3 -test.timeout=60s
