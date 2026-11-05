@@ -1,0 +1,34 @@
+name: Windows SDK driver path observation
+on:
+  push:
+    branches: [codex/windows-sdk-driver-observation-20261105]
+permissions:
+  contents: read
+jobs:
+  observe:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Observe the unchanged factory SDK spelling and native handle identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:GOENV = 'off'; $env:GOWORK = 'off'; $env:GOTOOLCHAIN = 'local'; $env:GOFLAGS = ''
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/sdk-path" | Out-Null
+          go version | Set-Content "$env:RUNNER_TEMP/sdk-path/go-version.txt"
+          Get-FileHash -Path @((Get-Command go).Source, 'internal/plan9asm/amd64_frame.go', 'dev/windows-sdk-driver-observation/probe_windows.go') | Format-List | Out-File "$env:RUNNER_TEMP/sdk-path/input-hashes.txt"
+          $probe = Start-Process -FilePath ((Get-Command go).Source) -ArgumentList 'run', '-mod=readonly', './dev/windows-sdk-driver-observation/probe_windows.go' -Wait -PassThru -NoNewWindow -RedirectStandardOutput "$env:RUNNER_TEMP/sdk-path/actual.json" -RedirectStandardError "$env:RUNNER_TEMP/sdk-path/actual.stderr"
+          $probe.ExitCode | Set-Content "$env:RUNNER_TEMP/sdk-path/exit.txt"
+          if ($probe.ExitCode -ne 0) { exit $probe.ExitCode }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-sdk-driver-path
+          path: ${{ runner.temp }}/sdk-path
+          if-no-files-found: error
