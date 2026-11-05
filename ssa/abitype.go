@@ -389,6 +389,25 @@ func (b Builder) abiInterfaceImethods(t *types.Interface, name string) llvm.Valu
 	})
 }
 
+// Function metadata keeps its source callable role through physical bridge
+// generation. Only Go funcvals have a supported MakeFunc entry on Wasm.
+func (b Builder) abiFunctionFields(sig *types.Signature, cc CallConv) []llvm.Value {
+	name, _ := b.Prog.abi.TypeName(sig)
+	fields := []llvm.Value{
+		b.abiTuples(sig.Params(), name+"$in"),
+		b.abiTuples(sig.Results(), name+"$out"),
+	}
+	if b.Prog.target.usesWasmReflectBridges() {
+		bridges := b.Pkg.wasmReflectBridge(sig, cc)
+		makeEntry := b.Prog.Nil(b.Prog.VoidPtr()).impl
+		if bridges.make != nil {
+			makeEntry = bridges.make.impl
+		}
+		fields = append(fields, bridges.call.impl, makeEntry)
+	}
+	return fields
+}
+
 func (b Builder) abiTuples(t *types.Tuple, name string) llvm.Value {
 	prog := b.Prog
 	n := t.Len()
@@ -470,18 +489,10 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 			prog.IntVal(uint64(flags), prog.Uint32()).impl,
 		}
 	case *types.Signature:
-		name, _ := prog.abi.TypeName(t)
-		fields = []llvm.Value{
-			b.abiTuples(t.Params(), name+"$in"),
-			b.abiTuples(t.Results(), name+"$out"),
-		}
-		if prog.target.usesWasmReflectBridges() {
-			bridges := pkg.wasmReflectBridge(t)
-			fields = append(fields, bridges.call.impl, bridges.make.impl)
-		}
+		return b.abiFunctionFields(t, CDecl)
 	case *types.Struct:
 		if IsClosure(t) {
-			return b.abiExtendedFields(t.Field(0).Type(), name, global)
+			return b.abiFunctionFields(t.Field(0).Type().(*types.Signature), GoDecl)
 		}
 		name, _ = prog.abi.TypeName(t)
 		var pkgPath string

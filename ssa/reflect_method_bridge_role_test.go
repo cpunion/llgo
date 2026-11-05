@@ -70,7 +70,7 @@ func TestWasmReflectMethodExpressionGoRoleRegistration(t *testing.T) {
 			if flags&uint64(rtabi.TFlagClosure) == 0 {
 				t.Fatal("reflected method expression descriptor lost its Go callable role")
 			}
-			bridges := pkg.wasmReflectBridge(expression)
+			bridges := pkg.wasmReflectBridge(expression, GoDecl)
 			functionType := prog.rtNamed("functype").Underlying().(*types.Struct)
 			for _, field := range []struct {
 				name string

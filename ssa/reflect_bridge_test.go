@@ -48,22 +48,22 @@ func TestWasmReflectBridgeShapeDeduplication(t *testing.T) {
 			types.NewTuple(types.NewParam(token.NoPos, nil, "x", in)),
 			types.NewTuple(types.NewParam(token.NoPos, nil, "", out)), false)
 	}
-	intBridge := pkg.wasmReflectBridge(signature(types.Typ[types.Int64], types.Typ[types.Uint64]))
-	unsignedBridge := pkg.wasmReflectBridge(signature(types.Typ[types.Uint64], types.Typ[types.Int64]))
+	intBridge := pkg.wasmReflectBridge(signature(types.Typ[types.Int64], types.Typ[types.Uint64]), GoDecl)
+	unsignedBridge := pkg.wasmReflectBridge(signature(types.Typ[types.Uint64], types.Typ[types.Int64]), GoDecl)
 	if intBridge != unsignedBridge {
 		t.Fatal("signedness-only distinction generated duplicate bridges")
 	}
 
-	pointerBridge := pkg.wasmReflectBridge(signature(types.Typ[types.UnsafePointer], types.Typ[types.UnsafePointer]))
+	pointerBridge := pkg.wasmReflectBridge(signature(types.Typ[types.UnsafePointer], types.Typ[types.UnsafePointer]), GoDecl)
 	mapType := types.NewMap(types.Typ[types.String], types.Typ[types.Int])
-	mapBridge := pkg.wasmReflectBridge(signature(mapType, mapType))
+	mapBridge := pkg.wasmReflectBridge(signature(mapType, mapType), GoDecl)
 	if pointerBridge != mapBridge {
 		t.Fatal("equivalent directly rooted pointers generated duplicate bridges")
 	}
 
 	emptyInterface := types.NewInterfaceType(nil, nil).Complete()
-	interfaceBridge := pkg.wasmReflectBridge(signature(emptyInterface, emptyInterface))
-	closureBridge := pkg.wasmReflectBridge(signature(NoArgsNoRet, NoArgsNoRet))
+	interfaceBridge := pkg.wasmReflectBridge(signature(emptyInterface, emptyInterface), GoDecl)
+	closureBridge := pkg.wasmReflectBridge(signature(NoArgsNoRet, NoArgsNoRet), GoDecl)
 	if closureBridge.call != pointerBridge.call || closureBridge.make != pointerBridge.make {
 		t.Fatal("the one-word rooted Go descriptor did not reuse both pointer bridges")
 	}
@@ -154,12 +154,12 @@ func TestWasmReflectBridgeEmptyAndMultipleResults(t *testing.T) {
 	prog.EnableGCRoots(true)
 	pkg := prog.NewPackage("p", "example.com/p")
 
-	pkg.wasmReflectBridge(NoArgsNoRet)
+	pkg.wasmReflectBridge(NoArgsNoRet, GoDecl)
 	results := types.NewTuple(
 		types.NewParam(token.NoPos, nil, "", types.Typ[types.Int64]),
 		types.NewParam(token.NoPos, nil, "", types.Typ[types.String]),
 	)
-	pkg.wasmReflectBridge(types.NewSignatureType(nil, nil, nil, nil, results, false))
+	pkg.wasmReflectBridge(types.NewSignatureType(nil, nil, nil, nil, results, false), GoDecl)
 	if err := llvm.VerifyModule(pkg.mod, llvm.ReturnStatusAction); err != nil {
 		t.Fatal(err)
 	}
