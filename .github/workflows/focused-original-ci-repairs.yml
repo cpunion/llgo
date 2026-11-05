@@ -1,0 +1,152 @@
+name: Focused original CI repairs
+on:
+  push:
+    branches: [codex/focused-original-ci-repairs-20261105]
+permissions:
+  contents: read
+env:
+  SOURCE_SHA: 07cd25a268a2d1e83e261528f0d0f232b01158d7
+jobs:
+  linux-syscall:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+      - name: Record exact source
+        shell: python {0}
+        run: &source |
+          import hashlib,json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'focused';out.mkdir(exist_ok=True)
+          head=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          status=subprocess.check_output(['git','status','--porcelain'],text=True)
+          record={'head':head,'status':status,'expected':os.environ['SOURCE_SHA'],'fixture':{}}
+          if os.name=='nt':
+            for name in ('main.go','entry.s','go.mod'):
+              data=pathlib.Path('internal/build/testdata/plan9asm-native-address',name).read_bytes()
+              record['fixture'][name]={'sha256':hashlib.sha256(data).hexdigest(),'CRLF':data.count(b'\r\n'),'bareLF':data.replace(b'\r\n',b'').count(b'\n')}
+            assert all(v['CRLF']>0 and v['bareLF']==0 for v in record['fixture'].values()),record
+          (out/('source-'+os.environ.get('PHASE','before')+'.json')).write_text(json.dumps(record,indent=2))
+          assert head==os.environ['SOURCE_SHA'] and status=='',record
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: '1.27.3'
+      - uses: ./.github/actions/setup-llgo-cache
+      - name: Build original CI tools
+        shell: bash
+        run: |
+          dev/build_ci_tools.sh "$RUNNER_TEMP/llgo-bin"
+          echo "$RUNNER_TEMP/llgo-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          go version -m "$RUNNER_TEMP/llgo-bin/llgo" > "$RUNNER_TEMP/focused/compiler.txt"
+          sha256sum "$RUNNER_TEMP/llgo-bin/llgo" > "$RUNNER_TEMP/focused/compiler.sha256"
+      - name: Execute original syscallraw demo
+        working-directory: _demo/go/syscallraw
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/dev/run_logged_command.py" --timeout 300 --label 'build syscallraw' "$RUNNER_TEMP/focused/demo-build.log" llgo build -p=1 -o "$RUNNER_TEMP/syscallraw" .
+          python3 "$GITHUB_WORKSPACE/dev/run_logged_command.py" --timeout 120 --label 'run syscallraw' "$RUNNER_TEMP/focused/demo-run.log" "$RUNNER_TEMP/syscallraw"
+      - name: Execute stock Go and LLGo syscall owners
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          go test -json -count=1 -timeout=5m -run '^TestRawWriteResultAndEffects$' ./test/std/syscall > "$RUNNER_TEMP/focused/stock.jsonl" 2> "$RUNNER_TEMP/focused/stock.stderr"
+          code=$?; echo "$code" > "$RUNNER_TEMP/focused/stock.exit"; test "$code" = 0 || exit "$code"
+          python3 dev/run_logged_command.py --timeout 600 --label 'LLGo syscall owners' "$RUNNER_TEMP/focused/llgo.log" llgo test -v -count=1 -timeout=5m -run '^(TestRawWriteResultAndEffects|TestPipeReadWrite|TestOpenSeekReadWrite)$' ./test/std/syscall
+          code=$?; echo "$code" > "$RUNNER_TEMP/focused/llgo.exit"; test "$code" = 0 || exit "$code"
+          go tool test2json -p github.com/xgo-dev/llgo/test/std/syscall < "$RUNNER_TEMP/focused/llgo.log" > "$RUNNER_TEMP/focused/llgo.jsonl"
+      - name: Require unique actual RUN and PASS
+        shell: python {0}
+        env:
+          EXPECTED_JSON: '{"stock.jsonl":["TestRawWriteResultAndEffects"],"llgo.jsonl":["TestRawWriteResultAndEffects","TestPipeReadWrite","TestOpenSeekReadWrite"]}'
+        run: &verify |
+          import collections,json,os,pathlib
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'focused';summary={}
+          for name,expected in json.loads(os.environ['EXPECTED_JSON']).items():
+            actions=collections.defaultdict(list);package=[]
+            for line in (out/name).read_text().splitlines():
+              event=json.loads(line);action=event['Action'];test=event.get('Test')
+              if test and action in ('run','pass','fail','skip'):actions[test].append(action)
+              if not test and action in ('pass','fail','skip'):package.append(action)
+            assert {n for n in actions if '/' not in n}==set(expected),(name,actions)
+            assert actions and all(a==['run','pass'] for a in actions.values()),(name,actions)
+            assert package==['pass'],(name,package)
+            summary[name]={'roots':expected,'unique_PASS_nodes':sorted(actions),'SKIP':0}
+          (out/'actual-acceptance.json').write_text(json.dumps(summary,indent=2))
+      - name: Require final source unchanged
+        if: always()
+        shell: python {0}
+        env:
+          PHASE: after
+        run: *source
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: focused-linux-syscall
+          path: ${{ runner.temp }}/focused
+          if-no-files-found: error
+  windows-address:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [msvc, mingw]
+    steps:
+      - name: Require normal CRLF checkout
+        shell: pwsh
+        run: git config --global core.autocrlf true
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+      - name: Record exact source and actual CRLF fixture
+        shell: python {0}
+        run: *source
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: amd64
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: '1.27.3'
+          architecture: x64
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: amd64
+      - name: Execute five original nonconditional object and source owners
+        shell: python {0}
+        run: |
+          import json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'focused'
+          command=['go','test','-json','-count=1','-timeout=15m','-run','^TestPlan9AsmAddressOnlyNativeEntry(Objects|RejectsUnprovedSources|KeepsGoDeclaration|SourceRole|AliasRoles)$','./internal/build']
+          with (out/'owners.jsonl').open('wb') as stdout,(out/'owners.stderr').open('wb') as stderr:
+            child=subprocess.run(command,stdout=stdout,stderr=stderr,timeout=1200)
+          (out/'owners-command.json').write_text(json.dumps({'command':command,'exit':child.returncode}))
+          raise SystemExit(child.returncode)
+      - name: Require all five roots and every child actual PASS without SKIP
+        shell: python {0}
+        env:
+          EXPECTED_JSON: '{"owners.jsonl":["TestPlan9AsmAddressOnlyNativeEntryObjects","TestPlan9AsmAddressOnlyNativeEntryRejectsUnprovedSources","TestPlan9AsmAddressOnlyNativeEntryKeepsGoDeclaration","TestPlan9AsmAddressOnlyNativeEntrySourceRole","TestPlan9AsmAddressOnlyNativeEntryAliasRoles"]}'
+        run: *verify
+      - name: Require final source unchanged
+        if: always()
+        shell: python {0}
+        env:
+          PHASE: after
+        run: *source
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: focused-windows-address-${{ matrix.abi }}
+          path: ${{ runner.temp }}/focused
+          if-no-files-found: error
