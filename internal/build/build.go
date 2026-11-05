@@ -1563,6 +1563,12 @@ func cSharedLinkArgs(toolchain crosscompile.NativeToolchain) []string {
 	if toolchain.ObjectFormat != crosscompile.ObjectFormatCOFF {
 		args = append(args, "-fPIC")
 	}
+	if toolchain.ObjectFormat == crosscompile.ObjectFormatELF {
+		// Lazy PLT resolution may clobber a Go closure's hidden environment
+		// register before reaching its entry. Resolve shared-library imports
+		// at load time so the first call preserves the same ABI as later calls.
+		args = append(args, "-Wl,-z,now")
+	}
 	return args
 }
 

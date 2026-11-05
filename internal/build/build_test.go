@@ -2824,7 +2824,7 @@ func TestCSharedLinkArgs(t *testing.T) {
 		objectType crosscompile.ObjectFormat
 		want       string
 	}{
-		{name: "ELF", objectType: crosscompile.ObjectFormatELF, want: "-shared -fPIC"},
+		{name: "ELF", objectType: crosscompile.ObjectFormatELF, want: "-shared -fPIC -Wl,-z,now"},
 		{name: "Mach-O", objectType: crosscompile.ObjectFormatMachO, want: "-shared -fPIC"},
 		{name: "COFF", objectType: crosscompile.ObjectFormatCOFF, want: "-shared"},
 	} {
