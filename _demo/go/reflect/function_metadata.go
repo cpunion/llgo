@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"runtime"
 	"unsafe"
 )
 
@@ -78,8 +79,43 @@ func testFunctionMetadata() {
 		panic("function-returning-closure metadata")
 	}
 
-	cTyp := reflect.TypeOf((*reflectedCFunc)(nil)).Elem()
+	// Convert at the compiler boundary before reflecting the native entry.
+	// reflect.Set only copies a function representation; it cannot turn a Go
+	// descriptor into a native C entry pointer.
+	native := reflect.ValueOf(reflectedCFunc(reflectedBase))
+	cTyp := native.Type()
 	cValue := reflect.New(cTyp).Elem()
-	cValue.Set(base)
+	cValue.Set(native)
 	checkCall(cValue)
+	copied := cValue.Interface().(reflectedCFunc)
+	if ok, n := copied(100, "hello"); !ok || n != 105 {
+		panic("reflected native function roundtrip")
+	}
+	cValue.Set(reflect.Zero(cTyp))
+	if !cValue.IsNil() {
+		panic("reflected nil native function")
+	}
+	cValue.Set(native)
+	checkCall(cValue)
+
+	// Stock Go ignores llgo:cdecl and gives these types the same function
+	// representation. LLGo must reject copying between the two ABIs in
+	// either direction, without changing the destination on failure.
+	if runtime.Compiler == "llgo" {
+		if base.Type().AssignableTo(cTyp) || cTyp.AssignableTo(base.Type()) {
+			panic("Go and native function representations are assignable")
+		}
+		shouldPanic("is not assignable", func() { cValue.Set(base) })
+		checkCall(cValue)
+		shouldPanic("is not assignable", func() { newBase.Set(native) })
+		checkCall(newBase)
+	} else {
+		if !base.Type().AssignableTo(cTyp) || !cTyp.AssignableTo(base.Type()) {
+			panic("ordinary Go function assignment control")
+		}
+		cValue.Set(base)
+		checkCall(cValue)
+		newBase.Set(native)
+		checkCall(newBase)
+	}
 }
