@@ -62,22 +62,38 @@ func TestPlan9AsmAddressOnlyNativeEntryAliasRoles(t *testing.T) {
 	if object == "" {
 		t.Fatal("positive source role missing")
 	}
-	for _, row := range []struct{ name, directive string }{
-		{"LLGo alias", "//llgo:link entry example.com/other.entry"},
-		{"spaced LLGo alias", "// llgo:link entry example.com/other.entry"},
-		{"normalized Go alias", "//go: linkname entry example.com/other.entry"},
-		{"Go symbol collision", "//go:linkname shadow " + object + "\nfunc shadow()"},
-		{"native import collision", "//go:cgo_import_dynamic imported " + object},
+	for _, ending := range []struct{ name, newline string }{
+		{"LF", "\n"},
+		{"CRLF", "\r\n"},
 	} {
-		t.Run(row.name, func(t *testing.T) {
-			source := strings.Replace(base["main.go"], "var entry uintptr", row.directive+"\nvar entry uintptr", 1)
-			if strings.Contains(row.directive, "go:linkname") {
-				source = strings.Replace(source, "package main\n", "package main\nimport _ \"unsafe\"\n", 1)
-			}
-			files := map[string]string{"go.mod": base["go.mod"], "main.go": source, "entry.s": base["entry.s"]}
-			_, apkg := nativeAddressFixturePackage(t, files, "linux", "amd64", "x86_64-unknown-linux-gnu")
-			if entries := nativeAddressEntries(apkg.Package, []byte(files["entry.s"]), "amd64"); len(entries) != 0 {
-				t.Fatalf("source alias/collision acquired an address role: %v", entries)
+		t.Run(ending.name, func(t *testing.T) {
+			goSource := strings.ReplaceAll(base["main.go"], "\r\n", "\n")
+			goSource = strings.ReplaceAll(goSource, "\n", ending.newline)
+			for _, row := range []struct{ name, directive string }{
+				{"LLGo alias", "//llgo:link entry example.com/other.entry"},
+				{"spaced LLGo alias", "// llgo:link entry example.com/other.entry"},
+				{"normalized Go alias", "//go: linkname entry example.com/other.entry"},
+				{"Go symbol collision", "//go:linkname shadow " + object + "\nfunc shadow()"},
+				{"native import collision", "//go:cgo_import_dynamic imported " + object},
+			} {
+				t.Run(row.name, func(t *testing.T) {
+					source := strings.Replace(goSource, "var entry uintptr", row.directive+"\nvar entry uintptr", 1)
+					if source == goSource {
+						t.Fatal("alias fixture did not modify its declaration")
+					}
+					if strings.Contains(row.directive, "go:linkname") {
+						withImport := strings.Replace(source, "package main", "package main\nimport _ \"unsafe\"\n", 1)
+						if withImport == source {
+							t.Fatal("linkname fixture did not import unsafe")
+						}
+						source = withImport
+					}
+					files := map[string]string{"go.mod": base["go.mod"], "main.go": source, "entry.s": base["entry.s"]}
+					_, apkg := nativeAddressFixturePackage(t, files, "linux", "amd64", "x86_64-unknown-linux-gnu")
+					if entries := nativeAddressEntries(apkg.Package, []byte(files["entry.s"]), "amd64"); len(entries) != 0 {
+						t.Fatalf("source alias/collision acquired an address role: %v", entries)
+					}
+				})
 			}
 		})
 	}
