@@ -33,10 +33,7 @@ func main() {
 // CHECK-NEXT: [[BOX_TYPE:%.*]] = extractvalue %"{{.*}}/runtime/internal/runtime.eface" [[BOX]], 0
 // CHECK-NEXT: [[MATCH:%.*]] = call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @"_llgo_closure$QIHBTaw1IFobr8yvWpq-2AJFm3xBNhdW_aNBicqUBGk", ptr [[BOX_TYPE]])
 // CHECK-NEXT: br i1 [[MATCH]], label %[[MATCHED:_llgo_[0-9]+]], label %[[UNMATCHED:_llgo_[0-9]+]]
-// CHECK: [[ERROR_BOX:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 16)
-// CHECK-NEXT: store %"{{.*}}/runtime/internal/runtime.String" { ptr @[[GLOB5]], i64 5 }, ptr [[ERROR_BOX]], align 8
-// CHECK-NEXT: [[ERROR_IFACE:%.*]] = insertvalue %"{{.*}}/runtime/internal/runtime.eface" { ptr @_llgo_string, ptr undef }, ptr [[ERROR_BOX]], 1
-// CHECK-NEXT: call void @"{{.*}}/runtime/internal/runtime.Panic"(%"{{.*}}/runtime/internal/runtime.eface" [[ERROR_IFACE]])
+// CHECK: call void @"{{.*}}/runtime/internal/runtime.Panic"(%"{{.*}}/runtime/internal/runtime.eface" { ptr @_llgo_string, ptr @"_llgo_ifacebox${{.*}}" })
 // CHECK-NEXT: unreachable
 // CHECK: [[FN_NIL:%.*]] = icmp eq ptr [[FN:%[0-9]+]], null
 // CHECK-NEXT: br i1 [[FN_NIL]], label %[[NIL_BLOCK:_llgo_[0-9]+]], label %[[CALL_BLOCK:_llgo_[0-9]+]]
