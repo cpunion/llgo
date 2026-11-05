@@ -562,11 +562,15 @@ class FunctionPrinter:
 
     def to_string(self):
         function = self.layout["function"]
-        if re.fullmatch(function["type_pattern"],
-                        _canonical_type_name(self.value)) is None:
+        address, descriptor = _pointer_runtime_value(self.value, function["type_pattern"])
+        if address is None:
             return None
-        code = _value_as_int(_field(self.value, function["code"]))
-        data = _value_as_int(_field(self.value, function["data"]))
+        if address == 0:
+            return "nil"
+        if descriptor is None:
+            return None
+        code = _value_as_int(_field(descriptor, function["code"]))
+        data = _value_as_int(_field(descriptor, function["data"]))
         if code is None or data is None:
             return None
         if code == 0:

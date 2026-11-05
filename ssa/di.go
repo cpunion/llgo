@@ -259,7 +259,9 @@ func (b diBuilder) createType(name string, ty Type, pos token.Position) DIType {
 		return b.createSliceType(name, ty, tyElem)
 	case *types.Struct:
 		if ty.kind == vkClosure {
-			return b.createPointerType(name, b.prog.funcvalDescriptorType(ty), pos)
+			descriptor := b.diType(b.prog.funcvalDescriptorType(ty), pos)
+			marker := b.createRuntimeContainerTypedef("$llgo.funcval", descriptor.ll, pos)
+			return &aDIType{ll: b.createDIPointerType(name, marker)}
 		}
 		return b.createStructType(name, ty, pos)
 	case *types.Signature:

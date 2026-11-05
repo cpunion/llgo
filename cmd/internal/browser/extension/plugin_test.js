@@ -104,6 +104,69 @@ function response(value, init) {
   return new Response(typeof value === 'string' ? value : JSON.stringify(value), init);
 }
 
+for (const pointerSize of [4, 8]) {
+test(`Go function descriptor storage keeps physical pointer width ${pointerSize}`, async () => {
+  const index = fixtureIndex();
+  index.record.pointer_size = pointerSize;
+  // Memory32 still uses eight-byte Go words. The physical pointers occupy
+  // four bytes, but the environment is at the producer's DWARF offset eight.
+  const goWord = 8;
+  index.types.push(
+    {id: 'entry', kind: 'function', name: 'func()', size: pointerSize, complete: true},
+    {id: 'unsafe', kind: 'pointer', name: 'unsafe.Pointer', size: pointerSize, complete: true},
+    {id: 'descriptor', kind: 'struct', name: 'struct struct{code func(); env unsafe.Pointer}',
+      size: goWord * 2, complete: true,
+      fields: [{name: 'code', type: 'entry', offset: 0}, {name: 'env', type: 'unsafe', offset: goWord}]},
+    {id: 'marker', kind: 'typedef', name: '$llgo.funcval', size: goWord * 2,
+      elem: 'descriptor', complete: true},
+    {id: 'fn', kind: 'pointer', name: '*$llgo.funcval',
+      size: pointerSize, elem: 'marker', complete: true},
+    {id: 'named', kind: 'typedef', name: 'main.Callback', size: pointerSize, elem: 'fn', complete: true},
+    {id: 'native', kind: 'pointer', name: 'func() *', size: pointerSize, elem: 'entry', complete: true},
+    {id: 'record', kind: 'pointer', name: '*struct struct{code func(); env unsafe.Pointer}',
+      size: goWord, elem: 'descriptor', complete: true},
+  );
+  const memory = new Uint8Array(256), view = new DataView(memory.buffer);
+  const word = (at, value) => pointerSize === 4 ? view.setUint32(at, value, true) :
+    view.setBigUint64(at, BigInt(value), true);
+  word(16, 64); word(64, 7); word(64 + goWord, 128);
+  const reads = [];
+  const plugin = new LLGoLanguageExtensionPlugin({
+    getWasmLinearMemory: async (offset, length) => {
+      assert.notEqual(offset, 0, 'a nil function must not dereference address zero');
+      reads.push([offset, length]);
+      return memory.slice(offset, offset + length).buffer;
+    },
+  }, async url => {
+    if (url.endsWith('/debug-index.json')) return response(index);
+    if (url.endsWith('/debug-schema.json')) return response(debuggerSchema);
+    if (url.endsWith('/plugin-ready')) return new Response(null, {status: 204});
+    throw new Error(`unexpected URL ${url}`);
+  });
+  await plugin.addRawModule('module', undefined, {
+    url: 'http://host/function.wasm', code: moduleBytes({pointerSize}).buffer,
+  });
+  const module = plugin.module('module');
+  const read = name => plugin.remoteObject(module, module.types.get(name),
+    {kind: 'address', value: 16n}, 'stop');
+  for (const name of ['fn', 'named']) {
+    const result = await read(name);
+    assert.equal(result.description, 'func[7] data=0x80');
+    assert.ok(reads.some(([at, size]) => at === 64 + goWord && size === pointerSize));
+    await plugin.releaseObject(result.objectId);
+  }
+  for (const name of ['native', 'record']) {
+    const result = await read(name);
+    assert.doesNotMatch(result.description, /^func\[/,
+      'native code pointers and similar user records do not have Go descriptor identity');
+    await plugin.releaseObject(result.objectId);
+  }
+  word(16, 0); reads.length = 0;
+  assert.equal((await read('named')).type, 'null');
+  assert.deepEqual(reads, [[16, pointerSize]], 'nil reads only its own pointer storage');
+});
+}
+
 for (const width of [4, 8]) {
 test(`closure captures preserve reference and value storage (${width} bytes)`, async () => {
   const index = fixtureIndex();
@@ -119,12 +182,14 @@ test(`closure captures preserve reference and value storage (${width} bytes)`, a
     {id: 'missing', kind: 'struct', size: width, complete: false},
     {id: 'env', kind: 'struct', name: 'captures', size: width + 4, complete: true,
       fields: [{name: 'reference', type: 'intptr', offset: 0}, {name: 'value', type: 'int32', offset: width}]},
-    {id: 'fn', kind: 'struct', name: 'struct{$f func(); $data unsafe.Pointer}', size: width * 2, complete: true,
-      fields: [{name: '$f', type: 'word', offset: 0}, {name: '$data', type: 'word', offset: width}]},
+    {id: 'header', kind: 'struct', name: 'descriptor', size: width * 2, complete: true,
+      fields: [{name: 'code', type: 'word', offset: 0}, {name: 'env', type: 'word', offset: width}]},
+    {id: 'fn', kind: 'pointer', name: 'struct{$f func(); $data unsafe.Pointer}',
+      size: width, elem: 'header', complete: true},
   );
   const memory = new Uint8Array(256), view = new DataView(memory.buffer);
   const word = (at, value) => width === 4 ? view.setUint32(at, value, true) : view.setBigUint64(at, BigInt(value), true);
-  word(16, 7); word(16 + width, 128); word(128, 192);
+  word(16, 64); word(64, 7); word(64 + width, 128); word(128, 192);
   view.setInt32(128 + width, 23, true); view.setInt32(192, 41, true);
   const plugin = new LLGoLanguageExtensionPlugin({
     getWasmLinearMemory: async (offset, length) => memory.slice(offset, offset + length).buffer,
@@ -151,13 +216,13 @@ test(`closure captures preserve reference and value storage (${width} bytes)`, a
     assert.equal(plugin.objects.size, 0, 'release includes captured pointers');
   }
   for (const code of [8, 9, 99]) {
-    word(16, code);
+    word(64, code);
     const fn = await read();
     assert.ok(!(await plugin.getProperties(fn.objectId)).some(p => p.name === 'captures'),
       'opaque, incomplete and unknown functions have no guessed capture layout');
     await plugin.releaseObject(fn.objectId);
   }
-  word(16, 7); word(16 + width, 0);
+  word(64, 7); word(64 + width, 0);
   const empty = await read();
   assert.ok(!(await plugin.getProperties(empty.objectId)).some(p => p.name === 'captures'));
   await plugin.releaseObject(empty.objectId);
@@ -329,8 +394,10 @@ test(`LLGo language extension presents runtime layouts with struct prefix ${JSON
        fields: [{name: 'Pointer', type: 'ptrInt', offset: 0}]},
       {id: 'nonemptyInterface', name: 'interface{Value() int32}', kind: 'struct', size: 8, complete: true,
        fields: [{name: 'type', type: 'ptrItab', offset: 0}, {name: 'data', type: 'ptrInt', offset: 4}]},
-      {id: 'funcval', name: 'struct{$f func(); $data unsafe.Pointer}', kind: 'struct', size: 8,
-       complete: true, fields: [{name: '$f', type: 'u32', offset: 0}, {name: '$data', type: 'ptrInt', offset: 4}]},
+      {id: 'funcHeader', name: 'descriptor', kind: 'struct', size: 16,
+       complete: true, fields: [{name: 'code', type: 'u32', offset: 0}, {name: 'env', type: 'ptrInt', offset: 8}]},
+      {id: 'funcval', name: 'struct{$f func(); $data unsafe.Pointer}', kind: 'pointer', size: 8,
+       complete: true, elem: 'funcHeader'},
       {id: 'topArray', name: '[8]uint8', kind: 'array', size: 8, elem: 'u8', count: 8, complete: true},
       {id: 'keyArray', name: '[8]int32', kind: 'array', size: 32, elem: 'int32', count: 8, complete: true},
       {id: 'valueArray', name: '[8]int32', kind: 'array', size: 32, elem: 'int32', count: 8, complete: true},
@@ -395,7 +462,7 @@ test(`LLGo language extension presents runtime layouts with struct prefix ${JSON
   u32(80, 160); // map header pointer
   u32(84, 300); // channel header pointer
   u32(88, 500); u32(92, 520); // empty interface type/data
-  u32(96, 10); u32(100, 123); // function code/data
+  u32(96, 800); u32(800, 10); u32(808, 123); // descriptor pointer, then code/environment
   u32(104, 600); // debuggerAllgV1
   u32(112, 560); u32(116, 520); // non-empty interface itab/data
   u32(160, 2); u32(168, 200); // hmap count, buckets
