@@ -1,4 +1,4 @@
-// LITTEST darwin/arm64 linux/amd64
+// LITTEST darwin/arm64 linux/amd64 windows/amd64
 package main
 
 var my = demo2{}.encode
@@ -25,6 +25,12 @@ func main() {
 	}
 }
 
+// CHECK: [[GLOBAL_METHOD_DESCRIPTOR:@"_llgo_funcval\$[0-9a-f]+"]] =
+// WINDOWS-SAME: private constant
+// DARWIN-SAME: linkonce_odr constant
+// LINUX-SAME: linkonce_odr constant
+// CHECK-SAME: { ptr, ptr } { ptr @"main.demo2.encode$bound", ptr @"__llgo.moduleZeroSizedAlloc$" }
+
 // Pointer receiver wrappers must guard nil before calling the value receiver.
 // CHECK-LABEL: define i64 @"main.(*demo1).encode"(ptr %0){{.*}} {
 // CHECK: %[[D1_NIL:[0-9]+]] = icmp eq ptr %0, null
@@ -37,9 +43,9 @@ func main() {
 // CHECK: call i64 @main.demo2.encode(%main.demo2 zeroinitializer)
 
 // The package-global method value stores both the selected bound wrapper and
-// the zero-sized receiver in init.
+// the zero-sized receiver through one descriptor pointer in init.
 // CHECK-LABEL: define void @main.init(){{.*}} {
-// CHECK: store { ptr, ptr } { ptr @"main.demo2.encode$bound", ptr @"__llgo.moduleZeroSizedAlloc$" }, ptr @main.my
+// CHECK: store ptr [[GLOBAL_METHOD_DESCRIPTOR]], ptr @main.my
 
 // CHECK-LABEL: define void @main.main(){{.*}} {
 // ARM64: %[[RESULT:[0-9]+]] = call i64 @"main.demo1.encode$bound"(ptr swiftself @"__llgo.moduleZeroSizedAlloc$")

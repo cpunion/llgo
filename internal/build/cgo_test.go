@@ -256,11 +256,14 @@ func TestParseCgoDeclWithCommandEnvUsesPkgConfigSetting(t *testing.T) {
 }
 
 func TestParseCgoPreambleDelegatesToCommandEnvParser(t *testing.T) {
-	preamble, decls, err := parseCgoPreamble(token.Position{Filename: "request.go", Line: 7}, "#cgo CFLAGS: -I/request/include")
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "request.go")
+	preamble, decls, err := parseCgoPreamble(token.Position{Filename: goFile, Line: 7}, "#cgo CFLAGS: -Iinclude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preamble.goFile != "request.go" || preamble.src == "" || !reflect.DeepEqual(decls, []cgoDecl{{cflags: []string{"-I/request/include"}}}) {
+	want := []cgoDecl{{cflags: []string{"-I" + filepath.Join(dir, "include")}}}
+	if preamble.goFile != goFile || preamble.src == "" || !reflect.DeepEqual(decls, want) {
 		t.Fatalf("parseCgoPreamble() = %#v, %#v", preamble, decls)
 	}
 }
@@ -567,8 +570,8 @@ func TestParseCgoCollectsNativeFiles(t *testing.T) {
 	src := `package demo
 
 /*
-#cgo CFLAGS: -I/c
-#cgo CXXFLAGS: -I/cxx
+#cgo CFLAGS: -Ic
+#cgo CXXFLAGS: -Icxx
 */
 import "unsafe"
 `
@@ -609,8 +612,8 @@ import "unsafe"
 		t.Fatalf("parseCgo_ files = %#v, want %#v", gotFiles, wantFiles)
 	}
 	if !reflect.DeepEqual(decls, []cgoDecl{
-		{cflags: []string{"-I/c"}},
-		{cxxflags: []string{"-I/cxx"}},
+		{cflags: []string{"-I" + filepath.Join(dir, "c")}},
+		{cxxflags: []string{"-I" + filepath.Join(dir, "cxx")}},
 	}) {
 		t.Fatalf("parseCgo_ decls = %#v", decls)
 	}
@@ -1056,19 +1059,12 @@ func TestSplitWindowsCgoImportAlias(t *testing.T) {
 }
 
 func TestShouldSkipDarwinDynimportTrampolineAsm(t *testing.T) {
-	src := []byte("TEXT _trampoline<>(SB),$0-0\nDATA _trampoline_addr(SB)/8,$0\n")
-	fileSrc := `package unix
-//go:cgo_import_dynamic libc_read read
-`
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "unix.go", fileSrc, parser.ParseComments)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := &context{buildConf: &Config{Goos: "darwin", Goarch: "arm64"}}
-	pkg := &packages.Package{PkgPath: "golang.org/x/sys/unix", Syntax: []*ast.File{file}}
-	enabled := shouldCheckDarwinDynimportTrampolineAsm(ctx, pkg)
-	if !shouldSkipDarwinDynimportTrampolineAsm(enabled, "zsyscall_darwin_arm64.s", src) {
-		t.Fatal("expected generated dynimport trampoline asm to be skipped")
+	// A generated filename and two substrings cannot establish ownership.
+	ctx, pkg := nativeAddressFixturePackageAtPath(t, dynimportTrampolineFiles(),
+		"example.com/nativebridge", "darwin", "arm64", "arm64-apple-darwin")
+	source := plan9AsmSource{path: "zsyscall_darwin_arm64.s", source: []byte("TEXT _trampoline<>(SB),$0-0\nDATA _trampoline_addr(SB)/8,$0\n")}
+	owned, err := darwinDynimportTrampolineSources(ctx, pkg.Package, []plan9AsmSource{source})
+	if err != nil || owned[source.path] {
+		t.Fatalf("unowned generated-looking source: %v, %v", owned, err)
 	}
 }

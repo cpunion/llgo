@@ -4,6 +4,14 @@ package ffi
 
 import "unsafe"
 
+// NativeUintptrType follows the physical ABI used by this file's C arrays.
+// TypeUintptr continues to describe the eight-byte Go language word.
+func NativeUintptrType() *Type { return TypeUint32 }
+
+var nativePointerType = &Type{4, 4, TypePointer.Type, nil}
+
+func NativePointerType() *Type { return nativePointerType }
+
 type signatureStorage struct {
 	cif   Signature
 	ret   *Type

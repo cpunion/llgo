@@ -123,9 +123,6 @@ func (v Value) typ() *abi.Type {
 // v.Kind() must be Pointer, Map, Chan, Func, or UnsafePointer
 // if v.Kind() == Pointer, the base type must not be not-in-heap.
 func (v Value) pointer() unsafe.Pointer {
-	if v.typ_.IsClosure() {
-		return v.ptr
-	}
 	if v.typ().Size() != goarch.PtrSize || !v.typ().Pointers() {
 		panic("can't call pointer on a non-pointer Value")
 	}
@@ -187,9 +184,6 @@ func unpackEface(i any) Value {
 		return Value{}
 	}
 	f := flag(t.Kind())
-	if t.IsClosure() {
-		f = flag(Func)
-	}
 	if t.IfaceIndir() {
 		f |= flagIndir
 	}
@@ -586,11 +580,6 @@ func (v Value) Elem() Value {
 		typ := tt.Elem
 		fl := v.flag&flagRO | flagIndir | flagAddr
 		kind := typ.Kind()
-		if typ.IsClosure() {
-			kind = abi.Func
-		} else if kind == abi.Func {
-			typ = closureOf(typ.FuncType())
-		}
 		fl |= flag(kind)
 		return Value{typ, ptr, fl}
 	}
@@ -737,17 +726,9 @@ func (v Value) Float() float64 {
 
 var uint8Type = rtypeOf(uint8(0))
 
-// funcElem returns the in-memory type and public kind of a function-typed
-// value. Function values occupy LLGo's two-word closure.
+// funcElem returns the storage type and source kind of an element.
 func funcElem(typ *abi.Type) (*abi.Type, abi.Kind) {
-	kind := typ.Kind()
-	if kind == abi.Func {
-		return closureOf(typ.FuncType()), abi.Func
-	}
-	if typ.IsClosure() {
-		return typ, abi.Func
-	}
-	return typ, kind
+	return typ, typ.Kind()
 }
 
 // Index returns v's i'th element.
@@ -1999,9 +1980,6 @@ func New(typ Type) Value {
 		panic("reflect: New(nil)")
 	}
 	t := &typ.(*rtype).t
-	if t.Kind() == abi.Func {
-		t = closureOf(t.FuncType())
-	}
 	pt := ptrTo(t)
 	if ifaceIndir(pt) {
 		// This is a pointer to a not-in-heap type.
@@ -2017,9 +1995,6 @@ func New(typ Type) Value {
 func NewAt(typ Type, p unsafe.Pointer) Value {
 	fl := flag(Pointer)
 	t := typ.(*rtype)
-	if t.Kind() == Func {
-		t = toRType(closureOf(t.t.FuncType()))
-	}
 	return Value{t.ptrTo(), p, fl}
 }
 
@@ -2033,26 +2008,16 @@ func (v Value) assignTo(context string, dst *abi.Type, target unsafe.Pointer) Va
 		v = makeMethodValue(context, v)
 	}
 	typ := v.typ()
-	if typ.Kind() == abi.Func {
-		typ = closureOf(typ.FuncType())
-	}
-	assignDst := dst
-	if dst.Kind() == abi.Func {
-		// Function values use LLGo's closure struct as their physical
-		// representation. Compare against the same canonical closure type
-		// as the source value, while retaining dst for the returned Value.
-		assignDst = closureOf(dst.FuncType())
-	}
 
 	switch {
-	case directlyAssignable(assignDst, typ):
+	case directlyAssignable(dst, typ):
 		// Overwrite type so that they match.
 		// Same memory layout, so no harm done.
 		fl := v.flag&(flagAddr|flagIndir) | v.flag.ro()
 		fl |= flag(dst.Kind())
 		return Value{dst, v.ptr, fl}
 
-	case implements(assignDst, typ):
+	case implements(dst, typ):
 		if v.Kind() == Interface && v.IsNil() {
 			// A nil ReadWriter passed to nil Reader is OK,
 			// but using ifaceE2I below will panic.
@@ -2359,11 +2324,37 @@ func toFFIArg(v Value, typ *abi.Type) unsafe.Pointer {
 	panic("reflect.toFFIArg unsupport type " + v.typ().String())
 }
 
-var (
-	ffiTypeClosure = ffi.StructOf(ffi.TypePointer, ffi.TypePointer)
-)
+func toFFIArgForType(v Value, typ *abi.Type, ffiType *ffi.Type) unsafe.Pointer {
+	if typ.Kind() == abi.Uintptr && ffiType.Size < typ.Size_ && v.Uint()>>(ffiType.Size*8) != 0 {
+		panic("reflect: WebAssembly ABI integer conversion out of range")
+	}
+	if typ.Kind() == abi.Array && (ffiType.Size != typ.Size_ || ffiType.Alignment < uint16(typ.Align_)) {
+		storage := runtime.AllocZAligned(ffiType.Size, uintptr(ffiType.Alignment))
+		var offset uintptr
+		for i := 0; i < int(typ.ArrayType().Len); i++ {
+			field, fieldOffset, next := ffiResultField(ffiType, i, offset)
+			memmove(add(storage, fieldOffset, ""), toFFIArgForType(v.Index(i), typ.Elem(), field), field.Size)
+			offset = next
+		}
+		return storage
+	}
+	return toFFIArg(v, typ)
+}
 
-func toFFIType(typ *abi.Type) *ffi.Type {
+func validateNativeFFIWords(v Value, typ *abi.Type) {
+	switch typ.Kind() {
+	case abi.Uintptr:
+		if size := ffi.NativeUintptrType().Size; size < typ.Size_ && v.Uint()>>(size*8) != 0 {
+			panic("reflect: WebAssembly ABI integer conversion out of range")
+		}
+	case abi.Array:
+		for i := 0; i < int(typ.ArrayType().Len); i++ {
+			validateNativeFFIWords(v.Index(i), typ.Elem())
+		}
+	}
+}
+
+func toFFIType(typ *abi.Type, native bool) *ffi.Type {
 	// Vector storage (including zero-length arrays and enclosing aggregates)
 	// has alignment above the ordinary Go maximum of 8. libffi's scalar/struct
 	// descriptions cannot represent its vector calling convention. Check before
@@ -2372,6 +2363,9 @@ func toFFIType(typ *abi.Type) *ffi.Type {
 		panic("reflect: libffi calls with vector storage are not supported")
 	}
 	kind := typ.Kind()
+	if native && kind == abi.Uintptr {
+		return ffi.NativeUintptrType()
+	}
 	switch kind {
 	case abi.Bool, abi.Int, abi.Int8, abi.Int16, abi.Int32, abi.Int64,
 		abi.Uint, abi.Uint8, abi.Uint16, abi.Uint32, abi.Uint64, abi.Uintptr,
@@ -2379,28 +2373,20 @@ func toFFIType(typ *abi.Type) *ffi.Type {
 		return ffi.Typ[kind]
 	case abi.Array:
 		st := typ.ArrayType()
-		return ffi.ArrayOf(toFFIType(st.Elem), int(st.Len))
-	case abi.Chan:
-		return ffi.TypePointer
-	case abi.Func:
-		return ffiTypeClosure
+		return ffi.ArrayOf(toFFIType(st.Elem, native), int(st.Len))
 	case abi.Interface:
 		return ffi.TypeInterface
-	case abi.Map:
-		return ffi.TypePointer
-	case abi.Pointer:
+	case abi.Chan, abi.Func, abi.Map, abi.Pointer, abi.UnsafePointer:
+		if native {
+			return ffi.NativePointerType()
+		}
 		return ffi.TypePointer
 	case abi.Slice:
 		return ffi.TypeSlice
 	case abi.String:
 		return ffi.TypeString
 	case abi.Struct:
-		if typ.IsClosure() {
-			return ffiTypeClosure
-		}
 		return toFFIStructType(typ)
-	case abi.UnsafePointer:
-		return ffi.TypePointer
 	}
 	panic("reflect.toFFIType unsupport type " + typ.String())
 }
@@ -2416,7 +2402,9 @@ func toFFIStructType(typ *abi.Type) *ffi.Type {
 		if fs.Typ.Size_ == 0 {
 			continue
 		}
-		fields = append(fields, toFFIType(fs.Typ))
+		// Struct fields retain their own declared layout; the callable's
+		// native role does not turn an ordinary Go struct into a C struct.
+		fields = append(fields, toFFIType(fs.Typ, false))
 		off = fs.Offset + fs.Typ.Size_
 	}
 	// Do not pad to typ.Size_: trailing zero-sized fields can enlarge the
@@ -2448,31 +2436,32 @@ func appendFFIPadding(fields []*ffi.Type, off, size uintptr) ([]*ffi.Type, uintp
 	return fields, off
 }
 
-func toFFISig(tin, tout []*abi.Type) (*ffi.Signature, error) {
-	args := make([]*ffi.Type, len(tin))
-	for i, in := range tin {
-		args[i] = toFFIType(in)
+func toFFISig(ft *funcType) (*ffi.Signature, error) {
+	native := !ft.IsClosure()
+	args := make([]*ffi.Type, len(ft.In))
+	for i, in := range ft.In {
+		args[i] = toFFIType(in, native)
 	}
-	return ffi.NewSignature(toFFIRetType(tout), args...)
+	return ffi.NewSignature(toFFIRetType(ft.Out, native), args...)
 }
 
-func toFFIRetType(tout []*abi.Type) *ffi.Type {
+func toFFIRetType(tout []*abi.Type, native bool) *ffi.Type {
 	switch n := len(tout); n {
 	case 0:
 		return ffi.TypeVoid
 	case 1:
-		return toFFIType(tout[0])
+		return toFFIType(tout[0], native)
 	default:
 		fields := make([]*ffi.Type, n)
 		for i, out := range tout {
-			fields[i] = toFFIType(out)
+			fields[i] = toFFIType(out, native)
 		}
 		return ffi.StructOf(fields...)
 	}
 }
 
 func (v Value) closureFunc() *abi.FuncType {
-	return toFuncType(v.typ_.StructType())
+	return v.typ_.FuncType()
 }
 
 func (v Value) call(op string, in []Value) (out []Value) {
@@ -2486,13 +2475,11 @@ func (v Value) call(op string, in []Value) (out []Value) {
 		ioff int
 	)
 	if v.typ_.IsClosure() && v.flag&flagMethod == 0 {
-		ft = v.typ_.StructType().Fields[0].Typ.FuncType()
-		c := (*struct {
-			fn  unsafe.Pointer
-			env unsafe.Pointer
-		})(v.ptr)
-		fn = c.fn
-		env = c.env
+		ft = v.typ_.FuncType()
+		if c := (*closure)(v.pointer()); c != nil {
+			fn = c.fn
+			env = c.env
+		}
 		tin = ft.In
 		if env != nil && ffi.ClosureEnvExplicit {
 			tin = append([]*abi.Type{rtypeOf(unsafe.Pointer(nil))}, tin...)
@@ -2586,8 +2573,9 @@ func (v Value) call(op string, in []Value) (out []Value) {
 	}
 
 	ffiArgs := make([]*ffi.Type, 0, len(tin)+4)
+	native := !ft.IsClosure()
 	for i := 0; i < ioff; i++ {
-		ffiArgs = append(ffiArgs, toFFIType(tin[i]))
+		ffiArgs = append(ffiArgs, toFFIType(tin[i], native))
 	}
 	for i, arg := range in {
 		typ := tin[ioff+i]
@@ -2597,13 +2585,25 @@ func (v Value) call(op string, in []Value) (out []Value) {
 			args = append(args, unsafe.Pointer(&h.Data), unsafe.Pointer(&h.Len), unsafe.Pointer(&h.Cap))
 			continue
 		}
-		ffiArgs = append(ffiArgs, toFFIType(typ))
-		args = append(args, toFFIArg(arg, typ))
+		ffiArgs = append(ffiArgs, toFFIType(typ, native))
+		args = append(args, nil)
 	}
 
-	sig, err := ffi.NewSignature(toFFIRetType(ft.Out), ffiArgs...)
+	sig, err := ffi.NewSignature(toFFIRetType(ft.Out, native), ffiArgs...)
 	if err != nil {
 		panic(err)
+	}
+	// Aggregate sizes/alignments are finalized by ffi_prep_cif. Marshal only
+	// after that point, using the exact types retained by the prepared CIF.
+	index := ioff
+	for i, arg := range in {
+		typ := tin[ioff+i]
+		if ffiCallSliceAsTriple && typ.Kind() == abi.Slice {
+			index += 3
+			continue
+		}
+		args[index] = toFFIArgForType(arg, typ, ffiArgs[index])
+		index++
 	}
 	if sig.RType != ffi.TypeVoid {
 		v := runtime.AllocZAligned(sig.RType.Size, uintptr(sig.RType.Alignment))
@@ -2630,6 +2630,16 @@ func (v Value) call(op string, in []Value) (out []Value) {
 }
 
 func valueFromFFIResult(ptr unsafe.Pointer, typ *abi.Type, ffiType *ffi.Type) Value {
+	if typ.Kind() == abi.Array && (ffiType.Size != typ.Size_ || ffiType.Alignment < uint16(typ.Align_)) {
+		out := New(toType(typ)).Elem()
+		var offset uintptr
+		for i := 0; i < int(typ.ArrayType().Len); i++ {
+			field, fieldOffset, next := ffiResultField(ffiType, i, offset)
+			out.Index(i).Set(valueFromFFIResult(add(ptr, fieldOffset, ""), typ.Elem(), field))
+			offset = next
+		}
+		return out
+	}
 	if ffiType.Size != typ.Size_ || ffiType.Alignment < uint16(typ.Align_) {
 		storage := runtime.AllocZAligned(typ.Size_, uintptr(typ.Align_))
 		size := ffiType.Size
@@ -2662,10 +2672,6 @@ func toRuntimeTypes(typs []*abi.Type) []*abi.Type {
 }
 
 func toRuntimeType(typ *abi.Type) *abi.Type {
-	switch typ.Kind() {
-	case abi.Func:
-		return closureOf((*abi.FuncType)(unsafe.Pointer(typ)))
-	}
 	return typ
 }
 
@@ -2998,12 +3004,6 @@ func (f flag) panicNotMap() {
 // copyVal returns a Value containing the map key or value at ptr,
 // allocating a new variable as needed.
 func copyVal(typ *abi.Type, fl flag, ptr unsafe.Pointer) Value {
-	if typ.IsClosure() {
-		// Maps retain LLGo's physical two-word closure descriptor so bucket
-		// evacuation copies both the code and environment pointers. Expose the
-		// semantic Go kind on the reflected value, just as unpackEface does.
-		fl = fl&^flagKindMask | flag(Func)
-	}
 	if typ.IfaceIndir() {
 		// Copy result so future changes to the map
 		// won't change the underlying value.
@@ -3132,10 +3132,6 @@ func convertOp(dst, src *abi.Type) func(Value, Type) Value {
 	case Chan:
 		if dst.Kind() == abi.Chan && specialChannelAssignability(dst, src) {
 			return cvtDirect
-		}
-	case Func:
-		if dst.Kind() == abi.Func {
-			return cvtFunc
 		}
 	}
 
@@ -3358,24 +3354,6 @@ func cvtSliceArray(v Value, t Type) Value {
 func cvtDirect(v Value, typ Type) Value {
 	f := v.flag
 	t := typ.common()
-	ptr := v.ptr
-	if f&flagAddr != 0 {
-		// indirect, mutable word - make a copy
-		c := unsafe_New(t)
-		typedmemmove(t, c, ptr)
-		ptr = c
-		f &^= flagAddr
-	}
-	return Value{t, ptr, v.flag.ro() | f} // v.flag.ro()|f == f?
-}
-
-// convertOp: func copy
-func cvtFunc(v Value, typ Type) Value {
-	f := v.flag
-	t := typ.common()
-	if t.Kind() == abi.Func {
-		t = closureOf(t.FuncType())
-	}
 	ptr := v.ptr
 	if f&flagAddr != 0 {
 		// indirect, mutable word - make a copy

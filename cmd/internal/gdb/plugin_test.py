@@ -146,5 +146,50 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(plugin._read_pointer.call_count, 5)
 
 
+class FunctionDescriptorTests(unittest.TestCase):
+    class Value:
+        def __init__(self, width, pointer, native=False, record=False):
+            self.pointer = pointer
+            self.type = self.Type(width, native, record)
+            self.dereference = Mock(return_value={"code": 0x1234, "env": 0x8000})
+
+        def __int__(self):
+            return self.pointer
+
+        def __getitem__(self, name):
+            raise KeyError(name)
+
+        class Type:
+            def __init__(self, width, native, record):
+                self.sizeof, self.native, self.record, self.code = width, native, record, 1
+
+            def strip_typedefs(self):
+                return self
+
+            def __str__(self):
+                return ("func() *" if self.native else
+                    "struct{code func(); env unsafe.Pointer} *" if self.record else "$llgo.funcval *")
+
+    def test_go_descriptor_and_nil_preserve_target_width(self):
+        for width in (4, 8):
+            for pointer, expected in ((0x4000, "main.Plain"), (0, "nil")):
+                with self.subTest(width=width, pointer=pointer):
+                    value = self.Value(width, pointer)
+                    with patch.object(plugin, "_symbol_name", return_value="main.Plain"):
+                        self.assertEqual(plugin.FunctionPrinter(value, plugin.LLGO_RUNTIME_LAYOUTS[2]).to_string(), expected)
+                    self.assertEqual(value.dereference.call_count, int(pointer != 0))
+
+    def test_native_function_pointer_is_not_a_go_descriptor(self):
+        value = self.Value(8, 0x4000, native=True)
+        self.assertIsNone(plugin.FunctionPrinter(value, plugin.LLGO_RUNTIME_LAYOUTS[2]).to_string())
+        value.dereference.assert_not_called()
+
+    def test_similar_native_callback_record_has_no_go_descriptor_identity(self):
+        value = self.Value(8, 0x4000, record=True)
+        with patch.object(plugin, "_symbol_name", return_value="main.Plain"):
+            self.assertIsNone(plugin.FunctionPrinter(value, plugin.LLGO_RUNTIME_LAYOUTS[2]).to_string())
+        value.dereference.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

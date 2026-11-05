@@ -3,6 +3,7 @@ package main
 import (
 	"runtime"
 	"time"
+	"unsafe"
 	"weak"
 )
 
@@ -23,6 +24,7 @@ var weakObject weak.Pointer[object]
 
 func main() {
 	testFinalizerCalls()
+	testFinalizerPointerResults()
 	testFinalizerCancellation()
 	testFinalizerReplacement()
 	testFinalizerDependencyOrder()
@@ -214,6 +216,81 @@ func testFinalizerCalls() {
 		return remaining == 0
 	}
 	collectUntil("typed finalizers", drain)
+	collectCycles(4)
+	drain()
+}
+
+// Address-valued results occupy a Go word in memory, but use the physical
+// Wasm address type at a call boundary. Exercise both receiver forms and
+// both environment forms for every address-valued result kind.
+func pointerResultFinalizer[T any](value *object) T {
+	value.finalizerEvents <- value.value
+	var zero T
+	return zero
+}
+
+func interfacePointerResultFinalizer[T any](value valued) T {
+	return pointerResultFinalizer[T](value.(*object))
+}
+
+//go:noinline
+func installPointerResultFinalizers[T any](events chan<- int, first int) {
+	pointer := &object{value: first, finalizerEvents: events}
+	iface := &object{value: first + 1, finalizerEvents: events}
+	capturedPointer := &object{value: first + 2}
+	capturedInterface := &object{value: first + 3}
+	runtime.SetFinalizer(pointer, pointerResultFinalizer[T])
+	runtime.SetFinalizer(iface, interfacePointerResultFinalizer[T])
+	runtime.SetFinalizer(capturedPointer, func(value *object) T {
+		events <- value.value
+		var zero T
+		return zero
+	})
+	runtime.SetFinalizer(capturedInterface, func(value valued) T {
+		events <- value.Value()
+		var zero T
+		return zero
+	})
+}
+
+func testFinalizerPointerResults() {
+	const kinds, copies = 20, 3
+	var events [copies]chan int
+	for i := range events {
+		events[i] = make(chan int, kinds)
+	}
+	done := make(chan struct{})
+	go func() {
+		for _, batch := range events {
+			installPointerResultFinalizers[chan int](batch, 1)
+			installPointerResultFinalizers[map[int]int](batch, 5)
+			installPointerResultFinalizers[*object](batch, 9)
+			installPointerResultFinalizers[unsafe.Pointer](batch, 13)
+			installPointerResultFinalizers[func()](batch, 17)
+		}
+		close(done)
+	}()
+	<-done
+	var seen [copies][kinds + 1]bool
+	var covered [kinds + 1]bool
+	remaining := kinds
+	drain := func() bool {
+		for copy, batch := range events {
+			for len(batch) != 0 {
+				event := <-batch
+				if event < 1 || event > kinds || seen[copy][event] {
+					panic("pointer-result finalizer ran with an invalid or duplicate event")
+				}
+				seen[copy][event] = true
+				if !covered[event] {
+					covered[event] = true
+					remaining--
+				}
+			}
+		}
+		return remaining == 0
+	}
+	collectUntil("pointer-result finalizers", drain)
 	collectCycles(4)
 	drain()
 }

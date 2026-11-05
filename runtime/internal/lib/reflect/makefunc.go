@@ -32,10 +32,11 @@ import (
 )
 
 type funcData struct {
-	ftyp *funcType
-	tout []*abi.Type
-	fn   func(args []Value) (results []Value)
-	nin  int
+	ftyp   *funcType
+	ffiSig *ffi.Signature
+	tout   []*abi.Type
+	fn     func(args []Value) (results []Value)
+	nin    int
 
 	recoverFrom unsafe.Pointer
 	recoverTo   unsafe.Pointer
@@ -78,6 +79,9 @@ func validateMakeFuncResults(out []Value, ftyp *abi.FuncType, touts []*abi.Type)
 			panic("reflect: function created by MakeFunc returned value obtained from unexported field")
 		}
 		out[i] = v.assignTo("reflect: function created by MakeFunc", typ, nil)
+		if !ftyp.IsClosure() {
+			validateNativeFFIWords(out[i], typ)
+		}
 	}
 	return out
 }
@@ -95,7 +99,7 @@ func storeMakeFuncFFIResult(ret unsafe.Pointer, v Value, typ *abi.Type, ffiType 
 		size = ffiType.Size
 	}
 	if size != 0 {
-		c.Memmove(ret, toFFIArg(v, typ), size)
+		c.Memmove(ret, toFFIArgForType(v, typ, ffiType), size)
 	}
 }
 
@@ -113,22 +117,11 @@ func ffiResultField(aggregate *ffi.Type, index int, offset uintptr) (field *ffi.
 
 func ffiToValue(ptr unsafe.Pointer, typ *abi.Type) (v Value) {
 	kind := typ.Kind()
-	if typ.Kind() == abi.Func {
-		typ = closureOf(typ.FuncType())
-	}
 	v.typ_ = typ
 	v.flag = flag(kind)
 	if typ.IfaceIndir() {
 		v.flag |= flagIndir
-		if typ.IsClosure() {
-			c := (*closure)(ptr)
-			v.ptr = unsafe.Pointer(&closure{
-				fn:  c.fn,
-				env: c.env,
-			})
-		} else {
-			v.ptr = ptr
-		}
+		v.ptr = ptr
 	} else {
 		v.ptr = *(*unsafe.Pointer)(ptr)
 	}

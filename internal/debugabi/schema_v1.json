@@ -104,9 +104,10 @@
         }
       },
       "function": {
-        "type_pattern": "^struct\\{\\$f func.*; \\$data unsafe\\.Pointer\\}$",
-        "code": "$f",
-        "data": "$data",
+        "type_pattern": "^(struct\\{\\$f func.*; \\$data unsafe\\.Pointer\\}|\\*?\\$llgo\\.funcval( \\*)?)$",
+        "storage": "descriptor_pointer",
+        "code": "code",
+        "data": "env",
         "closure_symbol_pattern": "\\$[0-9]+(?:\\$[0-9]+)*$",
         "bound_symbol_suffix": "$bound"
       },
