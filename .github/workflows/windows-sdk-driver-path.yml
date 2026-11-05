@@ -1,13 +1,13 @@
 name: Windows SDK driver path observation
 on:
   push:
-    branches: [codex/windows-sdk-driver-observation-20261105]
+    branches: [codex/windows-sdk-driver-observation-latest-20261105]
 permissions:
   contents: read
 jobs:
   observe:
     if: github.repository == 'cpunion/llgo'
-    runs-on: windows-2022
+    runs-on: windows-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
