@@ -3,6 +3,7 @@
 package main
 
 import (
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -10,13 +11,15 @@ import (
 func main() {
 	verifySyscallAPI()
 	msg := []byte("Hello from Syscall!\n")
-	r1, r2, err := syscall.Syscall(
+	r1, _, err := syscall.Syscall(
 		syscall.SYS_WRITE,
 		1,
 		uintptr(unsafe.Pointer(&msg[0])),
 		uintptr(len(msg)),
 	)
-	if r1 != 20 || r2 != 0 || err != 0 {
+	// write reports its byte count in r1; the second result is platform-specific.
+	runtime.KeepAlive(msg)
+	if r1 != uintptr(len(msg)) || err != 0 {
 		panic("syscall error")
 	}
 }
