@@ -1098,7 +1098,7 @@ jobs:
             windows_arch: "386"
           # Share the host compiler, llvm-mingw archive and vcpkg bootstrap
           # across targets while retaining every macOS-to-Windows build.
-          - os: macos-latest
+          - os: macos-15
             windows_arch: all
     runs-on: ${{ startsWith(matrix.os, 'ubuntu') && fromJSON(needs.prepare.outputs.linux_large_runner) || matrix.os }}
     steps:

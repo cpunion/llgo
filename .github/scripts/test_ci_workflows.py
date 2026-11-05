@@ -656,10 +656,28 @@ sys.exit(subprocess.call(command + ['./internal/build']))
                                      for args in calls))
                 self.assertTrue(all("-json" in args for args in calls))
 
+    def test_capacity_blocked_macos_roles_share_standard_arm64_image(self):
+        roles = (
+            ("benchmark.yml", "benchmark"),
+            ("doc.yml", "remote_install"),
+            ("doc.yml", "local_install"),
+            ("go.yml", "test"),
+            ("llgo.yml", "windows-gnu-cross"),
+        )
+        for workflow, role in roles:
+            with self.subTest(workflow=workflow, role=role):
+                matrix = load(workflow)["jobs"][role]["strategy"]["matrix"]
+                entries = matrix.get("include", [{"os": os} for os in matrix.get("os", [])])
+                self.assertEqual([entry["os"] for entry in entries
+                                  if entry["os"].startswith("macos")], ["macos-15"])
+        jobs = load("go.yml")["jobs"]
+        self.assertEqual(jobs["macos-build"]["runs-on"], "macos-15")
+        self.assertEqual(jobs["macos-build"]["strategy"]["matrix"]["part"], ["0", "1"])
+
     def test_macos_build_suite_requires_arm64_native_atomic_acceptance(self):
         jobs = load("go.yml")["jobs"]
         entries = jobs["test"]["strategy"]["matrix"]["include"]
-        self.assertIn("macos-latest", [entry["os"] for entry in entries])
+        self.assertIn("macos-15", [entry["os"] for entry in entries])
         job = jobs["macos-build"]
         step = next(step for step in job["steps"] if step.get("name") == "Run this macOS build part")
         self.assertNotIn("continue-on-error", job)
@@ -697,9 +715,9 @@ sys.exit(subprocess.call(command + ['./internal/build']))
                 self.assertIn("steps.host_compiler.outcome == 'success'", step["if"])
                 self.assertIn(f"matrix.windows_arch == '{arch}'", step["if"])
                 self.assertNotIn("continue-on-error", step)
-        self.assertEqual(actual, {(host, arch) for host in ("ubuntu-24.04", "macos-latest")
+        self.assertEqual(actual, {(host, arch) for host in ("ubuntu-24.04", "macos-15")
                                   for arch in ("amd64", "arm64", "386")})
-        self.assertEqual(sum(entry["os"] == "macos-latest" for entry in entries), 1)
+        self.assertEqual(sum(entry["os"] == "macos-15" for entry in entries), 1)
 
     def test_embedded_debuggers_share_setup_without_losing_backend_failures(self):
         job = load("targets.yml")["jobs"]["embedded-debug"]

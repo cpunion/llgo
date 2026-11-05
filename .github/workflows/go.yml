@@ -49,7 +49,7 @@ jobs:
         # Compiler and repository-tool tests use only the pinned current Go
         # release. User-code compatibility is covered by LLGo's test matrix.
         include:
-          - os: macos-latest
+          - os: macos-15
             llvm: 22
           - os: ubuntu-latest
             llvm: 22
@@ -379,7 +379,7 @@ jobs:
     if: needs.prepare.outputs.run_code_ci == 'true'
     needs: prepare
     name: macOS build coverage (part ${{ matrix.part }})
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 90
     strategy:
       fail-fast: false

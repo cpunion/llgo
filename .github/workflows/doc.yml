@@ -31,7 +31,7 @@ jobs:
     strategy:
       matrix:
         os:
-          - macos-latest
+          - macos-15
           - ubuntu-latest
     runs-on: ${{ startsWith(matrix.os, 'ubuntu') && fromJSON(needs.prepare.outputs.linux_large_runner) || matrix.os }}
     steps:
@@ -81,7 +81,7 @@ jobs:
         platform: [macos, ubuntu, windows-msvc, windows-mingw]
         include:
           - platform: macos
-            os: macos-latest
+            os: macos-15
           - platform: ubuntu
             os: ubuntu-latest
           - platform: windows-msvc

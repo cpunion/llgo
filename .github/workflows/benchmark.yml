@@ -40,7 +40,7 @@ jobs:
             id: linux
             display: Linux
             timeout: 20
-          - os: macos-latest
+          - os: macos-15
             id: macos
             display: macOS
             timeout: 20

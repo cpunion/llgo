@@ -350,7 +350,7 @@ class BuildPartsTests(unittest.TestCase):
         self.assertEqual(build["timeout-minutes"], "90")
         self.assertEqual(build["strategy"]["matrix"]["part"], ["0", "1"])
         self.assertNotIn("max-parallel", build["strategy"])
-        self.assertEqual(build["runs-on"], "macos-latest")
+        self.assertEqual(build["runs-on"], "macos-15")
         body = "\n".join(step.get("run", "") for step in build["steps"])
         self.assertIn("--shards 8 --workers 2 --parts 2", body)
         self.assertIn("--require-arm64-atomic", body)
