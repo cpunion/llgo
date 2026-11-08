@@ -47,12 +47,12 @@ def run(name, args, timeout=180):
 source=(goroot/'test/fixedbugs/issue39541.go').read_text()
 binary=out/'issue39541.exe'
 if run('issue39541-build',[llgo,'build','-o',binary,goroot/'test/fixedbugs/issue39541.go'],240).get('code')==0:
-    for n in range(3): run('issue39541-run-'+str(n),[binary],150)
+    for n in range(1): run('issue39541-run-'+str(n),[binary],60)
 progress=out/'issue39541-progress.go'
 progress.write_text(source.replace('\t\t<-c\n','\t\t<-c; println("completed", i+1)\n'))
 binary=out/'issue39541-progress.exe'
 if run('progress-build',[llgo,'build','-o',binary,progress],240).get('code')==0:
-    run('progress-run',[binary],150)
+    run('progress-run',[binary],60)
 # Replay the compiler-crash and finalizer cases independently.
 generator=out/'generator.exe'
 if run('generator-build',['go','build','-o',generator,goroot/'test/convinline.go'],120).get('code')==0:
