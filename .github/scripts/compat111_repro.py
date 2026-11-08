@@ -65,5 +65,6 @@ if run('generator-build',['go','build','-o',generator,goroot/'test/convinline.go
 binary=out/'issue30476.exe'
 if run('issue30476-build',[llgo,'build','-o',binary,goroot/'test/fixedbugs/issue30476.go'],120).get('code')==0:
     run('issue30476-run',[binary],30)
+run('runtime-tests', [llgo,'test','./test/go','-run','^TestRuntimeKeepAlive|^TestReflectMakeFuncConcurrentInterfaceResults$','-v'],240)
 print(json.dumps(results,indent=2),flush=True)
 if any(r.get('code')!=0 or r.get('timeout') for r in results): raise SystemExit(1)
