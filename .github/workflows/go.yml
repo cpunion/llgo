@@ -38,3 +38,4 @@ jobs:
         with:
           name: compat111-windows-msvc-386
           path: .compat111
+          include-hidden-files: true
