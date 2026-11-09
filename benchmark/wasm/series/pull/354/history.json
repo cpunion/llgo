@@ -11,8 +11,8 @@
         "sha": "d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
         "ref": "codex/ci-base-main-d4b-20261105",
         "url": "https://github.com/cpunion/llgo/commit/d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
-        "runUrl": "https://github.com/cpunion/llgo/actions/runs/42575612145",
-        "timestamp": "2026-11-09T08:22:15Z"
+        "runUrl": "https://github.com/cpunion/llgo/actions/runs/42601469448",
+        "timestamp": "2026-11-09T10:31:24Z"
       },
       "platforms": {
         "wasm-linux": {
@@ -24,8 +24,8 @@
             "sha": "d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
             "ref": "codex/ci-base-main-d4b-20261105",
             "url": "https://github.com/cpunion/llgo/commit/d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
-            "runUrl": "https://github.com/cpunion/llgo/actions/runs/42575612145",
-            "timestamp": "2026-11-09T08:22:15Z"
+            "runUrl": "https://github.com/cpunion/llgo/actions/runs/42601469448",
+            "timestamp": "2026-11-09T10:31:24Z"
           },
           "platform": {
             "id": "wasm-linux",
@@ -56,12 +56,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 5858426843
+                    "build-ns": 4479316346
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 5858426843
+                "build-ns": 4479316346
               }
             },
             {
@@ -73,12 +73,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 6005094226
+                    "build-ns": 4424671074
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 6005094226
+                "build-ns": 4424671074
               }
             },
             {
@@ -90,12 +90,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 5137537213
+                    "build-ns": 4054037445
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 5137537213
+                "build-ns": 4054037445
               }
             },
             {
@@ -107,12 +107,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 16539825238
+                    "build-ns": 12434080171
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 16539825238
+                "build-ns": 12434080171
               }
             },
             {
@@ -124,12 +124,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 2619631281
+                    "build-ns": 2067092590
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 2619631281
+                "build-ns": 2067092590
               }
             },
             {
@@ -141,12 +141,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 2407069274
+                    "build-ns": 1867590918
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 2407069274
+                "build-ns": 1867590918
               }
             },
             {
@@ -650,11 +650,11 @@
     {
       "source": {
         "repository": "cpunion/llgo",
-        "sha": "2f6bd7f19f74263fb406756ecc34989d0c2fa1a1",
+        "sha": "2a865094b8fd6cc44df302d768677ef3aaf0901c",
         "ref": "codex/full-pr-ci-repairs-20261105",
-        "url": "https://github.com/cpunion/llgo/commit/2f6bd7f19f74263fb406756ecc34989d0c2fa1a1",
-        "runUrl": "https://github.com/cpunion/llgo/actions/runs/42575612145",
-        "timestamp": "2026-11-09T08:22:15Z"
+        "url": "https://github.com/cpunion/llgo/commit/2a865094b8fd6cc44df302d768677ef3aaf0901c",
+        "runUrl": "https://github.com/cpunion/llgo/actions/runs/42601469448",
+        "timestamp": "2026-11-09T10:31:24Z"
       },
       "platforms": {
         "wasm-linux": {
@@ -663,11 +663,11 @@
           "shardId": "merged",
           "source": {
             "repository": "cpunion/llgo",
-            "sha": "2f6bd7f19f74263fb406756ecc34989d0c2fa1a1",
+            "sha": "2a865094b8fd6cc44df302d768677ef3aaf0901c",
             "ref": "codex/full-pr-ci-repairs-20261105",
-            "url": "https://github.com/cpunion/llgo/commit/2f6bd7f19f74263fb406756ecc34989d0c2fa1a1",
-            "runUrl": "https://github.com/cpunion/llgo/actions/runs/42575612145",
-            "timestamp": "2026-11-09T08:22:15Z"
+            "url": "https://github.com/cpunion/llgo/commit/2a865094b8fd6cc44df302d768677ef3aaf0901c",
+            "runUrl": "https://github.com/cpunion/llgo/actions/runs/42601469448",
+            "timestamp": "2026-11-09T10:31:24Z"
           },
           "platform": {
             "id": "wasm-linux",
@@ -698,12 +698,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 6154823043
+                    "build-ns": 4679388257
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 6154823043
+                "build-ns": 4679388257
               }
             },
             {
@@ -715,12 +715,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 5929629787
+                    "build-ns": 4676197515
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 5929629787
+                "build-ns": 4676197515
               }
             },
             {
@@ -732,12 +732,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 5414029544
+                    "build-ns": 4287246539
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 5414029544
+                "build-ns": 4287246539
               }
             },
             {
@@ -749,12 +749,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 17567769027
+                    "build-ns": 13273511087
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 17567769027
+                "build-ns": 13273511087
               }
             },
             {
@@ -766,12 +766,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 2827451701
+                    "build-ns": 2183419343
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 2827451701
+                "build-ns": 2183419343
               }
             },
             {
@@ -783,12 +783,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 2554873752
+                    "build-ns": 2004448630
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 2554873752
+                "build-ns": 2004448630
               }
             },
             {
