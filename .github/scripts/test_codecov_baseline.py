@@ -1,6 +1,7 @@
 """The optional baseline job must measure its actual source before any upload."""
 
 import contextlib
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -38,7 +39,7 @@ class BaselineCoverageTests(unittest.TestCase):
             root = Path(directory) / "source"
             output = Path(directory) / "evidence"
             names = [".gitignore", ".go-version", ".github/codecov.yml", *module.WORKFLOWS,
-                     "_demo/c/cargs/demo.go"]
+                     "_demo/c/cargs/demo.go", ".github/workflows/test_demo.sh"]
             for name in names:
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,11 +55,13 @@ class BaselineCoverageTests(unittest.TestCase):
                 self.assertEqual(actual_root, root)
                 return SOURCE if args == ("rev-parse", "HEAD") else original_git(root, *args)
 
-            with mock.patch.object(module, "git", side_effect=git):
-                self.setup_dependencies(root, producer)
+            synthetic_qemu = {name: hashlib.sha256(("synthetic dependency fixture: " + name + "\n").encode()).hexdigest()
+                              for name in module.QEMU_FILES}
+            with mock.patch.object(module, "git", side_effect=git), mock.patch.object(module, "QEMU_FILES", synthetic_qemu):
+                self.setup_dependencies(root, producer, module)
                 yield root, output
 
-    def setup_dependencies(self, root, producer):
+    def setup_dependencies(self, root, producer, module):
         directory = root / "_demo/c/cargs/libs"
         if directory.exists():
             shutil.rmtree(directory)
@@ -66,6 +69,14 @@ class BaselineCoverageTests(unittest.TestCase):
             for name in ("cargs_linux_amd64.zip", "conaninfo.txt", "conanmanifest.txt", "include/cargs.h",
                          "lib/libcargs.so", "lib/pkgconfig/cargs.pc.tmpl", "lib/pkgconfig/cargs.pc", "licenses/LICENSE.md"):
                 path = directory / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("synthetic dependency fixture: " + name + "\n")
+        qemu = root / ".cache/qemu"
+        if qemu.exists():
+            shutil.rmtree(qemu)
+        if producer in ("go", "llgo"):
+            for name in module.QEMU_FILES:
+                path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("synthetic dependency fixture: " + name + "\n")
 
@@ -100,6 +111,10 @@ class BaselineCoverageTests(unittest.TestCase):
             self.assertEqual(step["with"]["fail_ci_if_error"], "true")
             self.assertNotIn("override_pr", step["with"])
             self.assertNotIn("if", step)
+        artifact = next(step for step in jobs["baseline"]["steps"]
+                        if step.get("uses", "").startswith("actions/upload-artifact@"))
+        self.assertEqual(artifact["with"]["path"], "${{ runner.temp }}/base-codecov")
+        self.assertEqual(artifact["with"].get("include-hidden-files"), "true")
 
     def test_every_script_and_report_comes_from_original_workflow(self):
         module = self.helper()
@@ -171,7 +186,7 @@ class BaselineCoverageTests(unittest.TestCase):
         module = self.helper()
         with self.fixture(module) as (root, output):
             for producer in module.PRODUCERS:
-                self.setup_dependencies(root, producer)
+                self.setup_dependencies(root, producer, module)
                 result = module.prepare(root, output / producer, producer)
                 for name in result["files"]:
                     path = root / name
@@ -193,7 +208,7 @@ class BaselineCoverageTests(unittest.TestCase):
             self.assertIn("?? _demo/c/cargs/libs/", module.git(root, "status", "--porcelain"))
             result = module.prepare(root, output, "go")
             self.assertFalse(any("/libs/" in name for name in result["source_files"]))
-            self.assertEqual(len(result["dependencies"]), 8)
+            self.assertEqual(len(result["dependencies"]), 19)
             self.reports(root, result)
             for name in ("coverage-main.txt", "coverage-build.txt", "coverage-compiler.txt",
                          "go-test-timings/main.jsonl", "go-test-timings/main-times.json",
@@ -269,11 +284,47 @@ class BaselineCoverageTests(unittest.TestCase):
             for evidence in ("mkdir -p", "source.txt", "git-status.txt", "go-version.txt", "llvm-version.txt"):
                 self.assertLess(step.index(evidence), step.index('test "$(go env GOVERSION)"'))
 
+    def test_original_embedded_setup_covers_ignored_payloads_and_rejects_injection(self):
+        module = self.helper()
+        # Complete union of the two SHA-pinned Linux packages in d4b's installer.
+        names = ["bin/qemu-system-riscv32", "bin/qemu-system-xtensa", "include/fdt.h",
+                 "include/libfdt.h", "include/libfdt_env.h", "lib/x86_64-linux-gnu/libfdt.a",
+                 "lib/x86_64-linux-gnu/pkgconfig/libfdt.pc", "share/qemu/esp32s3_rev0_rom.bin",
+                 "share/qemu/esp32-v3-rom.bin", "share/qemu/esp32c3-rom.bin", "share/qemu/esp32-v3-rom-app.bin"]
+        with self.fixture(module) as (root, output):
+            expected = {}
+            for name in names:
+                path = root / ".cache/qemu" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("synthetic dependency fixture: " + path.relative_to(root).as_posix() + "\n")
+                expected[path.relative_to(root).as_posix()] = module.digest(path)
+            with mock.patch.object(module, "QEMU_FILES", expected, create=True):
+                result = module.prepare(root, output, "go")
+                self.assertEqual(len(result["dependencies"]), 19)
+                self.reports(root, result)
+                module.verify(root, output)
+                for name in (".cache/qemu/include/extra.go", ".cache/qemu/include/extra.h",
+                             ".cache/qemu/share/qemu/extra.bin", ".cache/other/injected.go"):
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("injected\n")
+                    with self.assertRaises(ValueError):
+                        module.verify(root, output)
+                    path.unlink()
+                    module.verify(root, output)
+                library = root / ".cache/qemu/lib/x86_64-linux-gnu/libfdt.a"
+                saved = library.read_bytes()
+                library.write_bytes(saved + b"changed\n")
+                with self.assertRaises(ValueError):
+                    module.verify(root, output)
+                library.write_bytes(saved)
+                module.verify(root, output)
+
     def test_downloads_verify_each_producer_dependency_and_output_archive(self):
         module = self.helper()
         with self.fixture(module) as (root, output):
             for producer in module.PRODUCERS:
-                self.setup_dependencies(root, producer)
+                self.setup_dependencies(root, producer, module)
                 result = module.prepare(root, output / producer, producer)
                 self.reports(root, result)
                 module.verify(root, output / producer)
@@ -282,6 +333,14 @@ class BaselineCoverageTests(unittest.TestCase):
             # The upload executor has never installed native demo dependencies.
             self.assertFalse((root / "_demo/c/cargs/libs").exists())
             self.assertEqual(len(module.verify_downloads(root, output)), 4)
+            archived = output / "go/dependencies/.cache/qemu/bin/qemu-system-riscv32"
+            self.assertTrue(archived.is_file(), "the hidden dependency subtree must reach the artifact")
+            extra = output / "go/.unexpected"
+            extra.write_text("unrecorded artifact file\n")
+            with self.assertRaises(ValueError):
+                module.verify_downloads(root, output)
+            extra.unlink()
+            module.verify_downloads(root, output)
             for name in ("go/dependencies/_demo/c/cargs/libs/lib/libcargs.so", "go/verified.json",
                          "go/outputs/coverage-main-host.txt", "go/build.sh"):
                 path = output / name
@@ -292,6 +351,23 @@ class BaselineCoverageTests(unittest.TestCase):
                     module.verify_downloads(root, output)
                 path.write_bytes(original)
                 module.verify_downloads(root, output)
+
+    def test_original_demo_summary_is_output_only_for_selected_demo_command(self):
+        module = self.helper()
+        for producer in ("dev", "go"):
+            with self.subTest(producer=producer), self.fixture(module, producer) as (root, output):
+                result = module.prepare(root, output, producer)
+                self.reports(root, result)
+                module.verify(root, output)
+                (root / "result.md").write_text(":white_check_mark: All demo tests passed\n")
+                if producer == "dev":
+                    module.verify(root, output)
+                    manifest = json.loads((output / "verified.json").read_text())
+                    self.assertEqual(manifest["outputs"]["result.md"], module.digest(root / "result.md"))
+                    self.assertNotIn("result.md", manifest["reports"])
+                else:
+                    with self.assertRaises(ValueError):
+                        module.verify(root, output)
 
     def test_original_script_failures_stop_before_success_or_partial_reports(self):
         steps = self.workflow()["jobs"]["baseline"]["steps"]

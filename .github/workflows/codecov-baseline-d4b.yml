@@ -146,6 +146,7 @@ jobs:
         with:
           name: d4b-baseline-${{ matrix.producer }}
           path: ${{ runner.temp }}/base-codecov
+          include-hidden-files: true
           if-no-files-found: error
 
   upload:
