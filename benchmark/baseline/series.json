@@ -50,10 +50,10 @@
       "label": "Branch codex/full-pr-ci-repairs-20261105",
       "path": "series/branch/33b6daf0333d6642/summary.json",
       "configPath": "series/branch/33b6daf0333d6642/config.json",
-      "commitPath": "commits/2f6bd7f19f74263fb406756ecc34989d0c2fa1a1.json",
-      "sha": "2f6bd7f19f74263fb406756ecc34989d0c2fa1a1",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/2f6bd7f19f74263fb406756ecc34989d0c2fa1a1",
-      "updatedAt": "2026-11-09T09:22:05.289Z"
+      "commitPath": "commits/2a865094b8fd6cc44df302d768677ef3aaf0901c.json",
+      "sha": "2a865094b8fd6cc44df302d768677ef3aaf0901c",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/2a865094b8fd6cc44df302d768677ef3aaf0901c",
+      "updatedAt": "2026-11-09T11:34:16.658Z"
     },
     {
       "kind": "branch",
@@ -411,10 +411,10 @@
       "label": "PR #354",
       "path": "series/pull/354/summary.json",
       "configPath": "series/pull/354/config.json",
-      "commitPath": "commits/2f6bd7f19f74263fb406756ecc34989d0c2fa1a1.json",
-      "sha": "2f6bd7f19f74263fb406756ecc34989d0c2fa1a1",
-      "sourceUrl": "https://github.com/cpunion/llgo/commit/2f6bd7f19f74263fb406756ecc34989d0c2fa1a1",
-      "updatedAt": "2026-11-09T09:22:05.160Z"
+      "commitPath": "commits/2a865094b8fd6cc44df302d768677ef3aaf0901c.json",
+      "sha": "2a865094b8fd6cc44df302d768677ef3aaf0901c",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/2a865094b8fd6cc44df302d768677ef3aaf0901c",
+      "updatedAt": "2026-11-09T11:34:16.513Z"
     }
   ]
 }
