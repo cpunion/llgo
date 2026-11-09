@@ -1133,6 +1133,14 @@ elif args[0] == "test" and any(a.endswith("/test/std/bytes") for a in args):
             if "push" not in events and "pull_request" not in events:
                 continue
             with self.subTest(workflow=path.name):
+                if path.name == "codecov-baseline-d4b.yml":
+                    self.assertEqual(events, {"push": {"branches": ["codex/codecov-base-d4b-20261109"]}})
+                    self.assertEqual(workflow["concurrency"], {
+                        "group": "codecov-baseline-d4b.yml-${{ github.ref }}",
+                        "cancel-in-progress": "false"})
+                    for job in workflow["jobs"].values():
+                        self.assertEqual(job["if"], "github.repository == 'cpunion/llgo' && github.ref == 'refs/heads/codex/codecov-base-d4b-20261109'")
+                    continue
                 if "push" in events:
                     push = events["push"] or {}
                     self.assertIn("main", push.get("branches", []))
