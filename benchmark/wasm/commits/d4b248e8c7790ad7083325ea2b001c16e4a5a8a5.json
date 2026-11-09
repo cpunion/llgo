@@ -6,8 +6,8 @@
     "sha": "d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
     "ref": "codex/ci-base-main-d4b-20261105",
     "url": "https://github.com/cpunion/llgo/commit/d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
-    "runUrl": "https://github.com/cpunion/llgo/actions/runs/42601469448",
-    "timestamp": "2026-11-09T10:31:24Z"
+    "runUrl": "https://github.com/cpunion/llgo/actions/runs/42655095291",
+    "timestamp": "2026-11-09T16:28:15Z"
   },
   "platforms": {
     "wasm-linux": {
@@ -19,8 +19,8 @@
         "sha": "d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
         "ref": "codex/ci-base-main-d4b-20261105",
         "url": "https://github.com/cpunion/llgo/commit/d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
-        "runUrl": "https://github.com/cpunion/llgo/actions/runs/42601469448",
-        "timestamp": "2026-11-09T10:31:24Z"
+        "runUrl": "https://github.com/cpunion/llgo/actions/runs/42655095291",
+        "timestamp": "2026-11-09T16:28:15Z"
       },
       "platform": {
         "id": "wasm-linux",
@@ -51,12 +51,12 @@
             {
               "iterations": 1,
               "measurements": {
-                "build-ns": 4479316346
+                "build-ns": 5871513726
               }
             }
           ],
           "measurements": {
-            "build-ns": 4479316346
+            "build-ns": 5871513726
           }
         },
         {
@@ -68,12 +68,12 @@
             {
               "iterations": 1,
               "measurements": {
-                "build-ns": 4424671074
+                "build-ns": 5735107453
               }
             }
           ],
           "measurements": {
-            "build-ns": 4424671074
+            "build-ns": 5735107453
           }
         },
         {
@@ -85,12 +85,12 @@
             {
               "iterations": 1,
               "measurements": {
-                "build-ns": 4054037445
+                "build-ns": 5200628128
               }
             }
           ],
           "measurements": {
-            "build-ns": 4054037445
+            "build-ns": 5200628128
           }
         },
         {
@@ -102,12 +102,12 @@
             {
               "iterations": 1,
               "measurements": {
-                "build-ns": 12434080171
+                "build-ns": 17401366317
               }
             }
           ],
           "measurements": {
-            "build-ns": 12434080171
+            "build-ns": 17401366317
           }
         },
         {
@@ -119,12 +119,12 @@
             {
               "iterations": 1,
               "measurements": {
-                "build-ns": 2067092590
+                "build-ns": 2704482086
               }
             }
           ],
           "measurements": {
-            "build-ns": 2067092590
+            "build-ns": 2704482086
           }
         },
         {
@@ -136,12 +136,12 @@
             {
               "iterations": 1,
               "measurements": {
-                "build-ns": 1867590918
+                "build-ns": 2500735313
               }
             }
           ],
           "measurements": {
-            "build-ns": 1867590918
+            "build-ns": 2500735313
           }
         },
         {
