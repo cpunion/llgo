@@ -75,6 +75,9 @@ def git(root, *args):
 
 
 def snapshot(root):
+    if (os.environ.get("GOWORK") not in (None, "")
+            or (root / "go.work").exists() or (root / "go.work").is_symlink()):
+        raise ValueError("baseline workspace override or untracked root go.work")
     if (git(root, "rev-parse", "HEAD") != SOURCE
             or git(root, "status", "--porcelain", "--untracked-files=no")):
         raise ValueError("baseline tracked source must be the clean exact commit")

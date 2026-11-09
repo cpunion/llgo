@@ -57,7 +57,9 @@ class BaselineCoverageTests(unittest.TestCase):
 
             synthetic_qemu = {name: hashlib.sha256(("synthetic dependency fixture: " + name + "\n").encode()).hexdigest()
                               for name in module.QEMU_FILES}
-            with mock.patch.object(module, "git", side_effect=git), mock.patch.object(module, "QEMU_FILES", synthetic_qemu):
+            with (mock.patch.object(module, "git", side_effect=git),
+                  mock.patch.object(module, "QEMU_FILES", synthetic_qemu),
+                  mock.patch.dict(os.environ, {"GOWORK": ""})):
                 self.setup_dependencies(root, producer, module)
                 yield root, output
 
@@ -368,6 +370,58 @@ class BaselineCoverageTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):
                         module.verify(root, output)
+
+    def test_original_workspace_metadata_can_auto_discover_its_fixture(self):
+        binary = os.environ.get("BASELINE_METADATA_GO") or shutil.which("go")
+        self.assertTrue(binary, "workspace regression requires the actual Go metadata driver")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            for name in ("first", "second"):
+                path = workspace / name
+                path.mkdir()
+                (path / "go.mod").write_text(f"module example.com/{name}\n\ngo 1.18\n")
+            (workspace / "go.work").write_text("go 1.18\nuse (\n ./first\n ./second\n)\n")
+            environment = dict(os.environ, GOENV="off", GOTOOLCHAIN="local")
+            environment.pop("GOWORK", None)
+            original = self.workflow()["jobs"]["baseline"]["env"]
+            if "GOWORK" in original:
+                environment["GOWORK"] = original["GOWORK"]
+            version = subprocess.check_output([binary, "version"], env=environment, text=True).strip()
+            positive = subprocess.run([binary, "work", "sync"], cwd=workspace, env=environment,
+                                      capture_output=True, text=True)
+            self.assertEqual(positive.returncode, 0, (version, positive.stdout, positive.stderr))
+            blocked = subprocess.run([binary, "work", "sync"], cwd=workspace,
+                                     env=dict(environment, GOWORK="off"), capture_output=True, text=True)
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("no go.work file found", blocked.stderr)
+            print("workspace metadata driver:", version, "; auto=0, off=", blocked.returncode)
+            self.assertNotIn("GOWORK", original)
+            steps = self.workflow()["jobs"]["baseline"]["steps"]
+            for name in ("Materialize the exact original Linux commands", "Verify immutable source and every original report"):
+                step = next(step for step in steps if step.get("name") == name)
+                self.assertIn('test -z "$(go env GOWORK)"', step["run"])
+
+    def test_root_workspace_inputs_are_rejected_without_disabling_fixture_discovery(self):
+        module = self.helper()
+        with self.fixture(module) as (root, output):
+            module.prepare(root, output, "go")
+            # The baseline's existing Git ignore hides this from porcelain.
+            path = root / "go.work"
+            path.write_text("go 1.18\n")
+            self.assertNotIn("go.work", module.git(root, "status", "--porcelain"))
+            with self.assertRaisesRegex(ValueError, "workspace"):
+                module.prepare(root, output, "go")
+            path.unlink()
+            module.prepare(root, output, "go")
+            path.symlink_to(root.parent / "missing.work")
+            with self.assertRaisesRegex(ValueError, "workspace"):
+                module.prepare(root, output, "go")
+            path.unlink()
+            module.prepare(root, output, "go")
+            with mock.patch.dict(os.environ, {"GOWORK": str(root.parent / "outside.work")}):
+                with self.assertRaisesRegex(ValueError, "workspace"):
+                    module.prepare(root, output, "go")
+            module.prepare(root, output, "go")
 
     def test_original_script_failures_stop_before_success_or_partial_reports(self):
         steps = self.workflow()["jobs"]["baseline"]["steps"]
