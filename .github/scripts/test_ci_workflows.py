@@ -832,12 +832,14 @@ sys.exit(subprocess.call(command + ['./internal/build']))
         for name in ("Test SIMD behavior on WebAssembly",
                      "Test SIMD on JavaScript targets with off, Thin and Full LTO"):
             self.assertEqual(steps[name]["if"], "matrix.suite == 'simd'")
-        # The split changes ownership, not any existing runtime, worker,
-        # SIMD/LTO or JS-call script. Bind complete bodies, not keywords.
-        unchanged = {
+        # The split preserves runtime, worker, SIMD/LTO and JS-call bodies.
+        # Upstream adds HostLayout checks to the reflected-method body and a
+        # three-target escape-lifetime owner. Bind their full bodies as well.
+        pinned = {
             "Install Wasmer for W32": "b2231ab4857c56c9fb4cf999597a4e8b5bfd6d48b572800518b8fcd457f3decd",
             "Install llgo": "c5c0592b9a8f31d778c9850ee99917f526c4573ccd3c5ae1676515ad64048124",
-            "Test reflected method calls and large initializers": "c4cdd5df4c87b38c34128b3a70368e50804f5319d433ece60fe65f58eef3e3b0",
+            "Test escape lifetimes under WebAssembly GC": "0b56e05c344081f14ec2a820cb7a1df7cc504e95f32ff2683c72abc9f0c48aed",
+            "Test reflected method calls and large initializers": "71a63791c828dac5dff0ea222e4b230074a7064f59d80059d30478d876d77943",
             "Compare WebAssembly EH encodings and Go/C++ boundary": "71fa2442751e2a7d916da2205382ecd9c853ae0f4503075b30e9165ec82572f0",
             "Test WebAssembly target profiles": "62d5330ed8b1ce1a41aec4102ea26de5b28efb7d5ecf0904a9d44474e4841e62",
             "Verify final WebAssembly DWARF": "13dcc317812a94ea68f19cf1ea39df09bc952c7a95fcc82ecd1ccf4bec44b181",
@@ -850,9 +852,10 @@ sys.exit(subprocess.call(command + ['./internal/build']))
             "Test SIMD on JavaScript targets with off, Thin and Full LTO": "2c280e97b386174a4a3fb5b0672f7a0c62e5ad62396ead18980479fc752e6d67",
             "Compare JavaScript call semantics with Go": "ce149b260e5963507567672ac0a037c5814aa0c1b37588f66cd35e04920d1ca5",
         }
-        for name, digest in unchanged.items():
+        for name, digest in pinned.items():
             self.assertEqual(hashlib.sha256(steps[name]["run"].encode()).hexdigest(), digest, name)
-        for name in ("Test reflected method calls and large initializers",
+        for name in ("Test escape lifetimes under WebAssembly GC",
+                     "Test reflected method calls and large initializers",
                      "Compare WebAssembly EH encodings and Go/C++ boundary",
                      "Test WebAssembly target profiles", "Verify final WebAssembly DWARF",
                      "Build standard runtime for wasm", "Test wasm coverage reporting"):
@@ -875,6 +878,14 @@ sys.exit(subprocess.call(command + ['./internal/build']))
             "job budget": lambda job: job.update({"timeout-minutes": "61"}),
             "concurrency cap": lambda job: job["strategy"].update({"max-parallel": "3"}),
             "missing target": lambda job: job["strategy"]["matrix"]["include"].pop(),
+            "disabled upstream escape owner": lambda job: next(
+                step for step in job["steps"]
+                if step.get("name") == "Test escape lifetimes under WebAssembly GC"
+            ).update({"if": "false"}),
+            "changed upstream HostLayout cases": lambda job: next(
+                step for step in job["steps"]
+                if step.get("name") == "Test reflected method calls and large initializers"
+            ).update({"run": "echo HostLayout checks omitted"}),
         }
         for name, mutate in mutations.items():
             with self.subTest(mutation=name):
