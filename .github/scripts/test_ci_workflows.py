@@ -581,6 +581,11 @@ else:
         if index and not (root / (order[index - 1] + '.finished')).exists():
             sys.exit('host suites did not retain serial order')
     (root / (suite + '.finished')).touch()
+    for index, argument in enumerate(args):
+        if argument.startswith('-coverprofile='):
+            Path(argument.split('=', 1)[1]).write_text('mode: set\n')
+        elif argument == '-coverprofile':
+            Path(args[index + 1]).write_text('mode: set\n')
     sys.exit(7 if suite == os.environ['TEST_GO_FAILURE'] else 0)
 """)
                 fake_go.chmod(0o755)
