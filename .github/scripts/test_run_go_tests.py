@@ -88,10 +88,13 @@ sys.exit(status)
             self.assertEqual({case["Test"] for case in cases}, {"TestFirst", "TestSecond"})
             self.assertEqual(len((root / "main.jsonl").read_text().splitlines()), 2)
             profile = (root / "coverage-main.txt").read_text()
+            self.assertEqual((root / "main-coverage.txt").read_text(), profile)
             self.assertIn("example.invalid/First.go:1.1,2.1 1 1", profile)
             self.assertIn("example.invalid/Second.go:1.1,2.1 1 1", profile)
             provenance = json.loads((root / "main-runs.json").read_text())
             self.assertTrue(provenance["success"])
+            self.assertEqual(provenance["coverage_mirror"],
+                             {"member": "main-coverage.txt", "stage": "pre-host-filter"})
             self.assertEqual([r["command"] for r in provenance["runs"]], commands)
             self.assertEqual([r["exit"] for r in provenance["runs"]], [0, 0])
             effective = [r["coverage"]["path"] for r in provenance["runs"]]
@@ -107,6 +110,8 @@ sys.exit(status)
                 self.assertEqual(self.run_batch(root, "Second", mode=mode), 0)
                 self.assertIn(f"shared.go:1.1,2.1 1 {expected}\n",
                               (root / "coverage-main.txt").read_text())
+                self.assertEqual((root / "main-coverage.txt").read_bytes(),
+                                 (root / "coverage-main.txt").read_bytes())
         for package, extra in (("Duplicate", ()), ("First", ("--wrong-mode",))):
             with self.subTest(package=package, extra=extra), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -117,8 +122,10 @@ sys.exit(status)
             extra = ("--bad-statements=1",)
             self.assertEqual(self.run_batch(root, "First", extra=extra), 0)
             original = (root / "coverage-main.txt").read_bytes()
+            original_mirror = (root / "main-coverage.txt").read_bytes()
             self.assertNotEqual(self.run_batch(root, "Second", extra=extra), 0)
             self.assertEqual((root / "coverage-main.txt").read_bytes(), original)
+            self.assertEqual((root / "main-coverage.txt").read_bytes(), original_mirror)
             self.assertIn("statement counts differ",
                           str(json.loads((root / "main-runs.json").read_text())["errors"]))
 
@@ -126,15 +133,33 @@ sys.exit(status)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.assertEqual(self.run_batch(root, "Failure"), 7)
-            self.assertEqual(self.run_batch(root, "Second"), 7)
+            self.assertFalse((root / "main-coverage.txt").exists())
+            self.assertEqual(self.run_batch(root, "Second"), 0)
             report = json.loads((root / "main-runs.json").read_text())
             self.assertEqual([r["exit"] for r in report["runs"]], [7, 0])
             self.assertFalse(report["success"])
+            self.assertEqual(report["exit"], 7)
             self.assertEqual(len(json.loads((root / "main-times.json").read_text())), 2)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.assertNotEqual(self.run_batch(root, "Missing"), 0)
             self.assertFalse(json.loads((root / "main-runs.json").read_text())["success"])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main-coverage.txt").mkdir()
+            self.assertNotEqual(self.run_batch(root, "First"), 0)
+            report = json.loads((root / "main-runs.json").read_text())
+            self.assertFalse(report["success"])
+            self.assertTrue(report["errors"])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = self.batch_command(root, "First")
+            command[2] = "-coverprofile=" + str(root / "main-coverage.txt")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run_go_tests.run(command, root, "main"), 0)
+            report = json.loads((root / "main-runs.json").read_text())
+            self.assertTrue(report["success"])
+            self.assertEqual(report["coverage_mirror"]["member"], "main-coverage.txt")
 
     def test_foreign_command_target_or_unknown_record_rejects_union(self):
         for mutation in ("command", "target", "missing-command", "unknown-state"):
@@ -446,6 +471,58 @@ sys.exit(status)
                                              "GITHUB_STEP_SUMMARY": str(root / "summary")})
                 self.assertEqual(result.returncode, 1 if extra else 0, result.stderr)
                 self.assertEqual("windows_runtime_corruption=true" in output.read_text(), not extra)
+
+    def test_windows_multibatch_quarantine_preserves_ordinary_xargs_failure(self):
+        repo = Path(__file__).resolve().parents[2]
+        packages = ["github.com/xgo-dev/llgo/test/runtime", "github.com/xgo-dev/llgo/other"]
+        for failure in ("quarantined", "ordinary"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                go = root / "go"
+                go.write_text(f"#!{sys.executable}\nprint('github.com/xgo-dev/llgo')\n")
+                go.chmod(0o755)
+                child = root / "events.py"
+                child.write_text('''import json,os,pathlib,sys
+package=sys.argv[-1]
+failed=package.endswith('/test/runtime')
+profile=next(a.split('=',1)[1] for a in sys.argv if a.startswith('-coverprofile='))
+pathlib.Path(profile).write_text('mode: set\\nf.go:1.1,2.1 1 1\\n')
+if failed and os.environ['BATCH_FAILURE']=='quarantined':
+    diagnostic=('fatal error: receive on synctest channel from outside bubble\\n'
+                'testing.(*T).Run\\nFAIL '+package+' 0.1s\\n')
+    print(json.dumps(dict(Package=package,Action='output',Output=diagnostic)))
+else:
+    print(json.dumps(dict(Package=package,Test='TestCase',Action='run')))
+    print(json.dumps(dict(Package=package,Test='TestCase',Action='fail' if failed else 'pass',Elapsed=1)))
+sys.exit(1 if failed else 0)
+''')
+                env = {**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                       "BATCH_FAILURE": failure, "GITHUB_OUTPUT": str(root / "outputs")}
+                prefix = ["bash", str(repo / "dev/go_test_windows.sh"), sys.executable,
+                          str(repo / ".github/scripts/run_go_tests.py"), "--output-dir",
+                          str(root / "sequential"), "main", sys.executable, str(child),
+                          "-coverprofile=" + str(root / "coverage.txt"), "-covermode=set"]
+                original = b"previous coverage must not be replaced\n"
+                (root / "coverage.txt").write_bytes(original)
+                results = [subprocess.run(prefix + [package], cwd=root, env=env,
+                                          capture_output=True, timeout=15) for package in packages]
+                self.assertEqual([result.returncode for result in results],
+                                 [0 if failure == "quarantined" else 1, 0])
+                self.assertNotIn(b"fatal error:", results[1].stdout + results[1].stderr)
+                report = json.loads((root / "sequential/main-runs.json").read_text())
+                self.assertFalse(report["success"])
+                self.assertEqual(report["exit"], 1)
+                self.assertEqual([record["exit"] for record in report["runs"]], [1, 0])
+                self.assertEqual((root / "coverage.txt").read_bytes(), original)
+                self.assertFalse((root / "sequential/main-coverage.txt").exists())
+                prefix[5] = str(root / "xargs")
+                result = subprocess.run(["xargs", "-n1", *prefix], cwd=root, env=env,
+                                        input=("\n".join(packages) + "\n").encode(),
+                                        capture_output=True, timeout=30)
+                if failure == "quarantined":
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

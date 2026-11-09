@@ -186,6 +186,19 @@ def merge_profiles(records, destination):
         temporary.unlink(missing_ok=True)
 
 
+def mirror_profile(source, destination):
+    if source == destination:
+        return
+    temporary = destination.with_name(destination.name + ".tmp")
+    try:
+        with source.open("rb") as incoming, temporary.open("wb") as outgoing:
+            while chunk := incoming.read(65536):
+                outgoing.write(chunk)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def publish(output, suite, summary):
     with locked(output):
         runs = []
@@ -206,7 +219,7 @@ def publish(output, suite, summary):
                 errors.append(f"{batch.name}: {error}")
         runs.sort(key=lambda pair: pair[1]["claimed_ns"])
         complete = not errors and all(record["state"] == "completed" for _, record in runs)
-        report = {"complete": complete, "success": False, "errors": errors,
+        report = {"complete": complete, "success": False, "errors": errors, "coverage_mirror": None,
                   "runs": [{"directory": str(batch), **record} for batch, record in runs]}
         if not complete:
             atomic_json(output / (suite + "-runs.json"), report)
@@ -223,7 +236,11 @@ def publish(output, suite, summary):
                 errors.append("coverage destinations differ")
             if not status and not errors:
                 try:
-                    merge_profiles(covered, Path(covered[0]["coverage"]["destination"]))
+                    destination = Path(covered[0]["coverage"]["destination"])
+                    merge_profiles(covered, destination)
+                    member = suite + "-coverage.txt"
+                    mirror_profile(destination, output / member)
+                    report["coverage_mirror"] = {"member": member, "stage": "pre-host-filter"}
                 except (OSError, ValueError) as error:
                     errors.append(str(error))
         status = status or (1 if errors else 0)
@@ -242,7 +259,9 @@ def publish(output, suite, summary):
             render(cases, sum(record["cases"] for record in records), output, suite, status, summary)
         report.update(success=not status, exit=status)
         atomic_json(output / (suite + "-runs.json"), report)
-        return status
+        # A prior child failure stays in the aggregate report. The outer
+        # Windows wrapper must classify only this invocation's own diagnostics.
+        return 1 if errors else 0
 
 
 def cell(value):
@@ -306,7 +325,7 @@ def run(command, output, suite, summary=None):
     with (batch / f"{suite}-times.txt").open(encoding="utf-8") as timings:
         for line in timings:
             print(line, end="", flush=True)
-    return status if combined is None else combined
+    return status or (combined or 0)
 
 
 def render(cases, count, output, suite, status, summary):
