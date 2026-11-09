@@ -193,6 +193,32 @@ sys.exit(status)
                 run_go_tests.merge_profiles([record], root / "combined.txt")
                 self.assertEqual((root / "combined.txt").read_text().splitlines()[0], "mode: set")
 
+    def test_go_boolean_flags_keep_following_coverage_option_visible(self):
+        for boolean in ("-trimpath", "-cover", "-work", "-buildvcs", "-benchmem", "-fullpath"):
+            with self.subTest(boolean=boolean), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                command = ["go", "test", "-json", boolean,
+                           "-coverprofile=" + str(root / "coverage.txt"), "example.invalid/First"]
+                batch, record, _ = run_go_tests.claim(command, root, "main")
+                self.assertIsNotNone(record["coverage"])
+                self.assertEqual(record["effective_command"][-2],
+                                 "-coverprofile=" + str(batch / "coverage.txt"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = ["go", "test", "--trimpath", "--test.coverprofile", str(root / "out"),
+                       "-test.benchmem", "example.invalid/First"]
+            batch, record, _ = run_go_tests.claim(command, root, "main")
+            self.assertEqual(record["effective_command"][3:5],
+                             ["--test.coverprofile", str(batch / "coverage.txt")])
+            record["packages"] = ["example.invalid/First"]
+            self.assertEqual(run_go_tests.command_scope(record)[0], command[:-1])
+
+    def test_unknown_bare_option_cannot_hide_a_possible_coverage_destination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            command = ["go", "test", "-custom-bool", "-coverprofile=out", "example.invalid/First"]
+            with self.assertRaisesRegex(ValueError, "ambiguous coverage"):
+                run_go_tests.claim(command, Path(temporary), "main")
+
     def test_concurrent_batches_keep_inflight_incomplete_and_finalize_both(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

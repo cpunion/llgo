@@ -14,6 +14,18 @@ import tempfile
 import time
 
 
+# Go test's boolean flags, including IsBoolFlag buildvcs, from cmd/go/internal/
+# {base/flag.go,work/build.go,test/testflag.go}. Other bare flags consume a value.
+GO_BOOLEAN_OPTIONS = frozenset("""
+    a artifacts asan benchmem buildvcs c cover failfast fullpath json linkshared
+    modcacherw msan n race short trimpath v work x
+""".split())
+
+
+def option_name(argument):
+    return argument.split("=", 1)[0].lstrip("-").removeprefix("test.")
+
+
 @contextlib.contextmanager
 def locked(output):
     with (output / ".go-tests.lock").open("a+b") as lock:
@@ -47,20 +59,26 @@ def atomic_json(path, value):
 def coverage_options(command):
     # Unknown bare options may consume the following word, even one starting
     # with '-'. Be conservative rather than rewriting another flag's payload.
-    booleans = {"-json", "-v", "-race", "-short", "-failfast", "-cover"}
     index = 1
     while index < len(command):
         argument = command[index]
-        if argument in ("-args", "--"):
+        if argument in ("-args", "--args", "--"):
             break
-        name, separator, value = argument.partition("=")
-        if name in ("-coverprofile", "-covermode"):
+        _, separator, value = argument.partition("=")
+        name = option_name(argument)
+        if argument.startswith("-") and name in ("coverprofile", "covermode"):
             if not separator:
                 if index + 1 == len(command):
                     raise ValueError(f"missing value for {name}")
                 value = command[index + 1]
             yield index, name, value, bool(separator)
-        if argument.startswith("-") and not separator and name not in booleans:
+        if argument.startswith("-") and not separator and name not in GO_BOOLEAN_OPTIONS:
+            # Regex selectors can legitimately start with a coverage-looking
+            # word. For an unknown flag's possible value, refuse ambiguity.
+            if (name not in ("run", "bench", "list", "skip") and index + 1 < len(command)
+                    and command[index + 1].startswith("-")
+                    and option_name(command[index + 1]) in ("coverprofile", "covermode")):
+                raise ValueError("ambiguous coverage option after " + argument)
             index += 1
         index += 1
 
@@ -77,7 +95,7 @@ def claim(command, output, suite):
         coverage = None
         mode = None
         for index, name, value, joined in coverage_options(command):
-            if name == "-covermode":
+            if name == "covermode":
                 if mode is not None:
                     raise ValueError("multiple coverage modes in one command")
                 mode = value
@@ -87,7 +105,7 @@ def claim(command, output, suite):
                 coverage = {"destination": str(Path(value).resolve()),
                             "path": str(batch / "coverage.txt")}
                 if joined:
-                    effective[index] = "-coverprofile=" + coverage["path"]
+                    effective[index] = command[index].split("=", 1)[0] + "=" + coverage["path"]
                 else:
                     effective[index + 1] = coverage["path"]
         if coverage is not None:
@@ -124,10 +142,11 @@ def command_scope(record):
                 and not any(character.isspace() for character in name)
                 and "\\" not in name and ":" not in name}
     start = len(command)
-    if "-args" not in command and "--" not in command:
+    if not any(argument in ("-args", "--args", "--") for argument in command):
         while start and command[start - 1] in packages:
             start -= 1
-        if start and command[start - 1].startswith("-") and "=" not in command[start - 1]:
+        if (start and command[start - 1].startswith("-") and "=" not in command[start - 1]
+                and option_name(command[start - 1]) not in GO_BOOLEAN_OPTIONS):
             # A bare flag may consume the next word. Preserve it; an ambiguous
             # boolean spelling may refuse batching, but cannot erase a value.
             start = min(start + 1, len(command))
