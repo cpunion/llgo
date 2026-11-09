@@ -164,13 +164,12 @@ def merge_profiles(records, destination):
             if expected is not None and header != "mode: " + expected:
                 raise ValueError("coverage mode differs from its command")
             mode = header
-            seen = set()
+            # Go concatenates per-package profiles, repeating shared ranges.
             for line in profile:
                 block, statements, hits = line.rstrip().rsplit(" ", 2)
                 statements, hits = int(statements), int(hits)
-                if block in seen or statements < 0 or hits < 0 or mode == "mode: set" and hits > 1:
-                    raise ValueError("invalid or duplicate coverage block")
-                seen.add(block)
+                if statements < 0 or hits < 0 or mode == "mode: set" and hits > 1:
+                    raise ValueError("invalid coverage block")
                 previous, count = blocks.get(block, (statements, 0))
                 if previous != statements:
                     raise ValueError("coverage statement counts differ")
@@ -223,7 +222,7 @@ def publish(output, suite, summary):
                   "runs": [{"directory": str(batch), **record} for batch, record in runs]}
         if not complete:
             atomic_json(output / (suite + "-runs.json"), report)
-            return 1 if errors else None
+            return (1 if errors else None), errors
         records = [record for _, record in runs]
         status = next((record["exit"] for record in records if record["exit"]), 0)
         covered = [record for record in records if record["coverage"] is not None]
@@ -261,7 +260,7 @@ def publish(output, suite, summary):
         atomic_json(output / (suite + "-runs.json"), report)
         # A prior child failure stays in the aggregate report. The outer
         # Windows wrapper must classify only this invocation's own diagnostics.
-        return 1 if errors else 0
+        return (1 if errors else 0), errors
 
 
 def cell(value):
@@ -318,7 +317,10 @@ def run(command, output, suite, summary=None):
     record.update(state="completed", exit=status, completed_ns=time.time_ns(),
                   cases=len(cases), packages=sorted(packages))
     atomic_json(batch / "run.json", record)
-    combined = publish(output, suite, summary)
+    combined, publication_errors = publish(output, suite, summary)
+    if publication_errors:
+        diagnostic = "; ".join(publication_errors).replace("\r", "\\r").replace("\n", "\\n")
+        print(f"Go test suite {suite} publication failed: {diagnostic}", file=sys.stderr, flush=True)
     print()
     # Print only this immutable invocation outside the publication lock. A slow
     # Windows pipe must not block another batch's completion or repeat its log.

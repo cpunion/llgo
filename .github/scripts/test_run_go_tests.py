@@ -49,8 +49,9 @@ if name != 'Missing':
     statements = 2 if args.bad_statements and name == 'Second' else 1
     data = (f'mode: {mode}\\nshared.go:1.1,2.1 {statements} {hits}\\n'
             f'{args.package}.go:1.1,2.1 1 1\\n')
-    if name == 'Duplicate':
-        data += 'shared.go:1.1,2.1 1 1\\n'
+    if name in ('Duplicate', 'ConflictingDuplicate'):
+        duplicate_statements = 2 if name == 'ConflictingDuplicate' else 1
+        data += f'shared.go:1.1,2.1 {duplicate_statements} 1\\n'
     pathlib.Path(args.coverprofile).write_text(data)
 sys.exit(status)
 ''', encoding="utf-8")
@@ -102,6 +103,41 @@ sys.exit(status)
             for run in provenance["runs"]:
                 self.assertTrue(Path(run["coverage"]["path"]).exists())
 
+    def test_repeated_blocks_in_one_go_profile_follow_official_merge_rules(self):
+        # Actual multi-package Go profiles repeat instrumented dependency
+        # ranges. These first-party ranges also occurred in the Windows batch.
+        block = "github.com/xgo-dev/llgo/benchmark/binary_size/fmtprintf/main.go:6.2,7.1"
+        for mode, counts, expected in (("set", [0, 0, 1], 1),
+                                       ("count", [2, 3, 0], 5),
+                                       ("atomic", [2, 3, 0], 5)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                profile = root / "actual-go-profile.txt"
+                data = f"mode: {mode}\n" + "".join(f"{block} 1 {count}\n" for count in counts)
+                profile.write_text(data)
+                record = {"coverage": {"path": str(profile), "mode": mode}}
+                run_go_tests.merge_profiles([record], root / "merged.txt")
+                self.assertEqual((root / "merged.txt").read_text(),
+                                 f"mode: {mode}\n{block} 1 {expected}\n")
+                self.assertEqual(profile.read_text(), data)
+        # Retain the previous Duplicate input as a valid same-NumStmt case,
+        # while the conflicting duplicate remains an independent rejection.
+        for mode, expected in (("set", 1), ("count", 3), ("atomic", 3)):
+            with self.subTest(child_mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.assertEqual(self.run_batch(root, "Duplicate", mode=mode), 0)
+                self.assertIn(f"shared.go:1.1,2.1 1 {expected}\n",
+                              (root / "coverage-main.txt").read_text())
+        for second in ("2 1", "1 -1", "1 2"):
+            with self.subTest(second=second), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                profile = root / "invalid-go-profile.txt"
+                profile.write_text(f"mode: set\n{block} 1 0\n{block} {second}\n")
+                record = {"coverage": {"path": str(profile), "mode": "set"}}
+                with self.assertRaises(ValueError):
+                    run_go_tests.merge_profiles([record], root / "merged.txt")
+                self.assertFalse((root / "merged.txt").exists())
+
     def test_set_or_count_sum_and_counter_schema_rejections(self):
         for mode, expected in (("set", 1), ("count", 3), ("atomic", 3)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
@@ -112,7 +148,7 @@ sys.exit(status)
                               (root / "coverage-main.txt").read_text())
                 self.assertEqual((root / "main-coverage.txt").read_bytes(),
                                  (root / "coverage-main.txt").read_bytes())
-        for package, extra in (("Duplicate", ()), ("First", ("--wrong-mode",))):
+        for package, extra in (("ConflictingDuplicate", ()), ("First", ("--wrong-mode",))):
             with self.subTest(package=package, extra=extra), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 self.assertNotEqual(self.run_batch(root, package, extra=extra), 0)
@@ -123,11 +159,15 @@ sys.exit(status)
             self.assertEqual(self.run_batch(root, "First", extra=extra), 0)
             original = (root / "coverage-main.txt").read_bytes()
             original_mirror = (root / "main-coverage.txt").read_bytes()
-            self.assertNotEqual(self.run_batch(root, "Second", extra=extra), 0)
+            diagnostic = io.StringIO()
+            with contextlib.redirect_stderr(diagnostic):
+                self.assertNotEqual(self.run_batch(root, "Second", extra=extra), 0)
             self.assertEqual((root / "coverage-main.txt").read_bytes(), original)
             self.assertEqual((root / "main-coverage.txt").read_bytes(), original_mirror)
             self.assertIn("statement counts differ",
                           str(json.loads((root / "main-runs.json").read_text())["errors"]))
+            self.assertIn("Go test suite main publication failed: coverage statement counts differ\n",
+                          diagnostic.getvalue())
 
     def test_failed_or_missing_profile_never_becomes_successful_union(self):
         with tempfile.TemporaryDirectory() as temporary:
