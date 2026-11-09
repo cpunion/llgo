@@ -91,7 +91,8 @@ func demo4() Func {
 }
 
 // CHECK-LABEL: define ptr @main.demo5(i64 %0){{.*}} {
-// CHECK: [[DEMO5_CAPTURE:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
+// CHECK: [[DEMO5_CAPTURE:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocAtomicU"(i64 8)
+// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr [[DEMO5_CAPTURE]], i8 0, i64 8, i1 false)
 // CHECK: store i64 %0, ptr [[DEMO5_CAPTURE]]
 // CHECK: [[DEMO5_ALLOCATION:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 24)
 // CHECK-NEXT: [[DEMO5_DESCRIPTOR:%.*]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[DEMO5_ALLOCATION]], i32 0, i32 0

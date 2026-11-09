@@ -126,7 +126,8 @@ func makeWithFree(base int) Fn {
 // AMD64: call i64 [[WITH_FREE_CODE]](ptr nest [[WITH_FREE_ENV]], i64 2)
 // CHECK: call i64 @main.globalAdd(i64 1, i64 2)
 // A bound pointer method stores the receiver in the closure environment.
-// CHECK: [[S:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
+// CHECK: [[S:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocAtomicU"(i64 8)
+// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr [[S]], i8 0, i64 8, i1 false)
 // CHECK-NEXT: [[S_FIELD:%[0-9]+]] = getelementptr inbounds nuw %main.S, ptr [[S]], i32 0, i32 0
 // CHECK-NEXT: store i64 5, ptr [[S_FIELD]]
 // CHECK: call void @llvm.memset.p0.i64(ptr [[METHOD_ENV_ALLOCATION]], i8 0, i64 24, i1 false)
@@ -182,7 +183,8 @@ func makeWithFree(base int) Fn {
 // CHECK: ret i64 [[NO_FREE_RESULT]]
 
 // CHECK-LABEL: define ptr @main.makeWithFree(i64 %0){{.*}} {
-// CHECK: [[BASE_ADDR:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
+// CHECK: [[BASE_ADDR:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocAtomicU"(i64 8)
+// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr [[BASE_ADDR]], i8 0, i64 8, i1 false)
 // CHECK-NEXT: store i64 %0, ptr [[BASE_ADDR]]
 // CHECK: [[WITH_FREE_ENV_OUT_ALLOCATION:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 24)
 // CHECK-NEXT: [[WITH_FREE_FN:%[0-9]+]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[WITH_FREE_ENV_OUT_ALLOCATION]], i32 0, i32 0
