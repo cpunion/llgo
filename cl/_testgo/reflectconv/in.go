@@ -26,7 +26,8 @@ type namedFunc func(int) int
 // CHECK: call %{{.*}} @reflect.Value.Interface(%reflect.Value [[FUNC_RESULT]])
 
 // CHECK-LABEL: define void @main.functionPointers(){{.*}} {
-// CHECK: [[CAPTURED_CELL:%[0-9]+]] = call ptr @"{{.*}}AllocZ"(i64 8)
+// CHECK: [[CAPTURED_CELL:%[0-9]+]] = call ptr @"{{.*}}AllocAtomicU"(i64 8)
+// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr [[CAPTURED_CELL]], i8 0, i64 8, i1 false)
 // CHECK-NEXT: store i64 1, ptr [[CAPTURED_CELL]]
 // CHECK-NEXT: [[CAPTURED_ALLOCATION:%[0-9]+]] = call ptr @"{{.*}}AllocU"(i64 24)
 // CHECK-NEXT: [[CAPTURED_DESCRIPTOR:%[0-9]+]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[CAPTURED_ALLOCATION]], i32 0, i32 0

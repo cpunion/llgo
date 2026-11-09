@@ -117,7 +117,8 @@ type receiver struct {
 // CHECK-DAG: ret %"{{.*}}Slice" %{{.*}}
 
 // CHECK-LABEL: define ptr @main.makeFloatSum(double %0){{.*}} {
-// CHECK: [[FLOAT_BASE_ADDR:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
+// CHECK: [[FLOAT_BASE_ADDR:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocAtomicU"(i64 8)
+// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr [[FLOAT_BASE_ADDR]], i8 0, i64 8, i1 false)
 // CHECK-NEXT: store double %0, ptr [[FLOAT_BASE_ADDR]]
 // CHECK-NEXT: [[FLOAT_ALLOCATION:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 24)
 // CHECK-NEXT: [[FLOAT_CLOSURE:%.*]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[FLOAT_ALLOCATION]], i32 0, i32 0
@@ -147,7 +148,8 @@ type receiver struct {
 // CHECK: ret double [[FLOAT_S9]]
 
 // CHECK-LABEL: define ptr @main.makeNestedSum(i64 %0){{.*}} {
-// CHECK: [[NESTED_BASE_ADDR:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
+// CHECK: [[NESTED_BASE_ADDR:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocAtomicU"(i64 8)
+// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr [[NESTED_BASE_ADDR]], i8 0, i64 8, i1 false)
 // CHECK-NEXT: store i64 %0, ptr [[NESTED_BASE_ADDR]]
 // CHECK-NEXT: [[NESTED_ALLOCATION:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 24)
 // CHECK-NEXT: [[NESTED_CLOSURE:%.*]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[NESTED_ALLOCATION]], i32 0, i32 0
@@ -187,7 +189,8 @@ type receiver struct {
 // CHECK: ret i64 [[NESTED_RESULT]]
 
 // CHECK-LABEL: define ptr @main.makeSum(i64 %0){{.*}} {
-// CHECK: [[SUM_BASE_ADDR:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
+// CHECK: [[SUM_BASE_ADDR:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocAtomicU"(i64 8)
+// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr [[SUM_BASE_ADDR]], i8 0, i64 8, i1 false)
 // CHECK-NEXT: store i64 %0, ptr [[SUM_BASE_ADDR]]
 // CHECK-NEXT: [[SUM_ALLOCATION:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 24)
 // CHECK-NEXT: [[SUM_CLOSURE:%.*]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[SUM_ALLOCATION]], i32 0, i32 0
