@@ -44,10 +44,25 @@ func TestGoClosureStartupUsesGCManagedMemory(t *testing.T) {
 	if strings.Contains(ir, `"github.com/xgo-dev/llgo/runtime/internal/runtime.FreeRoot"`) {
 		t.Fatalf("the runtime, not the compiler wrapper, should release goroutine startup data:\n%s", ir)
 	}
-	// The closure context must remain visible to the runtime GC until the
-	// uncollectable startup record is initialized.
-	if got := strings.Count(ir, `"github.com/xgo-dev/llgo/runtime/internal/runtime.AllocAtomicU"`); got < 1 {
-		t.Fatalf("expected closure ctx to use AllocAtomicU, got %d:\n%s", got, ir)
+	// The combined descriptor and capture contain code/environment pointers,
+	// even though x itself is pointer-free. Keep that allocation scanned.
+	allocations := 0
+	entry := pkg.Module().NamedFunction("outer")
+	for _, block := range entry.BasicBlocks() {
+		for inst := block.FirstInstruction(); !inst.IsNil(); inst = llvm.NextInstruction(inst) {
+			call := inst.IsACallInst()
+			if call.IsNil() || call.CalledValue().Name() != ssa.PkgRuntime+".AllocU" {
+				continue
+			}
+			if call.ArgOperandsCount() != 1 || call.Operand(0).IsAConstantInt().IsNil() ||
+				call.Operand(0).ZExtValue() != 3*uint64(prog.GoWordSize()) {
+				t.Fatalf("closure descriptor/capture has the wrong scanned allocation: %s", call)
+			}
+			allocations++
+		}
+	}
+	if allocations != 1 {
+		t.Fatalf("expected one scanned descriptor/capture allocation, got %d:\n%s", allocations, ir)
 	}
 	if strings.Contains(ir, "EnterLocalContext") {
 		t.Fatalf("program without context-backed locals paid locality entry cost:\n%s", ir)
