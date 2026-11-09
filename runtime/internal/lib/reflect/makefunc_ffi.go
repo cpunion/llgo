@@ -50,9 +50,12 @@ var (
 
 func makeFuncFFIArgValue(fd *funcData, index int, ptr unsafe.Pointer) Value {
 	typ := fd.ftyp.In[index]
-	field := (*ffi.Type)(ffi.Index((*unsafe.Pointer)(unsafe.Pointer(fd.ffiSig.ArgTypes)), uintptr(index)))
+	field := fd.ffiSig.ArgumentType(uintptr(index))
+	if field == nil {
+		panic("reflect: missing libffi argument type")
+	}
 
-	if field.Size != typ.Size_ || field.Alignment < uint16(typ.Align_) {
+	if field.ByteSize() != typ.Size_ || field.Alignment < uint16(typ.Align_) {
 		// A physical native word/array must become owned Go-width storage,
 		// rather than reading typ.Size_ bytes from libffi's shorter buffer.
 		return valueFromFFIResult(ptr, typ, field)
@@ -76,7 +79,7 @@ func bind1(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdat
 		ins[i] = makeFuncFFIArgValue(fd, i, ffi.Index(args, uintptr(i)))
 	}
 	out := validateMakeFuncResults(fd.call(ins), fd.ftyp, fd.tout)
-	storeMakeFuncFFIResult(ret, out[0], fd.tout[0], cif.RType)
+	storeMakeFuncFFIResult(ret, out[0], fd.tout[0], cif.ReturnType())
 }
 
 func bindn(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
@@ -89,7 +92,7 @@ func bindn(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdat
 	var offset uintptr
 	for i, out := range outs {
 		typ := fd.tout[i]
-		field, fieldOffset, next := ffiResultField(cif.RType, i, offset)
+		field, fieldOffset, next := ffiResultField(cif.ReturnType(), i, offset)
 		storeMakeFuncFFIResult(add(ret, fieldOffset, ""), out, typ, field)
 		offset = next
 	}

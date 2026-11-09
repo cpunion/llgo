@@ -24,7 +24,7 @@ package main
 // CHECK-NEXT: store ptr [[RECORD_ENV]], ptr [[RECORD_FN_ENV_SLOT]]
 // CHECK-NEXT: [[FINAL_LABEL:%[0-9]+]] = call %"{{.*}}String" @main.label1(%"{{.*}}String" { ptr @[[CLEANUP_FINAL]], i64 13 }, i64 0)
 // CHECK-NEXT: [[PREVIOUS_DEFER:%[0-9]+]] = call ptr @"{{.*}}GetThreadDefer"()
-// CHECK: [[DEFER_FRAME:%[0-9]+]] = call ptr @"{{.*}}AllocU"(i64 48)
+// CHECK: [[DEFER_FRAME:%[0-9]+]] = alloca %"{{.*}}Defer", align 8
 // CHECK: store ptr [[PREVIOUS_DEFER]], ptr %{{[0-9]+}}
 // CHECK: call void @"{{.*}}SetThreadDefer"(ptr [[DEFER_FRAME]])
 // CHECK: [[DEFER_HEAD:%[0-9]+]] = getelementptr inbounds nuw %"{{.*}}Defer", ptr [[DEFER_FRAME]], i32 0, i32 5

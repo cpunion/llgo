@@ -35,10 +35,10 @@ package main
 // CHECK-NEXT: store ptr [[VALUE_ENV]], ptr [[VALUE_FN_ENV_SLOT]]
 // CHECK: [[VALUE_PREV_DEFER:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.GetThreadDefer"()
 // CHECK: store ptr [[VALUE_FN]], ptr %{{.*}}
-// When unwound, the deferred function descriptor is removed, freed, and invoked with its environment.
+// When unwound, the deferred function descriptor is removed and invoked with its environment.
 // CHECK: [[VALUE_NODE_DATA:%.*]] = load { ptr, i64, ptr }, ptr [[VALUE_NODE:%[-A-Za-z0-9_.]+]]
 // CHECK: [[VALUE_RUN_FN:%.*]] = extractvalue { ptr, i64, ptr } [[VALUE_NODE_DATA]], 2
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.FreeDeferNode"(ptr [[VALUE_NODE]])
+// CHECK-NOT: FreeDeferNode
 // CHECK: [[VALUE_RUN_ENV_SAFE:%[0-9]+]] = select i1 %{{[0-9]+}}, ptr @_llgo_funcval_nil, ptr [[VALUE_RUN_FN]]
 // CHECK-NEXT: [[VALUE_RUN_ENV_FIELD:%[0-9]+]] = getelementptr inbounds nuw { ptr, ptr }, ptr [[VALUE_RUN_ENV_SAFE]], i32 0, i32 1
 // CHECK-NEXT: [[VALUE_RUN_ENV:%.*]] = load ptr, ptr [[VALUE_RUN_ENV_FIELD]]
@@ -67,7 +67,7 @@ package main
 // CHECK: store ptr [[FIELD_FN]], ptr %{{.*}}
 // CHECK: [[FIELD_NODE_DATA:%.*]] = load { ptr, i64, ptr }, ptr [[FIELD_NODE:%[-A-Za-z0-9_.]+]]
 // CHECK: [[FIELD_RUN_FN:%.*]] = extractvalue { ptr, i64, ptr } [[FIELD_NODE_DATA]], 2
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.FreeDeferNode"(ptr [[FIELD_NODE]])
+// CHECK-NOT: FreeDeferNode
 // CHECK: [[FIELD_RECOVER_CODE_SAFE:%[0-9]+]] = select i1 %{{[0-9]+}}, ptr @_llgo_funcval_nil, ptr [[FIELD_RUN_FN]]
 // CHECK-NEXT: [[FIELD_RECOVER_CODE_FIELD:%[0-9]+]] = getelementptr inbounds nuw { ptr, ptr }, ptr [[FIELD_RECOVER_CODE_SAFE]], i32 0, i32 0
 // CHECK-NEXT: [[FIELD_RECOVER_CODE:%.*]] = load ptr, ptr [[FIELD_RECOVER_CODE_FIELD]]
@@ -96,7 +96,7 @@ package main
 // CHECK: [[METHOD_NODE_DATA:%.*]] = load { ptr, i64, ptr, ptr }, ptr [[METHOD_NODE:%[-A-Za-z0-9_.]+]]
 // CHECK: [[METHOD_RECEIVER:%.*]] = extractvalue { ptr, i64, ptr, ptr } [[METHOD_NODE_DATA]], 2
 // CHECK: [[METHOD_ARGUMENT:%.*]] = extractvalue { ptr, i64, ptr, ptr } [[METHOD_NODE_DATA]], 3
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.FreeDeferNode"(ptr [[METHOD_NODE]])
+// CHECK-NOT: FreeDeferNode
 // The original descriptor is passed through the node without reboxing.
 // CHECK-NOT: /runtime/internal/runtime.AllocU
 // CHECK-NEXT: call void @"main.(*Handler).SetHandler"(ptr [[METHOD_RECEIVER]], ptr [[METHOD_ARGUMENT]])
@@ -123,7 +123,7 @@ package main
 // CHECK: [[STRUCT_NODE_DATA:%.*]] = load { ptr, i64, ptr, ptr }, ptr [[STRUCT_NODE:%[-A-Za-z0-9_.]+]]
 // CHECK: [[STRUCT_RUN_PROCESSOR:%.*]] = extractvalue { ptr, i64, ptr, ptr } [[STRUCT_NODE_DATA]], 2
 // CHECK: [[STRUCT_RUN_FN:%.*]] = extractvalue { ptr, i64, ptr, ptr } [[STRUCT_NODE_DATA]], 3
-// CHECK: call void @"{{.*}}/runtime/internal/runtime.FreeDeferNode"(ptr [[STRUCT_NODE]])
+// CHECK-NOT: FreeDeferNode
 // CHECK: call void @"main.(*Processor).SetCallback"(ptr [[STRUCT_RUN_PROCESSOR]], ptr [[STRUCT_RUN_FN]])
 
 // ARM64-LABEL: define void @"main.testDeferStructClosure$1"(ptr swiftself %0, %"{{.*}}String" %1){{.*}} {

@@ -95,8 +95,8 @@ func storeMakeFuncResult(ret unsafe.Pointer, v Value, typ *abi.Type) {
 
 func storeMakeFuncFFIResult(ret unsafe.Pointer, v Value, typ *abi.Type, ffiType *ffi.Type) {
 	size := typ.Size_
-	if ffiType.Size < size {
-		size = ffiType.Size
+	if ffiType.ByteSize() < size {
+		size = ffiType.ByteSize()
 	}
 	if size != 0 {
 		c.Memmove(ret, toFFIArgForType(v, typ, ffiType), size)
@@ -112,7 +112,7 @@ func ffiResultField(aggregate *ffi.Type, index int, offset uintptr) (field *ffi.
 	if alignment := uintptr(field.Alignment); alignment > 1 {
 		fieldOffset = align(fieldOffset, alignment)
 	}
-	return field, fieldOffset, fieldOffset + field.Size
+	return field, fieldOffset, fieldOffset + field.ByteSize()
 }
 
 func ffiToValue(ptr unsafe.Pointer, typ *abi.Type) (v Value) {

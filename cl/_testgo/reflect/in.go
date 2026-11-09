@@ -190,7 +190,7 @@ func mapDemo2() {
 // CHECK-NEXT: br label %{{_llgo_[0-9]+}}
 // CHECK: %[[CLOSURE_IFACE:[0-9]+]] = call %"{{.*}}/runtime/internal/runtime.eface" @reflect.Value.Interface(%reflect.Value %[[CLOSURE_VALUE]])
 // CHECK: %[[CLOSURE_TYPE:[0-9]+]] = extractvalue %"{{.*}}/runtime/internal/runtime.eface" %[[CLOSURE_IFACE]], 0
-// CHECK: %[[CLOSURE_MATCH:[0-9]+]] = call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @"_llgo_closure$QIHBTaw1IFobr8yvWpq-2AJFm3xBNhdW_aNBicqUBGk", ptr %[[CLOSURE_TYPE]])
+// CHECK: %[[CLOSURE_MATCH:[0-9]+]] = call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @"_llgo_closure${{[A-Za-z0-9_-]+}}", ptr %[[CLOSURE_TYPE]])
 // CHECK: br i1 %[[CLOSURE_MATCH]]
 // CHECK: %[[CLOSURE_DATA:[0-9]+]] = extractvalue %"{{.*}}/runtime/internal/runtime.eface" %[[CLOSURE_IFACE]], 1
 // CHECK-NEXT: [[CLOSURE_SUCCESS_VALUE:%[0-9]+]] = insertvalue { ptr, i1 } undef, ptr %[[CLOSURE_DATA]], 0

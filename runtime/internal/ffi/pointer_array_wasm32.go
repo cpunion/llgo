@@ -2,13 +2,16 @@
 
 package ffi
 
-import "unsafe"
+import (
+	native "github.com/xgo-dev/llgo/runtime/internal/clite/ffi"
+	"unsafe"
+)
 
 // NativeUintptrType follows the physical ABI used by this file's C arrays.
 // TypeUintptr continues to describe the eight-byte Go language word.
 func NativeUintptrType() *Type { return TypeUint32 }
 
-var nativePointerType = &Type{4, 4, TypePointer.Type, nil}
+var nativePointerType = &Type{Size: 4, Alignment: 4, Type: TypePointer.Type}
 
 func NativePointerType() *Type { return nativePointerType }
 
@@ -51,7 +54,7 @@ func newAggregateType(size uintptr, alignment, kind uint16, values []*Type) *Typ
 			storage.slots[i] = uint32(uintptr(unsafe.Pointer(value)))
 		}
 	}
-	storage.typ = Type{size, alignment, kind, typePointerArrayFromSlots(storage.slots)}
+	storage.typ = native.NewType(size, alignment, kind, typePointerArrayFromSlots(storage.slots))
 	return &storage.typ
 }
 

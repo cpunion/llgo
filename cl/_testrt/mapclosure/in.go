@@ -8,7 +8,7 @@ type Type interface {
 // CHECK-DAG: [[DEMO_DESCRIPTOR:@"_llgo_funcval\$[0-9a-f]+"]] = linkonce_odr constant { ptr, ptr } { ptr @main.demo, ptr null }
 // CHECK-DAG: @"main.list$data" = global [1 x ptr] [ptr [[DEMO_DESCRIPTOR]]]
 // CHECK-LABEL: define %"{{.*}}/runtime/internal/runtime.String" @main.demo(%"{{.*}}/runtime/internal/runtime.iface" %0){{.*}} {
-// CHECK: [[DEMO_DATA:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.IfacePtrData"(%"{{.*}}/runtime/internal/runtime.iface" %0)
+// CHECK: [[DEMO_DATA:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.IfacePtrDataBuffer"(%"{{.*}}/runtime/internal/runtime.iface" %0, ptr %{{[0-9]+}})
 // CHECK: [[DEMO_METHOD:%[0-9]+]] = load ptr, ptr %{{[0-9]+}}
 // CHECK: [[DEMO_PAIR0:%[0-9]+]] = insertvalue { ptr, ptr } undef, ptr [[DEMO_METHOD]], 0
 // CHECK-NEXT: [[DEMO_PAIR:%[0-9]+]] = insertvalue { ptr, ptr } [[DEMO_PAIR0]], ptr [[DEMO_DATA]], 1

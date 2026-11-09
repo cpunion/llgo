@@ -2325,15 +2325,15 @@ func toFFIArg(v Value, typ *abi.Type) unsafe.Pointer {
 }
 
 func toFFIArgForType(v Value, typ *abi.Type, ffiType *ffi.Type) unsafe.Pointer {
-	if typ.Kind() == abi.Uintptr && ffiType.Size < typ.Size_ && v.Uint()>>(ffiType.Size*8) != 0 {
+	if typ.Kind() == abi.Uintptr && ffiType.ByteSize() < typ.Size_ && v.Uint()>>(ffiType.ByteSize()*8) != 0 {
 		panic("reflect: WebAssembly ABI integer conversion out of range")
 	}
-	if typ.Kind() == abi.Array && (ffiType.Size != typ.Size_ || ffiType.Alignment < uint16(typ.Align_)) {
-		storage := runtime.AllocZAligned(ffiType.Size, uintptr(ffiType.Alignment))
+	if typ.Kind() == abi.Array && (ffiType.ByteSize() != typ.Size_ || ffiType.Alignment < uint16(typ.Align_)) {
+		storage := runtime.AllocZAligned(ffiType.ByteSize(), uintptr(ffiType.Alignment))
 		var offset uintptr
 		for i := 0; i < int(typ.ArrayType().Len); i++ {
 			field, fieldOffset, next := ffiResultField(ffiType, i, offset)
-			memmove(add(storage, fieldOffset, ""), toFFIArgForType(v.Index(i), typ.Elem(), field), field.Size)
+			memmove(add(storage, fieldOffset, ""), toFFIArgForType(v.Index(i), typ.Elem(), field), field.ByteSize())
 			offset = next
 		}
 		return storage
@@ -2344,7 +2344,7 @@ func toFFIArgForType(v Value, typ *abi.Type, ffiType *ffi.Type) unsafe.Pointer {
 func validateNativeFFIWords(v Value, typ *abi.Type) {
 	switch typ.Kind() {
 	case abi.Uintptr:
-		if size := ffi.NativeUintptrType().Size; size < typ.Size_ && v.Uint()>>(size*8) != 0 {
+		if size := ffi.NativeUintptrType().ByteSize(); size < typ.Size_ && v.Uint()>>(size*8) != 0 {
 			panic("reflect: WebAssembly ABI integer conversion out of range")
 		}
 	case abi.Array:
@@ -2605,8 +2605,8 @@ func (v Value) call(op string, in []Value) (out []Value) {
 		args[index] = toFFIArgForType(arg, typ, ffiArgs[index])
 		index++
 	}
-	if sig.RType != ffi.TypeVoid {
-		v := runtime.AllocZAligned(sig.RType.Size, uintptr(sig.RType.Alignment))
+	if sig.ReturnType() != ffi.TypeVoid {
+		v := runtime.AllocZAligned(sig.ReturnType().ByteSize(), uintptr(sig.ReturnType().Alignment))
 		// libffi expects rvalue to point to the return value storage.
 		ret = v
 	}
@@ -2616,12 +2616,12 @@ func (v Value) call(op string, in []Value) (out []Value) {
 	switch n := len(tout); n {
 	case 0:
 	case 1:
-		return []Value{valueFromFFIResult(ret, tout[0], sig.RType)}
+		return []Value{valueFromFFIResult(ret, tout[0], sig.ReturnType())}
 	default:
 		out = make([]Value, n)
 		var off uintptr
 		for i, tout := range tout {
-			field, fieldOffset, next := ffiResultField(sig.RType, i, off)
+			field, fieldOffset, next := ffiResultField(sig.ReturnType(), i, off)
 			out[i] = valueFromFFIResult(add(ret, fieldOffset, ""), tout, field)
 			off = next
 		}
@@ -2630,7 +2630,7 @@ func (v Value) call(op string, in []Value) (out []Value) {
 }
 
 func valueFromFFIResult(ptr unsafe.Pointer, typ *abi.Type, ffiType *ffi.Type) Value {
-	if typ.Kind() == abi.Array && (ffiType.Size != typ.Size_ || ffiType.Alignment < uint16(typ.Align_)) {
+	if typ.Kind() == abi.Array && (ffiType.ByteSize() != typ.Size_ || ffiType.Alignment < uint16(typ.Align_)) {
 		out := New(toType(typ)).Elem()
 		var offset uintptr
 		for i := 0; i < int(typ.ArrayType().Len); i++ {
@@ -2640,9 +2640,9 @@ func valueFromFFIResult(ptr unsafe.Pointer, typ *abi.Type, ffiType *ffi.Type) Va
 		}
 		return out
 	}
-	if ffiType.Size != typ.Size_ || ffiType.Alignment < uint16(typ.Align_) {
+	if ffiType.ByteSize() != typ.Size_ || ffiType.Alignment < uint16(typ.Align_) {
 		storage := runtime.AllocZAligned(typ.Size_, uintptr(typ.Align_))
-		size := ffiType.Size
+		size := ffiType.ByteSize()
 		if typ.Size_ < size {
 			size = typ.Size_
 		}
