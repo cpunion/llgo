@@ -143,9 +143,13 @@ func (c *context) sourceGoVersion() string {
 	return runtime.Version()
 }
 
+// goFuncValueABI separates archives containing incompatible function-value layouts.
+const goFuncValueABI = "descriptor-v1"
+
 // collectCommonInputs collects common build configuration inputs.
 func (c *context) collectCommonInputs(m *manifestBuilder) {
 	m.common.EscapeAnalysisVersion = goescape.Version
+	m.common.GoFuncValueABI = goFuncValueABI
 	if c.buildConf.Tags != "" {
 		m.common.BuildTags = strings.Split(c.buildConf.Tags, ",")
 	}

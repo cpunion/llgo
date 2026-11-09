@@ -10,8 +10,10 @@ package main
 // Function values: the generated function descriptor pointer is non-nil and that
 // predicate is what reaches assert.
 // CHECK-LABEL: define void @"main.init#1"(){{.*}} {
-// CHECK: [[EQUAL_CAPTURE:%[0-9]+]] = call ptr @"{{.*}}AllocZ"(i64 8)
-// CHECK: [[EQUAL_ALLOCATION:%[0-9]+]] = call ptr @"{{.*}}AllocU"(i64 24)
+// CHECK: [[EQUAL_ALLOCATION:%[0-9]+]] = alloca { { ptr, ptr }, { ptr } }, align 8
+// CHECK: [[EQUAL_CAPTURE:%[0-9]+]] = alloca i64, align 8
+// CHECK: call void @llvm.memset.p0.i64(ptr [[EQUAL_CAPTURE]], i8 0, i64 8, i1 false)
+// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr [[EQUAL_ALLOCATION]], i8 0, i64 24, i1 false)
 // CHECK-NEXT: %[[CLOSURE:[0-9]+]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[EQUAL_ALLOCATION]], i32 0, i32 0
 // CHECK-NEXT: [[EQUAL_ENV:%[0-9]+]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[EQUAL_ALLOCATION]], i32 0, i32 1
 // CHECK: store ptr [[EQUAL_CAPTURE]], ptr %{{[0-9]+}}
