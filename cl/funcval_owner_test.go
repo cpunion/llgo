@@ -8,35 +8,47 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-// Inspect the actual readonly function descriptor instead of looking for its
-// code name inside an unrelated containing type or global initializer.
+// Inspect both native pointers and the Go-word storage of Memory32 pointers.
+func ownerFuncvalPointer(t *testing.T, value llvm.Value) llvm.Value {
+	t.Helper()
+	if value.IsNil() {
+		t.Fatal("missing function pointer storage")
+	}
+	if value.Type().TypeKind() == llvm.StructTypeKind {
+		fields := value.Type().StructElementTypes()
+		if len(fields) != 2 ||
+			fields[0].TypeKind() != llvm.PointerTypeKind ||
+			fields[1].TypeKind() != llvm.IntegerTypeKind || fields[1].IntTypeWidth() != 32 {
+			t.Fatalf("invalid Memory32 pointer storage: %s", value)
+		}
+		if value.IsNull() {
+			return llvm.ConstNull(fields[0])
+		}
+		if value.OperandsCount() != 2 || !value.Operand(1).IsNull() {
+			t.Fatalf("invalid Memory32 pointer initializer: %s", value)
+		}
+		value = value.Operand(0)
+	}
+	if !value.IsAZExtInst().IsNil() {
+		low := value.Operand(0)
+		if value.Type().TypeKind() != llvm.IntegerTypeKind || value.Type().IntTypeWidth() != 64 ||
+			low.Type().TypeKind() != llvm.IntegerTypeKind || low.Type().IntTypeWidth() != 32 ||
+			low.IsAConstantExpr().IsNil() || low.Opcode() != llvm.PtrToInt || low.OperandsCount() != 1 {
+			t.Fatalf("invalid widened Memory32 function pointer: %s", value)
+		}
+		value = low.Operand(0)
+	}
+	if value.Type().TypeKind() != llvm.PointerTypeKind {
+		t.Fatalf("function storage is not a pointer: %s", value)
+	}
+	return value
+}
+
+// Follow the readonly descriptor to its code and environment. The containing
+// global's name and two separate pointer-widening instructions prove neither.
 func ownerFuncvalParts(t *testing.T, storage llvm.Value) (llvm.Value, llvm.Value) {
 	t.Helper()
-	pointer := func(value llvm.Value) llvm.Value {
-		if value.IsNil() {
-			t.Fatal("missing function pointer storage")
-		}
-		if value.Type().TypeKind() == llvm.StructTypeKind {
-			fields := value.Type().StructElementTypes()
-			if len(fields) != 2 ||
-				fields[0].TypeKind() != llvm.PointerTypeKind ||
-				fields[1].TypeKind() != llvm.IntegerTypeKind || fields[1].IntTypeWidth() != 32 {
-				t.Fatalf("invalid Memory32 pointer storage: %s", value)
-			}
-			if value.IsNull() {
-				return llvm.ConstNull(fields[0])
-			}
-			if value.OperandsCount() != 2 || !value.Operand(1).IsNull() {
-				t.Fatalf("invalid Memory32 pointer initializer: %s", value)
-			}
-			value = value.Operand(0)
-		}
-		if value.Type().TypeKind() != llvm.PointerTypeKind {
-			t.Fatalf("function storage is not a pointer: %s", value)
-		}
-		return value
-	}
-	descriptor := pointer(storage).IsAGlobalVariable()
+	descriptor := ownerFuncvalPointer(t, storage).IsAGlobalVariable()
 	if descriptor.IsNil() || !descriptor.IsGlobalConstant() {
 		t.Fatalf("function storage is not a readonly descriptor: %s", storage)
 	}
@@ -55,7 +67,7 @@ func ownerFuncvalParts(t *testing.T, storage llvm.Value) (llvm.Value, llvm.Value
 			t.Fatalf("function descriptor has a nonalignment third field: %s", header)
 		}
 	}
-	return pointer(header.Operand(0)), pointer(header.Operand(1))
+	return ownerFuncvalPointer(t, header.Operand(0)), ownerFuncvalPointer(t, header.Operand(1))
 }
 
 func ownerIRModule(t *testing.T, ir string) llvm.Module {

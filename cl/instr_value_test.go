@@ -56,6 +56,7 @@ var Again = operation
 							t.Fatal(err)
 						}
 						mod := pkg.Module()
+						defer mod.Dispose()
 						entry := mustNamedFunction(t, mod, originalName)
 						if entry.Linkage() != llvm.LinkOnceAnyLinkage || !strings.Contains(entry.String(), tc.operation) {
 							t.Fatalf("invalid original-symbol entry:\n%s", entry.String())
@@ -63,9 +64,27 @@ var Again = operation
 						if target.GOOS == "windows" && !strings.Contains(entry.String(), "comdat") {
 							t.Fatal("COFF entry lacks COMDAT")
 						}
-						init := mustNamedFunction(t, mod, "entry.init").String()
-						if strings.Count(init, "ptr @entry.operation,") != 2 {
-							t.Fatalf("function values did not share the original entry:\n%s", init)
+						init := mustNamedFunction(t, mod, "entry.init")
+						var storage llvm.Value
+						stores := make(map[llvm.Value]bool)
+						for block := init.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+							for instruction := block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+								store := instruction.IsAStoreInst()
+								if store.IsNil() || (store.Operand(1) != mod.NamedGlobal("entry.Value") && store.Operand(1) != mod.NamedGlobal("entry.Again")) {
+									continue
+								}
+								value := store.Operand(0)
+								code, env := ownerFuncvalParts(t, value)
+								descriptor := ownerFuncvalPointer(t, value)
+								if stores[store.Operand(1)] || code != entry || !env.IsNull() || (!storage.IsNil() && descriptor != storage) {
+									t.Fatalf("function values lost their shared original-entry descriptor:\n%s", init)
+								}
+								storage = descriptor
+								stores[store.Operand(1)] = true
+							}
+						}
+						if len(stores) != 2 {
+							t.Fatalf("function values have %d stores, want two sharing the original entry:\n%s", len(stores), init)
 						}
 						mod.SetDataLayout(prog.DataLayout())
 						mod.SetTarget(target.Spec().Triple)

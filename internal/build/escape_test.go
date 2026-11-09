@@ -69,6 +69,8 @@ func TestEscapeCrossPackageCacheAndWorkers(t *testing.T) {
 		return
 	}
 	dir, cache := t.TempDir(), t.TempDir()
+	// Payload needs a real interface box; a one-word Go function value is
+	// carried directly. Exercise both while retaining the allocation oracle.
 	files := map[string]string{
 		"go.mod": "module example.com/escape\n\ngo 1.24\n",
 		"dep/dep.go": `package dep
@@ -77,23 +79,27 @@ type Payload [16]uint64
 func Read(p *Payload) uint64 { return p[0] + p[15] }
 //go:noinline
 func Call(v any) uint64 { return v.(func() uint64)() }
+//go:noinline
+func ReadBox(v any) uint64 { p := v.(Payload); return p[0] + p[15] }
 `,
 		"main.go": `package main
 import ("runtime"; "example.com/escape/dep")
 //go:noinline
 func borrow(p dep.Payload) uint64 {return dep.Read(&p)}
 //go:noinline
-func box(f func()uint64)uint64{return dep.Call(f)}
+func box(p dep.Payload)uint64{return dep.ReadBox(p)}
+//go:noinline
+func call(f func()uint64)uint64{return dep.Call(f)}
 func main() {
  var p dep.Payload; p[0]=3;p[15]=7
  f:=func()uint64{return 11}
- for i:=0;i<100;i++ {borrow(p);box(f)}
+ for i:=0;i<100;i++ {borrow(p);box(p);call(f)}
  var before,after runtime.MemStats
  runtime.ReadMemStats(&before)
  var sum uint64
- for i:=0;i<10000;i++ {sum+=borrow(p)+box(f)}
+ for i:=0;i<10000;i++ {sum+=borrow(p)+box(p)+call(f)}
  runtime.ReadMemStats(&after)
- if sum!=210000 {panic("result corrupted")}
+ if sum!=310000 {panic("result corrupted")}
  if after.TotalAlloc-before.TotalAlloc>65536 {panic("borrow or interface box still allocates per call")}
  println("escape-ok")
 }

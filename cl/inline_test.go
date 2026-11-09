@@ -79,8 +79,18 @@ var KeptValue = dep.Kept
 			if fn := mustNamedFunction(t, owner.Module(), "example.com/dep.Sum"); fn.IsDeclaration() || fn.Linkage() != llvm.ExternalLinkage {
 				t.Fatal("import changed defining package's real entry")
 			}
-			if !strings.Contains(mod.NamedGlobal("example.com/root.Value").String(), "example.com/dep.Sum") {
-				t.Fatal("function value lost canonical entry")
+			for _, value := range []struct{ global, entry string }{
+				{"Value", "Sum"},
+				{"KeptValue", "Kept"},
+			} {
+				global := mod.NamedGlobal("example.com/root." + value.global)
+				if global.IsNil() {
+					t.Fatalf("missing function-valued global %s", value.global)
+				}
+				code, env := ownerFuncvalParts(t, global.Initializer())
+				if code != mustNamedFunction(t, mod, "example.com/dep."+value.entry) || !env.IsNull() {
+					t.Fatalf("%s lost its canonical entry or acquired an environment: %s", value.global, global)
+				}
 			}
 			mod.SetDataLayout(prog.DataLayout())
 			mod.SetTarget(target.Spec().Triple)
