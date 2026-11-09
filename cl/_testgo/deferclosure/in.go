@@ -22,9 +22,10 @@ package main
 
 // CHECK-LABEL: define void @main.testDeferClosureValue(){{.*}} {
 // The captured 42 is stored in the closure environment before its descriptor is deferred.
+// CHECK: [[VALUE_ENV_ALLOCATION:%[0-9]+]] = alloca { { ptr, ptr }, { ptr } }, align 8
 // CHECK: [[VALUE_CAPTURE:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
 // CHECK: store i64 42, ptr [[VALUE_CAPTURE]]
-// CHECK: [[VALUE_ENV_ALLOCATION:%[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 24)
+// CHECK: call void @llvm.memset.p0.i64(ptr [[VALUE_ENV_ALLOCATION]], i8 0, i64 24, i1 false)
 // CHECK-NEXT: [[VALUE_FN:%[0-9]+]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[VALUE_ENV_ALLOCATION]], i32 0, i32 0
 // CHECK-NEXT: [[VALUE_ENV:%[0-9]+]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[VALUE_ENV_ALLOCATION]], i32 0, i32 1
 // CHECK: [[VALUE_ENV_CAPTURE_SLOT:%[0-9]+]] = getelementptr inbounds nuw { ptr }, ptr [[VALUE_ENV]], i32 0, i32 0

@@ -203,14 +203,15 @@ func (p *goProgram) hostNativeLayout(t types.Type, native bool) sourceLayout {
 	case *types.Slice:
 		return sourceLayout{3 * word, word}
 	case *types.Signature:
-		if native {
-			return sourceLayout{word, word}
-		}
-		return sourceLayout{2 * word, word}
+		// Go functions store a descriptor pointer; native functions store a
+		// code pointer. Neither stores the descriptor's code/env pair inline.
+		return sourceLayout{word, word}
 	case *types.Array:
 		return arraySourceLayout(p.hostNativeLayout(u.Elem(), native), u.Len())
 	case *types.Struct:
-		native = native || IsClosure(u)
+		if IsClosure(u) {
+			return sourceLayout{word, word}
+		}
 		fields := make([]*types.Var, u.NumFields())
 		for i := range fields {
 			fields[i] = u.Field(i)

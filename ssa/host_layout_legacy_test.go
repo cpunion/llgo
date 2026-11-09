@@ -83,11 +83,11 @@ const AliasSize = unsafe.Sizeof(Alias{})
 					}
 				})
 			}
-			// Marker-only Go records must still account for their closure
-			// environment, even in a package containing legacy declarations.
+			// Marker-only Go records keep one descriptor-pointer slot; the
+			// closure environment is owned by the descriptor, not embedded here.
 			goRecord := pkg.Scope().Lookup("GoRecord").Type()
 			word := int64(prog.GoWordSize())
-			checkHostLayout(t, prog, sizes, goRecord, 4*word, word, []int64{0, 0, word, 3 * word})
+			checkHostLayout(t, prog, sizes, goRecord, 3*word, word, []int64{0, 0, word, 2 * word})
 		})
 	}
 }

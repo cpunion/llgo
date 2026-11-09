@@ -35,6 +35,9 @@ type ZeroTail struct { F float64; Tail struct{} }
 type FuncFirst struct { F func(); D float64 }
 type Callback func()
 type AliasCallback = func()
+type GoCallback func()
+type GoAliasCallback = func()
+type GoCallbacks struct { Named GoCallback; Alias GoAliasCallback; Array [2]func(); Native Callback; Tail byte }
 type Callbacks struct { C Callback; Alias AliasCallback; Go func(); Tail byte }
 type Legacy struct { F func(); Tail byte }
 type LegacyAlias = struct { F func(); Tail byte }
@@ -85,6 +88,7 @@ const Offset = unsafe.Offsetof(HostOuter{}.Tail)
 					types.NewField(token.NoPos, nil, "Value", raw, false),
 				}, nil)
 			}
+			word := int64(prog.GoWordSize())
 			for _, tc := range []struct {
 				name        string
 				size, align int64
@@ -97,7 +101,8 @@ const Offset = unsafe.Offsetof(HostOuter{}.Tail)
 				{"ArrayBox", 56, 8, []int64{0, 48}},
 				{"ZeroTail", 8, 8, []int64{0, 8}},
 				{"FuncFirst", 16, 8, []int64{0, 8}},
-				{"Callbacks", 20, 4, []int64{0, 4, 8, 16}},
+				{"Callbacks", 4 * word, word, []int64{0, word, 2 * word, 3 * word}},
+				{"GoCallbacks", 6 * word, word, []int64{0, word, 2 * word, 4 * word, 5 * word}},
 				{"Legacy", 8, 4, []int64{0, 4}},
 				{"LegacyAlias", 8, 4, []int64{0, 4}},
 			} {
@@ -125,7 +130,20 @@ const Offset = unsafe.Offsetof(HostOuter{}.Tail)
 			}
 			checkHostLayout(t, prog, sizes, wrap(pkg.Scope().Lookup("LegacyArray").Type()), 8, 4, []int64{0, 0})
 			closure := prog.Closure(NoArgsNoRet)
-			checkHostLayout(t, prog, sizes, wrap(closure.RawType()), 8, 4, []int64{0, 0})
+			checkHostLayout(t, prog, sizes, wrap(closure.RawType()), word, word, []int64{0, 0})
+			// Only the synthetic function value collapses to a pointer. Its
+			// ordinary code/env backing record must remain two storage words.
+			header := prog.funcvalDescriptorType(closure)
+			checkHostLayout(t, prog, sizes, header.RawType(), 2*word, word, []int64{0, word})
+			checkHostLayout(t, prog, sizes, wrap(header.RawType()), 2*word, word, []int64{0, 0})
+			for name, want := range map[string]valueKind{
+				"GoCallback": vkClosure, "GoAliasCallback": vkClosure,
+				"Callback": vkFuncPtr, "AliasCallback": vkFuncPtr,
+			} {
+				if got := prog.Type(pkg.Scope().Lookup(name).Type(), GoDecl).kind; got != want {
+					t.Fatalf("%s callable role = %d, want %d", name, got, want)
+				}
+			}
 		})
 	}
 }

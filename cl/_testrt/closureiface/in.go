@@ -16,9 +16,10 @@ func main() {
 }
 
 // CHECK-LABEL: define void @main.main(){{.*}} {
+// CHECK: [[IFACE_FN_ALLOCATION:%.*]] = alloca { { ptr, ptr }, { ptr } }, align 8
 // CHECK: [[CAPTURE:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
 // CHECK-NEXT: store i64 200, ptr [[CAPTURE]], align 8
-// CHECK: [[IFACE_FN_ALLOCATION:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 24)
+// CHECK: call void @llvm.memset.p0.i64(ptr [[IFACE_FN_ALLOCATION]], i8 0, i64 24, i1 false)
 // CHECK-NEXT: [[IFACE_FN_DESCRIPTOR:%.*]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[IFACE_FN_ALLOCATION]], i32 0, i32 0
 // CHECK-NEXT: [[IFACE_FN_ENV:%.*]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[IFACE_FN_ALLOCATION]], i32 0, i32 1
 // CHECK-NEXT: [[IFACE_FN_CAPTURE_SLOT:%.*]] = getelementptr inbounds nuw { ptr }, ptr [[IFACE_FN_ENV]], i32 0, i32 0
