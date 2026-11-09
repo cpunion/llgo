@@ -4,6 +4,8 @@ import contextlib
 import importlib.util
 import os
 from pathlib import Path
+import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -31,24 +33,47 @@ class BaselineCoverageTests(unittest.TestCase):
         return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
     @contextlib.contextmanager
-    def fixture(self, module):
+    def fixture(self, module, producer="go"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "source"
             output = Path(directory) / "evidence"
-            names = [".go-version", ".github/codecov.yml", *module.WORKFLOWS]
+            names = [".gitignore", ".go-version", ".github/codecov.yml", *module.WORKFLOWS,
+                     "_demo/c/cargs/demo.go"]
             for name in names:
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(subprocess.check_output(["git", "show", f"{SOURCE}:{name}"], cwd=ROOT))
 
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                            "commit", "-qm", "unit fixture, not actual baseline"], cwd=root, check=True)
+            original_git = module.git
+
             def git(actual_root, *args):
                 self.assertEqual(actual_root, root)
-                return {("rev-parse", "HEAD"): SOURCE,
-                        ("status", "--porcelain"): "",
-                        ("ls-files", "-z"): "\0".join(names) + "\0"}[args]
+                return SOURCE if args == ("rev-parse", "HEAD") else original_git(root, *args)
 
             with mock.patch.object(module, "git", side_effect=git):
+                self.setup_dependencies(root, producer)
                 yield root, output
+
+    def setup_dependencies(self, root, producer):
+        directory = root / "_demo/c/cargs/libs"
+        if directory.exists():
+            shutil.rmtree(directory)
+        if producer != "browser":
+            for name in ("cargs_linux_amd64.zip", "conaninfo.txt", "conanmanifest.txt", "include/cargs.h",
+                         "lib/libcargs.so", "lib/pkgconfig/cargs.pc.tmpl", "lib/pkgconfig/cargs.pc", "licenses/LICENSE.md"):
+                path = directory / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("synthetic dependency fixture: " + name + "\n")
+
+    def reports(self, root, result):
+        for name in result["files"]:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("mode: set\nexample.go:1.1,1.2 1 1\n")
 
     def test_exact_cp_topic_only_all_producers_gate_upload(self):
         workflow = self.workflow()
@@ -80,7 +105,7 @@ class BaselineCoverageTests(unittest.TestCase):
         module = self.helper()
         self.assertEqual(module.SOURCE, SOURCE)
         for producer in module.PRODUCERS:
-            with self.subTest(producer=producer), self.fixture(module) as (root, output):
+            with self.subTest(producer=producer), self.fixture(module, producer) as (root, output):
                 result = module.prepare(root, output, producer)
                 original = yaml.load((root / result["workflow"]).read_text(), Loader=yaml.BaseLoader)
                 steps = original["jobs"][result["job"]]["steps"]
@@ -146,17 +171,126 @@ class BaselineCoverageTests(unittest.TestCase):
         module = self.helper()
         with self.fixture(module) as (root, output):
             for producer in module.PRODUCERS:
+                self.setup_dependencies(root, producer)
                 result = module.prepare(root, output / producer, producer)
                 for name in result["files"]:
                     path = root / name
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text("mode: set\nexample.go:1.1,1.2 1 1\n")
                 module.verify(root, output / producer)
+                for name in result["files"]:
+                    (root / name).unlink()
             self.assertEqual(set(module.verify_downloads(root, output)),
                              {producer + "_files" for producer in module.PRODUCERS})
             path = output / "go/reports/coverage-main-host.txt"
             path.write_text("changed\n")
             with self.assertRaises(ValueError):
+                module.verify_downloads(root, output)
+
+    def test_real_git_setup_and_exact_outputs_are_separate_from_source(self):
+        module = self.helper()
+        with self.fixture(module) as (root, output):
+            self.assertIn("?? _demo/c/cargs/libs/", module.git(root, "status", "--porcelain"))
+            result = module.prepare(root, output, "go")
+            self.assertFalse(any("/libs/" in name for name in result["source_files"]))
+            self.assertEqual(len(result["dependencies"]), 8)
+            self.reports(root, result)
+            for name in ("coverage-main.txt", "coverage-build.txt", "coverage-compiler.txt",
+                         "go-test-timings/main.jsonl", "go-test-timings/main-times.json",
+                         "go-test-timings/main-times.txt", "go-test-timings/build-shards.json"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("synthetic test output\n")
+            module.verify(root, output)
+            verified = json.loads((output / "verified.json").read_text())
+            self.assertEqual(verified["dependencies"], result["dependencies"])
+            self.assertIn("go-test-timings/main.jsonl", verified["outputs"])
+            self.assertEqual(verified["source_files"], result["source_files"])
+            # These reports are permitted only after the selected commands run.
+            with self.assertRaises(ValueError):
+                module.prepare(root, output / "premature", "go")
+
+    def test_real_git_unknown_source_and_dependency_changes_are_rejected(self):
+        module = self.helper()
+        with self.fixture(module) as (root, output):
+            self.reports(root, module.prepare(root, output, "go"))
+            module.verify(root, output)
+            for name in ("unexpected.go", "_demo/c/cargs/libs/include/injected.go",
+                         "_demo/c/cargs/libs/include/injected.S", "_demo/c/cargs/libs/include/injected.h",
+                         "go-test-timings/injected.go", "go-test-timings/injected.c",
+                         "go-test-timings/go.mod", "go-test-timings/other.json",
+                         "coverage-browser/unknown.out", "coverage-unknown.txt"):
+                with self.subTest(name=name):
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("injected source or unknown output\n")
+                    with self.assertRaises(ValueError):
+                        module.verify(root, output)
+                    path.unlink()
+                    module.verify(root, output)
+            for name in (".go-version", "_demo/c/cargs/libs/lib/libcargs.so"):
+                path = root / name
+                original = path.read_bytes()
+                path.write_bytes(original + b"changed\n")
+                with self.assertRaises(ValueError):
+                    module.verify(root, output)
+                path.write_bytes(original)
+                module.verify(root, output)
+            script = output / "build.sh"
+            original = script.read_bytes()
+            script.write_bytes(original + b"echo changed\n")
+            with self.assertRaisesRegex(ValueError, "original command changed"):
+                module.verify(root, output)
+            script.write_bytes(original)
+            module.verify(root, output)
+            library = root / "_demo/c/cargs/libs/lib/libcargs.so"
+            original = library.read_bytes()
+            escaped = output / "outside.so"
+            escaped.write_bytes(original)
+            library.unlink()
+            library.symlink_to(escaped)
+            with self.assertRaises(ValueError):
+                module.verify(root, output)
+            library.unlink()
+            library.write_bytes(original)
+            module.verify(root, output)
+
+    def test_prepare_records_diagnostics_before_rejecting_untracked_source(self):
+        module = self.helper()
+        with self.fixture(module) as (root, output):
+            (root / "untracked.go").write_text("package injected\n")
+            with self.assertRaises(ValueError):
+                module.prepare(root, output, "go")
+            actual = json.loads((output / "initial-source.json").read_text())
+            self.assertEqual(actual["head"], SOURCE)
+            self.assertIn("untracked.go", actual["status"])
+            step = next(step["run"] for step in self.workflow()["jobs"]["baseline"]["steps"]
+                        if step.get("name") == "Materialize the exact original Linux commands")
+            for evidence in ("mkdir -p", "source.txt", "git-status.txt", "go-version.txt", "llvm-version.txt"):
+                self.assertLess(step.index(evidence), step.index('test "$(go env GOVERSION)"'))
+
+    def test_downloads_verify_each_producer_dependency_and_output_archive(self):
+        module = self.helper()
+        with self.fixture(module) as (root, output):
+            for producer in module.PRODUCERS:
+                self.setup_dependencies(root, producer)
+                result = module.prepare(root, output / producer, producer)
+                self.reports(root, result)
+                module.verify(root, output / producer)
+                for name in result["files"]:
+                    (root / name).unlink()
+            # The upload executor has never installed native demo dependencies.
+            self.assertFalse((root / "_demo/c/cargs/libs").exists())
+            self.assertEqual(len(module.verify_downloads(root, output)), 4)
+            for name in ("go/dependencies/_demo/c/cargs/libs/lib/libcargs.so", "go/verified.json",
+                         "go/outputs/coverage-main-host.txt", "go/build.sh"):
+                path = output / name
+                original = path.read_bytes()
+                path.write_bytes(original.replace(b"sha256", b"tamper") if name.endswith("json")
+                                 else original + b"changed")
+                with self.assertRaises((ValueError, KeyError)):
+                    module.verify_downloads(root, output)
+                path.write_bytes(original)
                 module.verify_downloads(root, output)
 
     def test_original_script_failures_stop_before_success_or_partial_reports(self):

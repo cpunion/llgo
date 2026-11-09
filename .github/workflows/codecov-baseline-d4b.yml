@@ -78,14 +78,17 @@ jobs:
       - name: Materialize the exact original Linux commands
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/base-codecov"
+          git rev-parse HEAD > "$RUNNER_TEMP/base-codecov/source.txt"
+          git status --porcelain --untracked-files=all > "$RUNNER_TEMP/base-codecov/git-status.txt"
+          go version > "$RUNNER_TEMP/base-codecov/go-version.txt"
+          go env -json GOVERSION GOOS GOARCH > "$RUNNER_TEMP/base-codecov/go-env.json"
+          llvm-config --version > "$RUNNER_TEMP/base-codecov/llvm-version.txt"
           test "$(go env GOVERSION)" = go1.27.0
           test "$(go env GOOS)/$(go env GOARCH)" = linux/amd64
           test "$(llvm-config --version)" = 22.1.8
           echo "BASE_COVERAGE=$RUNNER_TEMP/base-codecov" >> "$GITHUB_ENV"
           python3 "$RUNNER_TEMP/codecov_baseline.py" prepare '${{ matrix.producer }}' "$RUNNER_TEMP/base-codecov"
-          go version > "$RUNNER_TEMP/base-codecov/go-version.txt"
-          llvm-config --version > "$RUNNER_TEMP/base-codecov/llvm-version.txt"
-          git rev-parse HEAD > "$RUNNER_TEMP/base-codecov/source.txt"
       - name: Original compiler build
         run: bash --noprofile --norc -e -o pipefail "$BASE_COVERAGE/build.sh"
       - name: Original dev LTO plugin build

@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -36,6 +38,12 @@ PRODUCERS = {
         "build": "Install llgo", "coverage": "Test real browser source breakpoints and paused variables",
     }),
 }
+DEPENDENCY_ROOT = "_demo/c/cargs/libs"
+# The Linux setup-demo-deps archive and its one rendered pkg-config file.
+DEPENDENCY_FILES = {DEPENDENCY_ROOT + "/" + name for name in (
+    "cargs_linux_amd64.zip", "conaninfo.txt", "conanmanifest.txt", "include/cargs.h",
+    "lib/libcargs.so", "lib/pkgconfig/cargs.pc.tmpl", "lib/pkgconfig/cargs.pc", "licenses/LICENSE.md",
+)}
 
 
 def digest(path):
@@ -47,13 +55,81 @@ def git(root, *args):
 
 
 def snapshot(root):
-    if git(root, "rev-parse", "HEAD") != SOURCE or git(root, "status", "--porcelain"):
-        raise ValueError("baseline must be the clean exact source commit")
+    if (git(root, "rev-parse", "HEAD") != SOURCE
+            or git(root, "status", "--porcelain", "--untracked-files=no")):
+        raise ValueError("baseline tracked source must be the clean exact commit")
     if (root / ".go-version").read_text().strip() != "1.27.0":
         raise ValueError("baseline SDK must retain its original 1.27.0 pin")
     if any(digest(root / name) != expected for name, expected in WORKFLOWS.items()):
         raise ValueError("original coverage workflow changed")
     return {name: digest(root / name) for name in git(root, "ls-files", "-z").split("\0") if name}
+
+
+def dependencies(root, producer):
+    directory = root / DEPENDENCY_ROOT
+    files = {}
+    if directory.is_symlink():
+        raise ValueError("redirected dependency directory")
+    for path in directory.rglob("*") if directory.exists() else ():
+        if path.is_symlink() and path.resolve().is_dir():
+            raise ValueError("redirected dependency subdirectory")
+        if path.is_dir():
+            continue
+        name = path.relative_to(root).as_posix()
+        if (name not in DEPENDENCY_FILES or not path.resolve().is_relative_to(directory.resolve())
+                or not stat.S_ISREG(path.stat().st_mode)):
+            raise ValueError("unknown or redirected native dependency: " + name)
+        files[name] = {"sha256": digest(path), "link": os.readlink(path) if path.is_symlink() else None}
+    if set(files) != (set() if producer == "browser" else DEPENDENCY_FILES):
+        raise ValueError("incomplete original native dependency set")
+    return files
+
+
+def output_names(result):
+    # Final names come from the original uploader; intermediate profile names
+    # and timing suites come from its selected original commands, not a glob.
+    scripts = "\n".join(result["scripts"].values())
+    names = set(result["files"])
+    names.update(name.removeprefix("../") for name in
+                 re.findall(r'-coverprofile=["\']?([A-Za-z0-9_./-]+)', scripts))
+    for group in re.findall(r"for profile in ([A-Za-z0-9 -]+); do", scripts):
+        names.update(profile + ".txt" for profile in group.split())
+    suites = re.findall(r"run_go_tests\.py(?: --output-dir \.\./go-test-timings)? ([a-z]+)", scripts)
+    for suite in suites:
+        names.update("go-test-timings/" + suite + suffix
+                     for suffix in (".jsonl", "-times.json", "-times.txt"))
+    if "run_build_tests.py" in scripts:
+        names.add("go-test-timings/build-shards.json")
+    return names
+
+
+def outputs(root, result, after):
+    allowed = output_names(result) if after else set()
+    names = {name for name in allowed if (root / name).exists()}
+    for directory in (root / "go-test-timings", root / "coverage-browser"):
+        if directory.is_symlink():
+            raise ValueError("redirected output directory")
+        for path in directory.rglob("*") if directory.exists() else ():
+            if not path.is_dir() or path.is_symlink():
+                name = path.relative_to(root).as_posix()
+                if name not in allowed:
+                    raise ValueError("unknown test output: " + name)
+    untracked = {name for name in git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if name}
+    unknown = untracked - DEPENDENCY_FILES - names
+    if unknown:
+        raise ValueError("unknown untracked baseline input: " + ", ".join(sorted(unknown)))
+    for name in names:
+        path = root / name
+        if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
+            raise ValueError("redirected or nonregular test output: " + name)
+    return {name: digest(root / name) for name in sorted(names)}
+
+
+def archive(root, output, category, files):
+    for name in files:
+        target = output / category / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / name, target)
 
 
 def definition(root, producer):
@@ -78,12 +154,18 @@ def definition(root, producer):
 
 
 def prepare(root, output, producer):
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "initial-source.json").write_text(json.dumps({
+        "head": git(root, "rev-parse", "HEAD"),
+        "status": git(root, "status", "--porcelain", "--untracked-files=all"),
+    }, indent=2) + "\n")
     source = snapshot(root)
     result = definition(root, producer)
-    output.mkdir(parents=True, exist_ok=True)
+    deps = dependencies(root, producer)
+    outputs(root, result, False)
     for key, script in result["scripts"].items():
         (output / (key + ".sh")).write_text(script)
-    result.update(source_commit=SOURCE, source_files=source, original_go_version="1.27.0")
+    result.update(source_commit=SOURCE, source_files=source, dependencies=deps, original_go_version="1.27.0")
     (output / "provenance.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
@@ -95,6 +177,12 @@ def verify(root, output):
     expected = definition(root, result["producer"])
     if any(result[key] != value for key, value in expected.items()):
         raise ValueError("coverage producer differs from original workflow")
+    if any((output / (key + ".sh")).read_text() != script for key, script in expected["scripts"].items()):
+        raise ValueError("materialized original command changed")
+    deps = dependencies(root, result["producer"])
+    if deps != result["dependencies"]:
+        raise ValueError("native dependencies changed during tests")
+    generated = outputs(root, result, True)
     reports = {}
     for name in result["files"]:
         path = root / name
@@ -104,7 +192,12 @@ def verify(root, output):
         target = output / "reports" / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
-    (output / "verified.json").write_text(json.dumps(reports, indent=2) + "\n")
+    archive(root, output, "dependencies", deps)
+    archive(root, output, "outputs", generated)
+    (output / "verified.json").write_text(json.dumps({
+        "source_files": result["source_files"], "dependencies": deps,
+        "outputs": generated, "reports": reports,
+    }, indent=2) + "\n")
     return reports
 
 
@@ -118,9 +211,27 @@ def verify_downloads(root, directory):
         if (result["source_commit"] != SOURCE or result["source_files"] != source
                 or any(result[key] != value for key, value in expected.items())):
             raise ValueError("downloaded baseline producer identity mismatch")
-        reports = json.loads((output / "verified.json").read_text())
+        if any((output / (key + ".sh")).read_text() != script for key, script in expected["scripts"].items()):
+            raise ValueError("archived original command changed")
+        verified = json.loads((output / "verified.json").read_text())
+        if verified["source_files"] != source or verified["dependencies"] != result["dependencies"]:
+            raise ValueError("producer pre/post provenance differs")
+        deps = verified["dependencies"]
+        if set(deps) != (set() if producer == "browser" else DEPENDENCY_FILES):
+            raise ValueError("incomplete archived dependency set")
+        for name, observation in deps.items():
+            if digest(output / "dependencies" / name) != observation["sha256"]:
+                raise ValueError("archived native dependency changed")
+        generated = verified["outputs"]
+        if not set(generated) <= output_names(expected):
+            raise ValueError("unknown archived test output")
+        if any(digest(output / "outputs" / name) != value for name, value in generated.items()):
+            raise ValueError("archived test output changed")
+        reports = verified["reports"]
         if set(reports) != set(expected["files"]):
             raise ValueError("incomplete original report set")
+        if any(generated.get(name) != value for name, value in reports.items()):
+            raise ValueError("coverage report differs from output observation")
         paths = [output / "reports" / name for name in expected["files"]]
         if any(digest(path) != reports[name] for name, path in zip(expected["files"], paths)):
             raise ValueError("downloaded coverage report changed")
