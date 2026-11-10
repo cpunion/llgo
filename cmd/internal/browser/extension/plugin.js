@@ -499,8 +499,10 @@
         return this.interfaceRemote(module, originalType, type, address, stopId, interfaceSpec);
       }
       const functionSpec = module.layout?.function;
-      if (functionSpec && runtimeTypeMatches(originalType, type, functionSpec.type_pattern, true)) {
-        return this.functionRemote(module, originalType, type, address, stopId, functionSpec);
+      if (functionSpec && type.kind === 'pointer' && (
+          runtimeTypeMatches(originalType, type, functionSpec.type_pattern, true) ||
+          runtimeTypeMatches(null, module.types.get(type.elem), functionSpec.type_pattern, true))) {
+        return this.functionRemote(module, originalType, type, located, stopId, functionSpec);
       }
       const mapSpec = module.layout?.map;
       if (mapSpec && (runtimeTypeMatches(originalType, type, mapSpec.type_pattern, true) ||
@@ -670,9 +672,17 @@
       return new TextDecoder().decode(raw);
     }
 
-    async functionRemote(module, originalType, type, address, stopId, spec) {
-      const codeField = fieldByName(type, spec.code);
-      const dataField = fieldByName(type, spec.data);
+    async functionRemote(module, originalType, type, located, stopId, spec) {
+      // Go storage may reserve eight bytes on Memory32; the descriptor address
+      // and both header pointers still use the target's physical pointer width.
+      const address = located.kind === 'value' ?
+        BigInt.asUintN(module.record.pointer_size * 8, BigInt(located.value)) :
+        await this.readUnsigned(located.value, module.record.pointer_size, stopId);
+      if (address === null) return null;
+      if (address === 0n) return {type: 'null', value: null, description: 'nil', hasChildren: false};
+      const descriptor = resolvePointee(module, type);
+      const codeField = fieldByName(descriptor, spec.code);
+      const dataField = fieldByName(descriptor, spec.data);
       if (!codeField || !dataField) return null;
       const code = await this.readUnsigned(
           address + BigInt(codeField.offset), module.record.pointer_size, stopId);
@@ -686,14 +696,14 @@
       if (info) name += ` ${info.name}`;
       if (data !== 0n) name += ` data=0x${data.toString(16)}`;
       const environment = info?.environment && resolvePointee(module, module.types.get(info.environment));
-      const objectId = this.storeObject(module, type, address, stopId, 'function', {
+      const objectId = this.storeObject(module, descriptor, address, stopId, 'function', {
         environment: environment?.kind === 'struct' && environment.complete ? environment : null,
         context: data,
       });
       return {
         type: 'object', className: originalType.name || type.name, description: name,
         objectId, hasChildren: true,
-        linearMemoryAddress: numberAddress(address), linearMemorySize: Math.max(0, type.size),
+        linearMemoryAddress: numberAddress(address), linearMemorySize: Math.max(0, descriptor.size),
       };
     }
 

@@ -11,6 +11,7 @@ func (t *T) Invoke() {
 	println("invoke")
 }
 
+// CHECK: [[CLOSURE_DESCRIPTOR:@"_llgo_funcval\$[0-9a-f]+"]] = linkonce_odr constant { ptr, ptr } { ptr @"main.main$1", ptr null }
 // CHECK-LABEL: define void @main.dump(%"{{.*}}/runtime/internal/runtime.eface" %0){{.*}} {
 // CHECK: store %"{{.*}}eface" %0, ptr [[DUMP_ADDR:%[-A-Za-z0-9_.]+]]
 // CHECK: [[DUMP_TYPE_FIELD:%.*]] = getelementptr inbounds nuw %main.eface, ptr [[DUMP_ADDR]], i32 0, i32 0
@@ -32,13 +33,13 @@ func dump(v any) {
 // CHECK: [[HAS_ELEM:%.*]] = icmp ne ptr [[TYPE_ELEM]], null
 // CHECK: br i1 [[HAS_ELEM]], label %{{.*}}, label %{{.*}}
 // CHECK: [[RECURSE_ELEM:%.*]] = call ptr @"{{.*}}/runtime/abi.(*Type).Elem"(ptr %0)
-// CHECK: [[ELEM_SEP:%.*]] = call %"{{.*}}String" @"{{.*}}/runtime/internal/runtime.StringCat"(%"{{.*}}String" %1, %"{{.*}}String" { ptr @{{.*}}, i{{[0-9]+}} 7 })
+// CHECK: [[ELEM_SEP:%.*]] = call %"{{.*}}String" @"{{.*}}/runtime/internal/runtime.StringCatBuffer"(%"{{.*}}String" %1, %"{{.*}}String" { ptr @{{.*}}, i{{[0-9]+}} 7 }, ptr %{{[0-9]+}})
 // CHECK: call void @main.dumpTyp(ptr [[RECURSE_ELEM]], %"{{.*}}String" [[ELEM_SEP]])
 // CHECK: [[RECHECK_UNCOMMON:%.*]] = call ptr @"{{.*}}/runtime/abi.(*Type).Uncommon"(ptr %0)
 // CHECK: [[HAS_UNCOMMON:%.*]] = icmp ne ptr [[RECHECK_UNCOMMON]], null
 // CHECK: br i1 [[HAS_UNCOMMON]], label %{{.*}}, label %{{.*}}
 // CHECK: [[DUMP_UNCOMMON:%.*]] = call ptr @"{{.*}}/runtime/abi.(*Type).Uncommon"(ptr %0)
-// CHECK: [[UNCOMMON_SEP:%.*]] = call %"{{.*}}String" @"{{.*}}/runtime/internal/runtime.StringCat"(%"{{.*}}String" %1, %"{{.*}}String" { ptr @{{.*}}, i{{[0-9]+}} 9 })
+// CHECK: [[UNCOMMON_SEP:%.*]] = call %"{{.*}}String" @"{{.*}}/runtime/internal/runtime.StringCatBuffer"(%"{{.*}}String" %1, %"{{.*}}String" { ptr @{{.*}}, i{{[0-9]+}} 9 }, ptr %{{[0-9]+}})
 // CHECK: call void @main.dumpUncommon(ptr [[DUMP_UNCOMMON]], %"{{.*}}String" [[UNCOMMON_SEP]])
 func dumpTyp(t *abi.Type, sep string) {
 	print(sep)
@@ -97,7 +98,7 @@ type eface struct {
 // CHECK: call void @main.dump(%"{{.*}}eface" { ptr @_llgo_float32, ptr @"_llgo_ifacebox${{.*}}" })
 // CHECK: call void @main.dump(%"{{.*}}eface" { ptr @_llgo_float64, ptr @"_llgo_ifacebox${{.*}}" })
 // CHECK: call void @main.dump(%"{{.*}}eface" { ptr @"[10]_llgo_int", ptr @"_llgo_ifacebox${{.*}}" })
-// CHECK: call void @main.dump(%"{{.*}}eface" { ptr @"_llgo_closure${{.*}}", ptr @"_llgo_ifacebox${{.*}}" })
+// CHECK: call void @main.dump(%"{{.*}}eface" { ptr @"_llgo_closure${{[-A-Za-z0-9_]+}}", ptr [[CLOSURE_DESCRIPTOR]] })
 // CHECK: call void @main.dump(%"{{.*}}eface" { ptr @"*_llgo_int", ptr null })
 // CHECK-DARWIN: call void @main.dump(%"{{.*}}eface" { ptr @"[]_llgo_int", ptr {{.*}} })
 // CHECK-LINUX: call void @main.dump(%"{{.*}}eface" { ptr @"[]_llgo_int", ptr {{.*}} })

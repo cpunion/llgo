@@ -1303,13 +1303,17 @@ def _symbol_name(target: lldb.SBTarget, address: int) -> Optional[str]:
 def function_summary(value: lldb.SBValue,
                      _internal_dict: Dict[str, Any]) -> Optional[str]:
     layout = _runtime_layout(value)
-    raw = _raw_value(value)
-    if (layout is None or
-            not re.fullmatch(layout.function_type_pattern,
-                             _canonical_type_name(raw))):
+    if layout is None:
         return None
-    code = _value_as_int(raw.GetChildMemberWithName(layout.function_code))
-    data = _value_as_int(raw.GetChildMemberWithName(layout.function_data))
+    address, descriptor = _pointer_runtime_value(value, layout.function_type_pattern)
+    if address is None:
+        return None
+    if address == 0:
+        return "nil"
+    if descriptor is None:
+        return None
+    code = _value_as_int(descriptor.GetChildMemberWithName(layout.function_code))
+    data = _value_as_int(descriptor.GetChildMemberWithName(layout.function_data))
     if code is None or data is None:
         return None
     if code == 0:

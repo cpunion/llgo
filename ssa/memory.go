@@ -29,11 +29,12 @@ import (
 func (b Builder) aggregateAllocU(t Type, flds ...llvm.Value) llvm.Value {
 	prog := b.Prog
 	size := prog.SizeOf(t)
-	ptr := b.allocTyped("AllocU", t, prog.IntVal(size, prog.Uintptr())).impl
+	ptr := b.allocTyped(t, prog.IntVal(size, prog.Uintptr()), false).impl
 	b.aggregateInit(ptr, t, flds...)
 	return ptr
 }
 
+/* TODO(xsw): to be removed
 func (b Builder) aggregateAlloca(t Type, flds ...llvm.Value) llvm.Value {
 	prog := b.Prog
 	size := prog.SizeOf(t)
@@ -49,6 +50,7 @@ func (b Builder) aggregateMalloc(t Type, flds ...llvm.Value) llvm.Value {
 	b.aggregateInit(ptr, t, flds...)
 	return ptr
 }
+*/
 
 // Aggregate constructs an aggregate value from Expr fields.
 func (b Builder) Aggregate(t Type, flds ...Expr) Expr {
@@ -61,6 +63,12 @@ func (b Builder) Aggregate(t Type, flds ...Expr) Expr {
 
 // aggregateValue yields the value of the aggregate X with the fields
 func (b Builder) aggregateValue(t Type, flds ...llvm.Value) Expr {
+	if t.kind == vkClosure {
+		if len(flds) != 2 {
+			panic("ssa: function descriptor requires code and environment")
+		}
+		return b.makeFuncval(t, flds[0], flds[1])
+	}
 	if t.kind == vkSIMD {
 		stored := b.aggregateValue(b.Prog.rawType(t.RawType().Underlying()), flds...)
 		return Expr{b.simdFromStorage(stored.impl, t), t}
@@ -164,7 +172,7 @@ func (b Builder) AllocEx(elem Type, heap bool, hoistToEntry bool) (ret Expr) {
 		if prog.SizeOf(elem) == 0 {
 			return pkg.moduleZeroSizedAlloc(elem)
 		}
-		ret = b.allocTyped("AllocZ", elem, size)
+		ret = b.allocTyped(elem, size, true)
 	} else {
 		// Stack-local zero-sized variables keep a distinct alloca. Only heap
 		// allocations and package globals use the shared module sentinel.
@@ -190,6 +198,7 @@ func (b Builder) AllocEx(elem Type, heap bool, hoistToEntry bool) (ret Expr) {
 		prog.requireStorageAlignment(alloca, elem)
 		ret = Expr{alloca, prog.VoidPtr()}
 		ret.impl = b.zeroinit(ret, size).impl
+		b.registerStackRoots(alloca, elem)
 	}
 	ret.Type = prog.Pointer(elem)
 	return
@@ -199,15 +208,31 @@ func (b Builder) AllocEx(elem Type, heap bool, hoistToEntry bool) (ret Expr) {
 func (b Builder) AllocU(elem Type, n ...int64) (ret Expr) {
 	prog := b.Prog
 	size := SizeOf(prog, elem, n...)
-	return Expr{b.allocTyped("AllocU", elem, size).impl, prog.Pointer(elem)}
+	return Expr{b.allocTyped(elem, size, false).impl, prog.Pointer(elem)}
 }
 
-func (b Builder) allocTyped(helper string, elem Type, size Expr) Expr {
+func (b Builder) allocTyped(elem Type, size Expr, zero bool) Expr {
+	hasPointers := b.Prog.abi.HasPointers(elem.raw.Type)
+	helper := "AllocAtomicU"
+	if hasPointers {
+		helper = "AllocU"
+		if zero {
+			helper = "AllocZ"
+		}
+	}
+	var ret Expr
 	alignment := b.Prog.AlignOf(elem)
 	if alignment > uint64(b.Prog.GoWordSize()) {
-		return b.InlineCall(b.Pkg.rtFunc(RuntimeSymbol(helper+"Aligned", "AllocUAligned", "AllocZAligned")), size, b.Prog.IntVal(alignment, b.Prog.Uintptr()))
+		ret = b.InlineCall(b.Pkg.rtFunc(RuntimeSymbol(helper+"Aligned", "AllocUAligned", "AllocZAligned", "AllocAtomicUAligned")), size, b.Prog.IntVal(alignment, b.Prog.Uintptr()))
+	} else {
+		ret = b.InlineCall(b.Pkg.rtFunc(RuntimeSymbol(helper, "AllocU", "AllocZ", "AllocAtomicU")), size)
 	}
-	return b.InlineCall(b.Pkg.rtFunc(RuntimeSymbol(helper, "AllocU", "AllocZ")), size)
+	if zero && !hasPointers {
+		// Keep initialization at the call site. LLVM can specialize a constant
+		// size and eliminate stores overwritten by the object's initializer.
+		ret = b.zeroinit(ret, size)
+	}
+	return ret
 }
 
 func (b Builder) allocUninited(size Expr) (ret Expr) {
@@ -235,6 +260,7 @@ func (b Builder) AllocaT(t Type) (ret Expr) {
 	ret.impl = llvm.CreateAlloca(b.impl, prog.storageType(t))
 	prog.requireStorageAlignment(ret.impl, t)
 	ret.Type = prog.Pointer(t)
+	b.registerStackRoots(ret.impl, t)
 	return
 }
 
@@ -523,10 +549,8 @@ func (b Builder) Store(ptr, val Expr) Expr {
 	dbgInstrf("Store %v, %v, %v\n", raw, ptr.impl, val.impl)
 	storageType := b.Prog.Elem(ptr.Type)
 	if storageType.kind == vkFuncPtr && val.kind == vkClosure {
-		// The raw signature alone does not distinguish a C pointer slot from
-		// a Go funcval. Use the actual storage representation so a two-word
-		// Go value cannot overwrite the next native variable. ChangeType also
-		// rejects closure environments that a native callback cannot carry.
+		// Native slots store an entry pointer, not a Go descriptor pointer.
+		// ChangeType extracts the entry and rejects captured environments.
 		val = b.ChangeType(storageType, val)
 	} else {
 		val = checkExpr(val, raw.(*types.Pointer).Elem(), b)

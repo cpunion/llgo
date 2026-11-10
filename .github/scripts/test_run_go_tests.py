@@ -8,12 +8,329 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from unittest import mock
 
 import run_go_tests
 
 
 class GoTestReportTests(unittest.TestCase):
+    def batch_command(self, root, package, mode="set", extra=()):
+        child = root / "fake_go.py"
+        if not child.exists():
+            child.write_text('''import argparse
+import json
+import pathlib
+import sys
+import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-coverprofile')
+parser.add_argument('-covermode')
+parser.add_argument('--release')
+parser.add_argument('--wrong-mode', action='store_true')
+parser.add_argument('--bad-statements', type=int, default=0)
+parser.add_argument('package')
+args, unknown = parser.parse_known_args()
+name = args.package.rsplit('/', 1)[-1]
+status = 7 if name == 'Failure' else 0
+print(json.dumps(dict(Package=args.package, Test='Test' + name,
+                     Action='fail' if status else 'pass', Elapsed=1)), flush=True)
+if args.release and name == 'First':
+    deadline = time.monotonic() + 10
+    while not pathlib.Path(args.release).exists():
+        if time.monotonic() > deadline:
+            sys.exit(9)
+        time.sleep(0.01)
+if name != 'Missing':
+    mode = 'count' if args.wrong_mode else args.covermode
+    hits = 1 if mode == 'set' or name == 'First' else 2
+    statements = 2 if args.bad_statements and name == 'Second' else 1
+    data = (f'mode: {mode}\\nshared.go:1.1,2.1 {statements} {hits}\\n'
+            f'{args.package}.go:1.1,2.1 1 1\\n')
+    if name in ('Duplicate', 'ConflictingDuplicate'):
+        duplicate_statements = 2 if name == 'ConflictingDuplicate' else 1
+        data += f'shared.go:1.1,2.1 {duplicate_statements} 1\\n'
+    pathlib.Path(args.coverprofile).write_text(data)
+sys.exit(status)
+''', encoding="utf-8")
+        return [sys.executable, str(child),
+                "-coverprofile=" + str(root / "coverage-main.txt"),
+                "-covermode=" + mode, *extra, "example.invalid/" + package]
+
+    def run_batch(self, root, package, **kwargs):
+        command = self.batch_command(root, package, **kwargs)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return run_go_tests.run(command, root, "main")
+
+    def test_repeated_stage_retains_both_commands_cases_and_coverage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            child = root / "fake_go.py"
+            child.write_text(
+                "import json,pathlib,sys\n"
+                "profile=next(a.split('=',1)[1] for a in sys.argv if a.startswith('-coverprofile='))\n"
+                "mode=next(a.split('=',1)[1] for a in sys.argv if a.startswith('-covermode='))\n"
+                "package=sys.argv[-1]\n"
+                "name=package.rsplit('/',1)[-1]\n"
+                "pathlib.Path(profile).write_text(f'mode: {mode}\\n{package}.go:1.1,2.1 1 1\\n')\n"
+                "print(json.dumps(dict(Package=package,Test='Test'+name,Action='pass',Elapsed=1)))\n",
+                encoding="utf-8")
+            commands = []
+            for package in ("example.invalid/First", "example.invalid/Second"):
+                command = [sys.executable, str(child),
+                           "-coverprofile=" + str(root / "coverage-main.txt"),
+                           "-covermode=set", package]
+                commands.append(command)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(run_go_tests.run(command, root, "main"), 0)
+            cases = json.loads((root / "main-times.json").read_text())
+            self.assertEqual({case["Test"] for case in cases}, {"TestFirst", "TestSecond"})
+            self.assertEqual(len((root / "main.jsonl").read_text().splitlines()), 2)
+            profile = (root / "coverage-main.txt").read_text()
+            self.assertEqual((root / "main-coverage.txt").read_text(), profile)
+            self.assertIn("example.invalid/First.go:1.1,2.1 1 1", profile)
+            self.assertIn("example.invalid/Second.go:1.1,2.1 1 1", profile)
+            provenance = json.loads((root / "main-runs.json").read_text())
+            self.assertTrue(provenance["success"])
+            self.assertEqual(provenance["coverage_mirror"],
+                             {"member": "main-coverage.txt", "stage": "pre-host-filter"})
+            self.assertEqual([r["command"] for r in provenance["runs"]], commands)
+            self.assertEqual([r["exit"] for r in provenance["runs"]], [0, 0])
+            effective = [r["coverage"]["path"] for r in provenance["runs"]]
+            self.assertEqual(len(set(effective)), 2)
+            for run in provenance["runs"]:
+                self.assertTrue(Path(run["coverage"]["path"]).exists())
+
+    def test_repeated_blocks_in_one_go_profile_follow_official_merge_rules(self):
+        # Actual multi-package Go profiles repeat instrumented dependency
+        # ranges. These first-party ranges also occurred in the Windows batch.
+        block = "github.com/xgo-dev/llgo/benchmark/binary_size/fmtprintf/main.go:6.2,7.1"
+        for mode, counts, expected in (("set", [0, 0, 1], 1),
+                                       ("count", [2, 3, 0], 5),
+                                       ("atomic", [2, 3, 0], 5)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                profile = root / "actual-go-profile.txt"
+                data = f"mode: {mode}\n" + "".join(f"{block} 1 {count}\n" for count in counts)
+                profile.write_text(data)
+                record = {"coverage": {"path": str(profile), "mode": mode}}
+                run_go_tests.merge_profiles([record], root / "merged.txt")
+                self.assertEqual((root / "merged.txt").read_text(),
+                                 f"mode: {mode}\n{block} 1 {expected}\n")
+                self.assertEqual(profile.read_text(), data)
+        # Retain the previous Duplicate input as a valid same-NumStmt case,
+        # while the conflicting duplicate remains an independent rejection.
+        for mode, expected in (("set", 1), ("count", 3), ("atomic", 3)):
+            with self.subTest(child_mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.assertEqual(self.run_batch(root, "Duplicate", mode=mode), 0)
+                self.assertIn(f"shared.go:1.1,2.1 1 {expected}\n",
+                              (root / "coverage-main.txt").read_text())
+        for second in ("2 1", "1 -1", "1 2"):
+            with self.subTest(second=second), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                profile = root / "invalid-go-profile.txt"
+                profile.write_text(f"mode: set\n{block} 1 0\n{block} {second}\n")
+                record = {"coverage": {"path": str(profile), "mode": "set"}}
+                with self.assertRaises(ValueError):
+                    run_go_tests.merge_profiles([record], root / "merged.txt")
+                self.assertFalse((root / "merged.txt").exists())
+
+    def test_set_or_count_sum_and_counter_schema_rejections(self):
+        for mode, expected in (("set", 1), ("count", 3), ("atomic", 3)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.assertEqual(self.run_batch(root, "First", mode=mode), 0)
+                self.assertEqual(self.run_batch(root, "Second", mode=mode), 0)
+                self.assertIn(f"shared.go:1.1,2.1 1 {expected}\n",
+                              (root / "coverage-main.txt").read_text())
+                self.assertEqual((root / "main-coverage.txt").read_bytes(),
+                                 (root / "coverage-main.txt").read_bytes())
+        for package, extra in (("ConflictingDuplicate", ()), ("First", ("--wrong-mode",))):
+            with self.subTest(package=package, extra=extra), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.assertNotEqual(self.run_batch(root, package, extra=extra), 0)
+                self.assertFalse(json.loads((root / "main-runs.json").read_text())["success"])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            extra = ("--bad-statements=1",)
+            self.assertEqual(self.run_batch(root, "First", extra=extra), 0)
+            original = (root / "coverage-main.txt").read_bytes()
+            original_mirror = (root / "main-coverage.txt").read_bytes()
+            diagnostic = io.StringIO()
+            with contextlib.redirect_stderr(diagnostic):
+                self.assertNotEqual(self.run_batch(root, "Second", extra=extra), 0)
+            self.assertEqual((root / "coverage-main.txt").read_bytes(), original)
+            self.assertEqual((root / "main-coverage.txt").read_bytes(), original_mirror)
+            self.assertIn("statement counts differ",
+                          str(json.loads((root / "main-runs.json").read_text())["errors"]))
+            self.assertIn("Go test suite main publication failed: coverage statement counts differ\n",
+                          diagnostic.getvalue())
+
+    def test_failed_or_missing_profile_never_becomes_successful_union(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(self.run_batch(root, "Failure"), 7)
+            self.assertFalse((root / "main-coverage.txt").exists())
+            self.assertEqual(self.run_batch(root, "Second"), 0)
+            report = json.loads((root / "main-runs.json").read_text())
+            self.assertEqual([r["exit"] for r in report["runs"]], [7, 0])
+            self.assertFalse(report["success"])
+            self.assertEqual(report["exit"], 7)
+            self.assertEqual(len(json.loads((root / "main-times.json").read_text())), 2)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertNotEqual(self.run_batch(root, "Missing"), 0)
+            self.assertFalse(json.loads((root / "main-runs.json").read_text())["success"])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main-coverage.txt").mkdir()
+            self.assertNotEqual(self.run_batch(root, "First"), 0)
+            report = json.loads((root / "main-runs.json").read_text())
+            self.assertFalse(report["success"])
+            self.assertTrue(report["errors"])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = self.batch_command(root, "First")
+            command[2] = "-coverprofile=" + str(root / "main-coverage.txt")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run_go_tests.run(command, root, "main"), 0)
+            report = json.loads((root / "main-runs.json").read_text())
+            self.assertTrue(report["success"])
+            self.assertEqual(report["coverage_mirror"]["member"], "main-coverage.txt")
+
+    def test_foreign_command_target_or_unknown_record_rejects_union(self):
+        for mutation in ("command", "target", "missing-command", "unknown-state"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.assertEqual(self.run_batch(root, "First"), 0)
+                before = (root / "coverage-main.txt").read_bytes()
+                if mutation in ("missing-command", "unknown-state"):
+                    record_path = next((root / "main-runs").glob("*/run.json"))
+                    record = json.loads(record_path.read_text())
+                    if mutation == "missing-command":
+                        del record["command"]
+                    else:
+                        record["state"] = "unknown"
+                    record_path.write_text(json.dumps(record))
+                extra = ("--foreign-flag",) if mutation == "command" else ()
+                target = "foreign" if mutation == "target" else os.getenv("GOOS", "")
+                with mock.patch.dict(os.environ, GOOS=target):
+                    self.assertNotEqual(self.run_batch(root, "Second", extra=extra), 0)
+                self.assertFalse(json.loads((root / "main-runs.json").read_text())["success"])
+                self.assertEqual((root / "coverage-main.txt").read_bytes(), before)
+
+    def test_package_named_flag_values_do_not_disappear_from_command_scope(self):
+        for flag in ("-coverpkg", "-run"):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                first = (flag, "example.invalid/First")
+                second = (flag, "example.invalid/Second")
+                self.assertEqual(self.run_batch(root, "First", extra=first), 0)
+                original = (root / "coverage-main.txt").read_bytes()
+                self.assertNotEqual(self.run_batch(root, "Second", extra=second), 0)
+                self.assertFalse(json.loads((root / "main-runs.json").read_text())["success"])
+                self.assertEqual((root / "coverage-main.txt").read_bytes(), original)
+
+    def test_coverage_options_do_not_rewrite_flag_values_or_test_arguments(self):
+        commands = (
+            ["go", "test", "-run", "-coverprofile=literal-regex", "example.invalid/First"],
+            ["go", "test", "example.invalid/First", "-args", "-coverprofile=payload"],
+            ["go", "test", "example.invalid/First", "--", "-coverprofile=payload"],
+        )
+        for command in commands:
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _, record, _ = run_go_tests.claim(command, root, "main")
+                self.assertEqual(record["effective_command"], command)
+                self.assertIsNone(record["coverage"])
+        for payload in (("-run", "-covermode=count"),
+                        ("-args", "-covermode=count"), ("--", "-covermode=count")):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                command = ["go", "test", "-coverprofile", str(root / "coverage.txt"),
+                           "-covermode=set", *payload]
+                batch, record, _ = run_go_tests.claim(command, root, "main")
+                self.assertEqual(record["effective_command"][-2:], list(payload))
+                (batch / "coverage.txt").write_text("mode: set\nf.go:1.1,2.1 1 1\n")
+                run_go_tests.merge_profiles([record], root / "combined.txt")
+                self.assertEqual((root / "combined.txt").read_text().splitlines()[0], "mode: set")
+
+    def test_go_boolean_flags_keep_following_coverage_option_visible(self):
+        for boolean in ("-trimpath", "-cover", "-work", "-buildvcs", "-benchmem", "-fullpath"):
+            with self.subTest(boolean=boolean), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                command = ["go", "test", "-json", boolean,
+                           "-coverprofile=" + str(root / "coverage.txt"), "example.invalid/First"]
+                batch, record, _ = run_go_tests.claim(command, root, "main")
+                self.assertIsNotNone(record["coverage"])
+                self.assertEqual(record["effective_command"][-2],
+                                 "-coverprofile=" + str(batch / "coverage.txt"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = ["go", "test", "--trimpath", "--test.coverprofile", str(root / "out"),
+                       "-test.benchmem", "example.invalid/First"]
+            batch, record, _ = run_go_tests.claim(command, root, "main")
+            self.assertEqual(record["effective_command"][3:5],
+                             ["--test.coverprofile", str(batch / "coverage.txt")])
+            record["packages"] = ["example.invalid/First"]
+            self.assertEqual(run_go_tests.command_scope(record)[0], command[:-1])
+
+    def test_unknown_bare_option_cannot_hide_a_possible_coverage_destination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            command = ["go", "test", "-custom-bool", "-coverprofile=out", "example.invalid/First"]
+            with self.assertRaisesRegex(ValueError, "ambiguous coverage"):
+                run_go_tests.claim(command, Path(temporary), "main")
+
+    def test_concurrent_batches_keep_inflight_incomplete_and_finalize_both(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = root / "release"
+            script = Path(run_go_tests.__file__).resolve()
+            first_command = self.batch_command(root, "First", extra=("--release", str(release)))
+            second_command = self.batch_command(root, "Second", extra=("--release", str(release)))
+            prefix = [sys.executable, str(script), "--output-dir", str(root), "main"]
+            with subprocess.Popen(prefix + first_command, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE) as first:
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (root / "main.jsonl").exists() or not (root / "main.jsonl").stat().st_size:
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    second = subprocess.run(prefix + second_command, capture_output=True, timeout=5)
+                    self.assertEqual(second.returncode, 0, second.stderr)
+                    report = json.loads((root / "main-runs.json").read_text())
+                    self.assertFalse(report["complete"])
+                    self.assertFalse(report["success"])
+                    self.assertIsNone(first.poll())
+                finally:
+                    release.touch()
+                    stdout, stderr = first.communicate(timeout=5)
+                self.assertEqual(first.returncode, 0, stdout + stderr)
+            report = json.loads((root / "main-runs.json").read_text())
+            self.assertTrue(report["complete"])
+            self.assertTrue(report["success"])
+            self.assertEqual(len(report["runs"]), 2)
+            self.assertEqual(len((root / "main.jsonl").read_text().splitlines()), 2)
+
+    def test_unstarted_command_keeps_provenance_without_completed_union(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = [str(root / "missing-program")]
+            with self.assertRaises(OSError):
+                run_go_tests.run(command, root, "main")
+            report = json.loads((root / "main-runs.json").read_text())
+            self.assertFalse(report["complete"])
+            self.assertFalse(report["success"])
+            record = json.loads(next((root / "main-runs").glob("*/run.json")).read_text())
+            self.assertEqual(record["command"], command)
+            self.assertEqual(record["state"], "incomplete")
+            self.assertFalse(record["spawned"])
+            self.assertIn("spawn_error", record)
+            self.assertIsNone(record["exit"])
+
     def invoke(self, lines, status=0):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -70,6 +387,61 @@ class GoTestReportTests(unittest.TestCase):
         _, status, output, _ = self.invoke(["compiler diagnostic", "[1, 2]"])
         self.assertEqual(status, 0)
         self.assertTrue(output.startswith("compiler diagnostic\n[1, 2]\n"))
+
+    def test_cli_preserves_unicode_and_child_status_with_cp1252_stdout(self):
+        package, name = "example.com/\u4e2d\u6587\u2215", "TestUnicode/\u00b7\U0001f642"
+        diagnostic = "compiler diagnostic: \u4e2d\u6587 \u2215 \U0001f642\n"
+        script = Path(run_go_tests.__file__).resolve()
+        for status in (0, 23):
+            for timings_only in (False, True):
+                with self.subTest(status=status, timings_only=timings_only), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    terminal = {"Package": package, "Test": name, "Elapsed": 1.25,
+                                "Action": "fail" if status else "pass"}
+                    lines = [] if timings_only else [
+                        json.dumps({"Action": "output", "Output": diagnostic}, ensure_ascii=False),
+                        diagnostic.rstrip("\n"), json.dumps([diagnostic], ensure_ascii=False)]
+                    lines.append(json.dumps(terminal, ensure_ascii=False))
+                    payload = ("\n".join(lines) + "\n").encode("utf-8")
+                    source = root / "events.jsonl"
+                    source.write_bytes(payload)
+                    summary = root / "summary.md"
+                    child = ("import pathlib,sys; "
+                             "sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes()); "
+                             "sys.exit(int(sys.argv[2]))")
+                    result = subprocess.run(
+                        [sys.executable, str(script), "--output-dir", str(root), "build",
+                         sys.executable, "-c", child, str(source), str(status)],
+                        capture_output=True, timeout=15,
+                        env={**os.environ, "PYTHONIOENCODING": "cp1252:strict", "PYTHONUTF8": "0",
+                             "GITHUB_STEP_SUMMARY": str(summary)})
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    rendered = result.stdout.decode("utf-8")
+                    if not timings_only:
+                        self.assertTrue(rendered.startswith(diagnostic + diagnostic))
+                        self.assertIn(json.dumps([diagnostic], ensure_ascii=False), rendered)
+                    self.assertEqual((root / "build.jsonl").read_bytes(), payload)
+                    self.assertEqual(json.loads((root / "build-times.json").read_text(encoding="utf-8")),
+                                     [terminal])
+                    timings = (root / "build-times.txt").read_text(encoding="utf-8")
+                    self.assertIn(timings, rendered)
+                    self.assertIn(f"1.25\t{terminal['Action']}\t{package}\t{name}", timings)
+                    report = summary.read_text(encoding="utf-8")
+                    self.assertIn(f"exit {status}", report)
+                    self.assertIn(package, report)
+                    self.assertIn(name, report)
+
+    def test_cli_preserves_unicode_command_diagnostics_with_cp1252_stderr(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostic = "\u4e2d\u6587\u2215\U0001f642"
+            result = subprocess.run(
+                [sys.executable, str(Path(run_go_tests.__file__).resolve()),
+                 "--output-dir", temporary, "build", sys.executable, "-c", "pass", diagnostic],
+                capture_output=True, timeout=15,
+                env={**os.environ, "PYTHONIOENCODING": "cp1252:strict", "PYTHONUTF8": "0"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(diagnostic, result.stderr.decode("utf-8"))
 
     def test_native_log_pipe_preserves_large_output_stderr_and_exit_status(self):
         repo = Path(__file__).resolve().parents[2]
@@ -139,6 +511,58 @@ class GoTestReportTests(unittest.TestCase):
                                              "GITHUB_STEP_SUMMARY": str(root / "summary")})
                 self.assertEqual(result.returncode, 1 if extra else 0, result.stderr)
                 self.assertEqual("windows_runtime_corruption=true" in output.read_text(), not extra)
+
+    def test_windows_multibatch_quarantine_preserves_ordinary_xargs_failure(self):
+        repo = Path(__file__).resolve().parents[2]
+        packages = ["github.com/xgo-dev/llgo/test/runtime", "github.com/xgo-dev/llgo/other"]
+        for failure in ("quarantined", "ordinary"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                go = root / "go"
+                go.write_text(f"#!{sys.executable}\nprint('github.com/xgo-dev/llgo')\n")
+                go.chmod(0o755)
+                child = root / "events.py"
+                child.write_text('''import json,os,pathlib,sys
+package=sys.argv[-1]
+failed=package.endswith('/test/runtime')
+profile=next(a.split('=',1)[1] for a in sys.argv if a.startswith('-coverprofile='))
+pathlib.Path(profile).write_text('mode: set\\nf.go:1.1,2.1 1 1\\n')
+if failed and os.environ['BATCH_FAILURE']=='quarantined':
+    diagnostic=('fatal error: receive on synctest channel from outside bubble\\n'
+                'testing.(*T).Run\\nFAIL '+package+' 0.1s\\n')
+    print(json.dumps(dict(Package=package,Action='output',Output=diagnostic)))
+else:
+    print(json.dumps(dict(Package=package,Test='TestCase',Action='run')))
+    print(json.dumps(dict(Package=package,Test='TestCase',Action='fail' if failed else 'pass',Elapsed=1)))
+sys.exit(1 if failed else 0)
+''')
+                env = {**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                       "BATCH_FAILURE": failure, "GITHUB_OUTPUT": str(root / "outputs")}
+                prefix = ["bash", str(repo / "dev/go_test_windows.sh"), sys.executable,
+                          str(repo / ".github/scripts/run_go_tests.py"), "--output-dir",
+                          str(root / "sequential"), "main", sys.executable, str(child),
+                          "-coverprofile=" + str(root / "coverage.txt"), "-covermode=set"]
+                original = b"previous coverage must not be replaced\n"
+                (root / "coverage.txt").write_bytes(original)
+                results = [subprocess.run(prefix + [package], cwd=root, env=env,
+                                          capture_output=True, timeout=15) for package in packages]
+                self.assertEqual([result.returncode for result in results],
+                                 [0 if failure == "quarantined" else 1, 0])
+                self.assertNotIn(b"fatal error:", results[1].stdout + results[1].stderr)
+                report = json.loads((root / "sequential/main-runs.json").read_text())
+                self.assertFalse(report["success"])
+                self.assertEqual(report["exit"], 1)
+                self.assertEqual([record["exit"] for record in report["runs"]], [1, 0])
+                self.assertEqual((root / "coverage.txt").read_bytes(), original)
+                self.assertFalse((root / "sequential/main-coverage.txt").exists())
+                prefix[5] = str(root / "xargs")
+                result = subprocess.run(["xargs", "-n1", *prefix], cwd=root, env=env,
+                                        input=("\n".join(packages) + "\n").encode(),
+                                        capture_output=True, timeout=30)
+                if failure == "quarantined":
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ package debugabi
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -82,6 +83,28 @@ func mutateRecord(raw []byte, offset int, value byte) []byte {
 	copy := bytes.Clone(raw)
 	copy[offset] = value
 	return copy
+}
+
+func TestFormatterTypePatternsUsePOSIX(t *testing.T) {
+	schema, err := ParseSchemaV1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version, raw := range schema.RuntimeLayouts {
+		var categories map[string]struct {
+			Pattern string `json:"type_pattern"`
+		}
+		if err := json.Unmarshal(raw, &categories); err != nil {
+			t.Fatal(err)
+		}
+		for category, spec := range categories {
+			if spec.Pattern != "" {
+				if _, err := regexp.CompilePOSIX(spec.Pattern); err != nil {
+					t.Errorf("runtime layout %s %s formatter regex is not POSIX: %v", version, category, err)
+				}
+			}
+		}
+	}
 }
 
 func TestSchemaV1Contract(t *testing.T) {

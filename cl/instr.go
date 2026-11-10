@@ -660,7 +660,9 @@ var llgoInstrs = map[string]int{
 	"stringData":        llgoStringData,
 	"funcAddr":          llgoFuncAddr,
 	"funcPCABI0":        llgoFuncPCABI0,
+	"keepAlive":         llgoKeepAlive,
 	"skip":              llgoSkip,
+	"noescape":          llgoNoEscape,
 	"syscall":           llgoSyscall,
 	"boolToUint8":       llgoBoolToUint8,
 	"interfaceKindUsed": llgoInterfaceKindUsed,
@@ -719,6 +721,8 @@ var llgoInstrs = map[string]int{
 func (p *context) funcOf(fn *ssa.Function) (aFn llssa.Function, pyFn llssa.PyObjRef, ftype int) {
 	pkgTypes, name, ftype := p.funcName(fn)
 	switch ftype {
+	case llvmIntrinsic:
+		p.resolveLLVMIntrinsic(fn, name)
 	case pyFunc:
 		if kind, mod := pkgKindByScope(pkgTypes.Scope()); kind == PkgPyModule {
 			pkg := p.pkg
@@ -743,8 +747,12 @@ func (p *context) funcOf(fn *ssa.Function) (aFn llssa.Function, pyFn llssa.PyObj
 			// Source env-bearing bodies are created by compileFuncDecl before
 			// lowering. Imported declarations cannot reconstruct //llgo:env.
 			aFn = pkg.NewFuncEx(name, sig, llssa.CallConv(ftype), false, p.needsLinkOnce(fn))
-			if disableInline {
+			noInlineDirective := hasNoInlineDirective(fn)
+			if disableInline || noInlineDirective {
 				aFn.Inline(llssa.NoInline)
+			}
+			if noInlineDirective {
+				aFn.DisableTailCalls()
 			}
 		}
 		if ftype == goFunc {
@@ -1278,10 +1286,13 @@ func (a *runtimeCallerAnalysis) callTargets(fn *ssa.Function, call *ssa.CallComm
 // Precompute before workers start; recover facts also synchronize lazy queries
 // for nested and synthetic functions that are not package members.
 type CallerTracking struct {
-	base        map[*ssa.Package]map[*ssa.Function]bool
-	extended    map[*ssa.Package]callerTrackingFuncSets
-	recover     *recoverFacts
-	precomputed bool
+	base                 map[*ssa.Package]map[*ssa.Function]bool
+	extended             map[*ssa.Package]callerTrackingFuncSets
+	recover              *recoverFacts
+	inlines              *inlineFacts
+	precomputed          bool
+	imported             map[*ssa.Package]bool // validated archive-owned frontend facts
+	exportedRuntimeTypes []types.Type
 }
 
 // Precompute resolves caller-tracking and recover data before package backends
@@ -1318,7 +1329,7 @@ func (c *CallerTracking) Precompute(pkgs []*ssa.Package) {
 	// serial: interface target resolution may still consult MethodValue, and
 	// scheduling those calls concurrently makes later module layout depend on
 	// worker completion order.
-	runtimeTypes := callerTrackingRuntimeTypes(pkgs)
+	runtimeTypes := callerTrackingRuntimeTypes(pkgs, c.exportedRuntimeTypes...)
 	methods := callerTrackingMethods(pkgs, runtimeTypes)
 	analyses := make([]callerTrackingPackageAnalysis, len(pkgs))
 	base := make([]map[*ssa.Function]bool, len(pkgs))
@@ -1329,10 +1340,18 @@ func (c *CallerTracking) Precompute(pkgs []*ssa.Package) {
 	}
 
 	for i := range pkgs {
+		if c.imported[pkgs[i]] {
+			base[i] = c.base[pkgs[i]]
+			extended[i] = c.extended[pkgs[i]]
+			continue
+		}
 		analyses[i] = analyzeCallerTrackingPackage(pkgs[i], methods[pkgs[i]])
 		base[i] = analyses[i].base
 	}
 	for i := range pkgs {
+		if c.imported[pkgs[i]] {
+			continue
+		}
 		extended[i] = computeRuntimeCallerFuncSets(c.recoverAnalysis(), pkgs[i], analyses[i].funcs, base[i], analyses[i].trackable, func(dep *ssa.Package) map[*ssa.Function]bool {
 			j, ok := index[dep]
 			if !ok {
@@ -1389,7 +1408,7 @@ func callerTrackingMethods(pkgs []*ssa.Package, runtimeTypes map[*ssa.Package][]
 // computes derived types under Program and method-set locks; calling it from
 // every package worker would serialize the supposedly parallel phase and would
 // repeatedly scan the same whole-program data.
-func callerTrackingRuntimeTypes(pkgs []*ssa.Package) map[*ssa.Package][]types.Type {
+func callerTrackingRuntimeTypes(pkgs []*ssa.Package, extra ...types.Type) map[*ssa.Package][]types.Type {
 	byProgram := make(map[*ssa.Program]map[*types.Package][]types.Type)
 	result := make(map[*ssa.Package][]types.Type, len(pkgs))
 	for _, pkg := range pkgs {
@@ -1400,6 +1419,11 @@ func callerTrackingRuntimeTypes(pkgs []*ssa.Package) map[*ssa.Package][]types.Ty
 		if !ok {
 			byPackage = make(map[*types.Package][]types.Type)
 			for _, typ := range pkg.Prog.RuntimeTypes() {
+				if owner := typeOwnerPackage(typ); owner != nil {
+					byPackage[owner] = append(byPackage[owner], typ)
+				}
+			}
+			for _, typ := range extra {
 				if owner := typeOwnerPackage(typ); owner != nil {
 					byPackage[owner] = append(byPackage[owner], typ)
 				}
@@ -1429,6 +1453,7 @@ func NewCallerTracking() *CallerTracking {
 		base:     make(map[*ssa.Package]map[*ssa.Function]bool),
 		extended: make(map[*ssa.Package]callerTrackingFuncSets),
 		recover:  newRecoverFacts(),
+		inlines:  newInlineFacts(),
 	}
 }
 
@@ -2637,7 +2662,12 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		if act == llssa.Call && isRecoverTransparentWrapper(p.goFn) {
 			needsRecoverToken = true
 		}
-		if needsRecoverToken {
+		if act == llssa.Call {
+			// Value-receiver adapters copy this borrowed word into the
+			// callee's parameter before it can be retained. A by-reference
+			// receiver ABI would require a separate lifetime proof here.
+			fn = b.ImethodBorrowed(o, mthd, needsRecoverToken)
+		} else if needsRecoverToken {
 			fn = b.ImethodWithRecoverToken(o, mthd)
 		} else {
 			fn = b.Imethod(o, mthd)
@@ -2660,6 +2690,18 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 	}
 	args := call.Args
 	dbgGoSSAln(">>> Do", act, cv, args)
+	if closure, ok := cv.(*ssa.MakeClosure); ok && act == llssa.Call && ds == nil {
+		if source, ok := closure.Fn.(*ssa.Function); ok {
+			entry, _, ftype := p.compileFunction(source)
+			if ftype == goFunc {
+				fn := p.compileValue(b, closure)
+				args := p.compileValues(b, args, kind)
+				return p.emitDo(b, act, ds, mayRecover, fn, func(b llssa.Builder, fn llssa.Expr, args ...llssa.Expr) llssa.Expr {
+					return b.CallKnownClosure(fn, entry, args...)
+				}, args...)
+			}
+		}
+	}
 	switch cv := cv.(type) {
 	case *ssa.Builtin:
 		fn := cv.Name()
@@ -2687,6 +2729,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			if folded, ok := p.foldConstantMakeValue(b, cv, call); ok {
 				return folded
 			}
+			p.importInlineBody(cv)
 		}
 		if _, ok := p.simdOperation(cv); ok && act != llssa.Call {
 			fn := p.compileValue(b, cv)
@@ -2696,6 +2739,8 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		aFn, pyFn, ftype := p.compileFunction(cv)
 		// TODO(xsw): check ca != llssa.Call
 		switch ftype {
+		case llvmIntrinsic:
+			ret = p.callLLVMIntrinsic(b, act, cv, call)
 		case cFunc, stdcallFunc:
 			p.inCFunc = true
 			args := p.compileValues(b, args, kind)
@@ -2817,10 +2862,26 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			ret = p.funcAddr(b, args)
 		case llgoFuncPCABI0:
 			ret = p.funcPCABI0(b, args)
+		case llgoKeepAlive:
+			if len(args) != 1 || call.Signature().Results().Len() != 0 {
+				panic("keepAlive(any): invalid arguments")
+			}
+			values := p.compileValues(b, args, kind)
+			ret = p.emitDo(b, act, ds, false, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
+				return b.KeepAlive(args[0])
+			}, values...)
 		case llgoSkip:
 			if results := call.Signature().Results(); results.Len() != 0 {
 				ret = p.zeroResult(results)
 			}
+		case llgoNoEscape:
+			if !noEscapeSignature(call.Signature()) {
+				panic("noescape(p unsafe.Pointer) unsafe.Pointer: invalid signature")
+			}
+			args := p.compileValues(b, args, kind)
+			ret = b.Do(act, llssa.Nil, func(_ llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
+				return args[0]
+			}, args...)
 		case llgoSyscall:
 			ret = p.syscallIntrinsic(b, args, call.Signature().Results())
 		case llgoBoolToUint8:

@@ -202,12 +202,13 @@ func TestMain(m *testing.M) {
 
 func TestConfigCloneDoesNotAliasInput(t *testing.T) {
 	input := &Config{
-		RunArgs:      []string{"run"},
-		Exec:         []string{"wrapper", "argument"},
-		GoBuildFlags: []string{"-tags=custom"},
-		Overlay:      map[string][]byte{"input.go": []byte("package input")},
-		Coverage:     &CoverageConfig{Mode: "count"},
-		coverage:     &coverageBuild{},
+		RunArgs:          []string{"run"},
+		Exec:             []string{"wrapper", "argument"},
+		GoBuildFlags:     []string{"-tags=custom"},
+		LoaderBuildFlags: []string{"-tags=custom", "-gcflags="},
+		Overlay:          map[string][]byte{"input.go": []byte("package input")},
+		Coverage:         &CoverageConfig{Mode: "count"},
+		coverage:         &coverageBuild{},
 		GlobalRewrites: map[string]Rewrites{
 			"example.com/p": {"value": "input"},
 			"nil":           nil,
@@ -217,6 +218,7 @@ func TestConfigCloneDoesNotAliasInput(t *testing.T) {
 	cloned.RunArgs[0] = "changed"
 	cloned.Exec[0] = "changed"
 	cloned.GoBuildFlags[0] = "-tags=changed"
+	cloned.LoaderBuildFlags[0] = "-tags=changed"
 	cloned.Overlay["input.go"][0] = 'P'
 	cloned.GlobalRewrites["example.com/p"]["value"] = "changed"
 	cloned.GlobalRewrites["new"] = Rewrites{"value": "new"}
@@ -230,6 +232,9 @@ func TestConfigCloneDoesNotAliasInput(t *testing.T) {
 	}
 	if got := input.GoBuildFlags[0]; got != "-tags=custom" {
 		t.Fatalf("input GoBuildFlags changed to %q", got)
+	}
+	if got := input.LoaderBuildFlags[0]; got != "-tags=custom" {
+		t.Fatalf("input LoaderBuildFlags changed to %q", got)
 	}
 	if got := string(input.Overlay["input.go"]); got != "package input" {
 		t.Fatalf("input overlay changed to %q", got)
@@ -1366,6 +1371,7 @@ func TestWindowsRuntimeSyscallVersionSelection(t *testing.T) {
 	}{
 		{name: "go1.25", lastMinor: 25, wantPreGo126: true},
 		{name: "go1.26", lastMinor: 26, wantPreGo126: false},
+		{name: "go1.27", lastMinor: 27, wantPreGo126: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := gobuild.Default
@@ -1377,6 +1383,8 @@ func TestWindowsRuntimeSyscallVersionSelection(t *testing.T) {
 			for name, want := range map[string]bool{
 				"syscall_windows_llgo.go":           true,
 				"syscall_windows_pre_go126_llgo.go": test.wantPreGo126,
+				"syscall_windows_args_pre_go127.go": test.lastMinor < 27,
+				"syscall_windows_args_go127.go":     test.lastMinor >= 27,
 			} {
 				got, err := ctx.MatchFile(runtimeDir, name)
 				if err != nil {
@@ -2821,7 +2829,7 @@ func TestCSharedLinkArgs(t *testing.T) {
 		objectType crosscompile.ObjectFormat
 		want       string
 	}{
-		{name: "ELF", objectType: crosscompile.ObjectFormatELF, want: "-shared -fPIC"},
+		{name: "ELF", objectType: crosscompile.ObjectFormatELF, want: "-shared -fPIC -Wl,-z,now"},
 		{name: "Mach-O", objectType: crosscompile.ObjectFormatMachO, want: "-shared -fPIC"},
 		{name: "COFF", objectType: crosscompile.ObjectFormatCOFF, want: "-shared"},
 	} {

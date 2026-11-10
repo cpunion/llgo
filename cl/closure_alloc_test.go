@@ -1,6 +1,7 @@
 package cl
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -28,6 +29,10 @@ func argument(x int) { unknown(func() int { return x }) }
 		{GOOS: "windows", GOARCH: "386"},
 	} {
 		t.Run(target.GOOS+"/"+target.GOARCH, func(t *testing.T) {
+			word := 8
+			if target.GOARCH == "386" {
+				word = 4
+			}
 			for _, mode := range []ssa.BuilderMode{0, ssa.GlobalDebug} {
 				ir := compileWithRewritesModeTarget(t, src, nil, mode, &target)
 				for _, name := range []string{"pointer", "mutate", "loop", "zero"} {
@@ -35,20 +40,52 @@ func argument(x int) { unknown(func() int { return x }) }
 						t.Errorf("%s retains heap capture storage:\n%s", name, body)
 					}
 				}
-				for _, name := range []string{"escape", "address", "deferred", "async", "argument"} {
-					body := llvmFunction(t, ir, "capturealloc."+name)
-					// Captured variables use zeroed storage; fully initialized
-					// environments use AllocU. Check the two lifetimes separately.
-					if !strings.Contains(body, "runtime.AllocZ") {
-						t.Errorf("%s lost heap capture storage:\n%s", name, body)
-					}
-					wantHeapEnv := name != "address"
-					if got := strings.Contains(body, "runtime.AllocU"); got != wantHeapEnv {
-						t.Errorf("%s heap environment = %t, want %t:\n%s", name, got, wantHeapEnv, body)
+				// A copied scalar shares one scanned allocation with the
+				// descriptor's code/environment header. Address-observed cells
+				// remain atomic; defer keeps two recover-visible scalar cells.
+				for _, capture := range []struct {
+					name                   string
+					atomic, scanned, roots int
+				}{
+					{"escape", 0, 1, 0},
+					{"address", 1, 0, 0},
+					{"deferred", 2, 0, 0},
+					{"async", 0, 1, 1},
+					{"argument", 0, 1, 0},
+				} {
+					body := llvmFunction(t, ir, "capturealloc."+capture.name)
+					checkClosureCaptureAllocations(t, body, word, capture.atomic, capture.scanned, capture.roots)
+					if capture.scanned != 0 {
+						layout := fmt.Sprintf("{ { ptr, ptr }, { i%d } }", 8*word)
+						code := "store ptr @\"capturealloc." + capture.name + "$1\""
+						if !strings.Contains(body, layout) || !strings.Contains(body, code) {
+							t.Errorf("%s lost its combined descriptor and scalar capture:\n%s", capture.name, body)
+						}
 					}
 				}
 			}
 		})
+	}
+}
+
+func checkClosureCaptureAllocations(t *testing.T, body string, word, atomic, scanned, roots int) {
+	t.Helper()
+	for _, allocation := range []struct {
+		name         string
+		count, words int
+	}{
+		{"AllocAtomicU", atomic, 1},
+		{"AllocU", scanned, 3},
+		{"AllocRoot", roots, 1},
+	} {
+		call := "runtime." + allocation.name + "\"("
+		exact := fmt.Sprintf("%si%d %d)", call, 8*word, allocation.words*word)
+		if strings.Count(body, call) != allocation.count || strings.Count(body, exact) != allocation.count {
+			t.Errorf("want %d %s allocations of %d bytes:\n%s", allocation.count, allocation.name, allocation.words*word, body)
+		}
+	}
+	if strings.Count(body, "runtime.Alloc") != atomic+scanned+roots {
+		t.Errorf("unexpected capture allocator:\n%s", body)
 	}
 }
 
@@ -78,108 +115,5 @@ func _Cfunc_noargs()(r1 uint64) {
 		if strings.Contains(body, "runtime.Alloc") {
 			t.Fatalf("%s retains unused argument/result frame:\n%s", name, body)
 		}
-	}
-}
-
-func TestImmediateClosureRejectsAdditionalUses(t *testing.T) {
-	for _, scenario := range []string{"no calls", "also passed as argument"} {
-		t.Run(scenario, func(t *testing.T) {
-			pkg, _, _ := buildGoSSAPkg(t, `package captureuses
-func f(x int) int { return func(y int) int { return x+y }(1) }
-`)
-			var closure *ssa.MakeClosure
-			var call *ssa.Call
-			for _, block := range pkg.Func("f").Blocks {
-				for _, instr := range block.Instrs {
-					switch instr := instr.(type) {
-					case *ssa.MakeClosure:
-						closure = instr
-					case *ssa.Call:
-						call = instr
-					}
-				}
-			}
-			if closure == nil || call == nil {
-				t.Fatal("missing closure graph")
-			}
-			ctx := &context{prog: newLLSSAProg(t)}
-			if !ctx.canStackAllocateClosure(closure) {
-				t.Fatal("control closure was not eligible")
-			}
-			if scenario == "no calls" {
-				*closure.Referrers() = nil
-			} else {
-				// A use-def rewrite must not hide an additional argument use
-				// behind the same instruction's synchronous callee use.
-				copy := *call
-				copy.Call.Args = append([]ssa.Value(nil), call.Call.Args...)
-				copy.Call.Args = append(copy.Call.Args, closure)
-				*closure.Referrers() = []ssa.Instruction{&copy}
-			}
-			if ctx.canStackAllocateClosure(closure) {
-				t.Fatal("additional use was accepted")
-			}
-		})
-	}
-}
-
-func TestImmediateClosureCaptureBoundaries(t *testing.T) {
-	if (&context{}).canStackAllocateCapture(&ssa.Alloc{Heap: true}) {
-		t.Fatal("untyped capture was accepted")
-	}
-	for _, scenario := range []string{"zero-sized", "unknown callee", "no users"} {
-		t.Run(scenario, func(t *testing.T) {
-			captureType := "int"
-			if scenario == "zero-sized" {
-				captureType = "struct{}"
-			}
-			pkg, _, _ := buildGoSSAPkg(t, "package captureboundaries\nfunc f(x "+captureType+") "+captureType+" { return func() "+captureType+" { return x }() }")
-			var alloc *ssa.Alloc
-			var closure *ssa.MakeClosure
-			var call *ssa.Call
-			for _, block := range pkg.Func("f").Blocks {
-				for _, instr := range block.Instrs {
-					switch instr := instr.(type) {
-					case *ssa.Alloc:
-						if instr.Comment == "x" {
-							alloc = instr
-						}
-					case *ssa.MakeClosure:
-						closure = instr
-					case *ssa.Call:
-						call = instr
-					}
-				}
-			}
-			if alloc == nil || closure == nil || call == nil || !alloc.Heap {
-				t.Fatal("missing heap capture graph")
-			}
-			prog := newLLSSAProg(t)
-			t.Cleanup(prog.Dispose)
-			ctx := &context{prog: prog}
-			if scenario == "zero-sized" {
-				if ctx.canStackAllocateCapture(alloc) {
-					t.Fatal("zero-sized capture lost the shared sentinel fallback")
-				}
-				return
-			}
-			if !ctx.canStackAllocateCapture(alloc) {
-				t.Fatal("control capture was not eligible")
-			}
-			copy := *alloc
-			if scenario == "no users" {
-				*copy.Referrers() = nil
-			} else {
-				closureCopy, callCopy := *closure, *call
-				closureCopy.Fn = ssa.NewConst(nil, closure.Fn.Type())
-				closureCopy.Bindings = []ssa.Value{&copy}
-				callCopy.Call.Value = &closureCopy
-				*closureCopy.Referrers() = []ssa.Instruction{&callCopy}
-				*copy.Referrers() = []ssa.Instruction{&closureCopy}
-			}
-			if ctx.canStackAllocateCapture(&copy) {
-				t.Fatal("capture without a known borrowed lifetime was accepted")
-			}
-		})
 	}
 }

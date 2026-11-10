@@ -47,7 +47,8 @@ type N struct {
 
 // unsafe.Slice validates pointer/length overflow, then constructs a slice whose
 // data and length are the values consumed by ordinary bounds checks.
-// CHECK: %[[ARRAY:[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 16)
+// CHECK: %[[ARRAY:[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocAtomicU"(i64 16)
+// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr %[[ARRAY]], i8 0, i64 16, i1 false)
 // CHECK: call void @llvm.memset.p0.i64(ptr %[[ARRAY_TMP]], i8 0, i64 16, i1 false)
 // CHECK: %[[ELEM0:[0-9]+]] = getelementptr inbounds i64, ptr %[[ARRAY_TMP]], i64 0
 // CHECK: %[[ELEM1:[0-9]+]] = getelementptr inbounds i64, ptr %[[ARRAY_TMP]], i64 1
@@ -107,8 +108,7 @@ func main() {
 	if unsafe.Sizeof(*(*M)(nil)) != unsafe.Sizeof([2]int{}) {
 		panic("error")
 	}
-	// TODO(lijie): inconsistent with golang
-	if unsafe.Sizeof(*(*N)(nil)) != unsafe.Sizeof([3]int{}) {
+	if unsafe.Sizeof(*(*N)(nil)) != unsafe.Sizeof([2]int{}) {
 		panic("error")
 	}
 
@@ -131,8 +131,7 @@ func main() {
 	if unsafe.Offsetof(N{}.fn) != 0 {
 		panic("error")
 	}
-	// TODO(lijie): inconsistent with golang
-	if unsafe.Offsetof(N{}.v) != unsafe.Sizeof([2]int{}) {
+	if unsafe.Offsetof(N{}.v) != unsafe.Sizeof(int(0)) {
 		panic("error")
 	}
 

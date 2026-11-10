@@ -5,21 +5,21 @@ import (
 	"unsafe"
 )
 
-// A declared function is represented as a closure pair with a nil environment,
-// and interface assertions use the closure type descriptor.
-// CHECK-LABEL: define void @main.check({ ptr, ptr } %0){{.*}} {
-// CHECK: %[[ARG_BOX:[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 16)
-// CHECK-NEXT: store { ptr, ptr } %0, ptr %[[ARG_BOX]]
-// CHECK: %[[ARG_EFACE:[0-9]+]] = insertvalue %"{{.*}}runtime.eface" { ptr @[[CLOSURE_TYPE:"_llgo_closure\$[^"]+"]], ptr undef }, ptr %[[ARG_BOX]], 1
-// CHECK: call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @[[CLOSURE_TYPE]], ptr @[[CLOSURE_TYPE]])
+// A declared function and its parameter retain the same canonical descriptor.
+// Interface assertions must retain the Go closure role independently of storage.
+// CHECK: [[DECL_DESCRIPTOR:@"_llgo_funcval\$[0-9a-f]+"]] = linkonce_odr constant { ptr, ptr } { ptr @main.demo, ptr null }
+// CHECK-LABEL: define void @main.check(ptr %0){{.*}} {
+// CHECK: %[[ARG_EFACE:[0-9]+]] = insertvalue %"{{.*}}runtime.eface" { ptr @[[CLOSURE_TYPE:"_llgo_closure\$[^"]+"]], ptr undef }, ptr %0, 1
+// CHECK: %[[DECL_MATCH:[0-9]+]] = call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @[[CLOSURE_TYPE]], ptr @[[CLOSURE_TYPE]])
 // CHECK: %[[ARG_TYPE:[0-9]+]] = extractvalue %"{{.*}}runtime.eface" %[[ARG_EFACE]], 0
-// CHECK: %[[ARG_MATCH:[0-9]+]] = call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @[[CLOSURE_TYPE]], ptr %[[ARG_TYPE]])
-// CHECK: %[[DECL_PTR:[0-9]+]] = call ptr @main.closurePtr(%"{{.*}}runtime.eface" { ptr @[[CLOSURE_TYPE]], ptr @"_llgo_ifacebox${{.*}}" })
+// CHECK-NEXT: %[[ARG_MATCH:[0-9]+]] = call i1 @"{{.*}}/runtime/internal/runtime.MatchesClosure"(ptr @[[CLOSURE_TYPE]], ptr %[[ARG_TYPE]])
+// CHECK: %[[DECL_PTR:[0-9]+]] = call ptr @main.closurePtr(%"{{.*}}runtime.eface" { ptr @[[CLOSURE_TYPE]], ptr [[DECL_DESCRIPTOR]] })
 // CHECK-NEXT: %[[ARG_PTR:[0-9]+]] = call ptr @main.closurePtr(%"{{.*}}runtime.eface" %[[ARG_EFACE]])
 // CHECK-NEXT: %[[SAME_PTR:[0-9]+]] = icmp eq ptr %[[DECL_PTR]], %[[ARG_PTR]]
 // CHECK-NEXT: call void @"{{.*}}/runtime/internal/runtime.PrintBool"(i1 %[[SAME_PTR]])
 // CHECK-LABEL: define ptr @main.closurePtr(%"{{.*}}runtime.eface" %0){{.*}} {
-// CHECK: %[[EFACE_BOX:[0-9]+]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 16)
+// CHECK: %[[EFACE_BOX:[0-9]+]] = alloca %"{{.*}}eface", align 8
+// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr %[[EFACE_BOX]], i8 0, i64 16, i1 false)
 // CHECK-NEXT: store %"{{.*}}runtime.eface" %0, ptr %[[EFACE_BOX]]
 // CHECK: %[[CLOSURE_SLOT:[0-9]+]] = getelementptr inbounds nuw %main.rtype, ptr %[[EFACE_BOX]], i32 0, i32 1
 // CHECK-NEXT: %[[CLOSURE:[0-9]+]] = load ptr, ptr %[[CLOSURE_SLOT]]
@@ -30,7 +30,7 @@ import (
 // CHECK: call void @"{{.*}}/runtime/internal/runtime.PrintString"(%"{{.*}}runtime.String" { ptr @{{[0-9]+}}, i64 4 })
 // CHECK: ret void
 // CHECK-LABEL: define void @main.main(){{.*}} {
-// CHECK: call void @main.check({ ptr, ptr } { ptr @main.demo, ptr null })
+// CHECK: call void @main.check(ptr [[DECL_DESCRIPTOR]])
 
 func check(fn func()) {
 	var a any = demo

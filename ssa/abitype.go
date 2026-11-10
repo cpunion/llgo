@@ -77,7 +77,7 @@ func directIfaceType(t types.Type) bool {
 	case *types.Array:
 		return t.Len() == 1 && directIfaceType(t.Elem())
 	case *types.Struct:
-		return t.NumFields() == 1 && directIfaceType(t.Field(0).Type())
+		return IsClosure(t) || t.NumFields() == 1 && directIfaceType(t.Field(0).Type())
 	}
 	return false
 }
@@ -136,7 +136,14 @@ func (b Builder) abiCommonFields(t types.Type, name string, hasUncommon bool, gl
 			typ := prog.Type(equal.raw.Type, GoDecl)
 			equal = checkExpr(equal, typ.raw.Type, b)
 		} else {
-			equal = b.Pkg.rtEnvFunc(RuntimeSymbol(name, "structequal", "arrayequal"))
+			// LLGo's native equality bridge consumes this actual Type* through
+			// its own environment ABI, then passes Type.Size_ to memequal. It is
+			// not the gc funcval {entry, captured-size} or an assembly R26/DX ABI.
+			goarch := prog.Target().GOARCH
+			if (goarch == "386" || goarch == "amd64" || goarch == "arm64") && ab.IsRegularMemory(t) {
+				name = "memequal_varlen"
+			}
+			equal = b.Pkg.rtEnvFunc(RuntimeSymbol(name, "structequal", "arrayequal", "memequal_varlen"))
 			b.Pkg.recordAbiTypeFakeUse(global, equal.impl)
 			env := b.abiType(t)
 			equal = b.aggregateValue(prog.Type(equalFunc, GoDecl), equal.impl, env.impl)
@@ -382,6 +389,25 @@ func (b Builder) abiInterfaceImethods(t *types.Interface, name string) llvm.Valu
 	})
 }
 
+// Function metadata keeps its source callable role through physical bridge
+// generation. Only Go funcvals have a supported MakeFunc entry on Wasm.
+func (b Builder) abiFunctionFields(sig *types.Signature, cc CallConv) []llvm.Value {
+	name, _ := b.Prog.abi.TypeName(sig)
+	fields := []llvm.Value{
+		b.abiTuples(sig.Params(), name+"$in"),
+		b.abiTuples(sig.Results(), name+"$out"),
+	}
+	if b.Prog.target.usesWasmReflectBridges() {
+		bridges := b.Pkg.wasmReflectBridge(sig, cc)
+		makeEntry := b.Prog.Nil(b.Prog.VoidPtr()).impl
+		if bridges.make != nil {
+			makeEntry = bridges.make.impl
+		}
+		fields = append(fields, bridges.call.impl, makeEntry)
+	}
+	return fields
+}
+
 func (b Builder) abiTuples(t *types.Tuple, name string) llvm.Value {
 	prog := b.Prog
 	n := t.Len()
@@ -453,9 +479,7 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 		hasher := b.abiMapHasher(t.Key(), global)
 		fields = []llvm.Value{
 			b.abiType(abi.PublicType(t.Key())).impl,
-			// Map operations use Elem for physical copies during bucket
-			// evacuation. Keep LLGo's two-word closure representation here;
-			// reflect converts it back to the public function type in Elem.
+			// Map copies use the function descriptor's one-word storage type.
 			b.abiType(t.Elem()).impl,
 			b.abiMapBucket(t, bucket).impl,
 			hasher.impl,
@@ -465,16 +489,11 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 			prog.IntVal(uint64(flags), prog.Uint32()).impl,
 		}
 	case *types.Signature:
-		name, _ := prog.abi.TypeName(t)
-		fields = []llvm.Value{
-			b.abiTuples(t.Params(), name+"$in"),
-			b.abiTuples(t.Results(), name+"$out"),
-		}
-		if prog.target.usesWasmReflectBridges() {
-			bridges := pkg.wasmReflectBridge(t)
-			fields = append(fields, bridges.call.impl, bridges.make.impl)
-		}
+		return b.abiFunctionFields(t, CDecl)
 	case *types.Struct:
+		if IsClosure(t) {
+			return b.abiFunctionFields(t.Field(0).Type().(*types.Signature), GoDecl)
+		}
 		name, _ = prog.abi.TypeName(t)
 		var pkgPath string
 		n := t.NumFields()
@@ -547,6 +566,9 @@ func (b Builder) structuralTypeChildren(t types.Type) []types.Type {
 		children = appendTupleTypeChildren(children, t.Results())
 		return children
 	case *types.Struct:
+		if IsClosure(t) {
+			return b.structuralTypeChildren(t.Field(0).Type())
+		}
 		children := make([]types.Type, 0, t.NumFields())
 		for i := 0; i < t.NumFields(); i++ {
 			children = append(children, abi.PublicType(t.Field(i).Type()))
@@ -694,10 +716,10 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		values = append(values, tfn)
 		fields[i] = prog.constStructValue(ft, values)
 		if prog.target.usesWasmReflectBridges() {
-			// Type.Method constructs a method-expression signature at runtime.
-			// Retain that descriptor with the method wrapper only when reflection
-			// can expose it.
-			expression := methodExprSignature(m.Type().(*types.Signature))
+			// Type.Method uses FuncOf to construct a Go callable at runtime.
+			// Retain that Go-role descriptor with the method wrapper, rather
+			// than the otherwise identical native code-pointer signature.
+			expression := funcType(prog, methodExprSignature(m.Type().(*types.Signature)))
 			b.abiType(expression)
 			if mb := b.Pkg.metaBuilder; mb != nil {
 				expressionName, _ := prog.abi.TypeName(expression)
@@ -756,10 +778,14 @@ func (b Builder) abiInterfaceMethods(mset *types.MethodSet) []*types.Selection {
 	return methods
 }
 
-// closure func type
+// Reflection describes the Go callable type. Explicit native C variadics keep
+// their native role; method code entries are retained separately in Ifn/Tfn.
 func funcType(prog Program, typ types.Type) types.Type {
-	ftyp := prog.Type(typ, GoDecl)
-	return ftyp.raw.Type.(*types.Struct).Field(0).Type()
+	value := prog.Type(typ, GoDecl).raw.Type.(*types.Struct)
+	if HasNameValist(typ.Underlying().(*types.Signature)) {
+		return value.Field(0).Type()
+	}
+	return value
 }
 
 func abiMethodName(obj types.Object) string {

@@ -39,7 +39,7 @@ func (p Program) needsWidePointerStorage(t Type) bool {
 		return false
 	}
 	switch t.kind {
-	case vkPtr, vkFuncPtr, vkMap, vkChan:
+	case vkPtr, vkFuncPtr, vkClosure, vkMap, vkChan:
 		return true
 	default:
 		return false
@@ -88,7 +88,7 @@ func (b Builder) logicalValue(v Expr) Expr {
 		return v
 	}
 	if v.impl.Type() != t.ll {
-		v.impl = castInt(b, v.impl, v.Type, t)
+		v.impl = b.fitLLVMValue(v.impl, v.Type, t.ll)
 	}
 	v.Type = t
 	return v
@@ -97,6 +97,29 @@ func (b Builder) logicalValue(v Expr) Expr {
 func (b Builder) fitLLVMValue(value llvm.Value, source Type, target llvm.Type) llvm.Value {
 	if value.Type() == target {
 		return value
+	}
+	logical := b.Prog.withoutNativeStorage(source)
+	if b.Prog.needsWidePointerStorage(logical) {
+		storage := b.Prog.storageType(logical)
+		if value.Type() == storage && target == logical.ll {
+			return b.fromStorageValue(logical, value)
+		}
+		if value.Type() == logical.ll && target == storage {
+			return b.toStorageValue(logical, value)
+		}
+	}
+	if logical.kind == vkArray && value.Type().TypeKind() == llvm.ArrayTypeKind &&
+		target.TypeKind() == llvm.ArrayTypeKind && value.Type().ArrayLength() == target.ArrayLength() {
+		// Arrays carry the storage role of each element. Convert before C ABI
+		// lowering allocates the physical by-value argument or result slot.
+		element := b.Prog.Index(logical)
+		result := llvm.Undef(target)
+		for i := 0; i < target.ArrayLength(); i++ {
+			part := b.impl.CreateExtractValue(value, i, "")
+			part = b.fitLLVMValue(part, element, target.ElementType())
+			result = b.impl.CreateInsertValue(result, part, i, "")
+		}
+		return result
 	}
 	if value.Type().TypeKind() == llvm.IntegerTypeKind && target.TypeKind() == llvm.IntegerTypeKind {
 		if value.Type().IntTypeWidth() > target.IntTypeWidth() {
@@ -147,7 +170,10 @@ func (p Program) childStorageType(parent Type, child types.Type) Type {
 	if !p.usesWideGoStorage() {
 		return t
 	}
-	if p.isNativeStorage(parent) || p.hasNativeTypeLayout(parent.raw.Type) || p.hasNativeTypeLayout(child) {
+	if hasHostLayout(parent.raw.Type) {
+		return t
+	}
+	if p.isNativeStorage(parent) || p.hasLegacyNativeTypeLayout(parent.raw.Type) || p.hasLegacyNativeTypeLayout(child) {
 		return p.withNativeStorage(t)
 	}
 	return t

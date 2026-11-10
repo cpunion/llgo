@@ -380,5 +380,65 @@ class CollectorSignalTests(unittest.TestCase):
             debugger.breakpoint_threads([thread])
 
 
+class FunctionDescriptorTests(unittest.TestCase):
+    def value(self, width, pointer, native=False, named=False, record=False):
+        invalid = Mock()
+        invalid.IsValid.return_value = False
+        descriptor = Mock()
+        descriptor.GetNonSyntheticValue.return_value = descriptor
+        fields = {}
+        for name, address in (("code", 0x1234), ("env", 0x8000)):
+            field = Mock()
+            field.GetValue.return_value = hex(address)
+            fields[name] = field
+        descriptor.GetChildMemberWithName.side_effect = lambda name: fields.get(name, invalid)
+        typ = Mock()
+        typ.GetName.return_value = ("func() *" if native else
+            "struct{code func(); env unsafe.Pointer} *" if record else "$llgo.funcval *")
+        typ.IsTypedefType.return_value = False
+        typ.IsPointerType.return_value = True
+        typ.GetByteSize.return_value = width
+        value = Mock()
+        value.GetNonSyntheticValue.return_value = value
+        value.GetValue.return_value = hex(pointer)
+        value.GetChildMemberWithName.return_value = invalid
+        value.Dereference.return_value = descriptor
+        if named:
+            alias = Mock()
+            alias.GetName.return_value = "main.Callback"
+            alias.IsTypedefType.return_value = True
+            alias.GetTypedefedType.return_value = typ
+            value.GetType.return_value = alias
+        else:
+            value.GetType.return_value = typ
+        return value
+
+    def test_descriptor_pointer_and_alias_have_one_word_storage(self):
+        for width in (4, 8):
+            for named in (False, True):
+                with self.subTest(width=width, named=named):
+                    value = self.value(width, 0x4000, named=named)
+                    with patch.object(plugin, "_runtime_layout", return_value=plugin.LLGO_RUNTIME_LAYOUTS[2]), \
+                            patch.object(plugin, "_symbol_name", return_value="main.Plain"):
+                        self.assertEqual(plugin.function_summary(value, {}), "main.Plain")
+                    value.Dereference.assert_called_once()
+
+    def test_nil_descriptor_is_not_dereferenced_and_native_code_is_distinct(self):
+        for width in (4, 8):
+            for native, expected in ((False, "nil"), (True, None)):
+                with self.subTest(width=width, native=native):
+                    value = self.value(width, 0, native=native)
+                    with patch.object(plugin, "_runtime_layout", return_value=plugin.LLGO_RUNTIME_LAYOUTS[2]):
+                        self.assertEqual(plugin.function_summary(value, {}), expected)
+                    value.Dereference.assert_not_called()
+
+    def test_similar_native_callback_record_has_no_go_descriptor_identity(self):
+        value = self.value(8, 0x4000, record=True)
+        with patch.object(plugin, "_runtime_layout", return_value=plugin.LLGO_RUNTIME_LAYOUTS[2]), \
+                patch.object(plugin, "_symbol_name", return_value="main.Plain"):
+            self.assertIsNone(plugin.function_summary(value, {}))
+        value.Dereference.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
