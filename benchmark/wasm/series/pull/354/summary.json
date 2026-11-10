@@ -11,8 +11,8 @@
         "sha": "d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
         "ref": "codex/ci-base-main-d4b-20261105",
         "url": "https://github.com/cpunion/llgo/commit/d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
-        "runUrl": "https://github.com/cpunion/llgo/actions/runs/42692435982",
-        "timestamp": "2026-11-09T23:28:07Z"
+        "runUrl": "https://github.com/cpunion/llgo/actions/runs/42749228484",
+        "timestamp": "2026-11-10T03:24:24Z"
       },
       "platforms": {
         "wasm-linux": {
@@ -24,8 +24,8 @@
             "sha": "d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
             "ref": "codex/ci-base-main-d4b-20261105",
             "url": "https://github.com/cpunion/llgo/commit/d4b248e8c7790ad7083325ea2b001c16e4a5a8a5",
-            "runUrl": "https://github.com/cpunion/llgo/actions/runs/42692435982",
-            "timestamp": "2026-11-09T23:28:07Z"
+            "runUrl": "https://github.com/cpunion/llgo/actions/runs/42749228484",
+            "timestamp": "2026-11-10T03:24:24Z"
           },
           "platform": {
             "id": "wasm-linux",
@@ -56,12 +56,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 6109574529
+                    "build-ns": 5844275622
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 6109574529
+                "build-ns": 5844275622
               }
             },
             {
@@ -73,12 +73,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 6726869415
+                    "build-ns": 5604562304
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 6726869415
+                "build-ns": 5604562304
               }
             },
             {
@@ -90,12 +90,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 5111219564
+                    "build-ns": 5115317889
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 5111219564
+                "build-ns": 5115317889
               }
             },
             {
@@ -107,12 +107,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 16709298022
+                    "build-ns": 16471596176
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 16709298022
+                "build-ns": 16471596176
               }
             },
             {
@@ -124,12 +124,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 2644680984
+                    "build-ns": 2735734564
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 2644680984
+                "build-ns": 2735734564
               }
             },
             {
@@ -141,12 +141,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 2479284640
+                    "build-ns": 2453636173
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 2479284640
+                "build-ns": 2453636173
               }
             },
             {
@@ -650,11 +650,11 @@
     {
       "source": {
         "repository": "cpunion/llgo",
-        "sha": "c9838649934ad38c3a16437301ba7ab26286c482",
+        "sha": "eee61ac33023c089522c732cd33e24b2166d8145",
         "ref": "codex/full-pr-ci-repairs-20261105",
-        "url": "https://github.com/cpunion/llgo/commit/c9838649934ad38c3a16437301ba7ab26286c482",
-        "runUrl": "https://github.com/cpunion/llgo/actions/runs/42692435982",
-        "timestamp": "2026-11-09T23:28:07Z"
+        "url": "https://github.com/cpunion/llgo/commit/eee61ac33023c089522c732cd33e24b2166d8145",
+        "runUrl": "https://github.com/cpunion/llgo/actions/runs/42749228484",
+        "timestamp": "2026-11-10T03:24:24Z"
       },
       "platforms": {
         "wasm-linux": {
@@ -663,11 +663,11 @@
           "shardId": "merged",
           "source": {
             "repository": "cpunion/llgo",
-            "sha": "c9838649934ad38c3a16437301ba7ab26286c482",
+            "sha": "eee61ac33023c089522c732cd33e24b2166d8145",
             "ref": "codex/full-pr-ci-repairs-20261105",
-            "url": "https://github.com/cpunion/llgo/commit/c9838649934ad38c3a16437301ba7ab26286c482",
-            "runUrl": "https://github.com/cpunion/llgo/actions/runs/42692435982",
-            "timestamp": "2026-11-09T23:28:07Z"
+            "url": "https://github.com/cpunion/llgo/commit/eee61ac33023c089522c732cd33e24b2166d8145",
+            "runUrl": "https://github.com/cpunion/llgo/actions/runs/42749228484",
+            "timestamp": "2026-11-10T03:24:24Z"
           },
           "platform": {
             "id": "wasm-linux",
@@ -698,12 +698,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 6094800214
+                    "build-ns": 6088632861
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 6094800214
+                "build-ns": 6088632861
               }
             },
             {
@@ -715,12 +715,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 6508708490
+                    "build-ns": 5947865334
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 6508708490
+                "build-ns": 5947865334
               }
             },
             {
@@ -732,12 +732,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 5382337638
+                    "build-ns": 5439182226
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 5382337638
+                "build-ns": 5439182226
               }
             },
             {
@@ -749,12 +749,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 17739098318
+                    "build-ns": 17968286223
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 17739098318
+                "build-ns": 17968286223
               }
             },
             {
@@ -766,12 +766,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 2829614922
+                    "build-ns": 2835604262
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 2829614922
+                "build-ns": 2835604262
               }
             },
             {
@@ -783,12 +783,12 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "build-ns": 2862049690
+                    "build-ns": 2651296016
                   }
                 }
               ],
               "measurements": {
-                "build-ns": 2862049690
+                "build-ns": 2651296016
               }
             },
             {
@@ -800,14 +800,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 152522,
+                    "module-bytes": 155781,
                     "glue-bytes": 88932
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 88932,
-                "module-bytes": 152522
+                "module-bytes": 155781
               }
             },
             {
@@ -819,14 +819,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 151527,
+                    "module-bytes": 154868,
                     "glue-bytes": 72985
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 72985,
-                "module-bytes": 151527
+                "module-bytes": 154868
               }
             },
             {
@@ -838,14 +838,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 139918,
+                    "module-bytes": 142497,
                     "glue-bytes": 92103
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 92103,
-                "module-bytes": 139918
+                "module-bytes": 142497
               }
             },
             {
@@ -895,14 +895,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 1619008,
+                    "module-bytes": 1635462,
                     "glue-bytes": 119386
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 119386,
-                "module-bytes": 1619008
+                "module-bytes": 1635462
               }
             },
             {
@@ -933,14 +933,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 1677442,
+                    "module-bytes": 1700901,
                     "glue-bytes": 89504
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 89504,
-                "module-bytes": 1677442
+                "module-bytes": 1700901
               }
             },
             {
@@ -952,14 +952,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 1508417,
+                    "module-bytes": 1516621,
                     "glue-bytes": 122684
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 122684,
-                "module-bytes": 1508417
+                "module-bytes": 1516621
               }
             },
             {
@@ -990,14 +990,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 1059766,
+                    "module-bytes": 1072618,
                     "glue-bytes": 0
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 0,
-                "module-bytes": 1059766
+                "module-bytes": 1072618
               }
             },
             {
@@ -1009,14 +1009,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 1060616,
+                    "module-bytes": 1073926,
                     "glue-bytes": 0
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 0,
-                "module-bytes": 1060616
+                "module-bytes": 1073926
               }
             },
             {
@@ -1028,14 +1028,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 151724,
+                    "module-bytes": 154979,
                     "glue-bytes": 88932
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 88932,
-                "module-bytes": 151724
+                "module-bytes": 154979
               }
             },
             {
@@ -1066,14 +1066,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 150962,
+                    "module-bytes": 154272,
                     "glue-bytes": 72985
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 72985,
-                "module-bytes": 150962
+                "module-bytes": 154272
               }
             },
             {
@@ -1085,14 +1085,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 139180,
+                    "module-bytes": 141696,
                     "glue-bytes": 92103
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 92103,
-                "module-bytes": 139180
+                "module-bytes": 141696
               }
             },
             {
@@ -1104,14 +1104,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 1316427,
-                    "glue-bytes": 94993
+                    "module-bytes": 1337834,
+                    "glue-bytes": 94818
                   }
                 }
               ],
               "measurements": {
-                "glue-bytes": 94993,
-                "module-bytes": 1316427
+                "glue-bytes": 94818,
+                "module-bytes": 1337834
               }
             },
             {
@@ -1142,14 +1142,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 1331164,
-                    "glue-bytes": 79042
+                    "module-bytes": 1351267,
+                    "glue-bytes": 78867
                   }
                 }
               ],
               "measurements": {
-                "glue-bytes": 79042,
-                "module-bytes": 1331164
+                "glue-bytes": 78867,
+                "module-bytes": 1351267
               }
             },
             {
@@ -1161,14 +1161,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 1211776,
+                    "module-bytes": 1228374,
                     "glue-bytes": 98465
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 98465,
-                "module-bytes": 1211776
+                "module-bytes": 1228374
               }
             },
             {
@@ -1199,14 +1199,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 974492,
+                    "module-bytes": 1013188,
                     "glue-bytes": 0
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 0,
-                "module-bytes": 974492
+                "module-bytes": 1013188
               }
             },
             {
@@ -1218,14 +1218,14 @@
                 {
                   "iterations": 1,
                   "measurements": {
-                    "module-bytes": 975003,
+                    "module-bytes": 1013834,
                     "glue-bytes": 0
                   }
                 }
               ],
               "measurements": {
                 "glue-bytes": 0,
-                "module-bytes": 975003
+                "module-bytes": 1013834
               }
             },
             {
