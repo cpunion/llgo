@@ -22,14 +22,15 @@ def configure(apt_dir, architecture):
         path = apt_dir / name
         if path.exists():
             # Both transports retain APT's signed Release and package-hash
-            # verification. Prefer Ubuntu's ordinary HTTP transport, keeping
-            # HTTPS as a fallback without changing suites or signing keys.
-            path.write_text(f"http://{url}\tpriority:1\n"
-                            f"https://{url}\tpriority:2\n")
+            # verification. Prefer HTTPS to avoid repeated port-80 timeouts
+            # before fallback, without changing suites or signing keys.
+            path.write_text(f"https://{url}\tpriority:1\n"
+                            f"http://{url}\tpriority:2\n")
 
     (apt_dir / "apt.conf.d" / "80-llgo-downloads").write_text('''\
 Acquire::ForceIPv4 "true";
 Acquire::Retries "3";
+Acquire::Languages "none";
 Acquire::http::Timeout "30";
 Acquire::https::Timeout "30";
 APT::Update::Error-Mode "any";
