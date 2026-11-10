@@ -161,14 +161,19 @@ func TestInterfaceBoxExplicitRoots(t *testing.T) {
 			src := interfaceBoxSource(valueType, `func box(f V) V { return extract(f) }`)
 			ir := compileInterfaceBoxIR(t, src, ssa.InstantiateGenerics, &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, true)
 			body := llvmFunction(t, ir, "ifacebox.box")
-			if !strings.Contains(body, "llvm_gc_root_chain") {
-				t.Fatalf("pointer-bearing value lost explicit GC roots:\n%s", body)
+			if strings.Contains(body, "runtime.AllocU") {
+				t.Fatalf("borrowed pointer-bearing box unexpectedly escaped to the heap:\n%s", body)
 			}
-			// F's descriptor is itself rooted; Payload's function field also
-			// requires a scanned heap box rather than unscanned stack fields.
-			wantHeap := valueType == "Payload"
-			if heap := strings.Contains(body, "runtime.AllocU"); heap != wantHeap {
-				t.Fatalf("explicit-root heap box = %v, want %v:\n%s", heap, wantHeap, body)
+			// F is its descriptor pointer. Payload retains a scanned stack box;
+			// its function field must be published through typed pointer roots.
+			if valueType == "Payload" && (!strings.Contains(body, "alloca ") ||
+				!strings.Contains(ir, "__llgo_gcroot_stack_pointer_")) {
+				t.Fatalf("function-bearing payload lost its typed scanned stack box:\n%s", ir)
+			}
+			for _, want := range []string{"gcroot.init", "llvm_gc_root_chain"} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("explicit-root box lost %s:\n%s", want, body)
+				}
 			}
 		})
 	}

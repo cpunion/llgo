@@ -64,10 +64,18 @@ type Options struct {
 	// EscapeAnalysis contains immutable storage decisions prepared before
 	// backend workers. Direct API callers may omit it to analyze their input.
 	EscapeAnalysis *goescape.Result
-	Debug          bool
-	DebugSymbols   bool
-	Trace          bool
-	ExportRename   bool
+	// EscapeImports are validated contracts owned by cached dependency archives.
+	EscapeImports    map[*ssa.Function]goescape.Summary
+	EscapeImportKeys map[*ssa.Function]string
+	// EscapeRoots includes methods materialized from exported runtime types.
+	EscapeRoots []*ssa.Function
+	// DeclarationsOnly preserves source/type bindings for a cached archive;
+	// its definitions and link metadata are supplied by that archive's export.
+	DeclarationsOnly bool
+	Debug            bool
+	DebugSymbols     bool
+	Trace            bool
+	ExportRename     bool
 	// AllowInternalDirectives permits directives reserved for LLGo's runtime.
 	// Package loaders set it only for verified Go standard-library sources.
 	AllowInternalDirectives bool
@@ -509,7 +517,11 @@ func (p *context) makeClosureCtx(fn *ssa.Function, pkg *types.Package, vars []*s
 		if name == "" {
 			name = "_"
 		}
-		flds[i] = types.NewField(token.NoPos, pkg, name, p.patchType(v.Type()), false)
+		typ := v.Type()
+		if p.options.EscapeAnalysis.CaptureByValue(v) {
+			typ = typ.Underlying().(*types.Pointer).Elem()
+		}
+		flds[i] = types.NewField(token.NoPos, pkg, name, p.patchType(typ), false)
 	}
 	t := types.NewPointer(types.NewStruct(flds, nil))
 	return types.NewParam(token.NoPos, pkg, "$env", t)
@@ -676,8 +688,10 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	if isInit && state == pkgHasPatch {
 		name = initFnNameOfHasPatch(name)
 		// TODO(xsw): pkg.init$guard has been set, change ssa.If to ssa.Jump
-		block := f.Blocks[0].Instrs[1].(*ssa.If).Block()
-		block.Succs[0], block.Succs[1] = block.Succs[1], block.Succs[0]
+		if !p.options.DeclarationsOnly {
+			block := f.Blocks[0].Instrs[1].(*ssa.If).Block()
+			block.Succs[0], block.Succs[1] = block.Succs[1], block.Succs[0]
+		}
 	}
 
 	fn := pkg.FuncOf(name)
@@ -760,6 +774,9 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		fn.AllowSIMDDispatcherInlining()
 	}
 	p.funcs[f] = fn
+	if p.options.DeclarationsOnly {
+		return fn, nil, goFunc
+	}
 	isCgo := isCgoExternSymbol(f)
 	if (len(f.Blocks) != 0 || simdDecl) && p.prog.FuncInfoMetadataEnabled() && p.inlineImports[f] == 0 {
 		goName := fn.Name()
@@ -2024,6 +2041,13 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		goFn, _ := v.Fn.(*ssa.Function)
 		if !p.canElideZeroSizedClosureEnv(goFn) {
 			bindings = p.compileValues(b, v.Bindings, 0)
+			if goFn != nil {
+				for i, freeVar := range goFn.FreeVars {
+					if p.options.EscapeAnalysis.CaptureByValue(freeVar) {
+						bindings[i] = b.Load(bindings[i])
+					}
+				}
+			}
 		}
 		ret = b.MakeClosureEx(fn, bindings, !p.stackStorage(v))
 	case *ssa.TypeAssert:
@@ -2036,7 +2060,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		ret = b.Extract(x, v.Index)
 	case *ssa.Range:
 		x := p.compileValue(b, v.X)
-		ret = b.Range(x)
+		// Go's opaque iterator is consumed by Next in this invocation; source
+		// code cannot publish it or capture it in an asynchronous operation.
+		ret = b.RangeBorrowed(x)
 	case *ssa.Next:
 		var typ llssa.Type
 		if !v.IsString {
@@ -2683,6 +2709,9 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 				if p.canElideZeroSizedClosureEnv(fn) {
 					return p.elidedZeroSizedFreeVar(b, v)
 				}
+				if p.options.EscapeAnalysis.CaptureByValue(v) {
+					return b.FieldAddr(p.fn.Env(), idx)
+				}
 				return p.fn.FreeVar(b, idx)
 			}
 		}
@@ -3154,9 +3183,11 @@ func processPkg(ctx *context, ret llssa.Package, pkg *ssa.Package) {
 		val  ssa.Member
 	}
 
-	ctx.collectStaticGlobalInits(pkg)
-	ctx.collectStaticMapInits(pkg)
-	ctx.collectUnusedGlobalInits(pkg)
+	if !ctx.options.DeclarationsOnly {
+		ctx.collectStaticGlobalInits(pkg)
+		ctx.collectStaticMapInits(pkg)
+		ctx.collectUnusedGlobalInits(pkg)
+	}
 
 	members := make([]*namedMember, 0, len(pkg.Members))
 	skips := ctx.skips

@@ -26,14 +26,13 @@ type namedFunc func(int) int
 // CHECK: call %{{.*}} @reflect.Value.Interface(%reflect.Value [[FUNC_RESULT]])
 
 // CHECK-LABEL: define void @main.functionPointers(){{.*}} {
-// CHECK: [[CAPTURED_CELL:%[0-9]+]] = call ptr @"{{.*}}AllocAtomicU"(i64 8)
-// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr [[CAPTURED_CELL]], i8 0, i64 8, i1 false)
-// CHECK-NEXT: store i64 1, ptr [[CAPTURED_CELL]]
+// CHECK: store i64 1, ptr [[CAPTURED_CELL:%[0-9]+]]
+// CHECK-NEXT: [[CAPTURED_COPY:%[0-9]+]] = load i64, ptr [[CAPTURED_CELL]]
 // CHECK-NEXT: [[CAPTURED_ALLOCATION:%[0-9]+]] = call ptr @"{{.*}}AllocU"(i64 24)
-// CHECK-NEXT: [[CAPTURED_DESCRIPTOR:%[0-9]+]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[CAPTURED_ALLOCATION]], i32 0, i32 0
-// CHECK-NEXT: [[CAPTURED_ENV:%[0-9]+]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[CAPTURED_ALLOCATION]], i32 0, i32 1
-// CHECK-NEXT: [[CAPTURED_CELL_SLOT:%[0-9]+]] = getelementptr inbounds nuw { ptr }, ptr [[CAPTURED_ENV]], i32 0, i32 0
-// CHECK-NEXT: store ptr [[CAPTURED_CELL]], ptr [[CAPTURED_CELL_SLOT]]
+// CHECK-NEXT: [[CAPTURED_DESCRIPTOR:%[0-9]+]] = getelementptr inbounds nuw { { ptr, ptr }, { i64 } }, ptr [[CAPTURED_ALLOCATION]], i32 0, i32 0
+// CHECK-NEXT: [[CAPTURED_ENV:%[0-9]+]] = getelementptr inbounds nuw { { ptr, ptr }, { i64 } }, ptr [[CAPTURED_ALLOCATION]], i32 0, i32 1
+// CHECK-NEXT: [[CAPTURED_CELL_SLOT:%[0-9]+]] = getelementptr inbounds nuw { i64 }, ptr [[CAPTURED_ENV]], i32 0, i32 0
+// CHECK-NEXT: store i64 [[CAPTURED_COPY]], ptr [[CAPTURED_CELL_SLOT]]
 // CHECK-NEXT: [[CAPTURED_CODE_SLOT:%[0-9]+]] = getelementptr inbounds nuw { ptr, ptr }, ptr [[CAPTURED_DESCRIPTOR]], i32 0, i32 0
 // CHECK-NEXT: store ptr @"main.functionPointers$1", ptr [[CAPTURED_CODE_SLOT]]
 // CHECK-NEXT: [[CAPTURED_ENV_SLOT:%[0-9]+]] = getelementptr inbounds nuw { ptr, ptr }, ptr [[CAPTURED_DESCRIPTOR]], i32 0, i32 1

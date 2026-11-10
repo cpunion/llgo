@@ -16,15 +16,15 @@ func main() {
 }
 
 // CHECK-LABEL: define void @main.main(){{.*}} {
-// CHECK: [[IFACE_FN_ALLOCATION:%.*]] = alloca { { ptr, ptr }, { ptr } }, align 8
-// CHECK: [[CAPTURE:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.AllocAtomicU"(i64 8)
-// CHECK-NEXT: call void @llvm.memset.p0.i64(ptr [[CAPTURE]], i8 0, i64 8, i1 false)
-// CHECK-NEXT: store i64 200, ptr [[CAPTURE]], align 8
+// CHECK: [[IFACE_FN_ALLOCATION:%.*]] = alloca { { ptr, ptr }, { i64 } }, align 8
+// CHECK: [[CAPTURE:%.*]] = alloca i64
+// CHECK: store i64 200, ptr [[CAPTURE]], align 8
+// CHECK-NEXT: [[CAPTURE_COPY:%.*]] = load i64, ptr [[CAPTURE]], align 8
 // CHECK: call void @llvm.memset.p0.i64(ptr [[IFACE_FN_ALLOCATION]], i8 0, i64 24, i1 false)
-// CHECK-NEXT: [[IFACE_FN_DESCRIPTOR:%.*]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[IFACE_FN_ALLOCATION]], i32 0, i32 0
-// CHECK-NEXT: [[IFACE_FN_ENV:%.*]] = getelementptr inbounds nuw { { ptr, ptr }, { ptr } }, ptr [[IFACE_FN_ALLOCATION]], i32 0, i32 1
-// CHECK-NEXT: [[IFACE_FN_CAPTURE_SLOT:%.*]] = getelementptr inbounds nuw { ptr }, ptr [[IFACE_FN_ENV]], i32 0, i32 0
-// CHECK-NEXT: store ptr [[CAPTURE]], ptr [[IFACE_FN_CAPTURE_SLOT]]
+// CHECK-NEXT: [[IFACE_FN_DESCRIPTOR:%.*]] = getelementptr inbounds nuw { { ptr, ptr }, { i64 } }, ptr [[IFACE_FN_ALLOCATION]], i32 0, i32 0
+// CHECK-NEXT: [[IFACE_FN_ENV:%.*]] = getelementptr inbounds nuw { { ptr, ptr }, { i64 } }, ptr [[IFACE_FN_ALLOCATION]], i32 0, i32 1
+// CHECK-NEXT: [[IFACE_FN_CAPTURE_SLOT:%.*]] = getelementptr inbounds nuw { i64 }, ptr [[IFACE_FN_ENV]], i32 0, i32 0
+// CHECK-NEXT: store i64 [[CAPTURE_COPY]], ptr [[IFACE_FN_CAPTURE_SLOT]]
 // CHECK-NEXT: [[IFACE_FN_CODE_SLOT:%.*]] = getelementptr inbounds nuw { ptr, ptr }, ptr [[IFACE_FN_DESCRIPTOR]], i32 0, i32 0
 // CHECK-NEXT: store ptr @"main.main$1", ptr [[IFACE_FN_CODE_SLOT]]
 // CHECK-NEXT: [[IFACE_FN_ENV_SLOT:%.*]] = getelementptr inbounds nuw { ptr, ptr }, ptr [[IFACE_FN_DESCRIPTOR]], i32 0, i32 1
@@ -73,9 +73,8 @@ func main() {
 // WINDOWS-ARM64-SAME: ptr swiftself %[[TMP0:[0-9]+]], i64 %[[TMP1:[0-9]+]]){{.*}} {
 // AMD64-SAME: ptr nest %[[TMP0:[0-9]+]], i64 %[[TMP1:[0-9]+]]){{.*}} {
 // CHECK-NEXT: _llgo_[[BB0:[0-9]+]]:
-// CHECK-NEXT:   %[[TMP2:[0-9]+]] = load { ptr }, ptr %[[TMP0]], align 8
-// CHECK-NEXT:   %[[TMP3:[0-9]+]] = extractvalue { ptr } %[[TMP2]], 0
-// CHECK-NEXT:   %[[TMP4:[0-9]+]] = load i64, ptr %[[TMP3]], align 8
-// CHECK-NEXT:   %[[TMP5:[0-9]+]] = add i64 %[[TMP4]], %[[TMP1]]
-// CHECK-NEXT:   ret i64 %[[TMP5]]
+// CHECK-NEXT:   %[[TMP2:[0-9]+]] = getelementptr inbounds nuw { i64 }, ptr %[[TMP0]], i32 0, i32 0
+// CHECK-NEXT:   %[[TMP3:[0-9]+]] = load i64, ptr %[[TMP2]], align 8
+// CHECK-NEXT:   %[[TMP4:[0-9]+]] = add i64 %[[TMP3]], %[[TMP1]]
+// CHECK-NEXT:   ret i64 %[[TMP4]]
 // CHECK-NEXT: }

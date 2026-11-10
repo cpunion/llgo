@@ -13,7 +13,11 @@ func (f Function) SetEscapeStackBytes(size uint64) {
 }
 
 func (f Function) reserveEscapeStack(typ Type) bool {
+	// Helpers reserve greedily in lowering order, without hotness weighting.
 	size, alignment := f.Prog.SizeOf(typ), f.Prog.AlignOf(typ)
+	if f.Prog.GCRootsEnabled() {
+		size += f.Prog.StackRootBytes(typ)
+	}
 	if alignment == 0 || alignment&(alignment-1) != 0 || f.escapeStackBytes > llabi.MaxEscapeStackBytes {
 		return false
 	}
@@ -36,6 +40,7 @@ func (b Builder) uninitializedStackSlot(elem Type) Expr {
 	entry := b.Func.entryAllocaBuilder()
 	value := llvm.CreateAlloca(entry, b.Prog.storageType(elem))
 	b.Prog.requireStorageAlignment(value, elem)
+	b.registerStackRoots(value, elem)
 	return Expr{value, b.Prog.Pointer(elem)}
 }
 
@@ -45,8 +50,8 @@ func (b Builder) ReadOnlyStringBytes(t Type, x Expr) Expr {
 	return Expr{b.InlineCall(b.Pkg.rtFunc("StringToBytesReadOnly"), x).impl, t}
 }
 
-// ReadOnlyBytesString requires an immediately consumed string temporary with
-// no source mutation between conversion and its sole comparison/lookup use.
+// ReadOnlyBytesString requires a temporary string with no source mutation on
+// any path from the conversion to its final consumer.
 func (b Builder) ReadOnlyBytesString(t Type, x Expr) Expr {
 	return Expr{b.InlineCall(b.Pkg.rtFunc("StringFromBytesReadOnly"), x).impl, t}
 }
