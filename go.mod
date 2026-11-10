@@ -33,4 +33,4 @@ replace github.com/xgo-dev/llgo/runtime => ./runtime
 replace golang.org/x/tools => github.com/xgo-dev/tools v0.51.1
 
 // Temporary integration pin; replace with an official fixed release before merge.
-replace github.com/xgo-dev/plan9asm => github.com/cpunion/plan9asm v0.0.0-20261105045801-a461833e4334
+replace github.com/xgo-dev/plan9asm => github.com/cpunion/plan9asm v0.0.0-20261110022429-27da784c401b

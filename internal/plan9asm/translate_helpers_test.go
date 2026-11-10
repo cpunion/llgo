@@ -203,8 +203,8 @@ func Round(value float64) int64
 		unwanted   string
 		wantErrSub string
 	}{
-		{name: "default hardware", mode: extplan9asm.X87Auto, source: asm, want: `asm sideeffect "fldl $1; frndint; fstpl $0"`, unwanted: "call double @llvm.floor.f64"},
-		{name: "software initialized control word", mode: extplan9asm.X87Software, source: initializedAsm, want: "call double @llvm.floor.f64", unwanted: "frndint"},
+		{name: "default hardware", mode: extplan9asm.X87Auto, source: asm, want: `asm sideeffect "fldt $3; frndint; fnstsw $2; fstpt $0"`, unwanted: "call double @llvm.floor.f64"},
+		{name: "software initialized control word", mode: extplan9asm.X87Software, source: initializedAsm, want: "alloca { i64, i16 }", unwanted: "asm sideeffect"},
 		{name: "software missing control word", mode: extplan9asm.X87Software, source: asm, wantErrSub: "instruction probe needs function context: result initialization"},
 		{name: "invalid", mode: extplan9asm.X87Mode(255), source: asm, wantErrSub: "invalid x87 mode"},
 	}
@@ -229,6 +229,12 @@ func Round(value float64) int64
 				t.Fatalf("invalid x87 module: %v", err)
 			}
 			ir := tr.Module.String()
+			// Both backends preserve the extended value between instructions.
+			// The software backend implements control-word rounding directly,
+			// without a binary64 conversion or native x87 instructions.
+			if !strings.Contains(ir, "alloca { i64, i16 }") || strings.Contains(ir, "@llvm.floor.f64") {
+				t.Fatalf("x87 mode lost binary80 rounding:\n%s", ir)
+			}
 			if !strings.Contains(ir, test.want) {
 				t.Fatalf("IR missing %q:\n%s", test.want, ir)
 			}
