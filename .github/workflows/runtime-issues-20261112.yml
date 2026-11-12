@@ -12,5 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-go
+      - uses: actions/checkout@v7
+        with:
+          repository: cpunion/llgo
+          ref: 542c39f067f5f39448139b307854b54ea8746bcb
+          path: _candidate
       - shell: bash
-        run: go run .github/issue-repro/sdkpath.go
+        run: |
+          go run .github/issue-repro/sdkpath.go
+          go test -v _candidate/internal/plan9asm/amd64_frame_path_windows.go _candidate/internal/plan9asm/amd64_frame_path_windows_test.go
