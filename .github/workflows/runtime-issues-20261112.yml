@@ -1,0 +1,53 @@
+name: Native runtime issue reproduction
+on:
+  push:
+    branches: [diagnose/runtime-issues-20261112]
+permissions:
+  contents: read
+jobs:
+  windows386:
+    if: github.repository == 'cpunion/llgo'
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [msvc, mingw]
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: '22'
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: '386'
+          windows-msvc-dependencies: runtime
+      - uses: ./.github/actions/setup-go
+        with:
+          architecture: x64
+      - name: Build host compiler
+        shell: bash
+        run: go build -o "$RUNNER_TEMP/llgo.exe" ./cmd/llgo
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: ${{ matrix.abi }}
+          windows-arch: '386'
+      - name: Build unchanged Go stress cases with both compilers
+        shell: bash
+        env:
+          LLGO_ROOT: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p _issue-reports
+          for name in issue25897a issue75764; do
+            go build -o "_issue-reports/go-$name.exe" ".github/issue-repro/$name.go"
+            "$RUNNER_TEMP/llgo.exe" build -o "_issue-reports/llgo-$name.exe" ".github/issue-repro/$name.go"
+          done
+      - name: Preserve repeated current-main execution outcomes
+        shell: bash
+        run: python .github/issue-repro/run.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: runtime-issue-msvc-mingw-386-${{ matrix.abi }}
+          path: _issue-reports
+          if-no-files-found: error
