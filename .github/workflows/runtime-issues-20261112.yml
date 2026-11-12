@@ -18,12 +18,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: cpunion/llgo
-          ref: 537ecffae
+          ref: 537ecffae62994228c9276c7c392a7bbc94cb42d
           path: _forward
       - uses: actions/checkout@v7
         with:
           repository: cpunion/llgo
-          ref: 746434465
+          ref: 74643446501e8ded7c4213c2a7a28f2c4838133c
           path: _gc
       - uses: ./.github/actions/setup-deps
         with:
