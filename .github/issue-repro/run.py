@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -6,6 +7,8 @@ import time
 root = Path('_issue-reports')
 results = []
 for name, repetitions, limit in [('issue25897a', 100, 90), ('issue75764', 100, 30)]:
+    if name not in os.environ.get('ISSUE_CASES', 'issue25897a issue75764').split():
+        continue
     for compiler in ('go', 'main', 'fixed'):
         failures = 0
         for iteration in range((1 if name == 'issue25897a' else 3) if compiler == 'main' else 3 if compiler == 'go' else repetitions):

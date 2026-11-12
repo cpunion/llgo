@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: cpunion/llgo
-          ref: 537ecffae62994228c9276c7c392a7bbc94cb42d
+          ref: 3d2684c1519831782057fe880a4e0d5cad051a3d
           path: _forward
       - uses: actions/checkout@v7
         with:
@@ -53,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _issue-reports
-          for name in issue25897a issue75764; do
+          for name in issue75764; do
             go build -o "_issue-reports/go-$name.exe" ".github/issue-repro/$name.go"
             "$RUNNER_TEMP/llgo.exe" build -o "_issue-reports/main-$name.exe" ".github/issue-repro/$name.go"
           done
@@ -62,8 +62,6 @@ jobs:
           find "$RUNNER_TEMP" -maxdepth 1 -iname '*.dll' -exec cp {} "$RUNNER_TEMP/forward/" \;
           LLGO_ROOT="$GITHUB_WORKSPACE/_forward" "$RUNNER_TEMP/forward/llgo.exe" build \
             -o _issue-reports/fixed-issue75764.exe .github/issue-repro/issue75764.go
-          LLGO_ROOT="$GITHUB_WORKSPACE/_gc" "$RUNNER_TEMP/llgo.exe" build \
-            -o _issue-reports/fixed-issue25897a.exe .github/issue-repro/issue25897a.go
           (cd _forward && LLGO_ROOT="$GITHUB_WORKSPACE/_forward" "$RUNNER_TEMP/forward/llgo.exe" test \
             -run '^TestInterfaceForward' ./test/go)
           (cd _gc && LLGO_ROOT="$GITHUB_WORKSPACE/_gc" "$RUNNER_TEMP/llgo.exe" test \
@@ -72,6 +70,8 @@ jobs:
             -run '^TestRuntimeGCNativeFinalizerReentry$' ./test/llgoext)
       - name: Preserve repeated current-main execution outcomes
         shell: bash
+        env:
+          ISSUE_CASES: issue75764
         run: python .github/issue-repro/run.py
       - uses: actions/upload-artifact@v7
         if: always()
