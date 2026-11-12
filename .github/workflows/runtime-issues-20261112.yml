@@ -64,12 +64,12 @@ jobs:
             -o _issue-reports/fixed-issue75764.exe .github/issue-repro/issue75764.go
           LLGO_ROOT="$GITHUB_WORKSPACE/_gc" "$RUNNER_TEMP/llgo.exe" build \
             -o _issue-reports/fixed-issue25897a.exe .github/issue-repro/issue25897a.go
-          LLGO_ROOT="$GITHUB_WORKSPACE/_forward" "$RUNNER_TEMP/forward/llgo.exe" test \
-            -run '^TestInterfaceForward' ./_forward/test/go
-          LLGO_ROOT="$GITHUB_WORKSPACE/_gc" "$RUNNER_TEMP/llgo.exe" test \
-            -run '^TestRuntime(ConcurrentGCRequests|BlockedFinalizerDoesNotBlockGC|ConcurrentGCFinalizers|GCDrainsBDWGCFinalizersOnDemand)$' ./_gc/test/go
-          LLGO_ROOT="$GITHUB_WORKSPACE/_gc" "$RUNNER_TEMP/llgo.exe" test \
-            -run '^TestRuntimeGCNativeFinalizerReentry$' ./_gc/test/llgoext
+          (cd _forward && LLGO_ROOT="$GITHUB_WORKSPACE/_forward" "$RUNNER_TEMP/forward/llgo.exe" test \
+            -run '^TestInterfaceForward' ./test/go)
+          (cd _gc && LLGO_ROOT="$GITHUB_WORKSPACE/_gc" "$RUNNER_TEMP/llgo.exe" test \
+            -run '^TestRuntime(ConcurrentGCRequests|BlockedFinalizerDoesNotBlockGC|ConcurrentGCFinalizers|GCDrainsBDWGCFinalizersOnDemand)$' ./test/go)
+          (cd _gc && LLGO_ROOT="$GITHUB_WORKSPACE/_gc" "$RUNNER_TEMP/llgo.exe" test \
+            -run '^TestRuntimeGCNativeFinalizerReentry$' ./test/llgoext)
       - name: Preserve repeated current-main execution outcomes
         shell: bash
         run: python .github/issue-repro/run.py
