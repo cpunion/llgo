@@ -1,81 +1,16 @@
-name: Native runtime issue reproduction
+name: Windows SDK identity diagnostic
 on:
   push:
     branches: [diagnose/runtime-issues-20261112]
 permissions:
   contents: read
 jobs:
-  windows386:
+  windows-path:
     if: github.repository == 'cpunion/llgo'
-    strategy:
-      fail-fast: false
-      matrix:
-        abi: [msvc, mingw]
     runs-on: windows-2022
-    timeout-minutes: 55
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: cpunion/llgo
-          ref: 3d2684c1519831782057fe880a4e0d5cad051a3d
-          path: _forward
-      - uses: actions/checkout@v7
-        with:
-          repository: cpunion/llgo
-          ref: 74643446501e8ded7c4213c2a7a28f2c4838133c
-          path: _gc
-      - uses: ./.github/actions/setup-deps
-        with:
-          llvm-version: '22'
-          windows-abi: ${{ matrix.abi }}
-          windows-arch: '386'
-          windows-msvc-dependencies: runtime
       - uses: ./.github/actions/setup-go
-        with:
-          architecture: x64
-      - name: Build host compiler
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/forward"
-          go build -o "$RUNNER_TEMP/llgo.exe" ./cmd/llgo
-          (cd _forward && go build -o "$RUNNER_TEMP/forward/llgo.exe" ./cmd/llgo)
-          echo "LLGO_TEST_LLGO=$RUNNER_TEMP/llgo.exe" >> "$GITHUB_ENV"
-      - uses: ./.github/actions/activate-windows-target
-        with:
-          windows-abi: ${{ matrix.abi }}
-          windows-arch: '386'
-      - name: Build unchanged Go stress cases with both compilers
-        shell: bash
-        env:
-          LLGO_ROOT: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          mkdir -p _issue-reports
-          for name in issue75764; do
-            go build -o "_issue-reports/go-$name.exe" ".github/issue-repro/$name.go"
-            "$RUNNER_TEMP/llgo.exe" build -o "_issue-reports/main-$name.exe" ".github/issue-repro/$name.go"
-          done
-          # The target activation isolates the baseline x64 compiler's DLL closure.
-          # Copy those exact host DLLs beside the other x64 compiler as well.
-          find "$RUNNER_TEMP" -maxdepth 1 -iname '*.dll' -exec cp {} "$RUNNER_TEMP/forward/" \;
-          LLGO_ROOT="$GITHUB_WORKSPACE/_forward" "$RUNNER_TEMP/forward/llgo.exe" build \
-            -o _issue-reports/fixed-issue75764.exe .github/issue-repro/issue75764.go
-          (cd _forward && LLGO_ROOT="$GITHUB_WORKSPACE/_forward" "$RUNNER_TEMP/forward/llgo.exe" test \
-            -run '^TestInterfaceForward' ./test/go)
-          (cd _gc && LLGO_ROOT="$GITHUB_WORKSPACE/_gc" "$RUNNER_TEMP/llgo.exe" test \
-            -run '^TestRuntime(ConcurrentGCRequests|BlockedFinalizerDoesNotBlockGC|ConcurrentGCFinalizers|GCDrainsBDWGCFinalizersOnDemand)$' ./test/go)
-          (cd _gc && LLGO_ROOT="$GITHUB_WORKSPACE/_gc" "$RUNNER_TEMP/llgo.exe" test \
-            -run '^TestRuntimeGCNativeFinalizerReentry$' ./test/llgoext)
-      - name: Preserve repeated current-main execution outcomes
-        shell: bash
-        env:
-          ISSUE_CASES: issue75764
-        run: python .github/issue-repro/run.py
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: runtime-issue-msvc-mingw-386-${{ matrix.abi }}
-          path: _issue-reports
-          if-no-files-found: error
+      - shell: bash
+        run: go run .github/issue-repro/sdkpath.go
