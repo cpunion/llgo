@@ -5,10 +5,10 @@ import time
 
 root = Path('_issue-reports')
 results = []
-for name, repetitions, limit in [('issue25897a', 10, 90), ('issue75764', 100, 30)]:
-    for compiler in ('go', 'llgo'):
+for name, repetitions, limit in [('issue25897a', 100, 90), ('issue75764', 100, 30)]:
+    for compiler in ('go', 'main', 'fixed'):
         failures = 0
-        for iteration in range(3 if compiler == 'go' else repetitions):
+        for iteration in range((1 if name == 'issue25897a' else 3) if compiler == 'main' else 3 if compiler == 'go' else repetitions):
             started = time.monotonic()
             try:
                 process = subprocess.run([str((root / f'{compiler}-{name}.exe').resolve())],
@@ -27,5 +27,5 @@ for name, repetitions, limit in [('issue25897a', 10, 90), ('issue75764', 100, 30
                 failures += 1
                 if failures >= 2:
                     break
-if any(row['code'] != 0 or row['output'] for row in results):
-    raise SystemExit('Original current-main cases have recorded failures; see results.json')
+if any((row['code'] != 0 or row['output']) and row['compiler'] != 'main' for row in results):
+    raise SystemExit('Candidate or stock-Go cases have recorded failures; see results.json')
