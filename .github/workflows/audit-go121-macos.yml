@@ -1,0 +1,57 @@
+name: Audit issue 367 on macOS Intel
+
+on:
+  push:
+    branches: [audit/367-go121-darwin-20261113]
+    paths:
+      - .github/workflows/audit-go121-macos.yml
+      - .github/scripts/audit-go121-macos.py
+
+permissions:
+  contents: read
+
+jobs:
+  math:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+      - uses: ./.github/actions/setup-go
+        with:
+          cache: "false"
+      - name: Build current LLGo and install historical SDKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(go env GOHOSTARCH)" = amd64
+          sw_vers
+          export LLVM_CONFIG="$(brew --prefix llvm@22)/bin/llvm-config"
+          export CGO_CPPFLAGS="$(bash dev/devenv_unix_flags.sh cppflags)"
+          export CGO_CXXFLAGS="-std=c++17"
+          export CGO_LDFLAGS="$(bash dev/devenv_unix_flags.sh ldflags)"
+          mkdir -p "$RUNNER_TEMP/issue367"
+          go build -tags llvm22 -o "$RUNNER_TEMP/issue367/llgo" ./cmd/llgo
+          for version in 1.21.4 1.21.13 1.20.14; do
+            go install "golang.org/dl/go${version}@latest"
+            "$GOBIN/go${version}" download
+          done
+      - name: Run original math example with each SDK
+        env:
+          LLGO_ROOT: ${{ github.workspace }}
+          LLGO_BUILD_CACHE: "off"
+        run: |
+          python3 .github/scripts/audit-go121-macos.py \
+            "$RUNNER_TEMP/issue367/llgo" "$RUNNER_TEMP/issue367/results" \
+            "$HOME/sdk/go1.21.4" "$HOME/sdk/go1.21.13" "$HOME/sdk/go1.20.14"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: issue367-macos-intel
+          path: |
+            ${{ runner.temp }}/issue367/results/**/*.log
+            ${{ runner.temp }}/issue367/results/**/*.json
+            ${{ runner.temp }}/issue367/results/**/*.go
+            ${{ runner.temp }}/issue367/results/**/go.mod
