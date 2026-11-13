@@ -2,26 +2,9 @@
 
 package llgoext
 
-import (
-	"runtime"
-	"testing"
-)
+import "testing"
 
 var deferCaptureAllocSink int
-var deferCaptureAllocRecords [64]runtime.MemProfileRecord
-
-//go:noinline
-func deferCaptureAllocEvents() uint64 {
-	n, ok := runtime.MemProfile(deferCaptureAllocRecords[:], true)
-	if !ok {
-		panic("allocation profile capacity")
-	}
-	var total uint64
-	for _, record := range deferCaptureAllocRecords[:n] {
-		total += uint64(record.AllocObjects)
-	}
-	return total
-}
 
 //go:noinline
 func deferCaptureAllocation(value int, callback func()) {
@@ -39,13 +22,15 @@ func deferCaptureAllocation(value int, callback func()) {
 func TestDeferCaptureNoAllocation(t *testing.T) {
 	deferCaptureAllocSink = 0
 	callback := func() {}
-	deferCaptureAllocation(0, callback)
-	before := deferCaptureAllocEvents()
-	for i := 1; i <= 100; i++ {
+	i := 0
+	// Use the standard per-call measurement rather than a process-wide zero
+	// delta: an unrelated background allocation must not fail this regression.
+	allocs := testing.AllocsPerRun(100, func() {
 		deferCaptureAllocation(i, callback)
-	}
-	after := deferCaptureAllocEvents()
-	if after != before || deferCaptureAllocSink != 5050 {
-		t.Fatalf("100 calls: allocations=%d, checksum=%d; want 0, 5050", after-before, deferCaptureAllocSink)
+		i++
+	})
+	// AllocsPerRun includes one warm-up call, so values 0 through 100 run.
+	if allocs != 0 || i != 101 || deferCaptureAllocSink != 5050 {
+		t.Fatalf("allocations/call=%v, calls=%d, checksum=%d; want 0, 101, 5050", allocs, i, deferCaptureAllocSink)
 	}
 }
