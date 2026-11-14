@@ -462,21 +462,12 @@ func (b Builder) AssertNilDeref(ptr Expr) {
 	if b.PanicSite != nil {
 		b.PanicSite(b)
 	}
-	b.Call(b.Pkg.rtFunc("AssertNilDeref"), b.Prog.BoolVal(true))
+	call := b.Call(b.Pkg.rtFunc("AssertNilDeref"), b.Prog.BoolVal(true))
 	if b.Prog.NeedsFramePointer() {
-		// AssertNilDeref(true) never returns. A self-loop here, however, lets
-		// LLVM infer noreturn for statically nil callers and place their
-		// callers' return PCs at the next function entry. Keep a formal return
-		// so those PCs stay inside the caller. Do not join the success block:
-		// that would lose its non-nil fact and force spills around cold calls.
-		// These undefined results are never observed; this is not a Go return
-		// and must not dispatch defers or other source-level return handling.
-		ret := b.Func.impl.GlobalValueType().ReturnType()
-		if ret.TypeKind() == llvm.VoidTypeKind {
-			b.impl.CreateRetVoid()
-		} else {
-			b.impl.CreateRet(llvm.Undef(ret))
-		}
+		// The constant true argument guarantees a panic, even though the
+		// runtime entry also accepts false. Do not invent a normal return.
+		call.impl.AddCallSiteAttribute(-1, b.Prog.ctx.CreateEnumAttribute(llvm.AttributeKindID("noreturn"), 0))
+		b.impl.CreateUnreachable()
 	} else {
 		b.Jump(blks[0])
 	}

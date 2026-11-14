@@ -131,8 +131,12 @@ func TestAssertNilDerefColdCall(t *testing.T) {
 					}
 					next := failure.LastInstruction()
 					if prog.NeedsFramePointer() {
-						if next.InstructionOpcode() != llvm.Ret {
-							t.Fatalf("native nil failure must retain a separate formal return:\n%s", fn.impl.String())
+						if next.InstructionOpcode() != llvm.Unreachable {
+							t.Fatalf("native nil failure must not return normally:\n%s", fn.impl.String())
+						}
+						call := failure.FirstInstruction()
+						if call.InstructionOpcode() != llvm.Call || call.GetCallSiteEnumAttribute(-1, llvm.AttributeKindID("noreturn")).C == nil {
+							t.Fatalf("known-nil runtime call must not return:\n%s", fn.impl.String())
 						}
 					} else if next.InstructionOpcode() != llvm.Br || next.SuccessorsCount() != 1 || next.Successor(0) != failure {
 						t.Fatalf("non-native nil failure must not rejoin the success path:\n%s", fn.impl.String())
@@ -159,8 +163,8 @@ func TestAssertNilDerefColdCall(t *testing.T) {
 			}
 			if prog.NeedsFramePointer() {
 				// Model LTO seeing the helper body and all of its call sites.
-				// It must not propagate a constant true into this noinline
-				// helper and rediscover noreturn through its callers.
+				// The general entry can return for false, but a known-nil call
+				// cannot. Preserve that distinction through optimization.
 				helper := mod.NamedFunction(PkgRuntime + ".AssertNilDeref")
 				helper.SetLinkage(llvm.InternalLinkage)
 				helper.AddFunctionAttr(prog.ctx.CreateEnumAttribute(llvm.AttributeKindID("noinline"), 0))
@@ -183,8 +187,11 @@ func TestAssertNilDerefColdCall(t *testing.T) {
 					t.Fatal(err)
 				}
 				fn := mod.NamedFunction("nil")
-				if attr := fn.GetEnumAttributeAtIndex(-1, llvm.AttributeKindID("noreturn")); attr.C != nil {
-					t.Fatalf("static nil caller must retain a return-PC continuation after optimization:\n%s", fn.String())
+				if attr := fn.GetEnumAttributeAtIndex(-1, llvm.AttributeKindID("noreturn")); attr.C == nil {
+					t.Fatalf("static nil caller must not return normally:\n%s", fn.String())
+				}
+				if attr := helper.GetEnumAttributeAtIndex(-1, llvm.AttributeKindID("noreturn")); attr.C != nil {
+					t.Fatal("potentially returning helper was marked noreturn")
 				}
 				if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 					t.Fatal(err)
