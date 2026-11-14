@@ -12,9 +12,10 @@ import sys
 import time
 
 BASE = '5e5e6a44b2062d61bfa569f384232483763d3380'
-HEAD = '26b788258ac6c280639001ecda0af28159cf8068'
+HEAD = 'cf72501dc15335e75fe6da85b6f490db7f223ff2'
 CONTROL = '9fbd8ff1f46e099e58e7d7240c0cd6b95a57ba52'
 COMPILER_BASE = 'ac1292206d672c2aeb546780a1d585ad98edbc3d'
+COMPILER_FIX = 'efd7db1fef7692732ffd80f8fcf49530b81cd566'
 BLOCKS = 20
 SYMBOL = 'github.com/cpunion/wasmvm/internal/engine/execute.(*Execution).runSlotsLoop'
 ROOT = Path('lto-inline-results').resolve()
@@ -54,31 +55,32 @@ def build(sources, report):
                GOFLAGS='', GOEXPERIMENT='', CCFLAGS='', CFLAGS='', LDFLAGS='')
     for name in ['CGO_CPPFLAGS', 'CGO_CXXFLAGS', 'CGO_LDFLAGS', 'CGO_CFLAGS']:
         env.pop(name, None)
-    variants = [('go-base', 'base', 'go', ''), ('go-head', 'head', 'go', ''),
-                ('llgo-base', 'base', 'llgo', ''), ('llgo-head', 'head', 'llgo', ''),
-                ('llgo-nocold', 'head', 'llgo', '-Wl,-mllvm,-cold-callsite-rel-freq=0')]
+    variants = [('go-base', 'base', 'go'), ('go-head', 'head', 'go'),
+                ('llgo-main-base', 'base', 'llgo-main'), ('llgo-fix-base', 'base', 'llgo-fix'),
+                ('llgo-main-head', 'head', 'llgo-main'), ('llgo-fix-head', 'head', 'llgo-fix')]
     binaries = ROOT / 'bin'
     binaries.mkdir()
-    for name, role, compiler, flags in variants:
+    for name, role, compiler in variants:
         source = sources[role]
         # The same role always links to the same path. Keep frozen guest
         # provenance labels unchanged; real identities are recorded beside it.
         output = ROOT / ('link-' + role)
         command = [compiler, 'build']
-        if compiler == 'llgo':
+        if compiler.startswith('llgo-'):
             command += ['-O3', '-lto=full']
         command += ['-o', str(output), './benchmarks/embedded/wasmvm']
         started = time.monotonic()
         with (ROOT / (name + '-build.log')).open('w') as log:
-            subprocess.run(command, cwd=source, env=dict(env, LDFLAGS=flags),
+            subprocess.run(command, cwd=source, env=env,
                            stdout=log, stderr=subprocess.STDOUT, timeout=240, check=True)
         binary = binaries / name
         shutil.copy2(output, binary)
         assert not capture(['git', '-C', str(source), 'status', '--porcelain', '--untracked-files=no'])
-        row = dict(command=command, linkerDiagnostic=flags, source=BASE if role == 'base' else HEAD,
+        row = dict(command=command, source=BASE if role == 'base' else HEAD,
+                   compiler=compiler, compilerSha256=digest(Path(shutil.which(compiler))),
                    sha256=digest(binary), size=binary.stat().st_size,
                    binary=str(binary), compileSeconds=time.monotonic()-started)
-        if compiler == 'llgo':
+        if compiler.startswith('llgo-'):
             nm = capture(['llvm-nm', '-S', str(binary)])
             row['dispatcherSymbol'] = [line for line in nm.splitlines() if line.endswith(SYMBOL)]
             assembly = capture(['llvm-objdump', '-d', '--no-show-raw-insn', '--x86-asm-syntax=intel',
@@ -167,7 +169,10 @@ def main():
                     'cl', 'ssa', 'internal', 'cmd', 'runtime'], check=True)
     report = dict(status='running', classification='Hosted native diagnostic; not full-portfolio acceptance',
                   compilerBase=COMPILER_BASE, diagnosticCommit=capture(['git', 'rev-parse', 'HEAD']),
-                  compilerSha256=digest(Path(shutil.which('llgo'))), go=capture(['go', 'version']),
+                  compilerFix=capture(['git', 'rev-parse', COMPILER_FIX]),
+                  compilers={name: digest(Path(shutil.which(name)))
+                      for name in ['llgo-main', 'llgo-fix']},
+                  go=capture(['go', 'version']),
                   llvm=capture(['clang', '--version']), host=dict(platform=platform.platform(),
                       cpu=capture(['lscpu']), loadBefore=os.getloadavg()),
                   controlRevision=CONTROL, builds={}, cases=[], checks=[])

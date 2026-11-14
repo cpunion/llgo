@@ -1,4 +1,4 @@
-name: Native LTO inline investigation
+name: Native LTO nil-check comparison
 on:
   push:
     branches: [audit/lto-inline-performance-20261114]
@@ -10,9 +10,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-22.04]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+        cohort: [1, 2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - name: Verify the compiler source baseline
@@ -27,7 +27,9 @@ jobs:
           go-version: '1.27.3'
           cache: false
       - uses: ./.github/actions/setup-llgo-cache
-      - name: Build the current compiler
+        with:
+          build-cache-mode: off
+      - name: Build the baseline and candidate compilers
         shell: bash
         run: |
           export CGO_CPPFLAGS CGO_LDFLAGS
@@ -35,14 +37,19 @@ jobs:
           export CGO_CXXFLAGS=-std=c++17
           CGO_LDFLAGS="$(bash dev/devenv_unix_flags.sh ldflags)"
           mkdir -p "$RUNNER_TEMP/lto-inline-bin"
-          go build -o "$RUNNER_TEMP/lto-inline-bin/llgo" ./cmd/llgo
+          git fetch --no-tags --depth=1 origin efd7db1fef7692732ffd80f8fcf49530b81cd566
+          git diff --exit-code ac1292206d672c2aeb546780a1d585ad98edbc3d efd7db1fef7692732ffd80f8fcf49530b81cd566 -- runtime internal cmd cl
+          git worktree add --detach "$RUNNER_TEMP/llgo-nil-fix" efd7db1fef7692732ffd80f8fcf49530b81cd566
+          go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-main" ./cmd/llgo
+          (cd "$RUNNER_TEMP/llgo-nil-fix" && go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-fix" ./cmd/llgo)
           echo "$RUNNER_TEMP/lto-inline-bin" >> "$GITHUB_PATH"
           echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "LLGO_BUILD_CACHE=off" >> "$GITHUB_ENV"
       - name: Fixed native comparison with same-binary controls
         run: python3 .github/scripts/verify_lto_inline.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: lto-inline-${{ matrix.runner }}
+          name: lto-nil-cohort-${{ matrix.cohort }}
           path: lto-inline-results/
           if-no-files-found: error
