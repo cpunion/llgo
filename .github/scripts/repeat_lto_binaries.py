@@ -28,9 +28,9 @@ def main():
     for path in INPUT.glob('*.asm'):
         shutil.copy2(path, ROOT/path.name)
     probe.ROOT = ROOT
-    probe.MEASUREMENT_SEED = 2026111410
+    probe.MEASUREMENT_SEED = 2026111412
     report = dict(status='running', classification='Preplanned independent fixed-binary replication; prior unresolved controls retained',
-                  frozenRun=43605504511, compilerBase=frozen['compilerBase'], compilerFix=frozen['compilerFix'],
+                  frozenRun=43610715887, compilerBase=frozen['compilerBase'], compilerFix=frozen['compilerFix'],
                   commonRuntime=frozen['commonRuntime'], go=probe.capture(['go','version']), llvm=frozen['llvm'],
                   host=dict(platform=platform.platform(), cpu=probe.capture(['lscpu']), loadBefore=os.getloadavg()),
                   controlRevision=frozen['controlRevision'], builds=builds, cases=[], checks=[])

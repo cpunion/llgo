@@ -1,9 +1,10 @@
-name: Native switch-cycle scoped inline comparison
+name: Independent fixed-binary scoped-inline replication
 on:
   push:
     branches: [audit/lto-inline-performance-20261114]
 permissions:
   contents: read
+  actions: read
 jobs:
   native-diagnostic:
     if: github.repository == 'cpunion/llgo'
@@ -12,50 +13,44 @@ jobs:
       matrix:
         cohort: [1, 2]
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v7
-      - name: Verify the compiler source baseline
-        run: |
-          git fetch --no-tags --depth=1 origin ac1292206d672c2aeb546780a1d585ad98edbc3d
-          git diff --exit-code ac1292206d672c2aeb546780a1d585ad98edbc3d HEAD -- cl ssa internal cmd runtime
-      - uses: ./.github/actions/setup-deps
+      - uses: actions/checkout@v7
         with:
-          llvm-version: 22
+          repository: cpunion/wasmvm
+          ref: 26b788258ac6c280639001ecda0af28159cf8068
+          path: fixture-source
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: cpunion/wasmvm
+          ref: 9fbd8ff1f46e099e58e7d7240c0cd6b95a57ba52
+          path: control-source
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: lto-scoped-cohort-1
+          run-id: 43610715887
+          github-token: ${{ github.token }}
+          path: lto-repeat-input
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: '1.27.3'
           cache: false
-      - uses: ./.github/actions/setup-llgo-cache
-        with:
-          build-cache-mode: off
-      - name: Build the baseline and candidate compilers
-        shell: bash
+      - name: Install runtime libraries
         run: |
-          export CGO_CPPFLAGS CGO_LDFLAGS
-          CGO_CPPFLAGS="$(bash dev/devenv_unix_flags.sh cppflags)"
-          export CGO_CXXFLAGS=-std=c++17
-          CGO_LDFLAGS="$(bash dev/devenv_unix_flags.sh ldflags)"
-          mkdir -p "$RUNNER_TEMP/lto-inline-bin"
-          git fetch --no-tags --depth=1 origin 6a482f7f6ad94e9f2d0a0fea97dd4cabd46b1130
-          git worktree add --detach "$RUNNER_TEMP/llgo-scoped-base" 6a482f7f6ad94e9f2d0a0fea97dd4cabd46b1130
-          (cd "$RUNNER_TEMP/llgo-scoped-base" && go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-main" ./cmd/llgo)
-          git fetch --no-tags --depth=1 origin c966d9f468b01144279696fb2c51a411392790cf
-          git worktree add --detach "$RUNNER_TEMP/llgo-scoped-fix" c966d9f468b01144279696fb2c51a411392790cf
-          (cd "$RUNNER_TEMP/llgo-scoped-fix" && go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-fix" ./cmd/llgo)
-          (cd "$RUNNER_TEMP/llgo-scoped-fix" && go test ./internal/build -run '^TestDispatchInline' -count=1)
-          echo "$RUNNER_TEMP/lto-inline-bin" >> "$GITHUB_PATH"
-          echo "LLGO_ROOT=$RUNNER_TEMP/llgo-scoped-base" >> "$GITHUB_ENV"
-          echo "LLGO_BUILD_CACHE=off" >> "$GITHUB_ENV"
-      - name: Fixed native comparison with same-binary controls
-        run: python3 .github/scripts/verify_lto_inline.py
+          python3 .github/actions/setup-deps/ubuntu_apt_test.py
+          sudo python3 .github/actions/setup-deps/ubuntu_apt.py /etc/apt "$(dpkg --print-architecture)"
+          sudo timeout --kill-after=30s 5m apt-get update
+          sudo timeout --kill-after=30s 5m apt-get install -y libgc1 libffi8
+      - name: Replay all frozen binaries with independent sample ordering
+        run: python3 -u .github/scripts/repeat_lto_binaries.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: lto-scoped-cohort-${{ matrix.cohort }}
+          name: lto-scoped-replication-${{ matrix.cohort }}
           path: |
-            lto-inline-results/*.json
-            lto-inline-results/*.asm
-            lto-inline-results/*build.log
-            lto-inline-results/bin/
+            lto-repeat-results/*.json
+            lto-repeat-results/*.asm
           if-no-files-found: error
