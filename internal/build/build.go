@@ -2154,6 +2154,12 @@ func (c *context) clangConfig() clang.Config {
 
 func (c *context) linker() *clang.Cmd {
 	config := c.clangConfig()
+	if args := nativeFullLTOAlignmentArgs(c.buildConf, &c.crossCompile); len(args) != 0 {
+		// Driver defaults precede command prefixes and environment/package
+		// flags so explicit LLVM alignment options retain their precedence.
+		config.CCArgs = slices.Concat(args, config.CCArgs)
+		config.CXXArgs = slices.Concat(args, config.CXXArgs)
+	}
 	linkerProgram := config.Linker
 	useCXX := config.Linker == "" && config.CXX != ""
 	if useCXX {
