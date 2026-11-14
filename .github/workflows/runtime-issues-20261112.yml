@@ -1,60 +1,40 @@
-name: Native nil-panic control-flow comparison
+name: Native nil-panic instruction attribution
 on:
   push:
     branches: [audit/lto-inline-performance-20261114]
 permissions:
   contents: read
+  actions: read
 jobs:
   native-diagnostic:
     if: github.repository == 'cpunion/llgo'
-    strategy:
-      fail-fast: false
-      matrix:
-        cohort: [1, 2]
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - name: Verify the compiler source baseline
+      - uses: actions/checkout@v7
+        with:
+          repository: cpunion/wasmvm
+          ref: cf72501dc15335e75fe6da85b6f490db7f223ff2
+          path: fixture-source
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: lto-nil-cohort-2
+          run-id: 43590417831
+          github-token: ${{ github.token }}
+          path: nil-callgrind-input
+      - name: Install the profiler and runtime libraries
         run: |
-          git fetch --no-tags --depth=1 origin ac1292206d672c2aeb546780a1d585ad98edbc3d
-          git diff --exit-code ac1292206d672c2aeb546780a1d585ad98edbc3d HEAD -- cl ssa internal cmd runtime
-      - uses: ./.github/actions/setup-deps
-        with:
-          llvm-version: 22
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version: '1.27.3'
-          cache: false
-      - uses: ./.github/actions/setup-llgo-cache
-        with:
-          build-cache-mode: off
-      - name: Build the baseline and candidate compilers
-        shell: bash
-        run: |
-          export CGO_CPPFLAGS CGO_LDFLAGS
-          CGO_CPPFLAGS="$(bash dev/devenv_unix_flags.sh cppflags)"
-          export CGO_CXXFLAGS=-std=c++17
-          CGO_LDFLAGS="$(bash dev/devenv_unix_flags.sh ldflags)"
-          mkdir -p "$RUNNER_TEMP/lto-inline-bin"
-          git fetch --no-tags --depth=1 origin 44756a542fbb6173826c8fcb1d12d3ef5e4d777a e57dd9ec011fa8a039c14ea6406de1d7208bcc15
-          git diff --exit-code 44756a542fbb6173826c8fcb1d12d3ef5e4d777a e57dd9ec011fa8a039c14ea6406de1d7208bcc15 -- runtime internal cmd cl
-          git worktree add --detach "$RUNNER_TEMP/llgo-nil-base" 44756a542fbb6173826c8fcb1d12d3ef5e4d777a
-          git worktree add --detach "$RUNNER_TEMP/llgo-nil-fix" e57dd9ec011fa8a039c14ea6406de1d7208bcc15
-          (cd "$RUNNER_TEMP/llgo-nil-base" && go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-main" ./cmd/llgo)
-          (cd "$RUNNER_TEMP/llgo-nil-fix" && go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-fix" ./cmd/llgo)
-          echo "$RUNNER_TEMP/lto-inline-bin" >> "$GITHUB_PATH"
-          echo "LLGO_ROOT=$RUNNER_TEMP/llgo-nil-base" >> "$GITHUB_ENV"
-          echo "LLGO_BUILD_CACHE=off" >> "$GITHUB_ENV"
-      - name: Fixed native comparison with same-binary controls
-        run: python3 .github/scripts/verify_lto_inline.py
+          python3 .github/actions/setup-deps/ubuntu_apt_test.py
+          sudo python3 .github/actions/setup-deps/ubuntu_apt.py /etc/apt "$(dpkg --print-architecture)"
+          sudo timeout --kill-after=30s 5m apt-get update
+          sudo timeout --kill-after=30s 5m apt-get install -y valgrind libgc1 libffi8 binutils
+      - name: Profile the exact previously measured binaries
+        run: python3 -u .github/scripts/verify_nil_callgrind.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: lto-nil-cohort-${{ matrix.cohort }}
-          path: |
-            lto-inline-results/*.json
-            lto-inline-results/*.asm
-            lto-inline-results/*build.log
-            lto-inline-results/bin/
+          name: nil-panic-instruction-attribution
+          path: nil-callgrind-results/
           if-no-files-found: error
