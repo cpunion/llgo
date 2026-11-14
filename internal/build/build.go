@@ -2152,7 +2152,7 @@ func (c *context) clangConfig() clang.Config {
 	config.CXX = c.crossCompile.CXX
 	config.CXXArgs = slices.Clone(c.crossCompile.CXXArgs)
 	config.LinkerArgs = slices.Clone(c.crossCompile.LinkerArgs)
-	if dispatchInlineEnabled(c.buildConf) {
+	if c.dispatchInlineBudgetEnabled() {
 		// LLVM 22 reads function-inline-threshold only after completing its
 		// cost walk; without this, its cold-site early exit masks the hint.
 		config.LDFLAGS = append(slices.Clone(config.LDFLAGS), "-Wl,-mllvm,-inline-cost-full")
@@ -3697,7 +3697,9 @@ func optimizeLLVMModule(ctx *context, pkgPath string, mod gllvm.Module) error {
 	if err := mod.RunPasses(llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode()), ctx.prog.TargetMachine(), pbo); err != nil {
 		return fmt.Errorf("run LLVM passes failed for %v: %w", pkgPath, err)
 	}
-	applyDispatchInlineBudget(ctx.buildConf, mod)
+	if ctx.dispatchInlineBudgetEnabled() {
+		applyDispatchInlineBudget(ctx.buildConf, mod)
+	}
 	return nil
 }
 
