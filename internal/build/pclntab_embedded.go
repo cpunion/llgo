@@ -86,14 +86,35 @@ func pruneEmbeddedPCLN(ctx *context, plan *mainLinkPlan, output string, verbose 
 	if plan.embeddedPCLN != nil && plan.entryTarget.GOARCH == "wasm" {
 		analyze = func(path string) (pclnpost.ExternalAnalysis, error) { return analyzeWasmPCLN(path, *plan.embeddedPCLN) }
 	}
-	return pruneEmbeddedPCLNWith(plan, output, verbose, embeddedPCLNLinker{
+	var relinkObjects string
+	previousObjects := ctx.darwinLTOObjectDirectory
+	err := pruneEmbeddedPCLNWith(plan, output, verbose, embeddedPCLNLinker{
 		analyze: analyze,
 		compile: func(ir, object string) error { return compileEmbeddedEntry(ctx, plan, ir, object) },
 		link: func(candidate string, inputs []string) error {
+			if ctx.buildConf.Goos == "darwin" && ctx.buildConf.ltoEnabled() {
+				oldOutput, oldDirectory := ctx.darwinLTOObjectOutput, ctx.darwinLTOObjectDirectory
+				ctx.darwinLTOObjectOutput, ctx.darwinLTOObjectDirectory = output, ""
+				defer func() {
+					ctx.darwinLTOObjectOutput, ctx.darwinLTOObjectDirectory = oldOutput, oldDirectory
+				}()
+				err := linkObjFiles(ctx, candidate, inputs, plan.linkArgs, verbose)
+				relinkObjects = ctx.darwinLTOObjectDirectory
+				return err
+			}
 			return linkObjFiles(ctx, candidate, inputs, plan.linkArgs, verbose)
 		},
 		publish: replaceFile,
 	})
+	if err != nil && relinkObjects != "" {
+		_ = os.RemoveAll(relinkObjects)
+	} else if relinkObjects != "" {
+		if previousObjects != "" && previousObjects != relinkObjects {
+			_ = os.RemoveAll(previousObjects)
+		}
+		ctx.darwinLTOObjectDirectory = relinkObjects
+	}
+	return err
 }
 
 // The staged linker keeps publication separate from fallible compilation and
