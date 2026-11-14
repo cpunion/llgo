@@ -1,5 +1,6 @@
 """Strict current-runtime replay; no retries or expected-failure exemptions."""
 
+import argparse
 import hashlib
 import json
 import os
@@ -19,6 +20,17 @@ RESULTS = []
 
 def save():
     (OUTPUT / "results.json").write_text(json.dumps(RESULTS, indent=2) + "\n")
+
+
+def source_manifest():
+    sources = ROOT / ".github" / "issue-repro" / "2780" / "go1267"
+    manifest = json.loads((sources / "sources.json").read_text())
+    for filename, expected in manifest["sha256"].items():
+        digest = hashlib.sha256((sources / filename).read_bytes()).hexdigest()
+        if digest != expected:
+            raise ValueError(f"original Go source changed: {filename}: {digest}, want {expected}")
+    (OUTPUT / "verified-sources.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return sources, manifest
 
 
 def run(name, args, cwd=ROOT, timeout=90, env=None):
@@ -84,8 +96,7 @@ def main():
     subprocess.run(["git", "diff", "--exit-code", identity["runtimeBase"], "HEAD", "--", "runtime"], check=True)
     run("compiler-version", [LLGO, "version"])
     run("go-version", ["go", "version"])
-    sources = ROOT / ".github" / "issue-repro" / "2780" / "go1267"
-    manifest = json.loads((sources / "sources.json").read_text())
+    sources, manifest = source_manifest()
     identity["upstreamSources"] = manifest
     for filename, repetitions in [("issue25897a.go", 100), ("issue79186.go", 15), ("issue30041.go", 10)]:
         source = sources / filename
@@ -112,4 +123,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preflight", action="store_true")
+    if parser.parse_args().preflight:
+        source_manifest()
+        print("Original Go sources and license verified")
+    else:
+        main()
