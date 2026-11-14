@@ -14,7 +14,7 @@ func TestDisableBoundsChecksIR(t *testing.T) {
 	checked := boundsChecksModuleIR(t, false)
 	unchecked := boundsChecksModuleIR(t, true)
 
-	for _, helper := range []string{"PanicIndex", "StringSlice2", "NewSlice2", "NewSlice3Bounds", "PanicSliceConvert"} {
+	for _, helper := range []string{"PanicIndex", "PanicBounds", "PanicSliceConvert"} {
 		if !strings.Contains(checked, helper) {
 			t.Errorf("default IR does not contain bounds helper %q", helper)
 		}
@@ -31,7 +31,7 @@ func TestDisableBoundsChecksIR(t *testing.T) {
 	}
 	for _, function := range []string{"sliceString", "sliceSlice", "sliceArray", "sliceArrayPointer", "sliceThree"} {
 		body := llvmFunctionBody(t, unchecked, function)
-		if strings.Contains(body, "StringSlice") || strings.Contains(body, "NewSlice2") || strings.Contains(body, "NewSlice3Bounds") {
+		if strings.Contains(body, "PanicBounds") {
 			t.Errorf("-B %s contains a slice bounds helper:\n%s", function, body)
 		}
 	}
@@ -69,7 +69,7 @@ func TestDisableBoundsChecksIR(t *testing.T) {
 }
 
 func TestDisableBoundsChecksLegalResultsMatchDefault(t *testing.T) {
-	wantFields := []string{"98", "30", "10", "40", "bc", "2", "3", "2", "3", "2", "3", "2", "3", "10", "40", "20", "30"}
+	wantFields := []string{"98", "30", "10", "40", "bc", "2", "3", "2", "3", "2", "3", "2", "3", "10", "40", "20", "30", "20", "30", "20", "30"}
 	checked := runBinary(t, buildBoundsChecksBinary(t, false))
 	unchecked := runBinary(t, buildBoundsChecksBinary(t, true))
 	if checked != unchecked {

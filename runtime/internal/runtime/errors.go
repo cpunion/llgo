@@ -73,6 +73,11 @@ func panicBounds(x int64, signed bool, y int, code boundsErrorCode) {
 	panic(boundsError{x: x, signed: signed, y: y, code: code})
 }
 
+// PanicBounds reports a compiler-generated bounds check failure.
+func PanicBounds(x int64, signed bool, y int, code uint8) {
+	panicBounds(x, signed, y, boundsErrorCode(code))
+}
+
 func boundsOutOfRange(x int64, signed bool, y int, inclusive bool) bool {
 	if signed {
 		if x < 0 {

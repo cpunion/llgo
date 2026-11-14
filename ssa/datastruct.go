@@ -395,36 +395,11 @@ func (b Builder) Index(x, idx Expr, takeAddr func() (addr Expr, zero bool)) Expr
 func (b Builder) Slice(x, low, high, max Expr) (ret Expr) {
 	dbgInstrf("Slice %v, %v, %v\n", x.impl, low.impl, high.impl)
 	prog := b.Prog
-	// Preserve the original widths before FitIntSize truncates wide indices.
-	// Only signed indices that fit a native int use the smaller string entry.
-	nativeIndices := (low.IsNil() || prog.SizeOf(low.Type) <= prog.SizeOf(prog.Int())) &&
-		(high.IsNil() || prog.SizeOf(high.Type) <= prog.SizeOf(prog.Int()))
-	var nCap Expr
-	var nEltSize Expr
-	var base Expr
-	var lowIsNil = low.IsNil()
-	var lowArg Expr
-	var highArg Expr
-	var maxArg Expr
-	var lowSigned = true
-	var highSigned = true
-	var maxSigned = true
-	var upperIsLen bool
-	if lowIsNil {
+	if low.IsNil() {
 		low = prog.IntVal(0, prog.Int())
-		lowArg = prog.IntVal(0, prog.Int64())
-	} else {
-		lowArg, lowSigned = b.boundsArg(low)
-		low = b.FitIntSize(low)
 	}
-	if !high.IsNil() {
-		highArg, highSigned = b.boundsArg(high)
-		high = b.FitIntSize(high)
-	}
-	if !max.IsNil() {
-		maxArg, maxSigned = b.boundsArg(max)
-		max = b.FitIntSize(max)
-	}
+	var base, upper Expr
+	upperCode, fullUpperCode := sliceBoundsAcap, sliceBounds3Acap
 	switch t := x.raw.Type.Underlying().(type) {
 	case *types.Basic:
 		if t.Kind() != types.String {
@@ -432,85 +407,92 @@ func (b Builder) Slice(x, low, high, max Expr) (ret Expr) {
 		}
 		if high.IsNil() {
 			high = b.StringLen(x)
-			highArg, highSigned = b.boundsArg(high)
 		}
+		if !prog.disableBoundsChecks {
+			b.checkSliceBound(high, b.StringLen(x), sliceBoundsAlen)
+			b.checkSliceBound(low, high, sliceBoundsB)
+		}
+		ret = b.stringSliceUnchecked(x, b.FitIntSize(low), b.FitIntSize(high))
 		ret.Type = x.Type
-		if prog.disableBoundsChecks {
-			ret.impl = b.stringSliceUnchecked(x, low, high).impl
-		} else if nativeIndices && lowSigned && highSigned {
-			ret.impl = b.InlineCall(b.Pkg.rtFunc("StringSlice"), x, low, high).impl
-		} else {
-			ret.impl = b.InlineCall(b.Pkg.rtFunc("StringSlice2"), x, lowArg, highArg, prog.BoolVal(lowSigned), prog.BoolVal(highSigned)).impl
-		}
 		return
 	case *types.Slice:
-		nEltSize = SizeOf(prog, prog.Index(x.Type))
-		nCap = b.SliceCap(x)
+		ret.Type = x.Type
+		base, upper = b.SliceData(x), b.SliceCap(x)
 		if high.IsNil() {
 			high = b.SliceLen(x)
-			highArg, highSigned = b.boundsArg(high)
 		}
-		ret.Type = x.Type
-		base = b.SliceData(x)
 	case *types.Pointer:
-		telem := t.Elem()
-		switch te := telem.Underlying().(type) {
-		case *types.Array:
-			elem := prog.rawType(te.Elem())
+		if array, ok := t.Elem().Underlying().(*types.Array); ok {
+			elem := prog.rawType(array.Elem())
 			ret.Type = prog.Slice(elem)
-			nEltSize = SizeOf(prog, elem)
-			nCap = prog.IntVal(uint64(te.Len()), prog.Int())
-			upperIsLen = true
-			if high.IsNil() {
-				if lowIsNil && max.IsNil() && !prog.disableBoundsChecks {
-					ret.impl = b.unsafeSlice(x, nCap.impl, nCap.impl).impl
-					return
-				}
-				high = nCap
-				highArg, highSigned = b.boundsArg(high)
-			}
 			base = x
+			base.Type = prog.Pointer(elem)
+			upper = prog.IntVal(uint64(array.Len()), prog.Int())
+			upperCode, fullUpperCode = sliceBoundsAlen, sliceBounds3Alen
+			if !isKnownNonNilArrayBase(x.impl) {
+				b.AssertNilDeref(x)
+			}
+			if high.IsNil() {
+				high = upper
+			}
 		}
 	}
-	if prog.disableBoundsChecks {
-		if _, ok := x.raw.Type.Underlying().(*types.Pointer); ok && !isKnownNonNilArrayBase(x.impl) {
-			b.AssertNilDeref(x)
+	if !prog.disableBoundsChecks {
+		if max.IsNil() {
+			b.checkSliceBound(high, upper, upperCode)
+			b.checkSliceBound(low, high, sliceBoundsB)
+		} else {
+			// Check from the upper bound down. Each successful check proves
+			// the next limit is non-negative and fits the native word size.
+			b.checkSliceBound(max, upper, fullUpperCode)
+			b.checkSliceBound(high, max, sliceBounds3B)
+			b.checkSliceBound(low, high, sliceBounds3C)
 		}
-		upper := nCap
-		if !max.IsNil() {
-			upper = max
-		}
-		ret.impl = b.sliceUnchecked(ret.Type, base, low, high, upper).impl
-		return
 	}
-	if max.IsNil() {
-		ret.impl = b.InlineCall(
-			b.Pkg.rtFunc("NewSlice2"),
-			base,
-			nEltSize,
-			nCap,
-			lowArg,
-			highArg,
-			prog.BoolVal(lowSigned),
-			prog.BoolVal(highSigned),
-			prog.BoolVal(upperIsLen),
-		).impl
-		return
+	if !max.IsNil() {
+		upper = max
 	}
-	ret.impl = b.InlineCall(
-		b.Pkg.rtFunc("NewSlice3Bounds"),
-		base,
-		nEltSize,
-		nCap,
-		lowArg,
-		highArg,
-		maxArg,
-		prog.BoolVal(lowSigned),
-		prog.BoolVal(highSigned),
-		prog.BoolVal(maxSigned),
-		prog.BoolVal(upperIsLen),
-	).impl
+	ret.impl = b.sliceUnchecked(ret.Type, base, b.FitIntSize(low), b.FitIntSize(high), b.FitIntSize(upper)).impl
 	return
+}
+
+// These codes are shared with runtime/internal/runtime.boundsErrorCode.
+const (
+	sliceBoundsAlen uint8 = 1 + iota
+	sliceBoundsAcap
+	sliceBoundsB
+	sliceBounds3Alen
+	sliceBounds3Acap
+	sliceBounds3B
+	sliceBounds3C
+)
+
+// checkSliceBound leaves slice arithmetic in the caller, independent of LLVM's
+// inlining budget. Unsigned i64 comparisons reject negative and wide indices
+// before any truncation; signedness is needed only for the panic message.
+func (b Builder) checkSliceBound(index, limit Expr, code uint8) {
+	// Callers establish a non-negative limit before checking lower bounds.
+	if v, ok := isConstantUint(index); ok && v == 0 {
+		return
+	}
+	x, signed := b.boundsArg(index)
+	y, _ := b.boundsArg(limit)
+	check := Expr{llvm.CreateICmp(b.impl, llvm.IntUGT, x.impl, y.impl), b.Prog.Bool()}
+	if check.impl.IsConstant() && check.impl.IsNull() {
+		return
+	}
+	blocks := b.Func.MakeBlocks(2)
+	b.If(check, blocks[0], blocks[1])
+	b.SetBlockEx(blocks[0], AtEnd, false)
+	if b.PanicSite != nil {
+		b.PanicSite(b)
+	}
+	b.Call(b.Pkg.rtFunc("PanicBounds"), x, b.Prog.BoolVal(signed), b.FitIntSize(limit), b.Prog.IntVal(uint64(code), b.Prog.Byte()))
+	// As for index checks, retain a post-call instruction for return-PC line
+	// information without allowing a panic path into the successful path.
+	b.Jump(blocks[0])
+	b.SetBlockEx(blocks[1], AtEnd, false)
+	b.blk.last = blocks[1].last
 }
 
 func (b Builder) stringSliceUnchecked(x, low, high Expr) Expr {
@@ -525,6 +507,11 @@ func (b Builder) stringSliceUnchecked(x, low, high Expr) Expr {
 func (b Builder) sliceUnchecked(t Type, base, low, high, upper Expr) Expr {
 	length := b.impl.CreateSub(high.impl, low.impl, "")
 	capacity := b.impl.CreateSub(upper.impl, low.impl, "")
+	if v, ok := isConstantUint(low); ok && v == 0 {
+		ret := b.unsafeSlice(base, length, capacity)
+		ret.Type = t
+		return ret
+	}
 	advanced := b.Advance(base, low)
 	zero := llvm.ConstInt(capacity.Type(), 0, false)
 	hasCapacity := llvm.CreateICmp(b.impl, llvm.IntSGT, capacity, zero)

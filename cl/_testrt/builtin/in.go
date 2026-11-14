@@ -70,9 +70,27 @@ func demo() {
 // CHECK-DAG: [[INT_TAIL:%.*]] = alloca [4 x i64], align 8
 // make([]byte, 4, 10) must preserve both the requested length and capacity.
 // CHECK-DAG: [[D_STORAGE:%.*]] = alloca [10 x i8], align 1
-// CHECK: [[D:%.*]] = call %"{{.*}}Slice" @"{{.*}}/runtime/internal/runtime.NewSlice2"(ptr [[D_STORAGE]], i64 1, i64 10, i64 0, i64 4, i1 true, i1 true, i1 true)
+// CHECK: [[D_DATA:%.*]] = insertvalue %"{{.*}}Slice" undef, ptr [[D_STORAGE]], 0
+// CHECK: [[D_LEN:%.*]] = insertvalue %"{{.*}}Slice" [[D_DATA]], i64 4, 1
+// CHECK: [[D:%.*]] = insertvalue %"{{.*}}Slice" [[D_LEN]], i64 10, 2
+// The loop header precedes generated bounds-check blocks in the IR.
+// CHECK: [[NEXT:%.*]] = call { i1, i64, i32 } @"{{.*}}/runtime/internal/runtime.StringIterNext"(ptr [[ITER:%.*]])
+// CHECK: [[HAS_NEXT:%.*]] = extractvalue { i1, i64, i32 } [[NEXT]], 0
+// CHECK: br i1 [[HAS_NEXT]], label %{{.*}}, label %{{.*}}
+// Floating-point helpers are exercised with both infinity signs and NaN results.
+// CHECK: [[POS_INF:%.*]] = call double @main.Inf(i64 1)
+// CHECK: [[NEG_INF:%.*]] = call double @main.Inf(i64 -1)
+// CHECK: [[NAN_VALUE:%.*]] = call double @main.NaN()
+// CHECK: [[NAN_INPUT:%.*]] = call double @main.NaN()
+// CHECK: [[NAN_TRUE:%.*]] = call i1 @main.IsNaN(double [[NAN_INPUT]])
+// CHECK: [[NAN_FALSE:%.*]] = call i1 @main.IsNaN(double 1.000000e+00)
+// Byte/rune conversions are round-tripped through their originating slices.
+// CHECK: [[BYTES:%.*]] = call %"{{.*}}Slice" @"{{.*}}/runtime/internal/runtime.StringToBytesReadOnly"(%"{{.*}}String" { ptr @{{.*}}, i64 7 })
+// CHECK: [[RUNES:%.*]] = call %"{{.*}}Slice" @"{{.*}}/runtime/internal/runtime.StringToRunesBuffer"(%"{{.*}}String" { ptr @{{.*}}, i64 7 }, ptr %{{[0-9]+}})
+// CHECK: call %"{{.*}}String" @"{{.*}}/runtime/internal/runtime.StringFromBytesBuffer"(%"{{.*}}Slice" [[BYTES]], ptr %{{[0-9]+}})
+// CHECK: call %"{{.*}}String" @"{{.*}}/runtime/internal/runtime.StringFromRunesBuffer"(%"{{.*}}Slice" [[RUNES]], ptr %{{[0-9]+}})
 // len("hello"[5:]) keeps the empty string slice's bounds.
-// CHECK: call %"{{.*}}String" @"{{.*}}/runtime/internal/runtime.StringSlice"(%"{{.*}}String" { ptr @{{.*}}, i64 5 }, i64 5, i64 5)
+// CHECK: call void @"{{.*}}/runtime/internal/runtime.PrintInt"(i64 0)
 // append(s, 5, 6, 7, 8) forwards the materialized four-element tail.
 // CHECK: call void @llvm.memset.p0.i64(ptr [[INT_TAIL]], i8 0, i64 32, i1 false)
 // CHECK: [[INT_TAIL_0:%.*]] = getelementptr inbounds i64, ptr [[INT_TAIL]], i64 0
@@ -92,22 +110,7 @@ func demo() {
 // CHECK: [[COPY_LITERAL:%.*]] = call i64 @"{{.*}}/runtime/internal/runtime.SliceCopy"(%"{{.*}}Slice" %{{.*}}, ptr @{{.*}}, i64 4, i64 1)
 // CHECK: store i64 [[COPY_LITERAL]], ptr [[COPY_N]]
 // String range is lowered to one iterator whose yielded index/rune are consumed.
-// CHECK: [[ITER:%.*]] = call ptr @"{{.*}}/runtime/internal/runtime.NewStringIterBuffer"(%"{{.*}}String" { ptr @{{.*}}, i64 7 }, ptr %{{[0-9]+}})
-// CHECK: [[NEXT:%.*]] = call { i1, i64, i32 } @"{{.*}}/runtime/internal/runtime.StringIterNext"(ptr [[ITER]])
-// CHECK: [[HAS_NEXT:%.*]] = extractvalue { i1, i64, i32 } [[NEXT]], 0
-// CHECK: br i1 [[HAS_NEXT]], label %{{.*}}, label %{{.*}}
-// Floating-point helpers are exercised with both infinity signs and NaN results.
-// CHECK: [[POS_INF:%.*]] = call double @main.Inf(i64 1)
-// CHECK: [[NEG_INF:%.*]] = call double @main.Inf(i64 -1)
-// CHECK: [[NAN_VALUE:%.*]] = call double @main.NaN()
-// CHECK: [[NAN_INPUT:%.*]] = call double @main.NaN()
-// CHECK: [[NAN_TRUE:%.*]] = call i1 @main.IsNaN(double [[NAN_INPUT]])
-// CHECK: [[NAN_FALSE:%.*]] = call i1 @main.IsNaN(double 1.000000e+00)
-// Byte/rune conversions are round-tripped through their originating slices.
-// CHECK: [[BYTES:%.*]] = call %"{{.*}}Slice" @"{{.*}}/runtime/internal/runtime.StringToBytesReadOnly"(%"{{.*}}String" { ptr @{{.*}}, i64 7 })
-// CHECK: [[RUNES:%.*]] = call %"{{.*}}Slice" @"{{.*}}/runtime/internal/runtime.StringToRunesBuffer"(%"{{.*}}String" { ptr @{{.*}}, i64 7 }, ptr %{{[0-9]+}})
-// CHECK: call %"{{.*}}String" @"{{.*}}/runtime/internal/runtime.StringFromBytesBuffer"(%"{{.*}}Slice" [[BYTES]], ptr %{{[0-9]+}})
-// CHECK: call %"{{.*}}String" @"{{.*}}/runtime/internal/runtime.StringFromRunesBuffer"(%"{{.*}}Slice" [[RUNES]], ptr %{{[0-9]+}})
+// CHECK: [[ITER]] = call ptr @"{{.*}}/runtime/internal/runtime.NewStringIterBuffer"(%"{{.*}}String" { ptr @{{.*}}, i64 7 }, ptr %{{[0-9]+}})
 // CHECK: [[BYTE_VALUE:%.*]] = load i8, ptr %{{.*}}
 // CHECK: [[BYTE64:%.*]] = zext i8 [[BYTE_VALUE]] to i64
 // CHECK: call %"{{.*}}String" @"{{.*}}/runtime/internal/runtime.StringFromUint64Buffer"(i64 [[BYTE64]], ptr %{{[0-9]+}})
