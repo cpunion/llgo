@@ -1,6 +1,7 @@
 package ssa_test
 
 import (
+	"fmt"
 	"go/types"
 	"regexp"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/xgo-dev/llgo/ssa"
 	"github.com/xgo-dev/llgo/ssa/ssatest"
+	"github.com/xgo-dev/llvm"
 )
 
 func TestBoundsCheckModesIR(t *testing.T) {
@@ -16,9 +18,7 @@ func TestBoundsCheckModesIR(t *testing.T) {
 
 	for _, helper := range []string{
 		"PanicIndex",
-		"StringSlice",
-		"NewSlice2",
-		"NewSlice3Bounds",
+		"PanicBounds",
 		"PanicSliceConvert",
 	} {
 		if !strings.Contains(checked, helper) {
@@ -36,12 +36,12 @@ func TestBoundsCheckModesIR(t *testing.T) {
 	if len(match) == 0 || match[1] != match[2] || match[2] != match[3] {
 		t.Error("checked IR does not isolate PanicIndex in a non-returning failure branch")
 	}
-	if got := strings.Count(unchecked, "select i1"); got < 4 {
-		t.Errorf("unchecked IR contains %d select operations, want at least 4", got)
+	if got := strings.Count(unchecked, "select i1"); got < 3 {
+		t.Errorf("unchecked IR contains %d select operations, want at least 3", got)
 	}
 }
 
-func TestStringSliceIndexABI(t *testing.T) {
+func TestStringSliceBoundsIR(t *testing.T) {
 	for _, arch := range []string{"amd64", "386"} {
 		t.Run(arch, func(t *testing.T) {
 			t.Setenv("GOOS", "windows")
@@ -49,22 +49,21 @@ func TestStringSliceIndexABI(t *testing.T) {
 			prog := ssatest.NewProgram(t, &ssa.Target{GOOS: "windows", GOARCH: arch})
 			t.Cleanup(prog.Dispose)
 			for _, test := range []struct {
-				name               string
-				low, high          types.BasicKind
-				omitLow, omitHigh  bool
-				native32, native64 bool
+				name              string
+				low, high         types.BasicKind
+				omitLow, omitHigh bool
 			}{
-				{"native", types.Int, types.Int, false, false, true, true},
-				{"narrow", types.Int8, types.Int16, false, false, true, true},
-				{"wideLow", types.Int64, types.Int, false, false, false, true},
-				{"wideHigh", types.Int, types.Int64, false, false, false, true},
-				{"unsignedLow", types.Uint, types.Int, false, false, false, false},
-				{"unsignedHigh", types.Int, types.Uint, false, false, false, false},
-				{"wideUnsignedLow", types.Uint64, types.Int, false, false, false, false},
-				{"wideUnsignedHigh", types.Int, types.Uint64, false, false, false, false},
-				{"omittedLow", types.Int64, types.Int, true, false, true, true},
-				{"omittedHigh", types.Int, types.Int64, false, true, true, true},
-				{"omittedBoth", types.Int64, types.Int64, true, true, true, true},
+				{"native", types.Int, types.Int, false, false},
+				{"narrow", types.Int8, types.Int16, false, false},
+				{"wideLow", types.Int64, types.Int, false, false},
+				{"wideHigh", types.Int, types.Int64, false, false},
+				{"unsignedLow", types.Uint, types.Int, false, false},
+				{"unsignedHigh", types.Int, types.Uint, false, false},
+				{"wideUnsignedLow", types.Uint64, types.Int, false, false},
+				{"wideUnsignedHigh", types.Int, types.Uint64, false, false},
+				{"omittedLow", types.Int64, types.Int, true, false},
+				{"omittedHigh", types.Int, types.Int64, false, true},
+				{"omittedBoth", types.Int64, types.Int64, true, true},
 			} {
 				t.Run(test.name, func(t *testing.T) {
 					params := types.NewTuple(
@@ -86,13 +85,29 @@ func TestStringSliceIndexABI(t *testing.T) {
 					}
 					b.Return(b.Slice(fn.Param(0), low, high, ssa.Expr{}))
 					b.EndBuild()
-					want, other := "StringSlice2", "StringSlice"
-					if (arch == "386" && test.native32) || (arch == "amd64" && test.native64) {
-						want, other = other, want
-					}
 					ir := pkg.String()
-					if !strings.Contains(ir, want+"\"(") || strings.Contains(ir, other+"\"(") {
-						t.Fatalf("string slice must use %s without truncating or reinterpreting its indices:\n%s", want, ir)
+					if strings.Contains(ir, ".StringSlice") || !strings.Contains(ir, "icmp ugt i64") {
+						t.Fatalf("slice checks must be emitted directly without a hot helper:\n%s", ir)
+					}
+					for _, bound := range []struct {
+						kind    types.BasicKind
+						omitted bool
+						code    int
+					}{{test.low, test.omitLow, 3}, {test.high, test.omitHigh, 1}} {
+						if bound.omitted && bound.code == 3 {
+							continue // The constant zero lower bound cannot fail.
+						}
+						signed := bound.omitted || types.Typ[bound.kind].Info()&types.IsUnsigned == 0
+						call := regexp.MustCompile(fmt.Sprintf(`PanicBounds"\(i64 [^,]+, i1 %t, i(?:32|64) [^,]+, i8 %d\)`, signed, bound.code))
+						if !call.MatchString(ir) {
+							t.Errorf("missing cold panic with original index signedness: %s\n%s", call, ir)
+						}
+					}
+					if arch == "386" && strings.Contains(ir, "trunc i64") && strings.Index(ir, "trunc i64") < strings.Index(ir, "icmp ugt i64") {
+						t.Errorf("wide slice index truncated before its check:\n%s", ir)
+					}
+					if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+						t.Fatalf("invalid slice IR: %v\n%s", err, ir)
 					}
 				})
 			}

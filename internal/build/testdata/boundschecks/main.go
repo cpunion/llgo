@@ -71,4 +71,9 @@ func main() {
 	arrayFromPointer := shortSliceToArrayPointer(slice)
 	arrayValue := shortSliceToArrayValue(slice)
 	println(arrayFromPointer[0], arrayFromPointer[3], arrayValue[1], arrayValue[2])
+	// Compare actual element values as well as slice headers. The offset of
+	// an array slice uses the element size, not the size of the whole array.
+	fromArray := sliceArray(array, 1, 3)
+	fromPointer := sliceArrayPointer(arrayPointer, 1, 3)
+	println(fromArray[0], fromArray[1], fromPointer[0], fromPointer[1])
 }
