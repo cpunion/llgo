@@ -14,8 +14,9 @@ import time
 BASE = '5e5e6a44b2062d61bfa569f384232483763d3380'
 HEAD = 'cf72501dc15335e75fe6da85b6f490db7f223ff2'
 CONTROL = '9fbd8ff1f46e099e58e7d7240c0cd6b95a57ba52'
-COMPILER_BASE = 'ac1292206d672c2aeb546780a1d585ad98edbc3d'
-COMPILER_FIX = '3d4e43b3ee7780ed1989b4a4492a9398773fa80d'
+DIAGNOSTIC_SOURCE_BASE = 'ac1292206d672c2aeb546780a1d585ad98edbc3d'
+COMPILER_BASE = '44756a542fbb6173826c8fcb1d12d3ef5e4d777a'
+COMPILER_FIX = 'e57dd9ec011fa8a039c14ea6406de1d7208bcc15'
 BLOCKS = 20
 SYMBOL = 'github.com/cpunion/wasmvm/internal/engine/execute.(*Execution).runSlotsLoop'
 ROOT = Path('lto-inline-results').resolve()
@@ -55,15 +56,13 @@ def build(sources, report):
                GOFLAGS='', GOEXPERIMENT='', CCFLAGS='', CFLAGS='', LDFLAGS='')
     for name in ['CGO_CPPFLAGS', 'CGO_CXXFLAGS', 'CGO_LDFLAGS', 'CGO_CFLAGS']:
         env.pop(name, None)
-    alignment = '-Wl,-mllvm,-align-all-functions=6 -Wl,-mllvm,-align-loops=32'
     variants = [('go-base', 'base', 'go', '', ''), ('go-head', 'head', 'go', '', '')]
     for role in ['base', 'head']:
         variants += [
             ('llgo-main-' + role, role, 'llgo-main', 'O3', ''),
-            ('llgo-align-' + role, role, 'llgo-main', 'O3', alignment),
             ('llgo-fix-' + role, role, 'llgo-fix', 'O3', ''),
         ]
-    # Default O2 is outside the alignment policy but still receives nil hints.
+    # Check default O2 separately from the reported full-LTO regression.
     variants += [('llgo-main-O2', 'base', 'llgo-main', 'O2', ''),
                  ('llgo-fix-O2', 'base', 'llgo-fix', 'O2', '')]
     binaries = ROOT / 'bin'
@@ -176,7 +175,7 @@ def main():
     ROOT.mkdir(exist_ok=False)
     assert capture(['go', 'version']).startswith('go version go1.27.3 ')
     assert '22.1.8' in capture(['clang', '--version'])
-    subprocess.run(['git', 'diff', '--exit-code', COMPILER_BASE, 'HEAD', '--',
+    subprocess.run(['git', 'diff', '--exit-code', DIAGNOSTIC_SOURCE_BASE, 'HEAD', '--',
                     'cl', 'ssa', 'internal', 'cmd', 'runtime'], check=True)
     report = dict(status='running', classification='Hosted native diagnostic; not full-portfolio acceptance',
                   compilerBase=COMPILER_BASE, diagnosticCommit=capture(['git', 'rev-parse', 'HEAD']),

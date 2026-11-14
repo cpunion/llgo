@@ -1,4 +1,4 @@
-name: Native LTO nil-check and layout comparison
+name: Native nil-panic control-flow comparison
 on:
   push:
     branches: [audit/lto-inline-performance-20261114]
@@ -37,13 +37,14 @@ jobs:
           export CGO_CXXFLAGS=-std=c++17
           CGO_LDFLAGS="$(bash dev/devenv_unix_flags.sh ldflags)"
           mkdir -p "$RUNNER_TEMP/lto-inline-bin"
-          git fetch --no-tags --depth=1 origin 3d4e43b3ee7780ed1989b4a4492a9398773fa80d
-          git diff --exit-code ac1292206d672c2aeb546780a1d585ad98edbc3d 3d4e43b3ee7780ed1989b4a4492a9398773fa80d -- runtime cmd cl
-          git worktree add --detach "$RUNNER_TEMP/llgo-nil-fix" 3d4e43b3ee7780ed1989b4a4492a9398773fa80d
-          go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-main" ./cmd/llgo
+          git fetch --no-tags --depth=1 origin 44756a542fbb6173826c8fcb1d12d3ef5e4d777a e57dd9ec011fa8a039c14ea6406de1d7208bcc15
+          git diff --exit-code 44756a542fbb6173826c8fcb1d12d3ef5e4d777a e57dd9ec011fa8a039c14ea6406de1d7208bcc15 -- runtime internal cmd cl
+          git worktree add --detach "$RUNNER_TEMP/llgo-nil-base" 44756a542fbb6173826c8fcb1d12d3ef5e4d777a
+          git worktree add --detach "$RUNNER_TEMP/llgo-nil-fix" e57dd9ec011fa8a039c14ea6406de1d7208bcc15
+          (cd "$RUNNER_TEMP/llgo-nil-base" && go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-main" ./cmd/llgo)
           (cd "$RUNNER_TEMP/llgo-nil-fix" && go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-fix" ./cmd/llgo)
           echo "$RUNNER_TEMP/lto-inline-bin" >> "$GITHUB_PATH"
-          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "LLGO_ROOT=$RUNNER_TEMP/llgo-nil-base" >> "$GITHUB_ENV"
           echo "LLGO_BUILD_CACHE=off" >> "$GITHUB_ENV"
       - name: Fixed native comparison with same-binary controls
         run: python3 .github/scripts/verify_lto_inline.py
