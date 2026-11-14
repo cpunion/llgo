@@ -1,41 +1,58 @@
-name: Frozen LTO software CPU-clock attribution
+name: Native function-entry-only LTO layout comparison
 on:
   push:
     branches: [audit/lto-inline-performance-20261114]
 permissions:
   contents: read
-  actions: read
 jobs:
   native-diagnostic:
     if: github.repository == 'cpunion/llgo'
+    strategy:
+      fail-fast: false
+      matrix:
+        cohort: [1, 2]
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: cpunion/wasmvm
-          ref: 26b788258ac6c280639001ecda0af28159cf8068
-          path: fixture-source
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
-        with:
-          name: lto-slice-cohort-2
-          run-id: 43599604900
-          github-token: ${{ github.token }}
-          path: lto-clock-input
-      - name: Install software sampling tools and runtime libraries
+      - name: Verify the compiler source baseline
         run: |
-          python3 .github/actions/setup-deps/ubuntu_apt_test.py
-          sudo python3 .github/actions/setup-deps/ubuntu_apt.py /etc/apt "$(dpkg --print-architecture)"
-          sudo timeout --kill-after=30s 5m apt-get update
-          sudo timeout --kill-after=30s 5m apt-get install -y linux-tools-generic libgc1 libffi8 binutils
-          sudo sysctl -w kernel.perf_event_paranoid=-1
-      - name: Sample the exact previously measured binaries
-        run: python3 -u .github/scripts/verify_lto_cpu_clock.py
+          git fetch --no-tags --depth=1 origin ac1292206d672c2aeb546780a1d585ad98edbc3d
+          git diff --exit-code ac1292206d672c2aeb546780a1d585ad98edbc3d HEAD -- cl ssa internal cmd runtime
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - uses: ./.github/actions/setup-llgo-cache
+        with:
+          build-cache-mode: off
+      - name: Build the baseline and candidate compilers
+        shell: bash
+        run: |
+          export CGO_CPPFLAGS CGO_LDFLAGS
+          CGO_CPPFLAGS="$(bash dev/devenv_unix_flags.sh cppflags)"
+          export CGO_CXXFLAGS=-std=c++17
+          CGO_LDFLAGS="$(bash dev/devenv_unix_flags.sh ldflags)"
+          mkdir -p "$RUNNER_TEMP/lto-inline-bin"
+          git fetch --no-tags --depth=1 origin 6a482f7f6ad94e9f2d0a0fea97dd4cabd46b1130
+          git worktree add --detach "$RUNNER_TEMP/llgo-entry64-base" 6a482f7f6ad94e9f2d0a0fea97dd4cabd46b1130
+          (cd "$RUNNER_TEMP/llgo-entry64-base" && go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-main" ./cmd/llgo)
+          cp "$RUNNER_TEMP/lto-inline-bin/llgo-main" "$RUNNER_TEMP/lto-inline-bin/llgo-fix"
+          echo "$RUNNER_TEMP/lto-inline-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$RUNNER_TEMP/llgo-entry64-base" >> "$GITHUB_ENV"
+          echo "LLGO_BUILD_CACHE=off" >> "$GITHUB_ENV"
+      - name: Fixed native comparison with same-binary controls
+        run: python3 .github/scripts/verify_lto_inline.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: lto-software-clock-attribution
-          path: lto-clock-results/
+          name: lto-entry64-cohort-${{ matrix.cohort }}
+          path: |
+            lto-inline-results/*.json
+            lto-inline-results/*.asm
+            lto-inline-results/*build.log
+            lto-inline-results/bin/
           if-no-files-found: error
