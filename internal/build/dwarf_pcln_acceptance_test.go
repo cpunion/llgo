@@ -23,6 +23,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/xgo-dev/llgo/internal/lto"
+	"github.com/xgo-dev/llgo/internal/optlevel"
 )
 
 const dwarfPCLNProbe = `package main
@@ -57,6 +60,22 @@ func checkFrames() {
 		if !more {
 			panic("checkFrames frame missing")
 		}
+	}
+}
+
+//go:noinline
+func deferredCaller(file *string, line *int) {
+	defer func() {
+		_, *file, *line, _ = runtime.Caller(1)
+	}()
+} // DEFER_MARK
+
+func checkDeferredLine() {
+	var file string
+	var line int
+	deferredCaller(&file, &line)
+	if !strings.HasSuffix(file, "main.go") || line != DEFER_LINE {
+		panic("bad deferred caller: " + file + ":" + strconv.Itoa(line))
 	}
 }
 
@@ -97,6 +116,7 @@ func main() {
 
 	checkCaller()
 	checkFrames()
+	checkDeferredLine()
 	checkRecoveredPanic()
 	os.Stdout.WriteString("PCLN_DWARF_OK\n")
 }
@@ -104,7 +124,7 @@ func main() {
 
 func TestDWARFPCLNLineSites(t *testing.T) {
 	source := dwarfPCLNProbe
-	for _, marker := range []string{"CALLER", "FRAMES", "LOG"} {
+	for _, marker := range []string{"CALLER", "FRAMES", "LOG", "DEFER"} {
 		source = strings.ReplaceAll(source, marker+"_LINE", strconv.Itoa(dwarfPCLNMarkerLine(source, marker+"_MARK")))
 	}
 	dir := t.TempDir()
@@ -113,16 +133,28 @@ func TestDWARFPCLNLineSites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conf := NewDefaultConf(ModeBuild)
-	conf.OutFile = filepath.Join(dir, "probe")
-	if runtime.GOOS == "windows" {
-		conf.OutFile += ".exe"
-	}
-	if _, err := Do([]string{file}, conf); err != nil {
-		t.Fatal(err)
-	}
-	if out := runBinary(t, conf.OutFile); !strings.Contains(out, "PCLN_DWARF_OK") {
-		t.Fatalf("unexpected DWARF PCLN probe output: %s", out)
+	for _, fullLTO := range []bool{false, true} {
+		name := "default"
+		if fullLTO {
+			name = "O3-full-LTO"
+		}
+		t.Run(name, func(t *testing.T) {
+			conf := NewDefaultConf(ModeBuild)
+			if fullLTO {
+				conf.OptLevel = optlevel.O3
+				conf.LTO = lto.Full
+			}
+			conf.OutFile = filepath.Join(dir, "probe-"+name)
+			if runtime.GOOS == "windows" {
+				conf.OutFile += ".exe"
+			}
+			if _, err := Do([]string{file}, conf); err != nil {
+				t.Fatal(err)
+			}
+			if out := runBinary(t, conf.OutFile); !strings.Contains(out, "PCLN_DWARF_OK") {
+				t.Fatalf("unexpected DWARF PCLN probe output: %s", out)
+			}
+		})
 	}
 }
 
