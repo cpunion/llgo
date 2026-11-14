@@ -31,6 +31,8 @@ jobs:
         with:
           windows-abi: msvc
           windows-arch: '386'
+      - name: Fetch the declared runtime baseline for source verification
+        run: git fetch --no-tags --depth=1 origin c0d07ce2b58c8f2f62b25133234486d239021ee1
       - name: Run unmodified GC and RWMutex stress with strict deadlines
         run: python .github/scripts/verify_2780_current.py
       - uses: actions/upload-artifact@v7

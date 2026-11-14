@@ -27,6 +27,15 @@ def run(name, args, cwd=ROOT, timeout=90, env=None):
         try:
             status = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            debugger = os.getenv("LLGO_LLDB")
+            if debugger:
+                with (OUTPUT / (name + "-threads.log")).open("wb") as stacks:
+                    try:
+                        subprocess.run([debugger, "-b", "-o", f"process attach --pid {process.pid}",
+                                        "-o", "thread backtrace all", "-o", "process detach", "-o", "quit"],
+                                       stdout=stacks, stderr=stacks, timeout=30, check=False)
+                    except subprocess.TimeoutExpired:
+                        stacks.write(b"\nDebugger sampling exceeded 30 seconds\n")
             with (OUTPUT / (name + "-processes.json")).open("wb") as snapshot:
                 subprocess.run(
                     ["powershell", "-NoProfile", "-Command",
@@ -56,9 +65,9 @@ def main():
                     abi=os.getenv("LLGO_WINDOWS_ABI")),
         cases={},
     )
+    (OUTPUT / "identity.json").write_text(json.dumps(identity, indent=2) + "\n")
     # The timeout patch and this fork-only harness do not change runtime code.
     subprocess.run(["git", "diff", "--exit-code", identity["runtimeBase"], "HEAD", "--", "runtime"], check=True)
-    (OUTPUT / "identity.json").write_text(json.dumps(identity, indent=2) + "\n")
     run("compiler-version", ["llgo", "version"])
     run("go-version", ["go", "version"])
     older_env = dict(os.environ, GOTOOLCHAIN="go1.26.7", GOOS="windows", GOARCH="amd64", GOWORK="off")
