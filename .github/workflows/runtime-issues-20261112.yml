@@ -1,4 +1,4 @@
-name: Native LTO nil-check comparison
+name: Native LTO nil-check and layout comparison
 on:
   push:
     branches: [audit/lto-inline-performance-20261114]
@@ -12,7 +12,7 @@ jobs:
       matrix:
         cohort: [1, 2]
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - name: Verify the compiler source baseline
@@ -37,9 +37,9 @@ jobs:
           export CGO_CXXFLAGS=-std=c++17
           CGO_LDFLAGS="$(bash dev/devenv_unix_flags.sh ldflags)"
           mkdir -p "$RUNNER_TEMP/lto-inline-bin"
-          git fetch --no-tags --depth=1 origin efd7db1fef7692732ffd80f8fcf49530b81cd566
-          git diff --exit-code ac1292206d672c2aeb546780a1d585ad98edbc3d efd7db1fef7692732ffd80f8fcf49530b81cd566 -- runtime internal cmd cl
-          git worktree add --detach "$RUNNER_TEMP/llgo-nil-fix" efd7db1fef7692732ffd80f8fcf49530b81cd566
+          git fetch --no-tags --depth=1 origin 3d4e43b3ee7780ed1989b4a4492a9398773fa80d
+          git diff --exit-code ac1292206d672c2aeb546780a1d585ad98edbc3d 3d4e43b3ee7780ed1989b4a4492a9398773fa80d -- runtime cmd cl
+          git worktree add --detach "$RUNNER_TEMP/llgo-nil-fix" 3d4e43b3ee7780ed1989b4a4492a9398773fa80d
           go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-main" ./cmd/llgo
           (cd "$RUNNER_TEMP/llgo-nil-fix" && go build -o "$RUNNER_TEMP/lto-inline-bin/llgo-fix" ./cmd/llgo)
           echo "$RUNNER_TEMP/lto-inline-bin" >> "$GITHUB_PATH"
@@ -51,5 +51,9 @@ jobs:
         if: always()
         with:
           name: lto-nil-cohort-${{ matrix.cohort }}
-          path: lto-inline-results/
+          path: |
+            lto-inline-results/*.json
+            lto-inline-results/*.asm
+            lto-inline-results/*build.log
+            lto-inline-results/bin/
           if-no-files-found: error

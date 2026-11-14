@@ -15,7 +15,7 @@ BASE = '5e5e6a44b2062d61bfa569f384232483763d3380'
 HEAD = 'cf72501dc15335e75fe6da85b6f490db7f223ff2'
 CONTROL = '9fbd8ff1f46e099e58e7d7240c0cd6b95a57ba52'
 COMPILER_BASE = 'ac1292206d672c2aeb546780a1d585ad98edbc3d'
-COMPILER_FIX = 'efd7db1fef7692732ffd80f8fcf49530b81cd566'
+COMPILER_FIX = '3d4e43b3ee7780ed1989b4a4492a9398773fa80d'
 BLOCKS = 20
 SYMBOL = 'github.com/cpunion/wasmvm/internal/engine/execute.(*Execution).runSlotsLoop'
 ROOT = Path('lto-inline-results').resolve()
@@ -55,29 +55,40 @@ def build(sources, report):
                GOFLAGS='', GOEXPERIMENT='', CCFLAGS='', CFLAGS='', LDFLAGS='')
     for name in ['CGO_CPPFLAGS', 'CGO_CXXFLAGS', 'CGO_LDFLAGS', 'CGO_CFLAGS']:
         env.pop(name, None)
-    variants = [('go-base', 'base', 'go'), ('go-head', 'head', 'go'),
-                ('llgo-main-base', 'base', 'llgo-main'), ('llgo-fix-base', 'base', 'llgo-fix'),
-                ('llgo-main-head', 'head', 'llgo-main'), ('llgo-fix-head', 'head', 'llgo-fix')]
+    alignment = '-Wl,-mllvm,-align-all-functions=6 -Wl,-mllvm,-align-loops=32'
+    variants = [('go-base', 'base', 'go', '', ''), ('go-head', 'head', 'go', '', '')]
+    for role in ['base', 'head']:
+        variants += [
+            ('llgo-main-' + role, role, 'llgo-main', 'O3', ''),
+            ('llgo-align-' + role, role, 'llgo-main', 'O3', alignment),
+            ('llgo-fix-' + role, role, 'llgo-fix', 'O3', ''),
+        ]
+    # Default O2 is outside the alignment policy but still receives nil hints.
+    variants += [('llgo-main-O2', 'base', 'llgo-main', 'O2', ''),
+                 ('llgo-fix-O2', 'base', 'llgo-fix', 'O2', '')]
     binaries = ROOT / 'bin'
     binaries.mkdir()
-    for name, role, compiler in variants:
+    for name, role, compiler, optimization, flags in variants:
         source = sources[role]
         # The same role always links to the same path. Keep frozen guest
         # provenance labels unchanged; real identities are recorded beside it.
         output = ROOT / ('link-' + role)
         command = [compiler, 'build']
         if compiler.startswith('llgo-'):
-            command += ['-O3', '-lto=full']
+            command += ['-' + optimization]
+            if optimization == 'O3':
+                command += ['-lto=full']
         command += ['-o', str(output), './benchmarks/embedded/wasmvm']
         started = time.monotonic()
         with (ROOT / (name + '-build.log')).open('w') as log:
-            subprocess.run(command, cwd=source, env=env,
+            subprocess.run(command, cwd=source, env=dict(env, LDFLAGS=flags),
                            stdout=log, stderr=subprocess.STDOUT, timeout=240, check=True)
         binary = binaries / name
         shutil.copy2(output, binary)
         assert not capture(['git', '-C', str(source), 'status', '--porcelain', '--untracked-files=no'])
         row = dict(command=command, source=BASE if role == 'base' else HEAD,
                    compiler=compiler, compilerSha256=digest(Path(shutil.which(compiler))),
+                   optimization=optimization, linkerDiagnostic=flags,
                    sha256=digest(binary), size=binary.stat().st_size,
                    binary=str(binary), compileSeconds=time.monotonic()-started)
         if compiler.startswith('llgo-'):
