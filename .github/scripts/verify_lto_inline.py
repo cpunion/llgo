@@ -18,6 +18,7 @@ DIAGNOSTIC_SOURCE_BASE = 'ac1292206d672c2aeb546780a1d585ad98edbc3d'
 COMPILER_BASE = '6a482f7f6ad94e9f2d0a0fea97dd4cabd46b1130'
 COMPILER_FIX = COMPILER_BASE
 BLOCKS = 20
+MEASUREMENT_SEED = 2026111409
 SYMBOL = 'github.com/cpunion/wasmvm/internal/engine/execute.(*Execution).runSlotsLoop'
 ROOT = Path('lto-inline-results').resolve()
 
@@ -120,7 +121,7 @@ def measure(sources, report, blocks=BLOCKS):
     report['affinity'] = sorted(os.sched_getaffinity(0))
     names = list(report['builds'])
     runtime_names = names + ['aa-' + name for name in names]
-    report['protocol'] = dict(blocks=blocks, warmups=2, samples=7, seed=2026111409,
+    report['protocol'] = dict(blocks=blocks, warmups=2, samples=7, seed=MEASUREMENT_SEED,
                               controls=['aa-' + name for name in names])
     wanted = {'core/integer-loop', 'core/function-calls', 'core/memory-load-store',
               'memory/dependent-address', 'memory/float64-unaligned'}
