@@ -457,7 +457,17 @@ func (b Builder) AssertNilDeref(ptr Expr) {
 	// field-address checks may fold to false only after LLVM optimization;
 	// calling AssertNilDeref(false) still forces spills across that call.
 	blks := b.Func.MakeBlocks(2)
-	b.If(isNil, blks[0], blks[1])
+	branch := b.impl.CreateCondBr(isNil.impl, blks[0].first, blks[1].first)
+	// Native panic edges retain a formal return for return-PC symbolization.
+	// Do not let that continuation make a nil failure look as likely as a
+	// successful dereference. Expected weights can be replaced by real profiles.
+	weights := b.Prog.ctx.MDNode([]llvm.Metadata{
+		b.Prog.ctx.MDString("branch_weights"),
+		b.Prog.ctx.MDString("expected"),
+		llvm.ConstInt(b.Prog.Int32().ll, 1, false).ConstantAsMetadata(),
+		llvm.ConstInt(b.Prog.Int32().ll, 2000, false).ConstantAsMetadata(),
+	})
+	branch.SetMetadata(b.Prog.ctx.MDKindID("prof"), weights)
 	b.SetBlockEx(blks[0], AtEnd, false)
 	if b.PanicSite != nil {
 		b.PanicSite(b)

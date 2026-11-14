@@ -120,6 +120,17 @@ func TestAssertNilDerefColdCall(t *testing.T) {
 					if branch.InstructionOpcode() != llvm.Br || branch.SuccessorsCount() != 2 {
 						t.Fatalf("dynamic nil check must branch before calling runtime:\n%s", fn.impl.String())
 					}
+					weights := branch.Metadata(prog.ctx.MDKindID("prof"))
+					if weights.IsNil() {
+						t.Fatalf("nil failure must be unlikely without being unreachable:\n%s", fn.impl.String())
+					}
+					operands := weights.MDNodeOperands()
+					if len(operands) != 4 || operands[0].MDString() != "branch_weights" ||
+						operands[1].MDString() != "expected" || operands[2].IsAConstantInt().IsNil() ||
+						operands[3].IsAConstantInt().IsNil() || operands[2].ZExtValue() == 0 ||
+						operands[2].ZExtValue() >= operands[3].ZExtValue() {
+						t.Fatalf("nil branch must favor its successful continuation: %s", weights.String())
+					}
 					for inst := entry.FirstInstruction(); !inst.IsNil(); inst = llvm.NextInstruction(inst) {
 						if inst.InstructionOpcode() == llvm.Call {
 							t.Fatalf("nil check calls runtime unconditionally:\n%s", fn.impl.String())
