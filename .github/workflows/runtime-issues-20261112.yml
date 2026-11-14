@@ -1,0 +1,48 @@
+name: Native LTO inline investigation
+on:
+  push:
+    branches: [audit/lto-inline-performance-20261114]
+permissions:
+  contents: read
+jobs:
+  native-diagnostic:
+    if: github.repository == 'cpunion/llgo'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify the compiler source baseline
+        run: |
+          git fetch --no-tags --depth=1 origin ac1292206d672c2aeb546780a1d585ad98edbc3d
+          git diff --exit-code ac1292206d672c2aeb546780a1d585ad98edbc3d HEAD -- cl ssa internal cmd runtime
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - uses: ./.github/actions/setup-llgo-cache
+      - name: Build the current compiler
+        shell: bash
+        run: |
+          export CGO_CPPFLAGS CGO_LDFLAGS
+          CGO_CPPFLAGS="$(bash dev/devenv_unix_flags.sh cppflags)"
+          export CGO_CXXFLAGS=-std=c++17
+          CGO_LDFLAGS="$(bash dev/devenv_unix_flags.sh ldflags)"
+          mkdir -p "$RUNNER_TEMP/lto-inline-bin"
+          go build -o "$RUNNER_TEMP/lto-inline-bin/llgo" ./cmd/llgo
+          echo "$RUNNER_TEMP/lto-inline-bin" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - name: Fixed native comparison with same-binary controls
+        run: python3 .github/scripts/verify_lto_inline.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lto-inline-${{ matrix.runner }}
+          path: lto-inline-results/
+          if-no-files-found: error
