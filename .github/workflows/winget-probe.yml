@@ -1,0 +1,40 @@
+name: WinGet lifecycle probe
+on:
+  push:
+    branches: [ci/winget-3091-probe-20261114]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          repository: xgo-dev/llgo
+          run-id: 43534584257
+          pattern: llgo-windows-*
+          merge-multiple: true
+          path: .windows-dist
+      - name: Install pinned WinGet
+        shell: powershell
+        run: ./.github/windows/setup-winget.ps1
+      - name: Exercise actual release ZIPs
+        shell: pwsh
+        run: |
+          $arches = if ('${{ matrix.os }}' -eq 'windows-11-arm') { @('arm64') } else { @('amd64', '386') }
+          foreach ($arch in $arches) {
+            $archive = @(Get-ChildItem ".windows-dist/*.windows-$arch.zip")
+            if ($archive.Count -ne 1) { throw "Expected one archive for $arch" }
+            ./.github/windows/test-winget-migration.ps1 -Archive $archive[0].FullName -GoArch $arch
+          }
