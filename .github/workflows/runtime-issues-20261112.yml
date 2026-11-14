@@ -1,0 +1,41 @@
+name: Native runtime issue reproduction
+on:
+  push:
+    branches: [audit/native-followups-20261114]
+permissions:
+  contents: read
+jobs:
+  msvc386-gc:
+    if: github.repository == 'cpunion/llgo'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 22
+          windows-abi: msvc
+          windows-arch: '386'
+      - uses: ./.github/actions/setup-go
+      - uses: ./.github/actions/setup-llgo-cache
+      - name: Build the host compiler
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-followups"
+          go build -o "$RUNNER_TEMP/native-followups/llgo.exe" ./cmd/llgo
+          echo "$RUNNER_TEMP/native-followups" >> "$GITHUB_PATH"
+          echo "LLGO_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/activate-windows-target
+        with:
+          windows-abi: msvc
+          windows-arch: '386'
+      - name: Run unmodified GC and RWMutex stress with strict deadlines
+        run: python .github/scripts/verify_2780_current.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: issue2780-current-msvc386
+          path: native-followups-results/
+          if-no-files-found: error
