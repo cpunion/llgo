@@ -16,9 +16,9 @@ HEAD = '26b788258ac6c280639001ecda0af28159cf8068'
 CONTROL = '9fbd8ff1f46e099e58e7d7240c0cd6b95a57ba52'
 DIAGNOSTIC_SOURCE_BASE = 'ac1292206d672c2aeb546780a1d585ad98edbc3d'
 COMPILER_BASE = '6a482f7f6ad94e9f2d0a0fea97dd4cabd46b1130'
-COMPILER_FIX = COMPILER_BASE
+COMPILER_FIX = 'c966d9f468b01144279696fb2c51a411392790cf'
 BLOCKS = 20
-MEASUREMENT_SEED = 2026111409
+MEASUREMENT_SEED = 2026111411
 SYMBOL = 'github.com/cpunion/wasmvm/internal/engine/execute.(*Execution).runSlotsLoop'
 ROOT = Path('lto-inline-results').resolve()
 
@@ -61,9 +61,8 @@ def build(sources, report):
     for role in ['base', 'head']:
         variants += [
             ('llgo-main-' + role, role, 'llgo-main', 'O3', ''),
-            ('llgo-align-' + role, role, 'llgo-main', 'O3', '-Wl,-mllvm,-align-all-functions=6'),
-            ('llgo-coldalign-' + role, role, 'llgo-main', 'O3',
-             '-Wl,-mllvm,-align-all-functions=6 -Wl,-mllvm,-cold-callsite-rel-freq=0'),
+            ('llgo-fullcost-' + role, role, 'llgo-main', 'O3', '-Wl,-mllvm,-inline-cost-full'),
+            ('llgo-fix-' + role, role, 'llgo-fix', 'O3', ''),
         ]
     # Check default O2 separately from the reported full-LTO regression.
     variants += [('llgo-main-O2', 'base', 'llgo-main', 'O2', ''),
@@ -183,8 +182,8 @@ def main():
     report = dict(status='running', classification='Hosted native diagnostic; not full-portfolio acceptance',
                   compilerBase=COMPILER_BASE, diagnosticCommit=capture(['git', 'rev-parse', 'HEAD']),
                   compilerFix=COMPILER_FIX,
-                  commonRuntime=COMPILER_FIX,
-                  comparison='Function-entry64 alignment only, and entry64 with unprofiled-cold heuristic; no loop alignment or SSA changes',
+                  commonRuntime=COMPILER_BASE,
+                  comparison='Switch-cycle callsite O3 budget plus complete inline-cost walk; independent full-cost-only control, no global cold heuristic or padding changes',
                   compilers={name: digest(Path(shutil.which(name)))
                       for name in ['llgo-main', 'llgo-fix']},
                   go=capture(['go', 'version']),
