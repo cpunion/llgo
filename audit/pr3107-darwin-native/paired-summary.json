@@ -1,0 +1,302 @@
+{
+  "cpu": "Apple M4 Max",
+  "compilerBase": "6a482f7f6ad94e9f2d0a0fea97dd4cabd46b1130",
+  "compilerFix": "a582e400267716ae3b49ef97e63ecda503ad16d9",
+  "cases": [
+    {
+      "id": "core/integer-loop",
+      "comparisons": {
+        "PR3107/main": {
+          "ratio": 1.059056420284083,
+          "lower": 1.0454603733148335,
+          "upper": 1.072216049092912,
+          "controlsResolved": true,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.9833934034432839,
+              "upper": 1.012589786280368,
+              "width": 0.029196382837084256,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9905236020066666,
+              "upper": 1.009052788959223,
+              "width": 0.018529186952556342,
+              "resolved": true
+            }
+          }
+        },
+        "old-ASM/main": {
+          "ratio": 1.1152529485594807,
+          "lower": 1.1051574991530144,
+          "upper": 1.1249707165026837,
+          "controlsResolved": true,
+          "controls": {
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.992347524862887,
+              "upper": 1.0158836512353095,
+              "width": 0.023536126372422528,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9905236020066666,
+              "upper": 1.009052788959223,
+              "width": 0.018529186952556342,
+              "resolved": true
+            }
+          }
+        }
+      },
+      "nsPerIteration": {
+        "aa-go-base": 64.82042,
+        "aa-llgo-main-base": 50.401875,
+        "aa-llgo-fix-base": 53.40125,
+        "llgo-entry-base": 56.679585,
+        "llgo-main-base": 50.498955,
+        "aa-llgo-entry-base": 56.70792,
+        "go-base": 64.912085,
+        "llgo-fix-base": 53.968125
+      }
+    },
+    {
+      "id": "core/function-calls",
+      "comparisons": {
+        "PR3107/main": {
+          "ratio": 1.3322481737577556,
+          "lower": 1.2904373806213596,
+          "upper": 1.3630084218585272,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.9591720264993536,
+              "upper": 1.0386625867082233,
+              "width": 0.07949056020886969,
+              "resolved": false
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9681300144868126,
+              "upper": 0.9972723879588753,
+              "width": 0.02914237347206272,
+              "resolved": false
+            }
+          }
+        },
+        "old-ASM/main": {
+          "ratio": 1.067739786117439,
+          "lower": 1.0526215105608077,
+          "upper": 1.0822863439357175,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9958615992798667,
+              "upper": 1.0176066974397922,
+              "width": 0.021745098159925424,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9681300144868126,
+              "upper": 0.9972723879588753,
+              "width": 0.02914237347206272,
+              "resolved": false
+            }
+          }
+        }
+      },
+      "nsPerIteration": {
+        "aa-go-base": 100.161665,
+        "aa-llgo-main-base": 87.51375,
+        "aa-llgo-fix-base": 120.92,
+        "llgo-entry-base": 94.581875,
+        "llgo-main-base": 88.598335,
+        "aa-llgo-entry-base": 95.537705,
+        "go-base": 100.962085,
+        "llgo-fix-base": 120.18375
+      }
+    },
+    {
+      "id": "core/memory-load-store",
+      "comparisons": {
+        "PR3107/main": {
+          "ratio": 1.081486633899041,
+          "lower": 1.0606152023503919,
+          "upper": 1.103000224694005,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.99390409682057,
+              "upper": 1.0232476943389859,
+              "width": 0.029343597518415865,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9745633777576153,
+              "upper": 1.0109449631783167,
+              "width": 0.03638158542070147,
+              "resolved": false
+            }
+          }
+        },
+        "old-ASM/main": {
+          "ratio": 1.0758015284549807,
+          "lower": 1.0594586840088436,
+          "upper": 1.093224441581851,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9907842757988342,
+              "upper": 1.0096084312509723,
+              "width": 0.018824155452138114,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9745633777576153,
+              "upper": 1.0109449631783167,
+              "width": 0.03638158542070147,
+              "resolved": false
+            }
+          }
+        }
+      },
+      "nsPerIteration": {
+        "aa-go-base": 144.74687,
+        "aa-llgo-main-base": 114.12979,
+        "aa-llgo-fix-base": 127.050625,
+        "llgo-entry-base": 124.404795,
+        "llgo-main-base": 117.456465,
+        "aa-llgo-entry-base": 125.58146,
+        "go-base": 144.629585,
+        "llgo-fix-base": 126.40146
+      }
+    },
+    {
+      "id": "memory/dependent-address",
+      "comparisons": {
+        "PR3107/main": {
+          "ratio": 1.0713998138362326,
+          "lower": 1.0584667283231424,
+          "upper": 1.086029194302612,
+          "controlsResolved": true,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.9792109576601639,
+              "upper": 1.0005749903515602,
+              "width": 0.021364032691396306,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9953027790085965,
+              "upper": 1.0213877412651595,
+              "width": 0.026084962256562982,
+              "resolved": true
+            }
+          }
+        },
+        "old-ASM/main": {
+          "ratio": 1.109936704401195,
+          "lower": 1.1011892268015844,
+          "upper": 1.119424523990686,
+          "controlsResolved": true,
+          "controls": {
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9963967480095426,
+              "upper": 1.0149711728292092,
+              "width": 0.018574424819666646,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9953027790085965,
+              "upper": 1.0213877412651595,
+              "width": 0.026084962256562982,
+              "resolved": true
+            }
+          }
+        }
+      },
+      "nsPerIteration": {
+        "aa-go-base": 92.254165,
+        "aa-llgo-main-base": 72.15625,
+        "aa-llgo-fix-base": 75.602915,
+        "llgo-entry-base": 80.98291,
+        "llgo-main-base": 73.154375,
+        "aa-llgo-entry-base": 81.171665,
+        "go-base": 89.547085,
+        "llgo-fix-base": 77.320835
+      }
+    },
+    {
+      "id": "memory/float64-unaligned",
+      "comparisons": {
+        "PR3107/main": {
+          "ratio": 1.0738892505568083,
+          "lower": 1.0587622520415467,
+          "upper": 1.0904106867875902,
+          "controlsResolved": true,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.9873623102550112,
+              "upper": 1.0085909425763402,
+              "width": 0.02122863232132899,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9828035636850637,
+              "upper": 1.009868991859126,
+              "width": 0.02706542817406221,
+              "resolved": true
+            }
+          }
+        },
+        "old-ASM/main": {
+          "ratio": 1.072111322784489,
+          "lower": 1.0604372736376264,
+          "upper": 1.0826697743140865,
+          "controlsResolved": true,
+          "controls": {
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9917925204974707,
+              "upper": 1.0225462221059634,
+              "width": 0.030753701608492667,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9828035636850637,
+              "upper": 1.009868991859126,
+              "width": 0.02706542817406221,
+              "resolved": true
+            }
+          }
+        }
+      },
+      "nsPerIteration": {
+        "aa-go-base": 142.51729,
+        "aa-llgo-main-base": 119.411255,
+        "aa-llgo-fix-base": 127.873545,
+        "llgo-entry-base": 129.714375,
+        "llgo-main-base": 120.41625,
+        "aa-llgo-entry-base": 128.92896,
+        "go-base": 142.706665,
+        "llgo-fix-base": 128.50104
+      }
+    }
+  ]
+}
