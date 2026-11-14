@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/golang/go",
+  "tag": "go1.26.7",
+  "revision": "e3336a22ad3f0a90bd252c95d8b5544e02674205",
+  "sha256": {
+    "issue25897a.go": "aca7264bcd884cb428aaac4eee4d8b9b2911721a58bda809092965178a2b2dce",
+    "issue79186.go": "2d96e16f35794c591372c06be829f0e58ee99a4b87ad4ded69f419f3f22f4f4f",
+    "issue30041.go": "5653f53f2544253fb9b482750ff9153bc217a54c0b6eb9286919851ae4b43cc0",
+    "LICENSE": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+  }
+}
