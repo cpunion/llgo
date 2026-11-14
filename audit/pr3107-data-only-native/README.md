@@ -1,0 +1,13 @@
+Native M4 Max, Go 1.27.3, LLVM 22.1.8, O3 Full LTO, normal GC/bounds checks. Frozen wasmvm source 5e5e6a44b2062d61bfa569f384232483763d3380; common runtime main 6a482f7f6ad94e9f2d0a0fea97dd4cabd46b1130.
+
+Candidate compiler source: https://github.com/cpunion/llgo/commit/d53e71fe26659c27635ee676c4d08c938afe4e70 . It combines data-only entry collection with retained-object/private-dSYM fixes. Its production Go files match PR3107 b4b194ebcbb19899a059a968b02537a68ea99f9d (tests and documentation differ). Compiler/binary SHA256 and raw observations are in each results.json.gz. `llgo-entry-base` is original PR3107 a582e4002; `llgo-fix-base` is the candidate.
+
+Protocol: https://github.com/cpunion/llgo/blob/88df6a0311636b8a42f29bd5dd01aaa6c9ca9cfe/.github/scripts/verify_lto_inline.py . Both cohorts use 20 interleaved blocks and the original five cases. Darwin has no Linux sched_setaffinity. Both relevant same-binary A/A controls must resolve before interpreting a paired interval.
+
+The first cohort (seed 2026111507) overlaps another local compiler test and has load25->18; most comparisons are unresolved. A single independent repeat (seed2026111508) reuses every exact binary after that compiler test ended. System load remains recorded; no claim of an idle/pinned machine. Both complete cohorts are retained. No further repetitions selected for a preferred result.
+
+Qualified comparisons: repeat integer candidate/PR ratio0.92865 [0.91632,0.94340]; repeat dependent-address candidate/PR0.94045 [0.92857,0.95267]. Candidate/main integer0.98922 [0.98065,0.99752] in the repeat; candidate/main float1.00137 [0.98803,1.01561] in the first cohort. Other candidate/main cases remain unresolved, so this does not prove performance equivalence across all workloads or platforms. Full per-pair controls and all adverse/uncertain rows are in paired-summary.json.
+
+Dispatcher main/oldPR/candidate: 1535/1561/1535 instructions, 51/51/51 direct calls, 480/560/480 B stack reservation. Executable sizes4911696/4736816/4801520 B: candidate adds64704 B (+1.37%) versus oldPR, and removes110176 B (-2.24%) versus main.
+
+Functional validation: all five real LLDB variants (O0/O2, ThinLTO, FullLTO, stripped DWARF, custom object path) pass with the combined candidate. Symbol collection, reservation growth/publication and default/O3 Caller/logging/panic/defer tests pass. Native source/inline/aggregate and runtime views passed; 112 O3FullLTO runtime regressions passed. Full frontend cl1338.175s and SSA36.671s passed against the earlier broader driver scope; the final narrower scope passed the driver/post-link tests.

@@ -1,0 +1,412 @@
+{
+  "cpu": "Apple M4 Max",
+  "compilerBase": "6a482f7f6ad94e9f2d0a0fea97dd4cabd46b1130",
+  "compilerFix": "d53e71fe26659c27635ee676c4d08c938afe4e70",
+  "cases": [
+    {
+      "id": "core/integer-loop",
+      "comparisons": {
+        "data-only/main": {
+          "ratio": 0.9761885060545511,
+          "lower": 0.9501245935066318,
+          "upper": 1.000441349973253,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.9942654512524193,
+              "upper": 1.0238567058576153,
+              "width": 0.02959125460519607,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9555423897299823,
+              "upper": 1.0165076018520083,
+              "width": 0.06096521212202599,
+              "resolved": false
+            }
+          }
+        },
+        "PR3107/main": {
+          "ratio": 1.0708462275979056,
+          "lower": 1.0463183255729405,
+          "upper": 1.0949296248057414,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9662580043401601,
+              "upper": 0.9956097036626553,
+              "width": 0.02935169932249526,
+              "resolved": false
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9555423897299823,
+              "upper": 1.0165076018520083,
+              "width": 0.06096521212202599,
+              "resolved": false
+            }
+          }
+        },
+        "data-only/PR3107": {
+          "ratio": 0.9116047485588212,
+          "lower": 0.8958211965683963,
+          "upper": 0.9255605939900737,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.9942654512524193,
+              "upper": 1.0238567058576153,
+              "width": 0.02959125460519607,
+              "resolved": true
+            },
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9662580043401601,
+              "upper": 0.9956097036626553,
+              "width": 0.02935169932249526,
+              "resolved": false
+            }
+          }
+        }
+      },
+      "nsPerIteration": {
+        "aa-llgo-fix-base": 58.457915,
+        "go-base": 74.80125,
+        "aa-go-base": 74.68625,
+        "llgo-main-base": 59.29083,
+        "aa-llgo-entry-base": 62.753955,
+        "aa-llgo-main-base": 59.829585,
+        "llgo-fix-base": 58.874585,
+        "llgo-entry-base": 62.90666
+      }
+    },
+    {
+      "id": "core/function-calls",
+      "comparisons": {
+        "data-only/main": {
+          "ratio": 0.9622735229286015,
+          "lower": 0.9302063201602088,
+          "upper": 0.9936797454048608,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.9744307365516354,
+              "upper": 1.049732010301751,
+              "width": 0.07530127375011553,
+              "resolved": false
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9649221870322159,
+              "upper": 1.0301025117183003,
+              "width": 0.06518032468608437,
+              "resolved": false
+            }
+          }
+        },
+        "PR3107/main": {
+          "ratio": 1.0414606565289397,
+          "lower": 1.0147219878967813,
+          "upper": 1.0692378813256591,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9572717010093652,
+              "upper": 1.0125300185926431,
+              "width": 0.05525831758327793,
+              "resolved": false
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9649221870322159,
+              "upper": 1.0301025117183003,
+              "width": 0.06518032468608437,
+              "resolved": false
+            }
+          }
+        },
+        "data-only/PR3107": {
+          "ratio": 0.9239653143842618,
+          "lower": 0.8830534705355855,
+          "upper": 0.9628110642768872,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.9744307365516354,
+              "upper": 1.049732010301751,
+              "width": 0.07530127375011553,
+              "resolved": false
+            },
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9572717010093652,
+              "upper": 1.0125300185926431,
+              "width": 0.05525831758327793,
+              "resolved": false
+            }
+          }
+        }
+      },
+      "nsPerIteration": {
+        "aa-llgo-fix-base": 136.60583,
+        "go-base": 149.77229,
+        "aa-go-base": 157.135625,
+        "llgo-main-base": 139.19333,
+        "aa-llgo-entry-base": 141.37,
+        "aa-llgo-main-base": 137.04854,
+        "llgo-fix-base": 131.976665,
+        "llgo-entry-base": 148.11021
+      }
+    },
+    {
+      "id": "core/memory-load-store",
+      "comparisons": {
+        "data-only/main": {
+          "ratio": 0.9731164424711473,
+          "lower": 0.9320109960515099,
+          "upper": 1.0096828785913499,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.98031951969623,
+              "upper": 1.0649173039497553,
+              "width": 0.08459778425352527,
+              "resolved": false
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9796310933966266,
+              "upper": 1.0492203960793196,
+              "width": 0.06958930268269303,
+              "resolved": false
+            }
+          }
+        },
+        "PR3107/main": {
+          "ratio": 1.30025108900476,
+          "lower": 1.2365595948443422,
+          "upper": 1.349762829735813,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9883335218012186,
+              "upper": 1.0277441864667711,
+              "width": 0.03941066466555254,
+              "resolved": false
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9796310933966266,
+              "upper": 1.0492203960793196,
+              "width": 0.06958930268269303,
+              "resolved": false
+            }
+          }
+        },
+        "data-only/PR3107": {
+          "ratio": 0.7484065583178949,
+          "lower": 0.727885102318156,
+          "upper": 0.7744283160476639,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.98031951969623,
+              "upper": 1.0649173039497553,
+              "width": 0.08459778425352527,
+              "resolved": false
+            },
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9883335218012186,
+              "upper": 1.0277441864667711,
+              "width": 0.03941066466555254,
+              "resolved": false
+            }
+          }
+        }
+      },
+      "nsPerIteration": {
+        "aa-llgo-fix-base": 142.12854,
+        "go-base": 176.53729,
+        "aa-go-base": 177.536455,
+        "llgo-main-base": 146.599375,
+        "aa-llgo-entry-base": 188.67167,
+        "aa-llgo-main-base": 149.352915,
+        "llgo-fix-base": 147.883335,
+        "llgo-entry-base": 188.02271
+      }
+    },
+    {
+      "id": "memory/dependent-address",
+      "comparisons": {
+        "data-only/main": {
+          "ratio": 0.9913320337088545,
+          "lower": 0.976409707969172,
+          "upper": 1.0069162568902226,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 1.0045751674764114,
+              "upper": 1.0385660269590953,
+              "width": 0.03399085948268388,
+              "resolved": false
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9987390473423005,
+              "upper": 1.0224767110472974,
+              "width": 0.02373766370499697,
+              "resolved": true
+            }
+          }
+        },
+        "PR3107/main": {
+          "ratio": 1.0638655196801043,
+          "lower": 1.053961421901544,
+          "upper": 1.0743831549205936,
+          "controlsResolved": true,
+          "controls": {
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9886932612383942,
+              "upper": 1.0144913855244209,
+              "width": 0.02579812428602668,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9987390473423005,
+              "upper": 1.0224767110472974,
+              "width": 0.02373766370499697,
+              "resolved": true
+            }
+          }
+        },
+        "data-only/PR3107": {
+          "ratio": 0.9318208132235923,
+          "lower": 0.9220525886118498,
+          "upper": 0.9422479134742398,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 1.0045751674764114,
+              "upper": 1.0385660269590953,
+              "width": 0.03399085948268388,
+              "resolved": false
+            },
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9886932612383942,
+              "upper": 1.0144913855244209,
+              "width": 0.02579812428602668,
+              "resolved": true
+            }
+          }
+        }
+      },
+      "nsPerIteration": {
+        "aa-llgo-fix-base": 74.601665,
+        "go-base": 89.80187,
+        "aa-go-base": 89.090625,
+        "llgo-main-base": 72.16229,
+        "aa-llgo-entry-base": 78.235625,
+        "aa-llgo-main-base": 74.45625,
+        "llgo-fix-base": 72.9175,
+        "llgo-entry-base": 77.794375
+      }
+    },
+    {
+      "id": "memory/float64-unaligned",
+      "comparisons": {
+        "data-only/main": {
+          "ratio": 1.0013734641092373,
+          "lower": 0.988027591796414,
+          "upper": 1.0156105754562963,
+          "controlsResolved": true,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.9805065963837905,
+              "upper": 1.0199409362860667,
+              "width": 0.039434339902276294,
+              "resolved": true
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9802821196708205,
+              "upper": 1.0092809716614737,
+              "width": 0.02899885199065322,
+              "resolved": true
+            }
+          }
+        },
+        "PR3107/main": {
+          "ratio": 1.084053289352126,
+          "lower": 1.058986509176248,
+          "upper": 1.11825856775495,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9740595168891963,
+              "upper": 1.039407137458741,
+              "width": 0.06534762056954468,
+              "resolved": false
+            },
+            "llgo-main-base": {
+              "runtime": "aa-llgo-main-base",
+              "lower": 0.9802821196708205,
+              "upper": 1.0092809716614737,
+              "width": 0.02899885199065322,
+              "resolved": true
+            }
+          }
+        },
+        "data-only/PR3107": {
+          "ratio": 0.923730847869756,
+          "lower": 0.8957141435965515,
+          "upper": 0.9486388323998584,
+          "controlsResolved": false,
+          "controls": {
+            "llgo-fix-base": {
+              "runtime": "aa-llgo-fix-base",
+              "lower": 0.9805065963837905,
+              "upper": 1.0199409362860667,
+              "width": 0.039434339902276294,
+              "resolved": true
+            },
+            "llgo-entry-base": {
+              "runtime": "aa-llgo-entry-base",
+              "lower": 0.9740595168891963,
+              "upper": 1.039407137458741,
+              "width": 0.06534762056954468,
+              "resolved": false
+            }
+          }
+        }
+      },
+      "nsPerIteration": {
+        "aa-llgo-fix-base": 128.821875,
+        "go-base": 153.882915,
+        "aa-go-base": 156.482295,
+        "llgo-main-base": 131.03583,
+        "aa-llgo-entry-base": 139.92042,
+        "aa-llgo-main-base": 129.00625,
+        "llgo-fix-base": 131.73646,
+        "llgo-entry-base": 142.308335
+      }
+    }
+  ]
+}
