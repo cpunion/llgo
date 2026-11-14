@@ -1,6 +1,9 @@
 package pclnpost
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"strings"
+)
 
 // SymbolEntryCarrierMagic identifies reserved storage whose entries must be
 // collected from the final native symbol table, without references in IR.
@@ -26,16 +29,15 @@ func entryRecords(path string, info *binaryInfo) ([]siteRecord, error) {
 	var records []siteRecord
 	for _, sym := range info.syms {
 		name := sym.name
-		for {
-			id := fnv64(name)
-			if _, ok := lookupSymIndex(index, id); ok {
-				records = append(records, siteRecord{pc: sym.addr, symbolID: id})
-				break
-			}
-			if info.format != "macho" || len(name) < 2 || name[0] != '_' {
-				break
-			}
-			name = name[1:]
+		// debug/macho already removes the C underscore from dotted names.
+		// For other names remove exactly one; trying multiple spellings can
+		// alias distinct linknames such as _foo and __foo in the catalog.
+		if info.format == "macho" && !strings.Contains(name, ".") {
+			name = strings.TrimPrefix(name, "_")
+		}
+		id := fnv64(name)
+		if _, ok := lookupSymIndex(index, id); ok {
+			records = append(records, siteRecord{pc: sym.addr, symbolID: id})
 		}
 	}
 	return records, nil
