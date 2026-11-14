@@ -52,7 +52,7 @@ def main():
         assert len(cases) == 2
         for case in cases:
             fixture = case['fixture']
-            path = Path('fixture-source/benchmarks/embedded/fixtures')/Path(fixture['path']).name
+            path = Path('fixture-source')/fixture['path'].split('/source-head/', 1)[1]
             assert sha(path) == fixture['wasmSha256']
             for role in ('main', 'fix', 'nocold', 'main-aa'):
                 name = 'llgo-'+role.removesuffix('-aa')+'-base'
