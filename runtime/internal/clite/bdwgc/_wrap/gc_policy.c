@@ -53,7 +53,13 @@ static void llgo_gc_yield(void)
 
 static size_t llgo_gc_budget(size_t live, int32_t percent)
 {
+#if defined(_WIN32)
+    /* Diagnostic: isolate the occupied-block floor from scan-work pacing. */
+    size_t base = 4u << 20;
+    (void)live;
+#else
     size_t base = live > (4u << 20) ? live : (4u << 20);
+#endif
     size_t result;
     if (percent < 0)
         return SIZE_MAX;
