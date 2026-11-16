@@ -85,11 +85,17 @@ static size_t llgo_gc_update_budget(void)
     /* Leave room for the collector's expansion arithmetic on 32-bit hosts. */
     if (budget > SIZE_MAX / 2)
         budget = SIZE_MAX / 2;
-    /* BDWGC normally permits roughly one third of its estimated scan work
-     * in allocations per collection. GOGC=100 permits the full estimate,
-     * including roots; a heap-only floor misses this fixed scanning cost. */
+    /* Scale BDWGC's scan-work estimate as well as the heap-only floor, so
+     * the fixed cost of scanning roots participates in the budget. */
     uint32_t percent = (uint32_t)llgo_gc_budget_percent;
-    uintptr_t divisor = percent == 0 ? UINTPTR_MAX : (100u / percent + (100u % percent != 0));
+#if defined(_WIN32)
+    /* Win32 tracks VirtualAlloc regions in a bounded table. Keep its normal
+     * expansion scale at GOGC=100 instead of tripling it by default. */
+    const uint32_t scan_percent = 300;
+#else
+    const uint32_t scan_percent = 100;
+#endif
+    uintptr_t divisor = percent == 0 ? UINTPTR_MAX : (scan_percent / percent + (scan_percent % percent != 0));
     GC_set_free_space_divisor(divisor > 0 ? divisor : 1);
     budget = budget > llgo_gc_original_min ? budget : llgo_gc_original_min;
     GC_set_min_bytes_allocd(budget);
