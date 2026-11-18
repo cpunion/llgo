@@ -1,6 +1,7 @@
 package ssa
 
 import (
+	"fmt"
 	"github.com/goplus/gogen/packages"
 	"go/token"
 	"go/types"
@@ -14,11 +15,11 @@ import (
 func TestTypedStackRootStorageLayouts(t *testing.T) {
 	for _, tc := range []struct {
 		name, triple, profile string
-		word                  uint64
+		word, pointerWidth    uint64
 	}{
-		{"J32", "wasm32-unknown-emscripten", "j32", 8},
-		{"J64", "wasm64-unknown-emscripten", "j64", 8},
-		{"W32", "wasm32-unknown-wasip1", "w32", 8},
+		{"J32", "wasm32-unknown-emscripten", "j32", 8, 4},
+		{"J64", "wasm64-unknown-emscripten", "j64", 8, 8},
+		{"W32", "wasm32-unknown-wasip1", "w32", 8, 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			goos := "js"
@@ -54,8 +55,9 @@ func TestTypedStackRootStorageLayouts(t *testing.T) {
 				t.Fatalf("%v\n%s", err, pkg.String())
 			}
 			ir := pkg.String()
-			if !strings.Contains(ir, "__llgo_gcroot_stack_pointer_") || !strings.Contains(ir, "i32 4, i32 4") {
-				t.Fatalf("missing typed map:\n%s", ir)
+			wantMap := fmt.Sprintf("{ i32, i32, i32 } { i32 4, i32 1, i32 %d }", tc.pointerWidth)
+			if !strings.Contains(ir, wantMap) {
+				t.Fatalf("missing typed map %s:\n%s", wantMap, ir)
 			}
 			// A managed alloca and all field initialization must dominate the
 			// first source block. No root may reference conditional storage.

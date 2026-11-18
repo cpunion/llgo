@@ -30,8 +30,9 @@ type Context struct {
 }
 
 type frameMap struct {
-	numRoots uint32
-	numMeta  uint32
+	numRoots   uint32
+	valueRoots uint32
+	stackWidth uint32
 }
 
 type stackEntry struct {
@@ -214,7 +215,7 @@ func Unregister(ctx *Context) {
 }
 
 // Visit calls visitor for every root slot in every registered context.
-func Visit(visitor func(root *unsafe.Pointer, metadata unsafe.Pointer)) {
+func Visit(visitor func(root *unsafe.Pointer, stackWidth uint32)) {
 	if visitor == nil {
 		return
 	}
@@ -239,15 +240,14 @@ func registeredLocked(want *Context) bool {
 	return false
 }
 
-// RootValue decodes a compiler root. Nil metadata means a direct pointer;
-// otherwise the root holds a stack-field address and metadata specifies the
-// physical pointer width. Go words in Wasm32 can be wider than C pointers.
-func RootValue(root *unsafe.Pointer, metadata unsafe.Pointer) uintptr {
-	if metadata == nil {
-		return uintptr(*root)
-	}
+// RootValue decodes a compiler root. A zero width means a direct pointer.
+// A stack-field address is loaded at the physical pointer width. Go words
+// in Wasm32 can be wider than C pointers.
+func RootValue(root *unsafe.Pointer, stackWidth uint32) uintptr {
 	address := *root
-	switch *(*uint8)(metadata) {
+	switch stackWidth {
+	case 0:
+		return uintptr(address)
 	case 4:
 		return uintptr(*(*uint32)(address))
 	case 8:
@@ -257,21 +257,22 @@ func RootValue(root *unsafe.Pointer, metadata unsafe.Pointer) uintptr {
 	}
 }
 
-func visitChain(chain unsafe.Pointer, visitor func(*unsafe.Pointer, unsafe.Pointer)) {
+func visitChain(chain unsafe.Pointer, visitor func(*unsafe.Pointer, uint32)) {
 	const pointerSize = unsafe.Sizeof(uintptr(0))
 	for entry := (*stackEntry)(chain); entry != nil; entry = entry.next {
-		if entry.m == nil || entry.m.numMeta > entry.m.numRoots {
+		m := entry.m
+		if m == nil || m.valueRoots > m.numRoots ||
+			m.valueRoots != m.numRoots && m.stackWidth != 4 && m.stackWidth != 8 {
 			panic("gcroot: invalid compiler root frame")
 		}
 		roots := unsafe.Add(unsafe.Pointer(entry), unsafe.Sizeof(stackEntry{}))
-		metadata := unsafe.Add(unsafe.Pointer(entry.m), unsafe.Sizeof(frameMap{}))
-		for i := uint32(0); i < entry.m.numRoots; i++ {
-			var meta unsafe.Pointer
-			if i < entry.m.numMeta {
-				meta = *(*unsafe.Pointer)(unsafe.Add(metadata, uintptr(i)*pointerSize))
-			}
+		for i := uint32(0); i < m.valueRoots; i++ {
 			root := (*unsafe.Pointer)(unsafe.Add(roots, uintptr(i)*pointerSize))
-			visitor(root, meta)
+			visitor(root, 0)
+		}
+		for i := m.valueRoots; i < m.numRoots; i++ {
+			root := (*unsafe.Pointer)(unsafe.Add(roots, uintptr(i)*pointerSize))
+			visitor(root, m.stackWidth)
 		}
 	}
 }

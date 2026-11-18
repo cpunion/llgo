@@ -1,10 +1,8 @@
 package ssa
 
 import (
-	"go/types"
-	"strconv"
-
 	"github.com/xgo-dev/llvm"
+	"go/types"
 )
 
 type gcStackObject struct {
@@ -44,21 +42,6 @@ func (p Function) finalizeGCRoots() {
 		slot.impl.ReplaceAllUsesWith(roots[i].impl)
 		slot.impl.EraseFromParentAsInstruction()
 	}
-}
-
-func (p Function) stackRootMetadata() llvm.Value {
-	width := p.Prog.PointerSize()
-	name := "__llgo_gcroot_stack_pointer_" + strconv.Itoa(width)
-	global := p.Pkg.mod.NamedGlobal(name)
-	if global.IsNil() {
-		global = llvm.AddGlobal(p.Pkg.mod, p.Prog.ctx.Int8Type(), name)
-		global.SetInitializer(llvm.ConstInt(p.Prog.ctx.Int8Type(), uint64(width), false))
-		global.SetGlobalConstant(true)
-		global.SetUnnamedAddr(true)
-		global.SetLinkage(llvm.InternalLinkage)
-		global.SetAlignment(1)
-	}
-	return global
 }
 
 func (p Function) initializeStackRoots(b Builder, roots []Expr) {

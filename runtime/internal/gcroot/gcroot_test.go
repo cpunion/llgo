@@ -5,11 +5,6 @@ import (
 	"unsafe"
 )
 
-type testFrameMap struct {
-	frameMap
-	meta [1]unsafe.Pointer
-}
-
 type testStackEntry struct {
 	stackEntry
 	roots [2]unsafe.Pointer
@@ -19,15 +14,11 @@ func TestVisitAndSwitchContexts(t *testing.T) {
 	resetForTest()
 	t.Cleanup(resetForTest)
 
-	meta := unsafe.Pointer(uintptr(0x33))
 	firstValue := unsafe.Pointer(uintptr(0x11))
 	secondValue := unsafe.Pointer(uintptr(0x22))
-	m := testFrameMap{
-		frameMap: frameMap{numRoots: 2, numMeta: 1},
-		meta:     [1]unsafe.Pointer{meta},
-	}
+	m := frameMap{numRoots: 2, valueRoots: 1, stackWidth: 4}
 	entry := testStackEntry{
-		stackEntry: stackEntry{m: &m.frameMap},
+		stackEntry: stackEntry{m: &m},
 		roots:      [2]unsafe.Pointer{firstValue, secondValue},
 	}
 	currentRootChain = uintptr(unsafe.Pointer(&entry.stackEntry))
@@ -36,21 +27,26 @@ func TestVisitAndSwitchContexts(t *testing.T) {
 	RegisterActive(&first)
 	Register(&second)
 
-	var values, metadata []unsafe.Pointer
-	Visit(func(root *unsafe.Pointer, meta unsafe.Pointer) {
+	var values []unsafe.Pointer
+	var widths []uint32
+	Visit(func(root *unsafe.Pointer, width uint32) {
+		// LLGo may publish its own frame while invoking the visitor.
+		if root != &entry.roots[0] && root != &entry.roots[1] {
+			return
+		}
 		values = append(values, *root)
-		metadata = append(metadata, meta)
+		widths = append(widths, width)
 	})
 	if len(values) != 2 || values[0] != firstValue || values[1] != secondValue {
 		t.Fatalf("Visit values = %v, want [%p %p]", values, firstValue, secondValue)
 	}
-	if metadata[0] != meta || metadata[1] != nil {
-		t.Fatalf("Visit metadata = %v, want [%p nil]", metadata, meta)
+	if widths[0] != 0 || widths[1] != 4 {
+		t.Fatalf("Visit widths = %v, want [0 4]", widths)
 	}
 
-	Switch(&second)
+	SwitchAtBoundary(&second)
 	if first.chain != unsafe.Pointer(&entry.stackEntry) || currentRootChain != 0 {
-		t.Fatal("Switch did not save the active chain and restore the next chain")
+		t.Fatal("SwitchAtBoundary did not save the active chain and restore the next chain")
 	}
 	Unregister(&first)
 	if contexts != &second || second.next != nil {
@@ -72,11 +68,17 @@ func TestRejectsInvalidContextOperations(t *testing.T) {
 }
 
 func TestRejectsInvalidFrameMap(t *testing.T) {
-	m := frameMap{numRoots: 1, numMeta: 2}
-	entry := stackEntry{m: &m}
-	assertPanics(t, func() {
-		visitChain(unsafe.Pointer(&entry), func(*unsafe.Pointer, unsafe.Pointer) {})
-	})
+	for _, m := range []*frameMap{
+		nil,
+		{numRoots: 1, valueRoots: 2},
+		{numRoots: 1, stackWidth: 0},
+		{numRoots: 1, stackWidth: 3},
+	} {
+		entry := stackEntry{m: m}
+		assertPanics(t, func() {
+			visitChain(unsafe.Pointer(&entry), func(*unsafe.Pointer, uint32) {})
+		})
+	}
 }
 
 func TestRestoreChain(t *testing.T) {

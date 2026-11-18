@@ -185,26 +185,19 @@ func (b Builder) currentGCRootChain() Expr {
 
 func (p Function) newGCRootMap(count int) llvm.Value {
 	prog := p.Prog
-	fields := []llvm.Type{prog.tyInt32(), prog.tyInt32()}
-	values := []llvm.Value{llvm.ConstInt(prog.tyInt32(), uint64(count), false), llvm.ConstInt(prog.tyInt32(), 0, false)}
+	// Value roots precede stack-field addresses, which all use the same
+	// physical pointer width. The collector reads the fixed header.
+	i32 := prog.tyInt32()
+	mapType := prog.ctx.StructType([]llvm.Type{i32, i32, i32}, false)
+	stackWidth := uint64(0)
 	if len(p.gcStackObjects) != 0 {
-		// Metadata is nil for value roots. A non-nil metadata byte gives the
-		// physical width of a pointer loaded from a registered stack field.
-		pointerType := prog.storageType(prog.VoidPtr())
-		metadata := make([]llvm.Value, count)
-		width := p.stackRootMetadata()
-		for i := range metadata {
-			value := llvm.ConstNull(prog.VoidPtr().ll)
-			if i >= len(p.gcRootSlots) {
-				value = width
-			}
-			metadata[i] = prog.toStorageConstant(prog.VoidPtr(), value)
-		}
-		fields = append(fields, llvm.ArrayType(pointerType, count))
-		values[1] = llvm.ConstInt(prog.tyInt32(), uint64(count), false)
-		values = append(values, llvm.ConstArray(pointerType, metadata))
+		stackWidth = uint64(prog.PointerSize())
 	}
-	mapType := prog.ctx.StructType(fields, false)
+	values := []llvm.Value{
+		llvm.ConstInt(i32, uint64(count), false),
+		llvm.ConstInt(i32, uint64(len(p.gcRootSlots)), false),
+		llvm.ConstInt(i32, stackWidth, false),
+	}
 	name := p.Name() + "$gcmap"
 	global := llvm.AddGlobal(p.Pkg.mod, mapType, name)
 	global.SetInitializer(llvm.ConstNamedStruct(mapType, values))
@@ -213,7 +206,7 @@ func (p Function) newGCRootMap(count int) llvm.Value {
 	// merge identical immutable maps, including across LTO modules.
 	global.SetUnnamedAddr(true)
 	global.SetLinkage(llvm.InternalLinkage)
-	global.SetAlignment(int(prog.AlignOf(prog.VoidPtr())))
+	global.SetAlignment(4)
 	return global
 }
 
