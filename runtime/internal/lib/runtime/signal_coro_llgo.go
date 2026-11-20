@@ -36,6 +36,25 @@ var (
 	coroSignalPollContextV1 uintptr
 )
 
+//llgo:coro noblock
+//go:linkname coroInstallSIGPIPE C.__llgo_runtime_sigpipe_install_v1
+func coroInstallSIGPIPE() int32
+
+//llgo:coro noblock
+//go:linkname coroRaiseSIGPIPE C.__llgo_runtime_sigpipe_stdout_v1
+func coroRaiseSIGPIPE()
+
+func init() {
+	if coroInstallSIGPIPE() != 0 {
+		throw("runtime: cannot install native SIGPIPE handler")
+	}
+}
+
+//go:linkname os_sigpipe os.sigpipe
+func os_sigpipe() {
+	coroRaiseSIGPIPE()
+}
+
 // The C side owns all state touched by the POSIX signal handler. Every entry
 // below is bounded and non-blocking; in particular, none can enter Go while a
 // signal handler is running.
