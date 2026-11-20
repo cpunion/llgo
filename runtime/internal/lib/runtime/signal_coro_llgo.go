@@ -36,11 +36,9 @@ var (
 	coroSignalPollContextV1 uintptr
 )
 
-//llgo:coro noblock
 //go:linkname coroInstallSIGPIPE C.__llgo_runtime_sigpipe_install_v1
 func coroInstallSIGPIPE() int32
 
-//llgo:coro noblock
 //go:linkname coroRaiseSIGPIPE C.__llgo_runtime_sigpipe_stdout_v1
 func coroRaiseSIGPIPE()
 
