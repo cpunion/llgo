@@ -64,35 +64,38 @@ func (registry *coroKeyedRegistryV2) register(
 		key == 0 || !operation.Valid() || operation.Source() != coro.OperationSourceManual {
 		return coroKeyedRegistryHandleV2{}, false
 	}
-	slots := registry.ensureSlots()
-	for index := range slots {
-		slot := &slots[index]
-		control := coroKeyedAtomicLoadUint32(&slot.control)
-		generation := coroKeyedRegistryControlGenerationV2(control)
-		if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryFreeV2 ||
-			generation == coroKeyedRegistryMaxGenerationV2 {
-			continue
+	for pageIndex := uint32(0); pageIndex < coroKeyedRegistryPageCountV2; pageIndex++ {
+		page := registry.ensurePage(pageIndex)
+		for offset := range page {
+			slot := &page[offset]
+			control := coroKeyedAtomicLoadUint32(&slot.control)
+			generation := coroKeyedRegistryControlGenerationV2(control)
+			if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryFreeV2 ||
+				generation == coroKeyedRegistryMaxGenerationV2 {
+				continue
+			}
+			generation++
+			registering := coroKeyedRegistryControlV2(generation, coroKeyedRegistryRegisteringV2)
+			if !coroKeyedAtomicCompareAndSwapUint32(&slot.control, control, registering) {
+				continue
+			}
+			index := pageIndex*coroKeyedRegistryPageSizeV2 + uint32(offset) + 1
+			if !registry.raiseScanLimit(index) {
+				_ = coroKeyedAtomicCompareAndSwapUint32(&slot.control, registering, control)
+				return coroKeyedRegistryHandleV2{}, false
+			}
+			sequence := coroKeyedAtomicAddUint32(&registry.sequence, 1)
+			coroKeyedAtomicStoreUint32((*uint32)(unsafe.Pointer(&slot.kind)), uint32(kind))
+			coroKeyedAtomicStoreUint32(&slot.logical, logical)
+			coroKeyedAtomicStoreUintptr(&slot.key, key)
+			coroKeyedAtomicStoreUint32(&slot.sequence, sequence)
+			coroKeyedAtomicStoreUint32(&slot.operation.SourceSlot, operation.SourceSlot)
+			coroKeyedAtomicStoreUint32(&slot.operation.Generation, operation.Generation)
+			coroKeyedAtomicStoreUint32(
+				&slot.control, coroKeyedRegistryControlV2(generation, coroKeyedRegistryActiveV2),
+			)
+			return coroKeyedRegistryHandleV2{Slot: index, Generation: generation}, true
 		}
-		generation++
-		registering := coroKeyedRegistryControlV2(generation, coroKeyedRegistryRegisteringV2)
-		if !coroKeyedAtomicCompareAndSwapUint32(&slot.control, control, registering) {
-			continue
-		}
-		if !registry.raiseScanLimit(uint32(index) + 1) {
-			_ = coroKeyedAtomicCompareAndSwapUint32(&slot.control, registering, control)
-			return coroKeyedRegistryHandleV2{}, false
-		}
-		sequence := coroKeyedAtomicAddUint32(&registry.sequence, 1)
-		coroKeyedAtomicStoreUint32((*uint32)(unsafe.Pointer(&slot.kind)), uint32(kind))
-		coroKeyedAtomicStoreUint32(&slot.logical, logical)
-		coroKeyedAtomicStoreUintptr(&slot.key, key)
-		coroKeyedAtomicStoreUint32(&slot.sequence, sequence)
-		coroKeyedAtomicStoreUint32(&slot.operation.SourceSlot, operation.SourceSlot)
-		coroKeyedAtomicStoreUint32(&slot.operation.Generation, operation.Generation)
-		coroKeyedAtomicStoreUint32(
-			&slot.control, coroKeyedRegistryControlV2(generation, coroKeyedRegistryActiveV2),
-		)
-		return coroKeyedRegistryHandleV2{Slot: uint32(index) + 1, Generation: generation}, true
 	}
 	return coroKeyedRegistryHandleV2{}, false
 }
@@ -182,42 +185,50 @@ func (registry *coroKeyedRegistryV2) claimOne(
 	if registry == nil || !validCoroKeyedParkKindV2(kind) || key == 0 {
 		return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
 	}
-	slots := registry.loadSlots()
-	if slots == nil {
-		return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
-	}
 	for {
 		limit := coroKeyedAtomicLoadUint32(&registry.scanLimit)
 		if limit > uint32(coroKeyedRegistryCapacityV2) {
 			return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
 		}
-		selected := -1
+		var selected *coroKeyedRegistrySlotV2
+		var slotNumber uint32
 		var candidate coroKeyedRegistrySnapshotV2
-		for index := uint32(0); index < limit; index++ {
-			slot := &slots[index]
-			control := coroKeyedAtomicLoadUint32(&slot.control)
-			if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryActiveV2 {
-				continue
+		for start := uint32(0); start < limit; start += coroKeyedRegistryPageSizeV2 {
+			page := registry.loadPage(start / coroKeyedRegistryPageSizeV2)
+			if page == nil {
+				return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
 			}
-			snapshot, stable := coroKeyedRegistryLoadSnapshotV2(slot, control)
-			if !stable || snapshot.kind != kind || snapshot.key != key ||
-				exact && snapshot.logical != logical {
-				continue
+			pageLimit := limit - start
+			if pageLimit > coroKeyedRegistryPageSizeV2 {
+				pageLimit = coroKeyedRegistryPageSizeV2
 			}
-			if selected < 0 || coroKeyedRegistrySequenceLessV2(snapshot.sequence, candidate.sequence) {
-				selected, candidate = int(index), snapshot
+			for offset := uint32(0); offset < pageLimit; offset++ {
+				slot := &page[offset]
+				control := coroKeyedAtomicLoadUint32(&slot.control)
+				if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryActiveV2 {
+					continue
+				}
+				snapshot, stable := coroKeyedRegistryLoadSnapshotV2(slot, control)
+				if !stable || snapshot.kind != kind || snapshot.key != key ||
+					exact && snapshot.logical != logical {
+					continue
+				}
+				if selected == nil || coroKeyedRegistrySequenceLessV2(snapshot.sequence, candidate.sequence) {
+					selected, candidate = slot, snapshot
+					slotNumber = start + offset + 1
+				}
 			}
 		}
-		if selected < 0 {
+		if selected == nil {
 			return coroKeyedRegistryHandleV2{}, coro.OperationID{}, false
 		}
 		generation := coroKeyedRegistryControlGenerationV2(candidate.control)
 		posting := coroKeyedRegistryControlV2(generation, coroKeyedRegistryPostingV2)
 		if coroKeyedAtomicCompareAndSwapUint32(
-			&slots[selected].control, candidate.control, posting,
+			&selected.control, candidate.control, posting,
 		) {
 			return coroKeyedRegistryHandleV2{
-				Slot: uint32(selected) + 1, Generation: generation,
+				Slot: slotNumber, Generation: generation,
 			}, candidate.operation, true
 		}
 	}

@@ -74,9 +74,13 @@ const (
 
 // Two native domains each configure 1024 manual-operation slots. The registry
 // slots contain only scalar equality keys and POD identities, never G, P,
-// ParkState or an LLVM handle. The registry owns one collector-visible pointer
-// to their stable array, allocated on the first valid registration.
-const coroKeyedRegistryCapacityV2 = 2 * 1024
+// ParkState or an LLVM handle. Registrations allocate stable pages in slot
+// order. A cold registry contains only the page directory.
+const (
+	coroKeyedRegistryCapacityV2  = 2 * 1024
+	coroKeyedRegistryPageSizeV2  = 64
+	coroKeyedRegistryPageCountV2 = coroKeyedRegistryCapacityV2 / coroKeyedRegistryPageSizeV2
+)
 
 type coroKeyedRegistryHandleV2 struct {
 	Slot       uint32
@@ -114,31 +118,28 @@ type coroKeyedRegistrySlotV2 struct {
 type coroKeyedRegistryV2 struct {
 	sequence  uint32
 	scanLimit uint32
-	// The array is published once, remains stable, and is retained by this
-	// collector-visible pointer. Read-only wake attempts never allocate.
-	slots unsafe.Pointer // *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2
+	// Published pages remain stable and are retained by collector-visible
+	// pointers. Read-only wake attempts never allocate.
+	pages [coroKeyedRegistryPageCountV2]unsafe.Pointer
 }
 
-// loadSlots never initializes storage: an unpublished registry has no waiters.
-func (registry *coroKeyedRegistryV2) loadSlots() *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2 {
-	if registry == nil {
-		return nil
-	}
-	return (*[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2)(coroKeyedAtomicLoadPointer(&registry.slots))
+type coroKeyedRegistryPageV2 [coroKeyedRegistryPageSizeV2]coroKeyedRegistrySlotV2
+
+func (registry *coroKeyedRegistryV2) loadPage(index uint32) *coroKeyedRegistryPageV2 {
+	return (*coroKeyedRegistryPageV2)(coroKeyedAtomicLoadPointer(&registry.pages[index]))
 }
 
-// ensureSlots runs only after a valid registration request. The winning zeroed
-// array is never moved or reset. Concurrent losing allocations are ordinary
-// collectable Go objects and never contain a published registry generation.
-func (registry *coroKeyedRegistryV2) ensureSlots() *[coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2 {
-	if slots := registry.loadSlots(); slots != nil {
-		return slots
+// ensurePage runs only during registration. An allocation that loses the
+// publication race never carries a generation and can be collected normally.
+func (registry *coroKeyedRegistryV2) ensurePage(index uint32) *coroKeyedRegistryPageV2 {
+	if page := registry.loadPage(index); page != nil {
+		return page
 	}
-	candidate := new([coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2)
-	if coroKeyedAtomicCompareAndSwapPointer(&registry.slots, nil, unsafe.Pointer(candidate)) {
+	candidate := new(coroKeyedRegistryPageV2)
+	if coroKeyedAtomicCompareAndSwapPointer(&registry.pages[index], nil, unsafe.Pointer(candidate)) {
 		return candidate
 	}
-	return registry.loadSlots()
+	return registry.loadPage(index)
 }
 
 var coroProgramKeyedRegistryV2State coroKeyedRegistryV2
@@ -215,11 +216,12 @@ func coroKeyedRegistrySlotV2For(
 		handle.Slot > coroKeyedRegistryCapacityV2 {
 		return nil, false
 	}
-	slots := registry.loadSlots()
-	if slots == nil {
+	index := handle.Slot - 1
+	page := registry.loadPage(index / coroKeyedRegistryPageSizeV2)
+	if page == nil {
 		return nil, false
 	}
-	return &slots[handle.Slot-1], true
+	return &page[index%coroKeyedRegistryPageSizeV2], true
 }
 
 func coroKeyedRegistryLoadOperationV2(
