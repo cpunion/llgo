@@ -1,3 +1,5 @@
+//go:build baremetal || (!darwin && !linux) || (!amd64 && !arm64)
+
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -41,32 +43,11 @@ type ExecutionQuota struct {
 	holders   uint32
 }
 
-// BindExecutorServicePressure gives one already-bound executor a read-only
-// view of this quota's waiter publication word. The quota and driver must both
-// remain at stable addresses through driver retirement. This is startup-only:
-// a runtime binds every fleet route after Start and before any managed resume.
-//
-// The word is advisory, not a second admission gate. A compiler safepoint only
-// uses a nonzero value to return to the scheduler; TryAcquire and Release remain
-// the sole owners of managed-execution admission.
-func BindExecutorServicePressure(driver *ExecutorDriver, quota *ExecutionQuota) bool {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
-		driver.servicePressure != nil || quota == nil ||
-		preemptLoad(&quota.lifecycle) != uint32(executionQuotaActive) {
-		return false
-	}
-	driver.servicePressure = &quota.waiters
-	return true
+func (quota *ExecutionQuota) hasWaiters() bool {
+	return preemptLoad(&quota.waiters) != 0
 }
 
-type executionQuotaLifecycle uint32
-
-const (
-	executionQuotaUnused executionQuotaLifecycle = iota
-	executionQuotaActive
-	executionQuotaSealed
-	executionQuotaRetired
-)
+const executionQuotaSize = 20
 
 type executionQuotaHolderState uint32
 

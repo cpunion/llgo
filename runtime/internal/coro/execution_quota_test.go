@@ -26,8 +26,8 @@ import (
 
 func TestExecutionQuotaLifecycleAndStickyWake(t *testing.T) {
 	quota := new(ExecutionQuota)
-	if got := unsafe.Sizeof(*quota); got != 5*unsafe.Sizeof(uint32(0)) {
-		t.Fatalf("execution quota size = %d, want five atomic words", got)
+	if got := unsafe.Sizeof(*quota); got != executionQuotaSize {
+		t.Fatalf("execution quota size = %d, want %d", got, executionQuotaSize)
 	}
 	if !quota.CanRelease() || quota.Start(0) || !quota.Start(1) || quota.Start(1) {
 		t.Fatal("execution quota start lifecycle invalid")
@@ -132,6 +132,65 @@ func TestExecutionQuotaRejectsRouteMisuse(t *testing.T) {
 	}
 	if _, ok := quota.Seal(); !ok || !quota.Retire() {
 		t.Fatal("retire misuse fixture")
+	}
+}
+
+func TestExecutionQuotaKeepsFullLogicalLimit(t *testing.T) {
+	var quota ExecutionQuota
+	const maximum = ^uint32(0)
+	if !quota.Start(maximum) {
+		t.Fatal("start with the maximum logical limit")
+	}
+	if acquired, ok := quota.TryAcquire(1); !acquired || !ok {
+		t.Fatal("acquire below the maximum logical limit")
+	}
+	if limit, active, ok := quota.Usage(); limit != maximum || active != 1 || !ok {
+		t.Fatalf("usage = (%d, %d, %t), want (%d, 1, true)", limit, active, ok, maximum)
+	}
+	if previous, wake, ok := quota.SetLimit(1); previous != maximum || wake || !ok {
+		t.Fatalf("shrink = (%d, %t, %t), want (%d, false, true)", previous, wake, ok, maximum)
+	}
+	if _, ok := quota.Release(1); !ok {
+		t.Fatal("release the held route after shrinking")
+	}
+}
+
+func TestExecutionQuotaReleaseOrdersWaiterPublication(t *testing.T) {
+	for iteration := 0; iteration < 128; iteration++ {
+		var quota ExecutionQuota
+		if !quota.Start(1) {
+			t.Fatal("start one-permit quota")
+		}
+		if acquired, ok := quota.TryAcquire(1); !acquired || !ok {
+			t.Fatal("hold the initial permit")
+		}
+		start := make(chan struct{})
+		var joined sync.WaitGroup
+		joined.Add(2)
+		var acquired, acquireOK, wake, releaseOK bool
+		go func() {
+			defer joined.Done()
+			<-start
+			acquired, acquireOK = quota.TryAcquire(2)
+		}()
+		go func() {
+			defer joined.Done()
+			<-start
+			wake, releaseOK = quota.Release(1)
+		}()
+		close(start)
+		joined.Wait()
+		if !acquireOK || !releaseOK || !acquired && !wake {
+			t.Fatalf("race lost permit or wake: acquired=%t/%t, wake=%t/%t", acquired, acquireOK, wake, releaseOK)
+		}
+		if !acquired {
+			if acquired, ok := quota.TryAcquire(2); !acquired || !ok {
+				t.Fatal("awakened route could not claim the returned permit")
+			}
+		}
+		if _, ok := quota.Release(2); !ok {
+			t.Fatal("release the final route")
+		}
 	}
 }
 
