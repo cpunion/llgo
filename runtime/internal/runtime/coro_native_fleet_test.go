@@ -162,6 +162,7 @@ func testCoroNativeFleetHandleResume(handle unsafe.Pointer) {
 				task.pollFD,
 				coro.PollInterestRead,
 				0,
+				false,
 			)
 			if !ok {
 				failCoroNativeFleetRunTestTaskV1(task, "prepare routed poll park failed")

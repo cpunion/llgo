@@ -26,6 +26,10 @@ import (
 
 const coroPollParkMagicV2 uint32 = 0x43504c32 // "CPL2"
 
+// CoroPollWaitStreamFlagV2 carries the immutable descriptor classification
+// alongside the direction in the compiler-owned poll-wait ABI.
+const CoroPollWaitStreamFlagV2 uint32 = 1 << 8
+
 const (
 	coroPollResumeReadyV2 uint32 = iota + 1
 	coroPollResumeClosingV2
@@ -82,13 +86,15 @@ func __llgo_coro_poll_park_v2(
 	deadline int64,
 ) {
 	state := (*CoroPollParkV2)(storage)
-	pollInterest := coro.PollInterest(interest)
+	streamSocket := interest&CoroPollWaitStreamFlagV2 != 0
+	interest &^= CoroPollWaitStreamFlagV2
 	if g == nil || handle == nil || header == nil || state == nil || context == 0 ||
-		(pollInterest != coro.PollInterestRead && pollInterest != coro.PollInterestWrite) ||
+		(interest != uint32(coro.PollInterestRead) && interest != uint32(coro.PollInterestWrite)) ||
 		*state != (CoroPollParkV2{}) {
 		coroPollAbortV2("invalid coroutine Poll V2 park ABI")
 		return
 	}
+	pollInterest := coro.PollInterest(interest)
 	task := (*coro.G)(g)
 	driver, wantExecutor, wantRoute, ok := coro.CurrentExecutorPollDriver(task)
 	if !ok || !ensureCoroPollOperationCapacityV1(driver, task, coroRuntimePollCapacityV1) {
@@ -106,6 +112,7 @@ func __llgo_coro_poll_park_v2(
 		fd,
 		pollInterest,
 		deadline,
+		streamSocket,
 	)
 	if !prepared || executor != wantExecutor || operation.Route() != wantRoute {
 		coroPollAbortV2("cannot prepare coroutine Poll V2 park")

@@ -73,7 +73,7 @@ func reservePollV2Test(
 ) (PollOperationHandle, OperationID) {
 	t.Helper()
 	handle, id, ok := poll.ReserveAndAttachPollOperationV2(
-		p, &park.task.g.park, park.ticket, park.wait, caseID, fd, PollInterestRead, 0,
+		p, &park.task.g.park, park.ticket, park.wait, caseID, fd, PollInterestRead, 0, false,
 	)
 	if !ok || !handle.Valid() || !id.Valid() || id.LocalSlot() != handle.Slot || id.Generation != handle.Generation {
 		t.Fatalf("reserve poll V2 = (%+v, %+v, %t)", handle, id, ok)
@@ -375,7 +375,7 @@ func TestPollOperationV2DeadlinePublishesTimeoutResult(t *testing.T) {
 	sources, poll := bindPollV2TestSources(t, p, RouteID(7), nil)
 	park := beginTimerV2TestPark(t, p, "poll-v2-deadline", 1, 210)
 	handle, id, reserved := poll.ReserveAndAttachPollOperationV2(
-		p, &park.task.g.park, park.ticket, park.wait, 63, 63, PollInterestWrite, 50,
+		p, &park.task.g.park, park.ticket, park.wait, 63, 63, PollInterestWrite, 50, false,
 	)
 	if !reserved || !handle.Valid() || !id.Valid() {
 		t.Fatal("reserve deadline poll V2")
@@ -417,7 +417,7 @@ func TestPollOperationV2DeadlineOrdersQueuedReadiness(t *testing.T) {
 			sources, poll := bindPollV2TestSources(t, p, RouteID(7), nil)
 			park := beginTimerV2TestPark(t, p, "poll-v2-readiness-deadline-order", 1, 214)
 			handle, id, reserved := poll.ReserveAndAttachPollOperationV2(
-				p, &park.task.g.park, park.ticket, park.wait, 66, 66, PollInterestRead, 50,
+				p, &park.task.g.park, park.ticket, park.wait, 66, 66, PollInterestRead, 50, false,
 			)
 			if !reserved || !handle.Valid() || !id.Valid() {
 				t.Fatal("reserve readiness/deadline poll V2")
@@ -450,12 +450,16 @@ func TestPollOperationV2ActiveDeadlineUpdateAndExactClosingWake(t *testing.T) {
 	sources, poll := bindPollV2TestSources(t, p, RouteID(7), nil)
 	park := beginTimerV2TestPark(t, p, "poll-v2-updated-deadline-close", 1, 212)
 	firstHandle, firstID, reserved := poll.ReserveAndAttachPollOperationV2(
-		p, &park.task.g.park, park.ticket, park.wait, 64, 64, PollInterestRead, 100,
+		p, &park.task.g.park, park.ticket, park.wait, 64, 64, PollInterestRead, 100, true,
 	)
 	if !reserved || !firstHandle.Valid() || !firstID.Valid() {
 		t.Fatal("reserve first deadline poll V2")
 	}
 	commitTimerV2TestPark(t, p, park)
+	if snapshot, active, ok := poll.SnapshotAt(p, firstHandle.Slot-1); !ok || !active ||
+		snapshot.ID != firstID || !snapshot.StreamSocket {
+		t.Fatalf("first poll generation lost stream classification: (%+v, %t, %t)", snapshot, active, ok)
+	}
 
 	staleFuture := firstID
 	staleFuture.Generation++
@@ -497,13 +501,17 @@ func TestPollOperationV2ActiveDeadlineUpdateAndExactClosingWake(t *testing.T) {
 
 	park = rebeginTimerV2TestPark(t, park.task, action, 1, 213)
 	secondHandle, secondID, reserved := poll.ReserveAndAttachPollOperationV2(
-		p, &park.task.g.park, park.ticket, park.wait, 65, 65, PollInterestWrite, 80,
+		p, &park.task.g.park, park.ticket, park.wait, 65, 65, PollInterestWrite, 80, false,
 	)
 	if !reserved || secondHandle.Slot != firstHandle.Slot ||
 		secondHandle.Generation <= firstHandle.Generation || secondID == firstID {
 		t.Fatalf("reserve reused poll generation: first=%+v second=%+v", firstHandle, secondHandle)
 	}
 	commitTimerV2TestPark(t, p, park)
+	if snapshot, active, ok := poll.SnapshotAt(p, secondHandle.Slot-1); !ok || !active ||
+		snapshot.ID != secondID || snapshot.StreamSocket {
+		t.Fatalf("reused poll generation retained stream classification: (%+v, %t, %t)", snapshot, active, ok)
+	}
 	if event := poll.PostPollOperationV2(firstID, PollOperationClosing); event != PollOperationPostStale {
 		t.Fatalf("post retired generation close = %d", event)
 	}

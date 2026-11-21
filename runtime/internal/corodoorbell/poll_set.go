@@ -64,11 +64,16 @@ func WaitPollSet(first *PollFD, count uint32, timeoutMS int32) (ready int, errno
 }
 
 // WaitPollSet borrows a snapshot whose first entry is this pipe's read end.
-// Only the current physical owner calls this method. Its readiness queue, if
-// allocated, follows the pipe across owner changes and closes with the pipe.
-func (pipe *Pipe) WaitPollSet(first *PollFD, count uint32, timeoutMS int32) (int, int32) {
+// streamPair certifies that the sole application descriptor is a stream
+// socket. FIFOs and other descriptor types use the general poll path.
+// Only the current physical owner calls this method. The optional readiness
+// queue follows the pipe across owner changes and closes with the pipe.
+func (pipe *Pipe) WaitPollSet(first *PollFD, count uint32, timeoutMS int32, streamPair bool) (int, int32) {
 	if pipe == nil || !validPollSet(first, count, timeoutMS) || first.FD != pipe.readFD {
 		return -1, -1
+	}
+	if !streamPair {
+		return nativePollSet(first, count, timeoutMS)
 	}
 	return pipe.pollQueue.wait(first, count, timeoutMS)
 }
