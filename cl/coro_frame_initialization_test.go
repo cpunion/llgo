@@ -54,3 +54,24 @@ func Leaf() byte {
 		})
 	}
 }
+
+func TestCoroLoopLocalIsZeroedAtDeclaration(t *testing.T) {
+	prog, pkg := compileCoroLeafPhysicalABISource(t, nil, `package foo
+func Leaf(index int) int {
+	var sum int
+	for round := 0; round < 2; round++ {
+		var seen [25]byte
+		sum += int(seen[index])
+		seen[index] = 1
+		sum += int(seen[round])
+	}
+	return sum
+}
+`)
+	defer prog.Dispose()
+	defer pkg.Module().Dispose()
+	ir := pkg.Module().NamedFunction("foo.Leaf$coro").String()
+	if !strings.Contains(ir, "store [25 x i8] zeroinitializer") {
+		t.Fatalf("re-entering the declaration must zero the loop local:\n%s", ir)
+	}
+}
