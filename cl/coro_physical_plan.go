@@ -536,6 +536,8 @@ type coroPhysicalFunctionPlan struct {
 	reachableBlocks   map[*ssa.BasicBlock]bool
 	instructions      map[ssa.Instruction]coroPhysicalInstructionPlan
 	captureSnapshots  []coroPhysicalCaptureSnapshot
+
+	waitGroupEntryUpdate *coroWaitGroupAddFastPlan
 }
 
 // coroPhysicalCaptureSnapshot is the target-bounded physical projection of an
@@ -864,6 +866,9 @@ func prepareCoroPhysicalFunctionPlan(
 		logical = function
 		plan.needsPreempt = function.Exec.Contains(coro.NeedsPreempt)
 		plan.staticOutcome = function.StaticOutcome
+		if function.Emission == coro.EmitCoroutine && !whole.IgnoresBody(audit.fn) {
+			plan.waitGroupEntryUpdate = planCoroWaitGroupAddFast(audit.ctx, audit.fn)
+		}
 	}
 	captureSnapshots, captureLoads, err := planCoroPhysicalCaptureSnapshots(audit)
 	if err != nil {
@@ -1356,6 +1361,9 @@ func (stage *coroPhysicalPlanStage) freezePhysicalFunctionPlan(plan *coroPhysica
 	if err := plan.validateLocalChannels(); err != nil {
 		return fmt.Errorf("physical plan local channels: %w", err)
 	}
+	if proof := plan.waitGroupEntryUpdate; proof != nil && !proof.validFor(plan.function) {
+		return fmt.Errorf("WaitGroup entry update lost its exact function proof")
+	}
 	if plan.cleanup != nil {
 		for _, site := range plan.cleanup.sites {
 			if site != nil && site.pollFDFast != nil && !site.pollFDFast.validCleanup(site) {
@@ -1387,9 +1395,8 @@ func (stage *coroPhysicalPlanStage) freezePhysicalFunctionPlan(plan *coroPhysica
 		}
 		if proof := physical.waitGroupAddFast; proof != nil {
 			if _, ok := instruction.(*ssa.Call); !ok || physical.control != coroPhysicalControlDirectAwait ||
-				physical.controlTarget != proof.target || physical.controlTargetID == "" ||
-				physical.controlClosure != nil || proof.stateField != 1 || proof.valueField != 2 ||
-				proof.sourceDigest != coroWaitGroupAddSourceDigest {
+				!proof.validFor(physical.controlTarget) || physical.controlTargetID == "" ||
+				physical.controlClosure != nil {
 				return fmt.Errorf("WaitGroup fast update lost its exact direct-await proof")
 			}
 		}

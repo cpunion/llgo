@@ -232,15 +232,37 @@ func coroWaitGroupAddUsesCanonicalAtomic(view coroWaitGroupProofView, fn *ssa.Fu
 	return returned
 }
 
-// emitCoroWaitGroupAddFast consumes only the immutable occurrence proof.
+func (proof *coroWaitGroupAddFastPlan) validFor(fn *ssa.Function) bool {
+	return proof != nil && fn != nil && proof.target == fn &&
+		proof.sourceDigest == coroWaitGroupAddSourceDigest && proof.stateField == 1 && proof.valueField == 2
+}
+
+// compileCoroWaitGroupEntryUpdate also covers entries such as a spawned Done
+// whose forwarding ramp has no source call at which to try the native update.
+// A rejected compare-and-swap leaves the original Go body authoritative.
+func (p *context) compileCoroWaitGroupEntryUpdate(b llssa.Builder, fn *ssa.Function, proof *coroWaitGroupAddFastPlan) {
+	if !proof.validFor(fn) || len(fn.Params) != 2 {
+		panic("WaitGroup entry update lost its frozen operands")
+	}
+	receiver := p.compileValue(b, fn.Params[0])
+	delta := p.compileValue(b, fn.Params[1])
+	done := p.emitCoroWaitGroupAddFast(b, []llssa.Expr{receiver, delta}, proof)
+	success, fallback := b.Func.MakeBlock(), b.Func.MakeBlock()
+	b.If(done, success, fallback)
+	b.SetBlockEx(success, llssa.AtEnd, false)
+	p.compileCoroReturn(b, nil)
+	b.SetBlockContinuation(fallback)
+}
+
+// emitCoroWaitGroupAddFast consumes only the immutable update proof.
 // Failure is side-effect free; all wake, misuse, overflow, race and bubble
-// cases keep the complete original coroutine call. A successful SC CAS has
+// cases keep the complete original coroutine body. A successful SC CAS has
 // exactly the original atomic-add value and synchronization effect.
 func (p *context) emitCoroWaitGroupAddFast(b llssa.Builder, args []llssa.Expr, proof *coroWaitGroupAddFastPlan) llssa.Expr {
 	if proof == nil {
 		return llssa.Nil
 	}
-	if len(args) != 2 || proof.target == nil || proof.sourceDigest != coroWaitGroupAddSourceDigest {
+	if len(args) != 2 || !proof.validFor(proof.target) {
 		panic("WaitGroup update lost frozen operands")
 	}
 	// Keep the nil receiver on the original structured Go panic path.
