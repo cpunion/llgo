@@ -8881,11 +8881,13 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 // p_filesz after replacing the carrier with the compact table without
 // moving any virtual address or pinning otherwise-dead functions. Mach-O gets
 // the same property from the dedicated __LLGO segment named at emission time.
+// The staged backend has already released its frontend Program, so consume
+// the site-emission fact frozen for linking rather than that disposed Program.
 func funcInfoSiteLayoutArgs(ctx *context, outputPath string) ([]string, func(), error) {
 	cleanup := func() {}
 	if ctx == nil || ctx.buildConf == nil || ctx.buildConf.Goos != "linux" ||
 		ctx.buildConf.Target != "" || ctx.buildConf.BuildMode != BuildModeExe ||
-		!shouldEmitRuntimeSites(ctx) {
+		!runtimeSitesForLink(ctx) {
 		return nil, cleanup, nil
 	}
 	dir := filepath.Dir(outputPath)

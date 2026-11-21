@@ -52,6 +52,12 @@ import (
 	"unsafe"
 )
 
+//go:linkname initPCLNFrames runtime.initRuntimeFuncPCFrames
+func initPCLNFrames()
+
+//go:linkname prebuiltPCLNFrameCount runtime.prebuiltFrameCount
+func prebuiltPCLNFrameCount() int
+
 //go:noinline
 func pclnTarget() uintptr {
 	pc, _, _, ok := runtime.Caller(0)
@@ -198,6 +204,9 @@ func main() {
 		panic("missing scenario")
 	}
 	switch os.Args[1] {
+	case "prebuilt":
+		initPCLNFrames()
+		fmt.Println(prebuiltPCLNFrameCount() > 0)
 	case "once":
 		fmt.Println(pclnState())
 	case "chdir-once":
@@ -467,6 +476,37 @@ func TestPCLNExternalLinkOptionsIntegration(t *testing.T) {
 				t.Fatalf("native symbol table with LinkOptions %+v = %v, want %v", tt.options, got, tt.wantSymtab)
 			}
 		})
+	}
+}
+
+func TestELFPrebuiltLayoutAfterFrontendRelease(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("ELF entry carrier layout is specific to native Linux")
+	}
+	requireNativePCLNSidecars(t)
+	setPCLNIntegrationEnv(t)
+	source := writePCLNIntegrationFixture(t)
+	bin := filepath.Join(t.TempDir(), "pclntab-prebuilt")
+	// DWARF builds can legitimately exceed the bounded entry carrier and
+	// retain the first-use construction fallback. Keep their API coverage in
+	// TestPCLNModeNativeIntegration, and exercise actual table publication in
+	// this separate no-DWARF build, as the normal CLI default does.
+	conf := &Config{
+		Mode: ModeBuild, BuildMode: BuildModeExe, OutFile: bin,
+		PCLNMode: PCLNEmbedded, PCLNModeSet: true,
+		OmitDWARFByDefault: true,
+	}
+	if _, err := Do([]string{source}, conf); err != nil {
+		t.Fatal(err)
+	}
+	for _, procs := range []string{"1", "4"} {
+		t.Setenv("GOMAXPROCS", procs)
+		if got := runPCLNIntegrationBinary(t, bin, "prebuilt"); got != "true\n" {
+			t.Fatalf("P%s embedded ELF did not adopt its prebuilt table: %q", procs, got)
+		}
+		if got := runPCLNIntegrationBinary(t, bin, "apis"); got != "caller=FULL frames=FULL func=FULL\n" {
+			t.Fatalf("P%s prebuilt table API states = %q", procs, got)
+		}
 	}
 }
 
