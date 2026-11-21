@@ -6,7 +6,11 @@
 
 package os
 
-import "io"
+import (
+	"io"
+	"runtime"
+	"syscall"
+)
 
 // Read reads up to len(b) bytes from the File and stores them in b.
 // It returns the number of bytes read and any error encountered.
@@ -15,7 +19,8 @@ func (f *File) Read(b []byte) (n int, err error) {
 	if err := f.checkValid("read"); err != nil {
 		return 0, err
 	}
-	n, err = f.read(b)
+	n, err = f.pfd.Read(b)
+	runtime.KeepAlive(f)
 	// The error wrapper may suspend. Skip its coroutine call on success.
 	if err != nil {
 		err = f.wrapErr("read", err)
@@ -30,7 +35,8 @@ func (f *File) Write(b []byte) (n int, err error) {
 	if err := f.checkValid("write"); err != nil {
 		return 0, err
 	}
-	n, e := f.write(b)
+	n, e := f.pfd.Write(b)
+	runtime.KeepAlive(f)
 	if n < 0 {
 		n = 0
 	}
@@ -42,4 +48,25 @@ func (f *File) Write(b []byte) (n int, err error) {
 		err = f.wrapErr("write", e)
 	}
 	return n, err
+}
+
+// Seek sets the offset for the next Read or Write on file, according to
+// whence, and returns the new offset.
+func (f *File) Seek(offset int64, whence int) (int64, error) {
+	if err := f.checkValid("seek"); err != nil {
+		return 0, err
+	}
+	if info := f.dirinfo.Swap(nil); info != nil {
+		// Discard the directory buffer so the next read starts at the new offset.
+		info.close()
+	}
+	ret, err := f.pfd.Seek(offset, whence)
+	runtime.KeepAlive(f)
+	if err == nil && f.dirinfo.Load() != nil && ret != 0 {
+		err = syscall.EISDIR
+	}
+	if err != nil {
+		return 0, f.wrapErr("seek", err)
+	}
+	return ret, nil
 }
