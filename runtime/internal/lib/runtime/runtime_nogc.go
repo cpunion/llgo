@@ -16,3 +16,5 @@ func ReadMemStats(m *runtime.MemStats) {
 func GC() {
 	// The leaking/nogc profile has no tracing collector.
 }
+
+func freeOSMemoryForCollector() { GC() }

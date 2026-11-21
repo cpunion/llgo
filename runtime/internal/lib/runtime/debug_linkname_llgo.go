@@ -48,8 +48,9 @@ func readGCStats(pauses *[]int64) {
 	buffer[2*count+2] = int64(stats.PauseTotalNs)
 }
 
+//llgo:managedlink
 //go:linkname freeOSMemory runtime/debug.freeOSMemory
-func freeOSMemory() {}
+func freeOSMemory() { freeOSMemoryForCollector() }
 
 //go:linkname setMaxStack runtime/debug.setMaxStack
 func setMaxStack(in int) (out int) {
