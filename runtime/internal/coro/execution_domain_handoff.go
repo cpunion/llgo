@@ -91,8 +91,10 @@ func (*executionDomainHandoffNoCopy) Unlock() {}
 // before publishing Idle, so reuse cannot observe an old epoch.
 //
 // This object contains no pointer and must remain at a stable address after
-// first use. The original owner alone calls Begin, RequestReturn, Complete, and
-// Retire. At most one compensation owner may successfully Claim,
+// first use. The original owner normally calls Begin, RequestReturn, Complete,
+// and Retire. A deferred-start publisher may call Begin and roll back its
+// unpublished dispatch while it exclusively holds the Starting gate. At most
+// one compensation owner may successfully Claim,
 // RequestClaimedReturn, and FinishReturn. Waiting and doorbells are target
 // policy, not part of this core.
 type ExecutionDomainHandoff struct {
@@ -300,6 +302,25 @@ func (handoff *ExecutionDomainHandoff) Returned(
 	handle ExecutionDomainHandoffHandle,
 ) bool {
 	return handoff.observes(handle, executionDomainHandoffReturned)
+}
+
+// Live reports whether the released generation still owns the baton.
+// The phase may advance while the receiver loads the owner epoch.
+func (handoff *ExecutionDomainHandoff) Live(handle ExecutionDomainHandoffHandle) bool {
+	if handoff == nil || !handle.Valid() {
+		return false
+	}
+	state := preemptLoad(&handoff.state)
+	phase := executionDomainHandoffStatePhase(state)
+	if phase < executionDomainHandoffReleased || phase > executionDomainHandoffReturned ||
+		executionDomainHandoffStateGeneration(state) != handle.Generation {
+		return false
+	}
+	epoch := preemptLoad(&handoff.ownerEpoch)
+	state = preemptLoad(&handoff.state)
+	phase = executionDomainHandoffStatePhase(state)
+	return epoch == handle.OwnerEpoch && executionDomainHandoffStateGeneration(state) == handle.Generation &&
+		phase >= executionDomainHandoffReleased && phase <= executionDomainHandoffReturned
 }
 
 // Complete consumes the returned generation and republishes reusable Idle.
