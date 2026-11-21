@@ -769,8 +769,9 @@ func TestRuntimeNativeSyscallDeferredReplacementUsesStableRequestGate(t *testing
 		release = strings.Index(prepared, "coroTargetReleaseManagedExecutionAtRouteV1(")
 		arm = strings.Index(prepared, "boundary.parent.deferred.Arm()")
 		requestObservation = strings.Index(prepared, "coro.ExecutorResumeHandoffRequestPending(&boundary.resume)")
-		if strings.Contains(prepared, "coroNativeMAllocateReplacementV1(") {
-			t.Error("deferred native syscall eagerly allocates a replacement slot")
+		if strings.Contains(prepared, "coroNativeMAllocateReplacementV1(") ||
+			strings.Contains(prepared, ".handoff.Begin(") {
+			t.Error("deferred native syscall publishes a replacement before demand")
 		}
 	}
 	if prepare < 0 || demand < 0 || release <= demand || arm <= release || requestObservation <= arm {
@@ -778,6 +779,12 @@ func TestRuntimeNativeSyscallDeferredReplacementUsesStableRequestGate(t *testing
 	}
 
 	request := readRuntimePollFile(t, "internal/runtime/coro_native_deferred_replacement_llgo.go")
+	claim := strings.Index(request, "parent.deferred.BeginStart()")
+	baton := strings.Index(request, "parent.handoff.Begin(epoch)")
+	allocation := strings.Index(request, "coroNativeMAllocateReplacementV1(")
+	if claim < 0 || baton <= claim || allocation <= baton {
+		t.Error("deferred replacement must claim demand before publishing its baton and allocating a slot")
+	}
 	for _, required := range []string{
 		"coroNativeMActiveOwnerV1(domain.driverOwnerV1())",
 		"parent.deferred.BeginStart()",

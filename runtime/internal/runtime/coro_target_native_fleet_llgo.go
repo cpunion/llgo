@@ -318,11 +318,10 @@ func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) co
 			return coroTargetDispatchInvalidV1
 		}
 		if blocked {
-			// Go main return terminates the process even when a background
-			// LockOSThread G remains inside an uninterruptible syscall. Such an
-			// M cannot be strongly joined or reused; process exit is its terminal
-			// lifetime boundary. Ordinary drainable shutdown still takes the
-			// full close/join path below.
+			// Go main return terminates the process even when a background G
+			// remains inside an uninterruptible syscall. Process exit is the
+			// lifetime boundary for that M. Drainable shutdown still joins all
+			// physical owners below.
 			c.Exit(0)
 			for {
 			}
