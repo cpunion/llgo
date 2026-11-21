@@ -2785,6 +2785,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			case coroPhysicalInstructionFrameAllocation:
 				observePhysical(coroPhysicalInstructionFrameAllocation)
 				ret = p.structuredOutcomeAlloca(elem, true)
+				if v.Block().Index != 0 {
+					// A declaration in a loop can execute again in the same frame.
+					// Its source allocation must start with a fresh zero value.
+					b.StoreKnownNonNil(ret, p.prog.Zero(elem))
+				}
 			case coroPhysicalInstructionBorrowedAllocation:
 				observePhysical(coroPhysicalInstructionBorrowedAllocation)
 				// The storage itself belongs to the entry/native frame, but a
