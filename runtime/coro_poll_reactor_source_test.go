@@ -35,7 +35,8 @@ func TestCoroNativePollReactorSharesExecutorWait(t *testing.T) {
 		"coroNativePollCapacityV1 + 1",
 		"coro.PollOperationConfiguredCapacity(",
 		"coro.SnapshotExecutorPollOperation(",
-		"corodoorbell.WaitPollSet(",
+		"streamSet := count > 1 && count <= 3 && streamSockets",
+		"pipe.WaitPollSet(&entries[0], count, timeoutMS, streamSet)",
 		"coroNativePollIDsV2",
 		"coroTargetPostPollEventsV1(count)",
 		"pipe.ConsumeRetainedWake()",
@@ -90,7 +91,8 @@ func TestCoroNativeFleetPollReactorKeepsOneExactPhysicalWaitPrimitive(t *testing
 		"coroNativeFleetPhysicalWaitActiveV1",
 		"domain.doorbell.ConsumeRetainedWake()",
 		"corodoorbell.DeadlinePollTimeout(now, wait.deadline)",
-		"corodoorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS)",
+		"storage.streamSet = count > 1 && count <= 3 && streamSockets",
+		"domain.doorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS, storage.streamSet)",
 		"coroNativeFleetPostPollV1(",
 		"storage.operations[entry-1]",
 		"coroNativeFleetWaitPassRetryV1",
@@ -130,7 +132,7 @@ func TestCoroNativeFleetPollReactorKeepsOneExactPhysicalWaitPrimitive(t *testing
 		}
 	}
 	for _, forbidden := range []string{
-		"corodoorbell.WaitPollSet(",
+		".WaitPollSet(",
 		"coro.SnapshotExecutorPollOperation(",
 		"corodoorbell.DeadlinePollTimeout(",
 	} {

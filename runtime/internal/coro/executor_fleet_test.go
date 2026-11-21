@@ -436,7 +436,7 @@ func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
 			t.Fatal("begin routed poll park set")
 		}
 		pollHandle, id, ok := poll.ReserveAndAttachPollOperationV2(
-			p, &task.g.park, ticket, wait, 17, 42, PollInterestRead, 0,
+			p, &task.g.park, ticket, wait, 17, 42, PollInterestRead, 0, false,
 		)
 		if !ok || id.Route() != RouteID(handle.Route) || !SealParkSet(&task.g.park, ticket) {
 			t.Fatalf("reserve routed poll operation = (%+v, %+v, %t)", pollHandle, id, ok)

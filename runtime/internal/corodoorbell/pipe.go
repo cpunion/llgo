@@ -32,10 +32,11 @@ const (
 )
 
 type Pipe struct {
-	readFD  int32
-	writeFD int32
-	pending uint32
-	open    uint32
+	pollQueue nativePollQueue
+	readFD    int32
+	writeFD   int32
+	pending   uint32
+	open      uint32
 }
 
 // Open is owner-only and creates one nonblocking, close-on-exec pipe. Both
@@ -257,8 +258,8 @@ func (pipe *Pipe) waitBoundedInterruptible(timeoutMS int32) (woke, ok bool) {
 // Close is owner-only and is called only after the owning TargetIngress has
 // been sealed and strongly joined. It performs no retry after EINTR: POSIX
 // close error state is platform-dependent and retrying could close a descriptor
-// already reused by another owner. Both descriptors are invalidated before the
-// calls.
+// already reused by another owner. It invalidates the descriptors and any
+// readiness queue before closing them.
 func (pipe *Pipe) Close() bool {
 	if pipe == nil || !nativeAtomicCompareAndSwap(&pipe.open, 1, 0) {
 		return false
@@ -266,9 +267,10 @@ func (pipe *Pipe) Close() bool {
 	readFD, writeFD := pipe.readFD, pipe.writeFD
 	pipe.readFD, pipe.writeFD = invalidFD, invalidFD
 	nativeAtomicStore(&pipe.pending, 0)
+	queueOK := pipe.pollQueue.close()
 	readOK := readFD >= 0 && nativePipeClose(readFD)
 	writeOK := writeFD >= 0 && nativePipeClose(writeFD)
-	return readOK && writeOK
+	return queueOK && readOK && writeOK
 }
 
 func (pipe *Pipe) Closed() bool {

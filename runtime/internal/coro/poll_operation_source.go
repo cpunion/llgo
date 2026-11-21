@@ -80,11 +80,12 @@ func (handle PollOperationHandle) Valid() bool {
 // target reactor. A snapshot is valid only for the returned handle generation;
 // the owner imports readiness with that handle, never with an fd lookup.
 type PollOperationSnapshot struct {
-	Handle   PollOperationHandle
-	ID       OperationID
-	Deadline int64
-	FD       int32
-	Interest PollInterest
+	Handle       PollOperationHandle
+	ID           OperationID
+	Deadline     int64
+	FD           int32
+	Interest     PollInterest
+	StreamSocket bool
 }
 
 // PollOperationPostResult classifies owner-side import of a readiness event.
@@ -133,12 +134,13 @@ const (
 )
 
 type pollOperationSlot struct {
-	state      pollOperationState
-	interest   PollInterest
-	generation uint32
-	p          *P
-	fd         int32
-	deadline   int64
+	state        pollOperationState
+	interest     PollInterest
+	streamSocket bool
+	generation   uint32
+	p            *P
+	fd           int32
+	deadline     int64
 
 	// v2Producer is a producer-admission header for the exact generation. A
 	// reactor producer touches only this header, mailbox and
@@ -332,7 +334,7 @@ func validPollOperationRecordResidue(source *PollOperationSource, slot *pollOper
 
 func reusablePollOperationSlot(source *PollOperationSource, slot *pollOperationSlot, index uint32) bool {
 	return slot != nil && slot.state == pollOperationFree &&
-		slot.interest == PollInterestInvalid && slot.p == nil && slot.fd == 0 && slot.deadline == 0 &&
+		slot.interest == PollInterestInvalid && !slot.streamSocket && slot.p == nil && slot.fd == 0 && slot.deadline == 0 &&
 		producerSourceSlotReusable(&slot.v2Producer) &&
 		preemptLoad(&slot.v2Mailbox) == uint32(pollOperationMailboxEmpty) &&
 		slot.v2Result == PollOperationResultInvalid &&
@@ -433,6 +435,7 @@ func (source *PollOperationSource) ReserveAndAttachPollOperationV2(
 	fd int32,
 	interest PollInterest,
 	deadline int64,
+	streamSocket bool,
 ) (PollOperationHandle, OperationID, bool) {
 	if !pollOperationSourceOwner(source, p) || state == nil || wait == nil || fd < 0 ||
 		!validPollInterest(interest) || deadline < 0 {
@@ -473,6 +476,7 @@ func (source *PollOperationSource) ReserveAndAttachPollOperationV2(
 			return PollOperationHandle{}, OperationID{}, false
 		}
 		slot.interest = interest
+		slot.streamSocket = streamSocket
 		slot.p = p
 		slot.fd = fd
 		slot.deadline = deadline
@@ -572,11 +576,12 @@ func (source *PollOperationSource) SnapshotAt(
 			return PollOperationSnapshot{}, false, true
 		}
 		return PollOperationSnapshot{
-			Handle:   PollOperationHandle{Slot: index + 1, Generation: slot.generation},
-			ID:       id,
-			Deadline: slot.deadline,
-			FD:       slot.fd,
-			Interest: slot.interest,
+			Handle:       PollOperationHandle{Slot: index + 1, Generation: slot.generation},
+			ID:           id,
+			Deadline:     slot.deadline,
+			FD:           slot.fd,
+			Interest:     slot.interest,
+			StreamSocket: slot.streamSocket,
 		}, true, true
 	case pollOperationDelivered, pollOperationCanceled:
 		return PollOperationSnapshot{}, false, validLivePollOperation(source, slot, p, index)
@@ -1021,6 +1026,7 @@ func (source *PollOperationSource) RecyclePollOperationV2(p *P, handle PollOpera
 		return false
 	}
 	slot.interest = PollInterestInvalid
+	slot.streamSocket = false
 	slot.p = nil
 	slot.fd = 0
 	slot.deadline = 0
