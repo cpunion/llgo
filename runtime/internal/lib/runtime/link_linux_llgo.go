@@ -63,9 +63,6 @@ func syscall_runtimeUnsetenv(key string) {
 //go:linkname os_beforeExit os.runtime_beforeExit
 func os_beforeExit(exitCode int) {}
 
-//go:linkname os_sigpipe os.sigpipe
-func os_sigpipe() {}
-
 //go:linkname os_ignoreSIGSYS os.ignoreSIGSYS
 func os_ignoreSIGSYS() {}
 
