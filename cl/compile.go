@@ -1364,6 +1364,11 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	if p.options.DebugSymbols && block.Parent().Origin() == nil && block.Index == 0 {
 		p.debugParams(b, block.Parent())
 	}
+	if block.Index == 0 && p.hasCoroPhysicalBody() {
+		if physical := p.coroEmissionPlan(); physical != nil && physical.waitGroupEntryUpdate != nil {
+			p.compileCoroWaitGroupEntryUpdate(b, block.Parent(), physical.waitGroupEntryUpdate)
+		}
+	}
 
 	if doModInit {
 		p.initializeLocalGuardsWithCoroPlan(b)
