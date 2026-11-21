@@ -1078,7 +1078,9 @@ func coroNativeMHasBlockedOwnerV1() (bool, bool) {
 			if !ownerOK || owner.handle.Route != route {
 				return false, false
 			}
-			if !owner.handoff.Idle() {
+			// A direct syscall can still own this thread while its deferred
+			// replacement is armed and no handoff generation has been opened.
+			if !owner.deferred.Idle() || !owner.handoff.Idle() {
 				return true, true
 			}
 			if !owner.baton.Valid() || owner.parentSlot == 0 {

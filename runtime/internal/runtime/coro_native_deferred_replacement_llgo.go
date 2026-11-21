@@ -75,13 +75,16 @@ func coroNativeMActivateDeferredReplacementV1(
 			if slot != 0 || !parent.deferred.BeginStart() {
 				continue
 			}
-			// BeginStart reloads the one-word gate and is authoritative. A delayed
-			// accepted request may safely coalesce into a later armed call on the
-			// same stable parent; the currently released baton selects the exact
-			// generation before this publisher materializes a directory slot.
-			released, releasedOK := parent.handoff.Released()
-			if !releasedOK || !released.Valid() ||
-				released.OwnerEpoch == 0 {
+			// A delayed request may win a later Arm on this parent. Read the
+			// epoch after BeginStart, which prevents that owner from returning
+			// until this publisher has dispatched or restored Armed.
+			active, resolved, activeSlot, epoch, activeOK := coroNativeMActiveOwnerV1(domain.driverOwnerV1())
+			if !activeOK || active != parent || resolved != domain || activeSlot != parentSlot {
+				_ = parent.deferred.RetryStart()
+				return false
+			}
+			released, begun := parent.handoff.Begin(epoch)
+			if !begun {
 				_ = parent.deferred.RetryStart()
 				return false
 			}
@@ -101,18 +104,18 @@ func coroNativeMActivateDeferredReplacementV1(
 				!replacement.handoff.Idle() || !replacement.deferred.Idle() ||
 				released != replacement.baton ||
 				replacement.ownerEpoch != released.OwnerEpoch {
-				if replacementOK && slot != 0 {
-					_ = coroNativeMReleaseUnstartedReplacementV1(slot)
+				if replacementOK && slot != 0 && !coroNativeMReleaseUnstartedReplacementV1(slot) {
+					coroRuntimeAbort("native deferred replacement rejected slot release failed")
 				}
-				_ = parent.deferred.RetryStart()
+				coroNativeMRetryDeferredReplacementV1(parent, released)
 				return false
 			}
 			queued, started := coroNativeMRequestPhysicalOwnerV1(replacement, slot)
 			if !started {
-				if !coroNativeMReleaseUnstartedReplacementV1(slot) ||
-					!parent.deferred.RetryStart() {
-					coroRuntimeAbort("native deferred replacement retry publication failed")
+				if !coroNativeMReleaseUnstartedReplacementV1(slot) {
+					coroRuntimeAbort("native deferred replacement retry release failed")
 				}
+				coroNativeMRetryDeferredReplacementV1(parent, released)
 				return false
 			}
 			if !parent.deferred.PublishStart(slot, queued) {
@@ -126,5 +129,14 @@ func coroNativeMActivateDeferredReplacementV1(
 		default:
 			return false
 		}
+	}
+}
+
+func coroNativeMRetryDeferredReplacementV1(parent *coroNativeMOwnerV1, baton coro.ExecutionDomainHandoffHandle) {
+	// Restore Armed only after retiring the failed dispatch's exact baton.
+	// The returning syscall owner can withdraw as soon as Armed is visible.
+	if parent.handoff.RequestReturn(baton) != coro.ExecutionDomainHandoffReturnUnclaimed ||
+		!parent.handoff.Complete(baton) || !parent.deferred.RetryStart() {
+		coroRuntimeAbort("native deferred replacement retry publication failed")
 	}
 }
