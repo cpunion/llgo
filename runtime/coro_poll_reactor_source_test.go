@@ -35,7 +35,8 @@ func TestCoroNativePollReactorSharesExecutorWait(t *testing.T) {
 		"coroNativePollCapacityV1 + 1",
 		"coro.PollOperationConfiguredCapacity(",
 		"coro.SnapshotExecutorPollOperation(",
-		"corodoorbell.WaitPollSet(",
+		"streamSet := count > 1 && count <= 3 && streamSockets",
+		"pipe.WaitPollSet(&entries[0], count, timeoutMS, streamSet)",
 		"coroNativePollIDsV2",
 		"coroTargetPostPollEventsV1(count)",
 		"pipe.ConsumeRetainedWake()",
@@ -131,7 +132,7 @@ func TestCoroNativeFleetPollReactorKeepsOneExactPhysicalWaitPrimitive(t *testing
 		}
 	}
 	for _, forbidden := range []string{
-		"corodoorbell.WaitPollSet(",
+		".WaitPollSet(",
 		"coro.SnapshotExecutorPollOperation(",
 		"corodoorbell.DeadlinePollTimeout(",
 	} {

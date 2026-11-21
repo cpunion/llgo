@@ -56,6 +56,7 @@ func coroTargetWaitExecutorV1(pipe *corodoorbell.Pipe, deadline int64, hasDeadli
 	}
 	entries[0] = corodoorbell.PollFD{FD: doorbellFD, Events: corodoorbell.PollRead}
 	count := uint32(1)
+	streamSockets := true
 	configuredCapacity := coro.PollOperationConfiguredCapacity(&coroProgramPollSourceV1State)
 	if configuredCapacity == 0 || configuredCapacity > coroNativePollCapacityV1 {
 		return false
@@ -88,8 +89,10 @@ func coroTargetWaitExecutorV1(pipe *corodoorbell.Pipe, deadline int64, hasDeadli
 		}
 		entries[count] = corodoorbell.PollFD{FD: snapshot.FD, Events: events}
 		operations[count-1] = snapshot.ID
+		streamSockets = streamSockets && snapshot.StreamSocket
 		count++
 	}
+	streamSet := count > 1 && count <= 3 && streamSockets
 
 	for {
 		if retained, retainedOK := pipe.ConsumeRetainedWake(); !retainedOK {
@@ -119,7 +122,7 @@ func coroTargetWaitExecutorV1(pipe *corodoorbell.Pipe, deadline int64, hasDeadli
 		for index := uint32(0); index < count; index++ {
 			entries[index].Revents = 0
 		}
-		ready, errno := corodoorbell.WaitPollSet(&entries[0], count, timeoutMS)
+		ready, errno := pipe.WaitPollSet(&entries[0], count, timeoutMS, streamSet)
 		if ready < 0 {
 			if corodoorbell.PollInterrupted(errno) {
 				continue
