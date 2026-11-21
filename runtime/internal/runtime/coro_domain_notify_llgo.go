@@ -12,20 +12,30 @@ func __llgo_coro_domain_post_v1(sourceSlot, generation uint32) bool {
 	}
 	registry := &coroProgramKeyedRegistryV2State
 	limit := coroKeyedAtomicLoadUint32(&registry.scanLimit)
-	if limit > uint32(len(registry.slots)) {
+	if limit > uint32(coroKeyedRegistryCapacityV2) {
 		return false
 	}
-	for index := uint32(0); index < limit; index++ {
-		slot := &registry.slots[index]
-		control := coroKeyedAtomicLoadUint32(&slot.control)
-		if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryActiveV2 {
-			continue
+	for start := uint32(0); start < limit; start += coroKeyedRegistryPageSizeV2 {
+		page := registry.loadPage(start / coroKeyedRegistryPageSizeV2)
+		if page == nil {
+			return false
 		}
-		operation, stable := coroKeyedRegistryLoadOperationV2(slot, control)
-		if stable && operation == id {
-			return coroKeyedPostExactV2(coroKeyedRegistryHandleV2{
-				Slot: index + 1, Generation: coroKeyedRegistryControlGenerationV2(control),
-			}, operation)
+		pageLimit := limit - start
+		if pageLimit > coroKeyedRegistryPageSizeV2 {
+			pageLimit = coroKeyedRegistryPageSizeV2
+		}
+		for offset := uint32(0); offset < pageLimit; offset++ {
+			slot := &page[offset]
+			control := coroKeyedAtomicLoadUint32(&slot.control)
+			if coroKeyedRegistryControlStateV2(control) != coroKeyedRegistryActiveV2 {
+				continue
+			}
+			operation, stable := coroKeyedRegistryLoadOperationV2(slot, control)
+			if stable && operation == id {
+				return coroKeyedPostExactV2(coroKeyedRegistryHandleV2{
+					Slot: start + offset + 1, Generation: coroKeyedRegistryControlGenerationV2(control),
+				}, operation)
+			}
 		}
 	}
 	return false

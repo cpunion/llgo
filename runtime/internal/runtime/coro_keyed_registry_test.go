@@ -19,6 +19,7 @@
 package runtime
 
 import (
+	goruntime "runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -257,7 +258,7 @@ func TestCoroKeyedRegistryConcurrentFIFOClaimsRemainLockFreeV2(t *testing.T) {
 func TestCoroKeyedRegistrySequenceWrapPreservesFIFOAndGenerationBoundV2(t *testing.T) {
 	registry := new(coroKeyedRegistryV2)
 	coroKeyedAtomicStoreUint32(
-		&registry.slots[0].control,
+		&registry.ensurePage(0)[0].control,
 		coroKeyedRegistryControlV2(coroKeyedRegistryMaxGenerationV2, coroKeyedRegistryFreeV2),
 	)
 	coroKeyedAtomicStoreUint32(&registry.sequence, ^uint32(0)-1)
@@ -377,5 +378,113 @@ func TestCoroKeyedPreparedStateAndTicketOrderingV2(t *testing.T) {
 	}
 	if got := unsafe.Sizeof(state); got != wantSize {
 		t.Fatalf("CoroKeyedParkV2 size = %d, want %d", got, wantSize)
+	}
+}
+
+func TestCoroKeyedRegistryColdReadsDoNotAllocateV2(t *testing.T) {
+	registry := new(coroKeyedRegistryV2)
+	operation := keyedRegistryOperation(t, 1, 1)
+	handle := coroKeyedRegistryHandleV2{Slot: 1, Generation: 1}
+	allocations := testing.AllocsPerRun(100, func() {
+		if _, _, found := registry.claimOne(coroKeyedParkSemaphoreV2, 0x9171, 0, false); found {
+			panic("cold registry fabricated a waiter")
+		}
+		if registry.claimExact(handle, operation) != coroKeyedRegistryClaimInvalidV2 ||
+			registry.finishPost(handle, operation) != coroKeyedRegistryPublishInvalidV2 ||
+			registry.retire(handle, operation) || registry.publicationRetired(handle) {
+			panic("cold registry fabricated an exact generation")
+		}
+		if _, ok := registry.register(coroKeyedParkInvalidV2, 0x9171, 0, operation); ok {
+			panic("invalid registration succeeded")
+		}
+	})
+	if allocations != 0 || registry.pages != ([coroKeyedRegistryPageCountV2]unsafe.Pointer{}) ||
+		registry.sequence != 0 || registry.scanLimit != 0 {
+		t.Fatalf("cold queries changed registry: allocations=%v pages=%v sequence=%d limit=%d",
+			allocations, registry.pages, registry.sequence, registry.scanLimit)
+	}
+}
+
+func TestCoroKeyedRegistryConcurrentFirstPublicationSurvivesGCV2(t *testing.T) {
+	const count = coroKeyedRegistryPageSizeV2 + 16
+	registry := new(coroKeyedRegistryV2)
+	type result struct {
+		handle    coroKeyedRegistryHandleV2
+		operation coro.OperationID
+		key       uintptr
+		ok        bool
+	}
+	start := make(chan struct{})
+	results := make(chan result, count)
+	var joined sync.WaitGroup
+	joined.Add(count)
+	for index := 0; index < count; index++ {
+		operation := keyedRegistryOperation(t, uint32(index+1), 1)
+		key := uintptr(0x9200 + index)
+		go func(operation coro.OperationID, key uintptr) {
+			defer joined.Done()
+			<-start
+			handle, ok := registry.register(coroKeyedParkSemaphoreV2, key, 0, operation)
+			results <- result{handle: handle, operation: operation, key: key, ok: ok}
+		}(operation, key)
+	}
+	close(start)
+	joined.Wait()
+	close(results)
+	first := uintptr(unsafe.Pointer(registry.loadPage(0)))
+	second := uintptr(unsafe.Pointer(registry.loadPage(1)))
+	if first == 0 || second == 0 || registry.loadPage(2) != nil {
+		t.Fatal("first-use registrations did not allocate exactly the two needed pages")
+	}
+	// The registration goroutines and their losing candidate allocations have
+	// all retired. Only the stable registry owner must keep every waiter live.
+	goruntime.GC()
+	goruntime.GC()
+	seen := make(map[uint32]bool, count)
+	for result := range results {
+		if !result.ok || result.handle.Slot == 0 || seen[result.handle.Slot] {
+			t.Fatalf("first-use registration lost or duplicated: %+v", result)
+		}
+		seen[result.handle.Slot] = true
+		handle, operation, found := registry.claimOne(coroKeyedParkSemaphoreV2, result.key, 0, true)
+		if !found || handle != result.handle || operation != result.operation ||
+			registry.claimExact(handle, operation) != coroKeyedRegistryClaimAlreadyV2 ||
+			!registry.retire(handle, operation) ||
+			registry.finishPost(handle, operation) != coroKeyedRegistryPublishRetiredV2 {
+			t.Fatalf("first-use waiter changed after GC: %+v; claimed=%+v/%+v/%t", result, handle, operation, found)
+		}
+	}
+	if len(seen) != count || uintptr(unsafe.Pointer(registry.loadPage(0))) != first ||
+		uintptr(unsafe.Pointer(registry.loadPage(1))) != second {
+		t.Fatalf("registry pages moved or lost waiters after GC: count=%d", len(seen))
+	}
+}
+
+func TestCoroKeyedRegistryPageBoundaryPreservesFIFOV2(t *testing.T) {
+	const key = 0x9400
+	registry := new(coroKeyedRegistryV2)
+	var handles [coroKeyedRegistryPageSizeV2 + 1]coroKeyedRegistryHandleV2
+	for index := range handles {
+		if index == coroKeyedRegistryPageSizeV2 && registry.loadPage(1) != nil {
+			t.Fatal("registry allocated a second page before the first was full")
+		}
+		var ok bool
+		handles[index], ok = registry.register(coroKeyedParkSemaphoreV2, key, 0, keyedRegistryOperation(t, uint32(index+1), 1))
+		if !ok || handles[index].Slot != uint32(index+1) {
+			t.Fatalf("register waiter %d: %+v/%t", index, handles[index], ok)
+		}
+	}
+	if !registry.retire(handles[0], keyedRegistryOperation(t, 1, 1)) {
+		t.Fatal("retire the first waiter")
+	}
+	replacement, ok := registry.register(coroKeyedParkSemaphoreV2, key, 0, keyedRegistryOperation(t, 1, 2))
+	if !ok || replacement.Slot != handles[0].Slot || replacement.Generation == handles[0].Generation {
+		t.Fatalf("reuse the first slot: %+v/%t", replacement, ok)
+	}
+	for _, expected := range append(handles[1:], replacement) {
+		handle, operation, found := registry.claimOne(coroKeyedParkSemaphoreV2, key, 0, false)
+		if !found || handle != expected || !registry.retire(handle, operation) {
+			t.Fatalf("FIFO claim = %+v/%t, want %+v", handle, found, expected)
+		}
 	}
 }

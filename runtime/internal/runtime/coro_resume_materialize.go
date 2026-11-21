@@ -73,9 +73,14 @@ const (
 )
 
 // Two native domains each configure 1024 manual-operation slots. The registry
-// stores only scalar equality keys and POD identities; it never retains G, P,
-// ParkState, an LLVM handle, or any other Go pointer.
-const coroKeyedRegistryCapacityV2 = 2 * 1024
+// slots contain only scalar equality keys and POD identities, never G, P,
+// ParkState or an LLVM handle. Registrations allocate stable pages in slot
+// order. A cold registry contains only the page directory.
+const (
+	coroKeyedRegistryCapacityV2  = 2 * 1024
+	coroKeyedRegistryPageSizeV2  = 64
+	coroKeyedRegistryPageCountV2 = coroKeyedRegistryCapacityV2 / coroKeyedRegistryPageSizeV2
+)
 
 type coroKeyedRegistryHandleV2 struct {
 	Slot       uint32
@@ -113,7 +118,28 @@ type coroKeyedRegistrySlotV2 struct {
 type coroKeyedRegistryV2 struct {
 	sequence  uint32
 	scanLimit uint32
-	slots     [coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2
+	// Published pages remain stable and are retained by collector-visible
+	// pointers. Read-only wake attempts never allocate.
+	pages [coroKeyedRegistryPageCountV2]unsafe.Pointer
+}
+
+type coroKeyedRegistryPageV2 [coroKeyedRegistryPageSizeV2]coroKeyedRegistrySlotV2
+
+func (registry *coroKeyedRegistryV2) loadPage(index uint32) *coroKeyedRegistryPageV2 {
+	return (*coroKeyedRegistryPageV2)(coroKeyedAtomicLoadPointer(&registry.pages[index]))
+}
+
+// ensurePage runs only during registration. An allocation that loses the
+// publication race never carries a generation and can be collected normally.
+func (registry *coroKeyedRegistryV2) ensurePage(index uint32) *coroKeyedRegistryPageV2 {
+	if page := registry.loadPage(index); page != nil {
+		return page
+	}
+	candidate := new(coroKeyedRegistryPageV2)
+	if coroKeyedAtomicCompareAndSwapPointer(&registry.pages[index], nil, unsafe.Pointer(candidate)) {
+		return candidate
+	}
+	return registry.loadPage(index)
 }
 
 var coroProgramKeyedRegistryV2State coroKeyedRegistryV2
@@ -187,10 +213,15 @@ func coroKeyedRegistrySlotV2For(
 	handle coroKeyedRegistryHandleV2,
 ) (*coroKeyedRegistrySlotV2, bool) {
 	if registry == nil || handle.Slot == 0 || handle.Generation == 0 ||
-		handle.Slot > uint32(len(registry.slots)) {
+		handle.Slot > coroKeyedRegistryCapacityV2 {
 		return nil, false
 	}
-	return &registry.slots[handle.Slot-1], true
+	index := handle.Slot - 1
+	page := registry.loadPage(index / coroKeyedRegistryPageSizeV2)
+	if page == nil {
+		return nil, false
+	}
+	return &page[index%coroKeyedRegistryPageSizeV2], true
 }
 
 func coroKeyedRegistryLoadOperationV2(
