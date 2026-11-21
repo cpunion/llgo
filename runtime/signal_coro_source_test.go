@@ -178,7 +178,7 @@ func TestRuntimeSignalCoroAdapterIsSignalSafeAndEventDriven(t *testing.T) {
 	}
 
 	manifest := readRuntimePollFile(t, "internal/lib/runtime/runtime_default.go")
-	if !strings.Contains(manifest, "_wrap/signal.c") {
+	if !strings.Contains(manifest, "_wrap/signal.c") || !strings.Contains(manifest, "_wrap/sigpipe.c") {
 		t.Fatal("non-baremetal runtime C manifest omits the native signal adapter")
 	}
 }
@@ -368,9 +368,12 @@ func TestRuntimeSignalFixedCAdapter(t *testing.T) {
 	testSource := filepath.Join(dir, "signal_adapter_test.c")
 	program := `
 #define _POSIX_C_SOURCE 200809L
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define SIGNAL_NONE UINT32_MAX
 
@@ -382,11 +385,24 @@ uint32_t __llgo_runtime_signal_ignored_v1(uint32_t);
 uint32_t __llgo_runtime_signal_receive_v1(void);
 uint32_t __llgo_runtime_signal_generation_v1(void);
 uint32_t __llgo_runtime_signal_idle_v1(uint32_t);
+int32_t __llgo_runtime_sigpipe_install_v1(void);
+void __llgo_runtime_sigpipe_stdout_v1(void);
 
 static volatile sig_atomic_t previous_seen;
 
 static void previous_handler(int sig) {
     previous_seen = sig;
+}
+
+static int broken_pipe_returns_epipe(void) {
+    int fds[2];
+    if (pipe(fds) != 0) {
+        return 0;
+    }
+    close(fds[0]);
+    int failed = write(fds[1], "x", 1) == -1 && errno == EPIPE;
+    close(fds[1]);
+    return failed;
 }
 
 int main(void) {
@@ -458,6 +474,42 @@ int main(void) {
     if (raise(SIGUSR1) != 0 || previous_seen != SIGUSR1) {
         return 20; /* disable restores the pre-existing disposition */
     }
+
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        return 22;
+    }
+    errno = EBUSY;
+    if (__llgo_runtime_sigpipe_install_v1() != 0 || errno != EBUSY ||
+        __llgo_runtime_signal_ignored_v1(SIGPIPE) != 0 || !broken_pipe_returns_epipe()) {
+        return 23; /* executable startup establishes Go's default */
+    }
+    __llgo_runtime_signal_enable_v1(SIGPIPE);
+    if (!broken_pipe_returns_epipe() || __llgo_runtime_signal_receive_v1() != SIGPIPE) {
+        return 24;
+    }
+    __llgo_runtime_sigpipe_stdout_v1();
+    if (__llgo_runtime_signal_receive_v1() != SIGNAL_NONE) {
+        return 25; /* no second notification from the os writer */
+    }
+    __llgo_runtime_signal_ignore_v1(SIGPIPE);
+    if (__llgo_runtime_signal_ignored_v1(SIGPIPE) == 0 || !broken_pipe_returns_epipe()) {
+        return 26;
+    }
+    __llgo_runtime_sigpipe_stdout_v1();
+    __llgo_runtime_signal_disable_v1(SIGPIPE);
+    if (__llgo_runtime_signal_ignored_v1(SIGPIPE) != 0 || !broken_pipe_returns_epipe()) {
+        return 27; /* reset restores the Go default */
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        __llgo_runtime_sigpipe_stdout_v1();
+        _exit(28);
+    }
+    int status = 0;
+    if (child < 0 || waitpid(child, &status, 0) != child ||
+        !WIFSIGNALED(status) || WTERMSIG(status) != SIGPIPE) {
+        return 29;
+    }
     return 0;
 }
 `
@@ -469,7 +521,8 @@ int main(void) {
 		t.Fatal(err)
 	}
 	executable := filepath.Join(dir, "signal_adapter_test")
-	compile := exec.Command(cc, "-std=c11", "-Wall", "-Wextra", "-Werror", adapter, testSource, "-o", executable)
+	sigpipe := filepath.Join(filepath.Dir(adapter), "sigpipe.c")
+	compile := exec.Command(cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-pthread", adapter, sigpipe, testSource, "-o", executable)
 	if output, err := compile.CombinedOutput(); err != nil {
 		t.Fatalf("compile native signal adapter: %v\n%s", err, output)
 	}
