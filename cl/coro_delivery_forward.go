@@ -35,6 +35,14 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwarders(ir *coroProgramIR) 
 		if !present || shape == nil || function.Signature.Variadic() || len(shape.target.FreeVars) != 0 {
 			return nil
 		}
+		// Delivery helpers currently transport parameter/value-field views,
+		// not computed scalar header projections. Keep the original producer
+		// and its frame-owned cleanup state for these wrappers.
+		for _, argument := range shape.args {
+			if argument.headerLength {
+				return nil
+			}
+		}
 		background, classified, err := u.FunctionBackground(function)
 		if err != nil {
 			return err
@@ -199,6 +207,16 @@ func coroDeliveryNeedsReceiverSnapshot(shape *coroForwardingSourceShape, target 
 }
 
 func composeCoroDeliveryForwardingArguments(shape *coroForwardingSourceShape, target coroSourceDeliveryRecipe) ([]coroForwardingSourceArgument, *ssa.Function, bool) {
+	for _, argument := range shape.args {
+		if argument.headerLength {
+			return nil, nil, false
+		}
+	}
+	for _, argument := range target.forwardArgs {
+		if argument.headerLength {
+			return nil, nil, false
+		}
+	}
 	if target.forward == nil {
 		return shape.args, target.producer, true
 	}
@@ -236,6 +254,9 @@ func (builder coroProgramIRBuilder) freezeDeliveryForwardingArguments(function *
 	u := builder.canonical.universe
 	arguments := make([]coroDeliveryForwardArgument, len(source))
 	for index, projection := range source {
+		if projection.headerLength {
+			return nil, false, nil
+		}
 		argument := coroDeliveryForwardArgument{coroForwardingSourceArgument: projection}
 		switch {
 		case projection.sourceParameter >= 0, projection.constant != nil:

@@ -1693,6 +1693,9 @@ func (p *context) compileCoroTailForwardParameter(
 	for _, field := range argument.fieldPath {
 		value = b.Field(value, field)
 	}
+	if argument.headerLength {
+		value = b.BuiltinCall("len", value)
+	}
 	if argument.retagTransportKey != "" {
 		value = b.ChangeType(p.prog.Type(argument.targetType, llssa.InGo), value)
 	}

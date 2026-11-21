@@ -664,6 +664,7 @@ type coroPhysicalTailForwardArgument struct {
 	constant          *ssa.Const
 	targetType        types.Type
 	fieldPath         []int
+	headerLength      bool
 	retagTransportKey string
 }
 
@@ -730,6 +731,12 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 			if !projected {
 				return fmt.Errorf("tail-forward argument %d has an invalid value-field projection", index)
 			}
+			if argument.headerLength {
+				if !coroForwardingHeaderHasLength(sourceType) || argument.retagTransportKey != "" {
+					return fmt.Errorf("tail-forward argument %d has an invalid header-length projection", index)
+				}
+				sourceType = types.Typ[types.Int]
+			}
 			identical := types.Identical(sourceType, argument.targetType)
 			if identical && argument.retagTransportKey != "" {
 				return fmt.Errorf("tail-forward argument %d has a redundant source parameter retag", index)
@@ -742,7 +749,7 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 		if argument.retagTransportKey != "" {
 			return fmt.Errorf("tail-forward argument %d retags a constant", index)
 		}
-		if len(argument.fieldPath) != 0 {
+		if len(argument.fieldPath) != 0 || argument.headerLength {
 			return fmt.Errorf("tail-forward argument %d projects a constant", index)
 		}
 		if argument.constant.Type() == nil ||
@@ -1287,13 +1294,14 @@ func planCoroPhysicalTailForward(
 				}
 			}
 			if !types.Identical(source.valueType, targetType) ||
-				(!shape.methodProjection && ((source.direct && retag) || (!source.direct && !retag && len(source.fieldPath) == 0))) ||
+				(!shape.methodProjection && ((source.direct && retag) || (!source.direct && !retag && len(source.fieldPath) == 0 && !source.headerLength))) ||
 				(retag && transportKey == "") {
 				return nil, nil
 			}
 			arguments[index] = coroPhysicalTailForwardArgument{
 				sourceParameter: source.sourceParameter, targetType: targetType,
-				fieldPath: append([]int(nil), source.fieldPath...), retagTransportKey: transportKey,
+				fieldPath: append([]int(nil), source.fieldPath...), headerLength: source.headerLength,
+				retagTransportKey: transportKey,
 			}
 			continue
 		}
