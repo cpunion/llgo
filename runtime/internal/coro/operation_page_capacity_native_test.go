@@ -21,7 +21,7 @@ package coro
 import "testing"
 
 func TestNativeSmallCatalogPreservesWireCapacity(t *testing.T) {
-	if operationCatalogPageCapacity != 16 || operationReadyWordsPerPage != 1 {
+	if operationCatalogPageCapacity != 4 || operationReadyWordsPerPage != 1 {
 		t.Fatal("small native page selection")
 	}
 	for _, maximum := range []uint32{TimerRegistrationMaximumCapacity, PollOperationMaximumCapacity, ManualOperationMaximumCapacity, WorkerOperationMaximumCapacity, ChannelOperationMaximumCapacity} {
@@ -29,11 +29,11 @@ func TestNativeSmallCatalogPreservesWireCapacity(t *testing.T) {
 			t.Fatal("maximum source-local slots changed", maximum)
 		}
 	}
-	if operationCatalogMaximumPageCount != 2044 || operationPageDirectoryBlockCount != 32 {
+	if operationCatalogMaximumPageCount != 8176 || operationPageDirectoryBlockCapacity != 256 || operationPageDirectoryBlockCount != 32 {
 		t.Fatal("bounded page directory")
 	}
 	var page operationReadyPage
-	if !page.mark(0) || !page.mark(15) || page.mark(16) {
+	if !page.mark(0) || !page.mark(3) || page.mark(4) {
 		t.Fatal("partial-word bounds")
 	}
 }

@@ -18,4 +18,7 @@
 
 package coro
 
-const operationCatalogPageCapacity = 16
+const (
+	operationCatalogPageCapacity        = 4
+	operationPageDirectoryBlockCapacity = uint32(256)
+)
