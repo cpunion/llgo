@@ -195,6 +195,9 @@ func IsDisabled() c.Int
 //go:linkname Gcollect C.GC_gcollect
 func Gcollect()
 
+//go:linkname GcollectAndUnmap C.GC_gcollect_and_unmap
+func GcollectAndUnmap()
+
 //go:linkname GetGCNo C.GC_get_gc_no
 func GetGCNo() uintptr
 

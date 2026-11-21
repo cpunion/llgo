@@ -98,6 +98,20 @@ func TestGCStatsMatchCollectorSnapshot(t *testing.T) {
 	}
 }
 
+func TestFreeOSMemoryCollects(t *testing.T) {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if before.NumGC == 0 {
+		t.Skip("target has no tracing collector")
+	}
+	debug.FreeOSMemory()
+	runtime.ReadMemStats(&after)
+	if after.NumGC <= before.NumGC {
+		t.Fatalf("FreeOSMemory did not advance the collector: before %d, after %d", before.NumGC, after.NumGC)
+	}
+}
+
 func TestPanicOnFaultStateIsGoroutineLocal(t *testing.T) {
 	previous := debug.SetPanicOnFault(true)
 	defer debug.SetPanicOnFault(previous)
