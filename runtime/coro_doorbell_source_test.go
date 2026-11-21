@@ -179,13 +179,14 @@ static int32_t error(uint64_t packed) { return (int32_t)(uint32_t)(packed >> 32)
 
 #if defined(__APPLE__)
 struct poll_queue {
-    int32_t descriptor, watched_fd, filter;
+    int32_t descriptor;
+    struct { int32_t fd, filter; } watches[2];
 };
 
-uint64_t __llgo_coro_doorbell_kevent_pair_v1(
+uint64_t __llgo_coro_doorbell_kevent_set_v1(
     struct poll_queue *, struct pollfd *, uint32_t, int32_t);
 
-static int kevent_pair_test(void) {
+static int kevent_set_test(void) {
     struct poll_queue queue = {0};
     int32_t bell[2];
     int first[2], second[2];
@@ -195,22 +196,33 @@ static int kevent_pair_test(void) {
         socketpair(AF_UNIX, SOCK_STREAM, 0, second)) {
         return 50;
     }
-    struct pollfd set[3] = {
+    struct pollfd set[4] = {
         { .fd = bell[0], .events = POLLIN },
         { .fd = first[0], .events = POLLIN },
-        { .fd = first[1], .events = POLLOUT },
+        { .fd = first[0], .events = POLLOUT },
+        { .fd = -1 },
     };
-    uint64_t packed = __llgo_coro_doorbell_kevent_pair_v1(&queue, set, 3, 0);
+    uint64_t packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 4, 0);
     if (result(packed) != 1 || set[2].revents != POLLOUT || queue.descriptor != 0) {
         return 51;
+    }
+    if (write(first[1], &byte, 1) != 1) {
+        return 61;
+    }
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 3, 10);
+    if (result(packed) != 2 || set[0].revents || set[1].revents != POLLIN ||
+        set[2].revents != POLLOUT || queue.descriptor <= 0 ||
+        queue.watches[0].filter != 0 || queue.watches[1].filter != 0 ||
+        read(first[0], &byte, 1) != 1) {
+        return 62;
     }
     if (write(bell[1], &byte, 1) != 1) {
         return 52;
     }
-    packed = __llgo_coro_doorbell_kevent_pair_v1(&queue, set, 2, 10);
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 10);
     if (result(packed) != 1 || set[0].revents != POLLIN || set[1].revents != 0 ||
         queue.descriptor <= 0 || !(fcntl(queue.descriptor - 1, F_GETFD) & FD_CLOEXEC) ||
-        queue.filter == 0 || read(bell[0], &byte, 1) != 1) {
+        queue.watches[0].filter == 0 || read(bell[0], &byte, 1) != 1) {
         return 53;
     }
 
@@ -221,24 +233,24 @@ static int kevent_pair_test(void) {
         return 54;
     }
     set[1].fd = second[0];
-    packed = __llgo_coro_doorbell_kevent_pair_v1(&queue, set, 2, 10);
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 10);
     if (result(packed) == 0) {
-        packed = __llgo_coro_doorbell_kevent_pair_v1(&queue, set, 2, 10);
+        packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 10);
     }
     if (result(packed) != 1 || set[0].revents || set[1].revents != POLLIN ||
-        queue.descriptor <= 0 || queue.filter != 0 || read(second[0], &byte, 1) != 1) {
+        queue.descriptor <= 0 || queue.watches[0].filter != 0 || read(second[0], &byte, 1) != 1) {
         return 55;
     }
 
     set[1].fd = second[0];
-    packed = __llgo_coro_doorbell_kevent_pair_v1(&queue, set, 2, 10);
-    if (result(packed) != 0 || queue.filter == 0 ||
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 10);
+    if (result(packed) != 0 || queue.watches[0].filter == 0 ||
         close(second[0]) || dup2(first[1], second[0]) != second[0]) {
         return 56;
     }
     // EOF after reuse is a read wake, even though the previous fd was quiet.
-    packed = __llgo_coro_doorbell_kevent_pair_v1(&queue, set, 2, 10);
-    if (result(packed) != 1 || set[1].revents != POLLIN || queue.filter != 0 ||
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 10);
+    if (result(packed) != 1 || set[1].revents != POLLIN || queue.watches[0].filter != 0 ||
         read(second[0], &byte, 1) != 0) {
         return 57;
     }
@@ -249,7 +261,7 @@ static int kevent_pair_test(void) {
     // An invalid current descriptor preserves poll's POLLNVAL result and
     // releases the kernel queue before switching to the general path.
     int old_queue = queue.descriptor - 1;
-    packed = __llgo_coro_doorbell_kevent_pair_v1(&queue, set, 2, 0);
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 0);
     if (result(packed) != 1 || !(set[1].revents & POLLNVAL) ||
         queue.descriptor >= 0 || fcntl(old_queue, F_GETFD) >= 0 || errno != EBADF) {
         return 59;
@@ -306,7 +318,7 @@ int main(void) {
         return 17;
     }
 #if defined(__APPLE__)
-    return kevent_pair_test();
+    return kevent_set_test();
 #else
     return 0;
 #endif

@@ -187,16 +187,21 @@ uint64_t __llgo_coro_doorbell_poll_set_v1(
 
 #if defined(__APPLE__)
 
-struct llgo_doorbell_kevent_pair_v1 {
-    int32_t descriptor;
-    int32_t watched_fd;
+enum {
+    llgo_kevent_max_sockets_v1 = 2,
+    llgo_kevent_bell_v1 = 1,
+    llgo_kevent_watch_v1 = 2,
+    llgo_kevent_delete_v1 = llgo_kevent_watch_v1 + llgo_kevent_max_sockets_v1,
+};
+
+struct llgo_doorbell_kevent_watch_v1 {
+    int32_t fd;
     int32_t filter;
 };
 
-enum {
-    llgo_kevent_bell_v1 = 1,
-    llgo_kevent_watch_v1,
-    llgo_kevent_delete_v1,
+struct llgo_doorbell_kevent_set_v1 {
+    int32_t descriptor;
+    struct llgo_doorbell_kevent_watch_v1 watches[llgo_kevent_max_sockets_v1];
 };
 
 static int llgo_doorbell_kevent_open_v1(int bell)
@@ -218,10 +223,11 @@ static int llgo_doorbell_kevent_open_v1(int bell)
 }
 
 static uint64_t llgo_doorbell_kevent_reset_v1(
-    struct llgo_doorbell_kevent_pair_v1 *queue, struct pollfd *fds, int error)
+    struct llgo_doorbell_kevent_set_v1 *queue,
+    struct pollfd *fds, uint32_t count, int error)
 {
     int fd = queue->descriptor - 1;
-    *queue = (struct llgo_doorbell_kevent_pair_v1){
+    *queue = (struct llgo_doorbell_kevent_set_v1){
         .descriptor = error == EINTR ? 0 : -1,
     };
     if (close(fd) != 0) {
@@ -231,11 +237,18 @@ static uint64_t llgo_doorbell_kevent_reset_v1(
         return llgo_doorbell_result_v1(-1, EINTR);
     }
     /* The original wait may already have used its budget. Only sample here. */
-    return __llgo_coro_doorbell_poll_set_v1(fds, 2, 0);
+    return __llgo_coro_doorbell_poll_set_v1(fds, count, 0);
 }
 
-uint64_t __llgo_coro_doorbell_kevent_pair_v1(
-    struct llgo_doorbell_kevent_pair_v1 *queue, struct pollfd *fds,
+static int llgo_doorbell_kevent_same_watch_v1(
+    const struct llgo_doorbell_kevent_watch_v1 *first,
+    const struct llgo_doorbell_kevent_watch_v1 *second)
+{
+    return first->fd == second->fd && first->filter == second->filter;
+}
+
+uint64_t __llgo_coro_doorbell_kevent_set_v1(
+    struct llgo_doorbell_kevent_set_v1 *queue, struct pollfd *fds,
     uint32_t count, int32_t timeout_ms)
 {
     if (queue == NULL || fds == NULL || count == 0 ||
@@ -243,10 +256,22 @@ uint64_t __llgo_coro_doorbell_kevent_pair_v1(
         timeout_ms > LLGO_DOORBELL_POLL_MAX_MS_V1) {
         return llgo_doorbell_result_v1(-1, EINVAL);
     }
-    if (count != 2 || queue->descriptor < 0 ||
-        fds[0].fd < 0 || fds[0].events != POLLIN ||
-        fds[1].fd < 0 || fds[1].fd == fds[0].fd ||
-        (fds[1].events != POLLIN && fds[1].events != POLLOUT)) {
+    if (count < 2 || count > llgo_kevent_max_sockets_v1 + 1 ||
+        queue->descriptor < 0 || fds[0].fd < 0 || fds[0].events != POLLIN) {
+        return __llgo_coro_doorbell_poll_set_v1(fds, count, timeout_ms);
+    }
+    uint32_t sockets = count - 1;
+    struct llgo_doorbell_kevent_watch_v1 current[llgo_kevent_max_sockets_v1] = {0};
+    for (uint32_t i = 0; i < sockets; i++) {
+        const struct pollfd *watch = &fds[i + 1];
+        if (watch->fd < 0 || watch->fd == fds[0].fd ||
+            (watch->events != POLLIN && watch->events != POLLOUT)) {
+            return __llgo_coro_doorbell_poll_set_v1(fds, count, timeout_ms);
+        }
+        current[i].fd = watch->fd;
+        current[i].filter = watch->events == POLLIN ? EVFILT_READ : EVFILT_WRITE;
+    }
+    if (sockets == 2 && llgo_doorbell_kevent_same_watch_v1(&current[0], &current[1])) {
         return __llgo_coro_doorbell_poll_set_v1(fds, count, timeout_ms);
     }
     if (queue->descriptor == 0) {
@@ -258,57 +283,79 @@ uint64_t __llgo_coro_doorbell_kevent_pair_v1(
         queue->descriptor = fd + 1;
     }
 
-    struct kevent changes[2], events[3];
-    int filter = fds[1].events == POLLIN ? EVFILT_READ : EVFILT_WRITE;
-    int previous = queue->watched_fd;
-    int previous_filter = queue->filter;
+    struct kevent changes[2 * llgo_kevent_max_sockets_v1];
+    struct kevent events[2 * llgo_kevent_max_sockets_v1 + 1];
+    unsigned deletes = 0;
     int nchange = 0;
-    if (previous_filter != 0 && (previous != fds[1].fd || previous_filter != filter)) {
-        EV_SET(&changes[0], previous, previous_filter, EV_DELETE, 0, 0,
-               (void *)(uintptr_t)llgo_kevent_delete_v1);
-        nchange = 1;
+    for (unsigned i = 0; i < llgo_kevent_max_sockets_v1; i++) {
+        const struct llgo_doorbell_kevent_watch_v1 *old = &queue->watches[i];
+        if (old->filter != 0 &&
+            !llgo_doorbell_kevent_same_watch_v1(old, &current[0]) &&
+            !llgo_doorbell_kevent_same_watch_v1(old, &current[1])) {
+            EV_SET(&changes[nchange], old->fd, old->filter, EV_DELETE, 0, 0,
+                   (void *)(uintptr_t)(llgo_kevent_delete_v1 + i));
+            deletes |= 1u << i;
+            nchange++;
+        }
     }
-    EV_SET(&changes[nchange], fds[1].fd, filter, EV_ADD | EV_ONESHOT, 0, 0,
-           (void *)(uintptr_t)llgo_kevent_watch_v1);
+    for (uint32_t i = 0; i < sockets; i++) {
+        EV_SET(&changes[nchange], current[i].fd, current[i].filter, EV_ADD | EV_ONESHOT, 0, 0,
+               (void *)(uintptr_t)(llgo_kevent_watch_v1 + i));
+        nchange++;
+    }
     struct timespec timeout = {
         .tv_sec = timeout_ms / 1000,
         .tv_nsec = (timeout_ms % 1000) * 1000000L,
     };
-    int ready = kevent(queue->descriptor - 1, changes, nchange + 1,
-                       events, 3, &timeout);
+    int ready = kevent(queue->descriptor - 1, changes, nchange,
+                       events, (int)(sizeof(events) / sizeof(events[0])), &timeout);
     if (ready < 0) {
-        return llgo_doorbell_kevent_reset_v1(queue, fds, errno);
+        return llgo_doorbell_kevent_reset_v1(queue, fds, count, errno);
     }
 
-    queue->watched_fd = fds[1].fd;
-    queue->filter = filter;
-    fds[0].revents = 0;
-    fds[1].revents = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        fds[i].revents = 0;
+    }
+    int completed = 0;
     for (int i = 0; i < ready; i++) {
         const struct kevent *event = &events[i];
         uintptr_t identity = (uintptr_t)event->udata;
         if (event->flags & EV_ERROR) {
-            /* Close can remove the previous knote before our delete. Darwin
-             * reports that receipt separately from the new ready watch. */
-            if (identity == llgo_kevent_delete_v1 && nchange == 1 &&
-                event->ident == (uintptr_t)previous && event->filter == previous_filter &&
+            /* An old fd may already have closed. Darwin can return only
+             * that delete receipt while retaining the new ready watch. */
+            if (identity >= llgo_kevent_delete_v1 &&
+                identity < llgo_kevent_delete_v1 + llgo_kevent_max_sockets_v1 &&
                 (event->data == ENOENT || event->data == EBADF)) {
-                continue;
+                unsigned index = (unsigned)(identity - llgo_kevent_delete_v1);
+                const struct llgo_doorbell_kevent_watch_v1 *old = &queue->watches[index];
+                if ((deletes & (1u << index)) && event->ident == (uintptr_t)old->fd &&
+                    event->filter == old->filter) {
+                    continue;
+                }
             }
-            return llgo_doorbell_kevent_reset_v1(queue, fds, (int)event->data);
+            return llgo_doorbell_kevent_reset_v1(queue, fds, count, (int)event->data);
         }
         if (identity == llgo_kevent_bell_v1 && event->ident == (uintptr_t)fds[0].fd &&
-            event->filter == EVFILT_READ) {
+            event->filter == EVFILT_READ && fds[0].revents == 0) {
             fds[0].revents = POLLIN;
-        } else if (identity == llgo_kevent_watch_v1 && event->ident == (uintptr_t)fds[1].fd &&
-                   event->filter == filter) {
-            fds[1].revents = fds[1].events;
-            queue->filter = 0;
-        } else {
-            return llgo_doorbell_kevent_reset_v1(queue, fds, EINVAL);
+            completed++;
+            continue;
         }
+        if (identity >= llgo_kevent_watch_v1 && identity < llgo_kevent_watch_v1 + sockets) {
+            unsigned index = (unsigned)(identity - llgo_kevent_watch_v1);
+            if (event->ident == (uintptr_t)current[index].fd && event->filter == current[index].filter) {
+                fds[index + 1].revents = fds[index + 1].events;
+                current[index].filter = 0;
+                completed++;
+                continue;
+            }
+        }
+        return llgo_doorbell_kevent_reset_v1(queue, fds, count, EINVAL);
     }
-    return llgo_doorbell_result_v1((fds[0].revents != 0) + (fds[1].revents != 0), 0);
+    for (unsigned i = 0; i < llgo_kevent_max_sockets_v1; i++) {
+        queue->watches[i] = current[i];
+    }
+    return llgo_doorbell_result_v1(completed, 0);
 }
 #endif
 
