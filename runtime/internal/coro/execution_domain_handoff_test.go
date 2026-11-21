@@ -44,23 +44,23 @@ func TestExecutionDomainHandoffClaimedReturnLifecycle(t *testing.T) {
 		t.Fatalf("begin = (%+v, %t)", handle, ok)
 	}
 	published, ok := handoff.Released()
-	if !ok || published != handle {
+	if !ok || published != handle || !handoff.Live(handle) {
 		t.Fatalf("released = (%+v, %t), want %+v", published, ok, handle)
 	}
-	if !handoff.Claim(handle) || handoff.Claim(handle) {
+	if !handoff.Claim(handle) || handoff.Claim(handle) || !handoff.Live(handle) {
 		t.Fatal("claim was not exactly once")
 	}
 	if result := handoff.RequestReturn(handle); result != ExecutionDomainHandoffReturnClaimed {
 		t.Fatalf("request return = %d, want claimed", result)
 	}
-	if !handoff.ReturnRequested(handle) || handoff.Returned(handle) {
+	if !handoff.ReturnRequested(handle) || handoff.Returned(handle) || !handoff.Live(handle) {
 		t.Fatal("claimed return request state invalid")
 	}
 	if !handoff.FinishReturn(handle) || handoff.FinishReturn(handle) ||
-		!handoff.Returned(handle) {
+		!handoff.Returned(handle) || !handoff.Live(handle) {
 		t.Fatal("finish return was not exactly once")
 	}
-	if !handoff.Complete(handle) || handoff.Complete(handle) || !handoff.Idle() {
+	if !handoff.Complete(handle) || handoff.Complete(handle) || !handoff.Idle() || handoff.Live(handle) {
 		t.Fatal("complete did not restore reusable idle")
 	}
 
@@ -68,7 +68,7 @@ func TestExecutionDomainHandoffClaimedReturnLifecycle(t *testing.T) {
 	if !ok || next.Generation != handle.Generation+1 || next.OwnerEpoch != 29 {
 		t.Fatalf("next begin = (%+v, %t)", next, ok)
 	}
-	if handoff.Claim(handle) ||
+	if handoff.Live(handle) || !handoff.Live(next) || handoff.Claim(handle) ||
 		handoff.RequestReturn(handle) != ExecutionDomainHandoffReturnInvalid ||
 		handoff.ReturnRequested(handle) || handoff.FinishReturn(handle) ||
 		handoff.Returned(handle) || handoff.Complete(handle) {
@@ -117,7 +117,7 @@ func TestExecutionDomainHandoffRejectsWrongOwnerEpoch(t *testing.T) {
 	}
 	wrong := handle
 	wrong.OwnerEpoch++
-	if handoff.Claim(wrong) ||
+	if handoff.Live(wrong) || handoff.Claim(wrong) ||
 		handoff.RequestReturn(wrong) != ExecutionDomainHandoffReturnInvalid ||
 		handoff.RequestClaimedReturn(wrong) ||
 		handoff.ReturnRequested(wrong) || handoff.FinishReturn(wrong) ||

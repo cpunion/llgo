@@ -692,6 +692,59 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetBlockedDirectSyscallMainReturnE2ESource = `package main
+
+import _ "unsafe"
+
+var MainThread uintptr
+
+//llgo:link funcPCABI0 llgo.funcPCABI0
+func funcPCABI0(fn any) uintptr
+
+//llgo:link raw llgo.syscall
+func raw(fn uintptr) (uintptr, uintptr, uintptr)
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=by-value abi=word-call.v1/0
+func libc___llgo_coro_native_fleet_e2e_block_v1_trampoline()
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+
+func Setup() {
+	MainThread = threadID()
+}
+
+func blockOnPeer() {
+	if threadID() == MainThread {
+		go blockOnPeer()
+		return
+	}
+	raw(funcPCABI0(libc___llgo_coro_native_fleet_e2e_block_v1_trampoline))
+}
+
+func main() {
+	resetState()
+	go blockOnPeer()
+	for isWaiting() == 0 {
+	}
+	// No other task asks for the blocked route. Main must exit even when
+	// there is no replacement thread to reclaim or join.
+}
+
+func Check() int32 {
+	return 62
+}
+`
+
 const coroNativeFleetChannelSelectE2ESource = `package main
 
 import _ "unsafe"
@@ -2079,6 +2132,10 @@ func TestCoroNativeFleetLockedGExitRetiresProgramOwnerE2E(t *testing.T) {
 
 func TestCoroNativeFleetMainReturnDoesNotJoinBlockedLockedGE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetBlockedLockedGMainReturnE2ESource, "blocked-locked-g-main-return", false, 2)
+}
+
+func TestCoroNativeFleetMainReturnDoesNotJoinBlockedDirectSyscallE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetBlockedDirectSyscallMainReturnE2ESource, "blocked-direct-syscall-main-return", false, 2)
 }
 
 func TestCoroNativeFleetChannelSelectCrossRouteE2E(t *testing.T) {
