@@ -57,6 +57,7 @@ func PrepareSinglePollPark(
 	fd int32,
 	interest PollInterest,
 	deadline int64,
+	streamSocket bool,
 ) (ParkTicket, PollOperationHandle, OperationID, bool) {
 	if !ValidG(g) || handle == nil || header == nil || source == nil || wait == nil ||
 		*wait != (WaitSetRecord{}) || caseID == 0 || fd < 0 || !validPollInterest(interest) || deadline < 0 ||
@@ -69,7 +70,7 @@ func PrepareSinglePollPark(
 		return ParkTicket{}, PollOperationHandle{}, OperationID{}, false
 	}
 	poll, operation, ok := source.ReserveAndAttachPollOperationV2(
-		g.runP, &g.park, ticket, wait, caseID, fd, interest, deadline,
+		g.runP, &g.park, ticket, wait, caseID, fd, interest, deadline, streamSocket,
 	)
 	if !ok || !SealParkSet(&g.park, ticket) || !PrepareParkSet(g, handle, header, ticket, wait) {
 		return ParkTicket{}, PollOperationHandle{}, OperationID{}, false
@@ -91,13 +92,14 @@ func PrepareCurrentExecutorPollPark(
 	fd int32,
 	interest PollInterest,
 	deadline int64,
+	streamSocket bool,
 ) (ParkTicket, PollOperationHandle, OperationID, ExecutorHandle, bool) {
 	source, ok := currentExecutorPollSource(driver, g)
 	if !ok {
 		return ParkTicket{}, PollOperationHandle{}, OperationID{}, ExecutorHandle{}, false
 	}
 	ticket, poll, operation, ok := PrepareSinglePollPark(
-		g, handle, header, source, wait, caseID, seed, fd, interest, deadline,
+		g, handle, header, source, wait, caseID, seed, fd, interest, deadline, streamSocket,
 	)
 	return ticket, poll, operation, driver.handle, ok
 }

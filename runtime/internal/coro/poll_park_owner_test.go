@@ -80,6 +80,7 @@ func newPollParkOwnerFixture(t *testing.T, name string, deadline int64) *pollPar
 		42,
 		PollInterestRead,
 		deadline,
+		true,
 	)
 	if !prepared || fixture.executor != executor || fixture.operation.Route() != route {
 		t.Fatalf("prepare %s Poll V2 park = (%+v, %+v, %+v, %+v, %t)",

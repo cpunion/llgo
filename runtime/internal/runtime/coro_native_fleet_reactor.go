@@ -35,6 +35,7 @@ var _ [coroNativeFleetPollCapacityV1 - coro.PollOperationPageCapacity]byte
 type coroNativeFleetPollSetV1 struct {
 	entries    [corodoorbell.PollSetCapacity]corodoorbell.PollFD
 	operations [coroNativeFleetPollCapacityV1]coro.OperationID
+	streamSet  bool
 }
 
 // Logical routes which have never performed a physical wait retain only a
@@ -132,6 +133,7 @@ func coroNativeFleetBuildPhysicalWaitV1(
 		Events: corodoorbell.PollRead,
 	}
 	count := uint32(1)
+	streamSockets := true
 	poll, driver := domain.pollOwnerV1(), domain.driverOwnerV1()
 	if poll == nil || driver == nil {
 		return coroNativeFleetPhysicalWaitV1{}, false
@@ -172,8 +174,10 @@ func coroNativeFleetBuildPhysicalWaitV1(
 			Events: events,
 		}
 		storage.operations[count-1] = snapshot.ID
+		streamSockets = streamSockets && snapshot.StreamSocket
 		count++
 	}
+	storage.streamSet = count > 1 && count <= 3 && streamSockets
 	return coroNativeFleetPhysicalWaitV1{
 		handle:      handle,
 		count:       count,
@@ -273,7 +277,7 @@ func coroNativeFleetWaitPhysicalPassAtV1(
 	for index := uint32(0); index < wait.count; index++ {
 		storage.entries[index].Revents = 0
 	}
-	ready, errno := corodoorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS)
+	ready, errno := domain.doorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS, storage.streamSet)
 	if ready < 0 {
 		if corodoorbell.PollInterrupted(errno) {
 			return coroNativeFleetPhysicalWaitRetryV1

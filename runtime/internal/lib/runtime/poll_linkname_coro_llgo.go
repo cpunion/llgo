@@ -278,6 +278,9 @@ func pollCoroPrepareWaitV2(ctx uintptr, mode int) (fd int32, interest uint32, de
 	if pollDeadlineExpired(deadline) {
 		return 0, 0, 0, pollErrTimeout
 	}
+	if GOOS == "darwin" && state&coroPollDescInlineStreamV1 != 0 {
+		interest |= llrt.CoroPollWaitStreamFlagV2
+	}
 	return pollDescFD(state), interest, deadline, pollNoError
 }
 

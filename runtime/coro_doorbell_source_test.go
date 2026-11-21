@@ -158,6 +158,8 @@ func TestCoroDoorbellFixedCLeaves(t *testing.T) {
 #include <stdint.h>
 
 #if defined(__APPLE__)
+#include <sys/socket.h>
+#include <unistd.h>
 typedef uint32_t llgo_doorbell_nfds_v1;
 #else
 typedef uintptr_t llgo_doorbell_nfds_v1;
@@ -174,6 +176,102 @@ uint64_t __llgo_coro_doorbell_poll_set_v1(
 
 static int32_t result(uint64_t packed) { return (int32_t)(uint32_t)packed; }
 static int32_t error(uint64_t packed) { return (int32_t)(uint32_t)(packed >> 32); }
+
+#if defined(__APPLE__)
+struct poll_queue {
+    int32_t descriptor;
+    struct { int32_t fd, filter; } watches[2];
+};
+
+uint64_t __llgo_coro_doorbell_kevent_set_v1(
+    struct poll_queue *, struct pollfd *, uint32_t, int32_t);
+
+static int kevent_set_test(void) {
+    struct poll_queue queue = {0};
+    int32_t bell[2];
+    int first[2], second[2];
+    uint8_t byte = 3;
+    if (!__llgo_coro_doorbell_open_v1(bell) ||
+        socketpair(AF_UNIX, SOCK_STREAM, 0, first) ||
+        socketpair(AF_UNIX, SOCK_STREAM, 0, second)) {
+        return 50;
+    }
+    struct pollfd set[4] = {
+        { .fd = bell[0], .events = POLLIN },
+        { .fd = first[0], .events = POLLIN },
+        { .fd = first[0], .events = POLLOUT },
+        { .fd = -1 },
+    };
+    uint64_t packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 4, 0);
+    if (result(packed) != 1 || set[2].revents != POLLOUT || queue.descriptor != 0) {
+        return 51;
+    }
+    if (write(first[1], &byte, 1) != 1) {
+        return 61;
+    }
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 3, 10);
+    if (result(packed) != 2 || set[0].revents || set[1].revents != POLLIN ||
+        set[2].revents != POLLOUT || queue.descriptor <= 0 ||
+        queue.watches[0].filter != 0 || queue.watches[1].filter != 0 ||
+        read(first[0], &byte, 1) != 1) {
+        return 62;
+    }
+    if (write(bell[1], &byte, 1) != 1) {
+        return 52;
+    }
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 10);
+    if (result(packed) != 1 || set[0].revents != POLLIN || set[1].revents != 0 ||
+        queue.descriptor <= 0 || !(fcntl(queue.descriptor - 1, F_GETFD) & FD_CLOEXEC) ||
+        queue.watches[0].filter == 0 || read(bell[0], &byte, 1) != 1) {
+        return 53;
+    }
+
+    // A stale delete after closing the previous socket must neither disable
+    // the backend nor consume the next socket's still-ready operation.
+    int reused = first[0];
+    if (close(reused) || write(second[1], &byte, 1) != 1) {
+        return 54;
+    }
+    set[1].fd = second[0];
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 10);
+    if (result(packed) == 0) {
+        packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 10);
+    }
+    if (result(packed) != 1 || set[0].revents || set[1].revents != POLLIN ||
+        queue.descriptor <= 0 || queue.watches[0].filter != 0 || read(second[0], &byte, 1) != 1) {
+        return 55;
+    }
+
+    set[1].fd = second[0];
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 10);
+    if (result(packed) != 0 || queue.watches[0].filter == 0 ||
+        close(second[0]) || dup2(first[1], second[0]) != second[0]) {
+        return 56;
+    }
+    // EOF after reuse is a read wake, even though the previous fd was quiet.
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 10);
+    if (result(packed) != 1 || set[1].revents != POLLIN || queue.watches[0].filter != 0 ||
+        read(second[0], &byte, 1) != 0) {
+        return 57;
+    }
+    if (close(second[0]) || close(first[1]) || close(second[1])) {
+        return 58;
+    }
+
+    // An invalid current descriptor preserves poll's POLLNVAL result and
+    // releases the kernel queue before switching to the general path.
+    int old_queue = queue.descriptor - 1;
+    packed = __llgo_coro_doorbell_kevent_set_v1(&queue, set, 2, 0);
+    if (result(packed) != 1 || !(set[1].revents & POLLNVAL) ||
+        queue.descriptor >= 0 || fcntl(old_queue, F_GETFD) >= 0 || errno != EBADF) {
+        return 59;
+    }
+    if (close(bell[0]) || close(bell[1])) {
+        return 60;
+    }
+    return 0;
+}
+#endif
 
 int main(void) {
     int32_t fds[2] = {-1, -1};
@@ -219,7 +317,11 @@ int main(void) {
         !__llgo_coro_doorbell_close_v1(fds[1])) {
         return 17;
     }
+#if defined(__APPLE__)
+    return kevent_set_test();
+#else
     return 0;
+#endif
 }
 `
 	if err := os.WriteFile(testSource, []byte(program), 0o600); err != nil {
