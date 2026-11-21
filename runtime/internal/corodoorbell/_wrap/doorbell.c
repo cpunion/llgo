@@ -29,6 +29,10 @@
 #include <stdint.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <sys/event.h>
+#endif
+
 #define LLGO_DOORBELL_OPEN_RETRIES_V1 16
 #define LLGO_DOORBELL_READ_MAX_V1 64u
 #define LLGO_DOORBELL_WRITE_SIZE_V1 1u
@@ -180,5 +184,132 @@ uint64_t __llgo_coro_doorbell_poll_set_v1(
         ? llgo_doorbell_result_v1(-1, errno)
         : llgo_doorbell_result_v1((int32_t)result, 0);
 }
+
+#if defined(__APPLE__)
+
+struct llgo_doorbell_kevent_pair_v1 {
+    int32_t descriptor;
+    int32_t watched_fd;
+    int32_t filter;
+};
+
+enum {
+    llgo_kevent_bell_v1 = 1,
+    llgo_kevent_watch_v1,
+    llgo_kevent_delete_v1,
+};
+
+static int llgo_doorbell_kevent_open_v1(int bell)
+{
+    int fd = kqueue();
+    if (fd < 0) {
+        return -1;
+    }
+    struct kevent change;
+    EV_SET(&change, bell, EVFILT_READ, EV_ADD, 0, 0,
+           (void *)(uintptr_t)llgo_kevent_bell_v1);
+    if (fd == INT32_MAX ||
+        llgo_doorbell_set_flag_v1(fd, F_GETFD, F_SETFD, FD_CLOEXEC) != 0 ||
+        kevent(fd, &change, 1, NULL, 0, NULL) != 0) {
+        (void)close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static uint64_t llgo_doorbell_kevent_reset_v1(
+    struct llgo_doorbell_kevent_pair_v1 *queue, struct pollfd *fds, int error)
+{
+    int fd = queue->descriptor - 1;
+    *queue = (struct llgo_doorbell_kevent_pair_v1){
+        .descriptor = error == EINTR ? 0 : -1,
+    };
+    if (close(fd) != 0) {
+        return llgo_doorbell_result_v1(-1, errno);
+    }
+    if (error == EINTR) {
+        return llgo_doorbell_result_v1(-1, EINTR);
+    }
+    /* The original wait may already have used its budget. Only sample here. */
+    return __llgo_coro_doorbell_poll_set_v1(fds, 2, 0);
+}
+
+uint64_t __llgo_coro_doorbell_kevent_pair_v1(
+    struct llgo_doorbell_kevent_pair_v1 *queue, struct pollfd *fds,
+    uint32_t count, int32_t timeout_ms)
+{
+    if (queue == NULL || fds == NULL || count == 0 ||
+        count > LLGO_DOORBELL_POLL_CAPACITY_V1 || timeout_ms < 0 ||
+        timeout_ms > LLGO_DOORBELL_POLL_MAX_MS_V1) {
+        return llgo_doorbell_result_v1(-1, EINVAL);
+    }
+    if (count != 2 || queue->descriptor < 0 ||
+        fds[0].fd < 0 || fds[0].events != POLLIN ||
+        fds[1].fd < 0 || fds[1].fd == fds[0].fd ||
+        (fds[1].events != POLLIN && fds[1].events != POLLOUT)) {
+        return __llgo_coro_doorbell_poll_set_v1(fds, count, timeout_ms);
+    }
+    if (queue->descriptor == 0) {
+        int fd = llgo_doorbell_kevent_open_v1(fds[0].fd);
+        if (fd < 0) {
+            queue->descriptor = -1;
+            return __llgo_coro_doorbell_poll_set_v1(fds, count, timeout_ms);
+        }
+        queue->descriptor = fd + 1;
+    }
+
+    struct kevent changes[2], events[3];
+    int filter = fds[1].events == POLLIN ? EVFILT_READ : EVFILT_WRITE;
+    int previous = queue->watched_fd;
+    int previous_filter = queue->filter;
+    int nchange = 0;
+    if (previous_filter != 0 && (previous != fds[1].fd || previous_filter != filter)) {
+        EV_SET(&changes[0], previous, previous_filter, EV_DELETE, 0, 0,
+               (void *)(uintptr_t)llgo_kevent_delete_v1);
+        nchange = 1;
+    }
+    EV_SET(&changes[nchange], fds[1].fd, filter, EV_ADD | EV_ONESHOT, 0, 0,
+           (void *)(uintptr_t)llgo_kevent_watch_v1);
+    struct timespec timeout = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_nsec = (timeout_ms % 1000) * 1000000L,
+    };
+    int ready = kevent(queue->descriptor - 1, changes, nchange + 1,
+                       events, 3, &timeout);
+    if (ready < 0) {
+        return llgo_doorbell_kevent_reset_v1(queue, fds, errno);
+    }
+
+    queue->watched_fd = fds[1].fd;
+    queue->filter = filter;
+    fds[0].revents = 0;
+    fds[1].revents = 0;
+    for (int i = 0; i < ready; i++) {
+        const struct kevent *event = &events[i];
+        uintptr_t identity = (uintptr_t)event->udata;
+        if (event->flags & EV_ERROR) {
+            /* Close can remove the previous knote before our delete. Darwin
+             * reports that receipt separately from the new ready watch. */
+            if (identity == llgo_kevent_delete_v1 && nchange == 1 &&
+                event->ident == (uintptr_t)previous && event->filter == previous_filter &&
+                (event->data == ENOENT || event->data == EBADF)) {
+                continue;
+            }
+            return llgo_doorbell_kevent_reset_v1(queue, fds, (int)event->data);
+        }
+        if (identity == llgo_kevent_bell_v1 && event->ident == (uintptr_t)fds[0].fd &&
+            event->filter == EVFILT_READ) {
+            fds[0].revents = POLLIN;
+        } else if (identity == llgo_kevent_watch_v1 && event->ident == (uintptr_t)fds[1].fd &&
+                   event->filter == filter) {
+            fds[1].revents = fds[1].events;
+            queue->filter = 0;
+        } else {
+            return llgo_doorbell_kevent_reset_v1(queue, fds, EINVAL);
+        }
+    }
+    return llgo_doorbell_result_v1((fds[0].revents != 0) + (fds[1].revents != 0), 0);
+}
+#endif
 
 #endif

@@ -57,11 +57,25 @@ var (
 // finite and fault-containment bounded; the scheduler resamples monotonic time
 // and re-enters instead of exposing an unbounded poll(-1) foreign edge.
 func WaitPollSet(first *PollFD, count uint32, timeoutMS int32) (ready int, errno int32) {
-	if first == nil || count == 0 || count > PollSetCapacity ||
-		timeoutMS < 0 || timeoutMS > physicalPollMaxMS {
+	if !validPollSet(first, count, timeoutMS) {
 		return -1, -1
 	}
 	return nativePollSet(first, count, timeoutMS)
+}
+
+// WaitPollSet borrows a snapshot whose first entry is this pipe's read end.
+// Only the current physical owner calls this method. Its readiness queue, if
+// allocated, follows the pipe across owner changes and closes with the pipe.
+func (pipe *Pipe) WaitPollSet(first *PollFD, count uint32, timeoutMS int32) (int, int32) {
+	if pipe == nil || !validPollSet(first, count, timeoutMS) || first.FD != pipe.readFD {
+		return -1, -1
+	}
+	return pipe.pollQueue.wait(first, count, timeoutMS)
+}
+
+func validPollSet(first *PollFD, count uint32, timeoutMS int32) bool {
+	return first != nil && count != 0 && count <= PollSetCapacity &&
+		timeoutMS >= 0 && timeoutMS <= physicalPollMaxMS
 }
 
 // PollInterrupted classifies the only retryable physical wait error. The

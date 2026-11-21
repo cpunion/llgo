@@ -273,7 +273,7 @@ func coroNativeFleetWaitPhysicalPassAtV1(
 	for index := uint32(0); index < wait.count; index++ {
 		storage.entries[index].Revents = 0
 	}
-	ready, errno := corodoorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS)
+	ready, errno := domain.doorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS)
 	if ready < 0 {
 		if corodoorbell.PollInterrupted(errno) {
 			return coroNativeFleetPhysicalWaitRetryV1

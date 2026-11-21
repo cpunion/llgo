@@ -90,7 +90,7 @@ func TestCoroNativeFleetPollReactorKeepsOneExactPhysicalWaitPrimitive(t *testing
 		"coroNativeFleetPhysicalWaitActiveV1",
 		"domain.doorbell.ConsumeRetainedWake()",
 		"corodoorbell.DeadlinePollTimeout(now, wait.deadline)",
-		"corodoorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS)",
+		"domain.doorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS)",
 		"coroNativeFleetPostPollV1(",
 		"storage.operations[entry-1]",
 		"coroNativeFleetWaitPassRetryV1",
