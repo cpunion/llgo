@@ -46,3 +46,5 @@ func GC() {
 		poolCleanup()
 	}
 }
+
+func freeOSMemoryForCollector() { GC() }
