@@ -5,6 +5,7 @@ package cl
 import (
 	"go/token"
 	"go/types"
+	"slices"
 	"testing"
 
 	"golang.org/x/tools/go/ssa"
@@ -57,6 +58,15 @@ func Root(i I) int { if Enabled() { return i.Method() }; return 0 }
 	universe.intrinsicOps = nil
 	universe.managedValueReferences = nil
 	universe.emissionTypeKeys = emissionTypeKeyCache{}
+	view := universe.CoroPlanningMetadata()
+	got, err := view.ManagedValueReferences(pkg.Func("Box"))
+	if err != nil || !slices.Equal(got, references) {
+		t.Fatalf("planning managed value references = %v, %v; want %v", got, err, references)
+	}
+	got[0] = nil
+	if frozen, err := view.ManagedValueReferences(pkg.Func("Box")); err != nil || frozen[0] == nil {
+		t.Fatalf("mutable planning result changed frozen references: %v, %v", frozen, err)
+	}
 	if got := ir.callableClassifications[pkg.Func("Enabled")]; got != classification {
 		t.Fatalf("callable classification changed after freeze: %+v", got)
 	}

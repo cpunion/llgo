@@ -18,6 +18,7 @@ package cl
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -127,10 +128,17 @@ func (view CoroPlanningMetadataView) exportIngressCertificate(
 // transport and are disjoint from raw ABI method/code-address references.
 func (view CoroPlanningMetadataView) ManagedValueReferences(owner *ssa.Function) ([]*ssa.Function, error) {
 	u := view.index.universe
-	if u == nil {
+	if u == nil || u.coroProgramIR == nil || !u.coroProgramIR.callsFrozen {
 		return nil, fmt.Errorf("coroutine managed value references require a prepared emission universe")
 	}
-	return u.coroFrozenABIReferences(owner, u.managedValueReferences, "managed value")
+	if owner == nil {
+		return nil, fmt.Errorf("coroutine managed value references require an exact owner function")
+	}
+	references, present := u.coroProgramIR.managedValueReferences[owner]
+	if !present {
+		return nil, fmt.Errorf("coroutine managed value reference owner %q has no frozen entry", owner.Name())
+	}
+	return slices.Clone(references), nil
 }
 
 // PlainLoweredCalls returns exact compiler-inserted helper occurrences in an

@@ -1192,7 +1192,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			}
 		}
 		u.coroProgramIR.managedMethodTargets[function] = target
-		references, err := u.CoroPlanningMetadata().ManagedValueReferences(function)
+		references, err := u.coroFrozenABIReferences(function, u.managedValueReferences, "managed value")
 		if err != nil {
 			return nil, err
 		}
