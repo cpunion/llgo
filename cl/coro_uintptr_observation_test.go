@@ -63,6 +63,14 @@ func StoreOptionalWord(buffer []byte, descriptor []uint64) {
 	descriptor[0] = address
 }
 
+func CheckOptionalWord(buffer []byte, offset, expected uint64) bool {
+	var address uint64
+	if offset < uint64(len(buffer)) {
+		address = uint64(uintptr(unsafe.Pointer(&buffer[offset])))
+	}
+	return address == expected
+}
+
 func Overlaps(a, b []byte) bool {
 	if len(a) == 0 || len(b) == 0 { return false }
 	elemSize := unsafe.Sizeof(a[0])
@@ -210,7 +218,7 @@ func TestCoroPointerUintptrAffineObservationNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s scalar observation acquired an await/preempt hook:\n%s", name, body)
 				}
 				pointerWords := 2
-				if name == "ReturnWord" || name == "StoreAndReturnWord" || name == "StoreOptionalWord" {
+				if name == "ReturnWord" || name == "StoreAndReturnWord" || name == "StoreOptionalWord" || name == "CheckOptionalWord" {
 					pointerWords = 1
 				}
 				if got := strings.Count(body, "ptrtoint ptr"); got < pointerWords || !strings.Contains(body, "to "+target.uintptrType) {
@@ -482,6 +490,7 @@ func compileCoroUintptrObservationFixture(
 		"ReturnWord":         ssaPkg.Func("ReturnWord"),
 		"StoreAndReturnWord": ssaPkg.Func("StoreAndReturnWord"),
 		"StoreOptionalWord":  ssaPkg.Func("StoreOptionalWord"),
+		"CheckOptionalWord":  ssaPkg.Func("CheckOptionalWord"),
 	}
 	var roots coro.Roots
 	for _, function := range functions {

@@ -2184,17 +2184,16 @@ func coroPointerUintptrScalarMinusAddressResult(address ssa.Value, operation *ss
 }
 
 // coroPointerUintptrStoreOrReturnTerminal accepts chains whose uses are integer
-// stores and returns. A store can consume a computed integer or a word
-// selected between the address and zero. A return can publish the address
-// word itself after integer casts. A later load or call result needs its
-// own proof before becoming a pointer again.
+// stores and returns or an optional address consumed as an integer.
+// A return can publish the address word itself after integer casts.
+// A later load or call result needs its own proof before becoming a pointer.
 func coroPointerUintptrStoreOrReturnTerminal(root ssa.Value) bool {
 	return coroPointerUintptrIntegerChainTerminal(root, true, func(value ssa.Value, use ssa.Instruction) bool {
 		switch terminal := use.(type) {
 		case *ssa.Store:
 			return coroPointerUintptrIntegerStore(value, terminal)
 		case *ssa.Phi:
-			return coroPointerUintptrOptionalStore(value, terminal)
+			return coroPointerUintptrOptionalIntegerTerminal(value, terminal)
 		case *ssa.Return:
 			return slices.Contains(terminal.Results, value) && coroPointerUintptrHasOnlyCasts(root, value)
 		}
@@ -2203,9 +2202,10 @@ func coroPointerUintptrStoreOrReturnTerminal(root ssa.Value) bool {
 }
 
 // A zero alternative represents an absent address in an integer descriptor.
-// Every semantic use of the merged word must store it as that integer type.
-// The merge gives neither source nor result pointer reconstruction authority.
-func coroPointerUintptrOptionalStore(value ssa.Value, merge *ssa.Phi) bool {
+// Every semantic use of the merged word must store its integer type or
+// compare it for equality in the join block. The merge grants no
+// pointer reconstruction authority.
+func coroPointerUintptrOptionalIntegerTerminal(value ssa.Value, merge *ssa.Phi) bool {
 	if len(merge.Edges) != 2 || merge.Referrers() == nil || !types.Identical(merge.Type(), value.Type()) {
 		return false
 	}
@@ -2218,18 +2218,26 @@ func coroPointerUintptrOptionalStore(value ssa.Value, merge *ssa.Phi) bool {
 		zero.Value.Kind() != constant.Int || constant.Sign(zero.Value) != 0 {
 		return false
 	}
-	stored := false
+	observed := false
 	for _, use := range *merge.Referrers() {
-		if _, debug := use.(*ssa.DebugRef); debug {
+		switch terminal := use.(type) {
+		case *ssa.DebugRef:
 			continue
-		}
-		store, ok := use.(*ssa.Store)
-		if !ok || !coroPointerUintptrIntegerStore(merge, store) {
+		case *ssa.Store:
+			if !coroPointerUintptrIntegerStore(merge, terminal) {
+				return false
+			}
+		case *ssa.BinOp:
+			if terminal.Block() != merge.Block() || (terminal.Op != token.EQL && terminal.Op != token.NEQ) ||
+				(terminal.X != merge && terminal.Y != merge) {
+				return false
+			}
+		default:
 			return false
 		}
-		stored = true
+		observed = true
 	}
-	return stored
+	return observed
 }
 
 func coroPointerUintptrIntegerStore(value ssa.Value, store *ssa.Store) bool {
