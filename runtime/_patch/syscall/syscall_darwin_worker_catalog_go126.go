@@ -159,6 +159,12 @@ func libc_mprotect_trampoline()
 //go:linkname libc_pipe_trampoline C.pipe
 func libc_pipe_trampoline()
 
+// poll borrows its descriptor array through completion and leaves the
+// readiness result there. Its timeout and descriptor count are scalar.
+//
+//go:linkname libc_poll_trampoline C.poll
+func libc_poll_trampoline()
+
 //go:linkname libc_readlink_trampoline C.readlink
 func libc_readlink_trampoline()
 

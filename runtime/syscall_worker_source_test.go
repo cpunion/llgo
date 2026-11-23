@@ -368,6 +368,7 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 		{"libc_mkdir_trampoline", "mkdir"},
 		{"libc_mprotect_trampoline", "mprotect"},
 		{"libc_pipe_trampoline", "pipe"},
+		{"libc_poll_trampoline", "poll"},
 		{"libc_readlink_trampoline", "readlink"},
 		{"libc_recvmsg_trampoline", "recvmsg"},
 		{"libc_rename_trampoline", "rename"},
