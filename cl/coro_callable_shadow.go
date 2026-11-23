@@ -373,9 +373,10 @@ func coroWorkerCallableTarget(
 	if err != nil {
 		return coroWorkerAddressTarget{}, "", err
 	}
+	// The contract belongs to the canonical SDK target. The shadow-set key
+	// separately records the exact source declaration and producer site.
 	certificateID := emissionDigest(framedEmissionKey(
-		"llgo-coro-inferred-patch-address-contract-v1",
-		coroWorkerAddressFunctionIdentity(universe, sourceTarget),
+		"llgo-coro-inferred-patch-address-contract-v2",
 		coroWorkerAddressFunctionIdentity(universe, target),
 		physical,
 		universe.emissionTypeKeys.goLinknameABI(target.Signature),

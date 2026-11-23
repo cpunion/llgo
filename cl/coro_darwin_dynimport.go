@@ -17,6 +17,7 @@
 package cl
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -195,7 +196,9 @@ func (b *coroCallableShadowBuilder) bindDarwinImportContracts(existing map[strin
 		symbol := shadow.PhysicalSymbol
 		if authoritative, ok := existing[symbol]; ok {
 			if !authoritative.sameContract(shadow) {
-				b.rejectProducer(producer, shadow, "darwin-import-conflicts-with-sdk-worker-abi")
+				reason := fmt.Sprintf("darwin-import-conflicts-with-sdk-worker-abi: SDK %d words, import %d words, same declaration %t",
+					authoritative.ABI.WordArgs, shadow.ABI.WordArgs, authoritative.Target == shadow.Target)
+				b.rejectProducer(producer, shadow, reason)
 			}
 			continue
 		}
