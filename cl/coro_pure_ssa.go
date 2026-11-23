@@ -2184,23 +2184,60 @@ func coroPointerUintptrScalarMinusAddressResult(address ssa.Value, operation *ss
 }
 
 // coroPointerUintptrStoreOrReturnTerminal accepts chains whose uses are integer
-// stores and returns. A store can consume a computed integer. A return can
-// publish the address word itself after integer casts. Either way, a later
-// load or call result needs its own proof before becoming a pointer again.
+// stores and returns. A store can consume a computed integer or a word
+// selected between the address and zero. A return can publish the address
+// word itself after integer casts. A later load or call result needs its
+// own proof before becoming a pointer again.
 func coroPointerUintptrStoreOrReturnTerminal(root ssa.Value) bool {
 	return coroPointerUintptrIntegerChainTerminal(root, true, func(value ssa.Value, use ssa.Instruction) bool {
 		switch terminal := use.(type) {
 		case *ssa.Store:
-			if terminal.Val != value || terminal.Addr == nil || terminal.Addr.Type() == nil {
-				return false
-			}
-			pointer, ok := types.Unalias(terminal.Addr.Type()).Underlying().(*types.Pointer)
-			return ok && types.Identical(pointer.Elem(), value.Type())
+			return coroPointerUintptrIntegerStore(value, terminal)
+		case *ssa.Phi:
+			return coroPointerUintptrOptionalStore(value, terminal)
 		case *ssa.Return:
 			return slices.Contains(terminal.Results, value) && coroPointerUintptrHasOnlyCasts(root, value)
 		}
 		return false
 	})
+}
+
+// A zero alternative represents an absent address in an integer descriptor.
+// Every semantic use of the merged word must store it as that integer type.
+// The merge gives neither source nor result pointer reconstruction authority.
+func coroPointerUintptrOptionalStore(value ssa.Value, merge *ssa.Phi) bool {
+	if len(merge.Edges) != 2 || merge.Referrers() == nil || !types.Identical(merge.Type(), value.Type()) {
+		return false
+	}
+	first, second := merge.Edges[0], merge.Edges[1]
+	if second == value {
+		first, second = second, first
+	}
+	zero, constantEdge := second.(*ssa.Const)
+	if first != value || !constantEdge || zero.Value == nil ||
+		zero.Value.Kind() != constant.Int || constant.Sign(zero.Value) != 0 {
+		return false
+	}
+	stored := false
+	for _, use := range *merge.Referrers() {
+		if _, debug := use.(*ssa.DebugRef); debug {
+			continue
+		}
+		store, ok := use.(*ssa.Store)
+		if !ok || !coroPointerUintptrIntegerStore(merge, store) {
+			return false
+		}
+		stored = true
+	}
+	return stored
+}
+
+func coroPointerUintptrIntegerStore(value ssa.Value, store *ssa.Store) bool {
+	if store.Val != value || store.Addr == nil || store.Addr.Type() == nil {
+		return false
+	}
+	pointer, ok := types.Unalias(store.Addr.Type()).Underlying().(*types.Pointer)
+	return ok && types.Identical(pointer.Elem(), value.Type())
 }
 
 func coroPointerUintptrHasOnlyCasts(root, value ssa.Value) bool {

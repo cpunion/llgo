@@ -54,6 +54,15 @@ func StoreAndReturnWord(pointer unsafe.Pointer, descriptor []uint64, offset uint
 	return address
 }
 
+func StoreOptionalWord(buffer []byte, descriptor []uint64) {
+	if len(descriptor) == 0 { return }
+	var address uint64
+	if len(buffer) != 0 {
+		address = uint64(uintptr(unsafe.Pointer(unsafe.SliceData(buffer))))
+	}
+	descriptor[0] = address
+}
+
 func Overlaps(a, b []byte) bool {
 	if len(a) == 0 || len(b) == 0 { return false }
 	elemSize := unsafe.Sizeof(a[0])
@@ -201,7 +210,7 @@ func TestCoroPointerUintptrAffineObservationNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s scalar observation acquired an await/preempt hook:\n%s", name, body)
 				}
 				pointerWords := 2
-				if name == "ReturnWord" || name == "StoreAndReturnWord" {
+				if name == "ReturnWord" || name == "StoreAndReturnWord" || name == "StoreOptionalWord" {
 					pointerWords = 1
 				}
 				if got := strings.Count(body, "ptrtoint ptr"); got < pointerWords || !strings.Contains(body, "to "+target.uintptrType) {
@@ -246,6 +255,10 @@ func TestCoroPointerUintptrAffineObservationRemainsFailClosed(t *testing.T) {
 		{name: "call", body: "consume(uintptr(pointer) + offset); return 0"},
 		{name: "store plus call", body: "word := uintptr(pointer); escaped = word; consume(word); return word"},
 		{name: "store plus derived return", body: "word := uintptr(pointer); escaped = word; return word + offset"},
+		{name: "merge nonzero and store", body: "word := uintptr(1); if offset != 0 { word = uintptr(pointer) }; escaped = word; return 0"},
+		{name: "merge two addresses and store", body: "word := uintptr(other); if offset != 0 { word = uintptr(pointer) }; escaped = word; return 0"},
+		{name: "merge and return", body: "var word uintptr; if offset != 0 { word = uintptr(pointer) }; escaped = word; return word"},
+		{name: "merge and reconstruct", body: "var word uintptr; if offset != 0 { word = uintptr(pointer) }; escaped = word; return unsafe.Pointer(word) == nil"},
 		{name: "multiply", body: "return (uintptr(pointer) * offset) == 0"},
 		{name: "reconstruct", body: "return uintptr(unsafe.Pointer(uintptr(pointer) + offset)) == 0"},
 		{name: "pointer offset", body: "return uintptr(pointer) <= uintptr(other) + uintptr(pointer)"},
@@ -468,6 +481,7 @@ func compileCoroUintptrObservationFixture(
 		"Overlaps":           ssaPkg.Func("Overlaps"),
 		"ReturnWord":         ssaPkg.Func("ReturnWord"),
 		"StoreAndReturnWord": ssaPkg.Func("StoreAndReturnWord"),
+		"StoreOptionalWord":  ssaPkg.Func("StoreOptionalWord"),
 	}
 	var roots coro.Roots
 	for _, function := range functions {
