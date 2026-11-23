@@ -47,6 +47,13 @@ func ReturnWord(pointer unsafe.Pointer) (NativeWord, bool) {
 	return NativeWord(uint64(uintptr(pointer))), true
 }
 
+func StoreAndReturnWord(pointer unsafe.Pointer, descriptor []uint64, offset uint64) uint64 {
+	if len(descriptor) == 0 { return 0 }
+	address := uint64(uintptr(pointer))
+	descriptor[0] = address + offset
+	return address
+}
+
 func Overlaps(a, b []byte) bool {
 	if len(a) == 0 || len(b) == 0 { return false }
 	elemSize := unsafe.Sizeof(a[0])
@@ -194,14 +201,14 @@ func TestCoroPointerUintptrAffineObservationNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s scalar observation acquired an await/preempt hook:\n%s", name, body)
 				}
 				pointerWords := 2
-				if name == "ReturnWord" {
+				if name == "ReturnWord" || name == "StoreAndReturnWord" {
 					pointerWords = 1
 				}
 				if got := strings.Count(body, "ptrtoint ptr"); got < pointerWords || !strings.Contains(body, "to "+target.uintptrType) {
 					t.Fatalf("%s ptrtoint lowering is incomplete for %s (count=%d):\n%s", name, target.uintptrType, got, body)
 				}
-				if name == "ReturnWord" && target.uintptrType == "i32" && !strings.Contains(body, "zext i32") {
-					t.Fatalf("ReturnWord does not widen the wasm32 address:\n%s", body)
+				if pointerWords == 1 && target.uintptrType == "i32" && !strings.Contains(body, "zext i32") {
+					t.Fatalf("%s does not widen the wasm32 address:\n%s", name, body)
 				}
 			}
 			assertCoroUintptrAffineIR(t, "Endpoint", requireCoroPhysicalFunction(t, module, "foo.Endpoint").String())
@@ -237,6 +244,8 @@ func TestCoroPointerUintptrAffineObservationRemainsFailClosed(t *testing.T) {
 		body string
 	}{
 		{name: "call", body: "consume(uintptr(pointer) + offset); return 0"},
+		{name: "store plus call", body: "word := uintptr(pointer); escaped = word; consume(word); return word"},
+		{name: "store plus derived return", body: "word := uintptr(pointer); escaped = word; return word + offset"},
 		{name: "multiply", body: "return (uintptr(pointer) * offset) == 0"},
 		{name: "reconstruct", body: "return uintptr(unsafe.Pointer(uintptr(pointer) + offset)) == 0"},
 		{name: "pointer offset", body: "return uintptr(pointer) <= uintptr(other) + uintptr(pointer)"},
@@ -455,9 +464,10 @@ func compileCoroUintptrObservationFixture(
 		t.Fatal(err)
 	}
 	functions := map[string]*ssa.Function{
-		"Endpoint":   ssaPkg.Func("Endpoint"),
-		"Overlaps":   ssaPkg.Func("Overlaps"),
-		"ReturnWord": ssaPkg.Func("ReturnWord"),
+		"Endpoint":           ssaPkg.Func("Endpoint"),
+		"Overlaps":           ssaPkg.Func("Overlaps"),
+		"ReturnWord":         ssaPkg.Func("ReturnWord"),
+		"StoreAndReturnWord": ssaPkg.Func("StoreAndReturnWord"),
 	}
 	var roots coro.Roots
 	for _, function := range functions {

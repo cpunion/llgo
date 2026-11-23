@@ -21,6 +21,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"slices"
 	"sort"
 	"strings"
 
@@ -2073,8 +2074,7 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 	if value == nil || !rootIsInstruction || root.Block() == nil || value.Referrers() == nil {
 		return false
 	}
-	if coroPointerUintptrReturnTerminal(value) || coroPointerUintptrMapKeyTerminal(value) ||
-		coroPointerUintptrStoreTerminal(value) {
+	if coroPointerUintptrStoreOrReturnTerminal(value) || coroPointerUintptrMapKeyTerminal(value) {
 		return true
 	}
 	uses := 0
@@ -2183,22 +2183,38 @@ func coroPointerUintptrScalarMinusAddressResult(address ssa.Value, operation *ss
 		!coroFrameRetentionIntegerHasPointerProvenance(operation.X, make(map[ssa.Value]bool))
 }
 
-// coroPointerUintptrStoreTerminal accepts an integer-only value chain whose
-// every path ends in a Store to the exact integer type. Storage ends this
-// compiler-visible pointer lifetime: a later load is an ordinary integer and
-// does not acquire uintptr-to-pointer reconstruction authority. This mirrors a
-// direct uintptr return while covering package state such as numeric sentinels.
-// Calls, Phi merging, a second pointer-derived operand, and every non-integer
-// consumer remain fail-closed.
-func coroPointerUintptrStoreTerminal(root ssa.Value) bool {
-	return coroPointerUintptrIntegerChainTerminal(root, true, func(value ssa.Value, reference ssa.Instruction) bool {
-		store, ok := reference.(*ssa.Store)
-		if !ok || store.Val != value || store.Addr == nil || store.Addr.Type() == nil {
+// coroPointerUintptrStoreOrReturnTerminal accepts chains whose uses are integer
+// stores and returns. A store can consume a computed integer. A return can
+// publish the address word itself after integer casts. Either way, a later
+// load or call result needs its own proof before becoming a pointer again.
+func coroPointerUintptrStoreOrReturnTerminal(root ssa.Value) bool {
+	return coroPointerUintptrIntegerChainTerminal(root, true, func(value ssa.Value, use ssa.Instruction) bool {
+		switch terminal := use.(type) {
+		case *ssa.Store:
+			if terminal.Val != value || terminal.Addr == nil || terminal.Addr.Type() == nil {
+				return false
+			}
+			pointer, ok := types.Unalias(terminal.Addr.Type()).Underlying().(*types.Pointer)
+			return ok && types.Identical(pointer.Elem(), value.Type())
+		case *ssa.Return:
+			return slices.Contains(terminal.Results, value) && coroPointerUintptrHasOnlyCasts(root, value)
+		}
+		return false
+	})
+}
+
+func coroPointerUintptrHasOnlyCasts(root, value ssa.Value) bool {
+	for value != root {
+		switch cast := value.(type) {
+		case *ssa.Convert:
+			value = cast.X
+		case *ssa.ChangeType:
+			value = cast.X
+		default:
 			return false
 		}
-		pointer, ok := types.Unalias(store.Addr.Type()).Underlying().(*types.Pointer)
-		return ok && types.Identical(pointer.Elem(), value.Type())
-	})
+	}
+	return true
 }
 
 // coroPointerUintptrIntegerChainTerminal is the shared fail-closed propagation
@@ -2362,51 +2378,6 @@ func coroPointerUintptrExactMapKey(mapping, key ssa.Value) bool {
 	}
 	typ, ok := types.Unalias(mapping.Type()).Underlying().(*types.Map)
 	return ok && types.Identical(typ.Key(), key.Type())
-}
-
-// coroPointerUintptrReturnTerminal accepts an integer return of the address
-// word, including integer-only casts such as uint64(uintptr(pointer)).
-// Each cast has a single operand, so following its uses cannot revisit a value
-// without a Phi. This proves a scalar observation and adds no pointer roots.
-func coroPointerUintptrReturnTerminal(value ssa.Value) bool {
-	instruction, ok := value.(ssa.Instruction)
-	if !ok || instruction.Parent() == nil || value.Referrers() == nil ||
-		!coroFrameRetentionIntegerLike(value.Type()) {
-		return false
-	}
-	used := false
-	for _, reference := range *value.Referrers() {
-		switch terminal := reference.(type) {
-		case *ssa.DebugRef:
-			continue
-		case *ssa.Convert:
-			if terminal.X != value || !coroPointerUintptrReturnTerminal(terminal) {
-				return false
-			}
-		case *ssa.ChangeType:
-			if terminal.X != value || !coroPointerUintptrReturnTerminal(terminal) {
-				return false
-			}
-		case *ssa.Return:
-			if terminal.Parent() != instruction.Parent() {
-				return false
-			}
-			found := false
-			for _, result := range terminal.Results {
-				if result == value {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return false
-			}
-		default:
-			return false
-		}
-		used = true
-	}
-	return used
 }
 
 // coroPointerUintptrAffineComparisonResult accepts one same-block affine
