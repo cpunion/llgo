@@ -27,6 +27,15 @@ var allocatorKinds = map[string]uint64{
 	runtimePrefix + "AllocRoot":    0,
 }
 
+// IsMarkedAllocatorCall reports whether LLGo attached the allocation contract
+// to a direct call. The contract applies to the constant positive-size
+// allocations of collectors that scan the native stack.
+func IsMarkedAllocatorCall(call llvm.Value) bool {
+	callee := call.CalledValue()
+	return !callee.IsAFunction().IsNil() && allocatorKinds[callee.Name()] != 0 &&
+		!call.GetCallSiteEnumAttribute(-1, llvm.AttributeKindID("allockind")).IsNil()
+}
+
 // ApplyAllocatorFunction is shared by SSA declarations and late ABI lowering.
 // The raw allocators return shared zerobase for zero bytes, so fresh-allocation
 // properties belong on proven-positive calls, not on these declarations.

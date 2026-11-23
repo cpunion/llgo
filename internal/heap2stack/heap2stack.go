@@ -2,7 +2,10 @@
 // heap-to-stack analysis. Attributor remains responsible for escape analysis.
 package heap2stack
 
-import "github.com/xgo-dev/llvm"
+import (
+	"github.com/xgo-dev/llgo/internal/llvmattr"
+	"github.com/xgo-dev/llvm"
+)
 
 // Bound recursive attribute analysis on native stacks, especially Windows'
 // 1 MiB threads. This is a conservative stack-safety cutoff, not a correctness
@@ -55,6 +58,16 @@ func (entry skippedFunction) restore() {
 // Initialization stays at the original allocation site. No lifetime markers
 // are needed for this placement, and pre-existing allocas are left alone.
 func Run(mod llvm.Module, tm llvm.TargetMachine) error {
+	return run(mod, tm, 0)
+}
+
+// RunAfterInlining revisits LLGo allocations exposed by scalar pointer joins.
+// Newly promoted storage retains the raw allocator's Go word alignment.
+func RunAfterInlining(mod llvm.Module, tm llvm.TargetMachine, wordSize int) error {
+	return run(mod, tm, wordSize)
+}
+
+func run(mod llvm.Module, tm llvm.TargetMachine, minAlignment int) error {
 	if mod.IsNil() {
 		return mod.RunAttributorHeapToStack(tm, nil)
 	}
@@ -77,6 +90,16 @@ func Run(mod llvm.Module, tm llvm.TargetMachine) error {
 			entry.skipAnalysis(mod.Context())
 			continue
 		}
+		var joins map[llvm.Value]bool
+		if minAlignment != 0 {
+			joins = joinedAllocations(fn)
+			if len(joins) == 0 {
+				entry := saveSkippedFunction(fn)
+				skipped = append(skipped, entry)
+				entry.skipAnalysis(mod.Context())
+				continue
+			}
+		}
 		functions = append(functions, fn)
 		cycles := cyclicBlocks(fn.EntryBasicBlock())
 		tailInputs := tailCallInputs(fn)
@@ -97,7 +120,7 @@ func Run(mod llvm.Module, tm llvm.TargetMachine) error {
 				if !isCall(i) || i.Type().TypeKind() != llvm.PointerTypeKind {
 					continue
 				}
-				if tailInputs[i] {
+				if tailInputs[i] || joins != nil && !joins[i] {
 					excluded = append(excluded, i)
 					continue
 				}
@@ -108,6 +131,9 @@ func Run(mod llvm.Module, tm llvm.TargetMachine) error {
 				}
 			}
 		}
+	}
+	if len(functions) == 0 {
+		return nil
 	}
 	if err := mod.RunAttributorHeapToStack(tm, excluded); err != nil {
 		return err
@@ -121,18 +147,45 @@ func Run(mod llvm.Module, tm llvm.TargetMachine) error {
 			first = llvm.NextInstruction(first)
 		}
 		b.SetInsertPointBefore(first)
-		for bb := llvm.NextBasicBlock(entry); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
+		for bb := entry; !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
 			for i := bb.FirstInstruction(); !i.IsNil(); {
 				next := llvm.NextInstruction(i)
 				if i.InstructionOpcode() == llvm.Alloca && !existing[i] && !i.Operand(0).IsAConstantInt().IsNil() {
-					i.RemoveFromParentAsInstruction()
-					b.Insert(i)
+					if i.Alignment() < minAlignment {
+						i.SetAlignment(minAlignment)
+					}
+					if bb != entry {
+						i.RemoveFromParentAsInstruction()
+						b.Insert(i)
+					}
 				}
 				i = next
 			}
 		}
 	}
 	return nil
+}
+
+func joinedAllocations(fn llvm.Value) map[llvm.Value]bool {
+	var joins map[llvm.Value]bool
+	for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
+		for phi := bb.FirstInstruction(); !phi.IsNil() && phi.InstructionOpcode() == llvm.PHI; phi = llvm.NextInstruction(phi) {
+			if phi.Type().TypeKind() != llvm.PointerTypeKind {
+				continue
+			}
+			for i := 0; i < phi.IncomingCount(); i++ {
+				v := phi.IncomingValue(i)
+				if v.IsAInstruction().IsNil() || !isCall(v) || !llvmattr.IsMarkedAllocatorCall(v) {
+					continue
+				}
+				if joins == nil {
+					joins = make(map[llvm.Value]bool)
+				}
+				joins[v] = true
+			}
+		}
+	}
+	return joins
 }
 
 func exceedsAnalysisBudget(fn llvm.Value) bool {

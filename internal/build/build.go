@@ -3814,6 +3814,12 @@ func compilePackageModule(ctx *context, aPkg *aPackage, externs []string, verbos
 	if err := optimizeLLVMModule(ctx, pkgPath, ret.Module()); err != nil {
 		return err
 	}
+	if ctx.passOpt && ctx.buildConf.ltoMode() == lto.Full && ctx.buildConf.OptLevel != optlevel.O0 &&
+		ctx.buildConf.Target == "" && ctx.buildConf.Goarch != "wasm" && !ctx.prog.GCRootsEnabled() {
+		if err := heap2stack.RunAfterInlining(ret.Module(), ctx.prog.TargetMachine(), ctx.prog.GoWordSize()); err != nil {
+			return fmt.Errorf("run post-inline heap-to-stack for %v failed: %w", pkgPath, err)
+		}
+	}
 	applyPackageDispatchInlineBudget(ctx, aPkg, ret.Module())
 	lowerEmscriptenSIMDCalls(ctx, ret.Module())
 	localizeWasmStackAddresses(ctx.buildConf.Goarch, ret.Module())
