@@ -40,6 +40,13 @@ func Endpoint(first, last unsafe.Pointer, offset uintptr) bool {
 	return uintptr(first) <= uintptr(last)+offset
 }
 
+type NativeWord uint64
+
+func ReturnWord(pointer unsafe.Pointer) (NativeWord, bool) {
+	if pointer == nil { return 0, false }
+	return NativeWord(uint64(uintptr(pointer))), true
+}
+
 func Overlaps(a, b []byte) bool {
 	if len(a) == 0 || len(b) == 0 { return false }
 	elemSize := unsafe.Sizeof(a[0])
@@ -186,8 +193,15 @@ func TestCoroPointerUintptrAffineObservationNativeAndWasm32(t *testing.T) {
 				if strings.Contains(body, coroAwaitPrepareInlineHookV4) || strings.Contains(body, coroPreemptPollHookV1) {
 					t.Fatalf("%s scalar observation acquired an await/preempt hook:\n%s", name, body)
 				}
-				if got := strings.Count(body, "ptrtoint ptr"); got < 2 || !strings.Contains(body, "to "+target.uintptrType) {
+				pointerWords := 2
+				if name == "ReturnWord" {
+					pointerWords = 1
+				}
+				if got := strings.Count(body, "ptrtoint ptr"); got < pointerWords || !strings.Contains(body, "to "+target.uintptrType) {
 					t.Fatalf("%s ptrtoint lowering is incomplete for %s (count=%d):\n%s", name, target.uintptrType, got, body)
+				}
+				if name == "ReturnWord" && target.uintptrType == "i32" && !strings.Contains(body, "zext i32") {
+					t.Fatalf("ReturnWord does not widen the wasm32 address:\n%s", body)
 				}
 			}
 			assertCoroUintptrAffineIR(t, "Endpoint", requireCoroPhysicalFunction(t, module, "foo.Endpoint").String())
@@ -441,8 +455,9 @@ func compileCoroUintptrObservationFixture(
 		t.Fatal(err)
 	}
 	functions := map[string]*ssa.Function{
-		"Endpoint": ssaPkg.Func("Endpoint"),
-		"Overlaps": ssaPkg.Func("Overlaps"),
+		"Endpoint":   ssaPkg.Func("Endpoint"),
+		"Overlaps":   ssaPkg.Func("Overlaps"),
+		"ReturnWord": ssaPkg.Func("ReturnWord"),
 	}
 	var roots coro.Roots
 	for _, function := range functions {

@@ -2364,19 +2364,29 @@ func coroPointerUintptrExactMapKey(mapping, key ssa.Value) bool {
 	return ok && types.Identical(typ.Key(), key.Type())
 }
 
-// coroPointerUintptrReturnTerminal accepts only the address word itself as an
-// exact return operand. Phi merging, arithmetic, storage, calls, and conversion
-// back to a pointer are deliberately not inferred here. Debug references do
-// not extend the semantic lifetime.
+// coroPointerUintptrReturnTerminal accepts an integer return of the address
+// word, including integer-only casts such as uint64(uintptr(pointer)).
+// Each cast has a single operand, so following its uses cannot revisit a value
+// without a Phi. This proves a scalar observation and adds no pointer roots.
 func coroPointerUintptrReturnTerminal(value ssa.Value) bool {
 	instruction, ok := value.(ssa.Instruction)
-	if value == nil || !ok || instruction.Parent() == nil || value.Referrers() == nil {
+	if !ok || instruction.Parent() == nil || value.Referrers() == nil ||
+		!coroFrameRetentionIntegerLike(value.Type()) {
 		return false
 	}
-	uses := 0
+	used := false
 	for _, reference := range *value.Referrers() {
 		switch terminal := reference.(type) {
 		case *ssa.DebugRef:
+			continue
+		case *ssa.Convert:
+			if terminal.X != value || !coroPointerUintptrReturnTerminal(terminal) {
+				return false
+			}
+		case *ssa.ChangeType:
+			if terminal.X != value || !coroPointerUintptrReturnTerminal(terminal) {
+				return false
+			}
 		case *ssa.Return:
 			if terminal.Parent() != instruction.Parent() {
 				return false
@@ -2391,12 +2401,12 @@ func coroPointerUintptrReturnTerminal(value ssa.Value) bool {
 			if !found {
 				return false
 			}
-			uses++
 		default:
 			return false
 		}
+		used = true
 	}
-	return uses != 0
+	return used
 }
 
 // coroPointerUintptrAffineComparisonResult accepts one same-block affine
