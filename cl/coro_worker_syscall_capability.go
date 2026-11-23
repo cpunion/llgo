@@ -1200,7 +1200,7 @@ func coroWorkerCallableShadowProducerKey(universe *EmissionUniverse, shadow Coro
 	block, instruction := -1, -1
 	if universe != nil && shadow.Producer != nil {
 		parentIdentity = universe.linkIdentities[shadow.Producer.Parent()]
-		block, instruction = coroWorkerSyscallInstructionSite(shadow.Producer)
+		block, instruction = coroWorkerInstructionSite(shadow.Producer)
 	}
 	sourceIdentity := ""
 	if shadow.SourceTarget != nil {
@@ -1214,16 +1214,23 @@ func coroWorkerCallableShadowProducerKey(universe *EmissionUniverse, shadow Coro
 }
 
 func coroWorkerSyscallInstructionSite(call *ssa.Call) (int, int) {
-	if call == nil || call.Parent() == nil {
+	if call == nil {
 		return -1, -1
 	}
-	for _, block := range call.Parent().Blocks {
+	return coroWorkerInstructionSite(call)
+}
+
+func coroWorkerInstructionSite(site ssa.Instruction) (int, int) {
+	if site == nil || site.Parent() == nil {
+		return -1, -1
+	}
+	for _, block := range site.Parent().Blocks {
 		semantic := 0
 		for _, instruction := range block.Instrs {
 			if _, debug := instruction.(*ssa.DebugRef); debug {
 				continue
 			}
-			if instruction == call {
+			if instruction == site {
 				return block.Index, semantic
 			}
 			semantic++

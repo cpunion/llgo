@@ -30,7 +30,7 @@ import (
 )
 
 // CoroCallableShadowABI is producer metadata, not a property recovered from a
-// uintptr. A FuncPCABI0 producer publishes the exact foreign-call family and
+// uintptr. A callable producer publishes the exact foreign-call family and
 // word arity that its target declaration permits. Consumers may compare this
 // value with their own call ABI, but may never manufacture it from the emitted
 // address.
@@ -52,22 +52,27 @@ const (
 	coroCallableShadowInvalidWordArgs = -2
 )
 
-// CoroCallableShadow is the compiler-only fact paired with one exact
-// FuncPCABI0 SSA result. Producer is deliberately part of the identity: two
+// CoroCallableShadow is the compiler-only fact paired with an exact SSA
+// producer. Producer is deliberately part of the identity: two
 // syntactically independent publications of the same text address remain two
 // facts even though Target and PhysicalSymbol match.
 type CoroCallableShadow struct {
-	Producer       *ssa.Call
+	Producer       coroCallableShadowProducer
 	SourceTarget   *ssa.Function
 	Target         *ssa.Function
 	PhysicalSymbol string
 	ABI            CoroCallableShadowABI
 	// ForeignPointerResultMask marks worker result words that the exact C
 	// declaration promises are pointers to non-Go storage. The fact is injected
-	// at FuncPCABI0 formation and never reconstructed from the returned uintptr.
+	// at the producer and never reconstructed from the returned uintptr.
 	ForeignPointerResultMask  uint8
 	ContractCertificateID     string
 	LegacyWorkerAddressCompat bool
+}
+
+type coroCallableShadowProducer interface {
+	ssa.Instruction
+	ssa.Value
 }
 
 func coroWorkerWordCallableABI(arity int) string {
@@ -418,8 +423,8 @@ type CoroCallableShadowSink struct {
 // CoroCallableShadowAnalysis is an immutable, reportable producer-forward
 // analysis. It intentionally has no address-keyed lookup API.
 type CoroCallableShadowAnalysis struct {
-	producers map[*ssa.Call]CoroCallableShadow
-	rejected  map[*ssa.Call]string
+	producers map[coroCallableShadowProducer]CoroCallableShadow
+	rejected  map[coroCallableShadowProducer]string
 	sinks     map[*ssa.Call]CoroCallableShadowSink
 }
 
@@ -463,7 +468,7 @@ func (a *CoroCallableShadowAnalysis) Sink(call ssa.CallInstruction) (CoroCallabl
 
 type coroCallableShadowFactKey struct {
 	value    ssa.Value
-	producer *ssa.Call
+	producer coroCallableShadowProducer
 }
 
 type coroCallableShadowBuilder struct {
@@ -474,14 +479,15 @@ type coroCallableShadowBuilder struct {
 	escaped  map[*ssa.Function]bool
 	closed   map[*ssa.Function]string
 
-	facts    map[ssa.Value]map[*ssa.Call]CoroCallableShadow
-	failures map[ssa.Value]string
-	queue    []coroCallableShadowFactKey
-	sinkABI  map[*ssa.Call]CoroCallableShadowABI
+	darwinGlobals map[*ssa.Global]coroDarwinImportTarget
+	facts         map[ssa.Value]map[coroCallableShadowProducer]CoroCallableShadow
+	failures      map[ssa.Value]string
+	queue         []coroCallableShadowFactKey
+	sinkABI       map[*ssa.Call]CoroCallableShadowABI
 }
 
 // AnalyzeCoroCallableShadows builds the compiler-side shadow flow from exact
-// FuncPCABI0 producers to exact llgo.syscall consumers. The accepted transport
+// code-address producers to exact llgo.syscall consumers. The accepted transport
 // is intentionally small: an SSA value may flow directly to the consumer or
 // through uintptr parameters of closed, private, statically called Go
 // functions. No integer operation, store, return, indirect call, exported
@@ -493,18 +499,19 @@ func AnalyzeCoroCallableShadows(universe *EmissionUniverse) (*CoroCallableShadow
 	b := &coroCallableShadowBuilder{
 		universe: universe,
 		result: &CoroCallableShadowAnalysis{
-			producers: make(map[*ssa.Call]CoroCallableShadow),
-			rejected:  make(map[*ssa.Call]string),
+			producers: make(map[coroCallableShadowProducer]CoroCallableShadow),
+			rejected:  make(map[coroCallableShadowProducer]string),
 			sinks:     make(map[*ssa.Call]CoroCallableShadowSink),
 		},
 		incoming: make(map[*ssa.Function][]*ssa.Call),
 		escaped:  make(map[*ssa.Function]bool),
 		closed:   make(map[*ssa.Function]string),
-		facts:    make(map[ssa.Value]map[*ssa.Call]CoroCallableShadow),
+		facts:    make(map[ssa.Value]map[coroCallableShadowProducer]CoroCallableShadow),
 		failures: make(map[ssa.Value]string),
 		sinkABI:  make(map[*ssa.Call]CoroCallableShadowABI),
 	}
 	b.indexCallsAndEscapes()
+	b.darwinGlobals = universe.coroDarwinImportGlobals()
 	if err := b.seedProducersAndSinks(); err != nil {
 		return nil, err
 	}
@@ -568,6 +575,11 @@ func (b *coroCallableShadowBuilder) seedProducersAndSinks() error {
 		}
 		for _, block := range fn.Blocks {
 			for _, instruction := range block.Instrs {
+				if load, ok := instruction.(*ssa.UnOp); ok && len(b.darwinGlobals) != 0 {
+					if err := b.seedDarwinImport(load); err != nil {
+						return err
+					}
+				}
 				call, ok := instruction.(*ssa.Call)
 				if !ok || call.Common() == nil || call.Common().IsInvoke() || call.Common().StaticCallee() == nil {
 					continue
@@ -616,7 +628,7 @@ func (b *coroCallableShadowBuilder) bindInferredProducerABIs() error {
 		return fmt.Errorf("callable shadow analysis: cannot bind inferred ABIs without an exact analysis")
 	}
 
-	constraints := make(map[*ssa.Call]map[int]none)
+	constraints := make(map[coroCallableShadowProducer]map[int]none)
 	for sink, abi := range b.sinkABI {
 		if invalid, exists := b.result.sinks[sink]; exists && invalid.Reason != "" {
 			continue
@@ -648,7 +660,7 @@ func (b *coroCallableShadowBuilder) bindInferredProducerABIs() error {
 			if len(words) > 1 {
 				reason = "inferred-callable-has-conflicting-sink-abis"
 			}
-			b.poisonInferredProducer(producer, shadow, reason)
+			b.rejectProducer(producer, shadow, reason)
 			continue
 		}
 		wordArgs := -1
@@ -664,15 +676,11 @@ func (b *coroCallableShadowBuilder) bindInferredProducerABIs() error {
 	}
 
 	physicalTargets := make(map[string]CoroCallableShadow)
-	for _, shadow := range b.result.producers {
-		if shadow.ABI.WordArgs < 0 {
+	for producer, shadow := range b.result.producers {
+		if _, darwinImport := producer.(*ssa.UnOp); darwinImport || shadow.ABI.WordArgs < 0 {
 			continue
 		}
-		if previous, exists := physicalTargets[shadow.PhysicalSymbol]; exists &&
-			(previous.Target != shadow.Target || previous.ABI != shadow.ABI ||
-				previous.ForeignPointerResultMask != shadow.ForeignPointerResultMask ||
-				previous.ContractCertificateID != shadow.ContractCertificateID ||
-				previous.LegacyWorkerAddressCompat != shadow.LegacyWorkerAddressCompat) {
+		if previous, exists := physicalTargets[shadow.PhysicalSymbol]; exists && !previous.sameContract(shadow) {
 			return fmt.Errorf(
 				"callable shadow analysis: physical target %q has conflicting producer targets or ABIs",
 				shadow.PhysicalSymbol,
@@ -680,11 +688,19 @@ func (b *coroCallableShadowBuilder) bindInferredProducerABIs() error {
 		}
 		physicalTargets[shadow.PhysicalSymbol] = shadow
 	}
+	b.bindDarwinImportContracts(physicalTargets)
 	return nil
 }
 
+func (s CoroCallableShadow) sameContract(other CoroCallableShadow) bool {
+	return s.Target == other.Target && s.ABI == other.ABI &&
+		s.ForeignPointerResultMask == other.ForeignPointerResultMask &&
+		s.ContractCertificateID == other.ContractCertificateID &&
+		s.LegacyWorkerAddressCompat == other.LegacyWorkerAddressCompat
+}
+
 func (b *coroCallableShadowBuilder) replaceProducerShadow(
-	producer *ssa.Call,
+	producer coroCallableShadowProducer,
 	shadow CoroCallableShadow,
 ) {
 	if b == nil || producer == nil {
@@ -698,8 +714,8 @@ func (b *coroCallableShadowBuilder) replaceProducerShadow(
 	}
 }
 
-func (b *coroCallableShadowBuilder) poisonInferredProducer(
-	producer *ssa.Call,
+func (b *coroCallableShadowBuilder) rejectProducer(
+	producer coroCallableShadowProducer,
 	shadow CoroCallableShadow,
 	reason string,
 ) {
@@ -767,10 +783,14 @@ func (b *coroCallableShadowBuilder) injectProducer(call *ssa.Call) (CoroCallable
 	if reason != "" {
 		return CoroCallableShadow{}, reason, nil
 	}
+	return capability.shadow(call, source), "", nil
+}
+
+func (capability coroWorkerAddressTarget) shadow(producer coroCallableShadowProducer, source *ssa.Function) CoroCallableShadow {
 	return CoroCallableShadow{
-		Producer:                  call,
+		Producer:                  producer,
 		SourceTarget:              source,
-		Target:                    target,
+		Target:                    capability.target,
 		PhysicalSymbol:            capability.physicalSymbol,
 		ForeignPointerResultMask:  capability.foreignPointerResultMask,
 		ContractCertificateID:     capability.contractCertificateID,
@@ -779,7 +799,7 @@ func (b *coroCallableShadowBuilder) injectProducer(call *ssa.Call) (CoroCallable
 			Family:   coroCallableShadowWorkerSyscallFamily,
 			WordArgs: capability.workerArity,
 		},
-	}, "", nil
+	}
 }
 
 func (b *coroCallableShadowBuilder) addFact(value ssa.Value, shadow CoroCallableShadow) {
@@ -788,7 +808,7 @@ func (b *coroCallableShadowBuilder) addFact(value ssa.Value, shadow CoroCallable
 	}
 	byProducer := b.facts[value]
 	if byProducer == nil {
-		byProducer = make(map[*ssa.Call]CoroCallableShadow)
+		byProducer = make(map[coroCallableShadowProducer]CoroCallableShadow)
 		b.facts[value] = byProducer
 	}
 	if _, exists := byProducer[shadow.Producer]; exists {
@@ -1127,7 +1147,7 @@ func coroCallableShadowSortKey(shadow CoroCallableShadow) string {
 		if shadow.Producer.Parent() != nil {
 			parent = shadow.Producer.Parent().String()
 		}
-		block, instruction = coroWorkerSyscallInstructionSite(shadow.Producer)
+		block, instruction = coroWorkerInstructionSite(shadow.Producer)
 	}
 	target := ""
 	if shadow.Target != nil {
