@@ -119,7 +119,20 @@ func TestCoroAuditModeInlineAwaitAndSpawnLifecycle(t *testing.T) {
 		t.Fatal("CommitInlineAwaitReturnPhysicalDestroyCompiler(borrowed) failed")
 	}
 
-	// Spawn lifecycle.
+	// Spawn lifecycle + per-P goid cache.
+	if _, ok := TakeCachedGoid(g); ok {
+		t.Fatal("TakeCachedGoid succeeded on empty cache")
+	}
+	StoreCachedGoid(g, 100, 102)
+	if id, ok := TakeCachedGoid(g); !ok || id != 100 {
+		t.Fatalf("first TakeCachedGoid = (%d, %t), want (100, true)", id, ok)
+	}
+	if id, ok := TakeCachedGoid(g); !ok || id != 101 {
+		t.Fatalf("second TakeCachedGoid = (%d, %t), want (101, true)", id, ok)
+	}
+	if _, ok := TakeCachedGoid(g); ok {
+		t.Fatal("third TakeCachedGoid succeeded after cache exhaustion")
+	}
 	spawnedG := new(G)
 	if !BeginSpawnCompiler(g, spawnedG, unsafe.Pointer(spawnedG), TaskStorageSize()) {
 		t.Fatal("BeginSpawnCompiler failed")

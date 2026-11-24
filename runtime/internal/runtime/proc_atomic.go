@@ -23,8 +23,15 @@ import "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 const (
 	mainExitedBit  = uint64(1) << 63
 	gCountMask     = mainExitedBit - 1
-	goidCacheBatch = uint64(16)
+	goidCacheBatch = uint64(64)
 )
+
+func nextGoidBatch() (first, end uint64) {
+	// Internal atomic.Add returns the previous value, like LLVM atomicrmw.
+	// Reserve (old, old+batch], returning the inclusive start and exclusive end.
+	last := atomic.Add(&sched.goidgen, goidCacheBatch) + goidCacheBatch
+	return last - goidCacheBatch + 1, last + 1
+}
 
 func nextGoid(gp, owner *g) uint64 {
 	// Match Go's per-P id allocation shape. The owner is the currently running
@@ -84,6 +91,10 @@ func gState() (count uint64, mainExited bool) {
 
 func readgstatus(gp *g) uint32 {
 	return atomic.Load(&gp.atomicstatus)
+}
+
+func setgstatus(gp *g, status uint32) {
+	atomic.Store(&gp.atomicstatus, status)
 }
 
 func casgstatus(gp *g, oldval, newval uint32) {

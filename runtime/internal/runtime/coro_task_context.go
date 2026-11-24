@@ -137,12 +137,22 @@ func coroBindTaskAllocationRuntimeContext(task, parent *coro.G) bool {
 //
 // All potentially failing checks precede initialization, so the caller can use
 // the ordinary scheduler rollback without a partially retained logical G.
+func nextCoroSpawnGoid(parent *coro.G, gp, parentG *g) uint64 {
+	if id, ok := coro.TakeCachedGoid(parent); ok {
+		return id
+	}
+	if first, end := nextGoidBatch(); first != 0 {
+		coro.StoreCachedGoid(parent, first+1, end)
+		return first
+	}
+	return nextGoid(gp, parentG)
+}
+
 func coroInitializeTaskAllocationRuntimeContextCompiler(
 	task, parent *coro.G,
 	ctx *coroRuntimeContext,
 ) bool {
-	if task == nil || parent == nil || ctx == nil ||
-		unsafe.Pointer(ctx) != unsafe.Add(unsafe.Pointer(task), coroTaskAllocationContextOffset) {
+	if task == nil || parent == nil || ctx == nil {
 		return false
 	}
 	parentContext := (*coroRuntimeContext)(coro.TaskLocal(parent))
@@ -150,22 +160,29 @@ func coroInitializeTaskAllocationRuntimeContextCompiler(
 		return false
 	}
 	parentG := &parentContext.g
-	if parentG.context != parentContext || parentG.startarg != unsafe.Pointer(parent) {
-		return false
-	}
-
-	if ctx != &(*coroTaskAllocation)(unsafe.Pointer(task)).context ||
-		ctx.g.context != nil || ctx.g.localContext != nil {
-		return false
+	if coro.AuditEnabled {
+		if unsafe.Pointer(ctx) != unsafe.Add(unsafe.Pointer(task), coroTaskAllocationContextOffset) ||
+			parentG.context != parentContext || parentG.startarg != unsafe.Pointer(parent) {
+			return false
+		}
+		if ctx != &(*coroTaskAllocation)(unsafe.Pointer(task)).context ||
+			ctx.g.context != nil || ctx.g.localContext != nil {
+			return false
+		}
 	}
 	if coro.ExecutionDomainEnabled() && !coroInheritExecutionDomainTask(task, parent) {
 		return false
 	}
-	gp := initCoroRuntimeContext(ctx, parentG, _Grunnable)
+	gp := &ctx.g
+	gp.atomicstatus = _Grunnable
+	gp.goid = nextCoroSpawnGoid(parent, gp, parentG)
+	gp.parentGoid = parentG.goid
+	gp.context = ctx
 	gp.localContext = &ctx.local
 	gp.isMain = false
 	gp.coroEmbedded = true
 	gp.startarg = unsafe.Pointer(task)
+	retainG()
 	return true
 }
 
@@ -273,6 +290,29 @@ func coroCaptureRuntimeContextV1() unsafe.Pointer {
 // that exact nested case borrows the existing install. current is captured at
 // the surrounding stable scheduler boundary and is restored by leave.
 func coroEnterRuntimeContextFrom(task *coro.G, currentRaw unsafe.Pointer) (coroRuntimeContextActivationV1, bool) {
+	if !coro.AuditEnabled {
+		ctx := (*coroRuntimeContext)(coro.TaskLocal(task))
+		if ctx == nil {
+			return coroRuntimeContextActivationV1{}, false
+		}
+		gp := &ctx.g
+		current := (*g)(currentRaw)
+		if current == gp {
+			return coroRuntimeContextActivationV1{
+				previous: unsafe.Pointer(gp),
+				borrowed: true,
+			}, true
+		}
+		if current == nil || current.m == nil {
+			return coroRuntimeContextActivationV1{}, false
+		}
+		mp := current.m
+		setgstatus(gp, _Grunning)
+		gp.m = mp
+		mp.curg = gp
+		setgCoro(gp)
+		return coroRuntimeContextActivationV1{previous: unsafe.Pointer(current)}, true
+	}
 	ctx := (*coroRuntimeContext)(coro.TaskLocal(task))
 	if !validCoroRuntimeTaskContext(task, ctx) {
 		return coroRuntimeContextActivationV1{}, false
@@ -309,6 +349,26 @@ func coroEnterRuntimeContext(task *coro.G) (coroRuntimeContextActivationV1, bool
 }
 
 func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivationV1) bool {
+	if !coro.AuditEnabled {
+		anchor := (*g)(activation.previous)
+		if anchor == nil {
+			return false
+		}
+		if activation.borrowed {
+			return true
+		}
+		mp := anchor.m
+		if mp == nil || mp.curg == nil {
+			return false
+		}
+		gp := mp.curg
+		previous := anchor
+		setgstatus(gp, _Grunnable)
+		mp.curg = previous
+		gp.m = nil
+		setgCoro(previous)
+		return true
+	}
 	anchor := (*g)(activation.previous)
 	if anchor == nil {
 		return false
@@ -354,13 +414,17 @@ func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivati
 // has made the G terminal but before its scanned task allocation is cleared.
 func coroReleaseRuntimeContext(task *coro.G, raw unsafe.Pointer) bool {
 	ctx := (*coroRuntimeContext)(raw)
-	if !validCoroRuntimeTaskContext(task, ctx) {
+	if coro.AuditEnabled {
+		if !validCoroRuntimeTaskContext(task, ctx) {
+			return false
+		}
+		if ctx.g.m != nil || readgstatus(&ctx.g) != _Grunnable {
+			return false
+		}
+	} else if ctx == nil {
 		return false
 	}
 	gp := &ctx.g
-	if gp.m != nil || readgstatus(gp) != _Grunnable {
-		return false
-	}
 	embedded := ctx.g.coroEmbedded
 	if gp.localContext != nil {
 		releaseLocalBlocks(gp.localContext)
@@ -370,10 +434,16 @@ func coroReleaseRuntimeContext(task *coro.G, raw unsafe.Pointer) bool {
 		c.Free(gp.panic_)
 		gp.panic_ = nil
 	}
-	releasePanicPCStore(gp)
+	if gp.panicPCs != nil {
+		releasePanicPCStore(gp)
+	}
 	gp.startarg = nil
 	gp.coroEmbedded = false
-	casgstatus(gp, _Grunnable, _Gdead)
+	if coro.AuditEnabled {
+		casgstatus(gp, _Grunnable, _Gdead)
+	} else {
+		setgstatus(gp, _Gdead)
+	}
 	gp.context = nil
 	releaseGAndCheckDeadlock()
 	if !embedded {

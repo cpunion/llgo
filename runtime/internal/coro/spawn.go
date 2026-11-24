@@ -37,6 +37,33 @@ func TaskStorageSize() uintptr {
 	return unsafe.Sizeof(G{})
 }
 
+// TakeCachedGoid returns the next amortized logical-G identifier cached on the
+// running parent's current P. The boolean is false when the cache is empty or
+// no current P is attached; callers then refill from the runtime generator.
+func TakeCachedGoid(parent *G) (uint64, bool) {
+	if parent == nil {
+		return 0, false
+	}
+	p := parent.runP
+	if p == nil || p.goidCache == p.goidCacheEnd {
+		return 0, false
+	}
+	id := p.goidCache
+	p.goidCache++
+	return id, true
+}
+
+// StoreCachedGoid installs a freshly reserved [next, end) logical-G id range
+// into the running parent's current P.
+func StoreCachedGoid(parent *G, next, end uint64) {
+	if parent == nil || parent.runP == nil || next > end {
+		return
+	}
+	p := parent.runP
+	p.goidCache = next
+	p.goidCacheEnd = end
+}
+
 // BindTaskLocal attaches one opaque runtime context to a freshly initialized
 // G. The scheduler retains it only as a scanned pointer and never inspects its
 // representation.
@@ -197,6 +224,24 @@ func beginSpawnCompiler(
 	local unsafe.Pointer,
 	bindLocal bool,
 ) bool {
+	if !AuditEnabled {
+		if parent == nil || child == nil || parent.runP == nil || (bindLocal && local == nil) {
+			return false
+		}
+		p := parent.runP
+		child.magic = gMagic
+		child.panicBoundary = parent.panicBoundary
+		child.taskStorage = storage
+		child.taskState = taskStorageOwned
+		if bindLocal {
+			child.taskLocal = local
+		}
+		child.spawnParent = parent
+		child.spawnP = p
+		preemptStore(preemptAddress(child), preemptIdle)
+		parent.spawnChild = child
+		return true
+	}
 	if parent == nil || child == nil || child == parent || storage != unsafe.Pointer(child) ||
 		size != TaskStorageSize() || uintptr(storage)%unsafe.Alignof(G{}) != 0 ||
 		parent.spawnChild != nil || !compilerSpawnResumeGateTaken(parent) || bindLocal && local == nil {

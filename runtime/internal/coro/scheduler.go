@@ -229,6 +229,11 @@ type P struct {
 	// only an executing producer can turn that waiter into a durable executor
 	// request.
 	externalWaitCount uint32
+	// goidCache amortizes global logical-G id allocation across spawns on this
+	// P even while a context-independent parent executes without borrowing a
+	// physical runtime P.
+	goidCache    uint64
+	goidCacheEnd uint64
 }
 
 const (
@@ -1830,23 +1835,38 @@ func validBoundedRootHeaders(p *P, g *G, wasRoot bool) bool {
 // last root publishes a handle-free receipt instead of entering executor
 // close, rescanning queues, or looping on the legacy schedule CAS.
 func finishBoundedRootDestroy(p *P, g *G, wasRoot, panicking bool) (Action, bool) {
-	if !validBoundedRootHeaders(p, g, wasRoot) {
-		return Action{}, false
-	}
-	if panicking {
-		if !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) || g.state != GPanicking {
+	if AuditEnabled {
+		if !validBoundedRootHeaders(p, g, wasRoot) {
 			return Action{}, false
 		}
-	} else if g.panicUnwind || !emptyPanicRecord(&g.panicRecord) || g.state != GDispatching {
+		if panicking {
+			if !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) || g.state != GPanicking {
+				return Action{}, false
+			}
+		} else if g.panicUnwind || !emptyPanicRecord(&g.panicRecord) || g.state != GDispatching {
+			return Action{}, false
+		}
+	} else if p == nil || g == nil || !wasRoot {
 		return Action{}, false
 	}
 
 	// ReleaseFrame has already freed the combined root allocation. Clear the
 	// cached root before publishing any return boundary; destroyRoot remains the
 	// logical receipt bit and is never dereferenced.
-	retireOwner, released := releaseOSThreadLockForExit(p, g)
-	if !released || !disableGPreempt(g) {
-		return Action{}, false
+	var retireOwner bool
+	if AuditEnabled || g.osThreadLockDepth != 0 {
+		var released bool
+		retireOwner, released = releaseOSThreadLockForExit(p, g)
+		if !released {
+			return Action{}, false
+		}
+	}
+	if AuditEnabled {
+		if !disableGPreempt(g) {
+			return Action{}, false
+		}
+	} else {
+		preemptStore(preemptAddress(g), preemptDisabled)
 	}
 	g.root = nil
 	if p.readyHead == nil && emptySchedulerWaitQueues(p) {

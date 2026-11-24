@@ -27,6 +27,10 @@ func nextGoid(gp, owner *g) uint64 {
 	return uint64(uintptr(unsafe.Pointer(gp)))
 }
 
+func nextGoidBatch() (first, end uint64) {
+	return 0, 0
+}
+
 func nextMid(mp *m) int64 {
 	return int64(uintptr(unsafe.Pointer(mp)))
 }
@@ -55,6 +59,10 @@ func gState() (count uint64, mainExited bool) {
 // Each bare-metal G owns its status transitions in the current backend.
 func readgstatus(gp *g) uint32 {
 	return gp.atomicstatus
+}
+
+func setgstatus(gp *g, status uint32) {
+	gp.atomicstatus = status
 }
 
 func casgstatus(gp *g, oldval, newval uint32) {
