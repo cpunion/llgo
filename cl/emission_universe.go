@@ -133,6 +133,159 @@ type EmissionUniverseOptions struct {
 	// frontend input because runtime.GOROOT may be empty in a trimpath compiler
 	// binary. GOROOT-only managed-linkname proofs fail closed when it is empty.
 	GOROOT string
+	// PlanCache optionally shares pure, predicate-independent frontend caches
+	// (structural type digests, signature strings, SSA function sort keys,
+	// method nil-deref scans, and package AST lowering facts) across
+	// predicate-discovery retries inside one compilation.
+	PlanCache *EmissionPlanCache
+	// CallerTracking optionally reuses a compilation-scoped CallerTracking
+	// cache (already precomputed by the build driver) instead of rescanning
+	// every package's SSA caller/recover closure from scratch.
+	CallerTracking *CallerTracking
+}
+
+type emissionPackageSourceFacts struct {
+	fileCount               int
+	firstFile               *ast.File
+	lastFile                *ast.File
+	addrOfFieldAddrs        map[token.Pos]none
+	sourceUsesRuntimeCaller bool
+}
+
+// EmissionPlanCache retains pure, predicate-independent frontend caches across
+// predicate-discovery retries within a single compilation. Callers must not
+// retain it across independent compiler requests.
+type EmissionPlanCache struct {
+	typeKeys             emissionTypeKeyCache
+	mu                   sync.RWMutex
+	signatureStrings     map[*types.Signature]string
+	ssaFunctionSortKeys  map[*ssa.Function]string
+	methodNilDerefChecks map[*ssa.Function]map[*ssa.UnOp]none
+	packageSourceFacts   map[*ssa.Package]emissionPackageSourceFacts
+}
+
+// NewEmissionPlanCache creates a fresh compilation-scoped frontend cache.
+func NewEmissionPlanCache() *EmissionPlanCache {
+	return &EmissionPlanCache{
+		signatureStrings:     make(map[*types.Signature]string),
+		ssaFunctionSortKeys:  make(map[*ssa.Function]string),
+		methodNilDerefChecks: make(map[*ssa.Function]map[*ssa.UnOp]none),
+		packageSourceFacts:   make(map[*ssa.Package]emissionPackageSourceFacts),
+	}
+}
+
+func (c *EmissionPlanCache) signatureString(sig *types.Signature) string {
+	if sig == nil {
+		return ""
+	}
+	if c == nil {
+		return types.TypeString(sig, func(pkg *types.Package) string { return llssa.PathOf(pkg) })
+	}
+	c.mu.RLock()
+	cached, ok := c.signatureStrings[sig]
+	c.mu.RUnlock()
+	if ok {
+		return cached
+	}
+	value := types.TypeString(sig, func(pkg *types.Package) string { return llssa.PathOf(pkg) })
+	c.mu.Lock()
+	if c.signatureStrings == nil {
+		c.signatureStrings = make(map[*types.Signature]string)
+	}
+	if existing, exists := c.signatureStrings[sig]; exists {
+		value = existing
+	} else {
+		c.signatureStrings[sig] = value
+	}
+	c.mu.Unlock()
+	return value
+}
+
+func (c *EmissionPlanCache) ssaFunctionSortKey(fn *ssa.Function) string {
+	if fn == nil {
+		return ""
+	}
+	if c == nil {
+		return emissionFunctionSortKey(fn)
+	}
+	c.mu.RLock()
+	cached, ok := c.ssaFunctionSortKeys[fn]
+	c.mu.RUnlock()
+	if ok {
+		return cached
+	}
+	value := emissionFunctionSortKeyWithSig(fn, c.signatureString(fn.Signature))
+	c.mu.Lock()
+	if c.ssaFunctionSortKeys == nil {
+		c.ssaFunctionSortKeys = make(map[*ssa.Function]string)
+	}
+	if existing, exists := c.ssaFunctionSortKeys[fn]; exists {
+		value = existing
+	} else {
+		c.ssaFunctionSortKeys[fn] = value
+	}
+	c.mu.Unlock()
+	return value
+}
+
+func (c *EmissionPlanCache) methodNilDerefChecksFor(fn *ssa.Function) map[*ssa.UnOp]none {
+	if fn == nil {
+		return nil
+	}
+	if c == nil {
+		return collectMethodNilDerefChecks(fn)
+	}
+	c.mu.RLock()
+	cached, ok := c.methodNilDerefChecks[fn]
+	c.mu.RUnlock()
+	if ok {
+		return cached
+	}
+	value := collectMethodNilDerefChecks(fn)
+	c.mu.Lock()
+	if c.methodNilDerefChecks == nil {
+		c.methodNilDerefChecks = make(map[*ssa.Function]map[*ssa.UnOp]none)
+	}
+	if existing, exists := c.methodNilDerefChecks[fn]; exists {
+		value = existing
+	} else {
+		c.methodNilDerefChecks[fn] = value
+	}
+	c.mu.Unlock()
+	return value
+}
+
+func (c *EmissionPlanCache) sourceFacts(pkg *ssa.Package, files []*ast.File) (map[token.Pos]none, bool) {
+	var firstFile, lastFile *ast.File
+	if len(files) != 0 {
+		firstFile = files[0]
+		lastFile = files[len(files)-1]
+	}
+	if c != nil && pkg != nil {
+		c.mu.RLock()
+		cached, ok := c.packageSourceFacts[pkg]
+		c.mu.RUnlock()
+		if ok && cached.fileCount == len(files) && cached.firstFile == firstFile && cached.lastFile == lastFile {
+			return cached.addrOfFieldAddrs, cached.sourceUsesRuntimeCaller
+		}
+	}
+	addrOfFieldAddrs := collectAddrOfFieldSelectors(files)
+	sourceUsesRuntimeCaller := filesUseRuntimeCaller(files)
+	if c != nil && pkg != nil {
+		c.mu.Lock()
+		if c.packageSourceFacts == nil {
+			c.packageSourceFacts = make(map[*ssa.Package]emissionPackageSourceFacts)
+		}
+		c.packageSourceFacts[pkg] = emissionPackageSourceFacts{
+			fileCount:               len(files),
+			firstFile:               firstFile,
+			lastFile:                lastFile,
+			addrOfFieldAddrs:        addrOfFieldAddrs,
+			sourceUsesRuntimeCaller: sourceUsesRuntimeCaller,
+		}
+		c.mu.Unlock()
+	}
+	return addrOfFieldAddrs, sourceUsesRuntimeCaller
 }
 
 type preparedEmissionPackage struct {
@@ -164,6 +317,10 @@ type preparedEmissionPackage struct {
 	// packages.
 	addrOfFieldAddrs        map[token.Pos]none
 	sourceUsesRuntimeCaller bool
+	callerSetsReady         bool
+	trackCallerFrames       bool
+	runtimeCallerFuncs      map[*ssa.Function]bool
+	logicalCallerFuncs      map[*ssa.Function]bool
 }
 
 type emissionSourceSpan struct {
@@ -362,6 +519,7 @@ type EmissionUniverse struct {
 	// use instead made managed-interface and cgo emission repeat the same graph
 	// walk many times.
 	emissionTypeKeys emissionTypeKeyCache
+	planCache        *EmissionPlanCache
 
 	effectiveTypeMu         sync.Mutex
 	effectiveTypeCacheReady bool
@@ -850,6 +1008,14 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		}
 	}
 	identities := make(map[string]*ssa.Package, len(inputs))
+	callerTracking := options.CallerTracking
+	if callerTracking == nil || !callerTracking.coversEmissionPackages(inputs) {
+		callerTracking = NewCallerTracking()
+	}
+	planCache := options.PlanCache
+	if planCache == nil {
+		planCache = NewEmissionPlanCache()
+	}
 	u := &EmissionUniverse{
 		prog:                    prog,
 		goroot:                  goroot,
@@ -857,7 +1023,8 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		completeRuntimeABI:      options.CompleteRuntimeABI,
 		logicalLocality:         options.LogicalLocality,
 		coroCapabilities:        options.CoroTargetCapabilities,
-		callerTracking:          NewCallerTracking(),
+		callerTracking:          callerTracking,
+		planCache:               planCache,
 		packages:                make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
 		byTypes:                 make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
 		typeOwners:              make(map[*types.Package]map[*preparedEmissionPackage]none, len(inputs)*3),
@@ -930,6 +1097,9 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	u.libraryEffects.index.universe = u
 	u.libraryImports = options.CoroLibraryEffects
 	u.coroProgramIR.programPredicates = options.CoroProgramPredicates
+	if options.PlanCache != nil {
+		u.emissionTypeKeys.shared = &options.PlanCache.typeKeys
+	}
 	for i, input := range inputs {
 		if input.SSA == nil || input.SSA.Prog == nil || input.SSA.Pkg == nil {
 			return nil, fmt.Errorf("prepare emission universe: package %d is incomplete", i)
@@ -976,6 +1146,9 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		if err != nil {
 			return nil, fmt.Errorf("prepare emission universe: package %q: %w", identity, err)
 		}
+		addrOfFieldAddrs, sourceUsesRuntimeCaller := planCache.sourceFacts(input.SSA, input.Files)
+		runtimeCallerFuncs := runtimeCallerFuncSet(callerTracking, input.SSA)
+		logicalCallerFuncs := runtimeLogicalCallerFuncSet(callerTracking, input.SSA)
 		prepared := &preparedEmissionPackage{
 			order:                    i,
 			identity:                 identity,
@@ -993,8 +1166,12 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			assemblyNoSuspend:        assemblyNoSuspend,
 			rawDataSymbols:           rawDataSymbols,
 			compilerSourcePatchSpans: compilerSourcePatchSpans,
-			addrOfFieldAddrs:         collectAddrOfFieldSelectors(input.Files),
-			sourceUsesRuntimeCaller:  filesUseRuntimeCaller(input.Files),
+			addrOfFieldAddrs:         addrOfFieldAddrs,
+			sourceUsesRuntimeCaller:  sourceUsesRuntimeCaller,
+			callerSetsReady:          true,
+			trackCallerFrames:        sourceUsesRuntimeCaller || len(runtimeCallerFuncs) != 0,
+			runtimeCallerFuncs:       runtimeCallerFuncs,
+			logicalCallerFuncs:       logicalCallerFuncs,
 		}
 		if patch, ok := patches[pkgPath]; ok {
 			if patch.Alt == nil || patch.Types == nil {
@@ -6538,8 +6715,8 @@ func (u *EmissionUniverse) classifiedManagedSymbol(prepared *preparedEmissionPac
 		goTyps:           prepared.pkgTypes,
 		goPkg:            prepared.ssa,
 		patches:          u.patches,
-		loaded:           u.loadedPackages(true),
-		linkOnceFns:      make(map[*ssa.Function]none),
+		loaded:           u.loadedPackages(false),
+		loadedReadOnly:   true,
 		state:            state,
 		emissionUniverse: u,
 	}
@@ -7594,9 +7771,9 @@ func (u *EmissionUniverse) isIntrinsic(fn *ssa.Function, owner *preparedEmission
 		goProg:      u.goProg,
 		goTyps:      owner.pkgTypes,
 		goPkg:       owner.ssa,
-		patches:     u.patches,
-		loaded:      u.loadedPackages(true),
-		linkOnceFns: make(map[*ssa.Function]none),
+		patches:        u.patches,
+		loaded:         u.loadedPackages(false),
+		loadedReadOnly: true,
 	}
 	_, _, ftype := ctx.funcName(fn)
 	return ftype == llgoInstr
@@ -7606,21 +7783,24 @@ func (u *EmissionUniverse) isIntrinsic(fn *ssa.Function, owner *preparedEmission
 // context paths which may extend their local view. Keeping both views behind
 // one entry point prevents cache mechanics from expanding universe authority.
 func (u *EmissionUniverse) loadedPackages(writable bool) map[*types.Package]*pkgInfo {
-	snapshot := map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
+	var snapshot map[*types.Package]*pkgInfo
 	if u != nil && u.loadedPackageSnapshot != nil {
 		snapshot = u.loadedPackageSnapshot
-	} else if u != nil && u.goProg != nil {
-		for _, pkg := range u.goProg.AllPackages() {
-			if pkg == nil || pkg.Pkg == nil {
-				continue
+	} else {
+		snapshot = map[*types.Package]*pkgInfo{types.Unsafe: {kind: PkgDeclOnly}}
+		if u != nil && u.goProg != nil {
+			for _, pkg := range u.goProg.AllPackages() {
+				if pkg == nil || pkg.Pkg == nil {
+					continue
+				}
+				snapshot[pkg.Pkg] = &pkgInfo{kind: pkgKindByPath(llssa.PathOf(pkg.Pkg))}
 			}
-			snapshot[pkg.Pkg] = &pkgInfo{kind: pkgKindByPath(llssa.PathOf(pkg.Pkg))}
-		}
-		for _, prepared := range u.packages {
-			snapshot[prepared.oldTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
-			snapshot[prepared.pkgTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
-			if prepared.altTypes != nil {
-				snapshot[prepared.altTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+			for _, prepared := range u.packages {
+				snapshot[prepared.oldTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+				snapshot[prepared.pkgTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+				if prepared.altTypes != nil {
+					snapshot[prepared.altTypes] = &pkgInfo{kind: pkgKindByPath(prepared.pkgPath)}
+				}
 			}
 		}
 	}
@@ -7752,7 +7932,7 @@ func (u *EmissionUniverse) effectiveTypeContext(owner *preparedEmissionPackage, 
 		goPkg:            owner.ssa,
 		patches:          u.patches,
 		loaded:           u.loadedPackages(false),
-		linkOnceFns:      make(map[*ssa.Function]none),
+		loadedReadOnly:   true,
 		emissionUniverse: u,
 	}
 }
@@ -8458,8 +8638,8 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 			goTyps:           prepared.pkgTypes,
 			goPkg:            prepared.ssa,
 			patches:          u.patches,
-			loaded:           u.loadedPackages(true),
-			linkOnceFns:      make(map[*ssa.Function]none),
+			loaded:           u.loadedPackages(false),
+			loadedReadOnly:   true,
 			state:            state,
 			emissionUniverse: u,
 		}
@@ -9362,15 +9542,62 @@ func splitManagedSymbolKey(key string) (ftype int, name, signature string, ok bo
 	return ftype, name, signature, true
 }
 
-func (u *EmissionUniverse) sortedUseOwners(fn *ssa.Function) []*preparedEmissionPackage {
-	owners := make([]*preparedEmissionPackage, 0, len(u.useOwners[fn]))
-	for owner := range u.useOwners[fn] {
-		owners = append(owners, owner)
+func (u *EmissionUniverse) packageCallerSets(owner *preparedEmissionPackage) (bool, map[*ssa.Function]bool, map[*ssa.Function]bool) {
+	if owner == nil {
+		return false, nil, nil
 	}
-	if len(owners) == 0 {
+	if owner.callerSetsReady {
+		return owner.trackCallerFrames, owner.runtimeCallerFuncs, owner.logicalCallerFuncs
+	}
+	callerTracking := NewCallerTracking()
+	if u != nil && u.callerTracking != nil {
+		callerTracking = u.callerTracking
+	}
+	runtimeFuncs := runtimeCallerFuncSet(callerTracking, owner.ssa)
+	logicalFuncs := runtimeLogicalCallerFuncSet(callerTracking, owner.ssa)
+	return owner.sourceUsesRuntimeCaller || len(runtimeFuncs) != 0, runtimeFuncs, logicalFuncs
+}
+
+func (u *EmissionUniverse) signatureString(sig *types.Signature) string {
+	if u != nil && u.planCache != nil {
+		return u.planCache.signatureString(sig)
+	}
+	if sig == nil {
+		return ""
+	}
+	return types.TypeString(sig, func(pkg *types.Package) string { return llssa.PathOf(pkg) })
+}
+
+func (u *EmissionUniverse) ssaFunctionSortKey(fn *ssa.Function) string {
+	if u != nil && u.planCache != nil {
+		return u.planCache.ssaFunctionSortKey(fn)
+	}
+	return emissionFunctionSortKey(fn)
+}
+
+func (u *EmissionUniverse) methodNilDerefChecksFor(fn *ssa.Function) map[*ssa.UnOp]none {
+	if u != nil && u.planCache != nil {
+		return u.planCache.methodNilDerefChecksFor(fn)
+	}
+	return collectMethodNilDerefChecks(fn)
+}
+
+func (u *EmissionUniverse) sortedUseOwners(fn *ssa.Function) []*preparedEmissionPackage {
+	useOwners := u.useOwners[fn]
+	if len(useOwners) == 0 {
 		if owner := u.fnOwners[fn]; owner != nil {
-			owners = append(owners, owner)
+			return []*preparedEmissionPackage{owner}
 		}
+		return nil
+	}
+	if len(useOwners) == 1 {
+		for owner := range useOwners {
+			return []*preparedEmissionPackage{owner}
+		}
+	}
+	owners := make([]*preparedEmissionPackage, 0, len(useOwners))
+	for owner := range useOwners {
+		owners = append(owners, owner)
 	}
 	sort.SliceStable(owners, func(i, j int) bool {
 		if owners[i].identity != owners[j].identity {
@@ -9401,6 +9628,12 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 		}
 	}
 	if len(managed) != 0 {
+		if len(managed) == 1 {
+			if functionNeedsLinkOnce(fn) {
+				return framedEmissionKey("managed-linkonce", managed[0].key)
+			}
+			return framedEmissionKey("managed", managed[0].key)
+		}
 		sort.SliceStable(managed, func(i, j int) bool {
 			if managed[i].owner != managed[j].owner {
 				return managed[i].owner < managed[j].owner
@@ -9419,9 +9652,6 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 			}
 			sort.Strings(keys[1:])
 			return framedEmissionKey(keys...)
-		}
-		if len(managed) == 1 {
-			return framedEmissionKey("managed", managed[0].key)
 		}
 		fields := make([]string, 1, len(managed)*2+1)
 		fields[0] = "managed-multi-owner"
@@ -9442,7 +9672,7 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 		if owner != nil {
 			ownerPath = owner.identity
 		}
-		return framedEmissionKey("llgo-intrinsic-call-wrapper-v1", ownerPath, emissionFunctionSortKey(info.intrinsic))
+		return framedEmissionKey("llgo-intrinsic-call-wrapper-v1", ownerPath, u.ssaFunctionSortKey(info.intrinsic))
 	}
 	if info, ok := u.builtinSpawnWrapInfo[fn]; ok {
 		if key := u.syntheticKeys[fn]; key != "" {
@@ -9467,7 +9697,7 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 		return framedEmissionKey(
 			"llgo-builtin-spawn-wrapper-v1",
 			ownerPath,
-			emissionFunctionSortKey(info.spawn.Parent()),
+			u.ssaFunctionSortKey(info.spawn.Parent()),
 			info.spawn.String(),
 		)
 	}
@@ -9480,38 +9710,43 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 		}
 		return framedEmissionKey(
 			"llgo-managed-foreign-function-value-wrapper-v1",
-			emissionFunctionSortKey(target),
+			u.ssaFunctionSortKey(target),
 		)
 	}
 	owner := u.ownerOf(fn)
 	if owner != nil {
 		ctx := &context{
-			prog:        u.prog,
-			fset:        u.goProg.Fset,
-			goProg:      u.goProg,
-			goTyps:      owner.pkgTypes,
-			goPkg:       owner.ssa,
-			patches:     u.patches,
-			loaded:      u.loadedPackages(true),
-			linkOnceFns: make(map[*ssa.Function]none),
+			prog:           u.prog,
+			fset:           u.goProg.Fset,
+			goProg:         u.goProg,
+			goTyps:         owner.pkgTypes,
+			goPkg:          owner.ssa,
+			patches:        u.patches,
+			loaded:         u.loadedPackages(false),
+			loadedReadOnly: true,
 		}
 		_, name, ftype := ctx.funcName(fn)
-		sig := ""
-		if fn.Signature != nil {
-			sig = types.TypeString(fn.Signature, func(pkg *types.Package) string { return llssa.PathOf(pkg) })
-		}
+		sig := u.signatureString(fn.Signature)
 		return framedEmissionKey("resolved", strconv.Itoa(ftype), name, sig)
 	}
-	return framedEmissionKey("ssa", emissionFunctionSortKey(fn))
+	return framedEmissionKey("ssa", u.ssaFunctionSortKey(fn))
 }
 
 func (u *EmissionUniverse) functionSortKey(fn *ssa.Function) string {
 	owners := u.sortedUseOwners(fn)
-	ownerIDs := make([]string, 0, len(owners))
-	for _, owner := range owners {
-		ownerIDs = append(ownerIDs, owner.identity)
+	ownerIDs := ""
+	switch len(owners) {
+	case 0:
+	case 1:
+		ownerIDs = owners[0].identity
+	default:
+		ids := make([]string, 0, len(owners))
+		for _, owner := range owners {
+			ids = append(ids, owner.identity)
+		}
+		ownerIDs = strings.Join(ids, "\x00")
 	}
-	return framedEmissionKey(u.finalIdentity(fn), strings.Join(ownerIDs, "\x00"), emissionFunctionSortKey(fn))
+	return framedEmissionKey(u.finalIdentity(fn), ownerIDs, u.ssaFunctionSortKey(fn))
 }
 
 // sortEmissionFunctionsByFrozenKey snapshots the structural key once per
@@ -9574,6 +9809,13 @@ func emissionFunctionSortKey(fn *ssa.Function) string {
 	sig := ""
 	if fn.Signature != nil {
 		sig = types.TypeString(fn.Signature, func(pkg *types.Package) string { return llssa.PathOf(pkg) })
+	}
+	return emissionFunctionSortKeyWithSig(fn, sig)
+}
+
+func emissionFunctionSortKeyWithSig(fn *ssa.Function, sig string) string {
+	if fn == nil {
+		return ""
 	}
 	filename := ""
 	line, column := 0, 0

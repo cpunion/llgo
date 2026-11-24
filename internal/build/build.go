@@ -7258,6 +7258,9 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage, library *co
 		// because its unselected branch was conservatively analyzed first.
 		ctx.coroProgramPredicates = coro.ProgramPredicateRequirements{Mask: coro.ProgramPredicateMask()}
 	}
+	if ctx.coroPlanCache == nil {
+		ctx.coroPlanCache = cl.NewEmissionPlanCache()
+	}
 	emission, err := cl.PrepareEmissionUniverseWithOptions(ctx.prog, ctx.patches, inputs, cl.EmissionUniverseOptions{
 		CoroLibraryEffects: library,
 		// Archive-producing entry resolution with the real runtime input must
@@ -7269,7 +7272,9 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage, library *co
 		LogicalLocality:        true,
 		CoroForeignExecutorLeafProofs: ctx.coroRawGlobalSymbols.
 			frozenForeignExecutorLeafProofs(),
-		GOROOT: ctx.goRoot,
+		GOROOT:         ctx.goRoot,
+		PlanCache:      ctx.coroPlanCache,
+		CallerTracking: ctx.callerTracking,
 	})
 	if err != nil {
 		return err
@@ -7578,6 +7583,7 @@ type context struct {
 	// execution architecture.
 	coroPlan              *coro.SSAPlan
 	coroEmission          *cl.EmissionUniverse
+	coroPlanCache         *cl.EmissionPlanCache
 	coroSSAEmission       *coro.SSAEmissionUniverse
 	coroProgramPredicates coro.ProgramPredicateRequirements
 	// coroRawGlobalSymbols freezes package-owned non-Go linker inputs before
@@ -7766,6 +7772,7 @@ func releaseBuildStateBeforeExecution(c *context, pkgs []*aPackage) {
 	c.plan9asmPkgs = nil
 	c.coroPlan = nil
 	c.coroEmission = nil
+	c.coroPlanCache = nil
 	c.coroSSAEmission = nil
 	c.coroProgramPredicates = coro.ProgramPredicateRequirements{}
 	c.coroRawGlobalSymbols = nil
@@ -9714,26 +9721,116 @@ func materializeStagedPackageBackends(ctx *context, pkgs []*aPackage, verbose bo
 	if !shouldStageNativeExecutableBackend(ctx) {
 		return nil
 	}
+	type stagedWork struct {
+		pkg     *aPackage
+		bitcode string
+		size    int64
+	}
+	work := make([]stagedWork, 0, len(pkgs))
 	for _, pkg := range pkgs {
 		if pkg == nil || pkg.StagedBitcode == "" {
 			continue
 		}
-		object, err := exportStagedPackageObject(ctx, pkg)
-		if err != nil {
-			return fmt.Errorf("export staged object of %s failed: %w", pkg.PkgPath, err)
+		var sz int64
+		if info, err := os.Stat(pkg.StagedBitcode); err == nil {
+			sz = info.Size()
 		}
-		pkg.ObjFiles = append(pkg.ObjFiles, object)
-		_ = os.Remove(pkg.StagedBitcode)
-		delete(ctx.stagedBitcodeFiles, pkg.StagedBitcode)
-		pkg.StagedBitcode = ""
-		if err := normalizeToArchive(ctx, pkg, verbose); err != nil {
-			return err
+		work = append(work, stagedWork{pkg: pkg, bitcode: pkg.StagedBitcode, size: sz})
+	}
+	if len(work) > 0 {
+		if ctx.canUsePackageCache() {
+			_ = ctx.ensureCacheManager()
 		}
-		if pkg.PendingCacheSave {
-			if err := ctx.saveToCache(pkg); err != nil && verbose {
-				fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+		// Schedule largest bitcodes first (LPT) so heavy packages such as net
+		// overlap with smaller packages when parallelism > 1.
+		slices.SortStableFunc(work, func(a, b stagedWork) int {
+			if a.size != b.size {
+				if a.size > b.size {
+					return -1
+				}
+				return 1
 			}
-			pkg.PendingCacheSave = false
+			return strings.Compare(a.pkg.PkgPath, b.pkg.PkgPath)
+		})
+		workers := ctx.buildConf.parallelism()
+		if workers > 4 {
+			workers = 4
+		}
+		if workers > len(work) {
+			workers = len(work)
+		}
+		materializeOne := func(item stagedWork) error {
+			pkg := item.pkg
+			object, err := exportStagedPackageObject(ctx, pkg)
+			if err != nil {
+				return fmt.Errorf("export staged object of %s failed: %w", pkg.PkgPath, err)
+			}
+			pkg.ObjFiles = append(pkg.ObjFiles, object)
+			_ = os.Remove(item.bitcode)
+			pkg.StagedBitcode = ""
+			if err := normalizeToArchive(ctx, pkg, verbose); err != nil {
+				return err
+			}
+			if pkg.PendingCacheSave {
+				if err := ctx.saveToCache(pkg); err != nil && verbose {
+					fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+				}
+				pkg.PendingCacheSave = false
+			}
+			return nil
+		}
+		if workers <= 1 {
+			for _, item := range work {
+				if err := materializeOne(item); err != nil {
+					return err
+				}
+				delete(ctx.stagedBitcodeFiles, item.bitcode)
+			}
+		} else {
+			jobs := make(chan stagedWork, len(work))
+			for _, item := range work {
+				jobs <- item
+			}
+			close(jobs)
+			var (
+				wg       sync.WaitGroup
+				errMu    sync.Mutex
+				firstErr error
+				doneMu   sync.Mutex
+				doneBC   = make([]string, 0, len(work))
+			)
+			for i := 0; i < workers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for item := range jobs {
+						errMu.Lock()
+						failed := firstErr != nil
+						errMu.Unlock()
+						if failed {
+							return
+						}
+						if err := materializeOne(item); err != nil {
+							errMu.Lock()
+							if firstErr == nil {
+								firstErr = err
+							}
+							errMu.Unlock()
+							return
+						}
+						doneMu.Lock()
+						doneBC = append(doneBC, item.bitcode)
+						doneMu.Unlock()
+					}
+				}()
+			}
+			wg.Wait()
+			for _, bc := range doneBC {
+				delete(ctx.stagedBitcodeFiles, bc)
+			}
+			if firstErr != nil {
+				return firstErr
+			}
 		}
 	}
 	entryIDs := make([]string, 0, len(ctx.stagedMainEntries))
@@ -9768,6 +9865,7 @@ func releaseCoroPlanningScratchBeforeEmission(ctx *context) {
 	}
 	ctx.progSSA = nil
 	ctx.dedup = nil
+	ctx.coroPlanCache = nil
 	ctx.coroSSAEmission = nil
 	ctx.coroProgramPredicates = coro.ProgramPredicateRequirements{}
 	ctx.coroRawGlobalSymbols = nil

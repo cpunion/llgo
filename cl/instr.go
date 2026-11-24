@@ -1559,6 +1559,30 @@ type CallerTracking struct {
 // caller-tracking lookup miss panics instead of mutating the shared maps;
 // recover facts retain their own synchronization for nested and synthetic
 // functions that are not package members.
+func (c *CallerTracking) coversEmissionPackages(inputs []EmissionPackage) bool {
+	if c == nil {
+		return false
+	}
+	if !c.precomputed {
+		return true
+	}
+	for _, input := range inputs {
+		if input.SSA == nil {
+			continue
+		}
+		if _, ok := c.base[input.SSA]; !ok {
+			return false
+		}
+		if _, ok := c.extended[input.SSA]; !ok {
+			return false
+		}
+		if _, ok := c.logical[input.SSA]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *CallerTracking) Precompute(pkgs []*ssa.Package) {
 	if c == nil {
 		return

@@ -19,7 +19,6 @@ package cl
 import (
 	"fmt"
 	"go/types"
-	"sort"
 	"strconv"
 
 	"github.com/xgo-dev/llgo/internal/coro"
@@ -120,9 +119,7 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 		declarations = append(declarations, alias)
 	}
 	declarations = stableUniqueFunctions(declarations)
-	sort.SliceStable(declarations, func(i, j int) bool {
-		return u.functionSortKey(declarations[i]) < u.functionSortKey(declarations[j])
-	})
+	sortEmissionFunctionsByFrozenKey(declarations, u.functionSortKey)
 
 	type exactAnnotation struct {
 		declaration *ssa.Function

@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
-	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -193,9 +192,7 @@ func freezeCoroLocalExportBindings(
 
 	functions := append([]*ssa.Function(nil), input.functions...)
 	functions = stableUniqueFunctions(functions)
-	sort.SliceStable(functions, func(i, j int) bool {
-		return input.functionSortKey(functions[i]) < input.functionSortKey(functions[j])
-	})
+	sortEmissionFunctionsByFrozenKey(functions, input.functionSortKey)
 
 	targets := make(map[string]*coroLocalExportTargetGroup)
 	targetABI := make(map[*ssa.Function]string)
@@ -274,9 +271,7 @@ func freezeCoroLocalExportBindings(
 	for declaration := range input.callableIdentities {
 		declarations = append(declarations, declaration)
 	}
-	sort.SliceStable(declarations, func(i, j int) bool {
-		return input.functionSortKey(declarations[i]) < input.functionSortKey(declarations[j])
-	})
+	sortEmissionFunctionsByFrozenKey(declarations, input.functionSortKey)
 	for _, declaration := range declarations {
 		canonical := input.canonicalAlias(declaration)
 		if canonical == nil {

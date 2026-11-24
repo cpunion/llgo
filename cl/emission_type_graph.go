@@ -65,8 +65,56 @@ type emissionTypeKeyCacheKey struct {
 // deliberately narrower than EmissionUniverse: structural type identity is a
 // reusable service, not another consumer of the whole-program plan authority.
 type emissionTypeKeyCache struct {
-	mu     sync.RWMutex
-	values map[emissionTypeKeyCacheKey]string
+	shared  *emissionTypeKeyCache
+	mu      sync.RWMutex
+	values  map[emissionTypeKeyCacheKey]string
+	acyclic map[emissionTypeKeyCacheKey]string
+}
+
+type emissionTypeKeyModeSpec struct {
+	schema                string
+	prefix                string
+	options               emissionTypeGraphOptions
+	normalizeTopSignature bool
+}
+
+func emissionTypeKeySpecForMode(mode emissionTypeKeyMode) emissionTypeKeyModeSpec {
+	switch mode {
+	case emissionTypeKeyStrict:
+		return emissionTypeKeyModeSpec{
+			schema: emissionStrictTypeGraphSchema,
+			prefix: emissionStrictTypeGraphKeyPrefix,
+		}
+	case emissionTypeKeyStrictABI:
+		return emissionTypeKeyModeSpec{
+			schema:  emissionStrictABITypeGraphSchema,
+			prefix:  emissionStrictABITypeGraphKeyPrefix,
+			options: emissionTypeGraphOptions{omitTupleNames: true},
+		}
+	case emissionTypeKeyGoLinknameABI:
+		return emissionTypeKeyModeSpec{
+			schema:                emissionGoLinknameTypeGraphSchema,
+			prefix:                emissionGoLinknameTypeGraphKeyPrefix,
+			options:               emissionTypeGraphOptions{omitTupleNames: true, expandNamed: true, omitStructFieldMetadata: true},
+			normalizeTopSignature: true,
+		}
+	case emissionTypeKeyIdentityFreeABI:
+		return emissionTypeKeyModeSpec{
+			schema:                emissionIdentityFreeTypeGraphSchema,
+			prefix:                emissionIdentityFreeTypeGraphPrefix,
+			options:               emissionTypeGraphOptions{omitTupleNames: true, expandNamed: true, omitStructFieldMetadata: true},
+			normalizeTopSignature: true,
+		}
+	case emissionTypeKeyCFunctionABI:
+		return emissionTypeKeyModeSpec{
+			schema:                emissionCFunctionTypeGraphSchema,
+			prefix:                emissionCFunctionTypeGraphPrefix,
+			options:               emissionTypeGraphOptions{omitTupleNames: true, expandNamed: true, omitStructFieldMetadata: true, opaquePointers: true},
+			normalizeTopSignature: true,
+		}
+	default:
+		panic("cl: unknown structural emission type-key mode")
+	}
 }
 
 func structuralEmissionTypeKeyForMode(mode emissionTypeKeyMode, typ types.Type) string {
@@ -86,17 +134,35 @@ func structuralEmissionTypeKeyForMode(mode emissionTypeKeyMode, typ types.Type) 
 	}
 }
 
+func (c *emissionTypeKeyCache) lookupAcyclic(mode emissionTypeKeyMode, typ types.Type) (string, bool) {
+	if c == nil || typ == nil {
+		return "", false
+	}
+	if c.shared != nil {
+		return c.shared.lookupAcyclic(mode, typ)
+	}
+	c.mu.RLock()
+	digest, ok := c.acyclic[emissionTypeKeyCacheKey{mode: mode, typ: typ}]
+	c.mu.RUnlock()
+	return digest, ok
+}
+
 // key retains a root digest only inside the cache which owns its go/types
 // graph. This avoids both repeated full-graph walks and a process-global cache
-// that would keep every prior compiler request alive. The computation remains
-// outside the mutex so independent package emitters do not serialize on a
-// large first-use graph.
+// that would keep every prior compiler request alive. Acyclic sub-node digests
+// are memoized separately so distinct signatures sharing large struct/interface
+// parameter types reuse their Merkle leaves in O(1) without walking those
+// subgraphs again. The computation remains outside the write mutex so
+// independent package emitters do not serialize on a large first-use graph.
 func (c *emissionTypeKeyCache) key(
 	mode emissionTypeKeyMode,
 	typ types.Type,
 ) string {
 	if c == nil {
 		return structuralEmissionTypeKeyForMode(mode, typ)
+	}
+	if c.shared != nil {
+		return c.shared.key(mode, typ)
 	}
 	if typ != nil {
 		typ = types.Unalias(typ)
@@ -108,7 +174,22 @@ func (c *emissionTypeKeyCache) key(
 	if ok {
 		return value
 	}
-	value = structuralEmissionTypeKeyForMode(mode, typ)
+	spec := emissionTypeKeySpecForMode(mode)
+	rootTyp := typ
+	if spec.normalizeTopSignature {
+		if signature, ok := rootTyp.(*types.Signature); ok {
+			rootTyp = normalizeGoLinknameABISignature(signature)
+		}
+	}
+	builder := emissionTypeGraphBuilder{
+		ids:     make(map[types.Type]int),
+		options: spec.options,
+		cache:   c,
+		mode:    mode,
+	}
+	root := builder.node(rootTyp)
+	digester := newEmissionTypeGraphDigester(builder.nodes, spec.schema)
+	value = spec.prefix + digester.digestNode(root)
 	c.mu.Lock()
 	if c.values == nil {
 		c.values = make(map[emissionTypeKeyCacheKey]string)
@@ -117,6 +198,20 @@ func (c *emissionTypeKeyCache) key(
 		value = existing
 	} else {
 		c.values[key] = value
+	}
+	for index, node := range builder.nodes {
+		if node.cacheType == nil || node.precomputedDigest != "" {
+			continue
+		}
+		if digester.cyclic[digester.component[index]] {
+			continue
+		}
+		if digest := digester.digests[index]; digest != "" {
+			if c.acyclic == nil {
+				c.acyclic = make(map[emissionTypeKeyCacheKey]string)
+			}
+			c.acyclic[emissionTypeKeyCacheKey{mode: mode, typ: node.cacheType}] = digest
+		}
 	}
 	c.mu.Unlock()
 	return value
@@ -176,7 +271,9 @@ type emissionTypeGraphToken struct {
 }
 
 type emissionTypeGraphNode struct {
-	tokens []emissionTypeGraphToken
+	tokens            []emissionTypeGraphToken
+	precomputedDigest string
+	cacheType         types.Type
 }
 
 // emissionTypeGraphBuilder turns the reachable go/types value graph into a
@@ -189,6 +286,8 @@ type emissionTypeGraphBuilder struct {
 	ids     map[types.Type]int
 	nodes   []emissionTypeGraphNode
 	options emissionTypeGraphOptions
+	cache   *emissionTypeKeyCache
+	mode    emissionTypeKeyMode
 }
 
 func compactStructuralGoLinknameABITypeKey(typ types.Type) string {
@@ -223,7 +322,7 @@ func (b *emissionTypeGraphBuilder) node(typ types.Type) int {
 		if index, ok := b.ids[nil]; ok {
 			return index
 		}
-		return b.reserveAndFill(nil, nil)
+		return b.reserveAndFill(nil, nil, nil)
 	}
 	typ = types.Unalias(typ)
 	if named, ok := typ.(*types.Named); ok && b.options.expandNamed {
@@ -235,22 +334,37 @@ func (b *emissionTypeGraphBuilder) node(typ types.Type) int {
 			b.ids[named] = index
 			return index
 		}
-		return b.reserveAndFill(named, underlying)
+		if digest, ok := b.cache.lookupAcyclic(b.mode, underlying); ok {
+			index := len(b.nodes)
+			b.nodes = append(b.nodes, emissionTypeGraphNode{precomputedDigest: digest})
+			b.ids[named] = index
+			b.ids[underlying] = index
+			return index
+		}
+		return b.reserveAndFill(named, underlying, underlying)
 	}
 	if index, ok := b.ids[typ]; ok {
 		return index
 	}
-	return b.reserveAndFill(typ, typ)
+	if digest, ok := b.cache.lookupAcyclic(b.mode, typ); ok {
+		index := len(b.nodes)
+		b.nodes = append(b.nodes, emissionTypeGraphNode{precomputedDigest: digest})
+		b.ids[typ] = index
+		return index
+	}
+	return b.reserveAndFill(typ, typ, typ)
 }
 
-func (b *emissionTypeGraphBuilder) reserveAndFill(identity, body types.Type) int {
+func (b *emissionTypeGraphBuilder) reserveAndFill(identity, body, cacheType types.Type) int {
 	index := len(b.nodes)
 	b.nodes = append(b.nodes, emissionTypeGraphNode{})
 	b.ids[identity] = index
 	if named, ok := identity.(*types.Named); ok && b.options.expandNamed {
 		b.ids[types.Unalias(named.Underlying())] = index
 	}
-	b.nodes[index] = b.describe(body)
+	node := b.describe(body)
+	node.cacheType = cacheType
+	b.nodes[index] = node
 	return index
 }
 
@@ -414,8 +528,8 @@ type emissionTypeGraphDigester struct {
 	component  []int
 	components [][]int
 	cyclic     []bool
-	digests    map[int]string
-	active     map[int]bool
+	digests    []string
+	active     []bool
 	// Children finish before their parent's fields are hashed. One buffer can
 	// therefore serve every node without retaining its temporary serialization.
 	scratch []byte
@@ -439,13 +553,17 @@ func newEmissionTypeGraphDigester(nodes []emissionTypeGraphNode, schema string) 
 	}
 	return &emissionTypeGraphDigester{
 		nodes: nodes, schema: schema, component: component, components: components, cyclic: cyclic,
-		digests: make(map[int]string), active: make(map[int]bool),
+		digests: make([]string, len(nodes)), active: make([]bool, len(components)),
 	}
 }
 
 func (d *emissionTypeGraphDigester) digestNode(node int) string {
-	if digest, ok := d.digests[node]; ok {
+	if digest := d.digests[node]; digest != "" {
 		return digest
+	}
+	if pre := d.nodes[node].precomputedDigest; pre != "" {
+		d.digests[node] = pre
+		return pre
 	}
 	component := d.component[node]
 	if d.active[component] {
@@ -466,7 +584,7 @@ func (d *emissionTypeGraphDigester) digestNode(node int) string {
 		fields[0] = "cyclic-component-v1"
 		d.appendCyclicComponent(&fields, component, node)
 	}
-	delete(d.active, component)
+	d.active[component] = false
 	digest := d.digestFields(fields)
 	d.digests[node] = digest
 	return digest

@@ -526,10 +526,7 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 			}
 			sitePlan.localityDispatchers = append(sitePlan.localityDispatchers, canonical)
 		}
-		sort.Slice(sitePlan.localityDispatchers, func(i, j int) bool {
-			return u.functionSortKey(sitePlan.localityDispatchers[i]) <
-				u.functionSortKey(sitePlan.localityDispatchers[j])
-		})
+		sortEmissionFunctionsByFrozenKey(sitePlan.localityDispatchers, u.functionSortKey)
 	}
 	if err := u.coroProgramIR.freezeSite(ownerFn, ownerPkg, instr, sitePlan); err != nil {
 		return fmt.Errorf("prepare emission universe: function %q site plan: %w", ownerFn.Name(), err)

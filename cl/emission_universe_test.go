@@ -2047,3 +2047,75 @@ func TestEmissionUniverseRejectsPackageMutation(t *testing.T) {
 		t.Fatal("unexpected empty diagnostic")
 	}
 }
+
+func TestEmissionPlanCacheEquivalence(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	producer := testProg.addPackage(t, "example.com/emission/plancacheproducer", `package plancacheproducer
+type Box[T any] struct { Value T }
+func (b *Box[T]) Get() T { return b.Value }
+type Reader interface { Read([]byte) (int, error) }
+type Node struct { Next *Node; Box Box[int] }
+func (n *Node) Read(p []byte) (int, error) { return len(p), nil }
+`)
+	consumer := testProg.addPackage(t, "example.com/emission/plancacheconsumer", `package plancacheconsumer
+import p "example.com/emission/plancacheproducer"
+func Use(n *p.Node) (p.Reader, int) {
+	var r p.Reader = n
+	return r, n.Box.Get()
+}
+`)
+	testProg.ssa.Build()
+
+	inputs := []EmissionPackage{
+		{SSA: producer.ssa, Files: []*ast.File{producer.file}},
+		{SSA: consumer.ssa, Files: []*ast.File{consumer.file}},
+	}
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+
+	uncached, err := PrepareEmissionUniverseWithOptions(prog, nil, inputs, EmissionUniverseOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cache := NewEmissionPlanCache()
+	tracking := NewCallerTracking()
+	tracking.Precompute([]*ssa.Package{producer.ssa, consumer.ssa})
+
+	first, err := PrepareEmissionUniverseWithOptions(prog, nil, inputs, EmissionUniverseOptions{
+		PlanCache:      cache,
+		CallerTracking: tracking,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := PrepareEmissionUniverseWithOptions(prog, nil, inputs, EmissionUniverseOptions{
+		PlanCache:      cache,
+		CallerTracking: tracking,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantFns := uncached.Functions()
+	for label, got := range map[string]*EmissionUniverse{"first": first, "second": second} {
+		gotFns := got.Functions()
+		if len(gotFns) != len(wantFns) {
+			t.Fatalf("%s Functions() len = %d, want %d", label, len(gotFns), len(wantFns))
+		}
+		for i, fn := range wantFns {
+			if gotFns[i] != fn {
+				t.Fatalf("%s Functions()[%d] = %v, want %v", label, i, gotFns[i], fn)
+			}
+			if got.finalIdentity(fn) != uncached.finalIdentity(fn) {
+				t.Fatalf("%s finalIdentity(%v) = %q, want %q", label, fn, got.finalIdentity(fn), uncached.finalIdentity(fn))
+			}
+			if got.functionSortKey(fn) != uncached.functionSortKey(fn) {
+				t.Fatalf("%s functionSortKey(%v) = %q, want %q", label, fn, got.functionSortKey(fn), uncached.functionSortKey(fn))
+			}
+		}
+	}
+	if len(cache.typeKeys.values) == 0 || len(cache.ssaFunctionSortKeys) == 0 {
+		t.Fatalf("expected PlanCache to be populated: typeKeys=%d sortKeys=%d", len(cache.typeKeys.values), len(cache.ssaFunctionSortKeys))
+	}
+}

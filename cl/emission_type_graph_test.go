@@ -310,6 +310,75 @@ func BenchmarkStructuralGoLinknameABITypeKeySharedDAG(b *testing.B) {
 	}
 }
 
+func TestEmissionTypeKeyCacheAcyclicSubnodeEquivalence(t *testing.T) {
+	pkg := types.NewPackage("example.com/typegraph", "typegraph")
+	shared := testSharedGoLinknameType("example.com/shared", 8, types.Typ[types.Int64])
+	anon := testSharedAnonymousEmissionType(6)
+
+	// Self-recursive type: type Self struct { next *Self; payload shared }
+	selfName := types.NewTypeName(token.NoPos, pkg, "Self", nil)
+	selfNamed := types.NewNamed(selfName, nil, nil)
+	selfNamed.SetUnderlying(types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, pkg, "next", types.NewPointer(selfNamed), false),
+		types.NewField(token.NoPos, pkg, "payload", shared, false),
+	}, nil))
+
+	// Mutually recursive 2-node SCC: A <-> B referencing shared acyclic subgraphs.
+	aName := types.NewTypeName(token.NoPos, pkg, "CycleA", nil)
+	bName := types.NewTypeName(token.NoPos, pkg, "CycleB", nil)
+	cycleA := types.NewNamed(aName, nil, nil)
+	cycleB := types.NewNamed(bName, nil, nil)
+	cycleA.SetUnderlying(types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, pkg, "b", types.NewPointer(cycleB), false),
+		types.NewField(token.NoPos, pkg, "s", shared, false),
+	}, nil))
+	cycleB.SetUnderlying(types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, pkg, "a", types.NewPointer(cycleA), false),
+		types.NewField(token.NoPos, pkg, "x", anon, false),
+	}, nil))
+
+	sig1 := types.NewSignatureType(
+		types.NewParam(token.NoPos, pkg, "r", types.NewPointer(selfNamed)),
+		nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, pkg, "p", shared)),
+		types.NewTuple(types.NewParam(token.NoPos, pkg, "out", anon)),
+		false,
+	)
+	sig2 := types.NewSignatureType(
+		nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, pkg, "a", types.NewPointer(cycleA)), types.NewParam(token.NoPos, pkg, "b", shared)),
+		types.NewTuple(types.NewParam(token.NoPos, pkg, "c", types.NewPointer(cycleB))),
+		false,
+	)
+	allTypes := []types.Type{shared, anon, selfNamed, cycleA, cycleB, sig1, sig2, types.NewPointer(cycleA), types.NewPointer(cycleB)}
+	modes := []emissionTypeKeyMode{
+		emissionTypeKeyStrict,
+		emissionTypeKeyStrictABI,
+		emissionTypeKeyGoLinknameABI,
+		emissionTypeKeyIdentityFreeABI,
+		emissionTypeKeyCFunctionABI,
+	}
+
+	// Verify both forward and reverse warm orders match uncached oracle bit-for-bit.
+	for _, reverse := range []bool{false, true} {
+		var cache emissionTypeKeyCache
+		for _, mode := range modes {
+			for i := range allTypes {
+				idx := i
+				if reverse {
+					idx = len(allTypes) - 1 - i
+				}
+				typ := allTypes[idx]
+				got := cache.key(mode, typ)
+				want := structuralEmissionTypeKeyForMode(mode, typ)
+				if got != want {
+					t.Fatalf("mode=%d reverse=%t type=%v: got %q, want %q", mode, reverse, typ, got, want)
+				}
+			}
+		}
+	}
+}
+
 func BenchmarkStructuralEmissionABITypeKeySharedDAG(b *testing.B) {
 	typ := testSharedAnonymousEmissionType(18)
 	b.ReportAllocs()
