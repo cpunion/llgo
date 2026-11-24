@@ -355,7 +355,6 @@ type EmissionUniverse struct {
 	globalPhysicalIDs       map[*ssa.Global]string
 	globalPhysicalGroups    map[string]CoroGlobalPhysicalIdentity
 	globalPhysicalSeen      map[*ssa.Global]none
-	staticMapInitializationPlan
 
 	// emissionTypeKeys memoizes structural digests only for the lifetime of
 	// this frozen compilation universe. A package-level cache would retain
@@ -8418,7 +8417,6 @@ type emissionGlobalPhysicalCandidate struct {
 	linknamed      bool
 	functionCell   bool
 	privateSource  bool
-	ordinaryData   bool
 }
 
 // freezeCoroGlobalPhysicalIdentities mirrors the exact global subset and order
@@ -8484,17 +8482,12 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 				linknamed:      linknamed,
 				functionCell:   coroGlobalPhysicalFunctionCell(patchedType),
 				privateSource:  object != nil && !object.Exported(),
-				ordinaryData:   true,
-			}
-			if locality, known := ctx.resolveLocality(prepared.pkgTypes, llssa.FullName(prepared.pkgTypes, global.Name())); known && locality.Locality != llssa.LocalityNone {
-				candidate.ordinaryData = false
 			}
 			if previous, exists := seenCandidates[global]; exists {
 				if previous.owner != candidate.owner || previous.physicalSymbol != candidate.physicalSymbol ||
 					previous.structuralType != candidate.structuralType || previous.background != candidate.background ||
 					previous.define != candidate.define || previous.linknamed != candidate.linknamed ||
-					previous.functionCell != candidate.functionCell || previous.privateSource != candidate.privateSource ||
-					previous.ordinaryData != candidate.ordinaryData {
+					previous.functionCell != candidate.functionCell || previous.privateSource != candidate.privateSource {
 					return fmt.Errorf("prepare emission universe: global %q has owner-dependent physical metadata", global.Name())
 				}
 				continue
@@ -8649,8 +8642,6 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 			u.globalPhysicalIDs[member] = id
 		}
 	}
-	u.staticMapInitializationPlan.sourceFunctions = &u.functions
-	u.freezeStaticMapInitializers(byCell, linknameTargets, rawWorldProvesAbsent)
 	return nil
 }
 
