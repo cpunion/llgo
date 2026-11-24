@@ -104,6 +104,7 @@ jobs:
           cd runtime
           go test -race -shuffle=on ./internal/coroalloc -count=1
           go test -race -shuffle=on ./internal/coro -count=1
+          go test -race -shuffle=on -tags=coro_no_audit ./internal/coro -run '^TestCoroAuditModeInlineAwaitAndSpawnLifecycle$' -count=1
           go test -race -shuffle=on ./internal/corodoorbell -count=1
           go test -race -shuffle=on ./internal/coroworker -count=3
           go test -race -tags=coro_gc_observer_test \
@@ -968,7 +969,7 @@ jobs:
           # Vet the selected production LLGo runtime, not a nonexistent host-Go
           # runtime assembled without its compiler-owned bridges. Runtime
           # source-island tests above check the host adapters independently.
-          (cd runtime && go vet ./internal/coro && go vet -unsafeptr=false -tags='llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer' ./internal/runtime)
+          (cd runtime && go vet ./internal/coro && go vet -tags=coro_no_audit ./internal/coro && go vet -unsafeptr=false -tags='llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer' ./internal/runtime && go vet -unsafeptr=false -tags='llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,coro_audit' ./internal/runtime)
           # The compiler package has a pre-existing unsafe.Pointer finding.
           # Disable only that analyzer and keep all other checks enabled.
           go vet -unsafeptr=false ./cl

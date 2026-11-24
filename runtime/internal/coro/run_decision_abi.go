@@ -81,6 +81,16 @@ func TakeRunDecisionWordsCompiler(
 // Park, cancellation, nested-inline, stale, and malformed shapes fall through
 // to the complete TakeRunDecision path.
 func takeOrdinaryZeroRunDecisionCompiler(g *G) bool {
+	if !AuditEnabled {
+		if g != nil && g.runP != nil {
+			p := g.runP
+			if !p.runDecisionTaken && p.runDecision == (RunDecision{}) {
+				p.runDecisionTaken = true
+				return true
+			}
+		}
+		return false
+	}
 	if !ValidG(g) || g.runP == nil {
 		return false
 	}

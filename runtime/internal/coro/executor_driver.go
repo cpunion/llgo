@@ -83,7 +83,13 @@ const executorDriverMagic uint32 = 0x45584431 // "EXD1"
 // capacity or walk the in-progress logical resolution cursor. The concrete
 // source or resolution reduction performs those exact checks before mutation.
 func validExecutorDriverHeader(driver *ExecutorDriver) bool {
-	if driver == nil || driver.magic != executorDriverMagic || driver.state == executorDriverUnbound {
+	if driver == nil || driver.state == executorDriverUnbound {
+		return false
+	}
+	if !AuditEnabled {
+		return driver.p != nil
+	}
+	if driver.magic != executorDriverMagic {
 		return false
 	}
 	if driver.state == executorDriverActive {
@@ -133,6 +139,9 @@ func validExecutorDriver(driver *ExecutorDriver) bool {
 	// queue part of the common driver-header gate.
 	if !validExecutorDriverHeader(driver) {
 		return false
+	}
+	if !AuditEnabled {
+		return true
 	}
 	slot, ok := executorSlot(driver.registry, driver.handle)
 	return ok && driver.requestGate == &slot.gate &&

@@ -214,6 +214,9 @@ func validMaterializedParkHeader(state *ParkState) bool {
 }
 
 func validParkState(state *ParkState) bool {
+	if !AuditEnabled {
+		return state != nil && !state.resolving
+	}
 	if state == nil || state.resolving || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) || state.cancelKind > ParkCancelShutdown ||
 		state.attached > state.expected || state.directChannel && state.phase != parkMaterialized {
 		return false
@@ -344,6 +347,10 @@ func validParkState(state *ParkState) bool {
 // generic intrusive-list validator even though their exact invariant requires
 // head == nil and attached == 0.
 func validReleasableParkState(state *ParkState) bool {
+	if !AuditEnabled {
+		return state != nil && !state.resolving &&
+			(state.phase == parkIdle || state.phase == parkConsumed || state.phase == parkDelivered)
+	}
 	if state == nil || state.resolving ||
 		!validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) ||
 		state.cancelKind > ParkCancelShutdown || state.attached > state.expected || state.directChannel {

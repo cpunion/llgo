@@ -470,6 +470,23 @@ func RegisterFrameCompiler(
 func RegisterFrameCompilerPrepared(
 	g *G, raw unsafe.Pointer, total, size, align uintptr, descriptor unsafe.Pointer,
 ) (unsafe.Pointer, bool) {
+	if !AuditEnabled {
+		if g == nil || raw == nil || descriptor == nil || total == 0 ||
+			align == 0 || align&(align-1) != 0 {
+			return nil, false
+		}
+		storage := unsafe.Add(raw, unsafe.Sizeof(compilerFrameAllocationReceiptV1{}))
+		if uintptr(storage)&(align-1) != 0 {
+			var ok bool
+			storage, ok = compilerAlignedStorage(raw, align)
+			if !ok {
+				return nil, false
+			}
+		}
+		receipt := (*compilerFrameAllocationReceiptV1)(unsafe.Add(storage, -int(unsafe.Sizeof(compilerFrameAllocationReceiptV1{}))))
+		*receipt = compilerFrameAllocationReceiptV1{raw: raw, total: total}
+		return storage, true
+	}
 	if !ValidG(g) || raw == nil || descriptor == nil || total == 0 ||
 		align == 0 || align&(align-1) != 0 ||
 		uintptr(raw)%unsafe.Alignof(Frame{}) != 0 {
@@ -623,6 +640,57 @@ func PublishFrameV3Compiler(
 	g *G, handle unsafe.Pointer, header *HeaderV1, storage, metadata,
 	descriptor, resultSlot unsafe.Pointer,
 ) bool {
+	if !AuditEnabled {
+		if g == nil || handle == nil || header == nil || metadata == nil || descriptor == nil {
+			return false
+		}
+		mode, ok := descriptorRuntimeContextMode(descriptor)
+		if !ok {
+			return false
+		}
+		if storage != nil {
+			receiptSize := unsafe.Sizeof(compilerFrameAllocationReceiptV1{})
+			receipt := (*compilerFrameAllocationReceiptV1)(unsafe.Add(storage, -int(receiptSize)))
+			frame := (*Frame)(metadata)
+			*header = HeaderV1{
+				G:              unsafe.Pointer(g),
+				Descriptor:     descriptor,
+				AllocationBase: receipt.raw,
+				ResultSlot:     resultSlot,
+				SuspendReason:  uint16(SuspendNone),
+				Lifecycle:      uint16(FrameInitialSuspended),
+			}
+			frame.owner = g
+			frame.handle = handle
+			frame.header = header
+			frame.allocationSize = receipt.total
+			frame.state = FrameInitialSuspended
+			frame.runtimeContext = mode
+			frame.next = g.frames
+			g.frames = frame
+			receipt.total = uintptr(unsafe.Pointer(frame))
+			return true
+		}
+		*header = HeaderV1{
+			G:              unsafe.Pointer(g),
+			Descriptor:     descriptor,
+			AllocationBase: metadata,
+			ResultSlot:     resultSlot,
+			SuspendReason:  uint16(SuspendNone),
+			Lifecycle:      uint16(FrameInitialSuspended),
+		}
+		Zero(metadata, unsafe.Sizeof(Frame{}))
+		frame := (*Frame)(metadata)
+		frame.owner = g
+		frame.handle = handle
+		frame.header = header
+		frame.state = FrameInitialSuspended
+		frame.runtimeContext = mode
+		frame.properties = frameBorrowedStorage
+		frame.next = g.frames
+		g.frames = frame
+		return true
+	}
 	if !ValidG(g) || handle == nil || header == nil || metadata == nil || descriptor == nil {
 		return false
 	}
@@ -847,6 +915,34 @@ func PrepareCompleteStatus(g *G, handle unsafe.Pointer, header *HeaderV1, status
 // Panic, Goexit, cancellation, and any uncertain shape retain the complete
 // status validator below.
 func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1, status CompletionStatus) bool {
+	if !AuditEnabled && status == CompletionReturn && g != nil {
+		frame := g.active
+		p := g.runP
+		if frame != nil && p != nil {
+			if p.inlineAwaitDepth != 0 {
+				parent := frame.parent
+				if parent != nil && g.pending.kind == pendingNone &&
+					g.park.taskCancelPhase != taskCancelRequested &&
+					parent.completion.status == completionArmed {
+					parent.completion.status = CompletionReturn
+					g.pending = pendingTransition{kind: pendingComplete, from: frame}
+					return true
+				}
+			} else if frame == g.root && g.frames == frame && frame.next == nil &&
+				g.pending.kind == pendingNone && g.park.taskCancelPhase != taskCancelRequested &&
+				g.park.taskCancelKind == TaskCancelNone {
+				if g.park == (ParkState{}) && loadGPreempt(g) == preemptIdle {
+					g.pending = pendingTransition{kind: pendingCompilerRootComplete, from: frame}
+					return true
+				}
+				if g.park.phase == parkDelivered {
+					g.park = ParkState{}
+				}
+				g.pending = pendingTransition{kind: pendingComplete, from: frame}
+				return true
+			}
+		}
+	}
 	if status == CompletionReturn && g != nil && handle != nil && header != nil {
 		frame := g.active
 		if frame != nil && frame.handle == handle && frame.header == header &&
@@ -1033,6 +1129,24 @@ func ReleaseFrame(g *G, storage unsafe.Pointer, size, align uintptr, descriptor 
 func ReleaseFrameCompiler(
 	g *G, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer,
 ) (metadata, raw unsafe.Pointer, total uintptr, ok bool) {
+	if !AuditEnabled && g != nil {
+		frame := g.destroyTarget
+		if frame != nil && g.frames == frame && frame.header != nil && !frame.borrowedStorage() {
+			allocationBase := frame.header.AllocationBase
+			allocationSize := frame.allocationSize
+			g.frames = frame.next
+			frame.next = nil
+			frame.state = FrameDestroyed
+			frame.panicLine = frame.header.Line
+			frame.header.Lifecycle = uint16(FrameDestroyed)
+			g.destroyTarget = nil
+			if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
+				g.pending.from == frame.parent {
+				g.pending.target = nil
+			}
+			return unsafe.Pointer(frame), allocationBase, allocationSize, true
+		}
+	}
 	preempt := uint32(preemptDisabled)
 	if g != nil {
 		preempt = preemptLoad(&g.preempt)
@@ -1112,6 +1226,9 @@ func CommitFrameDestroyV2(g *G, handle unsafe.Pointer) bool {
 // storage, descriptor, size, lifecycle, and target. Allocation-elided frames
 // retain destroyTarget and therefore use the complete unlink transaction.
 func CommitFrameDestroyCompiler(g *G, handle unsafe.Pointer) bool {
+	if !AuditEnabled && g != nil && g.destroyTarget == nil {
+		return true
+	}
 	if ValidG(g) && handle != nil && gPreemptEnabledAtDepthZero(g) &&
 		g.destroyTarget == nil {
 		return true

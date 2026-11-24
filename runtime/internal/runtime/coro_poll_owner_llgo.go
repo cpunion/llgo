@@ -83,9 +83,14 @@ func __llgo_coro_poll_park_v2(
 ) {
 	state := (*CoroPollParkV2)(storage)
 	pollInterest := coro.PollInterest(interest)
-	if g == nil || handle == nil || header == nil || state == nil || context == 0 ||
-		(pollInterest != coro.PollInterestRead && pollInterest != coro.PollInterestWrite) ||
-		*state != (CoroPollParkV2{}) {
+	if coro.AuditEnabled {
+		if g == nil || handle == nil || header == nil || state == nil || context == 0 ||
+			(pollInterest != coro.PollInterestRead && pollInterest != coro.PollInterestWrite) ||
+			*state != (CoroPollParkV2{}) {
+			coroPollAbortV2("invalid coroutine Poll V2 park ABI")
+			return
+		}
+	} else if state == nil || state.magic != 0 {
 		coroPollAbortV2("invalid coroutine Poll V2 park ABI")
 		return
 	}
@@ -158,7 +163,12 @@ func __llgo_coro_poll_park_v2(
 //export __llgo_coro_poll_resume_v2
 func __llgo_coro_poll_resume_v2(g, storage unsafe.Pointer) uint32 {
 	state := (*CoroPollParkV2)(storage)
-	if g == nil || !validCoroPollParkV2(state) {
+	if coro.AuditEnabled {
+		if g == nil || !validCoroPollParkV2(state) {
+			coroPollAbortV2("invalid coroutine Poll V2 resume ABI")
+			return 0
+		}
+	} else if g == nil || state == nil || state.magic != coroPollParkMagicV2 {
 		coroPollAbortV2("invalid coroutine Poll V2 resume ABI")
 		return 0
 	}
