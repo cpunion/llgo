@@ -121,12 +121,11 @@ func coroTargetReleaseManagedExecutionAtRouteV1(
 }
 
 func coroTargetReleaseManagedExecutionRouteV1(route coro.RouteID) bool {
-	wake, released := coroNativeFleetV1State.execution.Release(route)
-	if !released || !wake {
+	waiters, released := coroNativeFleetV1State.execution.Release(route)
+	if !released || waiters == 0 {
 		return released
 	}
-	waiters, valid := coroNativeFleetV1State.execution.WaiterMask()
-	return valid && coroNativeFleetRingExecutionWaitersV1(waiters)
+	return coroNativeFleetRingExecutionWaitersV1(waiters)
 }
 
 // coroTargetReleaseManagedExecutionIfHeldV1 is the physical-owner succession
@@ -222,13 +221,8 @@ func CoroGOMAXPROCS(n int) int {
 	if uint64(n) > uint64(coroNativeMaximumLogicalProcsV1) {
 		next = coroNativeMaximumLogicalProcsV1
 	}
-	previous, wake, changed := coroNativeFleetSetExecutionLimitV1(next)
-	waiters := uint32(0)
-	waitersOK := true
-	if wake {
-		waiters, waitersOK = coroNativeFleetV1State.execution.WaiterMask()
-	}
-	if !changed || !waitersOK || wake && !coroNativeFleetRingExecutionWaitersV1(waiters) {
+	previous, waiters, changed := coroNativeFleetSetExecutionLimitV1(next)
+	if !changed || waiters != 0 && !coroNativeFleetRingExecutionWaitersV1(waiters) {
 		coroRuntimeAbort("native coroutine execution quota resize failed")
 		return int(limit)
 	}

@@ -103,19 +103,22 @@ func (quota *ExecutionQuota) Held(route RouteID) (held, ok bool) {
 	return state&bit != 0, true
 }
 
-func (quota *ExecutionQuota) SetLimit(limit uint32) (previous uint32, wake, ok bool) {
+func (quota *ExecutionQuota) SetLimit(limit uint32) (previous, waiters uint32, ok bool) {
 	if quota == nil || limit == 0 {
-		return 0, false, false
+		return 0, 0, false
 	}
 	for {
 		state := preemptLoad64(&quota.state)
 		if quotaPhase(state) != executionQuotaActive {
-			return 0, false, false
+			return 0, 0, false
 		}
 		previous = uint32(state >> executionQuotaLimitShift)
 		next := state&^executionQuotaLimitMask | uint64(limit)<<executionQuotaLimitShift
 		if next == state || preemptCompareAndSwap64(&quota.state, state, next) {
-			return previous, limit > previous && state&executionQuotaWaiterMask != 0, true
+			if limit > previous {
+				waiters = uint32((state & executionQuotaWaiterMask) >> executionQuotaRouteBits)
+			}
+			return previous, waiters, true
 		}
 	}
 }
@@ -147,20 +150,23 @@ func (quota *ExecutionQuota) TryAcquire(route RouteID) (acquired, ok bool) {
 	}
 }
 
-func (quota *ExecutionQuota) Release(route RouteID) (wake, ok bool) {
+func (quota *ExecutionQuota) Release(route RouteID) (waiters uint32, ok bool) {
 	bit := quotaRouteBit(route)
 	if quota == nil || bit == 0 {
-		return false, false
+		return 0, false
 	}
 	for {
 		state := preemptLoad64(&quota.state)
 		phase := quotaPhase(state)
 		if (phase != executionQuotaActive && phase != executionQuotaSealed) || state&bit == 0 {
-			return false, false
+			return 0, false
 		}
 		next := (state &^ bit) - executionQuotaPermit
 		if preemptCompareAndSwap64(&quota.state, state, next) {
-			return phase == executionQuotaActive && state&executionQuotaWaiterMask != 0, true
+			if phase == executionQuotaActive {
+				waiters = uint32((state & executionQuotaWaiterMask) >> executionQuotaRouteBits)
+			}
+			return waiters, true
 		}
 	}
 }
