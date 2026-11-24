@@ -899,11 +899,15 @@ func ResumedExecutorRun(
 		// and this adjacent physical return. Consume only the issued identity;
 		// all other completion/suspension paths retain Resumed's full proof.
 		frame := g.pending.from
-		if p.current != g || g.runP != p || !p.inResume || p.inlineAwaitDepth != 0 ||
-			g.state != GRunning || p.action != action || !p.runDecisionTaken ||
-			action.Kind != ActionResume || action.Flags != 0 || action.Handle == nil ||
-			frame == nil || frame != g.active || frame.handle != action.Handle ||
-			g.pending.target != nil || g.pending.directChannel {
+		if AuditEnabled {
+			if p.current != g || g.runP != p || !p.inResume || p.inlineAwaitDepth != 0 ||
+				g.state != GRunning || p.action != action || !p.runDecisionTaken ||
+				action.Kind != ActionResume || action.Flags != 0 || action.Handle == nil ||
+				frame == nil || frame != g.active || frame.handle != action.Handle ||
+				g.pending.target != nil || g.pending.directChannel {
+				return Action{}, false, false
+			}
+		} else if frame == nil || action.Handle == nil {
 			return Action{}, false, false
 		}
 		g.pending = pendingTransition{}
@@ -1012,6 +1016,17 @@ func PrepareIssuedExecutorDestroyAfterResume(
 	g *G,
 	action Action,
 ) bool {
+	if !AuditEnabled {
+		if driver == nil || driver.p == nil || g == nil ||
+			driver.run.issued != ActionCheckResume || action.Kind != ActionCheckDestroy ||
+			action.Handle == nil || g.park.taskCancelPhase == taskCancelRequested ||
+			g.panicUnwind || driver.p.foreignReentry != nil ||
+			executorRunReadyOwnerBoundary(driver.p) {
+			return false
+		}
+		driver.run.issued = ActionCheckDestroy
+		return true
+	}
 	if !validIssuedExecutorRunAction(driver) ||
 		driver.run.issued != ActionCheckResume || g == nil {
 		return false
@@ -1052,6 +1067,18 @@ func FinishIssuedExecutorDestroyAfterResume(
 	action Action,
 	done bool,
 ) (Action, bool) {
+	if !AuditEnabled {
+		if driver == nil || g == nil || driver.p == nil || action.Handle == nil {
+			return Action{}, false
+		}
+		if !done {
+			driver.run.issued = ActionCheckResume
+			return Action{}, false
+		}
+		next := Action{Kind: ActionDestroy, Handle: action.Handle}
+		driver.p.action = next
+		return next, true
+	}
 	if driver == nil || g == nil || driver.p == nil ||
 		driver.run.issued != ActionCheckDestroy {
 		return Action{}, false
@@ -1076,8 +1103,13 @@ func FinishIssuedExecutorDestroyAfterResume(
 // the completed G nor its old handle, so a runtime may reclaim a dynamic G
 // immediately after a successful ActionComplete commit.
 func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placement executorRunQueuePlacement) bool {
-	if !validIssuedExecutorRunAction(driver) || g == nil ||
-		!validOSThreadPeerActionCommit(driver.p, g) {
+	if AuditEnabled {
+		if !validIssuedExecutorRunAction(driver) || g == nil ||
+			!validOSThreadPeerActionCommit(driver.p, g) {
+			return false
+		}
+	} else if driver == nil || driver.p == nil || g == nil ||
+		(driver.p.osThreadLockOwner != nil && !validOSThreadPeerActionCommit(driver.p, g)) {
 		return false
 	}
 	p := driver.p
@@ -1094,7 +1126,11 @@ func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placemen
 		if placement != executorRunQueueTail {
 			return false
 		}
-		committed = completedExecutorRunAction(p, g, next)
+		if !AuditEnabled {
+			committed = true
+		} else {
+			committed = completedExecutorRunAction(p, g, next)
+		}
 	case ActionCommitDestroy:
 		if placement != executorRunQueueTail {
 			return false

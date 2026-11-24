@@ -35,9 +35,6 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 	// read-only CanBeginSpawn preflight before every successful allocation only
 	// audits the same scheduler episode twice. Allocation failure is rolled back
 	// locally and an invalid boundary still fails atomically in BeginSpawn.
-	if !coroalloc.Ready() {
-		return nil, false
-	}
 	taskSize := coro.TaskStorageSize()
 	allocationSize := uintptr(coroTaskAllocationSize)
 	raw := coroalloc.AllocTask(allocationSize)

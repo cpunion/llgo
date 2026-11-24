@@ -11,14 +11,20 @@ package coro
 // A task stop takes the ordinary full BeginRunG path instead. Async preemption
 // and schedule requests remain live gates here as on every continuation.
 func beginExecutorRunInitialPrepared(p *P, g *G, peerRunnable bool) (Action, bool) {
-	if p == nil || g == nil || !g.initialRunPrepared ||
-		!gPreemptEnabledAtDepthZero(g) || g.active == nil ||
-		g.active.handle == nil || g.active.state != FrameInitialSuspended {
-		return Action{}, false
-	}
-	schedule := preemptLoad(&p.schedule)
-	if schedule != scheduleIdle && schedule != scheduleRequested {
-		return Action{}, false
+	if !AuditEnabled {
+		if p == nil || g == nil || !g.initialRunPrepared || g.active == nil || g.active.handle == nil {
+			return Action{}, false
+		}
+	} else {
+		if p == nil || g == nil || !g.initialRunPrepared ||
+			!gPreemptEnabledAtDepthZero(g) || g.active == nil ||
+			g.active.handle == nil || g.active.state != FrameInitialSuspended {
+			return Action{}, false
+		}
+		schedule := preemptLoad(&p.schedule)
+		if schedule != scheduleIdle && schedule != scheduleRequested {
+			return Action{}, false
+		}
 	}
 	handle := g.active.handle
 	budget := servicePreemptSafepointBudget

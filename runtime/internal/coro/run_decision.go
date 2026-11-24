@@ -137,6 +137,11 @@ func prepareRunDecision(p *P, g *G) bool {
 // independent writer exists between those adjacent gates. Compatibility
 // Checked retains prepareRunDecision's complete arbitrary-caller validation.
 func prepareIssuedRunDecision(p *P, g *G) bool {
+	if !AuditEnabled && (g.park.phase == parkIdle || g.park.phase == parkDelivered) &&
+		g.park.taskCancelPhase != taskCancelRequested {
+		p.runDecision = RunDecision{}
+		return true
+	}
 	// BeginRunG is the sole producer of this exact P/G/ActionCheckResume
 	// episode and already audited the runnable ParkState before publishing it.
 	// No producer can mutate a materialized frame packet or scheduler-owned
