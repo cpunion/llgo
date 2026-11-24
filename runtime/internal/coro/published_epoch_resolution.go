@@ -110,6 +110,9 @@ func validPublishedEpochResolveCursor(cursor *publishedEpochResolveCursor, p *P)
 		cursor.wait.ticket != cursor.wait.g.park.ticket || cursor.batchTail == nil || cursor.batchTail.workNext != nil {
 		return false
 	}
+	if !AuditEnabled {
+		return cursor.nextWait == cursor.wait.workNext
+	}
 	if cursor.nextWait != cursor.wait.workNext {
 		return false
 	}

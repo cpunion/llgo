@@ -7,6 +7,7 @@
 package os
 
 import (
+	"internal/poll"
 	"io"
 	"runtime"
 	"syscall"
@@ -19,7 +20,20 @@ func (f *File) Read(b []byte) (n int, err error) {
 	if err := f.checkValid("read"); err != nil {
 		return 0, err
 	}
-	n, err = f.pfd.Read(b)
+	var status uint8
+	n, err, status = f.pfd.LLGoTryRead(b)
+	switch status {
+	case poll.LLGoTryDone:
+	case poll.LLGoTryDoneSlowUnlock:
+		f.pfd.LLGoSlowReadUnlock()
+	case poll.LLGoTryWaitLocked:
+		n, err = f.pfd.LLGoReadWaitLocked(b)
+	case poll.LLGoTryFallbackSlowUnlock:
+		f.pfd.LLGoSlowReadUnlock()
+		n, err = f.pfd.Read(b)
+	default:
+		n, err = f.pfd.Read(b)
+	}
 	runtime.KeepAlive(f)
 	// The error wrapper may suspend. Skip its coroutine call on success.
 	if err != nil {
@@ -35,7 +49,30 @@ func (f *File) Write(b []byte) (n int, err error) {
 	if err := f.checkValid("write"); err != nil {
 		return 0, err
 	}
-	n, e := f.pfd.Write(b)
+	var e error
+	var status uint8
+	n, e, status = f.pfd.LLGoTryWrite(b)
+	switch status {
+	case poll.LLGoTryDone:
+	case poll.LLGoTryDoneSlowUnlock:
+		f.pfd.LLGoSlowWriteUnlock()
+	case poll.LLGoTryWaitLocked:
+		n, e = f.pfd.LLGoWriteWaitLocked(b, n)
+	case poll.LLGoTryPartialWrite:
+		var m int
+		m, e = f.pfd.Write(b[n:])
+		n += m
+	case poll.LLGoTryPartialWriteSlowUnlock:
+		f.pfd.LLGoSlowWriteUnlock()
+		var m int
+		m, e = f.pfd.Write(b[n:])
+		n += m
+	case poll.LLGoTryFallbackSlowUnlock:
+		f.pfd.LLGoSlowWriteUnlock()
+		n, e = f.pfd.Write(b)
+	default:
+		n, e = f.pfd.Write(b)
+	}
 	runtime.KeepAlive(f)
 	if n < 0 {
 		n = 0
@@ -60,7 +97,14 @@ func (f *File) Seek(offset int64, whence int) (int64, error) {
 		// Discard the directory buffer so the next read starts at the new offset.
 		info.close()
 	}
-	ret, err := f.pfd.Seek(offset, whence)
+	ret, err, status := f.pfd.LLGoTrySeek(offset, whence)
+	switch status {
+	case poll.LLGoTryDone:
+	case poll.LLGoTryDoneSlowUnlock:
+		f.pfd.LLGoSlowDecref()
+	default:
+		ret, err = f.pfd.Seek(offset, whence)
+	}
 	runtime.KeepAlive(f)
 	if err == nil && f.dirinfo.Load() != nil && ret != 0 {
 		err = syscall.EISDIR

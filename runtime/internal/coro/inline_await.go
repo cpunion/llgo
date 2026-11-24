@@ -614,6 +614,18 @@ func CommitInlineAwaitDestroy(g *G, parentHandle, childHandle unsafe.Pointer) bo
 // is the durable child identity, so a second scan of the remaining frame list
 // is unnecessary on this private suffix.
 func CommitInlineAwaitDestroyCompiler(g *G, parentHandle, childHandle unsafe.Pointer) bool {
+	if !AuditEnabled && g != nil && g.runP != nil {
+		parent := g.active
+		if parent != nil && parent.handle == parentHandle && parent.header != nil &&
+			g.pending.kind == pendingNone && g.destroyTarget == nil &&
+			parent.completion.child == childHandle && parent.completion.status == CompletionReturn &&
+			parent.completion.typeWord == nil && parent.completion.dataWord == nil {
+			parent.state = FrameActive
+			parent.header.SuspendReason = uint16(SuspendNone)
+			parent.header.Lifecycle = uint16(FrameActive)
+			return true
+		}
+	}
 	if ValidG(g) && parentHandle != nil && childHandle != nil && g.runP != nil {
 		p := g.runP
 		parent := g.active
@@ -753,7 +765,7 @@ func resumedFrameForAction(g *G, action Action) (*Frame, bool) {
 		g.active.state != FrameActive {
 		return nil, false
 	}
-	if g.active.handle == action.Handle {
+	if !AuditEnabled || g.active.handle == action.Handle {
 		return g.active, true
 	}
 	root := findFrame(g, action.Handle)

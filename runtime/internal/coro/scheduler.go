@@ -360,8 +360,11 @@ func setAction(p *P, kind ActionKind, handle unsafe.Pointer) (Action, bool) {
 }
 
 func expectedAction(p *P, g *G, action Action, kind ActionKind) bool {
-	return p != nil && p.current == g && ValidG(g) && action.Kind == kind && action.Flags == 0 && action.Handle != nil &&
-		p.action == action && g.runP == p
+	if p == nil || p.current != g || g == nil || action.Kind != kind || action.Flags != 0 || action.Handle == nil ||
+		p.action != action || g.runP != p {
+		return false
+	}
+	return !AuditEnabled || ValidG(g)
 }
 
 // InitG initializes a zero G.
@@ -810,6 +813,16 @@ func dequeueOSThreadRunnable(p *P) *G {
 }
 
 func enqueueParkSet(p *P, g *G) bool {
+	if !AuditEnabled {
+		if p == nil || g == nil || g.active == nil || g.active.parkWait == nil ||
+			g.state != GWaiting || g.isWaiting() ||
+			g.isQueued() || g.nextReady != nil || g.runP != nil || g.transferState != runnableTransferGIdle ||
+			g.park.phase != parkParked {
+			return false
+		}
+		activateWaitSetRecordUnchecked(p, g, g.active.parkWait)
+		return true
+	}
 	if p == nil || !ValidG(g) || g.active == nil || g.active.parkWait == nil ||
 		g.state != GWaiting || g.isWaiting() ||
 		g.isQueued() || g.nextReady != nil || g.runP != nil || g.transferState != runnableTransferGIdle ||
@@ -1628,7 +1641,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		// BeginRunG guarantees that a running G has no ready-queue link. Check
 		// the remaining queue invariants before committing any state so a
 		// corrupted queue cannot leave a half-requeued G behind.
-		if g.isQueued() || g.nextReady != nil || !validReadyQueueHeader(p) {
+		if g.isQueued() || g.nextReady != nil || (AuditEnabled && !validReadyQueueHeader(p)) {
 			return Action{}, false
 		}
 		if !acknowledgeSuspendedGPreempt(g) {
@@ -1645,8 +1658,9 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		return Action{Kind: ActionYield}, true
 	}
 	if g.park.phase == parkParked {
-		if g.isQueued() || g.nextReady != nil || !validParkWaitQueueHeader(p) ||
-			!validAffectedWaitQueueHeader(p) || !canAccountWaitSetExternal(p, g, g.active.parkWait) {
+		if g.isQueued() || g.nextReady != nil ||
+			(AuditEnabled && (!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p))) ||
+			!canAccountWaitSetExternal(p, g, g.active.parkWait) {
 			return Action{}, false
 		}
 		if !acknowledgeSuspendedGPreempt(g) {

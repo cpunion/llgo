@@ -156,8 +156,17 @@ func validActiveParkStateHeader(state *ParkState, ticket ParkTicket) bool {
 // ParkState headers. It never walks candidate ParkLinks and is the predicate
 // used by fact publication, cancellation, affected pop, and promotion.
 func validActiveWaitSetRecordFast(p *P, record *WaitSetRecord) bool {
-	if record == nil {
+	if record == nil || p == nil {
 		return false
+	}
+	if !AuditEnabled {
+		if record.state != waitSetRecordActive || record.g == nil ||
+			record.g.state != GWaiting || record.g.active == nil ||
+			record.g.active.parkWait != record {
+			return false
+		}
+		external, externalOK := waitSetExternalCount(record.g, record)
+		return externalOK && external <= p.externalWaitCount
 	}
 	external, externalOK := waitSetExternalCount(record.g, record)
 	if p == nil || record.state != waitSetRecordActive || !validParkTicket(record.ticket) ||

@@ -1572,13 +1572,24 @@ func (p *context) emitCoroStaticInlineAwait(
 	return completed.Expr
 }
 
+const coroInlinePanicBoundaryResumeHelperV1 = "__llgo_coro_inline_panic_boundary_resume_v1"
+
+func coroInlinePanicBoundaryResumeHelperName(pushName, popName, stageName string) string {
+	if pushName == coroPanicBoundaryPushHookV1 &&
+		popName == coroPanicBoundaryPopHookV1 &&
+		stageName == coroPanicBoundaryStageHookV1 {
+		return coroInlinePanicBoundaryResumeHelperV1
+	}
+	return coroInlinePanicBoundaryResumeHelperV1 + "." + pushName
+}
+
 // emitCoroInlineChildResume wraps the one direct child resume in the same
-// native panic boundary as an executor resume. Keeping llvm.coro.resume in
-// this exact static caller is essential: LLVM 22's CoroAnnotationElide can
-// still embed the child frame, while a fault in the child lands at the child's
-// own generated resume gate instead of abandoning the surrounding parent
-// resume transaction. No boundary or setjmp symbol is emitted on non-native
-// targets.
+// native panic boundary as an executor resume. The fast path keeps
+// llvm.coro.resume directly in this exact static caller while the cold
+// boundary path delegates sigsetjmp/Defer stack storage to a noinline helper
+// so LLVM CoroSplit never spills sigjmp_buf/Defer into coroutine frames
+// (including inside loops) and avoids returns_twice register pessimization.
+// No boundary or setjmp symbol is emitted on non-native targets.
 func (p *context) emitCoroInlineChildResume(body *coroBodyContext, b llssa.Builder, child llssa.Expr) {
 	if body == nil || b == nil || b.Func != p.fn || child.IsNil() {
 		panic("inline coroutine child resume has an incomplete physical body")
@@ -1617,77 +1628,25 @@ func (p *context) emitCoroInlineChildResume(body *coroBodyContext, b llssa.Build
 	enabledHook := p.pkg.NewFunc(
 		enabledName, coroPanicBoundaryEnabledSignature(), llssa.InC,
 	).Expr
-	push := p.pkg.NewFunc(
-		pushName, coroPanicBoundaryPushSignature(), llssa.InC,
-	).Expr
-	pop := p.pkg.NewFunc(
-		popName, coroPanicBoundaryCloseSignature(), llssa.InC,
-	).Expr
-	stage := p.pkg.NewFunc(
-		stageName, coroPanicBoundaryCloseSignature(), llssa.InC,
-	).Expr
+	helper := p.pkg.CoroInlinePanicBoundaryResumeHelper(
+		coroInlinePanicBoundaryResumeHelperName(pushName, popName, stageName),
+		pushName,
+		popName,
+		stageName,
+	)
 	enabled := b.Call(enabledHook, body.task)
-	allocate := p.fn.MakeBlock()
+	protected := p.fn.MakeBlock()
 	fast := p.fn.MakeBlock()
-	setjmp := p.fn.MakeBlock()
-	pushBoundary := p.fn.MakeBlock()
-	resume := p.fn.MakeBlock()
-	landed := p.fn.MakeBlock()
-	popBoundary := p.fn.MakeBlock()
 	done := p.fn.MakeBlock()
-	b.IfWithBranchWeights(enabled, allocate, fast, 1, 1000)
+	b.IfWithBranchWeights(enabled, protected, fast, 1, 1000)
 
-	b.SetBlockEx(allocate, llssa.AtEnd, false)
-	// These compiler-owned target types are the same single source of truth
-	// used by ordinary defer lowering. Both addresses have only this native
-	// activation's lifetime and never enter the coroutine frame. Keep their
-	// initialization off the default fast path.
-	boundary := b.AllocaZeroedT(p.prog.Defer())
-	env := b.AllocaSigjmpBuf()
-	b.Jump(setjmp)
-
-	b.SetBlockEx(fast, llssa.AtEnd, false)
-	b.Jump(resume)
-
-	b.SetBlockEx(setjmp, llssa.AtEnd, false)
-	result := b.Sigsetjmp(env, p.prog.IntVal(0, p.prog.CInt()))
-	direct := b.BinOp(token.EQL, result, p.prog.IntVal(0, p.prog.CInt()))
-	b.IfWithBranchWeights(direct, pushBoundary, landed, 1000, 1)
-
-	b.SetBlockEx(pushBoundary, llssa.AtEnd, false)
-	b.Call(
-		push,
-		body.task,
-		child,
-		b.Convert(p.prog.VoidPtr(), boundary),
-		b.Convert(p.prog.VoidPtr(), env),
-	)
-	b.Jump(resume)
-
-	b.SetBlockEx(resume, llssa.AtEnd, false)
-	activeBoundary := b.Phi(boundary.Type)
-	activeBoundary.AddIncoming(b, []llssa.BasicBlock{fast, pushBoundary}, func(index int, _ llssa.BasicBlock) llssa.Expr {
-		if index == 0 {
-			return p.prog.Nil(boundary.Type)
-		}
-		return boundary
-	})
-	b.CoroResume(child)
-	b.IfWithBranchWeights(
-		b.BinOp(token.NEQ, activeBoundary.Expr, p.prog.Nil(boundary.Type)),
-		popBoundary,
-		done,
-		1,
-		1000,
-	)
-
-	b.SetBlockEx(popBoundary, llssa.AtEnd, false)
-	b.Call(pop, body.task, child, b.Convert(p.prog.VoidPtr(), activeBoundary.Expr))
+	b.SetBlockEx(protected, llssa.AtEnd, false)
+	b.Call(helper, body.task, child)
 	b.Jump(done)
 
-	b.SetBlockEx(landed, llssa.AtEnd, false)
-	b.Call(stage, body.task, child, b.Convert(p.prog.VoidPtr(), boundary))
-	b.Jump(setjmp)
+	b.SetBlockEx(fast, llssa.AtEnd, false)
+	b.CoroResume(child)
+	b.Jump(done)
 
 	b.SetBlockContinuation(done)
 }

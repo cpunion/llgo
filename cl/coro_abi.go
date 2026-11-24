@@ -1693,6 +1693,12 @@ func (p *context) compileCoroTailForwardParameter(
 	for _, field := range argument.fieldPath {
 		value = b.Field(value, field)
 	}
+	switch argument.builtin {
+	case coroForwardingBuiltinLen:
+		value = b.BuiltinCall("len", value)
+	case coroForwardingBuiltinCap:
+		value = b.BuiltinCall("cap", value)
+	}
 	if argument.retagTransportKey != "" {
 		value = b.ChangeType(p.prog.Type(argument.targetType, llssa.InGo), value)
 	}

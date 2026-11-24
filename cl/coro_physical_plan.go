@@ -664,6 +664,7 @@ type coroPhysicalTailForwardArgument struct {
 	constant          *ssa.Const
 	targetType        types.Type
 	fieldPath         []int
+	builtin           coroForwardingBuiltinKind
 	retagTransportKey string
 }
 
@@ -730,6 +731,10 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 			if !projected {
 				return fmt.Errorf("tail-forward argument %d has an invalid value-field projection", index)
 			}
+			sourceType, projected = coroForwardingBuiltinResultType(sourceType, argument.builtin)
+			if !projected {
+				return fmt.Errorf("tail-forward argument %d has an invalid header builtin projection", index)
+			}
 			identical := types.Identical(sourceType, argument.targetType)
 			if identical && argument.retagTransportKey != "" {
 				return fmt.Errorf("tail-forward argument %d has a redundant source parameter retag", index)
@@ -742,7 +747,7 @@ func (plan *coroPhysicalTailForwardPlan) validate(
 		if argument.retagTransportKey != "" {
 			return fmt.Errorf("tail-forward argument %d retags a constant", index)
 		}
-		if len(argument.fieldPath) != 0 {
+		if len(argument.fieldPath) != 0 || argument.builtin != coroForwardingBuiltinNone {
 			return fmt.Errorf("tail-forward argument %d projects a constant", index)
 		}
 		if argument.constant.Type() == nil ||
@@ -1278,22 +1283,28 @@ func planCoroPhysicalTailForward(
 			if source.sourceParameter >= sourceSig.Params().Len() || source.projectedType == nil || source.valueType == nil {
 				return nil, nil
 			}
-			retag := !types.Identical(source.projectedType, targetType)
+			effectiveType, validBuiltin := coroForwardingBuiltinResultType(source.projectedType, source.builtin)
+			if !validBuiltin {
+				return nil, nil
+			}
+			retag := !types.Identical(effectiveType, targetType)
 			transportKey := ""
 			if retag {
-				transportKey = coroPhysicalTransportTypeKey(universe, source.projectedType)
+				transportKey = coroPhysicalTransportTypeKey(universe, effectiveType)
 				if transportKey != coroPhysicalTransportTypeKey(universe, targetType) {
 					return nil, nil
 				}
 			}
 			if !types.Identical(source.valueType, targetType) ||
-				(!shape.methodProjection && ((source.direct && retag) || (!source.direct && !retag && len(source.fieldPath) == 0))) ||
+				(!shape.methodProjection && ((source.direct && (retag || source.builtin != coroForwardingBuiltinNone)) ||
+					(!source.direct && !retag && len(source.fieldPath) == 0 && source.builtin == coroForwardingBuiltinNone))) ||
 				(retag && transportKey == "") {
 				return nil, nil
 			}
 			arguments[index] = coroPhysicalTailForwardArgument{
 				sourceParameter: source.sourceParameter, targetType: targetType,
-				fieldPath: append([]int(nil), source.fieldPath...), retagTransportKey: transportKey,
+				fieldPath: append([]int(nil), source.fieldPath...), builtin: source.builtin,
+				retagTransportKey: transportKey,
 			}
 			continue
 		}

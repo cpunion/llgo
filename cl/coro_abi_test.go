@@ -303,6 +303,117 @@ func Leaf(value uint32) uint32 { return value + 1 }
 	}
 }
 
+func TestCoroNativeInlineAwaitPanicBoundaryAddsNoCoroutineFrameStorage(t *testing.T) {
+	const source = `package foo
+//go:noinline
+func Child(p *uint32) uint32 { return *p }
+
+func Caller(p *uint32) uint32 { return Child(p) + 1 }
+
+func LoopCaller(p *uint32, n int) uint32 {
+	var sum uint32
+	for i := 0; i < n; i++ {
+		sum += Child(p)
+	}
+	return sum
+}
+`
+	for _, fnName := range []string{"Caller", "LoopCaller"} {
+		t.Run(fnName, func(t *testing.T) {
+			frameSize := make(map[bool]uint64)
+			for _, enabled := range []bool{false, true} {
+				ssaPkg, _, files := buildGoSSAPkg(t, source)
+				prog := newLLSSAProg(t)
+				universe, err := prepareStacklessEmissionUniverse(
+					prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+				)
+				if err != nil {
+					prog.Dispose()
+					t.Fatal(err)
+				}
+				ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+				if err != nil {
+					prog.Dispose()
+					t.Fatal(err)
+				}
+				child, callerFn := ssaPkg.Func("Child"), ssaPkg.Func(fnName)
+				plan, err := coro.AnalyzeSSA(
+					ssaPkg.Prog,
+					coro.Roots{{Function: callerFn, Demand: coro.AsyncDemand}},
+					coro.SSAConfig{
+						EmissionUniverse:     ssaUniverse,
+						FunctionIDs:          universe.FunctionIDConfig(),
+						MaxPlainInstructions: -1,
+						ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+							if function == child || function == callerFn {
+								return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+							}
+							return coro.SSAFunctionPolicy{}, nil
+						},
+					},
+				)
+				if err != nil {
+					prog.Dispose()
+					t.Fatal(err)
+				}
+				compilation := &Compilation{
+					CoroPlan:                           plan,
+					EmissionUniverse:                   universe,
+					FinalCoroProgramCapabilities:       coro.NewProgramCapabilities(false, enabled),
+					FinalCoroProgramCapabilitiesFrozen: true,
+				}
+				pkg, _, err := NewPackageExWithEmbedOptions(
+					prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+					PackageOptions{Compilation: compilation},
+				)
+				if err != nil {
+					prog.Dispose()
+					t.Fatal(err)
+				}
+				module := pkg.Module()
+				caller := module.NamedFunction("foo." + fnName + "$coro")
+				if caller.IsNil() {
+					module.Dispose()
+					prog.Dispose()
+					t.Fatalf("missing coroutine %s", fnName)
+				}
+				if enabled && !strings.Contains(caller.String(), coroInlinePanicBoundaryResumeHelperV1) {
+					body := caller.String()
+					module.Dispose()
+					prog.Dispose()
+					t.Fatalf("expected inline panic boundary helper call in %s:\n%s", fnName, body)
+				}
+				if enabled {
+					helper := module.NamedFunction(coroInlinePanicBoundaryResumeHelperV1)
+					if helper.IsNil() {
+						module.Dispose()
+						prog.Dispose()
+						t.Fatalf("missing outlined inline panic boundary helper in %s", fnName)
+					}
+					helperIR := helper.String()
+					pushIndex := strings.Index(helperIR, "call void @"+coroPanicBoundaryPushHookV1)
+					resumeIndex := strings.Index(helperIR, "call void @llvm.coro.resume")
+					popIndex := strings.Index(helperIR, "call void @"+coroPanicBoundaryPopHookV1)
+					if pushIndex < 0 || resumeIndex <= pushIndex || popIndex <= resumeIndex ||
+						!strings.Contains(helperIR, "call void @"+coroPanicBoundaryStageHookV1) ||
+						!regexp.MustCompile(`call i32 @(?:__)?sigsetjmp\(ptr [^,]+, i32 0\)`).MatchString(helperIR) {
+						module.Dispose()
+						prog.Dispose()
+						t.Fatalf("outlined inline panic boundary helper lost push -> resume -> pop/stage/sigsetjmp contract:\n%s", helperIR)
+					}
+				}
+				runCoroABITestPipeline(t, prog, module)
+				frameSize[enabled] = coroFrameAllocationSize(t, module.NamedFunction("foo."+fnName+"$coro"), prog.PointerSize()*8)
+				module.Dispose()
+				prog.Dispose()
+			}
+			if frameSize[true] != frameSize[false] {
+				t.Fatalf("%s native inline panic boundary spilled storage into coroutine frame: disabled=%d enabled=%d", fnName, frameSize[false], frameSize[true])
+			}
+		})
+	}
+}
+
 func TestCoroPanicBoundaryIsAbsentFromStacklessPortableTargets(t *testing.T) {
 	const source = `package foo
 func Leaf(value uint32) uint32 { return value + 1 }
@@ -3715,19 +3826,14 @@ func assertCoroStaticChildAwait(t *testing.T, parent string, nativeFaultBoundary
 	popCall := "call void @" + coroPanicBoundaryPopHookV1
 	stageCall := "call void @" + coroPanicBoundaryStageHookV1
 	enabledCall := "call i1 @" + coroPanicBoundaryEnabledHookV1
+	helperCall := "call void @" + coroInlinePanicBoundaryResumeHelperV1
 	if nativeFaultBoundary {
-		pushIndex := strings.Index(suffix, pushCall)
-		resumeIndex := strings.Index(suffix, resumeCall)
-		popIndex := strings.Index(suffix, popCall)
-		if !strings.Contains(suffix, enabledCall) || pushIndex < 0 || resumeIndex <= pushIndex ||
-			popIndex <= resumeIndex || !strings.Contains(suffix, stageCall) ||
+		if !strings.Contains(suffix, enabledCall) || !strings.Contains(suffix, helperCall) ||
 			strings.Count(suffix, resumeCall) != 1 {
-			t.Fatalf("Parent native static-inline ownership does not contain enabled -> conditional push -> one resume -> pop and landing stage:\n%s", parent)
+			t.Fatalf("Parent native static-inline ownership does not contain enabled -> outlined boundary helper and one fast resume:\n%s", parent)
 		}
-		if !regexp.MustCompile(`call i32 @(?:__)?sigsetjmp\(ptr [^,]+, i32 0\)`).MatchString(suffix) {
-			t.Fatalf("Parent native static-inline boundary does not use target sigjmp storage with savemask=0:\n%s", parent)
-		}
-	} else if strings.Contains(suffix, enabledCall) || strings.Contains(suffix, pushCall) || strings.Contains(suffix, popCall) ||
+	} else if strings.Contains(suffix, enabledCall) || strings.Contains(suffix, helperCall) ||
+		strings.Contains(suffix, pushCall) || strings.Contains(suffix, popCall) ||
 		strings.Contains(suffix, stageCall) {
 		t.Fatalf("Parent non-native static-inline ownership retained a native fault boundary:\n%s", parent)
 	}
