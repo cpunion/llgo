@@ -47,6 +47,19 @@ func (quota *ExecutionQuota) hasWaiters() bool {
 	return preemptLoad(&quota.waiters) != 0
 }
 
+// SoloActive reports whether route is the sole active holder of the execution
+// quota with no waiting routes and active lifecycle.
+func (quota *ExecutionQuota) SoloActive(route RouteID) bool {
+	_, _, shift, ok := executionQuotaRouteMasks(route)
+	if quota == nil || !ok {
+		return false
+	}
+	return preemptLoad(&quota.lifecycle) == uint32(executionQuotaActive) &&
+		preemptLoad(&quota.active) == 1 &&
+		preemptLoad(&quota.waiters) == 0 &&
+		preemptLoad(&quota.holders) == uint32(executionQuotaHolderHeld)<<shift
+}
+
 const executionQuotaSize = 20
 
 type executionQuotaHolderState uint32

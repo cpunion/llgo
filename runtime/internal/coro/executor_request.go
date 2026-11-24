@@ -240,6 +240,19 @@ func (registry *ExecutorRegistry) ObserveRequested(handle ExecutorHandle) bool {
 	return gate&^executorGateMask == 0 && gate&executorGateClosed == 0 && gate&executorGateRequested != 0
 }
 
+// ObserveIdleUnrequested reports whether handle is actively sleeping with no
+// pending or closed request bit. Combined with a target-side quiescent-sleep
+// marker, it lets a solo active route prove that a peer route has neither an
+// external wake source nor a racing request.
+func (registry *ExecutorRegistry) ObserveIdleUnrequested(handle ExecutorHandle) bool {
+	slot, ok := executorSlot(registry, handle)
+	if !ok || preemptLoad(&slot.generation) != handle.Generation ||
+		preemptLoad(&slot.state) != uint32(executorActive) {
+		return false
+	}
+	return preemptLoad(&slot.gate) == executorGateIdleArmed
+}
+
 // Acknowledge clears the advisory request after publication epoch A. The
 // caller must run one unconditional full epoch B after this CAS because a
 // producer may have coalesced immediately before the clear. A request arriving

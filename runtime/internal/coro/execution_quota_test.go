@@ -373,3 +373,63 @@ func TestExecutionQuotaConcurrentResizeMaintainsPhysicalBound(t *testing.T) {
 		t.Fatal("retire resized execution quota")
 	}
 }
+
+func TestExecutionQuotaSoloActive(t *testing.T) {
+	quota := new(ExecutionQuota)
+	if quota.SoloActive(1) {
+		t.Fatal("unused quota reported SoloActive")
+	}
+	if !quota.Start(2) {
+		t.Fatal("start execution quota")
+	}
+	if quota.SoloActive(1) {
+		t.Fatal("idle quota reported SoloActive")
+	}
+	if acquired, ok := quota.TryAcquire(1); !acquired || !ok {
+		t.Fatal("acquire route 1")
+	}
+	if !quota.SoloActive(1) || quota.SoloActive(2) {
+		t.Fatal("route 1 alone should report SoloActive(1)=true, SoloActive(2)=false")
+	}
+	// Second active route disables SoloActive.
+	if acquired, ok := quota.TryAcquire(2); !acquired || !ok {
+		t.Fatal("acquire route 2")
+	}
+	if quota.SoloActive(1) || quota.SoloActive(2) {
+		t.Fatal("two active routes must not report SoloActive")
+	}
+	if _, ok := quota.Release(2); !ok {
+		t.Fatal("release route 2")
+	}
+	if !quota.SoloActive(1) {
+		t.Fatal("route 1 alone after release should report SoloActive")
+	}
+	// Waiting route under limit=1 disables SoloActive.
+	if _, _, ok := quota.SetLimit(1); !ok {
+		t.Fatal("set limit 1")
+	}
+	if acquired, ok := quota.TryAcquire(2); acquired || !ok {
+		t.Fatalf("route 2 acquire under limit=1 = (%t, %t), want (false, true)", acquired, ok)
+	}
+	if quota.SoloActive(1) {
+		t.Fatal("route 1 with route 2 waiting must not report SoloActive")
+	}
+	if _, ok := quota.Release(1); !ok {
+		t.Fatal("release route 1")
+	}
+	if acquired, ok := quota.TryAcquire(2); !acquired || !ok {
+		t.Fatal("route 2 claim permit")
+	}
+	if !quota.SoloActive(2) {
+		t.Fatal("route 2 alone should report SoloActive")
+	}
+	if _, ok := quota.Seal(); !ok {
+		t.Fatal("seal quota")
+	}
+	if quota.SoloActive(2) {
+		t.Fatal("sealed quota must not report SoloActive")
+	}
+	if _, ok := quota.Release(2); !ok || !quota.Quiesced() || !quota.Retire() {
+		t.Fatal("retire quota")
+	}
+}

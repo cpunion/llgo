@@ -1041,3 +1041,54 @@ func TestCoroNativeFleetPollStorageMaterializesOneStableRoute(t *testing.T) {
 		t.Fatal("wait storage address changed")
 	}
 }
+
+func TestCoroNativeFleetQuiescentMaskTracksStandbySleepAndWake(t *testing.T) {
+	saved := coroNativeFleetV1State
+	savedMask := coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)
+	coroNativeFleetV1State = coroNativeFleetStateV1{}
+	coroNativeAtomicStoreV1(&coroNativeFleetQuiescentMaskV1, 0)
+	t.Cleanup(func() {
+		for i := uint32(0); i < coroNativeFleetV1State.domainCount; i++ {
+			if !coroNativeFleetV1State.domains[i].doorbell.Close() {
+				t.Error("close test doorbell")
+			}
+		}
+		coroNativeFleetV1State = saved
+		coroNativeAtomicStoreV1(&coroNativeFleetQuiescentMaskV1, savedMask)
+	})
+	if !coroNativeFleetStartStateV1(&coroNativeFleetV1State, 2) {
+		t.Fatal("start two routes")
+	}
+	handle := coroNativeFleetV1State.domains[1].handle
+	peerBit := uint32(1) << (handle.Route - 1)
+	if coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)&peerBit != 0 {
+		t.Fatal("peer bit must start cleared")
+	}
+	epoch, ok := coroNativeFleetBeginOwnerEpochV1(handle)
+	if !ok {
+		t.Fatal("begin peer owner epoch")
+	}
+	plan, ok := coroNativeFleetPrepareOwnerWaitAtV1(handle, epoch, 100, 100)
+	if !ok || !plan.Armed || plan.HasDeadline {
+		t.Fatalf("PrepareOwnerWaitAtV1 = (%+v, %t)", plan, ok)
+	}
+	if coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)&peerBit == 0 {
+		t.Fatal("quiescent sleeping peer must set its quiescent bit")
+	}
+	if !coro.DriverIdleUnrequested(coroNativeFleetV1State.domains[1].driverOwnerV1()) {
+		t.Fatal("quiescent sleeping peer must report DriverIdleUnrequested")
+	}
+	// A request must immediately invalidate DriverIdleUnrequested.
+	if result := coroNativeFleetV1State.fleet.RequestExecutor(handle); result != coro.ExecutorRequestIdleWake {
+		t.Fatalf("RequestExecutor = %v, want IdleWake", result)
+	}
+	if coro.DriverIdleUnrequested(coroNativeFleetV1State.domains[1].driverOwnerV1()) {
+		t.Fatal("requested peer must not report DriverIdleUnrequested")
+	}
+	if _, ok := coroNativeFleetWakeOwnerAtV1(handle, 101); !ok {
+		t.Fatal("wake peer owner")
+	}
+	if coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)&peerBit != 0 {
+		t.Fatal("woken peer must clear its quiescent bit")
+	}
+}
