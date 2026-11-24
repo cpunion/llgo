@@ -338,6 +338,24 @@ func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
 // validated its descriptor capability, so an O(n) handle lookup and another
 // program-object range proof are unnecessary here.
 func CommitSpawnCompiler(parent, child *G, handle unsafe.Pointer) bool {
+	if !AuditEnabled && parent != nil && child != nil && child.spawnP != nil {
+		p := child.spawnP
+		root := child.frames
+		if root != nil {
+			if p.readyCount != 0 && !RequestPreempt(parent) {
+				return false
+			}
+			child.root = root
+			child.active = root
+			child.state = GRunnable
+			child.initialRunPrepared = true
+			child.spawnParent = nil
+			child.spawnP = nil
+			appendReadyUnchecked(p, child)
+			parent.spawnChild = nil
+			return true
+		}
+	}
 	if parent == nil || child == nil || child == parent || handle == nil ||
 		parent.spawnChild != child || child.spawnParent != parent ||
 		child.spawnP == nil || parent.runP != child.spawnP {

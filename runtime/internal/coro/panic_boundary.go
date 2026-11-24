@@ -98,6 +98,9 @@ func ResumePanicBoundaryMayLand(g *G, handle unsafe.Pointer) bool {
 // validator for every other entry shape. Signal landing always uses the full
 // ResumePanicBoundaryMayLand proof.
 func ResumePanicBoundaryActiveCompiler(g *G, handle unsafe.Pointer) bool {
+	if !AuditEnabled {
+		return g != nil && handle != nil
+	}
 	if ValidG(g) && handle != nil && g.runP != nil {
 		p := g.runP
 		pending := g.pending
@@ -119,6 +122,9 @@ func ResumePanicBoundaryActiveCompiler(g *G, handle unsafe.Pointer) bool {
 // A real suspension, exceptional completion or ancestor unwind keeps the full
 // returning-ancestry proof below.
 func ResumePanicBoundaryReturningCompiler(g *G, handle unsafe.Pointer) bool {
+	if !AuditEnabled {
+		return g != nil && handle != nil
+	}
 	if ValidG(g) && handle != nil && g.runP != nil {
 		p := g.runP
 		pending := g.pending

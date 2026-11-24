@@ -57,6 +57,25 @@ const maxInlineAwaitDepth uint8 = 16
 func PrepareInlineAwaitCompiler(
 	g *G, parentHandle, childHandle, recoverType, recoverData unsafe.Pointer,
 ) InlineAwaitDisposition {
+	if !AuditEnabled && recoverType == nil && recoverData == nil && g != nil && g.runP != nil {
+		p := g.runP
+		parent, child := g.active, g.frames
+		if parent != nil && child != nil && parent != child && parent.handle == parentHandle && child.handle == childHandle {
+			parent.completion.child = childHandle
+			parent.completion.status = completionArmed
+			linkAwaitChild(parent, child)
+			if p.inlineAwaitDepth >= maxInlineAwaitDepth {
+				g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
+				return InlineAwaitDeclined
+			}
+			parent.state = FrameSuspended
+			child.state = FrameActive
+			g.active = child
+			g.pending = pendingTransition{kind: pendingInlineStart, from: parent, target: child}
+			p.inlineAwaitDepth++
+			return InlineAwaitStarted
+		}
+	}
 	// The ordinary compiler lane is adjacent to the child ramp's successful
 	// PublishFrameV3Compiler return. The active parent, newest initial child,
 	// and already-consumed resume decision are therefore one private phase
@@ -401,6 +420,13 @@ func takeInlineAwaitInitialDecision(g *G, expected ParkTicket) bool {
 // owner-private transaction before the child prologue takes it. Any uncertain
 // shape falls back to takeInlineAwaitInitialDecision through TakeRunDecision.
 func takeInlineAwaitInitialDecisionCompiler(g *G) bool {
+	if !AuditEnabled {
+		if g != nil && g.pending.kind == pendingInlineStart {
+			g.pending = pendingTransition{}
+			return true
+		}
+		return false
+	}
 	if !ValidG(g) || g.runP == nil {
 		return false
 	}
@@ -427,6 +453,14 @@ func takeInlineAwaitInitialDecisionCompiler(g *G) bool {
 func FinishInlineAwait(
 	g *G, parentHandle, childHandle unsafe.Pointer, done bool,
 ) InlineAwaitDisposition {
+	if !AuditEnabled && g != nil && g.runP != nil {
+		p := g.runP
+		if !done && p.inlineAwaitDepth != 0 &&
+			g.pending.kind != pendingNone && g.pending.kind != pendingInlineStart {
+			p.inlineAwaitDepth--
+			return InlineAwaitSuspend
+		}
+	}
 	if !ValidG(g) || parentHandle == nil || childHandle == nil || g.runP == nil {
 		return InlineAwaitInvalid
 	}
@@ -479,6 +513,26 @@ func FinishInlineAwait(
 func FinishInlineAwaitReturnCompiler(
 	g *G, parentHandle, childHandle unsafe.Pointer,
 ) bool {
+	if !AuditEnabled && g != nil && g.runP != nil {
+		pending := g.pending
+		child := pending.from
+		if pending.kind == pendingComplete && child != nil && child == g.active {
+			parent := child.parent
+			if parent != nil && parent.completion.status == CompletionReturn &&
+				parent.completion.typeWord == nil && parent.completion.dataWord == nil {
+				g.active = parent
+				child.state = FrameDestroyPending
+				child.header.Lifecycle = uint16(FrameDestroyPending)
+				g.destroyTarget = child
+				g.pending = pendingTransition{
+					kind: pendingInlineDestroy, from: parent, target: child,
+				}
+				g.runP.inlineAwaitDepth--
+				return true
+			}
+		}
+		return false
+	}
 	if ValidG(g) && parentHandle != nil && childHandle != nil && g.runP != nil {
 		p := g.runP
 		pending := g.pending
@@ -599,6 +653,28 @@ func CommitInlineAwaitDestroyCompiler(g *G, parentHandle, childHandle unsafe.Poi
 func CommitInlineAwaitReturnPhysicalDestroyCompiler(
 	g *G, parentHandle, childHandle unsafe.Pointer,
 ) bool {
+	if !AuditEnabled && g != nil && g.pending.kind == pendingInlineDestroy {
+		parent := g.pending.from
+		child := g.pending.target
+		if child != nil {
+			if g.destroyTarget != child || g.frames != child {
+				return false
+			}
+			g.frames = parent
+			child.next = nil
+			child.state = FrameDestroyed
+			child.header.Lifecycle = uint16(FrameDestroyed)
+			g.destroyTarget = nil
+		} else if g.destroyTarget != nil || g.frames != parent {
+			return false
+		}
+		g.pending = pendingTransition{}
+		parent.state = FrameActive
+		parent.header.SuspendReason = uint16(SuspendNone)
+		parent.header.Lifecycle = uint16(FrameActive)
+		parent.completion = CompletionRecord{}
+		return true
+	}
 	if ValidG(g) && parentHandle != nil && childHandle != nil && !g.destroysRoot() {
 		pending := g.pending
 		parent := pending.from
