@@ -149,6 +149,12 @@ func libc_listen_trampoline()
 //go:linkname libc_mkdir_trampoline C.mkdir
 func libc_mkdir_trampoline()
 
+// mkfifo borrows the NUL-terminated path through completion. The mode and
+// padding word use the same three-word carrier as mkdir.
+//
+//go:linkname libc_mkfifo_trampoline C.mkfifo
+func libc_mkfifo_trampoline()
+
 // mprotect changes process VM metadata for a caller-owned mapped slice. It has
 // no executor-thread affinity or managed callback, while the slice data remains
 // rooted by the suspended generated wrapper through worker completion.
