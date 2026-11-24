@@ -9542,44 +9542,20 @@ func splitManagedSymbolKey(key string) (ftype int, name, signature string, ok bo
 	return ftype, name, signature, true
 }
 
-func (u *EmissionUniverse) packageCallerSets(owner *preparedEmissionPackage) (bool, map[*ssa.Function]bool, map[*ssa.Function]bool) {
+func (owner *preparedEmissionPackage) callerSets(fallback *CallerTracking) (bool, map[*ssa.Function]bool, map[*ssa.Function]bool) {
 	if owner == nil {
 		return false, nil, nil
 	}
 	if owner.callerSetsReady {
 		return owner.trackCallerFrames, owner.runtimeCallerFuncs, owner.logicalCallerFuncs
 	}
-	callerTracking := NewCallerTracking()
-	if u != nil && u.callerTracking != nil {
-		callerTracking = u.callerTracking
+	callerTracking := fallback
+	if callerTracking == nil {
+		callerTracking = NewCallerTracking()
 	}
 	runtimeFuncs := runtimeCallerFuncSet(callerTracking, owner.ssa)
 	logicalFuncs := runtimeLogicalCallerFuncSet(callerTracking, owner.ssa)
 	return owner.sourceUsesRuntimeCaller || len(runtimeFuncs) != 0, runtimeFuncs, logicalFuncs
-}
-
-func (u *EmissionUniverse) signatureString(sig *types.Signature) string {
-	if u != nil && u.planCache != nil {
-		return u.planCache.signatureString(sig)
-	}
-	if sig == nil {
-		return ""
-	}
-	return types.TypeString(sig, func(pkg *types.Package) string { return llssa.PathOf(pkg) })
-}
-
-func (u *EmissionUniverse) ssaFunctionSortKey(fn *ssa.Function) string {
-	if u != nil && u.planCache != nil {
-		return u.planCache.ssaFunctionSortKey(fn)
-	}
-	return emissionFunctionSortKey(fn)
-}
-
-func (u *EmissionUniverse) methodNilDerefChecksFor(fn *ssa.Function) map[*ssa.UnOp]none {
-	if u != nil && u.planCache != nil {
-		return u.planCache.methodNilDerefChecksFor(fn)
-	}
-	return collectMethodNilDerefChecks(fn)
 }
 
 func (u *EmissionUniverse) sortedUseOwners(fn *ssa.Function) []*preparedEmissionPackage {
@@ -9672,7 +9648,7 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 		if owner != nil {
 			ownerPath = owner.identity
 		}
-		return framedEmissionKey("llgo-intrinsic-call-wrapper-v1", ownerPath, u.ssaFunctionSortKey(info.intrinsic))
+		return framedEmissionKey("llgo-intrinsic-call-wrapper-v1", ownerPath, u.planCache.ssaFunctionSortKey(info.intrinsic))
 	}
 	if info, ok := u.builtinSpawnWrapInfo[fn]; ok {
 		if key := u.syntheticKeys[fn]; key != "" {
@@ -9697,7 +9673,7 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 		return framedEmissionKey(
 			"llgo-builtin-spawn-wrapper-v1",
 			ownerPath,
-			u.ssaFunctionSortKey(info.spawn.Parent()),
+			u.planCache.ssaFunctionSortKey(info.spawn.Parent()),
 			info.spawn.String(),
 		)
 	}
@@ -9710,7 +9686,7 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 		}
 		return framedEmissionKey(
 			"llgo-managed-foreign-function-value-wrapper-v1",
-			u.ssaFunctionSortKey(target),
+			u.planCache.ssaFunctionSortKey(target),
 		)
 	}
 	owner := u.ownerOf(fn)
@@ -9726,10 +9702,10 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 			loadedReadOnly: true,
 		}
 		_, name, ftype := ctx.funcName(fn)
-		sig := u.signatureString(fn.Signature)
+		sig := u.planCache.signatureString(fn.Signature)
 		return framedEmissionKey("resolved", strconv.Itoa(ftype), name, sig)
 	}
-	return framedEmissionKey("ssa", u.ssaFunctionSortKey(fn))
+	return framedEmissionKey("ssa", u.planCache.ssaFunctionSortKey(fn))
 }
 
 func (u *EmissionUniverse) functionSortKey(fn *ssa.Function) string {
@@ -9746,7 +9722,7 @@ func (u *EmissionUniverse) functionSortKey(fn *ssa.Function) string {
 		}
 		ownerIDs = strings.Join(ids, "\x00")
 	}
-	return framedEmissionKey(u.finalIdentity(fn), ownerIDs, u.ssaFunctionSortKey(fn))
+	return framedEmissionKey(u.finalIdentity(fn), ownerIDs, u.planCache.ssaFunctionSortKey(fn))
 }
 
 // sortEmissionFunctionsByFrozenKey snapshots the structural key once per

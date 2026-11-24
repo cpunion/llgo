@@ -256,7 +256,7 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 		return nil, fmt.Errorf("ABI type demand requires an emission universe, function, and exact owner")
 	}
 	unevaluated, _ := u.frozenUnsafeLayoutUnevaluatedSSA(fn)
-	trackCallerFrames, runtimeCallerFuncs, logicalCallerFuncs := u.packageCallerSets(owner)
+	trackCallerFrames, runtimeCallerFuncs, logicalCallerFuncs := owner.callerSets(u.callerTracking)
 	return &context{
 		// ABI analysis starts from canonical source identities. Layout demand
 		// explicitly applies PhysicalType/Type after this patch projection.
@@ -269,7 +269,7 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 		patches:              u.patches,
 		loaded:               u.loadedPackages(false),
 		loadedReadOnly:       true,
-		methodNilDerefChecks: u.methodNilDerefChecksFor(fn),
+		methodNilDerefChecks: u.planCache.methodNilDerefChecksFor(fn),
 		unevaluatedSSA:       unevaluated,
 		addrOfFieldAddrs:     owner.addrOfFieldAddrs,
 		emissionUniverse:     u,
@@ -287,11 +287,10 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 	}
 	var normalized typeutil.Map
 	var seen typeutil.Map
-	return u.materializeABITypeDemandWithContext(ctx, &normalized, &seen, fn, owner, root, state)
+	return ctx.materializeABITypeDemand(&normalized, &seen, fn, owner, root, state)
 }
 
-func (u *EmissionUniverse) materializeABITypeDemandWithContext(
-	ctx *context,
+func (ctx *context) materializeABITypeDemand(
 	normalized *typeutil.Map,
 	seen *typeutil.Map,
 	fn *ssa.Function,
@@ -299,6 +298,7 @@ func (u *EmissionUniverse) materializeABITypeDemandWithContext(
 	root types.Type,
 	state emissionFunctionState,
 ) error {
+	u := ctx.emissionUniverse
 	physicalMethodSignature := func(typ types.Type) types.Type {
 		if u.prog == nil {
 			return typ
@@ -411,10 +411,11 @@ func (u *EmissionUniverse) functionABITypeDemands(fn *ssa.Function, owner *prepa
 	if err != nil {
 		return nil, err
 	}
-	return u.functionABITypeDemandsWithContext(ctx, fn, owner)
+	return ctx.functionABITypeDemands(fn, owner)
 }
 
-func (u *EmissionUniverse) functionABITypeDemandsWithContext(ctx *context, fn *ssa.Function, owner *preparedEmissionPackage) ([]types.Type, error) {
+func (ctx *context) functionABITypeDemands(fn *ssa.Function, owner *preparedEmissionPackage) ([]types.Type, error) {
+	u := ctx.emissionUniverse
 	physical := func(typ types.Type) types.Type {
 		return u.physicalFunctionABIType(ctx, typ)
 	}
@@ -734,14 +735,14 @@ func (u *EmissionUniverse) materializeABITypeDemandsOfFunction(fn *ssa.Function,
 	if err != nil {
 		return err
 	}
-	demands, err := u.functionABITypeDemandsWithContext(ctx, fn, owner)
+	demands, err := ctx.functionABITypeDemands(fn, owner)
 	if err != nil {
 		return err
 	}
 	var normalized typeutil.Map
 	var seen typeutil.Map
 	for _, typ := range demands {
-		if err := u.materializeABITypeDemandWithContext(ctx, &normalized, &seen, fn, owner, typ, state); err != nil {
+		if err := ctx.materializeABITypeDemand(&normalized, &seen, fn, owner, typ, state); err != nil {
 			return fmt.Errorf("function %q ABI type %v: %w", fn.String(), typ, err)
 		}
 	}
