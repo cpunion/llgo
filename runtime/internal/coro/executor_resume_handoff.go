@@ -66,9 +66,10 @@ type ExecutorResumeHandoff struct {
 	// inlineAwaitDepth is removed from P together with the active action. A
 	// replacement owner must observe an idle P; the blocked owner restores the
 	// bounded native-resume ancestry before returning from its foreign call.
-	inlineAwaitDepth uint8
-	mode             ExecutorResumeHandoffMode
-	state            executorResumeHandoffState
+	inlineAwaitDepth   uint8
+	mode               ExecutorResumeHandoffMode
+	state              executorResumeHandoffState
+	returnablePrepared bool
 }
 
 // Detached reports whether handoff currently roots one active foreign wait.
@@ -83,7 +84,7 @@ func emptyExecutorResumeHandoff(handoff *ExecutorResumeHandoff) bool {
 		handoff.action == (Action{}) && handoff.budget == 0 &&
 		handoff.inlineAwaitDepth == 0 &&
 		handoff.mode == ExecutorResumeHandoffInvalid &&
-		handoff.state == executorResumeHandoffIdle
+		handoff.state == executorResumeHandoffIdle && !handoff.returnablePrepared
 }
 
 func validForeignWaitingExecutorTask(p *P, task *G) bool {
@@ -121,26 +122,39 @@ func detachExecutorResumeCertified(
 	driver *ExecutorDriver,
 	task *G,
 	mode ExecutorResumeHandoffMode,
+	compilerCertified bool,
 ) bool {
-	if !enterCriticalContext(task) ||
-		driver.run.issued != ActionCheckResume {
-		return false
-	}
 	p := driver.p
 	locked := task.osThreadLockDepth != 0
-	if p == nil || p.current != task || task.runP != p ||
-		(locked && p.osThreadLockOwner != task) ||
-		(!locked && p.osThreadLockOwner != nil) ||
-		(mode == ExecutorResumeHandoffLockedForeign && !locked) ||
-		p.osThreadSuspend != osThreadSuspendAttached ||
-		task.runAction != ActionInvalid || task.isQueued() || task.nextReady != nil ||
-		task.isWaiting() || task.spawnParent != nil || task.spawnP != nil ||
-		task.destroyTarget != nil || task.destroysRoot() ||
-		p.action.Kind != ActionResume || p.action.Handle == nil ||
-		task.active == nil || !activeResumeOwnedByAction(task) ||
-		p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
-		p.servicePreemptBudget == 0 {
-		return false
+	if !AuditEnabled && compilerCertified {
+		if task.state != GRunning || !gPreemptEnabledAtDepthZero(task) ||
+			driver.run.issued != ActionCheckResume || p == nil ||
+			p.current != task || task.runP != p ||
+			(mode == ExecutorResumeHandoffLockedForeign && !locked) ||
+			p.osThreadSuspend != osThreadSuspendAttached ||
+			p.action.Kind != ActionResume || p.action.Handle == nil ||
+			p.servicePreemptBudget == 0 {
+			return false
+		}
+	} else {
+		if !enterCriticalContext(task) ||
+			driver.run.issued != ActionCheckResume {
+			return false
+		}
+		if p == nil || p.current != task || task.runP != p ||
+			(locked && p.osThreadLockOwner != task) ||
+			(!locked && p.osThreadLockOwner != nil) ||
+			(mode == ExecutorResumeHandoffLockedForeign && !locked) ||
+			p.osThreadSuspend != osThreadSuspendAttached ||
+			task.runAction != ActionInvalid || task.isQueued() || task.nextReady != nil ||
+			task.isWaiting() || task.spawnParent != nil || task.spawnP != nil ||
+			task.destroyTarget != nil || task.destroysRoot() ||
+			p.action.Kind != ActionResume || p.action.Handle == nil ||
+			task.active == nil || !activeResumeOwnedByAction(task) ||
+			p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
+			p.servicePreemptBudget == 0 {
+			return false
+		}
 	}
 
 	handoff.driver = driver
@@ -196,7 +210,7 @@ func DetachExecutorResume(
 	}
 	current, _, _, ownerOK := CurrentExecutorDriver(task)
 	return ownerOK && current == driver &&
-		detachExecutorResumeCertified(handoff, driver, task, mode)
+		detachExecutorResumeCertified(handoff, driver, task, mode, false)
 }
 
 // DetachExecutorResumeForCompilerTask consumes the hidden task capability
@@ -217,7 +231,7 @@ func DetachExecutorResumeForCompilerTask(
 	}
 	current, _, ownerOK := CurrentExecutorDriverForCompilerTask(task)
 	return ownerOK && current == driver &&
-		detachExecutorResumeCertified(handoff, driver, task, mode)
+		detachExecutorResumeCertified(handoff, driver, task, mode, true)
 }
 
 // ExecutorResumeHandoffReturnable reports the necessary target-neutral
@@ -254,18 +268,104 @@ func ExecutorResumeHandoffCompensationRequired(
 ) (required, ok bool) {
 	if handoff == nil || handoff.state != executorResumeHandoffDetached ||
 		handoff.driver == nil || handoff.task == nil ||
-		handoff.action.Kind != ActionResume || handoff.action.Handle == nil ||
-		!ExecutorResumeHandoffReturnable(handoff.driver) {
+		handoff.action.Kind != ActionResume || handoff.action.Handle == nil {
 		return false, false
 	}
 	driver := handoff.driver
+	if AuditEnabled {
+		if !ExecutorResumeHandoffReturnable(driver) {
+			return false, false
+		}
+	} else {
+		p := driver.p
+		if driver.state != executorDriverActive || driver.run.issued != ActionInvalid ||
+			driver.poll.phase != executorPollIdle || p == nil ||
+			p.current != nil || p.inResume || p.osThreadLockOwner != nil {
+			return false, false
+		}
+		schedule := preemptLoad(&p.schedule)
+		if schedule != scheduleIdle && schedule != scheduleRequested {
+			return false, false
+		}
+	}
 	p := driver.p
 	control := driver.sources.control
+	handoff.returnablePrepared = true
 	return runnableForOSThreadOwner(p) ||
 		p.externalWaitCount != 0 ||
 		control != nil && control.activeCount != 0 ||
 		ownerLocalCompletionPending(driver) ||
 		executorRunSourceRequested(driver), true
+}
+
+// SoloSyscallEligible reports whether driver and task are in a clean,
+// uncontended active resume with zero local runnable work, zero external
+// waits, zero active timers, zero control operations, zero owner-local or
+// direct-channel completions, and zero pending scheduler or executor requests.
+// Combined with an execution-quota solo-holder check, zero detached foreign
+// calls, and quiescent peer routes, a synchronous llgo.syscall may execute
+// directly on the calling M without detaching or arming a deferred replacement.
+func SoloSyscallEligible(driver *ExecutorDriver, task *G) bool {
+	if driver == nil || task == nil || driver.state != executorDriverActive ||
+		driver.run.issued != ActionCheckResume || driver.poll.phase != executorPollIdle {
+		return false
+	}
+	p := driver.p
+	if p == nil || p.current != task || !p.inResume || p.readyCount != 0 ||
+		p.externalWaitCount != 0 || p.affectedWaitHead != nil ||
+		p.osThreadLockOwner != nil || p.osThreadSuspend != osThreadSuspendAttached {
+		return false
+	}
+	if timers := driver.sources.timers; timers != nil && timers.activeCount != 0 {
+		return false
+	}
+	if control := driver.sources.control; control != nil && control.activeCount != 0 {
+		return false
+	}
+	if ownerLocalCompletionPending(driver) ||
+		executorRunSourceRequested(driver) ||
+		!executorDirectChannelInboxIdle(driver) {
+		return false
+	}
+	if preemptLoad(&p.schedule) != scheduleIdle {
+		return false
+	}
+	if driver.registry != nil && driver.registry.ObserveRequested(driver.handle) {
+		return false
+	}
+	return true
+}
+
+// DriverQuiescentForSleep reports whether a sleeping executor driver holds
+// zero ready tasks, zero external wake obligations, zero active timers, zero
+// active task-control endpoints, zero pending completions, and an unrequested
+// idle gate. Pure logical channel waiters leave externalWaitCount zero because
+// only an executing Go producer can wake them.
+func DriverQuiescentForSleep(driver *ExecutorDriver) bool {
+	if driver == nil || driver.state != executorDriverSleeping || driver.p == nil {
+		return false
+	}
+	p := driver.p
+	if p.readyCount != 0 || p.externalWaitCount != 0 || p.affectedWaitHead != nil {
+		return false
+	}
+	if timers := driver.sources.timers; timers != nil && timers.activeCount != 0 {
+		return false
+	}
+	if control := driver.sources.control; control != nil && control.activeCount != 0 {
+		return false
+	}
+	if ownerLocalCompletionPending(driver) || !executorDirectChannelInboxIdle(driver) {
+		return false
+	}
+	return driver.registry != nil && driver.registry.ObserveIdleUnrequested(driver.handle)
+}
+
+// DriverIdleUnrequested observes the atomic executor gate for driver without
+// inspecting owner-only scheduler fields.
+func DriverIdleUnrequested(driver *ExecutorDriver) bool {
+	return driver != nil && driver.registry != nil &&
+		driver.registry.ObserveIdleUnrequested(driver.handle)
 }
 
 // ExecutorResumeHandoffRequestPending closes the request-before-admission
@@ -324,6 +424,20 @@ func ExecutorResumeHandoffContext(
 // Success consumes and zeroes handoff; a duplicate or mismatched restore is
 // rejected without changing scheduler state.
 func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
+	return restoreExecutorResume(handoff, false)
+}
+
+// RestoreExecutorResumeAfterWithdraw restores a native syscall whose owner
+// successfully withdrew the deferred dispatch and reacquired its P lease.
+// The caller must have excluded both replacement execution and reentry for
+// this exact handoff. Preparation already checked the idle scheduler, and
+// detachment checked the inline ancestry. Sticky requests can arrive in the
+// meantime, so their atomic state is still checked and left intact.
+func RestoreExecutorResumeAfterWithdraw(handoff *ExecutorResumeHandoff) bool {
+	return restoreExecutorResume(handoff, true)
+}
+
+func restoreExecutorResume(handoff *ExecutorResumeHandoff, withdrawn bool) bool {
 	if handoff == nil || handoff.state != executorResumeHandoffDetached ||
 		handoff.driver == nil || handoff.task == nil ||
 		handoff.action.Kind != ActionResume || handoff.action.Handle == nil ||
@@ -334,14 +448,38 @@ func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
 	}
 	driver, task := handoff.driver, handoff.task
 	p := driver.p
-	if !ExecutorResumeHandoffReturnable(driver) ||
-		!validForeignWaitingExecutorTask(p, task) ||
-		(handoff.mode == ExecutorResumeHandoffLockedForeign &&
-			task.osThreadLockDepth == 0) ||
-		(p.foreignReentry != nil && p.foreignReentry.handoff == handoff) ||
-		!resumeActionOwnsActive(task, handoff.action, handoff.inlineAwaitDepth) ||
-		task.runP != p || driver.run.issued != ActionInvalid {
-		return false
+	if withdrawn {
+		if !handoff.returnablePrepared || handoff.mode != ExecutorResumeHandoffSameMForeign ||
+			p == nil || p.executor != driver || driver.state != executorDriverActive ||
+			driver.poll.phase != executorPollIdle || p.current != nil || p.inResume ||
+			p.osThreadLockOwner != nil {
+			return false
+		}
+		schedule := preemptLoad(&p.schedule)
+		if schedule != scheduleIdle && schedule != scheduleRequested {
+			return false
+		}
+		if AuditEnabled {
+			if !validForeignWaitingExecutorTask(p, task) {
+				return false
+			}
+		} else if task.state != GForeignWaiting || task.runP != p || task.active == nil {
+			return false
+		}
+		if (p.foreignReentry != nil && p.foreignReentry.handoff == handoff) ||
+			task.runP != p || driver.run.issued != ActionInvalid {
+			return false
+		}
+	} else {
+		if !ExecutorResumeHandoffReturnable(driver) ||
+			!validForeignWaitingExecutorTask(p, task) ||
+			(handoff.mode == ExecutorResumeHandoffLockedForeign &&
+				task.osThreadLockDepth == 0) ||
+			(p.foreignReentry != nil && p.foreignReentry.handoff == handoff) ||
+			!resumeActionOwnsActive(task, handoff.action, handoff.inlineAwaitDepth) ||
+			task.runP != p || driver.run.issued != ActionInvalid {
+			return false
+		}
 	}
 
 	p.current = task
@@ -366,5 +504,6 @@ func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
 	handoff.inlineAwaitDepth = 0
 	handoff.mode = ExecutorResumeHandoffInvalid
 	handoff.state = executorResumeHandoffIdle
+	handoff.returnablePrepared = false
 	return true
 }

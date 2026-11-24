@@ -721,3 +721,69 @@ func TestExecutorResumeHandoffRejectsNonLockedAndMalformedRestore(t *testing.T) 
 	}
 	runtime.KeepAlive(task.frame.memory)
 }
+
+func TestSoloSyscallEligibleAndRestoreAfterWithdraw(t *testing.T) {
+	p := new(P)
+	driver, registry, handle := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "solo-syscall")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue solo task")
+	}
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, ok := Checked(p, task.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatalf("Checked = (%+v, %t)", resume, ok)
+	}
+	takeNormalRunnerDecision(t, task.g)
+	task.frame.header.SuspendReason = uint16(SuspendNone)
+	task.frame.header.Lifecycle = uint16(FrameActive)
+
+	if !SoloSyscallEligible(driver, task.g) {
+		t.Fatal("expected clean solo active resume to be SoloSyscallEligible")
+	}
+
+	// External request disables solo eligibility.
+	if result := registry.Request(handle); result != ExecutorRequestPublished {
+		t.Fatalf("Request = %v", result)
+	}
+	if SoloSyscallEligible(driver, task.g) {
+		t.Fatal("requested executor must not be SoloSyscallEligible")
+	}
+	if _, ok := registry.Acknowledge(handle); !ok {
+		t.Fatal("Acknowledge request")
+	}
+	if !SoloSyscallEligible(driver, task.g) {
+		t.Fatal("acknowledged executor should be SoloSyscallEligible again")
+	}
+
+	// Another runnable task disables solo eligibility.
+	peer := newYieldingTestG(t, "solo-peer")
+	if !Enqueue(p, peer.g) {
+		t.Fatal("enqueue peer")
+	}
+	if SoloSyscallEligible(driver, task.g) {
+		t.Fatal("non-empty ready queue must not be SoloSyscallEligible")
+	}
+
+	// Verify RestoreExecutorResumeAfterWithdraw after CompensationRequired.
+	var handoff ExecutorResumeHandoff
+	if !DetachExecutorResumeForCompilerTask(&handoff, driver, task.g, ExecutorResumeHandoffSameMForeign) {
+		t.Fatal("detach for withdraw test")
+	}
+	// Without CompensationRequired, RestoreExecutorResumeAfterWithdraw must fail closed.
+	if RestoreExecutorResumeAfterWithdraw(&handoff) {
+		t.Fatal("RestoreExecutorResumeAfterWithdraw succeeded without returnablePrepared")
+	}
+	required, demandOK := ExecutorResumeHandoffCompensationRequired(&handoff)
+	if !demandOK || !required {
+		t.Fatalf("CompensationRequired = (%t, %t), want (true, true)", required, demandOK)
+	}
+	if !RestoreExecutorResumeAfterWithdraw(&handoff) {
+		t.Fatal("RestoreExecutorResumeAfterWithdraw failed after CompensationRequired")
+	}
+	if handoff.Detached() || task.g.state != GRunning || p.current != task.g {
+		t.Fatal("RestoreExecutorResumeAfterWithdraw did not restore running state")
+	}
+	runtime.KeepAlive(task.frame.memory)
+	runtime.KeepAlive(peer.frame.memory)
+}

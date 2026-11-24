@@ -163,7 +163,7 @@ func coroNativeFleetPhysicalOwnersEnsureLockedV1(
 			peer.lifecycle = coroNativeFleetPhysicalFailedV1
 			return false
 		}
-		state.started++
+		coroNativeAtomicStoreV1(&state.started, index+1)
 	}
 	return true
 }

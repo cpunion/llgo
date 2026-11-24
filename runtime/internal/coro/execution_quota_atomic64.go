@@ -103,6 +103,19 @@ func (quota *ExecutionQuota) Held(route RouteID) (held, ok bool) {
 	return state&bit != 0, true
 }
 
+// SoloActive reports in one atomic load whether route is the sole active
+// holder of the execution quota with no waiting routes and active lifecycle.
+func (quota *ExecutionQuota) SoloActive(route RouteID) bool {
+	bit := quotaRouteBit(route)
+	if quota == nil || bit == 0 {
+		return false
+	}
+	state := preemptLoad64(&quota.state)
+	return quotaPhase(state) == executionQuotaActive &&
+		state&(executionQuotaHeldMask|executionQuotaWaiterMask|executionQuotaCountMask) ==
+			bit|executionQuotaPermit
+}
+
 func (quota *ExecutionQuota) SetLimit(limit uint32) (previous, waiters uint32, ok bool) {
 	if quota == nil || limit == 0 {
 		return 0, 0, false

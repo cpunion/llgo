@@ -199,7 +199,36 @@ type coroNativeFleetStateV1 struct {
 	lifecycle   coroNativeFleetLifecycleV1
 }
 
-var coroNativeFleetV1State coroNativeFleetStateV1
+var (
+	coroNativeFleetV1State         coroNativeFleetStateV1
+	coroNativeFleetQuiescentMaskV1 uint32
+)
+
+func coroNativeFleetSetQuiescentBitV1(route uint32) {
+	if route == 0 || route > coroNativeFleetDomainCapacityV1 {
+		return
+	}
+	bit := uint32(1) << (route - 1)
+	for {
+		cur := coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)
+		if cur&bit != 0 || coroNativeAtomicCASV1(&coroNativeFleetQuiescentMaskV1, cur, cur|bit) {
+			return
+		}
+	}
+}
+
+func coroNativeFleetClearQuiescentBitV1(route uint32) {
+	if route == 0 || route > coroNativeFleetDomainCapacityV1 {
+		return
+	}
+	bit := uint32(1) << (route - 1)
+	for {
+		cur := coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)
+		if cur&bit == 0 || coroNativeAtomicCASV1(&coroNativeFleetQuiescentMaskV1, cur, cur&^bit) {
+			return
+		}
+	}
+}
 
 func coroNativeFleetDomainCandidateV1(domain *coroNativeFleetDomainV1) bool {
 	return domain != nil && domain.lifecycle == coroNativeFleetDomainUnusedV1 &&
@@ -965,11 +994,12 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 	// IdleArmed and before CommitSleep: an already-published transfer becomes
 	// ready work, while any later publisher observes IdleArmed and must ring the
 	// route doorbell. This is the mailbox equivalent of the source-set B scan.
-	if _, _, status := coroNativeFleetTryDrainOwnerEpochV1(
+	_, _, drainStatus := coroNativeFleetTryDrainOwnerEpochV1(
 		handle,
 		epoch,
 		coro.RunnableTransferMailboxCapacity,
-	); status != coro.RunnableTransferDrainComplete && status != coro.RunnableTransferDrainContended {
+	)
+	if drainStatus != coro.RunnableTransferDrainComplete && drainStatus != coro.RunnableTransferDrainContended {
 		return coroNativeFleetOwnerWaitPlanV1{}, false
 	}
 	sleep, deadline, hasDeadline, committed := coro.CommitExecutorSleepAt(driver, freshNow)
@@ -979,6 +1009,10 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 	if !sleep {
 		return coroNativeFleetOwnerWaitPlanV1{}, true
 	}
+	if drainStatus == coro.RunnableTransferDrainComplete && !hasDeadline &&
+		coro.DriverQuiescentForSleep(driver) {
+		coroNativeFleetSetQuiescentBitV1(handle.Route)
+	}
 	plan := coroNativeFleetOwnerWaitPlanV1{
 		Epoch:       epoch,
 		Deadline:    deadline,
@@ -986,6 +1020,7 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 		Armed:       true,
 	}
 	if !coroNativeFleetFinishOwnerEpochV1(handle, epoch) {
+		coroNativeFleetClearQuiescentBitV1(handle.Route)
 		return coroNativeFleetOwnerWaitPlanV1{}, false
 	}
 	return plan, true
@@ -1001,6 +1036,7 @@ func coroNativeFleetWakeOwnerAtV1(
 	if now < 0 {
 		return 0, false
 	}
+	coroNativeFleetClearQuiescentBitV1(handle.Route)
 	epoch, acquired := coroNativeFleetBeginOwnerEpochV1(handle)
 	if !acquired {
 		return 0, false

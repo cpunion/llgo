@@ -381,3 +381,36 @@ func TestExecutorRequestAtomicLayout(t *testing.T) {
 		t.Fatal("executor registry atomic prefix is not uint32 aligned")
 	}
 }
+
+func TestExecutorRequestObserveIdleUnrequested(t *testing.T) {
+	registry := new(ExecutorRegistry)
+	handle := registerTestExecutor(t, registry)
+	if registry.ObserveIdleUnrequested(handle) {
+		t.Fatal("active executor must not report idle unrequested")
+	}
+	if !registry.ArmIdle(handle) || !registry.CommitSleep(handle) {
+		t.Fatal("arm and commit sleep")
+	}
+	if !registry.ObserveIdleUnrequested(handle) {
+		t.Fatal("sleeping unrequested executor must report idle unrequested")
+	}
+	if result := registry.Request(handle); result != ExecutorRequestIdleWake {
+		t.Fatalf("Request during sleep = %d, want IdleWake", result)
+	}
+	if registry.ObserveIdleUnrequested(handle) {
+		t.Fatal("requested sleeping executor must not report idle unrequested")
+	}
+	if left, ok := registry.LeaveIdle(handle); !ok || !left {
+		t.Fatalf("LeaveIdle = (%t, %t)", left, ok)
+	}
+	if _, ok := registry.Acknowledge(handle); !ok {
+		t.Fatal("Acknowledge")
+	}
+	if registry.ObserveIdleUnrequested(handle) {
+		t.Fatal("awake executor must not report idle unrequested")
+	}
+	retireTestExecutor(t, registry, handle)
+	if registry.ObserveIdleUnrequested(handle) {
+		t.Fatal("retired executor must not report idle unrequested")
+	}
+}

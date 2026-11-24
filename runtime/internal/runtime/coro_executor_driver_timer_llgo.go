@@ -112,7 +112,11 @@ func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool,
 		_, _, _, _ = coro.CommitExecutorSleepAt(driver, -1)
 		return false, 0, false, false
 	}
-	return coro.CommitExecutorSleepAt(driver, freshNow)
+	sleep, deadline, hasDeadline, ok = coro.CommitExecutorSleepAt(driver, freshNow)
+	if ok && sleep && !hasDeadline && coro.DriverQuiescentForSleep(driver) {
+		coroNativeFleetSetQuiescentBitV1(1)
+	}
+	return sleep, deadline, hasDeadline, ok
 }
 
 func coroProgramPollExecutorV1(driver *coro.ExecutorDriver) bool {
@@ -125,6 +129,7 @@ func coroProgramPollExecutorV1(driver *coro.ExecutorDriver) bool {
 }
 
 func coroProgramWakeExecutorV1(driver *coro.ExecutorDriver) bool {
+	coroNativeFleetClearQuiescentBitV1(1)
 	now, clockOK := coroclock.MonotonicNano()
 	if !clockOK {
 		return false

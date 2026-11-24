@@ -59,6 +59,7 @@ type coroNativeForeignBoundaryV1 struct {
 var (
 	coroNativeForeignBoundaryTLSV1      tls.StaticHandle[*coroNativeForeignBoundaryV1]
 	coroNativeForeignBoundaryTLSReadyV1 bool
+	coroNativeForeignDetachedCountV1    uint32
 )
 
 // coroWorkerCallWordsV2 executes one exact uintptr-shaped foreign thunk
@@ -249,6 +250,7 @@ func (boundary *coroNativeForeignBoundaryV1) beginV1(
 	boundary.ownerEpoch = ownerEpoch
 	boundary.route = route
 	boundary.active = true
+	coroKeyedAtomicAddUint32(&coroNativeForeignDetachedCountV1, 1)
 	if lazyCompensation {
 		if boundary.prepareDeferredReplacementV1() {
 			return true
@@ -257,6 +259,7 @@ func (boundary *coroNativeForeignBoundaryV1) beginV1(
 	if boundary.startReplacementV1(true) {
 		return true
 	}
+	coroKeyedAtomicAddUint32(&coroNativeForeignDetachedCountV1, ^uint32(0))
 	restored := coro.RestoreExecutorResume(&boundary.resume)
 	boundary.driver = nil
 	boundary.task = nil
@@ -488,8 +491,14 @@ func (boundary *coroNativeForeignBoundaryV1) finishV1() bool {
 		boundary.escape != (coro.CompletionSnapshot{}) {
 		return false
 	}
-	if boundary.replacementDeferred && !boundary.resolveDeferredReplacementV1() {
-		coroRuntimeAbort("native deferred foreign replacement resolution failed")
+	withdrawn := false
+	if boundary.replacementDeferred {
+		if !boundary.resolveDeferredReplacementV1() {
+			coroRuntimeAbort("native deferred foreign replacement resolution failed")
+		}
+		// A successful resolution without a replacement won Withdraw before
+		// another M could run on this P.
+		withdrawn = boundary.replacement == nil
 	}
 	if boundary.replacement != nil && !boundary.reclaimReplacementV1() {
 		coroRuntimeAbort("native direct foreign replacement reclaim failed")
@@ -505,9 +514,16 @@ func (boundary *coroNativeForeignBoundaryV1) finishV1() bool {
 	) {
 		coroRuntimeAbort("native direct foreign execution quota reentry failed")
 	}
-	if !coro.RestoreExecutorResume(&boundary.resume) {
+	var restored bool
+	if withdrawn {
+		restored = coro.RestoreExecutorResumeAfterWithdraw(&boundary.resume)
+	} else {
+		restored = coro.RestoreExecutorResume(&boundary.resume)
+	}
+	if !restored {
 		coroRuntimeAbort("native direct foreign resume restore failed")
 	}
+	coroKeyedAtomicAddUint32(&coroNativeForeignDetachedCountV1, ^uint32(0))
 	boundary.driver = nil
 	boundary.task = nil
 	boundary.parent = nil
@@ -844,6 +860,46 @@ func __llgo_coro_same_m_foreign_call_v1(
 	}
 }
 
+func coroNativeSyscallSoloFastEligibleV1(task *coro.G) bool {
+	if coro.GCObservationEnabled() && coroGCObservationV1State.Enabled() {
+		return false
+	}
+	if coroKeyedAtomicLoadUint32(&coroNativeForeignDetachedCountV1) != 0 {
+		return false
+	}
+	driver, route, ok := coro.CurrentExecutorDriverForCompilerTask(task)
+	if !ok || !route.Valid() {
+		return false
+	}
+	if !coroNativeFleetV1State.execution.SoloActive(route) {
+		return false
+	}
+	started := coroNativeAtomicLoadV1(&coroNativeFleetPhysicalOwnerV1State.started)
+	if started == 0 {
+		if route != 1 {
+			return false
+		}
+	} else {
+		totalRoutes := started + 1
+		if totalRoutes > coroNativeFleetV1State.domainCount {
+			return false
+		}
+		peerMask := ((uint32(1) << totalRoutes) - 1) &^ (uint32(1) << (uint32(route) - 1))
+		if coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)&peerMask != peerMask {
+			return false
+		}
+		for r := uint32(1); r <= totalRoutes; r++ {
+			if r == uint32(route) {
+				continue
+			}
+			if !coro.DriverIdleUnrequested(coroNativeFleetV1State.domains[r-1].driverOwnerV1()) {
+				return false
+			}
+		}
+	}
+	return coro.SoloSyscallEligible(driver, task)
+}
+
 func coroNativeForeignWordCallV1(
 	task *coro.G,
 	mode coro.ExecutorResumeHandoffMode,
@@ -862,8 +918,11 @@ func coroNativeForeignWordCallV1(
 		coroRuntimeAbort("invalid native direct foreign call")
 	}
 	var boundary coroNativeForeignBoundaryV1
-	if !boundary.beginV1(task, mode, lazyCompensation) {
-		coroRuntimeAbort("native direct foreign call cannot detach active resume")
+	solo := lazyCompensation && coroNativeSyscallSoloFastEligibleV1(task)
+	if !solo {
+		if !boundary.beginV1(task, mode, lazyCompensation) {
+			coroRuntimeAbort("native direct foreign call cannot detach active resume")
+		}
 	}
 	var result coroworker.Result
 	callOK := coroWorkerCallWordsV2(
@@ -871,8 +930,10 @@ func coroNativeForeignWordCallV1(
 		a0, a1, a2, a3, a4, a5, a6, a7, a8,
 		uintptr(unsafe.Pointer(&result)),
 	)
-	if !boundary.finishV1() {
-		coroRuntimeAbort("native direct foreign call cannot reacquire managed execution")
+	if !solo {
+		if !boundary.finishV1() {
+			coroRuntimeAbort("native direct foreign call cannot reacquire managed execution")
+		}
 	}
 	if !callOK {
 		coroRuntimeAbort("native direct foreign call failed")
