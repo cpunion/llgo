@@ -20,8 +20,38 @@ func llgoWaitGroupReadyPeer() bool
 //go:linkname llgoWaitGroupYield llgo.coroYield
 func llgoWaitGroupYield()
 
+func (wg *WaitGroup) llgoTryWaitFast() uint8 {
+	if race.Enabled {
+		return 2
+	}
+	state := wg.state.Load()
+	if state == 0 {
+		return 0
+	}
+	v := int32(state >> 32)
+	if v > 0 && state&0xffffffff == 0 && llgoWaitGroupReadyPeer() {
+		return 1
+	}
+	return 2
+}
+
+func (wg *WaitGroup) llgoTryWaitDone() bool {
+	return wg.state.Load() == 0
+}
+
 func (wg *WaitGroup) Wait() {
-	wg.llgoWait(true)
+	switch wg.llgoTryWaitFast() {
+	case 0:
+		return
+	case 1:
+		llgoWaitGroupYield()
+		if wg.llgoTryWaitDone() {
+			return
+		}
+		wg.llgoWait(false)
+	default:
+		wg.llgoWait(race.Enabled)
+	}
 }
 
 // llgoWait retains the complete waiting protocol. A compiler-proved direct

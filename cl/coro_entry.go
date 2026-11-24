@@ -807,6 +807,32 @@ func (c *Compilation) preflightCoroPlan() error {
 			c.coroPreflightErr = fmt.Errorf("coroutine managed dispatch consumer preflight: %w", err)
 			return
 		}
+		recoverCheck := func(target *ssa.Function) bool {
+			if target == nil {
+				return false
+			}
+			owner := universe.ownerOf(target)
+			if owner == nil {
+				return true
+			}
+			ctx, err := universe.functionABIContext(target, owner)
+			if err != nil || ctx == nil {
+				return true
+			}
+			return ctx.needsRecoverScope(target)
+		}
+		reflectCheck := func(common *ssa.CallCommon) bool {
+			if common == nil {
+				return false
+			}
+			if _, ok := reflectValueMethodByNameCheck(common); ok {
+				return true
+			}
+			return common.IsInvoke() && common.Method != nil &&
+				common.Method.Pkg() != nil && common.Method.Pkg().Path() == "reflect" &&
+				common.Method.Name() == "MethodByName"
+		}
+		planCoroPhysicalSyncRamps(physicalStage, plan, universe.coroProgramIR, universe.Resolve, recoverCheck, reflectCheck)
 		if err := universe.coroProgramIR.commitPhysicalFunctionPlans(physicalStage, physicalExpected); err != nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine physical preflight: commit ProgramIR: %w", err)
 			return

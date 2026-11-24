@@ -313,6 +313,14 @@ func (p *context) coroForeignIngressAdapter(
 		callArgs = append(callArgs, adapter.Param(index))
 	}
 	child := b.Call(childEntry.Expr, callArgs...)
+	returned := adapter.MakeBlock()
+	asyncRun := adapter.MakeBlock()
+	b.IfWithBranchWeights(
+		b.BinOp(token.EQL, child, p.prog.Nil(p.prog.VoidPtr())),
+		returned, asyncRun, 1000, 1,
+	)
+
+	b.SetBlockEx(asyncRun, llssa.AtEnd, false)
 	childHeader := b.CoroPromise(child, coroHeaderType(p.prog))
 	b.Store(b.FieldAddr(childHeader, coroHeaderParent), b.Load(parentSlot))
 
@@ -322,7 +330,6 @@ func (p *context) coroForeignIngressAdapter(
 		llssa.InC,
 	)
 	status := b.Call(run.Expr, child, typeSlot, dataSlot)
-	returned := adapter.MakeBlock()
 	failed := adapter.MakeBlock()
 	dispatch := b.Switch(status, failed)
 	dispatch.Case(

@@ -341,10 +341,6 @@ type coroPhysicalInstructionPlan struct {
 	controlTargetID    coro.FunctionID
 	controlReceiver    ssa.Value
 	controlClosure     ssa.Value
-	waitGroupAddFast   *coroWaitGroupAddFastPlan
-	waitGroupWaitFast  *coroWaitGroupWaitFastPlan
-	pollMutexFast      *coroPollMutexFastPlan
-	pollFDFast         *coroPollFDFastPlan
 	controlInterface   *coroInterfaceDispatchPlan
 	controlSignature   *types.Signature
 	controlFailure     string
@@ -522,6 +518,7 @@ type coroPhysicalFunctionPlan struct {
 	function          *ssa.Function
 	owner             *preparedEmissionPackage
 	tailForward       *coroPhysicalTailForwardPlan
+	syncRamp          *coroPhysicalSyncRampPlan
 	frameRetention    *coroFrameRetentionProof
 	critical          *coroCriticalProof
 	cleanup           *coroStaticCleanupPlan
@@ -843,19 +840,6 @@ func prepareCoroPhysicalFunctionPlan(
 		frameRetentionABI: audit.frameRetentionABI,
 		reachableBlocks:   make(map[*ssa.BasicBlock]bool, len(audit.reachableBlocks)),
 		instructions:      make(map[ssa.Instruction]coroPhysicalInstructionPlan),
-	}
-	// Cleanup plans were just prepared for this exact function/owner. Freeze
-	// the same source-bound, no-destroy update for a deferred decrement;
-	// registration, argument capture and LIFO draining remain the site owner.
-	if cleanup != nil && audit.ctx != nil && whole != nil {
-		for _, site := range cleanup.sites {
-			if site != nil && site.kind == coroStaticCleanupCoroutine && site.closure == nil &&
-				site.closureEnvironment == nil && !whole.IgnoresBody(site.target) {
-				if proof := planCoroPollFDFast(audit.ctx, site.target); proof != nil && proof.mutex.unlock {
-					site.pollFDFast = proof
-				}
-			}
-		}
 	}
 	for block, reachable := range audit.reachableBlocks {
 		plan.reachableBlocks[block] = reachable
@@ -1366,44 +1350,6 @@ func (stage *coroPhysicalPlanStage) freezePhysicalFunctionPlan(plan *coroPhysica
 	}
 	if err := plan.validateLocalChannels(); err != nil {
 		return fmt.Errorf("physical plan local channels: %w", err)
-	}
-	if plan.cleanup != nil {
-		for _, site := range plan.cleanup.sites {
-			if site != nil && site.pollFDFast != nil && !site.pollFDFast.validCleanup(site) {
-				return fmt.Errorf("deferred FD mutex update lost its exact cleanup site proof")
-			}
-		}
-	}
-	for instruction, physical := range plan.instructions {
-		if proof := physical.pollFDFast; proof != nil {
-			if _, ok := instruction.(*ssa.Call); !ok || physical.control != coroPhysicalControlDirectAwait ||
-				physical.controlTarget != proof.target || physical.controlTargetID == "" ||
-				physical.controlClosure != nil || !proof.valid() {
-				return fmt.Errorf("FD mutex update lost its exact direct-await proof")
-			}
-		}
-		if proof := physical.pollMutexFast; proof != nil {
-			if _, ok := instruction.(*ssa.Call); !ok || physical.control != coroPhysicalControlDirectAwait ||
-				physical.controlTarget != proof.target || physical.controlTargetID == "" ||
-				physical.controlClosure != nil || !proof.valid() {
-				return fmt.Errorf("poll mutex update lost its exact direct-await proof")
-			}
-		}
-		if proof := physical.waitGroupWaitFast; proof != nil {
-			if _, ok := instruction.(*ssa.Call); !ok || physical.control != coroPhysicalControlDirectAwait ||
-				physical.controlTarget != proof.target || physical.controlTargetID == "" ||
-				physical.controlClosure != nil || !proof.valid() {
-				return fmt.Errorf("WaitGroup fast wait lost its exact direct-await proof")
-			}
-		}
-		if proof := physical.waitGroupAddFast; proof != nil {
-			if _, ok := instruction.(*ssa.Call); !ok || physical.control != coroPhysicalControlDirectAwait ||
-				physical.controlTarget != proof.target || physical.controlTargetID == "" ||
-				physical.controlClosure != nil || proof.stateField != 1 || proof.valueField != 2 ||
-				proof.sourceDigest != coroWaitGroupAddSourceDigest {
-				return fmt.Errorf("WaitGroup fast update lost its exact direct-await proof")
-			}
-		}
 	}
 	key := emissionFunctionOwnerKey{function: plan.function, owner: plan.owner}
 	if _, exists := stage.plans[key]; exists {
@@ -2461,10 +2407,6 @@ func clearCoroPhysicalControlForOperation(result *coroPhysicalInstructionPlan) {
 	result.controlTargetID = ""
 	result.controlReceiver = nil
 	result.controlClosure = nil
-	result.waitGroupAddFast = nil
-	result.waitGroupWaitFast = nil
-	result.pollMutexFast = nil
-	result.pollFDFast = nil
 	result.controlInterface = nil
 	result.controlSignature = nil
 	result.controlFailure = ""
@@ -2715,12 +2657,6 @@ func planCoroPhysicalControlInstruction(
 		result.controlTarget = callee
 		result.controlTargetID = targetPlan.ID
 		result.controlClosure = closureValue
-		if result.control == coroPhysicalControlDirectAwait && closureValue == nil && audit.ctx != nil && !whole.IgnoresBody(callee) {
-			result.waitGroupAddFast = planCoroWaitGroupAddFast(audit.ctx, callee)
-			result.waitGroupWaitFast = planCoroWaitGroupWaitFast(audit.ctx, whole, callee)
-			result.pollMutexFast = planCoroPollMutexFast(audit.ctx, callee)
-			result.pollFDFast = planCoroPollFDFast(audit.ctx, callee)
-		}
 	case *ssa.Go:
 		result.controlFailureHard = true
 		if !capabilities.staticSpawn {
