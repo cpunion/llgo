@@ -429,7 +429,7 @@ func Root(value any) {
 		t.Fatalf("same-interface type assertion acquired runtime helpers: %v", helpers)
 	}
 	if reason := validateCoroExplicitStatusPanicInterfaceValue(
-		audit, payload, coroPhysicalLoweringCapabilities{explicitPanic: true}, make(map[ssa.Value]bool),
+		audit, payload, coroPhysicalLoweringCapabilities{explicitPanic: true},
 	); reason != "" {
 		var dump bytes.Buffer
 		ssa.WriteFunction(&dump, root)

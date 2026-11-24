@@ -27,6 +27,18 @@ func TestCoroPanicInterfacePhiUsesEvaluatedEdges(t *testing.T) {
 joined:
 	if err != nil { panic(err) }
 }`},
+		{"loop-carried", `
+var Updates []bool
+func Root() {
+	var err any
+	for _, update := range Updates {
+		if update && err == nil {
+			err = Stable()
+			if Enabled() { err = Opaque() }
+		}
+	}
+	if err != nil { panic(err) }
+}`},
 	} {
 		t.Run(test.name, func(t *testing.T) { testCoroPanicInterfacePhi(t, test.body) })
 	}
@@ -98,28 +110,27 @@ func Opaque() any
 				if err != nil {
 					t.Fatal(err)
 				}
-				var payload *ssa.Phi
 				var panicValue ssa.Value
 				for _, block := range root.Blocks {
 					for _, instruction := range block.Instrs {
 						switch value := instruction.(type) {
-						case *ssa.Phi:
-							payload = value
 						case *ssa.Panic:
 							panicValue = value.X
 						}
 					}
 				}
-				if payload == nil || len(payload.Edges) != 2 || panicValue == nil {
-					t.Fatal("fixture lost its interface phi containing the opaque call result")
+				payload, phi := panicValue.(*ssa.Phi)
+				if !phi || len(payload.Edges) < 2 {
+					t.Fatal("fixture lost its interface phi")
 				}
 				audit, err := newCoroPhysicalPureSSAAudit(universe, plan, root, "")
 				if err != nil {
 					t.Fatal(err)
 				}
-				reason := validateCoroExplicitStatusPanicInterfaceValue(audit, panicValue, coroPhysicalLoweringCapabilities{
+				capabilities := coroPhysicalLoweringCapabilities{
 					childAwait: true, explicitPanic: true,
-				}, make(map[ssa.Value]bool))
+				}
+				reason := validateCoroExplicitStatusPanicInterfaceValue(audit, payload, capabilities)
 				if enabled {
 					if !strings.Contains(reason, "interface call result") {
 						t.Fatalf("live opaque result escaped its lifetime gate: %q", reason)
@@ -128,6 +139,17 @@ func Opaque() any
 				}
 				if reason != "" {
 					t.Fatalf("dead phi input contaminated the managed result: %s", reason)
+				}
+				if strings.Contains(body, "range Updates") {
+					edges := append([]ssa.Value(nil), payload.Edges...)
+					for i := range payload.Edges {
+						payload.Edges[i] = payload
+					}
+					reason := validateCoroExplicitStatusPanicInterfaceValue(audit, payload, capabilities)
+					copy(payload.Edges, edges)
+					if !strings.Contains(reason, "no frame-stable source") {
+						t.Fatalf("unseeded interface cycle reached publication: %q", reason)
+					}
 				}
 				compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 				enableCoroChildAwaitCompilation(compilation)

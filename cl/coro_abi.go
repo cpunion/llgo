@@ -2785,7 +2785,7 @@ func validateCoroExplicitStatusPanic(
 			return "explicit-status panic requires one empty-interface operand"
 		}
 		if reason := validateCoroExplicitStatusPanicInterfaceValue(
-			audit, instruction.X, capabilities, make(map[ssa.Value]bool),
+			audit, instruction.X, capabilities,
 		); reason != "" {
 			return "explicit-status panic interface payload is not frame-stable: " + reason
 		}
@@ -2966,16 +2966,69 @@ func validateCoroExplicitStatusPanicInterfaceValue(
 	audit *coroPhysicalPureSSAAudit,
 	value ssa.Value,
 	capabilities coroPhysicalLoweringCapabilities,
-	visiting map[ssa.Value]bool,
 ) string {
 	if audit == nil || value == nil {
 		return "missing pure-SSA audit or interface value"
 	}
-	if visiting[value] {
-		return "cyclic interface value"
+
+	// Verify every evaluated producer before reasoning about cycles. Phi and
+	// interface conversions only forward a pair. A loop-carried pair is safe
+	// when its graph has a verified source and every input uses the same proof.
+	pending := []ssa.Value{value}
+	seen := map[ssa.Value]bool{value: true}
+	var consumers map[ssa.Value][]ssa.Value
+	var stable []ssa.Value
+	for i := 0; i < len(pending); i++ {
+		producer := pending[i]
+		hasInputs := false
+		reason := validateCoroExplicitStatusPanicInterfaceProducer(audit, producer, capabilities, func(input ssa.Value) {
+			hasInputs = true
+			if consumers == nil {
+				consumers = make(map[ssa.Value][]ssa.Value)
+			}
+			consumers[input] = append(consumers[input], producer)
+			if !seen[input] {
+				seen[input] = true
+				pending = append(pending, input)
+			}
+		})
+		if reason != "" {
+			return reason
+		}
+		if !hasInputs {
+			if i == 0 {
+				return ""
+			}
+			stable = append(stable, producer)
+		}
 	}
-	visiting[value] = true
-	defer delete(visiting, value)
+	clear(seen)
+	for _, producer := range stable {
+		seen[producer] = true
+	}
+	for i := 0; i < len(stable); i++ {
+		for _, consumer := range consumers[stable[i]] {
+			if !seen[consumer] {
+				seen[consumer] = true
+				stable = append(stable, consumer)
+			}
+		}
+	}
+	if len(seen) != len(pending) {
+		return "cyclic interface value has no frame-stable source"
+	}
+	return ""
+}
+
+func validateCoroExplicitStatusPanicInterfaceProducer(
+	audit *coroPhysicalPureSSAAudit,
+	value ssa.Value,
+	capabilities coroPhysicalLoweringCapabilities,
+	input func(ssa.Value),
+) string {
+	if value == nil {
+		return "missing interface value"
+	}
 	if instruction, ok := value.(ssa.Instruction); ok && instruction.Parent() != audit.fn {
 		return "interface producer belongs to a different SSA body"
 	}
@@ -3004,12 +3057,14 @@ func validateCoroExplicitStatusPanicInterfaceValue(
 		if reason := audit.validateChangeInterface(value); reason != "" {
 			return "interface conversion has no outcome-safe lowering: " + reason
 		}
-		return validateCoroExplicitStatusPanicInterfaceValue(audit, value.X, capabilities, visiting)
+		input(value.X)
+		return ""
 	case *ssa.ChangeType:
 		if reason := audit.validateChangeType(value); reason != "" {
 			return "interface change-type has no pure lowering: " + reason
 		}
-		return validateCoroExplicitStatusPanicInterfaceValue(audit, value.X, capabilities, visiting)
+		input(value.X)
+		return ""
 	case *ssa.Phi:
 		block := value.Block()
 		if block == nil || len(value.Edges) == 0 || len(value.Edges) != len(block.Preds) {
@@ -3030,9 +3085,7 @@ func validateCoroExplicitStatusPanicInterfaceValue(
 				continue
 			}
 			evaluated = true
-			if reason := validateCoroExplicitStatusPanicInterfaceValue(audit, edge, capabilities, visiting); reason != "" {
-				return "interface phi input: " + reason
-			}
+			input(edge)
 		}
 		if !evaluated {
 			return "interface phi has no evaluated incoming values"
@@ -3088,9 +3141,8 @@ func validateCoroExplicitStatusPanicInterfaceValue(
 			// the zero interface. Require the source pair to have the same
 			// post-destroy lifetime proof, while validateTypeAssert above binds a
 			// dynamically created itab to the managed NewItab helper path.
-			return validateCoroExplicitStatusPanicInterfaceValue(
-				audit, tuple.X, capabilities, visiting,
-			)
+			input(tuple.X)
+			return ""
 		}
 		call, ok := value.Tuple.(*ssa.Call)
 		if !ok || call == nil || call.Parent() != audit.fn || call.Common() == nil {
