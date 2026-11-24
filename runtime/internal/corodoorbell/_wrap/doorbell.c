@@ -166,12 +166,43 @@ struct llgo_doorbell_kq_slot_v2 {
 };
 
 static _Atomic uint32_t llgo_doorbell_close_epoch_v2 = 1u;
+static _Atomic(uint32_t *) llgo_doorbell_ext_close_epoch_v2 = 0;
+static _Atomic(uint32_t *) llgo_doorbell_ext_owned_fds_v2 = 0;
 static struct llgo_doorbell_kq_slot_v2 llgo_doorbell_kq_slots_v2[LLGO_DOORBELL_KQ_SLOTS_V2] = {
     {-1, -1, 0, 0, {{0, 0}}}, {-1, -1, 0, 0, {{0, 0}}},
     {-1, -1, 0, 0, {{0, 0}}}, {-1, -1, 0, 0, {{0, 0}}},
     {-1, -1, 0, 0, {{0, 0}}}, {-1, -1, 0, 0, {{0, 0}}},
     {-1, -1, 0, 0, {{0, 0}}}, {-1, -1, 0, 0, {{0, 0}}},
 };
+
+static void llgo_doorbell_kq_publish_owned_v2(
+    struct llgo_doorbell_kq_slot_v2 *slot,
+    int32_t kq)
+{
+    uint32_t *ext_owned = atomic_load_explicit(&llgo_doorbell_ext_owned_fds_v2, memory_order_acquire);
+    if (ext_owned != 0) {
+        uint32_t idx = (uint32_t)(slot - llgo_doorbell_kq_slots_v2);
+        if (idx < LLGO_DOORBELL_KQ_SLOTS_V2) {
+            uint32_t encoded = kq >= 0 ? (uint32_t)kq + 1u : 0u;
+            atomic_store_explicit((_Atomic uint32_t *)&ext_owned[idx], encoded, memory_order_release);
+        }
+    }
+}
+
+void __llgo_coro_doorbell_poll_bind_state_v1(uint32_t *close_epoch, uint32_t *owned_fds)
+{
+    uint32_t i;
+    if (close_epoch != 0) {
+        atomic_store_explicit(&llgo_doorbell_ext_close_epoch_v2, close_epoch, memory_order_release);
+    }
+    if (owned_fds != 0) {
+        atomic_store_explicit(&llgo_doorbell_ext_owned_fds_v2, owned_fds, memory_order_release);
+        for (i = 0; i < LLGO_DOORBELL_KQ_SLOTS_V2; i++) {
+            int32_t kq = atomic_load_explicit(&llgo_doorbell_kq_slots_v2[i].kq_fd, memory_order_acquire);
+            llgo_doorbell_kq_publish_owned_v2(&llgo_doorbell_kq_slots_v2[i], kq);
+        }
+    }
+}
 
 void __llgo_coro_doorbell_poll_close_epoch_bump_v1(void)
 {
@@ -195,6 +226,7 @@ int32_t __llgo_coro_doorbell_owns_poll_fd_v1(int32_t fd)
 static void llgo_doorbell_kq_reset_slot_v2(struct llgo_doorbell_kq_slot_v2 *slot)
 {
     int32_t kq = atomic_exchange_explicit(&slot->kq_fd, -1, memory_order_acq_rel);
+    llgo_doorbell_kq_publish_owned_v2(slot, -1);
     slot->watch_count = 0;
     slot->close_epoch = 0;
     if (kq >= 0) {
@@ -311,6 +343,12 @@ static int llgo_doorbell_kevent_poll_set_v2(
     }
 
     epoch = atomic_load_explicit(&llgo_doorbell_close_epoch_v2, memory_order_acquire);
+    {
+        uint32_t *ext_epoch = atomic_load_explicit(&llgo_doorbell_ext_close_epoch_v2, memory_order_acquire);
+        if (ext_epoch != 0) {
+            epoch += atomic_load_explicit((_Atomic uint32_t *)ext_epoch, memory_order_acquire);
+        }
+    }
     kq = atomic_load_explicit(&slot->kq_fd, memory_order_relaxed);
     if (kq >= 0 && slot->close_epoch != epoch) {
         llgo_doorbell_kq_reset_slot_v2(slot);
@@ -326,6 +364,7 @@ static int llgo_doorbell_kevent_poll_set_v2(
         }
         kq = (int32_t)opened;
         atomic_store_explicit(&slot->kq_fd, kq, memory_order_release);
+        llgo_doorbell_kq_publish_owned_v2(slot, kq);
         slot->watch_count = 0;
         slot->close_epoch = epoch;
     }
