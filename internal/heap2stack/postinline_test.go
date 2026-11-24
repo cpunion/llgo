@@ -16,7 +16,7 @@ define ptr @select_payload(i1 %temporary, ptr %source, ptr %value) {
 entry:
   br i1 %temporary, label %make, label %join
 make:
-  %local = call ptr @"github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ"(i64 48) allockind("alloc,zeroed")
+  %local = tail call ptr @"github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ"(i64 48) allockind("alloc,zeroed")
   %slot = getelementptr inbounds i8, ptr %local, i64 8
   store ptr %value, ptr %slot, align 8
   br label %join

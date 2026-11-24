@@ -58,16 +58,35 @@ func (entry skippedFunction) restore() {
 // Initialization stays at the original allocation site. No lifetime markers
 // are needed for this placement, and pre-existing allocas are left alone.
 func Run(mod llvm.Module, tm llvm.TargetMachine) error {
-	return run(mod, tm, 0)
+	return run(mod, tm, nil, 0)
 }
 
 // RunAfterInlining revisits LLGo allocations exposed by scalar pointer joins.
 // Newly promoted storage retains the raw allocator's Go word alignment.
 func RunAfterInlining(mod llvm.Module, tm llvm.TargetMachine, wordSize int) error {
-	return run(mod, tm, wordSize)
+	if mod.IsNil() {
+		return mod.RunAttributorHeapToStack(tm, nil)
+	}
+	var candidates map[llvm.Value]map[llvm.Value]bool
+	optnone := llvm.AttributeKindID("optnone")
+	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		if !fn.GetEnumFunctionAttribute(optnone).IsNil() {
+			continue
+		}
+		if joins := joinedAllocations(fn); len(joins) != 0 && !exceedsAnalysisBudget(fn) {
+			if candidates == nil {
+				candidates = make(map[llvm.Value]map[llvm.Value]bool)
+			}
+			candidates[fn] = joins
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	return run(mod, tm, candidates, wordSize)
 }
 
-func run(mod llvm.Module, tm llvm.TargetMachine, minAlignment int) error {
+func run(mod llvm.Module, tm llvm.TargetMachine, candidates map[llvm.Value]map[llvm.Value]bool, minAlignment int) error {
 	if mod.IsNil() {
 		return mod.RunAttributorHeapToStack(tm, nil)
 	}
@@ -84,21 +103,12 @@ func run(mod llvm.Module, tm llvm.TargetMachine, minAlignment int) error {
 		if fn.FirstBasicBlock().IsNil() || !fn.GetEnumFunctionAttribute(optnone).IsNil() {
 			continue
 		}
-		if exceedsAnalysisBudget(fn) {
+		joins := candidates[fn]
+		if (candidates == nil && exceedsAnalysisBudget(fn)) || (candidates != nil && joins == nil) {
 			entry := saveSkippedFunction(fn)
 			skipped = append(skipped, entry)
 			entry.skipAnalysis(mod.Context())
 			continue
-		}
-		var joins map[llvm.Value]bool
-		if minAlignment != 0 {
-			joins = joinedAllocations(fn)
-			if len(joins) == 0 {
-				entry := saveSkippedFunction(fn)
-				skipped = append(skipped, entry)
-				entry.skipAnalysis(mod.Context())
-				continue
-			}
 		}
 		functions = append(functions, fn)
 		cycles := cyclicBlocks(fn.EntryBasicBlock())
@@ -220,10 +230,18 @@ func isCall(i llvm.Value) bool {
 func tailCallInputs(fn llvm.Value) map[llvm.Value]bool {
 	inputs := make(map[llvm.Value]bool)
 	var work, published []llvm.Value
+	hasTailCall := false
 	for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
 		for i := bb.FirstInstruction(); !i.IsNil(); i = llvm.NextInstruction(i) {
 			if i.InstructionOpcode() == llvm.Call && i.IsTailCall() {
-				work = append(work, i)
+				hasTailCall = true
+				// The result of a tail-marked allocator is not itself an input
+				// to a tail call. A later tail call can still make it live here.
+				for n := 0; n < i.OperandsCount(); n++ {
+					if operand := i.Operand(n); !operand.IsAInstruction().IsNil() {
+						work = append(work, operand)
+					}
+				}
 			}
 			switch i.InstructionOpcode() {
 			case llvm.Store:
@@ -243,7 +261,7 @@ func tailCallInputs(fn llvm.Value) map[llvm.Value]bool {
 			}
 		}
 	}
-	if len(work) != 0 {
+	if hasTailCall {
 		work = append(work, published...)
 	}
 	for len(work) != 0 {
