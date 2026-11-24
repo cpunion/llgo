@@ -142,8 +142,8 @@ func TestServicePreemptQuantumUsesBoundRequestContract(t *testing.T) {
 		task := newYieldingTestG(t, "service-remote-quota-pressure")
 		runServicePreemptTestQuantum(t, p, task, true)
 
-		if wake, ok := quota.Release(1); !wake || !ok {
-			t.Fatalf("release current route quota = (%t, %t)", wake, ok)
+		if waiters, ok := quota.Release(1); waiters != 1<<(2-1) || !ok {
+			t.Fatalf("release current route quota = (%08b, %t), want route 2 waiter", waiters, ok)
 		}
 		if acquired, ok := quota.TryAcquire(2); !acquired || !ok {
 			t.Fatal("remote route did not acquire released execution quota")

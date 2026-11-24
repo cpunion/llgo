@@ -218,12 +218,12 @@ func coroNativeFleetPhysicalOwnersStartV1(limit uint32) bool {
 // logical quota update. Shrinks park excess peers instead of destroying them;
 // later growth reuses the same stable routes without another topology change.
 func coroNativeFleetSetExecutionLimitV1(limit uint32) (
-	previous uint32,
-	wake, ok bool,
+	previous, waiters uint32,
+	ok bool,
 ) {
 	state := &coroNativeFleetPhysicalOwnerV1State
 	if limit == 0 || !coroNativeFleetPhysicalOwnersLockV1(state) {
-		return 0, false, false
+		return 0, 0, false
 	}
 	ensure := false
 	switch state.lifecycle {
@@ -236,9 +236,9 @@ func coroNativeFleetSetExecutionLimitV1(limit uint32) (
 	}
 	if !ensure {
 		coroNativeFleetPhysicalOwnersUnlockV1(state)
-		return 0, false, false
+		return 0, 0, false
 	}
-	previous, wake, ok = coroNativeFleetV1State.execution.SetLimit(limit)
+	previous, waiters, ok = coroNativeFleetV1State.execution.SetLimit(limit)
 	if ok && previous != limit {
 		epoch := coroNativeAtomicLoadV1(&state.policyEpoch)
 		if epoch == 0 || epoch == ^uint32(0) {
@@ -248,7 +248,7 @@ func coroNativeFleetSetExecutionLimitV1(limit uint32) (
 		}
 	}
 	coroNativeFleetPhysicalOwnersUnlockV1(state)
-	return previous, wake, ok
+	return previous, waiters, ok
 }
 
 // Publish stop without joining: any domain's cleanup can release a worker

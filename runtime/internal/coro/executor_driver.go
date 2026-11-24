@@ -27,8 +27,8 @@ import "unsafe"
 // remain at stable addresses from BindExecutor through ConfirmExecutorClose.
 // requestGate caches the exact registry slot gate during that lifetime; foreign
 // producers may update the gate atomically, but they never retain the driver.
-// servicePressure is an optional process-shared scheduler-pressure word. A
-// fleet quota binds its waiter word once at startup so a locally isolated G can
+// servicePressure is an optional process-shared scheduler quota. The fleet
+// binds it once at startup so a locally isolated G can
 // still yield to a remote executor waiting for managed-execution capacity.
 // A real target surrounds a successful PrepareExecutorSleep with its retained
 // source poll and calls WakeExecutor after a real or spurious wake.
@@ -46,7 +46,7 @@ type ExecutorDriver struct {
 	registry        *ExecutorRegistry
 	handle          ExecutorHandle
 	requestGate     *uint32
-	servicePressure *uint32
+	servicePressure *ExecutionQuota
 	route           RouteID
 	sources         ExecutorSourceSet
 	poll            executorPollTransaction

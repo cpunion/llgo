@@ -560,7 +560,7 @@ func servicePreemptBudgetExpired(p *P, mode uint32) bool {
 	}
 	driver := p.executor
 	return driver != nil && driver.servicePressure != nil &&
-		preemptLoad(driver.servicePressure) != 0
+		driver.servicePressure.hasWaiters()
 }
 
 // acknowledgeSuspendedGPreempt consumes a request which was already satisfied

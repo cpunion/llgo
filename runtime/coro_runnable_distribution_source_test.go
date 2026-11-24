@@ -263,15 +263,17 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	for _, required := range []string{
 		"corofleet.OwnerCount(coroNativeMaximumLogicalProcsV1)",
 		"coroNativeFleetV1State.execution.TryAcquire(route)",
-		"coroNativeFleetV1State.execution.Release(route)",
+		"waiters, released := coroNativeFleetV1State.execution.Release(route)",
 		"func CoroGOMAXPROCS(n int) int",
-		"coroNativeFleetSetExecutionLimitV1(next)",
+		"previous, waiters, changed := coroNativeFleetSetExecutionLimitV1(next)",
 		"coroNativeFleetRingExecutionWaitersV1(waiters uint32)",
-		"coroNativeFleetV1State.execution.WaiterMask()",
 	} {
 		if !strings.Contains(quota, required) {
 			t.Errorf("native fleet execution quota lacks logical-limit marker %q", required)
 		}
+	}
+	if strings.Contains(quota, "coroNativeFleetV1State.execution.WaiterMask()") {
+		t.Error("native fleet execution quota should consume the waiter mask returned by Release/SetLimit directly")
 	}
 
 	distribution := readRuntimePollFile(t, "internal/runtime/coro_ready_distribution_fleet_llgo.go")

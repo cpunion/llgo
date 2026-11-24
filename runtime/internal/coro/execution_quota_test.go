@@ -26,8 +26,8 @@ import (
 
 func TestExecutionQuotaLifecycleAndStickyWake(t *testing.T) {
 	quota := new(ExecutionQuota)
-	if got := unsafe.Sizeof(*quota); got != 5*unsafe.Sizeof(uint32(0)) {
-		t.Fatalf("execution quota size = %d, want five atomic words", got)
+	if got := unsafe.Sizeof(*quota); got != executionQuotaSize {
+		t.Fatalf("execution quota size = %d, want %d", got, executionQuotaSize)
 	}
 	if !quota.CanRelease() || quota.Start(0) || !quota.Start(1) || quota.Start(1) {
 		t.Fatal("execution quota start lifecycle invalid")
@@ -50,8 +50,8 @@ func TestExecutionQuotaLifecycleAndStickyWake(t *testing.T) {
 	if waiters, ok := quota.WaiterMask(); !ok || waiters != 1<<(2-1) {
 		t.Fatalf("exact execution waiter mask = (%08b, %t)", waiters, ok)
 	}
-	if previous, wake, ok := quota.SetLimit(4); !ok || previous != 1 || !wake {
-		t.Fatalf("grow execution quota = (%d, %t, %t)", previous, wake, ok)
+	if previous, waiters, ok := quota.SetLimit(4); !ok || previous != 1 || waiters != 1<<(2-1) {
+		t.Fatalf("grow execution quota = (%d, %08b, %t)", previous, waiters, ok)
 	}
 	if acquired, ok := quota.TryAcquire(2); !acquired || !ok {
 		t.Fatal("route 2 did not acquire after growth")
@@ -59,20 +59,20 @@ func TestExecutionQuotaLifecycleAndStickyWake(t *testing.T) {
 	if waiters, ok := quota.WaiterMask(); !ok || waiters != 0 {
 		t.Fatalf("acquired route retained waiter = (%08b, %t)", waiters, ok)
 	}
-	if previous, wake, ok := quota.SetLimit(1); !ok || previous != 4 || wake {
-		t.Fatalf("shrink execution quota = (%d, %t, %t)", previous, wake, ok)
+	if previous, waiters, ok := quota.SetLimit(1); !ok || previous != 4 || waiters != 0 {
+		t.Fatalf("shrink execution quota = (%d, %08b, %t)", previous, waiters, ok)
 	}
 	if acquired, ok := quota.TryAcquire(3); acquired || !ok {
 		t.Fatalf("route 3 acquired above shrunken limit: (%t, %t)", acquired, ok)
 	}
-	if wake, ok := quota.Release(2); !ok || !wake {
-		t.Fatalf("route 2 release = (%t, %t), want sticky wake", wake, ok)
+	if waiters, ok := quota.Release(2); !ok || waiters != 1<<(3-1) {
+		t.Fatalf("route 2 release = (%08b, %t), want route 3 waiter", waiters, ok)
 	}
 	if acquired, ok := quota.TryAcquire(3); acquired || !ok {
 		t.Fatalf("route 3 acquired while route 1 still held: (%t, %t)", acquired, ok)
 	}
-	if wake, ok := quota.Release(1); !ok || !wake {
-		t.Fatalf("route 1 release = (%t, %t), want sticky wake", wake, ok)
+	if waiters, ok := quota.Release(1); !ok || waiters != 1<<(3-1) {
+		t.Fatalf("route 1 release = (%08b, %t), want route 3 waiter", waiters, ok)
 	}
 	if acquired, ok := quota.TryAcquire(1); acquired || !ok {
 		t.Fatalf("freshly released route bypassed published waiter: (%t, %t)", acquired, ok)
@@ -83,14 +83,14 @@ func TestExecutionQuotaLifecycleAndStickyWake(t *testing.T) {
 	if acquired, ok := quota.TryAcquire(3); !acquired || !ok {
 		t.Fatal("route 3 did not acquire released permit")
 	}
-	if wake, ok := quota.Release(3); !ok || !wake {
-		t.Fatal("route 3 release failed")
+	if waiters, ok := quota.Release(3); !ok || waiters != 1<<(1-1) {
+		t.Fatalf("route 3 release = (%08b, %t), want route 1 waiter", waiters, ok)
 	}
 	if acquired, ok := quota.TryAcquire(1); !acquired || !ok {
 		t.Fatal("deferred route 1 did not acquire after waiter release")
 	}
-	if _, ok := quota.Release(1); !ok {
-		t.Fatal("route 1 final release failed")
+	if waiters, ok := quota.Release(1); !ok || waiters != 0 {
+		t.Fatalf("route 1 final release = (%08b, %t), want no waiters", waiters, ok)
 	}
 	if wake, ok := quota.Seal(); !ok || wake {
 		t.Fatalf("execution quota seal = (%t, %t)", wake, ok)
@@ -132,6 +132,107 @@ func TestExecutionQuotaRejectsRouteMisuse(t *testing.T) {
 	}
 	if _, ok := quota.Seal(); !ok || !quota.Retire() {
 		t.Fatal("retire misuse fixture")
+	}
+}
+
+func TestExecutionQuotaKeepsFullLogicalLimit(t *testing.T) {
+	var quota ExecutionQuota
+	const maximum = ^uint32(0)
+	if !quota.Start(maximum) {
+		t.Fatal("start with the maximum logical limit")
+	}
+	if acquired, ok := quota.TryAcquire(1); !acquired || !ok {
+		t.Fatal("acquire below the maximum logical limit")
+	}
+	if limit, active, ok := quota.Usage(); limit != maximum || active != 1 || !ok {
+		t.Fatalf("usage = (%d, %d, %t), want (%d, 1, true)", limit, active, ok, maximum)
+	}
+	if previous, waiters, ok := quota.SetLimit(1); previous != maximum || waiters != 0 || !ok {
+		t.Fatalf("shrink = (%d, %08b, %t), want (%d, 0, true)", previous, waiters, ok, maximum)
+	}
+	if _, ok := quota.Release(1); !ok {
+		t.Fatal("release the held route after shrinking")
+	}
+}
+
+func TestExecutionQuotaReleaseAndResizeReturnWaiterMaskAcrossSeal(t *testing.T) {
+	var quota ExecutionQuota
+	if !quota.Start(1) {
+		t.Fatal("start execution quota")
+	}
+	if acquired, ok := quota.TryAcquire(1); !acquired || !ok {
+		t.Fatal("route 1 acquire")
+	}
+	if acquired, ok := quota.TryAcquire(2); acquired || !ok {
+		t.Fatal("route 2 should register as waiter")
+	}
+	if acquired, ok := quota.TryAcquire(4); acquired || !ok {
+		t.Fatal("route 4 should register as waiter")
+	}
+	const wantWaiters uint32 = 1<<(2-1) | 1<<(4-1)
+	if previous, waiters, ok := quota.SetLimit(1); !ok || previous != 1 || waiters != 0 {
+		t.Fatalf("no-op resize = (%d, %08b, %t), want (1, 0, true)", previous, waiters, ok)
+	}
+	if previous, waiters, ok := quota.SetLimit(2); !ok || previous != 1 || waiters != wantWaiters {
+		t.Fatalf("growth resize = (%d, %08b, %t), want (1, %08b, true)", previous, waiters, ok, wantWaiters)
+	}
+	if waiters, ok := quota.Release(1); !ok || waiters != wantWaiters {
+		t.Fatalf("active release = (%08b, %t), want (%08b, true)", waiters, ok, wantWaiters)
+	}
+	if acquired, ok := quota.TryAcquire(2); !acquired || !ok {
+		t.Fatal("route 2 acquire before seal")
+	}
+	if wake, ok := quota.Seal(); !ok || !wake {
+		t.Fatalf("seal with route 4 waiting = (%t, %t), want (true, true)", wake, ok)
+	}
+	if _, ok := quota.WaiterMask(); ok {
+		t.Fatal("WaiterMask must reject sealed quota")
+	}
+	if waiters, ok := quota.Release(2); !ok || waiters != 0 {
+		t.Fatalf("sealed release = (%08b, %t), want (0, true)", waiters, ok)
+	}
+	if !quota.Quiesced() || !quota.Retire() || !quota.CanRelease() {
+		t.Fatal("retire after sealed release")
+	}
+}
+
+func TestExecutionQuotaReleaseOrdersWaiterPublication(t *testing.T) {
+	for iteration := 0; iteration < 128; iteration++ {
+		var quota ExecutionQuota
+		if !quota.Start(1) {
+			t.Fatal("start one-permit quota")
+		}
+		if acquired, ok := quota.TryAcquire(1); !acquired || !ok {
+			t.Fatal("hold the initial permit")
+		}
+		start := make(chan struct{})
+		var joined sync.WaitGroup
+		joined.Add(2)
+		var acquired, acquireOK, releaseOK bool
+		var waiters uint32
+		go func() {
+			defer joined.Done()
+			<-start
+			acquired, acquireOK = quota.TryAcquire(2)
+		}()
+		go func() {
+			defer joined.Done()
+			<-start
+			waiters, releaseOK = quota.Release(1)
+		}()
+		close(start)
+		joined.Wait()
+		if !acquireOK || !releaseOK || !acquired && waiters != 1<<(2-1) {
+			t.Fatalf("race lost permit or wake: acquired=%t/%t, waiters=%08b/%t", acquired, acquireOK, waiters, releaseOK)
+		}
+		if !acquired {
+			if acquired, ok := quota.TryAcquire(2); !acquired || !ok {
+				t.Fatal("awakened route could not claim the returned permit")
+			}
+		}
+		if _, ok := quota.Release(2); !ok {
+			t.Fatal("release the final route")
+		}
 	}
 }
 

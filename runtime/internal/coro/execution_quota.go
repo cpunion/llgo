@@ -1,3 +1,5 @@
+//go:build baremetal || (!darwin && !linux) || (!amd64 && !arm64)
+
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -41,32 +43,11 @@ type ExecutionQuota struct {
 	holders   uint32
 }
 
-// BindExecutorServicePressure gives one already-bound executor a read-only
-// view of this quota's waiter publication word. The quota and driver must both
-// remain at stable addresses through driver retirement. This is startup-only:
-// a runtime binds every fleet route after Start and before any managed resume.
-//
-// The word is advisory, not a second admission gate. A compiler safepoint only
-// uses a nonzero value to return to the scheduler; TryAcquire and Release remain
-// the sole owners of managed-execution admission.
-func BindExecutorServicePressure(driver *ExecutorDriver, quota *ExecutionQuota) bool {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
-		driver.servicePressure != nil || quota == nil ||
-		preemptLoad(&quota.lifecycle) != uint32(executionQuotaActive) {
-		return false
-	}
-	driver.servicePressure = &quota.waiters
-	return true
+func (quota *ExecutionQuota) hasWaiters() bool {
+	return preemptLoad(&quota.waiters) != 0
 }
 
-type executionQuotaLifecycle uint32
-
-const (
-	executionQuotaUnused executionQuotaLifecycle = iota
-	executionQuotaActive
-	executionQuotaSealed
-	executionQuotaRetired
-)
+const executionQuotaSize = 20
 
 type executionQuotaHolderState uint32
 
@@ -254,24 +235,27 @@ func (quota *ExecutionQuota) Held(route RouteID) (held, ok bool) {
 
 // SetLimit atomically changes the logical execution limit and returns the
 // previous value. A shrink never revokes an in-flight resume; it prevents new
-// acquisitions until active falls below the new limit. wake reports whether a
-// blocked route may need its retained doorbell rung after a growth.
-func (quota *ExecutionQuota) SetLimit(limit uint32) (previous uint32, wake, ok bool) {
+// acquisitions until active falls below the new limit. waiters returns the
+// exact waiter routes that may need their retained doorbells rung after growth.
+func (quota *ExecutionQuota) SetLimit(limit uint32) (previous, waiters uint32, ok bool) {
 	if quota == nil || limit == 0 ||
 		preemptLoad(&quota.lifecycle) != uint32(executionQuotaActive) {
-		return 0, false, false
+		return 0, 0, false
 	}
 	for {
 		previous = preemptLoad(&quota.limit)
 		if previous == 0 {
-			return 0, false, false
+			return 0, 0, false
 		}
 		if previous == limit ||
 			preemptCompareAndSwap(&quota.limit, previous, limit) {
 			if preemptLoad(&quota.lifecycle) != uint32(executionQuotaActive) {
-				return 0, false, false
+				return 0, 0, false
 			}
-			return previous, limit > previous && preemptLoad(&quota.waiters) != 0, true
+			if limit > previous {
+				waiters = preemptLoad(&quota.waiters) & ((uint32(1) << uint32(ExecutorFleetCapacity)) - 1)
+			}
+			return previous, waiters, true
 		}
 	}
 }
@@ -400,13 +384,14 @@ func (quota *ExecutionQuota) TryAcquire(route RouteID) (acquired, ok bool) {
 	}
 }
 
-// Release closes the exact route's bounded P lease. wake is a sticky hint that
-// the caller must snapshot and ring the exact waiter routes. Each contender
-// clears only its own waiter bit after it successfully rechecks or acquires.
-func (quota *ExecutionQuota) Release(route RouteID) (wake, ok bool) {
+// Release closes the exact route's bounded P lease. waiters is the sticky
+// snapshot of contender routes whose retained doorbells must be rung while the
+// quota is active. Each contender clears only its own waiter bit after it
+// successfully rechecks or acquires.
+func (quota *ExecutionQuota) Release(route RouteID) (waiters uint32, ok bool) {
 	lifecycle := executionQuotaLifecycle(preemptLoad(&quota.lifecycle))
 	if lifecycle != executionQuotaActive && lifecycle != executionQuotaSealed {
-		return false, false
+		return 0, false
 	}
 	if _, marked := executionQuotaTransitionHolder(
 		quota,
@@ -414,7 +399,7 @@ func (quota *ExecutionQuota) Release(route RouteID) (wake, ok bool) {
 		executionQuotaHolderHeld,
 		executionQuotaHolderReleasing,
 	); !marked || !executionQuotaReleaseActive(quota) {
-		return false, false
+		return 0, false
 	}
 	if _, released := executionQuotaTransitionHolder(
 		quota,
@@ -422,9 +407,12 @@ func (quota *ExecutionQuota) Release(route RouteID) (wake, ok bool) {
 		executionQuotaHolderReleasing,
 		executionQuotaHolderIdle,
 	); !released {
-		return false, false
+		return 0, false
 	}
-	return lifecycle == executionQuotaActive && preemptLoad(&quota.waiters) != 0, true
+	if lifecycle == executionQuotaActive {
+		waiters = preemptLoad(&quota.waiters) & ((uint32(1) << uint32(ExecutorFleetCapacity)) - 1)
+	}
+	return waiters, true
 }
 
 // Seal prevents new managed resumes. Existing holders may still release.
