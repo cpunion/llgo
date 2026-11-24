@@ -159,6 +159,7 @@ type context struct {
 	pyMod                string
 	skips                map[string]none
 	loaded               map[*types.Package]*pkgInfo // loaded packages
+	loadedReadOnly       bool                        // copy-on-write guard for shared EmissionUniverse snapshot
 	bvals                map[ssa.Value]llssa.Expr    // block values
 	coroValueAddrs       map[ssa.Value]llssa.Expr    // compiler-owned addresses for awaited aggregate values
 	coroPrintScratch     llssa.Expr                  // one max-capacity PrintArgV1 array in the active coroutine frame

@@ -97,10 +97,13 @@ func (c *context) createPackageArchiveFile(archivePath string, pkg *aPackage, ve
 		objFiles = append(append([]string(nil), pkg.ObjFiles...), metadataPath)
 	}
 	// Runtime library files contain raw LLVM bitcode. Use the linked LLVM
-	// archive writer for its symbol index, as for memory-buffer members. A
-	// host ar can accept these files while silently leaving their symbols out.
+	// archive writer for its symbol index, as for memory-buffer members and
+	// standard native builds without an explicit LLGO_AR override. A host ar
+	// can accept raw bitcode while silently leaving its symbols out, and
+	// spawning external ar per package adds significant subprocess overhead.
 	runtimeBitcode := pkg.Package != nil && runtimeLibraryLTOPackage(c.buildConf, pkg.PkgPath)
-	if len(pkg.ObjBuffers) == 0 && !runtimeBitcode {
+	useExternalArchiver := os.Getenv("LLGO_AR") != "" || c.targetTriple() == ""
+	if len(pkg.ObjBuffers) == 0 && !runtimeBitcode && useExternalArchiver {
 		return c.createArchiveFile(archivePath, objFiles, verbose)
 	}
 

@@ -18,7 +18,6 @@ package cl
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/xgo-dev/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
@@ -67,9 +66,7 @@ func (u *EmissionUniverse) freezeCoroCallableIdentityCertificates() error {
 		declarations = append(declarations, alias)
 	}
 	declarations = stableUniqueFunctions(declarations)
-	sort.SliceStable(declarations, func(i, j int) bool {
-		return u.functionSortKey(declarations[i]) < u.functionSortKey(declarations[j])
-	})
+	sortEmissionFunctionsByFrozenKey(declarations, u.functionSortKey)
 	annotations := make(map[*ssa.Function]coroCallableContractCertificate)
 	annotationOwners := make(map[*ssa.Function]*ssa.Function)
 	for _, declaration := range declarations {

@@ -28,6 +28,7 @@ import (
 type coroFrozenOwnerBody struct {
 	function *ssa.Function
 	state    emissionFunctionState
+	sortKey  string
 }
 
 // coroFrozenOwnerBodies is the sole complete-runtime inventory of Go bodies
@@ -94,10 +95,14 @@ func (p *context) coroFrozenOwnerBodies() ([]coroFrozenOwnerBody, error) {
 			)
 		}
 	}
-	sort.SliceStable(bodies, func(i, j int) bool {
-		return universe.functionSortKey(bodies[i].function) <
-			universe.functionSortKey(bodies[j].function)
-	})
+	if len(bodies) >= 2 {
+		for i := range bodies {
+			bodies[i].sortKey = universe.functionSortKey(bodies[i].function)
+		}
+		sort.SliceStable(bodies, func(i, j int) bool {
+			return bodies[i].sortKey < bodies[j].sortKey
+		})
+	}
 	return bodies, nil
 }
 
