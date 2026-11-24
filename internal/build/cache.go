@@ -60,7 +60,6 @@ type cachePaths struct {
 	Manifest    string // Path to .manifest file
 	Meta        string // Path to .meta file
 	MethodTypes string // Independently hashed compact method-type constants
-	StaticMaps  string // Archive-bound retained map initializer producers
 }
 
 // PackagePaths returns the cache paths for a package
@@ -73,7 +72,6 @@ func (cm *cacheManager) PackagePaths(targetTriple, pkgPath, fingerprint string) 
 		Manifest:    filepath.Join(dir, fingerprint+cacheManifestExt),
 		Meta:        filepath.Join(dir, fingerprint+cacheMetaExt),
 		MethodTypes: filepath.Join(dir, fingerprint+".methodtypes"),
-		StaticMaps:  filepath.Join(dir, fingerprint+".staticmaps"),
 	}
 }
 
