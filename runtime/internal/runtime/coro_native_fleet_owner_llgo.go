@@ -587,6 +587,11 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 		} else if ready {
 			return true
 		}
+		if ready, fastOK := coroNativeFleetTryFastPollCompletionV1(handle); !fastOK {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer poll probe failed")
+		} else if ready {
+			return true
+		}
 		freshNow, freshClockOK := coroNativeFleetPhysicalOwnerClockV1()
 		if !freshClockOK {
 			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wait clock failed")

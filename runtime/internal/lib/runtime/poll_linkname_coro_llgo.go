@@ -192,6 +192,7 @@ func poll_runtime_pollClose(ctx uintptr) {
 		throw("runtime: close coroutine polldesc without completed unblock")
 		return
 	}
+	llrt.CoroNativePollNotifyDescriptorClosedV1()
 	llgoCoroPollDescFreeV1(ctx)
 }
 

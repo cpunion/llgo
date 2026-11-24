@@ -97,6 +97,11 @@ func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool,
 	} else if ready {
 		return false, 0, false, true
 	}
+	if ready, fastOK := coroNativeTryFastPollCompletionV1(driver); !fastOK {
+		return false, 0, false, false
+	} else if ready {
+		return false, 0, false, true
+	}
 	now, ok := coroclock.MonotonicNano()
 	if !ok {
 		return false, 0, false, false

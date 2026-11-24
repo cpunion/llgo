@@ -35,6 +35,7 @@ var _ [coroNativeFleetPollCapacityV1 - coro.PollOperationPageCapacity]byte
 type coroNativeFleetPollSetV1 struct {
 	entries    [corodoorbell.PollSetCapacity]corodoorbell.PollFD
 	operations [coroNativeFleetPollCapacityV1]coro.OperationID
+	prevCount  uint32
 }
 
 // Logical routes which have never performed a physical wait retain only a
@@ -121,12 +122,6 @@ func coroNativeFleetBuildPhysicalWaitV1(
 		storage = new(coroNativeFleetPollSetV1)
 		coroNativeAtomicStorePointerV1(&coroNativeFleetPollSetsV1[handle.Route-1], unsafe.Pointer(storage))
 	}
-	for index := range storage.entries {
-		storage.entries[index] = corodoorbell.PollFD{}
-	}
-	for index := range storage.operations {
-		storage.operations[index] = coro.OperationID{}
-	}
 	storage.entries[0] = corodoorbell.PollFD{
 		FD:     doorbellFD,
 		Events: corodoorbell.PollRead,
@@ -174,6 +169,11 @@ func coroNativeFleetBuildPhysicalWaitV1(
 		storage.operations[count-1] = snapshot.ID
 		count++
 	}
+	for index := count; index < storage.prevCount; index++ {
+		storage.entries[index] = corodoorbell.PollFD{}
+		storage.operations[index-1] = coro.OperationID{}
+	}
+	storage.prevCount = count
 	return coroNativeFleetPhysicalWaitV1{
 		handle:      handle,
 		count:       count,
@@ -353,4 +353,68 @@ func coroNativeFleetWaitOwnerPassAtV1(
 	default:
 		return coroNativeFleetWaitPassInvalidV1
 	}
+}
+
+// coroNativeFleetTryFastPollCompletionV1 performs a single non-blocking poll
+// probe for a peer route that already has active poll operations, avoiding the
+// full idle/sleep/quota round-trip when loopback readiness has already arrived.
+func coroNativeFleetTryFastPollCompletionV1(handle coro.ExecutorFleetHandle) (ready, ok bool) {
+	domain, _, valid := coroNativeFleetWaitStorageV1(handle)
+	if !valid {
+		return false, false
+	}
+	poll := domain.pollOwnerV1()
+	if poll == nil {
+		return false, true
+	}
+	scanLimit, scanOK := coro.PollOperationScanLimit(poll)
+	if !scanOK {
+		return false, false
+	}
+	if scanLimit == 0 {
+		return false, true
+	}
+	physical, built := coroNativeFleetBuildPhysicalWaitV1(handle, 0, false)
+	if !built || physical.count <= 1 {
+		return false, built
+	}
+	_, storage, storageOK := coroNativeFleetWaitStorageV1(handle)
+	if !storageOK || storage == nil {
+		return false, false
+	}
+	for index := uint32(0); index < physical.count; index++ {
+		storage.entries[index].Revents = 0
+	}
+	nReady, errno := corodoorbell.WaitPollSet(&storage.entries[0], physical.count, 0)
+	if nReady <= 0 {
+		_ = errno
+		return false, true
+	}
+	if storage.entries[0].Revents&corodoorbell.PollBadFD != 0 {
+		return false, true
+	}
+	woke := false
+	if storage.entries[0].Revents&
+		(corodoorbell.PollRead|corodoorbell.PollError|corodoorbell.PollHangup) != 0 {
+		if !domain.doorbell.Drain() {
+			return false, false
+		}
+		woke = true
+	}
+	for entry := uint32(1); entry < physical.count; entry++ {
+		if storage.entries[entry].Revents == 0 {
+			continue
+		}
+		if !coroNativeFleetPhysicalPollPostAcceptedV1(
+			coroNativeFleetPostPollV1(
+				storage.operations[entry-1],
+				coro.PollOperationReady,
+			),
+			coroNativeFleetPhysicalWaitActiveV1,
+		) {
+			return false, false
+		}
+		woke = true
+	}
+	return woke, true
 }

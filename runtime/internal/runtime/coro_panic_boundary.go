@@ -25,6 +25,15 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
+func coroPanicBoundaryCurrentG(task *coro.G) *g {
+	if !coro.AuditEnabled {
+		if local := coro.TaskLocal(task); local != nil {
+			return (*g)(local)
+		}
+	}
+	return getg()
+}
+
 // coroPanicBoundaryPush installs one M-owned fault boundary around an exact
 // physical coroutine resume and saves the G's logical defer cursor. boundary
 // and env have native activation lifetime and must not survive a suspension.
@@ -35,7 +44,7 @@ func coroPanicBoundaryPush(task *coro.G, handle unsafe.Pointer, boundary *Defer,
 			return false
 		}
 	}
-	gp := getg()
+	gp := coroPanicBoundaryCurrentG(task)
 	if gp == nil || gp.m == nil || (coro.AuditEnabled && gp.m.curg != gp) {
 		return false
 	}
@@ -73,7 +82,7 @@ const (
 )
 
 func coroPanicBoundaryPopStatus(task *coro.G, handle unsafe.Pointer, boundary *Defer) uint32 {
-	gp := getg()
+	gp := coroPanicBoundaryCurrentG(task)
 	if coro.AuditEnabled {
 		if !validCoroPanicBoundary(task, handle, boundary, gp) {
 			return coroPanicBoundaryPopInvalidRecord
@@ -81,6 +90,8 @@ func coroPanicBoundaryPopStatus(task *coro.G, handle unsafe.Pointer, boundary *D
 		if !coro.ResumePanicBoundaryReturningCompiler(task, handle) {
 			return coroPanicBoundaryPopInvalidResume
 		}
+	} else if gp == nil || gp.m == nil || gp.m.signalFaultBoundary != boundary {
+		return coroPanicBoundaryPopInvalidRecord
 	}
 	if ptr := gp.panic_; ptr != nil && (*panicNode)(ptr).defer_ == boundary {
 		return coroPanicBoundaryPopActivePanic
@@ -89,9 +100,7 @@ func coroPanicBoundaryPopStatus(task *coro.G, handle unsafe.Pointer, boundary *D
 		return coroPanicBoundaryPopInvalidRecord
 	}
 	gp.m.signalFaultBoundary = boundary.Link
-	if coro.AuditEnabled {
-		*boundary = Defer{}
-	}
+	*boundary = Defer{}
 	return coroPanicBoundaryPopOK
 }
 
@@ -172,7 +181,7 @@ func __llgo_coro_panic_boundary_take_v1(g, handle unsafe.Pointer) unsafe.Pointer
 	if task == nil || handle == nil || !coroPanicBoundaryCapability(task) {
 		return nil
 	}
-	gp := getg()
+	gp := coroPanicBoundaryCurrentG(task)
 	// No token exists in the ordinary resume case. Reading this M-local
 	// cursor grants no authority and changes no scheduler or panic state.
 	// A real token still requires the complete capability and landing proof.
