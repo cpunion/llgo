@@ -940,6 +940,14 @@ func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1
 				}
 				g.pending = pendingTransition{kind: pendingComplete, from: frame}
 				return true
+			} else if frame.parent != nil &&
+				g.pending.kind == pendingNone &&
+				g.park.taskCancelPhase != taskCancelRequested &&
+				frame.parent.completion.status == completionArmed &&
+				frame.parent.completion.child == handle {
+				frame.parent.completion.status = CompletionReturn
+				g.pending = pendingTransition{kind: pendingComplete, from: frame}
+				return true
 			}
 		}
 	}

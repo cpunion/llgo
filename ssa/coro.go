@@ -19,6 +19,7 @@ package ssa
 import (
 	"encoding/binary"
 	"fmt"
+	"go/token"
 	"go/types"
 
 	"github.com/xgo-dev/llvm"
@@ -1573,4 +1574,83 @@ func (b Builder) coroIntrinsic(name string, ret llvm.Type, args []llvm.Value, re
 		panic(fmt.Sprintf("ssa: LLVM %s rejected %s intrinsic signature", llvm.Version, name))
 	}
 	return value
+}
+
+// CoroInlinePanicBoundaryResumeHelper returns (creating once per module) a
+// linkonce_odr, noinline, cold helper that installs a native sigsetjmp fault
+// boundary around llvm.coro.resume(child). Keeping Defer and sigjmp_buf
+// allocas plus returns_twice out of presplit coroutine bodies prevents LLVM
+// CoroSplit from spilling them into heap coroutine frames (including inside
+// loops) and avoids returns_twice register-allocation pessimization across
+// coroutine resumes, while fast-path inline awaits still invoke
+// llvm.coro.resume(child) directly in the caller.
+func (p Package) CoroInlinePanicBoundaryResumeHelper(
+	name, pushName, popName, stageName string,
+) Expr {
+	if existing := p.FuncOf(name); existing != nil {
+		return existing.Expr
+	}
+	ptrParam := func(paramName string) *types.Var {
+		return types.NewParam(token.NoPos, nil, paramName, types.Typ[types.UnsafePointer])
+	}
+	helperSig := types.NewSignatureType(
+		nil, nil, nil,
+		types.NewTuple(ptrParam("task"), ptrParam("child")),
+		nil, false,
+	)
+	pushSig := types.NewSignatureType(
+		nil, nil, nil,
+		types.NewTuple(ptrParam("task"), ptrParam("child"), ptrParam("boundary"), ptrParam("env")),
+		nil, false,
+	)
+	closeSig := types.NewSignatureType(
+		nil, nil, nil,
+		types.NewTuple(ptrParam("task"), ptrParam("child"), ptrParam("boundary")),
+		nil, false,
+	)
+	push := p.NewFunc(pushName, pushSig, InC).Expr
+	pop := p.NewFunc(popName, closeSig, InC).Expr
+	stage := p.NewFunc(stageName, closeSig, InC).Expr
+
+	helper := p.NewFunc(name, helperSig, InC)
+	helper.impl.SetLinkage(llvm.LinkOnceODRLinkage)
+	helper.impl.SetUnnamedAddr(true)
+	ctx := p.mod.Context()
+	if kind := llvm.AttributeKindID("noinline"); kind != 0 {
+		helper.impl.AddFunctionAttr(ctx.CreateEnumAttribute(kind, 0))
+	}
+	if kind := llvm.AttributeKindID("cold"); kind != 0 {
+		helper.impl.AddFunctionAttr(ctx.CreateEnumAttribute(kind, 0))
+	}
+
+	b := helper.MakeBody(1)
+	defer b.Dispose()
+	task := helper.Param(0)
+	child := helper.Param(1)
+	setjmpBlk := helper.MakeBlock()
+	pushBlk := helper.MakeBlock()
+	landedBlk := helper.MakeBlock()
+
+	boundary := b.AllocaZeroedT(p.Prog.Defer())
+	env := b.AllocaSigjmpBuf()
+	boundaryPtr := b.Convert(p.Prog.VoidPtr(), boundary)
+	b.Jump(setjmpBlk)
+
+	b.SetBlockEx(setjmpBlk, AtEnd, false)
+	result := b.Sigsetjmp(env, p.Prog.IntVal(0, p.Prog.CInt()))
+	direct := b.BinOp(token.EQL, result, p.Prog.IntVal(0, p.Prog.CInt()))
+	b.IfWithBranchWeights(direct, pushBlk, landedBlk, 1000, 1)
+
+	b.SetBlockEx(pushBlk, AtEnd, false)
+	b.Call(push, task, child, boundaryPtr, env)
+	b.CoroResume(child)
+	b.Call(pop, task, child, boundaryPtr)
+	b.Return()
+
+	b.SetBlockEx(landedBlk, AtEnd, false)
+	b.Call(stage, task, child, boundaryPtr)
+	b.Jump(setjmpBlk)
+
+	b.EndBuild()
+	return helper.Expr
 }

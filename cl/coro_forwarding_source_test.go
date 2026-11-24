@@ -44,6 +44,11 @@ func TwoProjections(value NestedAlias, other struct { Number int }) int { return
 func PointerProjection(value *Nested) int { return Child(value.Inner.Number, 1) }
 func MutatedProjection(value Nested) int { value.Inner.Number++; return Child(value.Inner.Number, 1) }
 func UninitializedProjection(value Nested) int { var local Nested; number := local.Inner.Number; local = value; return Child(number, local.Prefix) }
+func SliceLen(buf []byte) int { return Child(len(buf), cap(buf)) }
+func StringLen(text string) int { return Child(len(text), 1) }
+func MapLen(values map[int]int) int { return Child(len(values), 1) }
+func ChanLen(values chan int) int { return Child(len(values), 1) }
+func PointerSliceLen(values *[]byte) int { return Child(len(*values), 1) }
 `
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
@@ -95,7 +100,20 @@ func UninitializedProjection(value Nested) int { var local Nested; number := loc
 			t.Fatalf("second parameter projection was confused with the first: %+v", shape)
 		}
 	}
-	for _, name := range []string{"ChangedResult", "TwoCalls", "Dynamic", "PointerProjection", "MutatedProjection", "UninitializedProjection"} {
+	for _, name := range []string{"SliceLen", "StringLen"} {
+		function := ssaPkg.Func(name)
+		shape, err := ir.forwardingSourceShape(function)
+		if err != nil || shape == nil || shape.target != ssaPkg.Func("Child") || len(shape.args) != 2 {
+			t.Fatalf("%s header builtin forwarding = %+v, error=%v", name, shape, err)
+		}
+		if shape.args[0].sourceParameter != 0 || shape.args[0].builtin != coroForwardingBuiltinLen || shape.args[0].direct {
+			t.Fatalf("%s arg0 lost len projection: %+v", name, shape.args[0])
+		}
+		if name == "SliceLen" && (shape.args[1].sourceParameter != 0 || shape.args[1].builtin != coroForwardingBuiltinCap || shape.args[1].direct) {
+			t.Fatalf("%s arg1 lost cap projection: %+v", name, shape.args[1])
+		}
+	}
+	for _, name := range []string{"ChangedResult", "TwoCalls", "Dynamic", "PointerProjection", "MutatedProjection", "UninitializedProjection", "MapLen", "ChanLen", "PointerSliceLen"} {
 		shape, err := ir.forwardingSourceShape(ssaPkg.Func(name))
 		if err != nil || shape != nil {
 			t.Fatalf("unsupported %s acquired a forwarding source shape: %+v, error=%v", name, shape, err)

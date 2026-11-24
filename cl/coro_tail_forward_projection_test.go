@@ -52,10 +52,12 @@ type Outer struct {
 }
 type Child interface { Child(int) int }
 func Projected(value Outer) int { return value.Inner.Child(value.Prefix) }
+func SliceChild(buf []byte, min int) int { return len(buf) + min }
+func ReadFullLike(buf []byte) int { return SliceChild(buf, len(buf)) }
 func Parent(value Outer, pointer *Outer) int {
 	var first Child = value
 	var second Child = pointer
-	return first.Child(1) + second.Child(2)
+	return first.Child(1) + second.Child(2) + ReadFullLike(nil)
 }
 `
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
@@ -104,7 +106,7 @@ func Parent(value Outer, pointer *Outer) int {
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
-			if function == target {
+			if function == target || function == ssaPkg.Func("SliceChild") {
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly, NeedsDispatch: true}, nil
 			}
 			if function == valueWrapper || function == pointerWrapper {
@@ -181,6 +183,18 @@ func Parent(value Outer, pointer *Outer) int {
 		!strings.Contains(projectedIR, "extractvalue") || strings.Count(projectedIR, "call ptr") != 1 || strings.Contains(projectedIR, "alloca") {
 		t.Fatalf("ordinary value-field wrapper added a frame or redundant storage:\n%s", projectedIR)
 	}
+	readFullLike := ssaPkg.Func("ReadFullLike")
+	readFullPlan, err := universe.coroProgramIR.physicalFunctionPlan(readFullLike, universe.ownerOf(readFullLike))
+	if err != nil || readFullPlan.tailForward == nil || len(readFullPlan.tailForward.args) != 2 ||
+		readFullPlan.tailForward.args[0].sourceParameter != 0 || readFullPlan.tailForward.args[0].builtin != coroForwardingBuiltinNone ||
+		readFullPlan.tailForward.args[1].sourceParameter != 0 || readFullPlan.tailForward.args[1].builtin != coroForwardingBuiltinLen {
+		t.Fatalf("len(slice) forwarding did not reuse tail-forward plan: %+v: %v", readFullPlan, err)
+	}
+	readFullIR := requireCoroPhysicalFunction(t, module, "foo.ReadFullLike").String()
+	if strings.Contains(readFullIR, "llvm.coro.") || strings.Contains(readFullIR, coroFrameAllocHookV1) ||
+		strings.Count(readFullIR, "call ptr") != 1 || strings.Contains(readFullIR, "alloca") {
+		t.Fatalf("len(slice) wrapper added a frame or redundant storage:\n%s", readFullIR)
+	}
 	runCoroABITestPipeline(t, prog, module)
 	for _, suffix := range []string{".resume", ".destroy"} {
 		if !module.NamedFunction(physicalName + "$coro" + suffix).IsNil() {
@@ -188,6 +202,9 @@ func Parent(value Outer, pointer *Outer) int {
 		}
 		if !module.NamedFunction(projectedName + "$coro" + suffix).IsNil() {
 			t.Fatalf("ordinary value-field wrapper acquired split %s entry:\n%s", suffix, module.String())
+		}
+		if !module.NamedFunction("foo.ReadFullLike$coro" + suffix).IsNil() {
+			t.Fatalf("len(slice) forwarding wrapper acquired split %s entry:\n%s", suffix, module.String())
 		}
 	}
 }

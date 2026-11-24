@@ -37,6 +37,14 @@ type coroForwardingSourceAdapter struct {
 	resultType  types.Type
 }
 
+type coroForwardingBuiltinKind uint8
+
+const (
+	coroForwardingBuiltinNone coroForwardingBuiltinKind = iota
+	coroForwardingBuiltinLen
+	coroForwardingBuiltinCap
+)
+
 type coroForwardingSourceArgument struct {
 	sourceParameter int
 	// A bound method captures its receiver value directly. Observing this
@@ -49,7 +57,64 @@ type coroForwardingSourceArgument struct {
 	valueType     types.Type
 	projectedType types.Type
 	fieldPath     []int
+	builtin       coroForwardingBuiltinKind
 	direct        bool
+}
+
+// coroForwardingBuiltinResultType validates pure header-only len/cap builtins
+// on already-evaluated slice or string values. Maps, channels, and array
+// pointers are rejected because their builtin evaluations either call into the
+// runtime or dereference a pointer.
+func coroForwardingBuiltinResultType(source types.Type, kind coroForwardingBuiltinKind) (types.Type, bool) {
+	if source == nil {
+		return nil, false
+	}
+	switch kind {
+	case coroForwardingBuiltinNone:
+		return source, true
+	case coroForwardingBuiltinLen:
+		switch underlying := types.Unalias(source).Underlying().(type) {
+		case *types.Slice:
+			return types.Typ[types.Int], true
+		case *types.Basic:
+			if underlying.Info()&types.IsString != 0 {
+				return types.Typ[types.Int], true
+			}
+		}
+		return nil, false
+	case coroForwardingBuiltinCap:
+		if _, ok := types.Unalias(source).Underlying().(*types.Slice); ok {
+			return types.Typ[types.Int], true
+		}
+		return nil, false
+	default:
+		return nil, false
+	}
+}
+
+func coroForwardingPureBuiltinKind(call *ssa.Call) (coroForwardingBuiltinKind, bool) {
+	if call == nil || call.Common() == nil || call.Common().IsInvoke() ||
+		call.Common().Method != nil || len(call.Common().Args) != 1 {
+		return coroForwardingBuiltinNone, false
+	}
+	builtin, ok := call.Common().Value.(*ssa.Builtin)
+	if !ok || builtin == nil {
+		return coroForwardingBuiltinNone, false
+	}
+	var kind coroForwardingBuiltinKind
+	switch builtin.Name() {
+	case "len":
+		kind = coroForwardingBuiltinLen
+	case "cap":
+		kind = coroForwardingBuiltinCap
+	default:
+		return coroForwardingBuiltinNone, false
+	}
+	if resultType, ok := coroForwardingBuiltinResultType(call.Common().Args[0].Type(), kind); !ok ||
+		!types.Identical(resultType, call.Type()) {
+		return coroForwardingBuiltinNone, false
+	}
+	return kind, true
 }
 
 func coroForwardingProjectedType(source types.Type, fields []int) (types.Type, bool) {
@@ -85,6 +150,7 @@ func deriveCoroForwardingSourceShape(function *ssa.Function) *coroForwardingSour
 	instructions := function.Blocks[0].Instrs
 	adapterParameters := make(map[ssa.Value]*ssa.Parameter)
 	valueProjections := make(map[ssa.Instruction]none)
+	builtinProjections := make(map[ssa.Value]*ssa.Call)
 	callIndex := 0
 scanAdapters:
 	for callIndex < len(instructions) {
@@ -105,6 +171,14 @@ scanAdapters:
 				break scanAdapters
 			}
 			valueProjections[adapter] = none{}
+			callIndex++
+			continue
+		case *ssa.Call:
+			if _, ok := coroForwardingPureBuiltinKind(adapter); !ok {
+				break scanAdapters
+			}
+			valueProjections[adapter] = none{}
+			builtinProjections[adapter] = adapter
 			callIndex++
 			continue
 		default:
@@ -194,25 +268,48 @@ scanAdapters:
 	for index, value := range call.Common().Args {
 		parameter, direct := value.(*ssa.Parameter)
 		var fieldPath []int
+		builtinKind := coroForwardingBuiltinNone
 		if !direct && adapterParameters[value] == nil {
+			sourceValue := value
+			var builtinCall *ssa.Call
+			if candidate, ok := builtinProjections[value]; ok {
+				kind, valid := coroForwardingPureBuiltinKind(candidate)
+				if !valid {
+					return nil
+				}
+				builtinCall = candidate
+				builtinKind = kind
+				sourceValue = candidate.Common().Args[0]
+			}
 			var consumed map[ssa.Instruction]none
 			var projected bool
-			parameter, fieldPath, consumed, projected = deriveCoroForwardingValueProjection(function, value)
+			parameter, fieldPath, consumed, projected = deriveCoroForwardingValueProjection(function, sourceValue)
 			if projected {
 				for instruction := range consumed {
 					projections[instruction] = none{}
 				}
-				direct = len(fieldPath) == 0 && value == parameter
+				if builtinCall != nil {
+					projections[builtinCall] = none{}
+				}
+				direct = builtinKind == coroForwardingBuiltinNone && len(fieldPath) == 0 && value == parameter
+			} else if builtinCall != nil {
+				return nil
 			}
 		} else if !direct {
 			parameter = adapterParameters[value]
 		}
-		argument := coroForwardingSourceArgument{sourceParameter: -1, valueType: value.Type(), direct: direct}
+		argument := coroForwardingSourceArgument{sourceParameter: -1, valueType: value.Type(), builtin: builtinKind, direct: direct}
 		if parameter != nil {
 			sourceIndex, owned := parameterIndex[parameter]
 			projectedType, projected := coroForwardingProjectedType(parameter.Type(), fieldPath)
 			if !owned || !projected {
 				return nil
+			}
+			if builtinKind != coroForwardingBuiltinNone {
+				if resultType, valid := coroForwardingBuiltinResultType(projectedType, builtinKind); !valid ||
+					!types.Identical(resultType, value.Type()) {
+					return nil
+				}
 			}
 			argument.sourceParameter = sourceIndex
 			argument.projectedType = projectedType

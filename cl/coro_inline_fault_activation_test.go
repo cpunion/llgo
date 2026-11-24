@@ -118,10 +118,10 @@ func Unrelated(value uint32) uint32 { return value + 1 }
 		if physical.IsNil() {
 			t.Fatalf("function-local fault case=%s has no physical entry:\n%s", test.name, module.String())
 		}
-		if got := strings.Contains(physical.String(), coroPanicBoundaryPushHookV1); test.name != "Fault" && got != test.inline {
+		if got := strings.Contains(physical.String(), coroInlinePanicBoundaryResumeHelperV1); test.name != "Fault" && got != test.inline {
 			t.Fatalf("%s inline child activation=%t want %t; local landing demand must remain independent:\n%s", test.name, got, test.inline, physical.String())
 		}
-		if test.name == "Mid" && strings.Count(physical.String(), "call void @"+coroPanicBoundaryPushHookV1) != 1 {
+		if test.name == "Mid" && strings.Count(physical.String(), "call void @"+coroInlinePanicBoundaryResumeHelperV1) != 1 {
 			t.Fatal("direct caller must protect exactly the faulting child")
 		}
 		match := regexp.MustCompile(`@(__llgo_coro_frame_descriptor_v1\.[0-9a-f]+)`).FindStringSubmatch(physical.String())
