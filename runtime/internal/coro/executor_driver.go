@@ -277,6 +277,16 @@ func currentExecutorParkDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, 
 	handle := g.active.handle
 	header := g.active.header
 	action := p.action
+	if !AuditEnabled {
+		if action.Kind != ActionResume || action.Handle == nil ||
+			!gPreemptEnabledAtDepthZero(g) ||
+			header.SuspendReason != uint16(SuspendPark) ||
+			header.Lifecycle != uint16(FrameSuspended) ||
+			driver.handle.Slot == 0 || driver.handle.Generation == 0 {
+			return nil, ExecutorHandle{}, 0, false
+		}
+		return driver, driver.handle, route, true
+	}
 	if action.Kind != ActionResume || action.Flags != 0 || action.Handle == nil ||
 		p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
 		!gPreemptEnabledAtDepthZero(g) ||
@@ -308,7 +318,7 @@ func CurrentExecutorSourceCatalog(
 ) (*P, ExecutorSourceCatalog, bool) {
 	current, _, route, ok := currentExecutorParkDriver(g)
 	if !ok || current != driver || driver.sources.owner != g.runP ||
-		driver.sources.route != route || !validExecutorSourceSet(&driver.sources, g.runP) {
+		driver.sources.route != route || (AuditEnabled && !validExecutorSourceSet(&driver.sources, g.runP)) {
 		return nil, ExecutorSourceCatalog{}, false
 	}
 	return g.runP, ExecutorSourceCatalog{

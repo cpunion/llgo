@@ -171,6 +171,10 @@ uint64_t __llgo_coro_doorbell_poll_one_v1(
     struct pollfd *, llgo_doorbell_nfds_v1, int32_t);
 uint64_t __llgo_coro_doorbell_poll_set_v1(
     struct pollfd *, llgo_doorbell_nfds_v1, int32_t);
+#if defined(__APPLE__)
+void __llgo_coro_doorbell_poll_close_epoch_bump_v1(void);
+int32_t __llgo_coro_doorbell_owns_poll_fd_v1(int32_t);
+#endif
 
 static int32_t result(uint64_t packed) { return (int32_t)(uint32_t)packed; }
 static int32_t error(uint64_t packed) { return (int32_t)(uint32_t)(packed >> 32); }
@@ -215,6 +219,77 @@ int main(void) {
     if (result(packed) != -1 || error(packed) != EINVAL) {
         return 16;
     }
+#if defined(__APPLE__)
+    /* Exercise persistent Darwin kqueue: level-triggered re-fire, swapped order,
+     * filter removal, close-epoch resync, and >64 fallback to poll(2). */
+    {
+        int32_t p1[2] = {-1, -1};
+        int32_t p2[2] = {-1, -1};
+        struct pollfd set[3];
+        struct pollfd wide[65];
+        uint32_t i;
+        if (!__llgo_coro_doorbell_open_v1(p1) || !__llgo_coro_doorbell_open_v1(p2)) {
+            return 20;
+        }
+        if (result(__llgo_coro_doorbell_write_v1(p1[1], &byte, 1)) != 1) {
+            return 21;
+        }
+        set[0].fd = fds[0]; set[0].events = POLLIN; set[0].revents = 0;
+        set[1].fd = p1[0];  set[1].events = POLLIN; set[1].revents = 0;
+        set[2].fd = p2[1];  set[2].events = POLLOUT; set[2].revents = 0;
+        packed = __llgo_coro_doorbell_poll_set_v1(set, 3, 0);
+        if (result(packed) != 2 || error(packed) != 0 ||
+            set[0].revents != 0 || (set[1].revents & POLLIN) == 0 || (set[2].revents & POLLOUT) == 0) {
+            return 22;
+        }
+        /* Swap order of p1/p2 (nchanges==0 steady state) and verify level-triggered re-fire. */
+        set[1].fd = p2[1]; set[1].events = POLLOUT; set[1].revents = 0;
+        set[2].fd = p1[0]; set[2].events = POLLIN;  set[2].revents = 0;
+        packed = __llgo_coro_doorbell_poll_set_v1(set, 3, 0);
+        if (result(packed) != 2 || error(packed) != 0 ||
+            (set[1].revents & POLLOUT) == 0 || (set[2].revents & POLLIN) == 0) {
+            return 23;
+        }
+        /* Drain p1 and remove p2 (EV_DELETE); neither doorbell nor p1 should fire. */
+        if (result(__llgo_coro_doorbell_read_v1(p1[0], &byte, 1)) != 1) {
+            return 24;
+        }
+        set[1].fd = p1[0]; set[1].events = POLLIN; set[1].revents = 0;
+        packed = __llgo_coro_doorbell_poll_set_v1(set, 2, 0);
+        if (result(packed) != 0 || error(packed) != 0) {
+            return 25;
+        }
+        /* Close-epoch bump must resync without losing readiness on newly written pipe. */
+        __llgo_coro_doorbell_poll_close_epoch_bump_v1();
+        if (result(__llgo_coro_doorbell_write_v1(p1[1], &byte, 1)) != 1) {
+            return 26;
+        }
+        packed = __llgo_coro_doorbell_poll_set_v1(set, 2, 0);
+        if (result(packed) != 1 || error(packed) != 0 || (set[1].revents & POLLIN) == 0) {
+            return 27;
+        }
+        if (result(__llgo_coro_doorbell_read_v1(p1[0], &byte, 1)) != 1) {
+            return 28;
+        }
+        /* >64 watches must transparently fall back to poll(2). */
+        wide[0].fd = fds[0]; wide[0].events = POLLIN; wide[0].revents = 0;
+        for (i = 1; i < 65; i++) {
+            wide[i].fd = p1[0]; wide[i].events = POLLIN; wide[i].revents = 0;
+        }
+        wide[64].fd = p2[1]; wide[64].events = POLLOUT; wide[64].revents = 0;
+        packed = __llgo_coro_doorbell_poll_set_v1(wide, 65, 0);
+        if (result(packed) != 1 || error(packed) != 0 || (wide[64].revents & POLLOUT) == 0) {
+            return 29;
+        }
+        if (__llgo_coro_doorbell_owns_poll_fd_v1(fds[0]) != 0) {
+            return 30;
+        }
+        if (!__llgo_coro_doorbell_close_v1(p1[0]) || !__llgo_coro_doorbell_close_v1(p1[1]) ||
+            !__llgo_coro_doorbell_close_v1(p2[0]) || !__llgo_coro_doorbell_close_v1(p2[1])) {
+            return 31;
+        }
+    }
+#endif
     if (!__llgo_coro_doorbell_close_v1(fds[0]) ||
         !__llgo_coro_doorbell_close_v1(fds[1])) {
         return 17;

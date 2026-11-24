@@ -22,6 +22,7 @@ import (
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
 	"github.com/xgo-dev/llgo/runtime/internal/coroclock"
+	"github.com/xgo-dev/llgo/runtime/internal/corodoorbell"
 )
 
 type coroNativeFleetTargetLifecycleV1 uint8
@@ -89,15 +90,25 @@ func coroTargetConsumeExecutorRunV2(handle coro.ExecutorHandle, epoch uint32) bo
 	return true
 }
 
-// CoroNativePollServerDescriptorV1 recognizes every configured route doorbell.
-// It exposes descriptor ownership only; no fd is a scheduler/P identity.
+// CoroNativePollServerDescriptorV1 recognizes every configured route doorbell
+// and internal persistent poll-queue descriptor. It exposes descriptor
+// ownership only; no fd is a scheduler/P identity.
 func CoroNativePollServerDescriptorV1(fd uintptr) bool {
+	if corodoorbell.OwnsPollDescriptor(fd) {
+		return true
+	}
 	for index := uint32(0); index < coroNativeFleetV1State.domainCount; index++ {
 		if coroNativeFleetV1State.domains[index].doorbell.OwnsDescriptor(fd) {
 			return true
 		}
 	}
 	return false
+}
+
+// CoroNativePollNotifyDescriptorClosedV1 notifies the platform poll set that a
+// pollable descriptor is closing so any cached kernel registration is resynced.
+func CoroNativePollNotifyDescriptorClosedV1() {
+	corodoorbell.NotifyDescriptorClosed()
 }
 
 func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {

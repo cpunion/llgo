@@ -32,7 +32,7 @@ func CurrentExecutorPollDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, 
 }
 
 func currentExecutorPollSource(driver *ExecutorDriver, g *G) (*PollOperationSource, bool) {
-	if driver == nil || !ValidG(g) || g.active == nil {
+	if driver == nil || g == nil || g.active == nil || (AuditEnabled && !ValidG(g)) {
 		return nil, false
 	}
 	current, _, _, ok := CurrentExecutorPollDriver(g)
@@ -58,10 +58,17 @@ func PrepareSinglePollPark(
 	interest PollInterest,
 	deadline int64,
 ) (ParkTicket, PollOperationHandle, OperationID, bool) {
-	if !ValidG(g) || handle == nil || header == nil || source == nil || wait == nil ||
-		*wait != (WaitSetRecord{}) || caseID == 0 || fd < 0 || !validPollInterest(interest) || deadline < 0 ||
-		!resumeGateTaken(g) || g.runP == nil || source.owner != g.runP ||
-		!CanReservePollOperationV2(g.runP, source) {
+	if g == nil || handle == nil || header == nil || source == nil || wait == nil ||
+		caseID == 0 || fd < 0 || !validPollInterest(interest) || deadline < 0 ||
+		g.runP == nil || source.owner != g.runP {
+		return ParkTicket{}, PollOperationHandle{}, OperationID{}, false
+	}
+	if AuditEnabled {
+		if !ValidG(g) || *wait != (WaitSetRecord{}) || !resumeGateTaken(g) ||
+			!CanReservePollOperationV2(g.runP, source) {
+			return ParkTicket{}, PollOperationHandle{}, OperationID{}, false
+		}
+	} else if !CanReservePollOperationV2(g.runP, source) {
 		return ParkTicket{}, PollOperationHandle{}, OperationID{}, false
 	}
 	ticket, ok := BeginParkSet(&g.park, 1, seed)

@@ -35,45 +35,11 @@ func llgoCoroPollBufferAddress(p []byte) unsafe.Pointer {
 	return unsafe.Pointer(&p[0])
 }
 
-// llgoCoroPollReadOnce asks the runtime for one bounded stream-socket
-// recv(MSG_DONTWAIT) attempt. EINTR is handled by FD.Read's outer loop. A
-// non-stream socket or non-pollable descriptor keeps the standard syscall path,
-// which the coroutine worker can lower without changing the synchronous
-// internal/poll API. The C leaf itself clamps a large stream buffer to one
-// 64 KiB episode; Read may return short and Write's standard loop continues.
-func llgoCoroPollReadOnce(fd *FD, p []byte) (int, error) {
-	if fd.pd.runtimeCtx != 0 {
-		result, errno, attempted := runtime_pollReadAttempt(
-			fd.pd.runtimeCtx,
-			fd.Sysfd,
-			llgoCoroPollBufferAddress(p),
-			len(p),
-		)
-		if attempted {
-			if errno != 0 {
-				return result, syscall.Errno(errno)
-			}
-			return result, nil
-		}
-	}
+func llgoCoroPollReadFallback(fd *FD, p []byte) (int, error) {
 	return syscall.Read(fd.Sysfd, p)
 }
 
-func llgoCoroPollWriteOnce(fd *FD, p []byte) (int, error) {
-	if fd.pd.runtimeCtx != 0 {
-		result, errno, attempted := runtime_pollWriteAttempt(
-			fd.pd.runtimeCtx,
-			fd.Sysfd,
-			llgoCoroPollBufferAddress(p),
-			len(p),
-		)
-		if attempted {
-			if errno != 0 {
-				return result, syscall.Errno(errno)
-			}
-			return result, nil
-		}
-	}
+func llgoCoroPollWriteFallback(fd *FD, p []byte) (int, error) {
 	return syscall.Write(fd.Sysfd, p)
 }
 
@@ -90,16 +56,43 @@ func (fd *FD) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	// A descriptor without poll state has nothing to reset before the syscall.
-	if fd.pd.runtimeCtx != 0 {
-		if err := fd.pd.prepareRead(fd.isFile); err != nil {
-			return 0, err
+	// Call runtime_pollReset directly to avoid the separate pollDesc.prepare
+	// coroutine frame on every Read.
+	ctx := fd.pd.runtimeCtx
+	if ctx != 0 {
+		if res := runtime_pollReset(ctx, 'r'); res != 0 {
+			return 0, convertErr(res, fd.isFile)
 		}
 	}
 	if fd.IsStream && len(p) > maxRW {
 		p = p[:maxRW]
 	}
 	for {
-		n, err := llgoCoroPollReadOnce(fd, p)
+		if ctx != 0 {
+			n, errno, attempted := runtime_pollReadAttempt(
+				ctx,
+				fd.Sysfd,
+				llgoCoroPollBufferAddress(p),
+				len(p),
+			)
+			if attempted {
+				if errno == 0 {
+					return n, fd.eofError(n, nil)
+				}
+				if errno == int(syscall.EINTR) {
+					continue
+				}
+				if errno == int(syscall.EAGAIN) && fd.pd.pollable() {
+					if err := fd.pd.waitRead(fd.isFile); err == nil {
+						continue
+					} else {
+						return 0, err
+					}
+				}
+				return 0, syscall.Errno(errno)
+			}
+		}
+		n, err := llgoCoroPollReadFallback(fd, p)
 		if err == syscall.EINTR {
 			continue
 		}
@@ -123,9 +116,10 @@ func (fd *FD) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	defer fd.writeUnlock()
-	if fd.pd.runtimeCtx != 0 {
-		if err := fd.pd.prepareWrite(fd.isFile); err != nil {
-			return 0, err
+	ctx := fd.pd.runtimeCtx
+	if ctx != 0 {
+		if res := runtime_pollReset(ctx, 'w'); res != 0 {
+			return 0, convertErr(res, fd.isFile)
 		}
 	}
 	var nn int
@@ -134,7 +128,46 @@ func (fd *FD) Write(p []byte) (int, error) {
 		if fd.IsStream && max-nn > maxRW {
 			max = nn + maxRW
 		}
-		n, err := llgoCoroPollWriteOnce(fd, p[nn:max])
+		var n int
+		var err error
+		if ctx != 0 {
+			var errno int
+			var attempted bool
+			n, errno, attempted = runtime_pollWriteAttempt(
+				ctx,
+				fd.Sysfd,
+				llgoCoroPollBufferAddress(p[nn:max]),
+				max-nn,
+			)
+			if attempted {
+				if errno == int(syscall.EINTR) {
+					continue
+				}
+				if n > 0 {
+					if n > max-nn {
+						panic("invalid return from write: got " + strconv.Itoa(n) + " from a write of " + strconv.Itoa(max-nn))
+					}
+					nn += n
+				}
+				if errno == 0 {
+					if nn == len(p) {
+						return nn, nil
+					}
+					if n == 0 {
+						return nn, io.ErrUnexpectedEOF
+					}
+					continue
+				}
+				if errno == int(syscall.EAGAIN) && fd.pd.pollable() {
+					if err = fd.pd.waitWrite(fd.isFile); err == nil {
+						continue
+					}
+					return nn, err
+				}
+				return nn, syscall.Errno(errno)
+			}
+		}
+		n, err = llgoCoroPollWriteFallback(fd, p[nn:max])
 		if err == syscall.EINTR {
 			continue
 		}

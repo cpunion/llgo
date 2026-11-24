@@ -47,9 +47,12 @@ type runtimeContext struct {
 }
 
 const runtimeContextCoreOffset = unsafe.Offsetof(runtimeContext{}.coroRuntimeContext)
+const coroRuntimeContextGOffset = unsafe.Offsetof(coroRuntimeContext{}.g)
 
-// Native teardown frees g.context as the original independent-root base.
+// Native teardown frees g.context as the original independent-root base, and
+// panic boundaries resolve (*g)(coro.TaskLocal(task)) directly in O(1).
 var _ [runtimeContextCoreOffset]byte = [0]byte{}
+var _ [coroRuntimeContextGOffset]byte = [0]byte{}
 
 var sched struct {
 	goidgen uint64

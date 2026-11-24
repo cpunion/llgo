@@ -53,7 +53,7 @@ func BindTaskLocal(g *G, local unsafe.Pointer) bool {
 
 // TaskLocal returns the runtime-adapter context attached to g.
 func TaskLocal(g *G) unsafe.Pointer {
-	if !ValidG(g) {
+	if g == nil || (AuditEnabled && !ValidG(g)) {
 		return nil
 	}
 	return g.taskLocal
