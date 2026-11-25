@@ -119,6 +119,14 @@ type coroSyncSlowTarget struct {
 	block *ssa.BasicBlock
 }
 
+type coroSyncSlowAugCFG struct {
+	reach               map[*ssa.BasicBlock]bool
+	dom                 map[*ssa.BasicBlock]map[*ssa.BasicBlock]bool
+	splitBlock          *ssa.BasicBlock
+	splitCallIdx        int
+	splitBlockReentered bool
+}
+
 type coroPhysicalSyncRampPlan struct {
 	kind            coroSyncRampKind
 	hasTryHelper    bool
@@ -126,6 +134,7 @@ type coroPhysicalSyncRampPlan struct {
 	slowTargets     []coroSyncSlowTarget
 	liveValues      []ssa.Value
 	liveInByTag     map[uint8]map[ssa.Value]bool
+	slowAugCFG      *coroSyncSlowAugCFG
 	singleAwaitCall *ssa.Call
 	singleAwaitPlan coroPhysicalInstructionPlan
 	needsSlowSplit  bool
@@ -348,7 +357,7 @@ func (pl *coroSyncPlanner) planOne(plan *coroPhysicalFunctionPlan) *coroPhysical
 	if ramp := pl.planSingleAwait(plan, cyclic); ramp != nil {
 		return ramp
 	}
-	return directRamp
+	return nil
 }
 
 func coroSyncDirectRampHasWork(ramp *coroPhysicalSyncRampPlan) bool {
@@ -1582,9 +1591,10 @@ func (pl *coroSyncPlanner) planDirectFastCFG(
 
 	var liveValues []ssa.Value
 	var liveInByTag map[uint8]map[ssa.Value]bool
+	var slowAugCFG *coroSyncSlowAugCFG
 	if len(slowTargets) > 0 {
 		var ok bool
-		liveValues, liveInByTag, ok = collectCoroSyncResumeSlowLiveValues(plan, slowTargets)
+		liveValues, liveInByTag, slowAugCFG, ok = collectCoroSyncResumeSlowLiveValues(plan, slowTargets)
 		if !ok || !coroSyncFastTreeCoversLiveIns(root, liveInByTag) {
 			return nil
 		}
@@ -1611,6 +1621,7 @@ func (pl *coroSyncPlanner) planDirectFastCFG(
 		slowTargets:    slowTargets,
 		liveValues:     liveValues,
 		liveInByTag:    liveInByTag,
+		slowAugCFG:     slowAugCFG,
 		needsSlowSplit: true,
 	}
 }
@@ -1822,7 +1833,7 @@ func (pl *coroSyncPlanner) planSingleAwait(
 	if root == nil || chosenCall == nil || !postHasReturn {
 		return nil
 	}
-	liveValues, liveInByTag, ok := collectCoroSyncSingleAwaitLiveValues(plan, chosenCall)
+	liveValues, liveInByTag, slowAugCFG, ok := collectCoroSyncSingleAwaitLiveValues(plan, chosenCall)
 	if !ok || !coroSyncFastTreeCoversLiveIns(root, liveInByTag) {
 		return nil
 	}
@@ -1831,6 +1842,7 @@ func (pl *coroSyncPlanner) planSingleAwait(
 		root:            root,
 		liveValues:      liveValues,
 		liveInByTag:     liveInByTag,
+		slowAugCFG:      slowAugCFG,
 		singleAwaitCall: chosenCall,
 		singleAwaitPlan: chosenPlan,
 		needsSlowSplit:  true,
@@ -1869,20 +1881,20 @@ func coroSyncPlainHelperIsPure(callee *ssa.Function, whole *coro.SSAPlan) bool {
 func collectCoroSyncResumeSlowLiveValues(
 	plan *coroPhysicalFunctionPlan,
 	targets []coroSyncSlowTarget,
-) ([]ssa.Value, map[uint8]map[ssa.Value]bool, bool) {
+) ([]ssa.Value, map[uint8]map[ssa.Value]bool, *coroSyncSlowAugCFG, bool) {
 	entryBlocks := make([]*ssa.BasicBlock, len(targets))
 	for i, t := range targets {
 		entryBlocks[i] = t.block
 	}
-	all, ok := collectCoroSyncCrossBoundaryLiveValues(plan, entryBlocks, nil)
+	all, augCFG, ok := collectCoroSyncCrossBoundaryLiveValues(plan, entryBlocks, nil)
 	if !ok {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	byTag := make(map[uint8]map[ssa.Value]bool, len(targets))
 	for _, t := range targets {
-		per, ok := collectCoroSyncCrossBoundaryLiveValues(plan, []*ssa.BasicBlock{t.block}, nil)
+		per, _, ok := collectCoroSyncCrossBoundaryLiveValues(plan, []*ssa.BasicBlock{t.block}, nil)
 		if !ok {
-			return nil, nil, false
+			return nil, nil, nil, false
 		}
 		req := make(map[ssa.Value]bool, len(per))
 		for _, v := range per {
@@ -1890,25 +1902,25 @@ func collectCoroSyncResumeSlowLiveValues(
 		}
 		byTag[t.tag] = req
 	}
-	return all, byTag, true
+	return all, byTag, augCFG, true
 }
 
 func collectCoroSyncSingleAwaitLiveValues(
 	plan *coroPhysicalFunctionPlan,
 	call *ssa.Call,
-) ([]ssa.Value, map[uint8]map[ssa.Value]bool, bool) {
+) ([]ssa.Value, map[uint8]map[ssa.Value]bool, *coroSyncSlowAugCFG, bool) {
 	if call == nil || call.Block() == nil {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
-	all, ok := collectCoroSyncCrossBoundaryLiveValues(plan, []*ssa.BasicBlock{call.Block()}, call)
+	all, augCFG, ok := collectCoroSyncCrossBoundaryLiveValues(plan, []*ssa.BasicBlock{call.Block()}, call)
 	if !ok {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	req := make(map[ssa.Value]bool, len(all))
 	for _, v := range all {
 		req[v] = true
 	}
-	return all, map[uint8]map[ssa.Value]bool{1: req, 2: req}, true
+	return all, map[uint8]map[ssa.Value]bool{1: req, 2: req}, augCFG, true
 }
 
 // coroSyncFastTreeCoversLiveIns proves that every fast-tree path reaching a
@@ -1967,7 +1979,7 @@ func collectCoroSyncCrossBoundaryLiveValues(
 	plan *coroPhysicalFunctionPlan,
 	entryBlocks []*ssa.BasicBlock,
 	splitCall *ssa.Call,
-) ([]ssa.Value, bool) {
+) ([]ssa.Value, *coroSyncSlowAugCFG, bool) {
 	fn := plan.function
 	reach := make(map[*ssa.BasicBlock]bool)
 	queue := make([]*ssa.BasicBlock, 0, len(entryBlocks))
@@ -2048,6 +2060,7 @@ func collectCoroSyncCrossBoundaryLiveValues(
 
 	var splitBlock *ssa.BasicBlock
 	splitCallIdx := -1
+	splitBlockReentered := false
 	if splitCall != nil {
 		splitBlock = splitCall.Block()
 		for i, ins := range splitBlock.Instrs {
@@ -2057,7 +2070,29 @@ func collectCoroSyncCrossBoundaryLiveValues(
 			}
 		}
 		if splitCallIdx < 0 {
-			return nil, false
+			return nil, nil, false
+		}
+		seen := make(map[*ssa.BasicBlock]bool)
+		reQueue := make([]*ssa.BasicBlock, 0, len(splitBlock.Succs))
+		for _, succ := range splitBlock.Succs {
+			if succ != nil && plan.reachableBlocks[succ] && !seen[succ] {
+				seen[succ] = true
+				reQueue = append(reQueue, succ)
+			}
+		}
+		for len(reQueue) > 0 {
+			cur := reQueue[0]
+			reQueue = reQueue[1:]
+			if cur == splitBlock {
+				splitBlockReentered = true
+				break
+			}
+			for _, succ := range cur.Succs {
+				if succ != nil && plan.reachableBlocks[succ] && !seen[succ] {
+					seen[succ] = true
+					reQueue = append(reQueue, succ)
+				}
+			}
 		}
 	}
 
@@ -2116,7 +2151,7 @@ func collectCoroSyncCrossBoundaryLiveValues(
 			continue
 		}
 		start := 0
-		if blk == splitBlock {
+		if blk == splitBlock && !splitBlockReentered {
 			start = splitCallIdx + 1
 		}
 		for idx := start; idx < len(blk.Instrs); idx++ {
@@ -2128,7 +2163,7 @@ func collectCoroSyncCrossBoundaryLiveValues(
 				for eIdx, edge := range phi.Edges {
 					pred := blk.Preds[eIdx]
 					if plan.reachableBlocks[pred] && !recordIfLive(edge, pred, len(pred.Instrs)) {
-						return nil, false
+						return nil, nil, false
 					}
 				}
 				continue
@@ -2136,15 +2171,22 @@ func collectCoroSyncCrossBoundaryLiveValues(
 			scratch.operands = ins.Operands(scratch.inline[:0])
 			for _, op := range scratch.operands {
 				if op != nil && !recordIfLive(*op, blk, idx) {
-					return nil, false
+					return nil, nil, false
 				}
 			}
 		}
 	}
 	if len(ordered) > coroSyncRampMaxLiveValues {
-		return nil, false
+		return nil, nil, false
 	}
-	return ordered, true
+	augCFG := &coroSyncSlowAugCFG{
+		reach:               reach,
+		dom:                 dom,
+		splitBlock:          splitBlock,
+		splitCallIdx:        splitCallIdx,
+		splitBlockReentered: splitBlockReentered,
+	}
+	return ordered, augCFG, true
 }
 
 // -----------------------------------------------------------------------------
@@ -2160,6 +2202,55 @@ type coroSyncSlowResumeState struct {
 	resumeAwaitBlk  llssa.BasicBlock
 	resumePostBlk   llssa.BasicBlock
 	singleAwaitDone bool
+}
+
+// dominatesDebugUse reports whether iv's LLVM SSA definition dominates ref
+// inside the augmented CFG of $coro.slow (after adding slow-resume entry edges).
+func (s *coroSyncSlowResumeState) dominatesDebugUse(iv instrOrValue, ref *ssa.DebugRef) bool {
+	if s == nil || s.plan == nil || s.plan.slowAugCFG == nil {
+		return true
+	}
+	cfg := s.plan.slowAugCFG
+	defBlock, useBlock := iv.Block(), ref.Block()
+	if defBlock == nil || useBlock == nil {
+		return false
+	}
+	if defBlock == useBlock {
+		if cfg.splitBlock != nil && defBlock == cfg.splitBlock {
+			if iv == s.plan.singleAwaitCall {
+				return true
+			}
+			defIdx, useIdx := -1, -1
+			for i, ins := range defBlock.Instrs {
+				if ins == iv {
+					defIdx = i
+				}
+				if ins == ref {
+					useIdx = i
+				}
+			}
+			if defIdx < 0 || useIdx < 0 {
+				return false
+			}
+			return (defIdx < cfg.splitCallIdx && useIdx < cfg.splitCallIdx) ||
+				(defIdx > cfg.splitCallIdx && useIdx > cfg.splitCallIdx)
+		}
+		return true
+	}
+	if !cfg.reach[useBlock] {
+		return true
+	}
+	if cfg.splitBlock != nil && defBlock == cfg.splitBlock && iv != s.plan.singleAwaitCall {
+		for i, ins := range defBlock.Instrs {
+			if ins == iv {
+				if i < cfg.splitCallIdx {
+					return false
+				}
+				break
+			}
+		}
+	}
+	return cfg.dom[useBlock][defBlock]
 }
 
 type coroSyncEmitEnv struct {
@@ -2244,16 +2335,23 @@ func (p *context) compileCoroSyncRampPhysicalBody(
 	rampFn := p.fn
 	slowSig := coroSyncSlowPhysicalSig(abi.physicalSig, ramp)
 	slowFn := p.pkg.NewFuncEx(rampFn.Name()+".slow", slowSig, llssa.InGo, false, true)
+	// Keep the cold coroutine-allocating .slow ramp out of the hot sync-fast
+	// entry so the fast path stays leaf-like with minimal register spills.
+	slowFn.Inline(llssa.NoInline)
 
 	// 1. Materialize $coro.slow via the standard coroutine physical body emitter.
 	if !slowFn.HasBody() {
 		savedFn, savedBvals, savedAddrs := p.fn, p.bvals, p.coroValueAddrs
 		savedPhis, savedBlkInfos, savedSlow := p.phis, p.blkInfos, p.coroSyncSlowResume
+		savedDebugDIVars := p.debugDIVars
 
 		p.fn = slowFn
 		p.bvals = make(map[ssa.Value]llssa.Expr)
 		p.coroValueAddrs = make(map[ssa.Value]llssa.Expr)
 		p.phis, p.blkInfos = nil, nil
+		if savedDebugDIVars != nil {
+			p.debugDIVars = make(map[*types.Var]llssa.DIVar)
+		}
 
 		if len(ramp.slowTargets) > 0 || ramp.kind == coroSyncRampSingleAwait {
 			extraBase := abi.physicalSig.Params().Len()
@@ -2276,10 +2374,20 @@ func (p *context) compileCoroSyncRampPhysicalBody(
 		}
 
 		slowBuilder := slowFn.MakeBody(1)
+		if p.options.Debug && p.goProg != nil && p.goProg.Fset != nil {
+			pos := p.goProg.Fset.Position(fn.Pos())
+			bodyPos := p.getFuncBodyPos(fn)
+			logicalName := slowFn.Name()
+			if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+				logicalName = funcInfoDisplayName(funcName(fn.Pkg.Pkg, fn, false))
+			}
+			slowBuilder.DebugFunctionNamed(slowFn, logicalName, slowFn.Name(), debugFunctionScope(fn), pos, bodyPos)
+		}
 		p.compileCoroPhysicalBodyCore(slowBuilder, fn, physicalPlan, abi, sourceParamBase, isInit)
 		slowBuilder.EndBuild()
 		slowBuilder.Dispose()
 
+		p.debugDIVars = savedDebugDIVars
 		p.coroSyncSlowResume, p.blkInfos, p.phis = savedSlow, savedBlkInfos, savedPhis
 		p.coroValueAddrs, p.bvals, p.fn = savedAddrs, savedBvals, savedFn
 	}

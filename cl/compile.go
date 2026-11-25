@@ -1260,12 +1260,24 @@ func (p *context) debugRef(b llssa.Builder, v *ssa.DebugRef) {
 	pos := p.goProg.Fset.Position(v.Pos())
 	var value llssa.Expr
 	if iv, ok := v.X.(instrOrValue); ok {
-		var exists bool
-		value, exists = p.bvals[iv]
-		if !exists {
-			// DebugRef is metadata-only. Do not rematerialize an SSA value that
-			// executable lowering deliberately omitted.
-			return
+		if p.coroSyncSlowResume != nil {
+			if slot, tracked := p.coroSyncSlowResume.liveSlots[iv]; tracked {
+				value = b.LoadKnownNonNil(slot)
+			} else if !p.coroSyncSlowResume.dominatesDebugUse(iv, v) {
+				// DebugRef is metadata-only and does not extend slow-resume
+				// live-ins. Skip references whose definition does not dominate
+				// this block in the augmented slow-resume CFG.
+				return
+			}
+		}
+		if value.IsNil() {
+			var exists bool
+			value, exists = p.bvals[iv]
+			if !exists {
+				// DebugRef is metadata-only. Do not rematerialize an SSA value that
+				// executable lowering deliberately omitted.
+				return
+			}
 		}
 	} else {
 		if function, ok := v.X.(*ssa.Function); ok && p.compilation != nil {

@@ -39,6 +39,18 @@ func compileCoroSyncRampTestPackages(
 	dynamicResolution coro.DynamicResolution,
 ) (llssa.Program, *Compilation, *coro.SSAPlan, llssa.Package) {
 	t.Helper()
+	return compileCoroSyncRampTestPackagesWithOptions(t, inputs, root, predicateValues, dynamicResolution, PackageOptions{})
+}
+
+func compileCoroSyncRampTestPackagesWithOptions(
+	t *testing.T,
+	inputs []EmissionPackage,
+	root *ssa.Function,
+	predicateValues coro.ProgramCapabilities,
+	dynamicResolution coro.DynamicResolution,
+	pkgOpts PackageOptions,
+) (llssa.Program, *Compilation, *coro.SSAPlan, llssa.Package) {
+	t.Helper()
 	prog := newLLSSAProg(t)
 	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, inputs, EmissionUniverseOptions{
 		CoroProgramPredicates: coro.ProgramPredicateRequirements{
@@ -99,9 +111,10 @@ func compileCoroSyncRampTestPackages(
 	}
 	enableCoroChildAwaitCompilation(compilation)
 	rootInput := inputs[len(inputs)-1]
+	pkgOpts.Compilation = compilation
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, rootInput.SSA, rootInput.Files, goembed.VarMap{},
-		PackageOptions{Compilation: compilation},
+		pkgOpts,
 	)
 	if err != nil {
 		prog.Dispose()
@@ -819,5 +832,63 @@ func Root(h *Handle) (uintptr, bool) { return h.acquire() }
 	}
 	if ramp.hasTryHelper {
 		t.Fatalf("Handle.acquire must not publish .try when post-CAS nil guard exists")
+	}
+}
+
+func TestCoroSyncRampResumeSlowDebugSymbolsDominate(t *testing.T) {
+	// Regression for syscall.(*SockaddrUnix).sockaddr under -g (GlobalDebug +
+	// Debug + DebugSymbols): aggregate DebugRef operands in blocks reachable
+	// from slow-resume entry edges must load from live-in slots (or be skipped
+	// if not live-in), never emitting non-dominating uses in $coro.slow.
+	src := `package demo
+
+type Addr struct {
+	Name string
+	Len  byte
+	Buf  [104]byte
+}
+
+func (a *Addr) encode() (int, bool) {
+	name := a.Name
+	n := len(name)
+	if n >= len(a.Buf) {
+		return 0, false
+	}
+	if n == 0 {
+		return 0, true
+	}
+	a.Len = byte(3 + n)
+	for i := 0; i < n; i++ {
+		a.Buf[i] = name[i]
+	}
+	return n, true
+}
+
+func Root(a *Addr) (int, bool) {
+	return a.encode()
+}
+`
+	ssaPkg, _, files := buildGoSSAPkgWithMode(t, src, ssa.SanityCheckFunctions|ssa.InstantiateGenerics|ssa.GlobalDebug)
+	prog, compilation, _, _ := compileCoroSyncRampTestPackagesWithOptions(
+		t,
+		[]EmissionPackage{{SSA: ssaPkg, Files: files}},
+		ssaPkg.Func("Root"),
+		0,
+		coro.DynamicUnknownOnly,
+		PackageOptions{
+			FrontendOptions: Options{
+				Debug:        true,
+				DebugSymbols: true,
+			},
+			FrontendOptionsSet: true,
+		},
+	)
+	defer prog.Dispose()
+
+	addrType := ssaPkg.Pkg.Scope().Lookup("Addr").Type().(*types.Named)
+	encFn := ssaPkg.Prog.FuncValue(addrType.Method(0))
+	ramp := sealedSyncRampForTest(t, compilation, encFn)
+	if ramp == nil || ramp.kind != coroSyncRampResumeSlow {
+		t.Fatalf("Addr.encode ramp=%+v, want ResumeSlow", ramp)
 	}
 }
