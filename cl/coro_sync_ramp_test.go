@@ -1023,3 +1023,57 @@ func SpawnMany(n int) {
 		t.Fatalf("SpawnMany did not emit weighted spawn preemption decrement (16):\n%s", spawnIR)
 	}
 }
+
+func TestCoroSyncRampLocalNilGuardAfterCallUsesNilNewTrace(t *testing.T) {
+	// A nil-pointer guard that trips inside a sync-fast ramp after a prior call
+	// (mutated=true, e.g. `for range *nilPtrFunc()`) originates a new panic in
+	// this frame rather than propagating an existing child panic trace. It must
+	// pass coroOutcomePropagateLocalFaultNil (8) so the shared helper appends a
+	// NilNew logical trace instead of NilPropagate.
+	program := newEmissionTestProgram()
+	program.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	demoPkg := program.addPackage(t, "demo", `package demo
+import _ "unsafe"
+
+//go:linkname yieldNow llgo.coroYield
+func yieldNow()
+
+var sink int
+
+//go:noinline
+func nilPtr() *[4]int {
+	sink++
+	return nil
+}
+
+func RangeNilAfterCall(flag bool) {
+	if flag {
+		yieldNow()
+	}
+	for range *nilPtr() {
+	}
+}
+
+func Entry(flag bool) {
+	RangeNilAfterCall(flag)
+}
+`)
+	program.ssa.Build()
+	inputs := []EmissionPackage{{SSA: demoPkg.ssa, Files: []*ast.File{demoPkg.file}}}
+	prog, compilation, _, pkg := compileCoroSyncRampTestPackages(
+		t, inputs, demoPkg.ssa.Func("Entry"), 0, coro.DynamicUnknownOnly,
+	)
+	defer prog.Dispose()
+
+	ramp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("RangeNilAfterCall"))
+	if ramp == nil || !ramp.returnsNullableHandle() {
+		t.Fatalf("RangeNilAfterCall ramp=%+v, want nullable-handle sync ramp", ramp)
+	}
+	irText := pkg.Module().String()
+	if !strings.Contains(irText, coroOutcomePropagateHelperNameV1) {
+		t.Fatalf("expected %s helper in module IR", coroOutcomePropagateHelperNameV1)
+	}
+	if !strings.Contains(irText, "i32 8, label") {
+		t.Fatalf("expected local nil fault case (i32 8) in %s:\n%s", coroOutcomePropagateHelperNameV1, irText)
+	}
+}

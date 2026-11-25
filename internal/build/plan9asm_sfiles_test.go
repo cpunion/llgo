@@ -68,6 +68,9 @@ func TestShouldSkipPlan9AsmSFilesForTarget(t *testing.T) {
 	if !shouldSkipPlan9AsmSFilesForTarget(&Config{Goarch: "arm64"}, "internal/chacha8rand") {
 		t.Fatal("native chacha8rand assembly should be replaced by its pure-Go source patch")
 	}
+	if !shouldSkipPlan9AsmSFilesForTarget(&Config{Goos: "linux", Goarch: "amd64"}, "internal/runtime/syscall/linux") {
+		t.Fatal("native linux internal syscall assembly should be replaced by its source patch")
+	}
 	if shouldSkipPlan9AsmSFilesForTarget(&Config{Goarch: "wasm"}, "internal/chacha8rand") {
 		t.Fatal("native wasm chacha8rand should retain its standard Go implementation")
 	}

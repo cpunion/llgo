@@ -260,3 +260,73 @@ func Dynamic(value reflect.Value, name string) { _ = value.MethodByName(name) }
 		}
 	}
 }
+
+func TestReflectTypeMethodCheckRecognizesStructuralInterfaces(t *testing.T) {
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackageEx("pkg", "pkg", true)
+	fn := pkg.NewFunc("pkg.caller", types.NewSignatureType(nil, nil, nil, nil, nil, false), llssa.InGo)
+	ctx := &context{pkg: pkg, fn: fn}
+
+	reflectPkg := types.NewPackage("reflect", "reflect")
+	reflectMethodType := types.NewNamed(
+		types.NewTypeName(token.NoPos, reflectPkg, "Method", nil),
+		types.NewStruct(nil, nil),
+		nil,
+	)
+	userPkg := types.NewPackage("user", "user")
+
+	methodByNameFn := types.NewFunc(token.NoPos, userPkg, "MethodByName", types.NewSignatureType(
+		nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, userPkg, "name", types.Typ[types.String])),
+		types.NewTuple(
+			types.NewParam(token.NoPos, userPkg, "", reflectMethodType),
+			types.NewParam(token.NoPos, userPkg, "", types.Typ[types.Bool]),
+		),
+		false,
+	))
+	methodByIdxFn := types.NewFunc(token.NoPos, userPkg, "Method", types.NewSignatureType(
+		nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, userPkg, "i", types.Typ[types.Int])),
+		types.NewTuple(types.NewParam(token.NoPos, userPkg, "", reflectMethodType)),
+		false,
+	))
+	wrongSigFn := types.NewFunc(token.NoPos, userPkg, "MethodByName", types.NewSignatureType(
+		nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, userPkg, "name", types.Typ[types.String])),
+		types.NewTuple(types.NewParam(token.NoPos, userPkg, "", types.Typ[types.Bool])),
+		false,
+	))
+
+	myTypeIface := types.NewInterfaceType([]*types.Func{methodByNameFn, methodByIdxFn}, nil)
+	myTypeIface.Complete()
+	myType := types.NewNamed(types.NewTypeName(token.NoPos, userPkg, "MyType", nil), myTypeIface, nil)
+	recv := ssa.NewConst(nil, myType)
+
+	check := ctx.reflectTypeMethodCheck(&ssa.CallCommon{
+		Value: recv,
+		Args:  []ssa.Value{ssa.NewConst(constant.MakeString("UniqueMethodName"), types.Typ[types.String])},
+	}, methodByNameFn)
+	if check.Kind != llssa.ReflectTypeMethodByName || check.Name != "UniqueMethodName" {
+		t.Fatalf("structural MethodByName check = %+v, want ReflectTypeMethodByName(UniqueMethodName)", check)
+	}
+
+	check = ctx.reflectTypeMethodCheck(&ssa.CallCommon{
+		Value: recv,
+		Args:  []ssa.Value{ssa.NewConst(constant.MakeInt64(0), types.Typ[types.Int])},
+	}, methodByIdxFn)
+	if check.Kind != llssa.ReflectTypeMethodByIndex {
+		t.Fatalf("structural Method(0) check = %+v, want ReflectTypeMethodByIndex", check)
+	}
+
+	otherIface := types.NewInterfaceType([]*types.Func{wrongSigFn}, nil)
+	otherIface.Complete()
+	otherType := types.NewNamed(types.NewTypeName(token.NoPos, userPkg, "Other", nil), otherIface, nil)
+	check = ctx.reflectTypeMethodCheck(&ssa.CallCommon{
+		Value: ssa.NewConst(nil, otherType),
+		Args:  []ssa.Value{ssa.NewConst(constant.MakeString("UniqueMethodName"), types.Typ[types.String])},
+	}, wrongSigFn)
+	if check != (llssa.ReflectMethodCheck{}) {
+		t.Fatalf("non-matching MethodByName signature check = %+v, want zero", check)
+	}
+}
