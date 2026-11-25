@@ -788,6 +788,7 @@ func prepareAwait(
 		return false
 	}
 	linkAwaitChild(parent, child)
+	promoteFrameToHead(g, child)
 	g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
 	return true
 }
@@ -1098,6 +1099,21 @@ func unlinkFrame(g *G, target *Frame) bool {
 	return false
 }
 
+func promoteFrameToHead(g *G, target *Frame) bool {
+	if g == nil || target == nil {
+		return false
+	}
+	if g.frames == target {
+		return true
+	}
+	if !unlinkFrame(g, target) {
+		return false
+	}
+	target.next = g.frames
+	g.frames = target
+	return true
+}
+
 // ReleaseFrame validates the compiler deallocation callback and unlinks its
 // combined allocation. The adapter must clear/free the returned range and
 // must not dereference the Frame afterwards.
@@ -1139,20 +1155,26 @@ func ReleaseFrameCompiler(
 ) (metadata, raw unsafe.Pointer, total uintptr, ok bool) {
 	if !AuditEnabled && g != nil {
 		frame := g.destroyTarget
-		if frame != nil && g.frames == frame && frame.header != nil && !frame.borrowedStorage() {
-			allocationBase := frame.header.AllocationBase
-			allocationSize := frame.allocationSize
-			g.frames = frame.next
-			frame.next = nil
-			frame.state = FrameDestroyed
-			frame.panicLine = frame.header.Line
-			frame.header.Lifecycle = uint16(FrameDestroyed)
-			g.destroyTarget = nil
-			if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
-				g.pending.from == frame.parent {
-				g.pending.target = nil
+		if frame != nil && frame.header != nil && !frame.borrowedStorage() {
+			if g.frames == frame {
+				g.frames = frame.next
+				frame.next = nil
+			} else if !unlinkFrame(g, frame) {
+				frame = nil
 			}
-			return unsafe.Pointer(frame), allocationBase, allocationSize, true
+			if frame != nil {
+				allocationBase := frame.header.AllocationBase
+				allocationSize := frame.allocationSize
+				frame.state = FrameDestroyed
+				frame.panicLine = frame.header.Line
+				frame.header.Lifecycle = uint16(FrameDestroyed)
+				g.destroyTarget = nil
+				if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
+					g.pending.from == frame.parent {
+					g.pending.target = nil
+				}
+				return unsafe.Pointer(frame), allocationBase, allocationSize, true
+			}
 		}
 	}
 	preempt := uint32(preemptDisabled)
@@ -1172,24 +1194,32 @@ func ReleaseFrameCompiler(
 		layoutOK := align-1 <= ^uintptr(0)-overhead && allocationSize >= size &&
 			allocationSize-size == overhead+align-1
 		if frame != nil && layoutOK && uintptr(storage)%align == 0 &&
-			FrameFromStorage(storage) == frame && g.frames == frame &&
+			FrameFromStorage(storage) == frame &&
 			frame.owner == g && frame.header != nil && frame.header.Descriptor == descriptor &&
 			frame.state == FrameDestroyPending && frame.parkWait == nil &&
 			uintptr(allocationBase)%unsafe.Alignof(Frame{}) == 0 &&
 			allocationContains(allocationBase, allocationSize, storage, size) &&
 			allocationContains(allocationBase, allocationSize, unsafe.Pointer(frame), unsafe.Sizeof(Frame{})) &&
 			frame.header.Lifecycle == uint16(FrameDestroyPending) {
-			g.frames = frame.next
-			frame.next = nil
-			frame.state = FrameDestroyed
-			frame.panicLine = frame.header.Line
-			frame.header.Lifecycle = uint16(FrameDestroyed)
-			g.destroyTarget = nil
-			if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
-				g.pending.from == frame.parent {
-				g.pending.target = nil
+			unlinked := false
+			if g.frames == frame {
+				g.frames = frame.next
+				frame.next = nil
+				unlinked = true
+			} else {
+				unlinked = unlinkFrame(g, frame)
 			}
-			return unsafe.Pointer(frame), allocationBase, allocationSize, true
+			if unlinked {
+				frame.state = FrameDestroyed
+				frame.panicLine = frame.header.Line
+				frame.header.Lifecycle = uint16(FrameDestroyed)
+				g.destroyTarget = nil
+				if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
+					g.pending.from == frame.parent {
+					g.pending.target = nil
+				}
+				return unsafe.Pointer(frame), allocationBase, allocationSize, true
+			}
 		}
 	}
 	legacyRaw, legacyTotal, legacyOK := ReleaseFrame(g, storage, size, align, descriptor)

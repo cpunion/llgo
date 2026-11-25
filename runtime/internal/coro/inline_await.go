@@ -60,20 +60,29 @@ func PrepareInlineAwaitCompiler(
 	if !AuditEnabled && recoverType == nil && recoverData == nil && g != nil && g.runP != nil {
 		p := g.runP
 		parent, child := g.active, g.frames
-		if parent != nil && child != nil && parent != child && parent.handle == parentHandle && child.handle == childHandle {
-			parent.completion.child = childHandle
-			parent.completion.status = completionArmed
-			linkAwaitChild(parent, child)
-			if p.inlineAwaitDepth >= maxInlineAwaitDepth {
-				g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
-				return InlineAwaitDeclined
+		if parent != nil && parent.handle == parentHandle && child != nil {
+			if child.handle != childHandle {
+				child = findFrame(g, childHandle)
+				if child == nil || child == parent || child.state != FrameInitialSuspended ||
+					child.parent != nil || !promoteFrameToHead(g, child) {
+					child = nil
+				}
 			}
-			parent.state = FrameSuspended
-			child.state = FrameActive
-			g.active = child
-			g.pending = pendingTransition{kind: pendingInlineStart, from: parent, target: child}
-			p.inlineAwaitDepth++
-			return InlineAwaitStarted
+			if child != nil && parent != child {
+				parent.completion.child = childHandle
+				parent.completion.status = completionArmed
+				linkAwaitChild(parent, child)
+				if p.inlineAwaitDepth >= maxInlineAwaitDepth {
+					g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
+					return InlineAwaitDeclined
+				}
+				parent.state = FrameSuspended
+				child.state = FrameActive
+				g.active = child
+				g.pending = pendingTransition{kind: pendingInlineStart, from: parent, target: child}
+				p.inlineAwaitDepth++
+				return InlineAwaitStarted
+			}
 		}
 	}
 	// The ordinary compiler lane is adjacent to the child ramp's successful
@@ -89,6 +98,9 @@ func PrepareInlineAwaitCompiler(
 		g.pending.kind == pendingNone && g.destroyTarget == nil && !g.destroysRoot() {
 		p := g.runP
 		parent, child := g.active, g.frames
+		if child == nil || child.handle != childHandle {
+			child = findFrame(g, childHandle)
+		}
 		preempt := preemptLoad(&g.preempt)
 		if p.current == g && p.inResume && g.state == GRunning &&
 			p.runDecisionTaken && p.runDecision == (RunDecision{}) &&
@@ -116,6 +128,7 @@ func PrepareInlineAwaitCompiler(
 				}
 			}
 			if depthOK {
+				promoteFrameToHead(g, child)
 				parent.completion.child = childHandle
 				parent.completion.status = completionArmed
 				linkAwaitChild(parent, child)
@@ -140,6 +153,9 @@ func PrepareInlineAwaitCompiler(
 		!g.isWaiting() && compilerReleasableParkState(&g.park) {
 		p := g.runP
 		parent, child := g.active, g.frames
+		if child == nil || child.handle != childHandle {
+			child = findFrame(g, childHandle)
+		}
 		if parent != nil && child != nil && parent != child &&
 			parent.handle == parentHandle && child.handle == childHandle &&
 			parent.owner == g && child.owner == g &&
@@ -151,6 +167,7 @@ func PrepareInlineAwaitCompiler(
 			child.header.Lifecycle == uint16(FrameInitialSuspended) &&
 			child.parent == nil && emptyCompletionRecord(&parent.completion) &&
 			compilerInlineAwaitParentDepth(g, parent, p.inlineAwaitDepth) {
+			promoteFrameToHead(g, child)
 			parent.completion.child = child.handle
 			if recoverType == nil {
 				parent.completion.status = completionArmed

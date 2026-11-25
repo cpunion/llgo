@@ -284,24 +284,59 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	if body == nil {
 		panic("managed dispatch await requires an active physical coroutine body")
 	}
+	shieldedVoidCleanup := cleanup != nil && !options.cleanup.recoverParent &&
+		options.delivery == nil && (options.cleanup.discardResult || abi.signature.Results().Len() == 0)
 	awaitChild := func(child llssa.Expr, endShield func(llssa.Builder)) {
-		var afterConsume func(llssa.Builder)
-		if options.cleanup.recoverParent {
-			token := descriptorWord
-			if options.recoverAliasChild {
-				token = child
+		awaitAsync := func() {
+			var afterConsume func(llssa.Builder)
+			if options.cleanup.recoverParent {
+				token := descriptorWord
+				if options.recoverAliasChild {
+					token = child
+				}
+				afterConsume = p.beginCoroRecoverAliasScope(
+					b, llssa.Nil, token, b.Load(cleanup.panicActive),
+				)
+			} else if options.transparentRecoverAlias {
+				afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
 			}
-			afterConsume = p.beginCoroRecoverAliasScope(
-				b, llssa.Nil, token, b.Load(cleanup.panicActive),
+			afterConsume = chainCoroReconciliation(afterConsume, endShield)
+			p.awaitCoroChildCompletionWithRecovery(
+				b, child, options.cleanup,
+				options.keepaliveSlots, afterConsume,
 			)
-		} else if options.transparentRecoverAlias {
-			afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
 		}
-		afterConsume = chainCoroReconciliation(afterConsume, endShield)
-		p.awaitCoroChildCompletionWithRecovery(
-			b, child, options.cleanup,
-			options.keepaliveSlots, afterConsume,
-		)
+		if shieldedVoidCleanup {
+			awaitAsync()
+			return
+		}
+		asyncBlk := p.fn.MakeBlock()
+		syncBlk := p.fn.MakeBlock()
+		doneBlk := p.fn.MakeBlock()
+		isAsync := b.BinOp(token.NEQ, child, p.prog.Nil(p.prog.VoidPtr()))
+		b.IfWithBranchWeights(isAsync, asyncBlk, syncBlk, 1, 1000)
+
+		b.SetBlockEx(asyncBlk, llssa.AtEnd, false)
+		awaitAsync()
+		b.Jump(doneBlk)
+
+		b.SetBlockEx(syncBlk, llssa.AtEnd, false)
+		if endShield != nil {
+			endShield(b)
+		}
+		p.emitCoroKeepaliveSlots(b, options.keepaliveSlots)
+		b.Jump(doneBlk)
+
+		b.SetBlockContinuation(doneBlk)
+	}
+	coroOutArg := func() llssa.Expr {
+		if shieldedVoidCleanup {
+			return p.prog.Nil(p.prog.VoidPtr())
+		}
+		if abi.signature.Results().Len() == 0 && !deferredAllocation {
+			return body.task
+		}
+		return b.Convert(p.prog.VoidPtr(), resultSlot)
 	}
 	if options.entry == coro.ManagedEntryCoroutine {
 		if !dispatchOptions.TrustedDescriptor {
@@ -312,7 +347,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 		child := b.CallPreparedCoroDispatchCoroOnly(
 			selection,
 			body.task,
-			b.Convert(p.prog.VoidPtr(), resultSlot),
+			coroOutArg(),
 			args,
 		)
 		awaitChild(child, endShield)
@@ -327,9 +362,6 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 
 	coroutineBlock := p.fn.MakeBlock()
 	nonCoroutineBlock := p.fn.MakeBlock()
-	outcomeBlock := p.fn.MakeBlock()
-	plainBlock := p.fn.MakeBlock()
-	join := p.fn.MakeBlock()
 	selection := b.PrepareCoroDispatchCall(fn, dispatchOptions)
 	if guard := options.delivery; guard != nil {
 		guard.result = resultSlot
@@ -341,19 +373,22 @@ func (p *context) compileCoroManagedDispatchAwaitValueResultWithRecovery(
 	hasOutcome, hasCoro, codeEntry := selection.HasOutcome(), selection.HasCoro(), selection.CodeEntry()
 	b.If(hasCoro, coroutineBlock, nonCoroutineBlock)
 
-	b.SetBlockEx(nonCoroutineBlock, llssa.AtEnd, false)
-	b.If(hasOutcome, outcomeBlock, plainBlock)
-
 	b.SetBlockEx(coroutineBlock, llssa.AtEnd, false)
 	endShield := p.beginCoroCleanupShield(b, options.cleanup)
 	child := b.CallPreparedCoroDispatchCoro(
 		selection,
 		body.task,
-		b.Convert(p.prog.VoidPtr(), resultSlot),
+		coroOutArg(),
 		args,
 	)
 	awaitChild(child, endShield)
+	outcomeBlock := p.fn.MakeBlock()
+	plainBlock := p.fn.MakeBlock()
+	join := p.fn.MakeBlock()
 	b.Jump(join)
+
+	b.SetBlockEx(nonCoroutineBlock, llssa.AtEnd, false)
+	b.If(hasOutcome, outcomeBlock, plainBlock)
 
 	b.SetBlockEx(outcomeBlock, llssa.AtEnd, false)
 	completion := p.structuredOutcomeScratch()

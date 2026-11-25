@@ -572,11 +572,22 @@ jobs:
           from pathlib import Path
           import subprocess
           image = '/tmp/llgo-waitgroup-fast-gate'
-          names = [line.split()[-1] for line in subprocess.check_output(['llvm-nm', image], text=True).splitlines()
-                   if 'TestWaitGroupFastAddConcurrentCounter' in line and line.rstrip().endswith('$coro.resume')]
-          assert names, 'missing native counter-test resumes'
-          assembly = subprocess.check_output(['llvm-objdump', '--disassemble', '--disassemble-symbols=' + ','.join(names), image], text=True)
-          assert 'cmpxchg' in assembly, 'native tests did not retain the guarded CAS'
+          symbols = subprocess.check_output(['llvm-nm', '--print-size', image], text=True)
+          entries = {}
+          for line in symbols.splitlines():
+              fields = line.split()
+              if len(fields) == 4:
+                  entries[fields[3]] = (int(fields[0], 16), int(fields[1], 16), fields[2])
+          add_sym = 'sync.(*WaitGroup).Add$coro'
+          slow_sym = 'sync.(*WaitGroup).Add$coro.slow'
+          assert add_sym in entries and slow_sym in entries, 'missing WaitGroup.Add sync-fast ramp symbols'
+          start, size, kind = entries[add_sym]
+          assert kind.lower() == 't' and size > 0, 'missing ELF extent for ' + add_sym
+          assembly = subprocess.check_output([
+              'llvm-objdump', '--disassemble', '--start-address=' + hex(start),
+              '--stop-address=' + hex(start + size), image], text=True)
+          assert ('xadd' in assembly or 'cmpxchg' in assembly or 'ldaxr' in assembly or 'ldadd' in assembly), 'WaitGroup.Add sync-fast ramp lost inline atomic update:\n' + assembly
+          assert '__llgo_coro_frame_alloc' not in assembly, 'WaitGroup.Add sync-fast ramp unexpectedly allocates a coroutine frame:\n' + assembly
           # The rejected patch is never added to the package. Its source
           # position in the actual image proves admission without requiring
           # the optimizer to retain a particular helper call or symbol.
@@ -757,9 +768,11 @@ jobs:
           symbols = subprocess.check_output(['llvm-nm', '--print-size', image], text=True)
           (out / 'symbols.txt').write_text(symbols)
           groups = {
-              'counter': lambda name: 'TestPollMutexFastConcurrent' in name and name.endswith('$coro.resume'),
-              'fd-read-lock': lambda name: name == 'internal/poll.(*FD).readLock$coro.resume',
-              'fd-read-unlock': lambda name: name == 'internal/poll.(*FD).readUnlock$coro.resume',
+              'fd-mutex-rwlock': lambda name: name in ('internal/poll.(*fdMutex).rwlock$coro.try', 'internal/poll.(*fdMutex).rwlock$coro'),
+              'fd-mutex-rwunlock': lambda name: name in ('internal/poll.(*fdMutex).rwunlock$coro.try', 'internal/poll.(*fdMutex).rwunlock$coro'),
+              'fd-read-lock': lambda name: name == 'internal/poll.(*FD).readLock$coro',
+              'fd-read-unlock': lambda name: name == 'internal/poll.(*FD).readUnlock$coro',
+              'waitgroup-add': lambda name: name == 'sync.(*WaitGroup).Add$coro',
           }
           proof = {}
           for group, selected in groups.items():
@@ -771,21 +784,28 @@ jobs:
                   address, size, kind, name = fields
                   start, size = int(address, 16), int(size, 16)
                   assert kind.lower() == 't' and size > 0, 'missing ELF function extent: ' + name
-                  # A resume contains interior __llgo_pcsite symbols. Selecting
-                  # only its name stops objdump at the first interior symbol;
-                  # the ELF function extent includes its remaining instructions.
                   assembly = subprocess.check_output([
                       'llvm-objdump', '--disassemble', '--start-address=' + hex(start),
                       '--stop-address=' + hex(start + size), image], text=True)
                   (out / (group + '-' + str(len(entries)) + '.s')).write_text(assembly)
-                  entries.append(dict(name=name, address=start, size=size, cas=assembly.count('cmpxchg')))
+                  entries.append(dict(
+                      name=name, address=start, size=size,
+                      cas=assembly.count('cmpxchg'),
+                      atomic=sum(assembly.count(op) for op in ('cmpxchg', 'xadd', 'ldaxr', 'ldadd')),
+                      calls_try=('.try' in assembly),
+                      allocs_frame=('__llgo_coro_frame_alloc' in assembly),
+                  ))
               proof[group] = entries
           (out / 'proof.json').write_text(json.dumps(proof, indent=2) + '\n')
           print(json.dumps(proof, indent=2))
-          assert len(proof['counter']) == 2, 'missing poll-lock counter-test resumes'
-          assert sum(entry['cas'] for entry in proof['counter']) >= 3, 'poll lock/unlock and WaitGroup guarded updates were not retained'
+          for group in ('fd-mutex-rwlock', 'fd-mutex-rwunlock'):
+              assert proof[group] and sum(e['cas'] for e in proof[group]) >= 1, 'missing fdMutex inline CAS sync-fast ramp: ' + group
+              assert all(not e['allocs_frame'] for e in proof[group]), 'fdMutex sync-fast ramp allocates coroutine frame: ' + group
           for group in ('fd-read-lock', 'fd-read-unlock'):
-              assert len(proof[group]) == 1 and proof[group][0]['cas'] >= 1, 'missing production guarded update: ' + group
+              assert len(proof[group]) == 1, 'missing production FD sync-fast ramp: ' + group
+              e = proof[group][0]
+              assert (e['cas'] >= 1 or e['calls_try']) and not e['allocs_frame'], 'missing zero-frame FD lock/unlock fast path: ' + group
+          assert len(proof['waitgroup-add']) == 1 and proof['waitgroup-add'][0]['atomic'] >= 1 and not proof['waitgroup-add'][0]['allocs_frame'], 'missing zero-frame WaitGroup.Add atomic fast path'
           PYCODE
           for procs in 1 4; do
             GOMAXPROCS="$procs" timeout 90s /tmp/llgo-poll-gate \

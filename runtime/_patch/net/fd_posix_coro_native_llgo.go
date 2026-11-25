@@ -26,6 +26,14 @@ import (
 func (fd *netFD) Read(p []byte) (n int, err error) {
 	var status uint8
 	n, err, status = fd.pfd.LLGoTryRead(p)
+	if status == poll.LLGoTryDone && err == nil {
+		runtime.KeepAlive(fd)
+		return n, nil
+	}
+	return fd.llgoReadSlow(p, n, err, status)
+}
+
+func (fd *netFD) llgoReadSlow(p []byte, n int, err error, status uint8) (int, error) {
 	switch status {
 	case poll.LLGoTryDone:
 	case poll.LLGoTryDoneSlowUnlock:
@@ -48,6 +56,14 @@ func (fd *netFD) Read(p []byte) (n int, err error) {
 func (fd *netFD) Write(p []byte) (nn int, err error) {
 	var status uint8
 	nn, err, status = fd.pfd.LLGoTryWrite(p)
+	if status == poll.LLGoTryDone && err == nil {
+		runtime.KeepAlive(fd)
+		return nn, nil
+	}
+	return fd.llgoWriteSlow(p, nn, err, status)
+}
+
+func (fd *netFD) llgoWriteSlow(p []byte, nn int, err error, status uint8) (int, error) {
 	switch status {
 	case poll.LLGoTryDone:
 	case poll.LLGoTryDoneSlowUnlock:

@@ -36,7 +36,10 @@ func main() {
 		if pkg.LPkg == nil {
 			return
 		}
-		function := pkg.LPkg.Module().NamedFunction("runtime.semaAcquireWaitGroup$coro")
+		function := pkg.LPkg.Module().NamedFunction("runtime.semaAcquireWaitGroup$coro.slow")
+		if function.IsNil() || function.BasicBlocksCount() == 0 {
+			function = pkg.LPkg.Module().NamedFunction("runtime.semaAcquireWaitGroup$coro")
+		}
 		if !function.IsNil() && function.BasicBlocksCount() != 0 {
 			body = function.String()
 		}

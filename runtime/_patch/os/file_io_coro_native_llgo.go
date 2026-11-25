@@ -22,6 +22,14 @@ func (f *File) Read(b []byte) (n int, err error) {
 	}
 	var status uint8
 	n, err, status = f.pfd.LLGoTryRead(b)
+	if status == poll.LLGoTryDone && err == nil {
+		runtime.KeepAlive(f)
+		return n, nil
+	}
+	return f.llgoReadSlow(b, n, err, status)
+}
+
+func (f *File) llgoReadSlow(b []byte, n int, err error, status uint8) (int, error) {
 	switch status {
 	case poll.LLGoTryDone:
 	case poll.LLGoTryDoneSlowUnlock:
@@ -35,7 +43,6 @@ func (f *File) Read(b []byte) (n int, err error) {
 		n, err = f.pfd.Read(b)
 	}
 	runtime.KeepAlive(f)
-	// The error wrapper may suspend. Skip its coroutine call on success.
 	if err != nil {
 		err = f.wrapErr("read", err)
 	}
@@ -52,6 +59,14 @@ func (f *File) Write(b []byte) (n int, err error) {
 	var e error
 	var status uint8
 	n, e, status = f.pfd.LLGoTryWrite(b)
+	if status == poll.LLGoTryDone && e == nil && n == len(b) {
+		runtime.KeepAlive(f)
+		return n, nil
+	}
+	return f.llgoWriteSlow(b, n, e, status)
+}
+
+func (f *File) llgoWriteSlow(b []byte, n int, e error, status uint8) (int, error) {
 	switch status {
 	case poll.LLGoTryDone:
 	case poll.LLGoTryDoneSlowUnlock:
@@ -74,6 +89,7 @@ func (f *File) Write(b []byte) (n int, err error) {
 		n, e = f.pfd.Write(b)
 	}
 	runtime.KeepAlive(f)
+	var err error
 	if n < 0 {
 		n = 0
 	}
@@ -93,11 +109,24 @@ func (f *File) Seek(offset int64, whence int) (int64, error) {
 	if err := f.checkValid("seek"); err != nil {
 		return 0, err
 	}
-	if info := f.dirinfo.Swap(nil); info != nil {
-		// Discard the directory buffer so the next read starts at the new offset.
-		info.close()
+	if f.dirinfo.Load() != nil {
+		return f.llgoSeekSlow(offset, whence, 0, nil, poll.LLGoTryFallback, true)
 	}
 	ret, err, status := f.pfd.LLGoTrySeek(offset, whence)
+	if status == poll.LLGoTryDone && err == nil && (ret == 0 || f.dirinfo.Load() == nil) {
+		runtime.KeepAlive(f)
+		return ret, nil
+	}
+	return f.llgoSeekSlow(offset, whence, ret, err, status, false)
+}
+
+func (f *File) llgoSeekSlow(offset int64, whence int, ret int64, err error, status uint8, clearDir bool) (int64, error) {
+	if clearDir {
+		if info := f.dirinfo.Swap(nil); info != nil {
+			// Discard the directory buffer so the next read starts at the new offset.
+			info.close()
+		}
+	}
 	switch status {
 	case poll.LLGoTryDone:
 	case poll.LLGoTryDoneSlowUnlock:

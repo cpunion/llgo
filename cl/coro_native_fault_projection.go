@@ -24,8 +24,12 @@ func (ir *coroProgramIR) nativeFaultIsolatedCalls() map[ssa.CallInstruction]bool
 	isolated := make(map[ssa.CallInstruction]bool)
 	seen := make(map[ssa.CallInstruction]bool)
 	defined := make(map[*ssa.Function]bool)
+	syncRampTargets := make(map[*ssa.Function]bool)
 	for _, function := range ir.physicalPlans {
 		defined[function.function] = function.function != nil && len(function.function.Blocks) != 0
+		if function.syncRamp != nil && function.syncRamp.returnsNullableHandle() {
+			syncRampTargets[function.function] = true
+		}
 	}
 	for _, function := range ir.physicalPlans {
 		for instruction, physical := range function.instructions {
@@ -33,12 +37,13 @@ func (ir *coroProgramIR) nativeFaultIsolatedCalls() map[ssa.CallInstruction]bool
 			if !ok {
 				continue
 			}
-			// A transparent ramp returns its target's frame instead of resuming
-			// an independent child. Propagate the target's landing demand through
-			// that frozen forwarding edge so its eventual caller protects the
-			// actual physical frame, even across multiple forwarding ramps.
-			separate := function.tailForward == nil &&
-				physical.control == coroPhysicalControlDirectAwait && defined[physical.controlTarget]
+			// A transparent ramp or nullable-handle sync-fast ramp executes its
+			// fast path on its caller's native activation rather than inside an
+			// independently protected coroutine child. Propagate native fault
+			// landing demand across those edges.
+			separate := function.tailForward == nil && function.syncRamp == nil &&
+				physical.control == coroPhysicalControlDirectAwait &&
+				defined[physical.controlTarget] && !syncRampTargets[physical.controlTarget]
 			// All ownership variants must agree before an occurrence is isolated.
 			if seen[call] {
 				isolated[call] = isolated[call] && separate

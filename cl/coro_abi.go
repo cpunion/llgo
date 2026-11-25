@@ -1542,6 +1542,14 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 		p.compileCoroTailForwardPhysicalBody(b, fn, physicalPlan, sourceParamBase)
 		return
 	}
+	if physicalPlan.syncRamp != nil && physicalPlan.syncRamp.needsSlowSplit {
+		p.compileCoroSyncRampPhysicalBody(b, fn, physicalPlan, abi, sourceParamBase, isInit)
+		return
+	}
+	p.compileCoroPhysicalBodyCore(b, fn, physicalPlan, abi, sourceParamBase, isInit)
+}
+
+func (p *context) compileCoroPhysicalBodyCore(b llssa.Builder, fn *ssa.Function, physicalPlan *coroPhysicalFunctionPlan, abi coroPhysicalABI, sourceParamBase int, isInit bool) {
 	frameRetention := physicalPlan.frameRetention
 	critical := physicalPlan.critical
 	cleanupPlan := physicalPlan.cleanup
@@ -1598,9 +1606,12 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	if physical.cleanup != nil && cleanupPlan != nil {
 		physical.cleanup.bindDelivery(p, cleanupPlan.delivery)
 	}
+	if p.coroSyncSlowResume != nil {
+		p.initCoroSyncSlowLiveSlots(p.coroSyncSlowResume)
+	}
 	b.SetBlock(physical.coro.InitialResumeBlock())
 	physical.activate(b)
-	b.Jump(sourceBlocks[0])
+	p.emitCoroSyncSlowEntryDispatch(b, p.coroSyncSlowResume, sourceBlocks)
 
 	cgoFrontend := isCgoExternSymbol(fn)
 	off := make([]int, len(fn.Blocks))

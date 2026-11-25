@@ -195,19 +195,19 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 	}
 	switch instructionPlan.control {
 	case coroPhysicalControlDirectAwait:
-		return p.compileCoroStaticAwait(b, call, instructionPlan), true
+		return p.joinCoroSyncSlowSingleAwait(b, call, p.compileCoroStaticAwait(b, call, instructionPlan)), true
 	case coroPhysicalControlDirectOutcome:
 		return p.compileCoroStaticOutcomeCall(b, call, instructionPlan), true
 	case coroPhysicalControlDispatchAwait:
-		return p.compileCoroManagedDispatchAwait(b, call, instructionPlan), true
+		return p.joinCoroSyncSlowSingleAwait(b, call, p.compileCoroManagedDispatchAwait(b, call, instructionPlan)), true
 	case coroPhysicalControlClosedInterfaceAwait:
-		return p.compileCoroInterfaceDispatchAwait(b, call, instructionPlan), true
+		return p.joinCoroSyncSlowSingleAwait(b, call, p.compileCoroInterfaceDispatchAwait(b, call, instructionPlan)), true
 	case coroPhysicalControlManagedInterfaceAwait:
-		return p.compileCoroManagedInterfaceAwait(b, call, instructionPlan), true
+		return p.joinCoroSyncSlowSingleAwait(b, call, p.compileCoroManagedInterfaceAwait(b, call, instructionPlan)), true
 	case coroPhysicalControlExactInterfaceCall:
 		return p.compileCoroExactInterfaceCall(b, call, instructionPlan), true
 	case coroPhysicalControlExactInterfaceAwait:
-		return p.compileCoroExactInterfaceAwait(b, call, instructionPlan), true
+		return p.joinCoroSyncSlowSingleAwait(b, call, p.compileCoroExactInterfaceAwait(b, call, instructionPlan)), true
 	case coroPhysicalControlPlainDispatch:
 		return p.compileCoroPhysicalPlainDispatch(b, call, instructionPlan), true
 	case coroPhysicalControlNilDispatchFault:

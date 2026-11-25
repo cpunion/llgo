@@ -46,7 +46,13 @@ func (p *context) compileCoroFFICall(b llssa.Builder, args []llssa.Expr) {
 		b.Convert(p.prog.VoidPtr(), argv),
 	)
 	child := b.Load(childSlot)
+	asyncBlk := p.fn.MakeBlock()
+	doneBlk := p.fn.MakeBlock()
+	b.IfWithBranchWeights(b.BinOp(token.NEQ, child, p.prog.Nil(p.prog.VoidPtr())), asyncBlk, doneBlk, 1, 1000)
+	b.SetBlockEx(asyncBlk, llssa.AtEnd, false)
 	p.awaitCoroChild(b, child, b.Convert(p.prog.VoidPtr(), out), nil)
+	b.Jump(doneBlk)
+	b.SetBlockContinuation(doneBlk)
 }
 
 func coroFFIRawCallSignature() *types.Signature {

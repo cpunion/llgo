@@ -195,11 +195,12 @@ type context struct {
 	// The runtime PC-line table stores file and line, but not column. Reset
 	// these fields at each SSA block boundary so repeated checks on one source
 	// line can share an anchor without crossing control-flow edges.
-	lastPCLineFile string
-	lastPCLineLine int
-	coroEmission   *coroPhysicalEmissionSession
-	coroPlainSite  *coroSiteEmissionObserver
-	rawPlainBody   bool // compiling the legacy ABI variant of a managed function
+	lastPCLineFile     string
+	lastPCLineLine     int
+	coroEmission       *coroPhysicalEmissionSession
+	coroPlainSite      *coroSiteEmissionObserver
+	coroSyncSlowResume *coroSyncSlowResumeState
+	rawPlainBody       bool // compiling the legacy ABI variant of a managed function
 	// physicalReachable is the owner-scoped constant-CFG projection used by
 	// every separately emitted managed body. A full coroutine already carries
 	// it in coroEmissionPlan; ordinary/outcome-independent bodies use this copy
@@ -1259,12 +1260,24 @@ func (p *context) debugRef(b llssa.Builder, v *ssa.DebugRef) {
 	pos := p.goProg.Fset.Position(v.Pos())
 	var value llssa.Expr
 	if iv, ok := v.X.(instrOrValue); ok {
-		var exists bool
-		value, exists = p.bvals[iv]
-		if !exists {
-			// DebugRef is metadata-only. Do not rematerialize an SSA value that
-			// executable lowering deliberately omitted.
-			return
+		if p.coroSyncSlowResume != nil {
+			if slot, tracked := p.coroSyncSlowResume.liveSlots[iv]; tracked {
+				value = b.LoadKnownNonNil(slot)
+			} else if !p.coroSyncSlowResume.dominatesDebugUse(iv, v) {
+				// DebugRef is metadata-only and does not extend slow-resume
+				// live-ins. Skip references whose definition does not dominate
+				// this block in the augmented slow-resume CFG.
+				return
+			}
+		}
+		if value.IsNil() {
+			var exists bool
+			value, exists = p.bvals[iv]
+			if !exists {
+				// DebugRef is metadata-only. Do not rematerialize an SSA value that
+				// executable lowering deliberately omitted.
+				return
+			}
 		}
 	} else {
 		if function, ok := v.X.(*ssa.Function); ok && p.compilation != nil {
@@ -1357,6 +1370,17 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	}
 	if block.Index == 0 && p.options.Trace && !strings.HasPrefix(fn.Name(), "github.com/xgo-dev/llgo/runtime/internal/runtime.Print") {
 		b.Printf("call " + fn.Name() + "\n\x00")
+	}
+	if p.coroSyncSlowResume != nil && len(p.coroSyncSlowResume.liveSlots) > 0 && n > 0 {
+		for k := 0; k < n; k++ {
+			if phi, ok := block.Instrs[k].(*ssa.Phi); ok {
+				if slot, tracked := p.coroSyncSlowResume.liveSlots[phi]; tracked {
+					if val, present := p.bvals[phi]; present {
+						b.StoreKnownNonNil(slot, val)
+					}
+				}
+			}
+		}
 	}
 	// place here to avoid wrong current-block
 	if p.options.DebugSymbols && block.Parent().Origin() == nil && block.Index == 0 {
@@ -2357,6 +2381,11 @@ func (p *context) beginCoroSemanticInstructionEmission(instr ssa.Instruction) fu
 
 func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue bool) (ret llssa.Expr) {
 	if asValue {
+		if p.coroSyncSlowResume != nil && p.coroSyncSlowResume.liveSlots != nil {
+			if slot, ok := p.coroSyncSlowResume.liveSlots[iv]; ok {
+				return b.LoadKnownNonNil(slot)
+			}
+		}
 		if v, ok := p.bvals[iv]; ok {
 			return v
 		}
@@ -3150,6 +3179,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		panic(fmt.Sprintf("compileInstrAndValue: unknown instr - %T\n", iv))
 	}
 	p.bvals[iv] = ret
+	if p.coroSyncSlowResume != nil && p.coroSyncSlowResume.liveSlots != nil {
+		if slot, ok := p.coroSyncSlowResume.liveSlots[iv]; ok && !ret.IsNil() {
+			b.StoreKnownNonNil(slot, ret)
+		}
+	}
 	return ret
 }
 

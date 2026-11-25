@@ -416,50 +416,20 @@ func (p *context) compileCoroStaticAwait(
 			closureContext = b.Field(closureValue, 1)
 		}
 	}
-	var fastReturn llssa.BasicBlock
-	var fastValue llssa.Expr
-	var keepaliveSlots []llssa.Expr
-	if instructionPlan.waitGroupWaitFast != nil {
-		// This recipe can suspend before publishing a child. Retain the same
-		// typed owners before that yield, including integer-carried provenance.
-		keepaliveSlots = p.compileCoroCallKeepaliveSlots(b, call)
-	}
-	fastTest := p.emitCoroWaitGroupAddFast(b, args, instructionPlan.waitGroupAddFast)
-	if proof := instructionPlan.waitGroupWaitFast; proof != nil {
-		if !fastTest.IsNil() {
-			panic("coroutine call has two guarded WaitGroup recipes")
+	if closureContext.IsNil() && !instructionPlan.recoverAlias {
+		entry := p.mustFunctionSymbol(callee)
+		if !entry.patchOriginalInit && !entry.importedLibrary && entry.usesCoroPhysicalABI() {
+			if targetPhysical, err := entry.sealedPhysicalFunctionPlan(); err == nil &&
+				targetPhysical != nil && targetPhysical.syncRamp != nil &&
+				targetPhysical.syncRamp.kind == coroSyncRampCallerInlineYield {
+				keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
+				p.compileCoroCallerInlineYieldAwait(b, callee, targetPhysical, args)
+				p.emitCoroKeepaliveSlots(b, keepaliveSlots)
+				return llssa.Nil
+			}
 		}
-		var opportunity llssa.Expr
-		fastTest, opportunity = p.emitCoroWaitGroupWaitFast(b, args, proof, body)
-		callee, args = proof.fallback, append(args, opportunity)
 	}
-	if instructionPlan.pollMutexFast != nil {
-		if !fastTest.IsNil() {
-			panic("coroutine call has two guarded update recipes")
-		}
-		fastValue = b.AllocaT(p.prog.Bool())
-		fastTest = p.emitCoroPollMutexFast(b, args, instructionPlan.pollMutexFast, fastValue)
-	}
-	if instructionPlan.pollFDFast != nil {
-		if !fastTest.IsNil() {
-			panic("coroutine call has two guarded update recipes")
-		}
-		if callee.Signature.Results().Len() != 0 {
-			resultType := p.type_(callee.Signature.Results().At(0).Type(), llssa.InGo)
-			fastValue = b.AllocaT(resultType)
-			b.Store(fastValue, p.prog.Zero(resultType))
-		}
-		fastTest = p.emitCoroPollFDFast(b, args, instructionPlan.pollFDFast)
-	}
-	if !fastTest.IsNil() {
-		fastReturn = b.Func.MakeBlock()
-		slow := b.Func.MakeBlock()
-		b.If(fastTest, fastReturn, slow)
-		b.SetBlockContinuation(slow)
-	}
-	if instructionPlan.waitGroupWaitFast == nil {
-		keepaliveSlots = p.compileCoroCallKeepaliveSlots(b, call)
-	}
+	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 	if instructionPlan.recoverAlias {
 		p.observeCoroPhysicalRecoverAlias(call)
 	}
@@ -472,28 +442,9 @@ func (p *context) compileCoroStaticAwait(
 		b.EmitReflectValueMethodCheckedLoad(result.value, reflectCheck)
 	}
 	value := result.value
-	if fastReturn != nil {
-		if !fastValue.IsNil() {
-			b.Store(fastValue, value)
-		}
-		b.Jump(fastReturn)
-		b.SetBlockContinuation(fastReturn)
-		if !fastValue.IsNil() {
-			value = b.Load(fastValue)
-		}
-	}
-	if instructionPlan.waitGroupWaitFast != nil {
-		p.emitCoroKeepaliveSlots(b, keepaliveSlots)
-	}
-	// Apply a managed go:linkname declaration's result view after both paths
-	// join, so a fast bool does not erase the caller's named scalar type.
 	value, retagged := p.compileManagedGoLinknameCallResult(b, source, callee, value)
 	if !retagged {
-		if !fastValue.IsNil() {
-			p.recordCoroValueAddress(call, fastValue)
-		} else {
-			p.recordCoroValueAddress(call, result.address)
-		}
+		p.recordCoroValueAddress(call, result.address)
 	}
 	return value
 }
@@ -766,22 +717,34 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 	}
 
 	guard := p.beginCoroDeliveryCall(b, callee, closureContext, args)
+	shieldedVoidCleanup := cleanup != nil && !invocation.recoverParent && guard == nil &&
+		(invocation.discardResult || sourceSig.Results().Len() == 0)
+	nullableChild := !shieldedVoidCleanup && p.coroEntryReturnsNullableHandle(entry)
 	var resultSlot llssa.Expr
+	var outArg llssa.Expr
 	if guard != nil {
 		resultSlot = guard.result
+		outArg = b.Convert(p.prog.VoidPtr(), resultSlot)
 	} else if invocation.discardResult || sourceSig.Results().Len() == 0 {
 		// Go discards a deferred call's results. A nonresource invocation
 		// needs neither an aggregate sink nor a managed allocation merely
 		// to throw that aggregate away after joining the child. A void source
 		// call has no result transport at all; completion has its own record.
 		resultSlot = p.prog.Nil(p.prog.VoidPtr())
+		outArg = resultSlot
+		if nullableChild && sourceSig.Results().Len() == 0 {
+			// Pass a non-nil sentinel so a void sync-fast ramp knows it is
+			// awaited (not spawned) without allocating a result slot.
+			outArg = body.task
+		}
 	} else {
 		resultSlot = p.coroResultSlot(p.prog.Type(abi.resultSlotType, llssa.InGo))
+		outArg = b.Convert(p.prog.VoidPtr(), resultSlot)
 	}
 	callArgs := make([]llssa.Expr, 0, len(physicalArgs)+2)
 	callArgs = append(callArgs,
 		body.task,
-		b.Convert(p.prog.VoidPtr(), resultSlot),
+		outArg,
 	)
 	callArgs = append(callArgs, physicalArgs...)
 	endShield := p.beginCoroCleanupShield(b, invocation)
@@ -796,21 +759,48 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 			callerPlan.ID, targetPlan.ID, childFn.Name(), childType, childFn.Expr.RawType(),
 		))
 	}
-	// This edge names one exact managed ramp and the child cannot outlive the
-	// caller's coroutine frame: every terminal or suspended path is reconciled
-	// by awaitCoroChildWithRecovery below. LLVM 22 may therefore embed the child
-	// frame in its static parent; dynamic/function-value calls never reach this
-	// proof point.
-	b.MarkCoroElideSafe(child)
-	var afterConsume func(llssa.Builder)
-	if invocation.recoverParent {
-		afterConsume = p.beginCoroRecoverAliasScope(
-			b, llssa.Nil, child, b.Load(cleanup.panicActive),
-		)
-	} else if transparentRecoverAlias {
-		afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
+	if !nullableChild {
+		// This edge names one exact managed ramp and the child cannot outlive the
+		// caller's coroutine frame: every terminal or suspended path is reconciled
+		// by awaitCoroChildWithRecovery below. LLVM 22 may therefore embed the child
+		// frame in its static parent; dynamic/function-value calls never reach this
+		// proof point.
+		b.MarkCoroElideSafe(child)
 	}
-	afterConsume = chainCoroReconciliation(afterConsume, endShield)
+	awaitAsync := func() {
+		var afterConsume func(llssa.Builder)
+		if invocation.recoverParent {
+			afterConsume = p.beginCoroRecoverAliasScope(
+				b, llssa.Nil, child, b.Load(cleanup.panicActive),
+			)
+		} else if transparentRecoverAlias {
+			afterConsume = p.beginCoroTransparentRecoverAliasScope(b, child)
+		}
+		afterConsume = chainCoroReconciliation(afterConsume, endShield)
+		p.awaitCoroChildCompletionWithRecovery(b, child, invocation, keepaliveSlots, afterConsume)
+	}
+	if nullableChild {
+		asyncBlk := p.fn.MakeBlock()
+		syncBlk := p.fn.MakeBlock()
+		doneBlk := p.fn.MakeBlock()
+		isAsync := b.BinOp(token.NEQ, child, p.prog.Nil(p.prog.VoidPtr()))
+		b.IfWithBranchWeights(isAsync, asyncBlk, syncBlk, 1, 1000)
+
+		b.SetBlockEx(asyncBlk, llssa.AtEnd, false)
+		awaitAsync()
+		b.Jump(doneBlk)
+
+		b.SetBlockEx(syncBlk, llssa.AtEnd, false)
+		if endShield != nil {
+			endShield(b)
+		}
+		p.emitCoroKeepaliveSlots(b, keepaliveSlots)
+		b.Jump(doneBlk)
+
+		b.SetBlockContinuation(doneBlk)
+	} else {
+		awaitAsync()
+	}
 	results := sourceSig.Results()
 	if invocation.discardResult {
 		results = types.NewTuple()
@@ -820,12 +810,9 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		// This is the caller's live resource cell, not a consumed temporary.
 		// The wrapper's unchanged Return does not copy these fields back, so
 		// retiring a pointer here would erase the still-owned public result.
-		p.awaitCoroChildCompletionWithRecovery(b, child, invocation, keepaliveSlots, afterConsume)
 		value = p.loadCoroAwaitBorrowedResult(b, resultSlot, results)
 	} else {
-		value = p.awaitCoroChildWithRecoveryAndConsume(
-			b, child, resultSlot, results, invocation, keepaliveSlots, afterConsume,
-		)
+		value = p.loadCoroAwaitResult(b, resultSlot, results)
 	}
 	if guard != nil {
 		body.cleanup.delivery.claim(b, guard)
@@ -886,6 +873,42 @@ func (p *context) beginCoroCleanupShield(b llssa.Builder, invocation coroCleanup
 		}
 		kind := done.Call(end.Expr, task, handle, receipt)
 		p.reconcileCoroCleanupTaskStop(done, cleanup, kind)
+	}
+}
+
+// coroEntryReturnsNullableHandle reports whether calling entry's physical $coro
+// symbol can return a nil handle on synchronous completion, following any
+// frozen tail-forward chain (for example io.ReadFull -> io.ReadAtLeast when a
+// spawn target does not flatten the static call).
+func (p *context) coroEntryReturnsNullableHandle(entry plannedFunctionSymbol) bool {
+	if entry.importedLibrary {
+		return true
+	}
+	if entry.patchOriginalInit || !entry.usesCoroPhysicalABI() {
+		return false
+	}
+	seen := make(map[coro.FunctionID]struct{})
+	for {
+		if entry.function == nil || !entry.usesCoroPhysicalABI() {
+			return false
+		}
+		if entry.plan.ID != "" {
+			if _, dup := seen[entry.plan.ID]; dup {
+				return false
+			}
+			seen[entry.plan.ID] = struct{}{}
+		}
+		targetPhysical, err := entry.sealedPhysicalFunctionPlan()
+		if err != nil || targetPhysical == nil {
+			return false
+		}
+		if targetPhysical.syncRamp.returnsNullableHandle() {
+			return true
+		}
+		if targetPhysical.tailForward == nil || targetPhysical.tailForward.target == nil {
+			return false
+		}
+		entry = p.mustFunctionSymbol(targetPhysical.tailForward.target)
 	}
 }
 
@@ -1700,6 +1723,23 @@ func (p *context) enterCoroPropagatedGoexit(b llssa.Builder) {
 // scheduler has resumed the parent. Multi-result calls are one SSA tuple value,
 // not a result-slot struct: preserving that distinction keeps the ordinary
 // Extract lowering and ValuePlan paths identical to a synchronous Go call.
+// awaitCoroSyncSlowPreChild completes an already-created child handle passed
+// from a SingleAwait sync-fast ramp into $coro.slow (mode==1) and reads its
+// result from this frame's caller-owned incoming resultSlot.
+func (p *context) awaitCoroSyncSlowPreChild(b llssa.Builder, preChild llssa.Expr, results *types.Tuple) llssa.Expr {
+	p.awaitCoroChildCompletionWithRecovery(b, preChild, coroCleanupInvocation{}, nil, nil)
+	return p.loadCoroSyncSlowIncomingResult(b, results)
+}
+
+func (p *context) loadCoroSyncSlowIncomingResult(b llssa.Builder, results *types.Tuple) llssa.Expr {
+	slot := p.coroIncomingResultSlot()
+	if slot.IsNil() {
+		panic("sync-slow incoming result load requires an active coroutine body")
+	}
+	typedSlot := b.Convert(p.prog.Pointer(p.prog.Type(coro.ResultSlotType(results), llssa.InGo)), slot)
+	return p.loadCoroAwaitResult(b, typedSlot, results)
+}
+
 func (p *context) loadCoroAwaitResult(b llssa.Builder, resultSlot llssa.Expr, results *types.Tuple) llssa.Expr {
 	// Normal completion has transferred these values into LLVM SSA. Retire
 	// copied pointer handles so an already-consumed result slot does not keep
