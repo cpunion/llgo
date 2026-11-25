@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	coroNativeFleetRunBudgetV1 uint32 = 64
+	coroNativeFleetRunBudgetV1 uint32 = 128
 )
 
 type coroNativeFleetPhysicalLifecycleV1 uint8
@@ -592,6 +592,11 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 		} else if ready {
 			return true
 		}
+		if ready, spinOK := coroNativeFleetPeerPreSleepSpinV1(handle, domain); !spinOK {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer pre-sleep spin failed")
+		} else if ready {
+			return true
+		}
 		freshNow, freshClockOK := coroNativeFleetPhysicalOwnerClockV1()
 		if !freshClockOK {
 			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wait clock failed")
@@ -640,6 +645,42 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 	default:
 		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer run slice failed")
 	}
+}
+
+func coroNativeFleetPeerPreSleepSpinV1(
+	handle coro.ExecutorFleetHandle,
+	domain *coroNativeFleetDomainV1,
+) (ready, ok bool) {
+	_ = handle
+	driver := domain.driverOwnerV1()
+	stop := &coroNativeFleetPhysicalOwnerV1State.stop
+	for i := 0; i < coroNativePreSleepTightSpinsV1; i++ {
+		if stop.Sealed() || coro.ExecutorDriverHasPendingExternalWork(driver) {
+			return true, true
+		}
+	}
+	start, clockOK := coroNativeFleetPhysicalOwnerClockV1()
+	if !clockOK {
+		return false, false
+	}
+	for round := 0; round < coroNativePreSleepYieldRoundsV1; round++ {
+		_ = corofleet.Yield()
+		for i := 0; i < coroNativePreSleepBurstSpinsV1; i++ {
+			if stop.Sealed() || coro.ExecutorDriverHasPendingExternalWork(driver) {
+				return true, true
+			}
+		}
+		if round&7 == 7 {
+			now, ok := coroNativeFleetPhysicalOwnerClockV1()
+			if !ok {
+				return false, false
+			}
+			if now-start >= coroNativePreSleepBudgetNSV1 {
+				break
+			}
+		}
+	}
+	return false, true
 }
 
 func coroNativeFleetRunPhysicalOwnerEpochV1(

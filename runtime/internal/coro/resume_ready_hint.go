@@ -8,11 +8,18 @@ package coro
 // grants queue ownership nor consumes a runnable. Any later yield revalidates
 // the exact current resume and uses the complete scheduler transition.
 func ResumeHasReadyPeer(g *G) bool {
-	if !ValidG(g) || !resumeGateTaken(g) {
+	if g == nil || (AuditEnabled && !ValidG(g)) || !resumeGateTaken(g) {
 		return false
 	}
 	p := g.runP
-	return p.current == g && p.osThreadLockOwner == nil &&
-		p.osThreadSuspend == osThreadSuspendAttached &&
-		p.readyHead != nil && p.readyCount != 0
+	if p == nil || p.current != g || p.osThreadLockOwner != nil ||
+		p.osThreadSuspend != osThreadSuspendAttached ||
+		p.readyHead == nil || p.readyCount == 0 {
+		return false
+	}
+	if p.readyCount == 1 ||
+		(p.readyCount == 2 && p.readyHead.runAction == ActionCheckDestroy) {
+		p.localYieldHint = true
+	}
+	return true
 }

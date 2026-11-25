@@ -405,6 +405,16 @@ func coroNativeFleetTryFastPollCompletionV1(handle coro.ExecutorFleetHandle) (re
 		if storage.entries[entry].Revents == 0 {
 			continue
 		}
+		if completed, ok := coro.CompleteOwnerPollEventV2(
+			domain.driverOwnerV1(),
+			storage.operations[entry-1],
+			coro.PollOperationReady,
+		); !ok {
+			return false, false
+		} else if completed {
+			woke = true
+			continue
+		}
 		if !coroNativeFleetPhysicalPollPostAcceptedV1(
 			coroNativeFleetPostPollV1(
 				storage.operations[entry-1],

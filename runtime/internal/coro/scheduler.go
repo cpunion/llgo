@@ -204,7 +204,12 @@ type P struct {
 	// synchronous managed calls stay on their fast path. It is zero at every
 	// scheduler/host boundary and occupies existing padding before Action.
 	inlineAwaitDepth uint8
-	action           Action
+	// localYieldHint is a transient owner-only advisory flag set when a waiting
+	// G voluntarily yields to a single local ready peer (e.g. WaitGroup.Wait).
+	// It occupies existing padding before Action and is consumed on the next
+	// stable action distribution check.
+	localYieldHint bool
+	action         Action
 	// runDecision is populated immediately before ActionResume and must be
 	// consumed by the compiler-generated resume prologue before control can
 	// publish another scheduler transition. It scales with P, not G.
@@ -1018,6 +1023,39 @@ func PollReadyAt(p *P, now int64) (int, bool) {
 // misreporting an empty ready queue as program completion.
 func HasWaiting(p *P) bool {
 	return p != nil && p.parkWaitHead != nil && p.parkWaitTail != nil
+}
+
+// HasReadySurplus reports whether p has no running G and more than one queued
+// runnable G, so sharing ready work with an idle peer increases parallelism
+// rather than migrating the owner's sole runnable G away. A single-peer
+// voluntary wait yield (e.g. WaitGroup.Wait yielding to its sole spawned child)
+// keeps that pair local on p so the child completes without cross-P wakeup.
+func HasReadySurplus(p *P, yieldAction bool) bool {
+	if p == nil || p.current != nil {
+		return false
+	}
+	if p.localYieldHint {
+		if yieldAction && p.readyCount <= 3 {
+			if p.readyCount <= 2 {
+				p.localYieldHint = false
+			}
+			return false
+		}
+		if !yieldAction && p.readyCount <= 2 {
+			p.localYieldHint = false
+			return false
+		}
+		p.localYieldHint = false
+	}
+	if p.readyCount <= 1 {
+		return false
+	}
+	if p.readyCount == 2 && p.readyHead != nil &&
+		(p.readyHead.runAction == ActionCheckDestroy ||
+			(p.readyTail != nil && p.readyTail.runAction == ActionCheckDestroy)) {
+		return false
+	}
+	return true
 }
 
 // NextRunnable removes the next ready G. It returns ok=false when a scheduler

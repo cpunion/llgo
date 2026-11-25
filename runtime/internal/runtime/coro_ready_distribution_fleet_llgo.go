@@ -151,6 +151,7 @@ func coroTargetRefreshRunSliceV1(target coroRunTargetCapabilityV1) (distribute, 
 func coroTargetAfterStableRunActionV1(
 	target coroRunTargetCapabilityV1,
 	source *coro.P,
+	yieldAction bool,
 ) (distributed, ok bool) {
 	state := &coroNativeFleetV1State
 	if source == nil {
@@ -165,6 +166,9 @@ func coroTargetAfterStableRunActionV1(
 	if state.lifecycle != coroNativeFleetActiveV1 {
 		return false, coroTargetReadyDistributionFailV1("native ready distribution fleet is not active")
 	}
+	if !state.fleet.HasPeerRunnableDemand(target.sourceRoute) {
+		return false, true
+	}
 	route := uint32(target.sourceRoute)
 	if route == 0 || route > state.domainCount {
 		return false, coroTargetReadyDistributionFailV1("native ready distribution source route invalid")
@@ -177,6 +181,7 @@ func coroTargetAfterStableRunActionV1(
 		sourceDomain.pOwnerV1() != source || sourceDomain.handle.Route != route {
 		return false, coroTargetReadyDistributionFailV1("native ready distribution source route mismatch")
 	}
+	_ = yieldAction
 	distribution, distributionOK := state.fleet.DistributePNeutralRunnable(
 		sourceDomain.handle,
 		source,
@@ -258,12 +263,22 @@ func coroTargetAfterSourceReductionV1(
 	return true, true
 }
 
+func coroNativeFleetSingleOwnerFastV1() bool {
+	return !coro.AuditEnabled &&
+		coroNativeFleetV1State.lifecycle == coroNativeFleetActiveV1 &&
+		coroNativeFleetTargetV1State.lifecycle == coroNativeFleetTargetActiveV1 &&
+		coroNativeAtomicLoadV1(&coroNativeFleetPhysicalOwnerV1State.started) == 0
+}
+
 // coroTargetDrainProgramTransfersV1 imports the adopted route-1 mailbox while
 // the program's existing DriveAdmission owns its P. A separate fleet owner
 // epoch would duplicate that serialization and conflict with the host ABI.
 // Contention or a bounded reducer's pending physical action is ordinary
 // retryable work; corrupt identity is the only failure.
 func coroTargetDrainProgramTransfersV1(p *coro.P, driver *coro.ExecutorDriver) (more, ok bool) {
+	if coroNativeFleetSingleOwnerFastV1() {
+		return false, true
+	}
 	state := &coroNativeFleetV1State
 	target := &coroNativeFleetTargetV1State
 	if state.lifecycle != coroNativeFleetActiveV1 ||
@@ -294,12 +309,18 @@ func coroTargetDrainProgramTransfersV1(p *coro.P, driver *coro.ExecutorDriver) (
 }
 
 func coroTargetRequestProgramRunnableV1(p *coro.P, driver *coro.ExecutorDriver) bool {
+	if coroNativeFleetSingleOwnerFastV1() {
+		return true
+	}
 	domain, ok := coroTargetReadyDistributionDomainV1(p, driver)
 	return ok && domain.adopted &&
 		coroNativeFleetV1State.fleet.RequestPNeutralRunnable(domain.handle, p)
 }
 
 func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) (retry, ok bool) {
+	if coroNativeFleetSingleOwnerFastV1() {
+		return false, true
+	}
 	domain, valid := coroTargetReadyDistributionDomainV1(p, driver)
 	if !valid || !domain.adopted {
 		return false, false

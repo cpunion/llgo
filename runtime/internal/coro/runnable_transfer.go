@@ -29,7 +29,7 @@ const (
 // RunnableTransferMailboxCapacity is the fixed target-neutral capacity of one
 // runnable migration mailbox. A target profile may shard mailboxes, but it may
 // not silently turn this bound into an allocating or unbounded queue.
-const RunnableTransferMailboxCapacity uint32 = 8
+const RunnableTransferMailboxCapacity uint32 = 32
 
 const runnableTransferMailboxMagic uint32 = 0x52544d31 // "RTM1"
 
@@ -212,6 +212,32 @@ func pNeutralRunnableHeader(g *G, queued bool) bool {
 	if !queued {
 		wantTransfer, wantPreempt = runnableTransferGPublished, preemptDisabled
 	}
+	if !AuditEnabled {
+		if g == nil || g.state != GRunnable || g.isQueued() != queued ||
+			(!queued && g.nextReady != nil) || g.transferState != wantTransfer ||
+			g.runnableAffinity != runnableAnyOwner ||
+			!gPreemptStateAtDepthZero(g, wantPreempt) ||
+			g.taskControlLeases != 0 || g.runAction != ActionInvalid || g.osThreadLockDepth != 0 ||
+			g.pending.kind != pendingNone || g.destroyTarget != nil || g.destroysRoot() ||
+			g.isWaiting() || g.runP != nil ||
+			(g.park.phase != parkIdle && g.park.phase != parkMaterialized) ||
+			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || g.panicUnwind {
+			return false
+		}
+		active := g.active
+		if active == nil || active.header == nil || active.parkWait != nil {
+			return false
+		}
+		if active == g.root && active.state == FrameInitialSuspended {
+			return true
+		}
+		if active.state != FrameSuspended {
+			return false
+		}
+		reason := active.header.SuspendReason
+		return reason == uint16(SuspendYield) ||
+			(reason == uint16(SuspendPark) && g.park.phase == parkMaterialized)
+	}
 	if !ValidG(g) || g.state != GRunnable || g.isQueued() != queued ||
 		(!queued && g.nextReady != nil) || g.transferState != wantTransfer ||
 		g.runnableAffinity != runnableAnyOwner ||
@@ -246,6 +272,9 @@ func pNeutralRunnableHeader(g *G, queued bool) bool {
 }
 
 func pNeutralFrameChain(g *G) bool {
+	if !AuditEnabled && g.active != nil && g.active == g.root && g.root.parent == nil {
+		return true
+	}
 	// A stable runnable task has no unattached allocation: the LIFO frame list
 	// is the active-to-root parent chain. Audit the chain before following it.
 	for slow, fast := g.active, g.active; fast != nil && fast.parent != nil; {
@@ -408,6 +437,44 @@ func publishPreparedPNeutralRunnableBatch(
 		!tryRunnableTransferGate(mailbox) {
 		return RunnableTransferID{}, 0
 	}
+	if !AuditEnabled {
+		if !validRunnableTransferHeaderLocked(mailbox) || !stableRunnableTransferP(source) {
+			releaseRunnableTransferGate(mailbox)
+			return RunnableTransferID{}, 0
+		}
+		for count < prepared && mailbox.count < RunnableTransferMailboxCapacity {
+			candidate := candidates[count]
+			if source.readyHead != candidate {
+				break
+			}
+			slotIndex := mailbox.tail
+			slot := &mailbox.slots[slotIndex]
+			if slot.state != runnableTransferSlotEmpty || slot.generation == ^uint32(0) {
+				break
+			}
+			if !compareAndSwapGPreemptStateAtDepthZero(candidate, preemptIdle, preemptDisabled) {
+				break
+			}
+			generation := slot.generation + 1
+			candidate.transferState = runnableTransferGPublished
+			dequeue(source)
+			slot.generation = generation
+			slot.source = source
+			slot.g = candidate
+			slot.state = runnableTransferSlotPublished
+			mailbox.tail = (mailbox.tail + 1) % RunnableTransferMailboxCapacity
+			mailbox.count++
+			if count == 0 {
+				first = RunnableTransferID{Slot: slotIndex + 1, Generation: generation}
+			}
+			count++
+		}
+		releaseRunnableTransferGate(mailbox)
+		if count == 0 {
+			return RunnableTransferID{}, 0
+		}
+		return first, count
+	}
 	for count < prepared {
 		candidate := candidates[count]
 		if source.readyHead != candidate {
@@ -521,6 +588,39 @@ func TryDrainPNeutralRunnables(
 		!stableRunnableTransferP(owner) {
 		releaseRunnableTransferGate(mailbox)
 		return 0, false, RunnableTransferDrainCorrupt
+	}
+	if !AuditEnabled {
+		for moved < budget && mailbox.count != 0 {
+			if owner.readyCount == ^uint32(0) {
+				more = true
+				releaseRunnableTransferGate(mailbox)
+				return moved, more, RunnableTransferDrainCorrupt
+			}
+			slot := &mailbox.slots[mailbox.head]
+			g := slot.g
+			if slot.state != runnableTransferSlotPublished || slot.source == nil ||
+				slot.source == owner || g == nil || g.transferState != runnableTransferGPublished {
+				more = mailbox.count != 0
+				releaseRunnableTransferGate(mailbox)
+				return moved, more, RunnableTransferDrainCorrupt
+			}
+			appendReadyUnchecked(owner, g)
+			g.transferState = runnableTransferGImported
+			if !compareAndSwapGPreemptStateAtDepthZero(g, preemptDisabled, preemptIdle) {
+				more = mailbox.count != 0
+				releaseRunnableTransferGate(mailbox)
+				return moved, more, RunnableTransferDrainCorrupt
+			}
+			slot.state = runnableTransferSlotEmpty
+			slot.source = nil
+			slot.g = nil
+			mailbox.head = (mailbox.head + 1) % RunnableTransferMailboxCapacity
+			mailbox.count--
+			moved++
+		}
+		more = mailbox.count != 0
+		releaseRunnableTransferGate(mailbox)
+		return moved, more, RunnableTransferDrainComplete
 	}
 	for moved < budget && mailbox.count != 0 {
 		slot := &mailbox.slots[mailbox.head]
