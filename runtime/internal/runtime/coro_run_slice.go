@@ -115,6 +115,7 @@ type coroRunResultV1 struct {
 	action      coro.Action
 	deadline    int64
 	hasDeadline bool
+	polledIdle  bool
 	used        uint32
 	sources     uint32
 	dispatches  uint32
@@ -337,9 +338,33 @@ func coroReduceExecutorRunActionPreparedV1(
 		}
 		result.dispatches++
 	}
-	next, advanced, committed, fusedDestroy := coroRunPhysicalActionV1(
-		p, driver, g, action, runtimeContext, remaining > baseCost,
-	)
+	var next coro.Action
+	var advanced, committed bool
+	var extraUsed, extraResumes, extraDestroys uint32
+	extraBudget := remaining - baseCost
+	for {
+		var fusedDestroy bool
+		next, advanced, committed, fusedDestroy = coroRunPhysicalActionV1(
+			p, driver, g, action, runtimeContext, extraUsed < extraBudget,
+		)
+		if !fusedDestroy {
+			break
+		}
+		extraUsed++
+		extraDestroys++
+		if !advanced || next.Kind != coro.ActionCheckResume || extraUsed >= extraBudget {
+			break
+		}
+		if policy.lifecycle != nil && *policy.lifecycle != coroProgramRunningV1 {
+			break
+		}
+		if !coro.ContinueIssuedExecutorParentResume(driver, g, next) {
+			break
+		}
+		extraUsed++
+		extraResumes++
+		action = next
+	}
 	// The physical resume may have changed program lifecycle. Re-read the live
 	// policy before selecting the scheduler commit placement.
 	running, returnRequested := false, false
@@ -411,8 +436,8 @@ func coroReduceExecutorRunActionPreparedV1(
 			distribute, stop, distributionOK = coroTargetReadyDistributionV1(target)
 		}
 		distributed := false
-		if distributionOK && distribute {
-			distributed, distributionOK = coroTargetAfterStableRunActionV1(target, p)
+		if distributionOK && distribute && coro.HasReadySurplus(p, next.Kind == coro.ActionYield) {
+			distributed, distributionOK = coroTargetAfterStableRunActionV1(target, p, next.Kind == coro.ActionYield)
 		}
 		if !distributionOK || !coro.CommitExecutorRunActionDistribution(driver, distributed) {
 
@@ -420,14 +445,12 @@ func coroReduceExecutorRunActionPreparedV1(
 		}
 		stopAfterStable = stop
 	}
-	result.used++
+	result.used += 1 + extraUsed
 	if dispatched {
 		result.used++
 	}
-	if fusedDestroy {
-		result.used++
-		result.destroys++
-	}
+	result.resumes += extraResumes
+	result.destroys += extraDestroys
 	switch action.Kind {
 	case coro.ActionCheckResume:
 		result.resumes++
@@ -552,7 +575,24 @@ func coroReduceExecutorRunStepV1(
 
 			return false, false
 		}
+		distributed, targetOK := false, true
+		distribute, stopAfterStable, distributionOK := coroTargetReadyDistributionV1(target)
+		if !distributionOK {
+			return false, false
+		}
+		if distribute {
+			distributed, targetOK = coroTargetAfterSourceReductionV1(
+				target, p, coro.ExecutorPollProgress{Complete: true, Promoted: 1},
+			)
+		}
+		if !targetOK || !coro.CommitExecutorRunSourceDistribution(driver, distributed) {
+			return false, false
+		}
 		result.used++
+		if stopAfterStable {
+			result.stop = coroRunAgainV1
+			return true, true
+		}
 		return false, true
 	case coro.ExecutorRunStepDispatch:
 		if step.Dispatched || step.G == nil || step.Action.Handle == nil {

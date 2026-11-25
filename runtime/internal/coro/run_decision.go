@@ -98,6 +98,13 @@ func validRunDecision(decision RunDecision) bool {
 // at any nested depth; every ordinary coroutine transition goes through
 // resumeGateTaken and is therefore rejected while preemption is masked.
 func resumeGateStructurallyTaken(g *G) bool {
+	if !AuditEnabled {
+		if g == nil || g.runP == nil {
+			return false
+		}
+		p := g.runP
+		return p.current == g && p.inResume && g.state == GRunning && p.runDecisionTaken
+	}
 	if !ValidG(g) || g.runP == nil {
 		return false
 	}

@@ -170,13 +170,14 @@ type PollOperationPage struct {
 // Active slots participate in the ExecutorSourceSet deadline minimum, so fd
 // readiness and timers share one retained target wait.
 type PollOperationSource struct {
-	pending      uint32
-	scanLimit    uint32
-	slots        [PollOperationPageCapacity]pollOperationSlot
-	extraPages   []PollOperationPage
-	dynamicPages operationDynamicPageDirectory
-	owner        *P
-	route        RouteID
+	pending       uint32
+	scanLimit     uint32
+	deadlineCount uint32
+	slots         [PollOperationPageCapacity]pollOperationSlot
+	extraPages    []PollOperationPage
+	dynamicPages  operationDynamicPageDirectory
+	owner         *P
+	route         RouteID
 }
 
 // PollOperationConfiguredCapacity returns the exact linear slot capacity. It
@@ -331,6 +332,9 @@ func validPollOperationRecordResidue(source *PollOperationSource, slot *pollOper
 }
 
 func reusablePollOperationSlot(source *PollOperationSource, slot *pollOperationSlot, index uint32) bool {
+	if !AuditEnabled {
+		return slot != nil && slot.state == pollOperationFree
+	}
 	return slot != nil && slot.state == pollOperationFree &&
 		slot.interest == PollInterestInvalid && slot.p == nil && slot.fd == 0 && slot.deadline == 0 &&
 		producerSourceSlotReusable(&slot.v2Producer) &&
@@ -344,6 +348,9 @@ func validLivePollOperation(source *PollOperationSource, slot *pollOperationSlot
 		slot.p == nil || owner != nil && slot.p != owner ||
 		slot.fd < 0 || !validPollInterest(slot.interest) || slot.deadline < 0 {
 		return false
+	}
+	if !AuditEnabled {
+		return slot.state == pollOperationActive || slot.state == pollOperationDelivered || slot.state == pollOperationCanceled
 	}
 	id, ok := pollOperationIDFor(source, index, slot.generation)
 	if !ok || !slot.record.Matches(id) || preemptLoad(&slot.v2Producer.generation) != slot.generation {
@@ -420,6 +427,77 @@ func beginPollOperationV2Producer(slot *pollOperationSlot, generation uint32) bo
 	return true
 }
 
+func (source *PollOperationSource) findReusablePollSlot(p *P) (uint32, *pollOperationSlot, OperationID, bool) {
+	if !pollOperationSourceOwner(source, p) {
+		return 0, nil, OperationID{}, false
+	}
+	capacity := PollOperationConfiguredCapacity(source)
+	for index := uint32(0); index < capacity; index++ {
+		slot, slotOK := pollOperationSlotAt(source, index)
+		if !slotOK || slot.generation == ^uint32(0) || !reusablePollOperationSlot(source, slot, index) {
+			continue
+		}
+		desired, idOK := pollOperationIDFor(source, index, slot.generation+1)
+		if !idOK {
+			continue
+		}
+		return index, slot, desired, true
+	}
+	return 0, nil, OperationID{}, false
+}
+
+func (source *PollOperationSource) reserveAndAttachPollOperationV2At(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+	fd int32,
+	interest PollInterest,
+	deadline int64,
+	index uint32,
+	slot *pollOperationSlot,
+	desired OperationID,
+) (PollOperationHandle, OperationID, bool) {
+	slot.state = pollOperationInitializing
+	if !raiseSourceScanLimit(&source.scanLimit, index, PollOperationConfiguredCapacity(source)) {
+		return PollOperationHandle{}, OperationID{}, false
+	}
+	if !PrepareOperationAtGeneration(&slot.record, desired) ||
+		!DeclareOperationCommitMode(&slot.record, OperationCommitReadyThenTryCommit) {
+		slot.state = pollOperationFree
+		return PollOperationHandle{}, OperationID{}, false
+	}
+	slot.generation = desired.Generation
+	if !beginPollOperationV2Producer(slot, desired.Generation) {
+		if !AbortReservedOperation(&slot.record, desired) {
+			return PollOperationHandle{}, OperationID{}, false
+		}
+		slot.state = pollOperationFree
+		return PollOperationHandle{}, OperationID{}, false
+	}
+	if !AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID) {
+		if !AbortReservedOperation(&slot.record, desired) ||
+			!resetProducerSourceSlot(&slot.v2Producer, desired.Generation) {
+			return PollOperationHandle{}, OperationID{}, false
+		}
+		slot.state = pollOperationFree
+		return PollOperationHandle{}, OperationID{}, false
+	}
+	slot.interest = interest
+	slot.p = p
+	slot.fd = fd
+	slot.deadline = deadline
+	if deadline > 0 {
+		source.deadlineCount++
+	}
+	slot.state = pollOperationActive
+	if !activateProducerSourceSlot(&slot.v2Producer, desired.Generation) {
+		return PollOperationHandle{}, OperationID{}, false
+	}
+	return PollOperationHandle{Slot: index + 1, Generation: desired.Generation}, desired, true
+}
+
 // ReserveAndAttachPollOperationV2 reserves one exact fd/interest generation
 // and attaches its ReadyThenTryCommit record to a scheduler-integrated wait.
 // The returned handle and OperationID identify the same shared generation;
@@ -438,51 +516,13 @@ func (source *PollOperationSource) ReserveAndAttachPollOperationV2(
 		!validPollInterest(interest) || deadline < 0 {
 		return PollOperationHandle{}, OperationID{}, false
 	}
-	for index := uint32(0); index < PollOperationConfiguredCapacity(source); index++ {
-		slot, slotOK := pollOperationSlotAt(source, index)
-		if !slotOK || slot.generation == ^uint32(0) || !reusablePollOperationSlot(source, slot, index) {
-			continue
-		}
-		desired, idOK := pollOperationIDFor(source, index, slot.generation+1)
-		if !idOK {
-			continue
-		}
-		slot.state = pollOperationInitializing
-		if !raiseSourceScanLimit(&source.scanLimit, index, PollOperationConfiguredCapacity(source)) {
-			return PollOperationHandle{}, OperationID{}, false
-		}
-		if !PrepareOperationAtGeneration(&slot.record, desired) ||
-			!DeclareOperationCommitMode(&slot.record, OperationCommitReadyThenTryCommit) {
-			slot.state = pollOperationFree
-			continue
-		}
-		slot.generation = desired.Generation
-		if !beginPollOperationV2Producer(slot, desired.Generation) {
-			if !AbortReservedOperation(&slot.record, desired) {
-				return PollOperationHandle{}, OperationID{}, false
-			}
-			slot.state = pollOperationFree
-			return PollOperationHandle{}, OperationID{}, false
-		}
-		if !AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID) {
-			if !AbortReservedOperation(&slot.record, desired) ||
-				!resetProducerSourceSlot(&slot.v2Producer, desired.Generation) {
-				return PollOperationHandle{}, OperationID{}, false
-			}
-			slot.state = pollOperationFree
-			return PollOperationHandle{}, OperationID{}, false
-		}
-		slot.interest = interest
-		slot.p = p
-		slot.fd = fd
-		slot.deadline = deadline
-		slot.state = pollOperationActive
-		if !activateProducerSourceSlot(&slot.v2Producer, desired.Generation) {
-			return PollOperationHandle{}, OperationID{}, false
-		}
-		return PollOperationHandle{Slot: index + 1, Generation: desired.Generation}, desired, true
+	index, slot, desired, ok := source.findReusablePollSlot(p)
+	if !ok {
+		return PollOperationHandle{}, OperationID{}, false
 	}
-	return PollOperationHandle{}, OperationID{}, false
+	return source.reserveAndAttachPollOperationV2At(
+		p, state, ticket, wait, caseID, fd, interest, deadline, index, slot, desired,
+	)
 }
 
 // PostPollOperationV2 publishes one pointer-free readiness/closing event from
@@ -614,6 +654,11 @@ func (source *PollOperationSource) UpdatePollOperationV2Deadline(
 		preemptLoad(&slot.v2Producer.state) != uint32(producerSourceActive) ||
 		pollOperationMailbox(preemptLoad(&slot.v2Mailbox)) != pollOperationMailboxEmpty {
 		return PollOperationUpdateClosed
+	}
+	if slot.deadline == 0 && deadline > 0 {
+		source.deadlineCount++
+	} else if slot.deadline > 0 && deadline == 0 && source.deadlineCount > 0 {
+		source.deadlineCount--
 	}
 	slot.deadline = deadline
 	preemptStore(&source.pending, 1)
@@ -965,6 +1010,66 @@ func (source *PollOperationSource) ApplyPollOperationV2One(
 	return OperationApplyDetached
 }
 
+// tryApplySingleOwnerPollV2One resolves, closes/quiesces, and detaches one
+// delivered single-operation poll wait in a single charged reduction. If a
+// concurrent producer is still inside ingress it leaves the wait state
+// untouched and returns applied=false, ok=true so the general cursor handles
+// the external wait transition.
+func (source *PollOperationSource) tryApplySingleOwnerPollV2One(
+	p *P,
+	state *ParkState,
+	wait *WaitSetRecord,
+	record *OperationRecord,
+) (resolution CompletionResolution, applied, ok bool) {
+	if !pollOperationSourceOwner(source, p) || state == nil || wait == nil || record == nil {
+		return CompletionResolution{}, false, false
+	}
+	id := record.id
+	if id.Source() != OperationSourcePoll || id.Route() != source.route ||
+		id.LocalSlot() == 0 || id.LocalSlot() > PollOperationConfiguredCapacity(source) {
+		return CompletionResolution{}, false, false
+	}
+	index := id.LocalSlot() - 1
+	slot, slotOK := pollOperationSlotAt(source, index)
+	if !slotOK || slot.generation != id.Generation || &slot.record != record ||
+		slot.state != pollOperationDelivered ||
+		pollOperationMailbox(preemptLoad(&slot.v2Mailbox)) != pollOperationMailboxDelivered ||
+		(AuditEnabled && !validLivePollOperation(source, slot, p, index)) {
+		return CompletionResolution{}, false, true
+	}
+	if record.phase != operationActive || record.disposition != OperationDispositionPending ||
+		record.resolutionApplied || record.quiesced || record.cancelRequested ||
+		p.externalWaitCount == 0 {
+		return CompletionResolution{}, false, true
+	}
+	switch beginProducerSourceClose(&slot.v2Producer) {
+	case producerSourceCloseStarted, producerSourceAlreadyClosing, producerSourceAlreadyQuiesced:
+	default:
+		return CompletionResolution{}, false, false
+	}
+	if !producerSourceSlotQuiesced(&slot.v2Producer) {
+		preemptStore(&source.pending, 1)
+		return CompletionResolution{}, false, true
+	}
+	if preemptLoad(&slot.v2Producer.state) == uint32(producerSourceClosing) &&
+		!markProducerSourceQuiesced(&slot.v2Producer) {
+		return CompletionResolution{}, false, false
+	}
+	resolution, resolved := resolveSingleReadyPollPark(state, wait.ticket, record)
+	if !resolved {
+		return CompletionResolution{}, false, false
+	}
+	record.resolutionApplied = true
+	record.quiesced = true
+	record.phase = operationDetached
+	record.link = ParkLink{}
+	state.head = nil
+	state.attached = 0
+	state.phase = parkReady
+	p.externalWaitCount--
+	return resolution, true, true
+}
+
 func (source *PollOperationSource) releasePollOperationV2Result(
 	p *P,
 	handle PollOperationHandle,
@@ -1023,6 +1128,9 @@ func (source *PollOperationSource) RecyclePollOperationV2(p *P, handle PollOpera
 	slot.interest = PollInterestInvalid
 	slot.p = nil
 	slot.fd = 0
+	if slot.deadline > 0 && source.deadlineCount > 0 {
+		source.deadlineCount--
+	}
 	slot.deadline = 0
 	slot.v2Result = PollOperationResultInvalid
 	preemptStore(&slot.v2Mailbox, uint32(pollOperationMailboxEmpty))
@@ -1073,6 +1181,7 @@ func BindPollOperationSourceAtRoute(source *PollOperationSource, p *P, route Rou
 	}
 	source.route = route
 	source.scanLimit = 0
+	source.deadlineCount = 0
 	source.owner = p
 	return true
 }
@@ -1087,7 +1196,148 @@ func UnbindPollOperationSource(source *PollOperationSource, p *P) bool {
 	}
 	source.owner = nil
 	source.scanLimit = 0
+	source.deadlineCount = 0
 	return true
+}
+
+// CompleteOwnerPollEventV2 directly completes, materializes, recycles, and
+// promotes one zero-deadline single-operation poll wait on its active idle
+// owner P without queuing a full A/Ack/B catalog scan epoch. If a deadline,
+// cancellation, concurrent producer, or non-idle driver state is present it
+// returns completed=false, ok=true so the caller falls back to PostExecutorPollEvent.
+func CompleteOwnerPollEventV2(
+	driver *ExecutorDriver,
+	id OperationID,
+	result PollOperationResult,
+) (completed, ok bool) {
+	if driver == nil || driver.state != executorDriverActive || driver.poll.phase != executorPollIdle ||
+		driver.p == nil || driver.p.current != nil || driver.p.inResume ||
+		driver.run.issued != ActionInvalid || driver.sources.poll == nil ||
+		driver.p.affectedWaitHead != nil || result != PollOperationReady {
+		return false, true
+	}
+	source, p := driver.sources.poll, driver.p
+	if !pollOperationSourceOwner(source, p) || id.Source() != OperationSourcePoll ||
+		id.Route() != source.route || id.LocalSlot() == 0 ||
+		id.LocalSlot() > PollOperationConfiguredCapacity(source) {
+		return false, true
+	}
+	index := id.LocalSlot() - 1
+	slot, slotOK := pollOperationSlotAt(source, index)
+	if !slotOK || slot.generation != id.Generation || slot.state != pollOperationActive ||
+		slot.deadline != 0 ||
+		pollOperationMailbox(preemptLoad(&slot.v2Mailbox)) != pollOperationMailboxEmpty ||
+		preemptLoad(&slot.v2Producer.inflight) != 0 ||
+		(AuditEnabled && !validLivePollOperation(source, slot, p, index)) {
+		return false, true
+	}
+	record := &slot.record
+	link := &record.link
+	wait := link.wait
+	if record.id != id || record.phase != operationActive ||
+		record.disposition != OperationDispositionPending ||
+		record.resolutionApplied || record.quiesced || record.cancelRequested ||
+		wait == nil || wait.state != waitSetRecordActive || wait.work != waitSetWorkIdle ||
+		wait.workNext != nil || wait.resumeKind != resumeBindingSingle || wait.g == nil ||
+		p.externalWaitCount == 0 {
+		return false, true
+	}
+	state := &wait.g.park
+	if state.cancelKind != ParkCancelNone || state.taskCancelKind != TaskCancelNone ||
+		state.taskCancelPhase != taskCancelIdle || state.phase != parkParked ||
+		state.resolving || state.expected != 1 || state.attached != 1 ||
+		state.head != link || link.previous != nil || link.next != nil {
+		return false, true
+	}
+	packet := (*ResumePacket)(wait.resume)
+	if !validBoundResumePacket(packet, wait.ticket) || packet.source != id {
+		return false, true
+	}
+	g := wait.g
+	frame := g.active
+	schedule := preemptLoad(&p.schedule)
+	if frame == nil || frame.parkWait != wait || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		(schedule != scheduleIdle && schedule != scheduleRequested) ||
+		link.caseID == 0 ||
+		(AuditEnabled && (!validParkWaitQueueHeader(p) || !validReadyQueueHeader(p) || !validActiveWaitSetRecordFast(p, wait))) {
+		return false, true
+	}
+	switch beginProducerSourceClose(&slot.v2Producer) {
+	case producerSourceCloseStarted, producerSourceAlreadyClosing, producerSourceAlreadyQuiesced:
+	default:
+		return false, false
+	}
+	if !producerSourceSlotQuiesced(&slot.v2Producer) ||
+		pollOperationMailbox(preemptLoad(&slot.v2Mailbox)) != pollOperationMailboxEmpty {
+		if preemptCompareAndSwap(
+			&slot.v2Mailbox,
+			uint32(pollOperationMailboxEmpty),
+			uint32(pollOperationMailboxPosting),
+		) {
+			slot.v2Result = result
+			preemptStore(&slot.v2Mailbox, uint32(pollOperationMailboxPosted))
+		}
+		preemptStore(&source.pending, 1)
+		_ = driver.registry.Request(driver.handle)
+		return true, true
+	}
+	if preemptLoad(&slot.v2Producer.state) == uint32(producerSourceClosing) &&
+		!markProducerSourceQuiesced(&slot.v2Producer) {
+		return false, false
+	}
+	caseID := link.caseID
+	ticket := wait.ticket
+	// Recycle the poll operation slot directly with canonical ABA residue.
+	slot.record = OperationRecord{id: id, phase: operationReusable}
+	slot.interest = PollInterestInvalid
+	slot.p = nil
+	slot.fd = 0
+	slot.deadline = 0
+	slot.v2Result = PollOperationResultInvalid
+	preemptStore(&slot.v2Mailbox, uint32(pollOperationMailboxEmpty))
+	if !recycleProducerSourceSlot(&slot.v2Producer) {
+		return false, false
+	}
+	slot.state = pollOperationFree
+	if index+1 == source.scanLimit {
+		for source.scanLimit != 0 {
+			lastIdx := source.scanLimit - 1
+			last, lastOK := pollOperationSlotAt(source, lastIdx)
+			if !lastOK {
+				return false, false
+			}
+			if !reusablePollOperationSlot(source, last, lastIdx) {
+				break
+			}
+			source.scanLimit--
+		}
+		if source.scanLimit == 0 {
+			preemptStore(&source.pending, 0)
+		}
+	}
+	// Materialize the P-neutral ResumePacket and promote G directly.
+	p.externalWaitCount--
+	*state = ParkState{
+		ticket:     ticket,
+		phase:      parkMaterialized,
+		outcome:    ParkOutcomeCompleted,
+		winnerCase: caseID,
+	}
+	*packet = ResumePacket{
+		ticket:  ticket,
+		caseID:  caseID,
+		outcome: ParkOutcomeCompleted,
+		result:  ResumeResultPoll,
+		small:   uint8(result),
+		state:   resumePacketMaterialized,
+	}
+	wait.resumeKind = resumeBindingMaterialized
+	promoteReadyWaitSetUnchecked(p, wait)
+	driver.run.blocked = false
+	if runnableForOSThreadOwner(p) {
+		driver.run.readyDebt = true
+	}
+	return true, true
 }
 
 func (source *PollOperationSource) CanRelease() bool {

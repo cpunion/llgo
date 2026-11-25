@@ -21,6 +21,7 @@ package runtime
 import (
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
 	"github.com/xgo-dev/llgo/runtime/internal/coroclock"
+	"github.com/xgo-dev/llgo/runtime/internal/corofleet"
 )
 
 // Native uses logical limits independent of page granularity, reached
@@ -88,7 +89,55 @@ func coroProgramNextRunStepV1(
 	return run.NextAt(now)
 }
 
-func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool, deadline int64, hasDeadline, ok bool) {
+const (
+	coroNativePreSleepTightSpinsV1  = 32
+	coroNativePreSleepYieldRoundsV1 = 4
+	coroNativePreSleepBurstSpinsV1  = 16
+	coroNativePreSleepBudgetNSV1    = 3_000
+)
+
+func coroProgramTryInSliceIdlePollV1(driver *coro.ExecutorDriver) (woke, posted, ok bool) {
+	return coroNativeTryFastPollCompletionDetailedV1(driver)
+}
+
+func coroProgramPreSleepSpinV1(driver *coro.ExecutorDriver) (ready, ok bool) {
+	if coroProgramLifecycleV1State != coroProgramRunningV1 ||
+		coroNativeAtomicLoadV1(&coroNativeFleetPhysicalOwnerV1State.started) == 0 {
+		return false, true
+	}
+	for i := 0; i < coroNativePreSleepTightSpinsV1; i++ {
+		if coroObserveGCV1() || coro.ExecutorDriverHasPendingExternalWork(driver) {
+			return true, true
+		}
+	}
+	start, clockOK := coroclock.MonotonicNano()
+	if !clockOK {
+		return false, false
+	}
+	for round := 0; round < coroNativePreSleepYieldRoundsV1; round++ {
+		_ = corofleet.Yield()
+		for i := 0; i < coroNativePreSleepBurstSpinsV1; i++ {
+			if coroObserveGCV1() || coro.ExecutorDriverHasPendingExternalWork(driver) {
+				return true, true
+			}
+		}
+		if coroProgramLifecycleV1State != coroProgramRunningV1 {
+			return true, true
+		}
+		if round&7 == 7 {
+			now, ok := coroclock.MonotonicNano()
+			if !ok {
+				return false, false
+			}
+			if now-start >= coroNativePreSleepBudgetNSV1 {
+				break
+			}
+		}
+	}
+	return false, true
+}
+
+func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver, skipFastPoll bool) (sleep bool, deadline int64, hasDeadline, ok bool) {
 	if coroObserveGCV1() {
 		return false, 0, false, true
 	}
@@ -97,7 +146,14 @@ func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool,
 	} else if ready {
 		return false, 0, false, true
 	}
-	if ready, fastOK := coroNativeTryFastPollCompletionV1(driver); !fastOK {
+	if !skipFastPoll {
+		if ready, fastOK := coroNativeTryFastPollCompletionV1(driver); !fastOK {
+			return false, 0, false, false
+		} else if ready {
+			return false, 0, false, true
+		}
+	}
+	if ready, spinOK := coroProgramPreSleepSpinV1(driver); !spinOK {
 		return false, 0, false, false
 	} else if ready {
 		return false, 0, false, true

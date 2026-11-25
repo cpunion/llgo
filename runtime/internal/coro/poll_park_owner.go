@@ -35,6 +35,10 @@ func currentExecutorPollSource(driver *ExecutorDriver, g *G) (*PollOperationSour
 	if driver == nil || g == nil || g.active == nil || (AuditEnabled && !ValidG(g)) {
 		return nil, false
 	}
+	if !AuditEnabled && g.runP != nil && driver.p == g.runP &&
+		driver.sources.poll != nil && driver.sources.poll.owner == g.runP {
+		return driver.sources.poll, true
+	}
 	current, _, _, ok := CurrentExecutorPollDriver(g)
 	if !ok || current != driver {
 		return nil, false
@@ -64,19 +68,20 @@ func PrepareSinglePollPark(
 		return ParkTicket{}, PollOperationHandle{}, OperationID{}, false
 	}
 	if AuditEnabled {
-		if !ValidG(g) || *wait != (WaitSetRecord{}) || !resumeGateTaken(g) ||
-			!CanReservePollOperationV2(g.runP, source) {
+		if !ValidG(g) || *wait != (WaitSetRecord{}) || !resumeGateTaken(g) {
 			return ParkTicket{}, PollOperationHandle{}, OperationID{}, false
 		}
-	} else if !CanReservePollOperationV2(g.runP, source) {
+	}
+	index, slot, desired, found := source.findReusablePollSlot(g.runP)
+	if !found {
 		return ParkTicket{}, PollOperationHandle{}, OperationID{}, false
 	}
 	ticket, ok := BeginParkSet(&g.park, 1, seed)
 	if !ok || !PrepareWaitSetRecord(wait, g, ticket) {
 		return ParkTicket{}, PollOperationHandle{}, OperationID{}, false
 	}
-	poll, operation, ok := source.ReserveAndAttachPollOperationV2(
-		g.runP, &g.park, ticket, wait, caseID, fd, interest, deadline,
+	poll, operation, ok := source.reserveAndAttachPollOperationV2At(
+		g.runP, &g.park, ticket, wait, caseID, fd, interest, deadline, index, slot, desired,
 	)
 	if !ok || !SealParkSet(&g.park, ticket) || !PrepareParkSet(g, handle, header, ticket, wait) {
 		return ParkTicket{}, PollOperationHandle{}, OperationID{}, false
@@ -120,7 +125,7 @@ func FinishSinglePollPark(
 	lease OperationResultLease,
 	discard bool,
 ) (PollOperationResult, bool) {
-	if !ValidG(g) || !resumeGateTaken(g) || g.runP == nil || source == nil ||
+	if g == nil || (AuditEnabled && !ValidG(g)) || !resumeGateTaken(g) || g.runP == nil || source == nil ||
 		source.owner != g.runP || !operation.Valid() || operation.Source() != OperationSourcePoll {
 		return PollOperationResultInvalid, false
 	}

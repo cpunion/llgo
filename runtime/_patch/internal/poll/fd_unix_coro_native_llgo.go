@@ -171,6 +171,77 @@ func (fd *FD) LLGoTryRead(p []byte) (int, error, uint8) {
 	return n, err, LLGoTryDoneSlowUnlock
 }
 
+// LLGoPollWaitOne forwards to the compiler-recognized single poll wait hook so
+// thin net/os callers can inline coroPollWait into their own slow frame.
+func LLGoPollWaitOne(ctx uintptr, fd int32, interest uint32, deadline int64) uint32 {
+	return runtime_pollWaitOne(ctx, fd, interest, deadline)
+}
+
+// LLGoPollError converts a non-zero netpoll status into the corresponding Go error.
+func (fd *FD) LLGoPollError(pollStatus int) error {
+	return convertErr(pollStatus, fd.isFile)
+}
+
+// LLGoReadWaitPrepare prepares a poll wait while holding fd's read lock.
+// Acyclic and convertErr-free so it compiles to EmitOutcomePlain (zero frame).
+func (fd *FD) LLGoReadWaitPrepare() (ctx uintptr, pfd int32, interest uint32, deadline int64, status uint8, pollStatus int) {
+	ctx = fd.pd.runtimeCtx
+	if ctx == 0 {
+		return 0, 0, 0, 0, LLGoTryFallback, 0
+	}
+	pfd, interest, deadline, pollStatus = runtime_pollPrepareWait(ctx, 'r')
+	if pollStatus != 0 {
+		if fd.llgoTryUnlock(mutexRLock, mutexRMask) {
+			return 0, 0, 0, 0, LLGoTryDone, pollStatus
+		}
+		return 0, 0, 0, 0, LLGoTryDoneSlowUnlock, pollStatus
+	}
+	return ctx, pfd, interest, deadline, LLGoTryWaitLocked, 0
+}
+
+// LLGoReadWaitFinishAndRead finishes one poll wait and performs one follow-up
+// non-blocking read attempt while holding fd's read lock. Acyclic and
+// convertErr-free so it compiles to EmitOutcomePlain (zero coroutine frame).
+func (fd *FD) LLGoReadWaitFinishAndRead(ctx uintptr, p []byte, waitResult uint32) (n int, err error, status uint8, pollStatus int) {
+	st, retry := runtime_pollFinishWait(ctx, 'r', waitResult)
+	if retry {
+		return 0, nil, LLGoTryWaitLocked, 0
+	}
+	if st != 0 {
+		if fd.llgoTryUnlock(mutexRLock, mutexRMask) {
+			return 0, nil, LLGoTryDone, st
+		}
+		return 0, nil, LLGoTryDoneSlowUnlock, st
+	}
+	if fd.IsStream && len(p) > maxRW {
+		p = p[:maxRW]
+	}
+	nn, errno, attempted := runtime_pollReadAttempt(
+		ctx,
+		fd.Sysfd,
+		llgoCoroPollBufferAddress(p),
+		len(p),
+	)
+	if !attempted || errno == int(syscall.EINTR) {
+		return 0, nil, LLGoTryFallback, 0
+	}
+	if errno == 0 {
+		err = fd.eofError(nn, nil)
+		if fd.llgoTryUnlock(mutexRLock, mutexRMask) {
+			return nn, err, LLGoTryDone, 0
+		}
+		return nn, err, LLGoTryDoneSlowUnlock, 0
+	}
+	if errno == int(syscall.EAGAIN) && fd.pd.pollable() {
+		return 0, nil, LLGoTryWaitLocked, 0
+	}
+	err = syscall.Errno(errno)
+	if fd.llgoTryUnlock(mutexRLock, mutexRMask) {
+		return 0, err, LLGoTryDone, 0
+	}
+	return 0, err, LLGoTryDoneSlowUnlock, 0
+}
+
 // LLGoReadWaitLocked completes a read after LLGoTryRead observed EAGAIN while
 // holding fd's read lock and having already prepared/reset the poll descriptor.
 func (fd *FD) LLGoReadWaitLocked(p []byte) (int, error) {
@@ -179,58 +250,57 @@ func (fd *FD) LLGoReadWaitLocked(p []byte) (int, error) {
 		p = p[:maxRW]
 	}
 	ctx := fd.pd.runtimeCtx
-	if ctx != 0 {
-		if res := runtime_pollWait(ctx, 'r'); res != 0 {
-			return 0, convertErr(res, fd.isFile)
-		}
-	} else if err := fd.pd.waitRead(fd.isFile); err != nil {
-		return 0, err
-	}
 	for {
 		if ctx != 0 {
-			n, errno, attempted := runtime_pollReadAttempt(
-				ctx,
-				fd.Sysfd,
-				llgoCoroPollBufferAddress(p),
-				len(p),
-			)
-			if attempted {
-				if errno == 0 {
-					return n, fd.eofError(n, nil)
+			for {
+				pfd, interest, deadline, status := runtime_pollPrepareWait(ctx, 'r')
+				if status != 0 {
+					return 0, convertErr(status, fd.isFile)
 				}
-				if errno == int(syscall.EINTR) {
-					continue
-				}
-				if errno == int(syscall.EAGAIN) && fd.pd.pollable() {
-					if res := runtime_pollWait(ctx, 'r'); res == 0 {
-						continue
-					} else {
-						return 0, convertErr(res, fd.isFile)
+				status, retry := runtime_pollFinishWait(ctx, 'r', runtime_pollWaitOne(ctx, pfd, interest, deadline))
+				if !retry {
+					if status != 0 {
+						return 0, convertErr(status, fd.isFile)
 					}
-				}
-				return 0, syscall.Errno(errno)
-			}
-		}
-		n, err := llgoCoroPollReadFallback(fd, p)
-		if err == syscall.EINTR {
-			continue
-		}
-		if err != nil {
-			n = 0
-			if err == syscall.EAGAIN && fd.pd.pollable() {
-				if ctx != 0 {
-					if res := runtime_pollWait(ctx, 'r'); res == 0 {
-						continue
-					} else {
-						err = convertErr(res, fd.isFile)
-					}
-				} else if err = fd.pd.waitRead(fd.isFile); err == nil {
-					continue
+					break
 				}
 			}
+		} else if err := fd.pd.waitRead(fd.isFile); err != nil {
+			return 0, err
 		}
-		err = fd.eofError(n, err)
-		return n, err
+		for {
+			if ctx != 0 {
+				n, errno, attempted := runtime_pollReadAttempt(
+					ctx,
+					fd.Sysfd,
+					llgoCoroPollBufferAddress(p),
+					len(p),
+				)
+				if attempted {
+					if errno == 0 {
+						return n, fd.eofError(n, nil)
+					}
+					if errno == int(syscall.EINTR) {
+						continue
+					}
+					if errno == int(syscall.EAGAIN) && fd.pd.pollable() {
+						break
+					}
+					return 0, syscall.Errno(errno)
+				}
+			}
+			n, err := llgoCoroPollReadFallback(fd, p)
+			if err == syscall.EINTR {
+				continue
+			}
+			if err != nil {
+				n = 0
+				if err == syscall.EAGAIN && fd.pd.pollable() {
+					break
+				}
+			}
+			return n, fd.eofError(n, err)
+		}
 	}
 }
 
@@ -329,87 +399,87 @@ func (fd *FD) LLGoTryWrite(p []byte) (int, error, uint8) {
 func (fd *FD) LLGoWriteWaitLocked(p []byte, nn int) (int, error) {
 	defer fd.writeUnlock()
 	ctx := fd.pd.runtimeCtx
-	if ctx != 0 {
-		if res := runtime_pollWait(ctx, 'w'); res != 0 {
-			return nn, convertErr(res, fd.isFile)
-		}
-	} else if err := fd.pd.waitWrite(fd.isFile); err != nil {
-		return nn, err
-	}
 	for {
-		max := len(p)
-		if fd.IsStream && max-nn > maxRW {
-			max = nn + maxRW
-		}
-		var n int
-		var err error
 		if ctx != 0 {
-			var errno int
-			var attempted bool
-			n, errno, attempted = runtime_pollWriteAttempt(
-				ctx,
-				fd.Sysfd,
-				llgoCoroPollBufferAddress(p[nn:max]),
-				max-nn,
-			)
-			if attempted {
-				if errno == int(syscall.EINTR) {
-					continue
+			for {
+				pfd, interest, deadline, status := runtime_pollPrepareWait(ctx, 'w')
+				if status != 0 {
+					return nn, convertErr(status, fd.isFile)
 				}
-				if n > 0 {
-					if n > max-nn {
-						panic("invalid return from write: got " + strconv.Itoa(n) + " from a write of " + strconv.Itoa(max-nn))
+				status, retry := runtime_pollFinishWait(ctx, 'w', runtime_pollWaitOne(ctx, pfd, interest, deadline))
+				if !retry {
+					if status != 0 {
+						return nn, convertErr(status, fd.isFile)
 					}
-					nn += n
+					break
 				}
-				if errno == 0 {
-					if nn == len(p) {
-						return nn, nil
-					}
-					if n == 0 {
-						return nn, io.ErrUnexpectedEOF
-					}
-					continue
-				}
-				if errno == int(syscall.EAGAIN) && fd.pd.pollable() {
-					if res := runtime_pollWait(ctx, 'w'); res == 0 {
-						continue
-					} else {
-						return nn, convertErr(res, fd.isFile)
-					}
-				}
-				return nn, syscall.Errno(errno)
 			}
-		}
-		n, err = llgoCoroPollWriteFallback(fd, p[nn:max])
-		if err == syscall.EINTR {
-			continue
-		}
-		if n > 0 {
-			if n > max-nn {
-				panic("invalid return from write: got " + strconv.Itoa(n) + " from a write of " + strconv.Itoa(max-nn))
-			}
-			nn += n
-		}
-		if nn == len(p) {
+		} else if err := fd.pd.waitWrite(fd.isFile); err != nil {
 			return nn, err
 		}
-		if err == syscall.EAGAIN && fd.pd.pollable() {
+		for {
+			max := len(p)
+			if fd.IsStream && max-nn > maxRW {
+				max = nn + maxRW
+			}
+			var n int
+			var err error
 			if ctx != 0 {
-				if res := runtime_pollWait(ctx, 'w'); res == 0 {
-					continue
-				} else {
-					err = convertErr(res, fd.isFile)
+				var errno int
+				var attempted bool
+				n, errno, attempted = runtime_pollWriteAttempt(
+					ctx,
+					fd.Sysfd,
+					llgoCoroPollBufferAddress(p[nn:max]),
+					max-nn,
+				)
+				if attempted {
+					if errno == int(syscall.EINTR) {
+						continue
+					}
+					if n > 0 {
+						if n > max-nn {
+							panic("invalid return from write: got " + strconv.Itoa(n) + " from a write of " + strconv.Itoa(max-nn))
+						}
+						nn += n
+					}
+					if errno == 0 {
+						if nn == len(p) {
+							return nn, nil
+						}
+						if n == 0 {
+							return nn, io.ErrUnexpectedEOF
+						}
+						continue
+					}
+					if errno == int(syscall.EAGAIN) && fd.pd.pollable() {
+						break
+					}
+					return nn, syscall.Errno(errno)
 				}
-			} else if err = fd.pd.waitWrite(fd.isFile); err == nil {
+			}
+			n, err = llgoCoroPollWriteFallback(fd, p[nn:max])
+			if err == syscall.EINTR {
 				continue
 			}
-		}
-		if err != nil {
-			return nn, err
-		}
-		if n == 0 {
-			return nn, io.ErrUnexpectedEOF
+			if n > 0 {
+				if n > max-nn {
+					panic("invalid return from write: got " + strconv.Itoa(n) + " from a write of " + strconv.Itoa(max-nn))
+				}
+				nn += n
+			}
+			if nn == len(p) {
+				return nn, err
+			}
+			if err == syscall.EAGAIN && fd.pd.pollable() {
+				break
+			}
+			if err != nil {
+				return nn, err
+			}
+			if n == 0 {
+				return nn, io.ErrUnexpectedEOF
+			}
 		}
 	}
 }
@@ -429,6 +499,9 @@ func (fd *FD) LLGoTrySeek(offset int64, whence int) (int64, error, uint8) {
 
 func runtime_pollReadAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (result int, errno int, attempted bool)
 func runtime_pollWriteAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (result int, errno int, attempted bool)
+func runtime_pollPrepareWait(ctx uintptr, mode int) (fd int32, interest uint32, deadline int64, status int)
+func runtime_pollWaitOne(ctx uintptr, fd int32, interest uint32, deadline int64) uint32
+func runtime_pollFinishWait(ctx uintptr, mode int, result uint32) (status int, retry bool)
 
 func llgoCoroPollBufferAddress(p []byte) unsafe.Pointer {
 	if len(p) == 0 {

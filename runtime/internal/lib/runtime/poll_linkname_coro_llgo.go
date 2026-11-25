@@ -318,6 +318,24 @@ func pollCoroFinishWaitV2(ctx uintptr, mode int, result uint32) (status int, ret
 	}
 }
 
+//llgo:managedlink
+//go:linkname poll_runtime_pollPrepareWait internal/poll.runtime_pollPrepareWait
+func poll_runtime_pollPrepareWait(ctx uintptr, mode int) (int32, uint32, int64, int) {
+	return pollCoroPrepareWaitV2(ctx, mode)
+}
+
+//llgo:managedlink
+//go:linkname poll_runtime_pollWaitOne internal/poll.runtime_pollWaitOne
+func poll_runtime_pollWaitOne(ctx uintptr, fd int32, interest uint32, deadline int64) uint32 {
+	return llgoCoroPollWaitV2(ctx, fd, interest, deadline)
+}
+
+//llgo:managedlink
+//go:linkname poll_runtime_pollFinishWait internal/poll.runtime_pollFinishWait
+func poll_runtime_pollFinishWait(ctx uintptr, mode int, result uint32) (int, bool) {
+	return pollCoroFinishWaitV2(ctx, mode, result)
+}
+
 // runtime_pollWait retains only the scalar ctx handle across
 // pollCoroWaitOneV2. Callers throughout internal/poll and the standard library
 // keep their Go blocking style without a Future/Await API or one worker thread

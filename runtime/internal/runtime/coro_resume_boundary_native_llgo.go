@@ -45,17 +45,19 @@ func coroHandleResumePhysicalV1(task *coro.G, handle unsafe.Pointer, panicBounda
 	boundary := (*Defer)(c.Alloca(unsafe.Sizeof(Defer{})))
 	env := (*SigjmpBuf)(c.AllocaSigjmpBuf())
 	*boundary = Defer{}
+	gp := coroPanicBoundaryCurrentG(task)
 	for {
 		landed := c.Sigsetjmp(unsafe.Pointer(env), c.Int(0))
 		if landed == 0 {
-			if !coroPanicBoundaryPush(task, handle, boundary, unsafe.Pointer(env)) {
+			if !coroPanicBoundaryPushWithG(gp, task, handle, boundary, unsafe.Pointer(env)) {
 				return false
 			}
 			coroHandleResume(handle)
-			return coroPanicBoundaryPop(task, handle, boundary)
+			return coroPanicBoundaryPopWithG(gp, task, handle, boundary)
 		}
 		if !coroPanicBoundaryStage(task, handle, boundary) {
 			return false
 		}
+		gp = coroPanicBoundaryCurrentG(task)
 	}
 }

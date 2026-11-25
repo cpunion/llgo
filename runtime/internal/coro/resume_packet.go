@@ -378,6 +378,11 @@ func bindSingleWaitSetResumePacket(
 }
 
 func validSingleWaitSetResumeInstall(record *WaitSetRecord, source OperationID) bool {
+	if !AuditEnabled {
+		return record != nil && record.resume == nil && record.resumeKind == resumeBindingNone &&
+			record.state == waitSetRecordCommitted && record.g != nil && record.g.runP != nil &&
+			supportedSingleResumeSource(source)
+	}
 	if record == nil || record.resume != nil || record.resumeKind != resumeBindingNone ||
 		record.state != waitSetRecordCommitted || record.work != waitSetWorkIdle ||
 		record.activePrev != nil || record.activeNext != nil || record.workNext != nil ||
@@ -1008,13 +1013,22 @@ func TakeResumePacket(
 	small uint8,
 	ok bool,
 ) {
-	if !ValidG(g) || g.runP == nil || !validMaterializedResumePacket(packet) ||
-		packet.ticket != expected {
+	if AuditEnabled {
+		if !ValidG(g) || g.runP == nil || !validMaterializedResumePacket(packet) ||
+			packet.ticket != expected {
+			return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
+		}
+	} else if g == nil || g.runP == nil || packet == nil ||
+		packet.state != resumePacketMaterialized || packet.ticket != expected {
 		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 	}
 	p := g.runP
-	if p.current != g || !p.inResume || g.state != GRunning || p.runDecisionTaken ||
-		!expectedAction(p, g, p.action, ActionResume) || !validRunDecision(p.runDecision) {
+	if AuditEnabled {
+		if p.current != g || !p.inResume || g.state != GRunning || p.runDecisionTaken ||
+			!expectedAction(p, g, p.action, ActionResume) || !validRunDecision(p.runDecision) {
+			return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
+		}
+	} else if p.current != g || !p.inResume || g.state != GRunning || p.runDecisionTaken {
 		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 	}
 	decision := &p.runDecision

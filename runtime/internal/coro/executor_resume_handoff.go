@@ -327,12 +327,6 @@ func SoloSyscallEligible(driver *ExecutorDriver, task *G) bool {
 		!executorDirectChannelInboxIdle(driver) {
 		return false
 	}
-	if preemptLoad(&p.schedule) != scheduleIdle {
-		return false
-	}
-	if driver.registry != nil && driver.registry.ObserveRequested(driver.handle) {
-		return false
-	}
 	return true
 }
 

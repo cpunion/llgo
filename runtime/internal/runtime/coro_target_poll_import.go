@@ -32,6 +32,16 @@ func coroTargetPostPollEventsV1(count uint32) (posted, ok bool) {
 		if coroNativePollEntriesV1[entry].Revents == 0 {
 			continue
 		}
+		if completed, ok := coro.CompleteOwnerPollEventV2(
+			&coroProgramExecutorDriverV1State,
+			coroNativePollIDsV2[entry-1],
+			coro.PollOperationReady,
+		); !ok {
+			return false, false
+		} else if completed {
+			posted = true
+			continue
+		}
 		if result := coro.PostExecutorPollEvent(
 			&coroProgramExecutorDriverV1State,
 			coroNativePollIDsV2[entry-1],
