@@ -116,3 +116,115 @@ func TestExecutorShutdownDrainDirectCompletionAfterCompatibility(t *testing.T) {
 		t.Fatal("shutdown result left a duplicate completion in the inbox")
 	}
 }
+
+func TestExecutorShutdownDrainDoesNotRequeueAwaitingExternalWait(t *testing.T) {
+	fixture := &pollParkOwnerFixture{
+		p:        new(P),
+		driver:   new(ExecutorDriver),
+		registry: new(ExecutorRegistry),
+		poll:     new(PollOperationSource),
+		task:     newYieldingTestG(t, "shutdown-awaiting-poll"),
+	}
+	packet := new(ResumePacket)
+	registered := registerTestExecutor(t, fixture.registry)
+	if !BindExecutorSourceCatalogAtRoute(
+		fixture.driver, fixture.p, fixture.registry, registered, RouteID(7),
+		ExecutorSourceCatalog{Poll: fixture.poll},
+	) {
+		t.Fatal("bind poll owner")
+	}
+	if !Enqueue(fixture.p, fixture.task.g) {
+		t.Fatal("enqueue poll task")
+	}
+	if next, ok := NextRunnableAt(fixture.p, 0); !ok || next != fixture.task.g {
+		t.Fatal("dequeue poll task")
+	}
+	fixture.action = beginWaitTestResume(t, fixture.p, fixture.task)
+	fixture.task.frame.header.SuspendReason = uint16(SuspendPark)
+	fixture.task.frame.header.Lifecycle = uint16(FrameSuspended)
+	var prepared bool
+	fixture.ticket, fixture.handle, fixture.operation, fixture.executor, prepared = PrepareCurrentExecutorPollPark(
+		fixture.driver, fixture.task.g, fixture.task.handle, fixture.task.frame.header,
+		&fixture.wait, 1, 1, 42, PollInterestRead, 0,
+	)
+	if !prepared || !BindSingleWaitSetResumePacket(&fixture.wait, packet, fixture.operation) {
+		t.Fatal("prepare/bind poll park")
+	}
+	if parked, ok := Resumed(fixture.p, fixture.task.g, fixture.action); !ok || parked.Kind != ActionPark {
+		t.Fatalf("commit poll park = (%+v, %t)", parked, ok)
+	}
+	if _, promoted, ok := PollExecutorAt(fixture.driver, 0); !ok || promoted != 0 {
+		t.Fatalf("initial idle poll = (%d, %t)", promoted, ok)
+	}
+
+	// Hold an admitted producer inflight so shutdown cancellation must
+	// transition the wait to waitSetWorkAwaitingExternal instead of promoting it.
+	slot, ok := pollOperationSlotAt(fixture.poll, fixture.operation.LocalSlot()-1)
+	if !ok || !producerAdmissionAcquire(&slot.v2Producer.inflight) {
+		t.Fatal("admit poll producer before shutdown")
+	}
+	if needed, ok := RequestExecutorShutdownDrain(fixture.driver); !ok || !needed {
+		t.Fatalf("first shutdown drain = (%t, %t)", needed, ok)
+	}
+	if _, promoted, ok := PollExecutorAt(fixture.driver, 0); !ok || promoted != 0 ||
+		fixture.wait.work != waitSetWorkAwaitingExternal {
+		t.Fatalf("awaiting external after first shutdown = (promoted=%d, ok=%t, work=%d)", promoted, ok, fixture.wait.work)
+	}
+	if fixture.p.affectedWaitHead != nil {
+		t.Fatal("affected wait queue must be empty once awaiting external")
+	}
+
+	// Repeating shutdown drain across peer run-slice boundaries must not
+	// requeue an already-canceled wait that is still awaiting external completion,
+	// otherwise it would livelock and starve sibling ready tasks (such as a
+	// shutdown sentinel whose defer releases the blocked external operation).
+	if needed, ok := RequestExecutorShutdownDrain(fixture.driver); !ok || !needed {
+		t.Fatalf("repeat shutdown drain = (%t, %t)", needed, ok)
+	}
+	if fixture.wait.work != waitSetWorkAwaitingExternal || fixture.p.affectedWaitHead != nil {
+		t.Fatalf("repeat shutdown drain requeued awaiting external wait: work=%d affected=%p", fixture.wait.work, fixture.p.affectedWaitHead)
+	}
+
+	// Complete the admitted producer and verify shutdown finishes cleanly.
+	if !preemptCompareAndSwap(
+		&slot.v2Mailbox,
+		uint32(pollOperationMailboxEmpty),
+		uint32(pollOperationMailboxPosting),
+	) {
+		t.Fatal("claim late admitted poll mailbox")
+	}
+	slot.v2Result = PollOperationReady
+	preemptStore(&slot.v2Mailbox, uint32(pollOperationMailboxPosted))
+	preemptStore(&fixture.poll.pending, 1)
+	producerAdmissionRelease(&slot.v2Producer.inflight)
+
+	if _, promoted, ok := PollExecutorAt(fixture.driver, 0); !ok || promoted != 1 {
+		t.Fatalf("resolve shutdown completion = (%d, %t)", promoted, ok)
+	}
+	if next, ok := NextRunnableAt(fixture.p, 0); !ok || next != fixture.task.g {
+		t.Fatalf("dequeue canceled task = (%p, %t)", next, ok)
+	}
+	action, ok := BeginRunG(fixture.p, fixture.task.g)
+	if !ok || action.Kind != ActionCheckResume {
+		t.Fatalf("begin canceled task = (%+v, %t)", action, ok)
+	}
+	fixture.action, ok = Checked(fixture.p, fixture.task.g, action, false)
+	if !ok || fixture.action.Kind != ActionResume {
+		t.Fatalf("activate canceled task = (%+v, %t)", fixture.action, ok)
+	}
+	outcome, _, cancel, _, _, taken := TakeResumePacket(fixture.task.g, fixture.ticket, packet, nil)
+	if !taken || outcome != ParkOutcomeCanceled || cancel != TaskCancelShutdown {
+		t.Fatalf("shutdown cleanup resume = (taken=%t, outcome=%d, cancel=%d)", taken, outcome, cancel)
+	}
+	fixture.task.frame.header.SuspendReason = uint16(SuspendNone)
+	fixture.task.frame.header.Lifecycle = uint16(FrameActive)
+	yieldRunningDriverTask(t, fixture.p, fixture.task, fixture.action)
+	closeTestExecutorDriver(t, fixture.driver)
+	finishReadyDriverTasks(t, fixture.p, map[*G]*yieldingTestG{fixture.task.g: fixture.task})
+	if !AcknowledgeTaskCancellation(fixture.task.g, TaskCancelShutdown) {
+		t.Fatal("acknowledge shutdown cancellation")
+	}
+	if !TerminalG(fixture.p, fixture.task.g) || !fixture.poll.CanRelease() || !fixture.registry.CanRelease() {
+		t.Fatal("shutdown awaiting-external owner retained terminal state")
+	}
+}

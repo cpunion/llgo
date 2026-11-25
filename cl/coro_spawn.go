@@ -197,7 +197,7 @@ func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go
 	handle := b.Call(root.Expr, physicalArgs...)
 	commit := p.pkg.NewFunc(coroSpawnCommitHookV1, coroSpawnCommitSignature(), llssa.InC)
 	b.Call(commit.Expr, parent, childG, handle)
-	body.pollAndSuspendForPreempt(b)
+	body.pollAndSuspendForPreemptWithWeight(b, coroSpawnPreemptWeight)
 	return true
 }
 
@@ -284,5 +284,5 @@ func (p *context) compileCoroDispatchSpawnTransaction(
 	handle := b.CallCoroDispatchCoro(fn, childG, null, args, opts)
 	commit := p.pkg.NewFunc(coroSpawnCommitHookV1, coroSpawnCommitSignature(), llssa.InC)
 	b.Call(commit.Expr, parent, childG, handle)
-	body.pollAndSuspendForPreempt(b)
+	body.pollAndSuspendForPreemptWithWeight(b, coroSpawnPreemptWeight)
 }

@@ -37,7 +37,11 @@ func coroProgramNextRunStepV1(
 	return run.Next()
 }
 
-func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool, deadline int64, hasDeadline, ok bool) {
+func coroProgramTryInSliceIdlePollV1(*coro.ExecutorDriver) (bool, bool, bool) {
+	return false, false, true
+}
+
+func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver, _ bool) (sleep bool, deadline int64, hasDeadline, ok bool) {
 	sleep, ok = coro.PrepareExecutorSleep(driver)
 	return sleep, 0, false, ok
 }

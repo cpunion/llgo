@@ -417,6 +417,12 @@ func (p *context) compileCoroStaticAwait(
 		}
 	}
 	if closureContext.IsNil() && !instructionPlan.recoverAlias {
+		if len(args) == 4 && p.canInlineCoroPollWaitWrapper(body, b, callee) {
+			keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
+			ret := p.compileCoroPollWait(b, nil, args)
+			p.emitCoroKeepaliveSlots(b, keepaliveSlots)
+			return ret
+		}
 		entry := p.mustFunctionSymbol(callee)
 		if !entry.patchOriginalInit && !entry.importedLibrary && entry.usesCoroPhysicalABI() {
 			if targetPhysical, err := entry.sealedPhysicalFunctionPlan(); err == nil &&
@@ -1725,14 +1731,24 @@ func (p *context) enterCoroPropagatedGoexit(b llssa.Builder) {
 // Extract lowering and ValuePlan paths identical to a synchronous Go call.
 // awaitCoroSyncSlowPreChild completes an already-created child handle passed
 // from a SingleAwait sync-fast ramp into $coro.slow (mode==1) and reads its
-// result from this frame's caller-owned incoming resultSlot.
-func (p *context) awaitCoroSyncSlowPreChild(b llssa.Builder, preChild llssa.Expr, results *types.Tuple) llssa.Expr {
+// result from resultSlot (or this frame's caller-owned incoming resultSlot
+// when resultSlot is nil).
+func (p *context) awaitCoroSyncSlowPreChild(b llssa.Builder, preChild, resultSlot llssa.Expr, results *types.Tuple) llssa.Expr {
 	p.awaitCoroChildCompletionWithRecovery(b, preChild, coroCleanupInvocation{}, nil, nil)
-	return p.loadCoroSyncSlowIncomingResult(b, results)
+	if results == nil || results.Len() == 0 {
+		return llssa.Nil
+	}
+	return p.loadCoroSyncSlowIncomingResult(b, resultSlot, results)
 }
 
-func (p *context) loadCoroSyncSlowIncomingResult(b llssa.Builder, results *types.Tuple) llssa.Expr {
-	slot := p.coroIncomingResultSlot()
+func (p *context) loadCoroSyncSlowIncomingResult(b llssa.Builder, resultSlot llssa.Expr, results *types.Tuple) llssa.Expr {
+	if results == nil || results.Len() == 0 {
+		return llssa.Nil
+	}
+	slot := resultSlot
+	if slot.IsNil() {
+		slot = p.coroIncomingResultSlot()
+	}
 	if slot.IsNil() {
 		panic("sync-slow incoming result load requires an active coroutine body")
 	}

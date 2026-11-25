@@ -132,6 +132,30 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 
 				return coroRunResultV1{}
 			}
+			if step.Kind == coro.ExecutorRunStepIdle &&
+				!target.physicalReturn &&
+				coroProgramLifecycleV1State == coroProgramRunningV1 &&
+				coro.HasWaiting(p) {
+				woke, posted, fastOK := coroProgramTryInSliceIdlePollV1(driver)
+				if !fastOK {
+					_ = coroFinishManagedExecutionV1(driver, held)
+
+					return coroRunResultV1{}
+				}
+				if woke {
+					if !coroFinishManagedExecutionV1(driver, held) {
+						return coroRunResultV1{}
+					}
+					result.used++
+					result.stop = coroRunAgainV1
+					return result
+				}
+				if posted {
+					result.used++
+					continue
+				}
+				result.polledIdle = true
+			}
 			terminal, reduced = coroReduceExecutorRunStepV1(
 				p, driver, policy, target, step, runtimeContext,
 				budget-result.used, &result,
@@ -279,7 +303,7 @@ func coroFinishRunSliceCompatibility(
 			result.stop = coroRunAgainV1
 			return result
 		}
-		sleep, deadline, hasDeadline, prepared := coroProgramPrepareExecutorSleepV1(driver)
+		sleep, deadline, hasDeadline, prepared := coroProgramPrepareExecutorSleepV1(driver, result.polledIdle)
 		if !prepared {
 			return coroRunResultV1{}
 		}

@@ -155,6 +155,15 @@ func executorRunExternalSourceRequested(driver *ExecutorDriver) bool {
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 }
 
+// ExecutorDriverHasPendingExternalWork performs a lock-free atomic check for
+// pending direct-channel, source, executor-request, or schedule work on driver.
+func ExecutorDriverHasPendingExternalWork(driver *ExecutorDriver) bool {
+	if driver == nil || driver.p == nil {
+		return false
+	}
+	return executorRunExternalSourceRequested(driver)
+}
+
 func executorRunSourceRequested(driver *ExecutorDriver) bool {
 	return driver.run.sourceMore || executorRunExternalSourceRequested(driver)
 }
@@ -466,9 +475,15 @@ func nextExecutorRunActionValidated(
 	if executorDirectChannelCompletionPending(driver) || ownerLocalCompletionPending(driver) {
 		return ExecutorRunActionStep{}, false, true
 	}
-	if executorRunSourceRequested(driver) ||
+	sourceReq := executorRunSourceRequested(driver)
+	if !AuditEnabled && driver.run.actionsSinceSource == executorRunSourceQuantum &&
+		!sourceReq && !driver.sources.needsMonotonicTimeNow() {
+		driver.run.actionsSinceSource = 0
+	}
+	if sourceReq ||
 		driver.run.actionsSinceSource == executorRunSourceQuantum ||
-		runnable == nil && HasWaiting(p) && !driver.run.blocked {
+		runnable == nil && HasWaiting(p) && !driver.run.blocked &&
+			(AuditEnabled || driver.sources.needsMonotonicTimeNow()) {
 		return ExecutorRunActionStep{}, false, true
 	}
 	driver.run.readyDebt = false
@@ -547,9 +562,15 @@ func nextExecutorRunStepAtValidated(
 			return dispatchExecutorRunReady(driver, runnable, combineDispatch)
 		}
 	}
-	if executorRunSourceRequested(driver) ||
+	sourceReq := executorRunSourceRequested(driver)
+	if !AuditEnabled && driver.run.actionsSinceSource == executorRunSourceQuantum &&
+		!sourceReq && !driver.sources.needsMonotonicTimeNow() {
+		driver.run.actionsSinceSource = 0
+	}
+	if sourceReq ||
 		driver.run.actionsSinceSource == executorRunSourceQuantum ||
-		runnable == nil && HasWaiting(p) && !driver.run.blocked {
+		runnable == nil && HasWaiting(p) && !driver.run.blocked &&
+			(AuditEnabled || driver.sources.needsMonotonicTimeNow()) {
 		// A negative timestamp is the explicit before-time probe used by the
 		// native adapter. Selection has not mutated the cursor yet, so its
 		// caller can sample a fresh clock and retry this exact decision.
@@ -562,6 +583,9 @@ func nextExecutorRunStepAtValidated(
 	driver.run.readyDebt = false
 	if runnable != nil {
 		return dispatchExecutorRunReady(driver, runnable, combineDispatch)
+	}
+	if !AuditEnabled && HasWaiting(p) && !driver.run.blocked && !driver.sources.needsMonotonicTimeNow() {
+		driver.run.blocked = true
 	}
 	return ExecutorRunStep{Kind: ExecutorRunStepIdle}, true
 }
@@ -1020,8 +1044,7 @@ func PrepareIssuedExecutorDestroyAfterResume(
 		if driver == nil || driver.p == nil || g == nil ||
 			driver.run.issued != ActionCheckResume || action.Kind != ActionCheckDestroy ||
 			action.Handle == nil || g.park.taskCancelPhase == taskCancelRequested ||
-			g.panicUnwind || driver.p.foreignReentry != nil ||
-			executorRunReadyOwnerBoundary(driver.p) {
+			g.panicUnwind || driver.p.foreignReentry != nil {
 			return false
 		}
 		driver.run.issued = ActionCheckDestroy
@@ -1095,6 +1118,42 @@ func FinishIssuedExecutorDestroyAfterResume(
 	next := Action{Kind: ActionDestroy, Handle: action.Handle}
 	p.action = next
 	return next, true
+}
+
+// ContinueIssuedExecutorParentResume chains a same-G parent continuation
+// directly after a fused child frame destroy when no peer G, source event,
+// direct-channel completion, cancellation, or OS-thread lock handoff competes
+// for the P. This avoids bouncing a lone returning G through the ready queue
+// and back through nextExecutorRunActionValidated on each frame unwind.
+func ContinueIssuedExecutorParentResume(
+	driver *ExecutorDriver,
+	g *G,
+	next Action,
+) bool {
+	if AuditEnabled || driver == nil || driver.p == nil || g == nil ||
+		driver.run.issued != ActionCheckDestroy ||
+		next.Kind != ActionCheckResume || next.Handle == nil {
+		return false
+	}
+	p := driver.p
+	if p.readyHead != nil || p.osThreadLockOwner != nil || p.foreignReentry != nil ||
+		g.park.taskCancelKind != TaskCancelNone || g.panicUnwind ||
+		g.osThreadLockDepth != 0 ||
+		executorDirectChannelCompletionPending(driver) ||
+		ownerLocalCompletionPending(driver) ||
+		executorRunSourceRequested(driver) {
+		return false
+	}
+	if driver.run.actionsSinceSource >= executorRunSourceQuantum {
+		if driver.sources.needsMonotonicTimeNow() {
+			return false
+		}
+		driver.run.actionsSinceSource = 0
+	}
+	driver.run.issued = ActionCheckResume
+	driver.run.blocked = false
+	driver.run.actionsSinceSource++
+	return true
 }
 
 // CommitExecutorRunAction closes the no-return physical interval opened by an

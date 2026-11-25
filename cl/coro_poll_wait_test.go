@@ -305,3 +305,108 @@ func compileCoroPollWaitFixture(t *testing.T, target *llssa.Target) (
 	}
 	return prog, pkg, plan, root, waitCall
 }
+
+func TestCoroPollWaitInlinesForwardingWrapperChain(t *testing.T) {
+	const src = `package foo
+
+import _ "unsafe"
+
+//go:linkname rawPollWait llgo.coroPollWait
+func rawPollWait(context uintptr, fd int32, interest uint32, deadline int64) uint32
+
+func wrapOne(context uintptr, fd int32, interest uint32, deadline int64) uint32 {
+	return rawPollWait(context, fd, interest, deadline)
+}
+
+func wrapTwo(context uintptr, fd int32, interest uint32, deadline int64) uint32 {
+	return wrapOne(context, fd, interest, deadline)
+}
+
+func Root(context uintptr, fd int32, interest uint32, deadline int64) uint32 {
+	a := wrapOne(context, fd, interest, deadline)
+	b := wrapTwo(context, fd, interest, deadline)
+	return a + b
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, src)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	prog.SetRuntime(func() *types.Package {
+		runtimePackage, err := importer.For("source", nil).Import(llssa.PkgRuntime)
+		if err != nil {
+			t.Fatal("load runtime failed:", err)
+		}
+		if runtimePackage.Scope().Lookup("CoroPollParkV2") == nil {
+			name := types.NewTypeName(token.NoPos, runtimePackage, "CoroPollParkV2", nil)
+			types.NewNamed(name, types.NewArray(types.Typ[types.Uintptr], 32), nil)
+			if previous := runtimePackage.Scope().Insert(name); previous != nil {
+				t.Fatalf("install Poll V2 test runtime type: duplicate %v", previous)
+			}
+		}
+		return runtimePackage
+	})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ssaPkg.Func("Root")
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if fn.Name() == "wrapOne" {
+				return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			callee := call.Common().StaticCallee()
+			if callee != nil && callee.Pkg != nil && callee.Pkg.Pkg.Path() == "unsafe" && callee.Name() == "init" {
+				return true, nil
+			}
+			semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call)
+			return intrinsic && semantics.ElidesManagedCall(), err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compilation := &Compilation{
+		CoroPlan:              plan,
+		EmissionUniverse:      universe,
+		CoroFrameRetentionABI: CoroFrameRetentionParkABIV2,
+	}
+	enableCoroPreemptCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify inlined poll wait wrapper module: %v\n%s", err, module.String())
+	}
+	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	for _, unexpected := range []string{"foo.wrapOne$coro", "foo.wrapTwo$coro"} {
+		if strings.Contains(rootIR, unexpected) {
+			t.Fatalf("Root failed to inline forwarding poll wait wrapper %q:\n%s", unexpected, rootIR)
+		}
+	}
+	if strings.Count(rootIR, "@"+coroPollParkHookV2) < 2 {
+		t.Fatalf("Root did not inline both forwarding poll wait sites:\n%s", rootIR)
+	}
+}

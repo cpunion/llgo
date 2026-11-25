@@ -105,10 +105,56 @@ const executorFleetMagic uint32 = 0x45584631 // "EXF1"
 // PublishPNeutralRunnableAndRequest; none retains or accepts a P/driver/source
 // pointer in its durable result.
 type ExecutorFleet struct {
-	magic     uint32
-	executors ExecutorRegistry
-	routes    OperationRouteRegistry
-	slots     [ExecutorFleetCapacity]executorFleetSlot
+	magic      uint32
+	demandMask uint32
+	executors  ExecutorRegistry
+	routes     OperationRouteRegistry
+	slots      [ExecutorFleetCapacity]executorFleetSlot
+}
+
+func (fleet *ExecutorFleet) setDemandBit(route uint32) {
+	if route == 0 || route > ExecutorFleetCapacity {
+		return
+	}
+	bit := uint32(1) << (route - 1)
+	for {
+		old := preemptLoad(&fleet.demandMask)
+		if old&bit != 0 {
+			return
+		}
+		if preemptCompareAndSwap(&fleet.demandMask, old, old|bit) {
+			return
+		}
+	}
+}
+
+func (fleet *ExecutorFleet) clearDemandBit(route uint32, slot *executorFleetSlot) {
+	if route == 0 || route > ExecutorFleetCapacity {
+		return
+	}
+	bit := uint32(1) << (route - 1)
+	for {
+		old := preemptLoad(&fleet.demandMask)
+		if old&bit == 0 {
+			break
+		}
+		if preemptCompareAndSwap(&fleet.demandMask, old, old&^bit) {
+			break
+		}
+	}
+	if slot != nil && preemptLoad(&slot.runnableDemand) == uint32(runnableDemandRequested) {
+		fleet.setDemandBit(route)
+	}
+}
+
+// HasPeerRunnableDemand reports whether any fleet route other than sourceRoute
+// has advertised runnable demand. It is a conservative advisory gate with zero
+// false negatives: a false return proves no peer is currently waiting for work.
+func (fleet *ExecutorFleet) HasPeerRunnableDemand(sourceRoute uint16) bool {
+	if fleet == nil || sourceRoute == 0 || uint32(sourceRoute) > ExecutorFleetCapacity {
+		return false
+	}
+	return preemptLoad(&fleet.demandMask)&^(uint32(1)<<(sourceRoute-1)) != 0
 }
 
 // RunnableDistribution is one exact demand-driven global injection. Target is
@@ -129,7 +175,7 @@ func (distribution RunnableDistribution) Valid() bool {
 }
 
 func pristineExecutorFleet(fleet *ExecutorFleet) bool {
-	if fleet == nil || fleet.magic != 0 || fleet.routes.next != 0 || !fleet.executors.CanRelease() {
+	if fleet == nil || fleet.magic != 0 || fleet.demandMask != 0 || fleet.routes.next != 0 || !fleet.executors.CanRelease() {
 		return false
 	}
 	for index := range fleet.routes.slots {
@@ -495,9 +541,13 @@ func (fleet *ExecutorFleet) RequestPNeutralRunnable(
 				uint32(runnableDemandIdle),
 				uint32(runnableDemandRequested),
 			) {
+				fleet.setDemandBit(handle.Route)
 				return true
 			}
-		case runnableDemandRequested, runnableDemandClaimed:
+		case runnableDemandRequested:
+			fleet.setDemandBit(handle.Route)
+			return true
+		case runnableDemandClaimed:
 			return true
 		default:
 			return false
@@ -528,6 +578,7 @@ func (fleet *ExecutorFleet) CancelPNeutralRunnableRequest(
 				uint32(runnableDemandRequested),
 				uint32(runnableDemandIdle),
 			) {
+				fleet.clearDemandBit(handle.Route, slot)
 				return false, true
 			}
 		case runnableDemandClaimed:
@@ -587,6 +638,10 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 	if !stableRunnableTransferP(source) {
 		return RunnableDistribution{}, true
 	}
+	demandMask := preemptLoad(&fleet.demandMask) &^ (uint32(1) << (sourceHandle.Route - 1))
+	if demandMask == 0 {
+		return RunnableDistribution{}, true
+	}
 	batchLimit := source.readyCount / 2
 	var candidates [RunnableTransferMailboxCapacity]*G
 	prepared := uint32(0)
@@ -610,6 +665,9 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 	}
 	for offset := uint32(1); offset < ExecutorFleetCapacity; offset++ {
 		index := (sourceHandle.Route - 1 + offset) % ExecutorFleetCapacity
+		if demandMask&(uint32(1)<<index) == 0 {
+			continue
+		}
 		target := &fleet.slots[index]
 		if preemptLoad(&target.state) != uint32(executorFleetSlotActive) ||
 			target.handle == sourceHandle ||
@@ -618,8 +676,10 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 				uint32(runnableDemandRequested),
 				uint32(runnableDemandClaimed),
 			) {
+			fleet.clearDemandBit(index+1, target)
 			continue
 		}
+		fleet.clearDemandBit(index+1, target)
 		id, count, request, published := fleet.publishPreparedPNeutralRunnableBatchAndRequest(
 			target.handle,
 			source,
@@ -629,6 +689,9 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 		if !published {
 			if !restoreRunnableDemandAfterFailedClaim(target) {
 				return RunnableDistribution{}, false
+			}
+			if preemptLoad(&target.runnableDemand) == uint32(runnableDemandRequested) {
+				fleet.setDemandBit(index + 1)
 			}
 			continue
 		}
@@ -697,6 +760,7 @@ func (fleet *ExecutorFleet) DistributeMaterializedRunnableToPreferredRoute(
 		) {
 		return RunnableDistribution{}, true
 	}
+	fleet.clearDemandBit(uint32(preferred), target)
 	var candidates [RunnableTransferMailboxCapacity]*G
 	candidates[0] = candidate
 	id, count, request, published := fleet.publishPreparedPNeutralRunnableBatchAndRequest(
@@ -708,6 +772,9 @@ func (fleet *ExecutorFleet) DistributeMaterializedRunnableToPreferredRoute(
 	if !published {
 		if !restoreRunnableDemandAfterFailedClaim(target) {
 			return RunnableDistribution{}, false
+		}
+		if preemptLoad(&target.runnableDemand) == uint32(runnableDemandRequested) {
+			fleet.setDemandBit(uint32(preferred))
 		}
 		return RunnableDistribution{}, true
 	}
@@ -868,6 +935,7 @@ func BeginExecutorFleetClose(fleet *ExecutorFleet, handle ExecutorFleetHandle) b
 		uint32(runnableDemandRequested),
 		uint32(runnableDemandIdle),
 	)
+	fleet.clearDemandBit(handle.Route, slot)
 	return true
 }
 

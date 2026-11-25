@@ -38,6 +38,7 @@ func coroTargetRefreshRunSliceV1(coroRunTargetCapabilityV1) (distribute, restart
 func coroTargetAfterStableRunActionV1(
 	coroRunTargetCapabilityV1,
 	*coro.P,
+	bool,
 ) (distributed, ok bool) {
 	return false, true
 }

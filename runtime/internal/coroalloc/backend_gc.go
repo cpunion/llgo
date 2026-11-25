@@ -41,7 +41,36 @@ func backendAllocFrame(size uintptr) unsafe.Pointer {
 }
 
 func backendFreeFrame(ptr unsafe.Pointer, size uintptr) bool {
-	_ = size
-	bdwgc.Free(ptr)
+	if size < unsafe.Sizeof(uintptr(0)) {
+		bdwgc.Free(ptr)
+		return true
+	}
+	if defaultGCFreeBatcher.tryAcquireDrain() {
+		bdwgc.Free(ptr)
+		drainGCFreeBatch()
+		return true
+	}
+	defaultGCFreeBatcher.pushPending(ptr)
+	if defaultGCFreeBatcher.tryAcquireDrain() {
+		drainGCFreeBatch()
+	}
 	return true
+}
+
+func drainGCFreeBatch() {
+	for {
+		batch := defaultGCFreeBatcher.takeBatch()
+		if batch == nil {
+			if !defaultGCFreeBatcher.releaseDrain() {
+				return
+			}
+			continue
+		}
+		for node := batch; node != nil; {
+			next := *(*unsafe.Pointer)(node)
+			*(*unsafe.Pointer)(node) = nil
+			bdwgc.Free(node)
+			node = next
+		}
+	}
 }

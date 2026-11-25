@@ -20,8 +20,118 @@ package net
 
 import (
 	"internal/poll"
+	"io"
 	"runtime"
+	"syscall"
 )
+
+func (c *conn) Read(b []byte) (int, error) {
+	if c == nil || c.fd == nil {
+		return 0, syscall.EINVAL
+	}
+	n, err, status := c.fd.pfd.LLGoTryRead(b)
+	if status == poll.LLGoTryDone && err == nil {
+		runtime.KeepAlive(c.fd)
+		return n, nil
+	}
+	return c.llgoReadSlow(b, n, err, status)
+}
+
+func (c *conn) llgoReadSlow(b []byte, n int, err error, status uint8) (int, error) {
+	fd := c.fd
+	switch status {
+	case poll.LLGoTryDone:
+	case poll.LLGoTryDoneSlowUnlock:
+		fd.pfd.LLGoSlowReadUnlock()
+	case poll.LLGoTryWaitLocked:
+		for {
+			ctx, pfd, interest, deadline, pst, pollSt := fd.pfd.LLGoReadWaitPrepare()
+			if pst == poll.LLGoTryWaitLocked {
+				waitResult := poll.LLGoPollWaitOne(ctx, pfd, interest, deadline)
+				n, err, pst, pollSt = fd.pfd.LLGoReadWaitFinishAndRead(ctx, b, waitResult)
+				if pst == poll.LLGoTryWaitLocked {
+					continue
+				}
+				if pst == poll.LLGoTryDoneSlowUnlock {
+					fd.pfd.LLGoSlowReadUnlock()
+				} else if pst == poll.LLGoTryFallback {
+					n, err = fd.pfd.LLGoReadWaitLocked(b)
+					break
+				}
+				if pollSt != 0 {
+					err = fd.pfd.LLGoPollError(pollSt)
+				}
+				break
+			}
+			if pst == poll.LLGoTryDoneSlowUnlock {
+				fd.pfd.LLGoSlowReadUnlock()
+			}
+			if pst == poll.LLGoTryDone || pst == poll.LLGoTryDoneSlowUnlock {
+				n, err = 0, fd.pfd.LLGoPollError(pollSt)
+			} else {
+				n, err = fd.pfd.LLGoReadWaitLocked(b)
+			}
+			break
+		}
+	case poll.LLGoTryFallbackSlowUnlock:
+		fd.pfd.LLGoSlowReadUnlock()
+		n, err = fd.pfd.Read(b)
+	default:
+		n, err = fd.pfd.Read(b)
+	}
+	runtime.KeepAlive(fd)
+	if err != nil {
+		err = wrapSyscallError(readSyscallName, err)
+		if err != io.EOF {
+			err = &OpError{Op: "read", Net: fd.net, Source: fd.laddr, Addr: fd.raddr, Err: err}
+		}
+		return n, err
+	}
+	return n, nil
+}
+
+func (c *conn) Write(b []byte) (int, error) {
+	if c == nil || c.fd == nil {
+		return 0, syscall.EINVAL
+	}
+	nn, err, status := c.fd.pfd.LLGoTryWrite(b)
+	if status == poll.LLGoTryDone && err == nil {
+		runtime.KeepAlive(c.fd)
+		return nn, nil
+	}
+	return c.llgoWriteSlow(b, nn, err, status)
+}
+
+func (c *conn) llgoWriteSlow(b []byte, nn int, err error, status uint8) (int, error) {
+	fd := c.fd
+	switch status {
+	case poll.LLGoTryDone:
+	case poll.LLGoTryDoneSlowUnlock:
+		fd.pfd.LLGoSlowWriteUnlock()
+	case poll.LLGoTryWaitLocked:
+		nn, err = fd.pfd.LLGoWriteWaitLocked(b, nn)
+	case poll.LLGoTryPartialWrite:
+		var m int
+		m, err = fd.pfd.Write(b[nn:])
+		nn += m
+	case poll.LLGoTryPartialWriteSlowUnlock:
+		fd.pfd.LLGoSlowWriteUnlock()
+		var m int
+		m, err = fd.pfd.Write(b[nn:])
+		nn += m
+	case poll.LLGoTryFallbackSlowUnlock:
+		fd.pfd.LLGoSlowWriteUnlock()
+		nn, err = fd.pfd.Write(b)
+	default:
+		nn, err = fd.pfd.Write(b)
+	}
+	runtime.KeepAlive(fd)
+	if err != nil {
+		err = wrapSyscallError(writeSyscallName, err)
+		return nn, &OpError{Op: "write", Net: fd.net, Source: fd.laddr, Addr: fd.raddr, Err: err}
+	}
+	return nn, nil
+}
 
 func (fd *netFD) Read(p []byte) (n int, err error) {
 	var status uint8

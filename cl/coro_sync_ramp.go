@@ -128,16 +128,19 @@ type coroSyncSlowAugCFG struct {
 }
 
 type coroPhysicalSyncRampPlan struct {
-	kind            coroSyncRampKind
-	hasTryHelper    bool
-	root            *coroSyncFastNode
-	slowTargets     []coroSyncSlowTarget
-	liveValues      []ssa.Value
-	liveInByTag     map[uint8]map[ssa.Value]bool
-	slowAugCFG      *coroSyncSlowAugCFG
-	singleAwaitCall *ssa.Call
-	singleAwaitPlan coroPhysicalInstructionPlan
-	needsSlowSplit  bool
+	kind               coroSyncRampKind
+	hasTryHelper       bool
+	hasBoxHelper       bool
+	root               *coroSyncFastNode
+	slowTargets        []coroSyncSlowTarget
+	liveValues         []ssa.Value
+	liveInByTag        map[uint8]map[ssa.Value]bool
+	slowAugCFG         *coroSyncSlowAugCFG
+	singleAwaitCall    *ssa.Call
+	singleAwaitPlan    coroPhysicalInstructionPlan
+	singleAwaitBoxed   bool
+	singleAwaitResults *types.Tuple
+	needsSlowSplit     bool
 }
 
 func (plan *coroPhysicalSyncRampPlan) returnsNullableHandle() bool {
@@ -168,6 +171,7 @@ type coroSyncPlanner struct {
 	reflectCheck       func(*ssa.CallCommon) bool
 	targetHasSyncRamp  func(*ssa.Function) bool
 	targetHasTryHelper func(*ssa.Function) bool
+	targetHasBoxHelper func(*ssa.Function) bool
 }
 
 // planCoroPhysicalSyncRamps computes general nullable-handle sync-fast ramps
@@ -180,6 +184,7 @@ func planCoroPhysicalSyncRamps(
 	resolve func(*ssa.Function) (*ssa.Function, bool),
 	needsRecover func(*ssa.Function) bool,
 	reflectCheck func(*ssa.CallCommon) bool,
+	hasAllocZ bool,
 ) {
 	if stage == nil || whole == nil || ir == nil || len(stage.plans) == 0 {
 		return
@@ -278,6 +283,21 @@ func planCoroPhysicalSyncRamps(
 			}
 			return true
 		},
+		targetHasBoxHelper: func(fn *ssa.Function) bool {
+			if !hasAllocZ {
+				return false
+			}
+			plans := byFunc[fn]
+			if len(plans) == 0 {
+				return false
+			}
+			for _, p := range plans {
+				if p == nil || p.syncRamp == nil || !coroSyncRampCanBox(p.function, p.syncRamp) {
+					return false
+				}
+			}
+			return true
+		},
 	}
 
 	// Converge in up to 4 passes: standalone ramps first, then outer wrappers
@@ -298,6 +318,53 @@ func planCoroPhysicalSyncRamps(
 			break
 		}
 	}
+
+	// Demand-mark .box helpers only for targets actually referenced by a boxed
+	// SingleAwait caller (and transitively through TailSlow tail-call chains).
+	var markBoxTarget func(fn *ssa.Function)
+	markBoxTarget = func(fn *ssa.Function) {
+		if fn == nil || !pl.targetHasBoxHelper(fn) {
+			return
+		}
+		for _, p := range byFunc[fn] {
+			if p == nil || p.syncRamp == nil || p.syncRamp.hasBoxHelper {
+				continue
+			}
+			p.syncRamp.hasBoxHelper = true
+			if p.syncRamp.kind == coroSyncRampTailSlow {
+				var walk func(n *coroSyncFastNode)
+				walk = func(n *coroSyncFastNode) {
+					if n == nil {
+						return
+					}
+					if n.exitKind == coroSyncFastExitTailCall && n.tailTarget != nil {
+						markBoxTarget(n.tailTarget)
+					}
+					walk(n.nextNode)
+					walk(n.trueNode)
+					walk(n.falseNode)
+				}
+				walk(p.syncRamp.root)
+			}
+		}
+	}
+	for _, key := range keys {
+		plan := stage.plans[key]
+		if plan != nil && plan.syncRamp != nil &&
+			plan.syncRamp.kind == coroSyncRampSingleAwait &&
+			plan.syncRamp.singleAwaitBoxed {
+			markBoxTarget(plan.syncRamp.singleAwaitPlan.controlTarget)
+		}
+	}
+}
+
+func coroSyncRampCanBox(fn *ssa.Function, ramp *coroPhysicalSyncRampPlan) bool {
+	if fn == nil || ramp == nil {
+		return false
+	}
+	fnSig := coroPhysicalNormalizeSourceSignature(fn.Signature)
+	return fnSig != nil && fnSig.Results().Len() > 0 &&
+		(ramp.kind == coroSyncRampTailSlow || ramp.hasTryHelper)
 }
 
 func (pl *coroSyncPlanner) canonicalFunc(fn *ssa.Function) *ssa.Function {
@@ -318,7 +385,7 @@ func (pl *coroSyncPlanner) planOne(plan *coroPhysicalFunctionPlan) *coroPhysical
 	if len(fn.FreeVars) != 0 || len(fn.Blocks) == 0 ||
 		fn.Signature == nil || fn.Signature.Variadic() ||
 		hasNoInlineDirective(fn) || isCgoExternSymbol(fn) ||
-		pl.roots[fn] || fn.Name() == "init" || fn.Name() == "main" {
+		pl.roots[fn] || isCoroProgramManagedEntry(fn) || fn.Name() == "main" {
 		return nil
 	}
 	logical, planned := pl.whole.FunctionPlan(fn)
@@ -539,6 +606,7 @@ func coroSyncFastPureInstrAllowed(
 	instr ssa.Instruction,
 	phys coroPhysicalInstructionPlan,
 	allowAfterMutation bool,
+	allowDynamicSlice bool,
 	zeroInts map[ssa.Value]bool,
 ) (mayMutate bool, needsGuardBail bool, ok bool) {
 	if !phys.semantic.evaluated || phys.elideValue ||
@@ -625,9 +693,9 @@ func coroSyncFastPureInstrAllowed(
 		b, isBasic := src.(*types.Basic)
 		return false, false, isBasic && b.Kind() == types.UnsafePointer
 	case *ssa.Slice:
-		// Accept ONLY proven zero-call identity reslicing x[0:] on a slice
-		// (e.g. buf[n:] on peeled iteration 1 where n==0). Non-identity slices
-		// lower to runtime NewSlice3Bounds ($outcome) and must stay in $coro.slow.
+		// Accept identity reslicing x[0:] everywhere, and bounds-checked
+		// x[low:] on slices in SingleAwait post-call blocks (bailing to slow
+		// on out-of-range low so runtime slice-bounds panics stay exact).
 		if phys.recipe != coroPhysicalInstructionOrdinary && phys.recipe != coroPhysicalInstructionSlice {
 			return false, false, false
 		}
@@ -638,7 +706,16 @@ func coroSyncFastPureInstrAllowed(
 			return false, false, false
 		}
 		isZeroLow := v.Low == nil || coroSyncIsZeroIntConst(v.Low) || zeroInts[v.Low]
-		return false, false, isZeroLow
+		if isZeroLow {
+			return false, false, true
+		}
+		if !allowDynamicSlice {
+			return false, false, false
+		}
+		if basic, isBasic := types.Unalias(v.Low.Type()).Underlying().(*types.Basic); !isBasic || basic.Info()&types.IsInteger == 0 {
+			return false, false, false
+		}
+		return false, false, true
 	case *ssa.Alloc:
 		if v.Heap {
 			return false, false, false
@@ -1245,7 +1322,7 @@ func (pl *coroSyncPlanner) planCallerInlineYield(
 			if _, isStore := ins.(*ssa.Store); isStore {
 				return nil
 			}
-			if _, guardBail, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, false, nil); !ok || guardBail {
+			if _, guardBail, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, false, false, nil); !ok || guardBail {
 				return nil
 			}
 		}
@@ -1522,7 +1599,7 @@ func (pl *coroSyncPlanner) planDirectFastCFG(
 				localZeroInts[phi] = coroSyncIsZeroIntConst(edge) || localZeroInts[edge]
 				continue
 			}
-			mayMut, guardBail, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, true, localZeroInts)
+			mayMut, guardBail, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, true, false, localZeroInts)
 			if !ok {
 				return bailOrSlow()
 			}
@@ -1585,7 +1662,7 @@ func (pl *coroSyncPlanner) planDirectFastCFG(
 		}
 	}
 	summarize(root)
-	if tooManySlow || !hasReturn {
+	if tooManySlow || (!hasReturn && !hasTailCall) {
 		return nil
 	}
 
@@ -1627,7 +1704,7 @@ func (pl *coroSyncPlanner) planDirectFastCFG(
 }
 
 // -----------------------------------------------------------------------------
-// Strategy 3: SingleAwait (pure prefix + 1 pass-through awaited call + post-call)
+// Strategy 3: SingleAwait (pure prefix + 1 awaited call + post-call)
 // -----------------------------------------------------------------------------
 
 func (pl *coroSyncPlanner) planSingleAwait(
@@ -1636,50 +1713,68 @@ func (pl *coroSyncPlanner) planSingleAwait(
 ) *coroPhysicalSyncRampPlan {
 	fn := plan.function
 	fnSig := coroPhysicalNormalizeSourceSignature(fn.Signature)
-	if fnSig == nil || fnSig.Results().Len() == 0 {
+	if fnSig == nil {
 		return nil
 	}
 
-	isCandidate := func(call *ssa.Call, phys coroPhysicalInstructionPlan) bool {
+	isCandidate := func(call *ssa.Call, phys coroPhysicalInstructionPlan) (callResults *types.Tuple, boxed bool, ok bool) {
 		if call == nil || call.Common() == nil || phys.recoverAlias ||
 			phys.operation != coroPhysicalOperationNone || phys.outcome != coroPhysicalOutcomeNone ||
 			phys.controlFailure != "" || (pl.reflectCheck != nil && pl.reflectCheck(call.Common())) {
-			return false
+			return nil, false, false
 		}
 		var callSig *types.Signature
+		var directTarget *ssa.Function
 		switch phys.control {
 		case coroPhysicalControlDirectAwait:
 			raw, ok := call.Common().Value.(*ssa.Function)
 			if phys.controlClosure != nil || phys.controlTarget == nil || phys.controlTarget == fn ||
 				!ok || raw != phys.controlTarget || !pl.targetHasSyncRamp(phys.controlTarget) {
-				return false
+				return nil, false, false
 			}
+			directTarget = phys.controlTarget
 			callSig = coroPhysicalNormalizeSourceSignature(phys.controlTarget.Signature)
 		case coroPhysicalControlExactInterfaceAwait:
 			if phys.controlTarget == nil || phys.controlTarget == fn || phys.controlReceiver == nil ||
 				!pl.targetHasSyncRamp(phys.controlTarget) {
-				return false
+				return nil, false, false
 			}
+			directTarget = phys.controlTarget
 			callSig = coroPhysicalNormalizeSourceSignature(phys.controlTarget.Signature)
 		case coroPhysicalControlManagedInterfaceAwait:
 			if phys.controlSignature == nil || phys.dispatchEntry == coro.ManagedEntryPlain || !phys.rawInterfaceReceiver {
-				return false
+				return nil, false, false
 			}
 			callSig = coroPhysicalNormalizeSourceSignature(phys.controlSignature)
 		case coroPhysicalControlDispatchAwait:
 			if phys.dispatchEntry == coro.ManagedEntryPlain {
-				return false
+				return nil, false, false
 			}
 			callSig = coroPhysicalNormalizeSourceSignature(call.Common().Signature())
 		default:
-			return false
+			return nil, false, false
 		}
-		return callSig != nil && types.Identical(callSig.Results(), fnSig.Results())
+		if callSig == nil {
+			return nil, false, false
+		}
+		res := callSig.Results()
+		if res.Len() == 0 {
+			return res, false, true
+		}
+		if fnSig.Results().Len() > 0 && types.Identical(res, fnSig.Results()) {
+			return res, false, true
+		}
+		if directTarget != nil && pl.targetHasBoxHelper(directTarget) {
+			return res, true, true
+		}
+		return nil, false, false
 	}
 
 	nodesUsed := 0
 	var chosenCall *ssa.Call
 	var chosenPlan coroPhysicalInstructionPlan
+	var chosenResults *types.Tuple
+	chosenBoxed := false
 	postHasReturn := false
 
 	bumpVisit := func(src map[*ssa.BasicBlock]int, blk *ssa.BasicBlock) map[*ssa.BasicBlock]int {
@@ -1749,7 +1844,7 @@ func (pl *coroSyncPlanner) planSingleAwait(
 				}
 				return fallback
 			}
-			if mayMut, guardBail, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, false, localZeroInts); !ok || mayMut || guardBail {
+			if mayMut, guardBail, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, false, true, localZeroInts); !ok || mayMut || guardBail {
 				return fallback
 			}
 		}
@@ -1810,11 +1905,11 @@ func (pl *coroSyncPlanner) planSingleAwait(
 				if pl.plainGoCallAllowed(call, phys) && coroSyncPlainHelperIsPure(pl.canonicalFunc(call.Common().StaticCallee()), pl.whole) {
 					continue
 				}
-				if isCandidate(call, phys) {
+				if callRes, boxed, ok := isCandidate(call, phys); ok {
 					if chosenCall != nil {
 						return bail
 					}
-					chosenCall, chosenPlan = call, phys
+					chosenCall, chosenPlan, chosenResults, chosenBoxed = call, phys, callRes, boxed
 					node.endInstr, node.singleAwait = i, call
 					// Fresh branch facts post-call so revisited loop headers re-evaluate Phis.
 					node.singleAwaitPost = explorePost(blk, pred, i+1, depth+1, bumpVisit(visits, blk), make(map[string]bool), make(map[ssa.Value]bool))
@@ -1822,7 +1917,7 @@ func (pl *coroSyncPlanner) planSingleAwait(
 				}
 				return bail
 			}
-			if mayMut, _, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, false, localZeroInts); !ok || mayMut {
+			if mayMut, _, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, false, false, localZeroInts); !ok || mayMut {
 				return bail
 			}
 		}
@@ -1838,14 +1933,16 @@ func (pl *coroSyncPlanner) planSingleAwait(
 		return nil
 	}
 	return &coroPhysicalSyncRampPlan{
-		kind:            coroSyncRampSingleAwait,
-		root:            root,
-		liveValues:      liveValues,
-		liveInByTag:     liveInByTag,
-		slowAugCFG:      slowAugCFG,
-		singleAwaitCall: chosenCall,
-		singleAwaitPlan: chosenPlan,
-		needsSlowSplit:  true,
+		kind:               coroSyncRampSingleAwait,
+		root:               root,
+		liveValues:         liveValues,
+		liveInByTag:        liveInByTag,
+		slowAugCFG:         slowAugCFG,
+		singleAwaitCall:    chosenCall,
+		singleAwaitPlan:    chosenPlan,
+		singleAwaitBoxed:   chosenBoxed,
+		singleAwaitResults: chosenResults,
+		needsSlowSplit:     true,
 	}
 }
 
@@ -2194,14 +2291,15 @@ func collectCoroSyncCrossBoundaryLiveValues(
 // -----------------------------------------------------------------------------
 
 type coroSyncSlowResumeState struct {
-	plan            *coroPhysicalSyncRampPlan
-	resumeTagParam  llssa.Expr
-	preChildParam   llssa.Expr
-	liveParams      []llssa.Expr
-	liveSlots       map[ssa.Value]llssa.Expr
-	resumeAwaitBlk  llssa.BasicBlock
-	resumePostBlk   llssa.BasicBlock
-	singleAwaitDone bool
+	plan               *coroPhysicalSyncRampPlan
+	resumeTagParam     llssa.Expr
+	preChildParam      llssa.Expr
+	preResultSlotParam llssa.Expr
+	liveParams         []llssa.Expr
+	liveSlots          map[ssa.Value]llssa.Expr
+	resumeAwaitBlk     llssa.BasicBlock
+	resumePostBlk      llssa.BasicBlock
+	singleAwaitDone    bool
 }
 
 // dominatesDebugUse reports whether iv's LLVM SSA definition dominates ref
@@ -2276,18 +2374,55 @@ func coroSyncSlowPhysicalSig(baseSig *types.Signature, ramp *coroPhysicalSyncRam
 	if ramp == nil || (len(ramp.slowTargets) == 0 && ramp.kind != coroSyncRampSingleAwait) {
 		return baseSig
 	}
-	params := make([]*types.Var, 0, baseSig.Params().Len()+2+len(ramp.liveValues))
+	params := make([]*types.Var, 0, baseSig.Params().Len()+3+len(ramp.liveValues))
 	for i := 0; i < baseSig.Params().Len(); i++ {
 		params = append(params, baseSig.Params().At(i))
 	}
 	params = append(params, types.NewParam(token.NoPos, nil, "__llgo_resume_tag", types.Typ[types.Uint8]))
 	if ramp.kind == coroSyncRampSingleAwait {
 		params = append(params, types.NewParam(token.NoPos, nil, "__llgo_pre_child", types.Typ[types.UnsafePointer]))
+		if ramp.singleAwaitBoxed {
+			params = append(params, types.NewParam(token.NoPos, nil, "__llgo_pre_result_slot", types.Typ[types.UnsafePointer]))
+		}
 	}
 	for i, v := range ramp.liveValues {
 		params = append(params, types.NewParam(token.NoPos, nil, fmt.Sprintf("__llgo_live_%d", i), v.Type()))
 	}
 	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), baseSig.Results(), false)
+}
+
+func coroSyncBoxResultTuple() *types.Tuple {
+	ptr := types.Typ[types.UnsafePointer]
+	return types.NewTuple(
+		types.NewParam(token.NoPos, nil, "__llgo_child", ptr),
+		types.NewParam(token.NoPos, nil, "__llgo_async_out", ptr),
+	)
+}
+
+func coroSyncBoxHelperSig(sourceSig *types.Signature) *types.Signature {
+	sourceSig = coroPhysicalNormalizeSourceSignature(sourceSig)
+	params := make([]*types.Var, 0, sourceSig.Params().Len()+2)
+	params = append(params,
+		types.NewParam(token.NoPos, nil, "__llgo_g", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "__llgo_out", types.Typ[types.UnsafePointer]),
+	)
+	for i := 0; i < sourceSig.Params().Len(); i++ {
+		params = append(params, sourceSig.Params().At(i))
+	}
+	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), coroSyncBoxResultTuple(), false)
+}
+
+func (p *context) coroSyncBoxHelperFunc(target *ssa.Function) llssa.Function {
+	entry := p.mustFunctionSymbol(target)
+	coroFn, _, kind := p.compileFunctionEntry(entry)
+	if kind != goFunc || coroFn == nil {
+		panic("sync-ramp .box callee did not resolve to a Go coroutine entry")
+	}
+	sourceSig, err := p.emissionUniverse.coroPhysicalSourceSignature(target)
+	if err != nil {
+		panic(fmt.Errorf("sync-ramp .box callee signature: %w", err))
+	}
+	return p.pkg.NewFuncEx(coroFn.Name()+".box", coroSyncBoxHelperSig(sourceSig), llssa.InGo, false, false)
 }
 
 func coroSyncTryHelperSig(sourceSig *types.Signature) *types.Signature {
@@ -2363,6 +2498,10 @@ func (p *context) compileCoroSyncRampPhysicalBody(
 			if ramp.kind == coroSyncRampSingleAwait {
 				state.preChildParam = slowFn.PhysicalParam(extraBase + 1)
 				liveBase = extraBase + 2
+				if ramp.singleAwaitBoxed {
+					state.preResultSlotParam = slowFn.PhysicalParam(extraBase + 2)
+					liveBase = extraBase + 3
+				}
 			}
 			if len(ramp.liveValues) > 0 {
 				state.liveParams = make([]llssa.Expr, len(ramp.liveValues))
@@ -2396,6 +2535,7 @@ func (p *context) compileCoroSyncRampPhysicalBody(
 
 	// 2. If hasTryHelper, materialize F$coro.try(g, out, args...) -> bool and
 	// make F$coro a thin wrapper around F$coro.try + F$coro.slow.
+	var tryFn llssa.Function
 	if ramp.hasTryHelper {
 		sourceSig, err := p.emissionUniverse.coroPhysicalSourceSignature(fn)
 		if err != nil {
@@ -2403,7 +2543,7 @@ func (p *context) compileCoroSyncRampPhysicalBody(
 		}
 		_, isLinkOnce := p.linkOnceFns[fn]
 		tryLinkOnce := isLinkOnce || fn.Synthetic != "" || fn.Origin() != nil || len(fn.TypeArgs()) != 0
-		tryFn := p.pkg.NewFuncEx(rampFn.Name()+".try", coroSyncTryHelperSig(sourceSig), llssa.InGo, false, tryLinkOnce)
+		tryFn = p.pkg.NewFuncEx(rampFn.Name()+".try", coroSyncTryHelperSig(sourceSig), llssa.InGo, false, tryLinkOnce)
 		if !tryFn.HasBody() {
 			savedFn := p.fn
 			p.fn = tryFn
@@ -2419,7 +2559,65 @@ func (p *context) compileCoroSyncRampPhysicalBody(
 			tb.Dispose()
 			p.fn = savedFn
 		}
+	}
 
+	// 2b. If hasBoxHelper, materialize F$coro.box(g, fastOut, args...) -> (child, asyncOut).
+	// Fast completions write directly into caller's stack fastOut and return (nil, nil);
+	// slow completions heap-allocate a fresh result slot so preChild never retains a stack pointer.
+	if ramp.hasBoxHelper {
+		sourceSig, err := p.emissionUniverse.coroPhysicalSourceSignature(fn)
+		if err != nil {
+			panic(fmt.Errorf("sync-ramp .box signature: %w", err))
+		}
+		_, isLinkOnce := p.linkOnceFns[fn]
+		boxLinkOnce := isLinkOnce || fn.Synthetic != "" || fn.Origin() != nil || len(fn.TypeArgs()) != 0
+		boxFn := p.pkg.NewFuncEx(rampFn.Name()+".box", coroSyncBoxHelperSig(sourceSig), llssa.InGo, false, boxLinkOnce)
+		if !boxFn.HasBody() {
+			savedFn := p.fn
+			p.fn = boxFn
+			bb := boxFn.MakeBody(1)
+			bb.SetBlock(boxFn.Block(0))
+			boxEmitter := &coroSyncFastEmitter{
+				p: p, b: bb, fn: fn, plan: physicalPlan, ramp: ramp, abi: abi,
+				task: boxFn.PhysicalParam(0), resultSlot: boxFn.PhysicalParam(1),
+				slowFn: slowFn, boxMode: true,
+			}
+			boxEmitter.initParams(boxFn, sourceParamBase)
+			if ramp.hasTryHelper {
+				paramCount := abi.physicalSig.Params().Len()
+				args := make([]llssa.Expr, paramCount)
+				for i := 0; i < paramCount; i++ {
+					args[i] = boxFn.PhysicalParam(i)
+				}
+				fastBlk, slowBlk, doneBlk := boxFn.MakeBlock(), boxFn.MakeBlock(), boxFn.MakeBlock()
+				bb.IfWithBranchWeights(bb.BinOp(token.NEQ, args[1], nullPtr), fastBlk, slowBlk, 1000, 1)
+
+				bb.SetBlockEx(fastBlk, llssa.AtEnd, false)
+				bb.IfWithBranchWeights(bb.Call(tryFn.Expr, args...), doneBlk, slowBlk, 1000, 1)
+
+				bb.SetBlockEx(doneBlk, llssa.AtEnd, false)
+				boxEmitter.returnBoxPair(nullPtr, nullPtr)
+
+				bb.SetBlockEx(slowBlk, llssa.AtEnd, false)
+				boxEmitter.emitSlowCall(0, nullPtr, nil)
+			} else {
+				fastEntry, bailStart := boxFn.MakeBlock(), boxFn.MakeBlock()
+				boxEmitter.bailStart = bailStart
+				bb.IfWithBranchWeights(bb.BinOp(token.NEQ, boxFn.PhysicalParam(1), nullPtr), fastEntry, bailStart, 1000, 1)
+
+				bb.SetBlockEx(bailStart, llssa.AtEnd, false)
+				boxEmitter.emitSlowCall(0, nullPtr, nil)
+
+				bb.SetBlockEx(fastEntry, llssa.AtEnd, false)
+				boxEmitter.emitNode(ramp.root, newCoroSyncEmitEnv())
+			}
+			bb.EndBuild()
+			bb.Dispose()
+			p.fn = savedFn
+		}
+	}
+
+	if ramp.hasTryHelper {
 		b.SetBlock(rampFn.Block(0))
 		paramCount := abi.physicalSig.Params().Len()
 		args := make([]llssa.Expr, paramCount)
@@ -2481,25 +2679,28 @@ func (p *context) compileCoroCallerInlineYieldAwait(
 }
 
 type coroSyncFastEmitter struct {
-	p                 *context
-	b                 llssa.Builder
-	fn                *ssa.Function
-	plan              *coroPhysicalFunctionPlan
-	ramp              *coroPhysicalSyncRampPlan
-	abi               coroPhysicalABI
-	task              llssa.Expr
-	resultSlot        llssa.Expr
-	slowFn            llssa.Function
-	bailStart         llssa.BasicBlock
-	paramExprs        []llssa.Expr
-	tryMode           bool
-	callerInline      bool
-	callerDoneBlk     llssa.BasicBlock
-	callerArgVals     []llssa.Expr
-	localAllocs       map[*ssa.Alloc]llssa.Expr
-	singleAwaitPreEnv map[ssa.Value]llssa.Expr
-	outcomeCompletion llssa.Expr
-	traceDescriptor   llssa.Expr
+	p                  *context
+	b                  llssa.Builder
+	fn                 *ssa.Function
+	plan               *coroPhysicalFunctionPlan
+	ramp               *coroPhysicalSyncRampPlan
+	abi                coroPhysicalABI
+	task               llssa.Expr
+	resultSlot         llssa.Expr
+	slowFn             llssa.Function
+	bailStart          llssa.BasicBlock
+	paramExprs         []llssa.Expr
+	tryMode            bool
+	boxMode            bool
+	callerInline       bool
+	callerDoneBlk      llssa.BasicBlock
+	callerArgVals      []llssa.Expr
+	localAllocs        map[*ssa.Alloc]llssa.Expr
+	singleAwaitPreEnv  map[ssa.Value]llssa.Expr
+	singleAwaitTmpSlot llssa.Expr
+	inSingleAwaitPost  bool
+	outcomeCompletion  llssa.Expr
+	traceDescriptor    llssa.Expr
 }
 
 func (e *coroSyncFastEmitter) initParams(llFn llssa.Function, sourceParamBase int) {
@@ -2530,6 +2731,51 @@ func (e *coroSyncFastEmitter) descriptorPtr() llssa.Expr {
 	return e.traceDescriptor
 }
 
+func (e *coroSyncFastEmitter) boxResultType() llssa.Type {
+	return e.p.prog.Type(coroSyncBoxResultTuple(), llssa.InGo)
+}
+
+func (e *coroSyncFastEmitter) returnBoxPair(child, asyncOut llssa.Expr) {
+	e.b.Return(e.b.Aggregate(e.boxResultType(), child, asyncOut))
+}
+
+func (p *context) allocCoroSyncBox(b llssa.Builder, elem llssa.Type) llssa.Expr {
+	if p.prog.SizeOf(elem) == 0 {
+		return b.Convert(p.prog.VoidPtr(), b.Alloc(elem, true))
+	}
+	if p.emissionUniverse != nil && p.emissionUniverse.CompleteRuntimeABI() {
+		rtPkg := p.emissionUniverse.byPath[llssa.PkgRuntime]
+		if rtPkg == nil {
+			panic("sync-ramp async box requires runtime package")
+		}
+		allocZ := p.emissionUniverse.canonicalAlias(rtPkg.ssa.Func("AllocZ"))
+		if allocZ == nil {
+			panic("sync-ramp async box requires runtime.AllocZ")
+		}
+		targetPlan, planned := p.immutablePlan().FunctionPlan(allocZ)
+		if !planned {
+			panic("sync-ramp async box runtime.AllocZ is unplanned")
+		}
+		var fn llssa.Function
+		var kind int
+		if targetPlan.Emission == coro.EmitPlain {
+			fn, _, kind = p.compileFunction(allocZ)
+		} else if p.immutablePlan().HasRawPlainVariant(allocZ) {
+			fn, _, kind = p.compileRawPlainFunction(allocZ)
+		}
+		if fn == nil || kind != goFunc {
+			panic("sync-ramp async box runtime.AllocZ did not resolve to a callable Go entry")
+		}
+		return b.Call(fn.Expr, llssa.SizeOf(p.prog, elem))
+	}
+	return b.Convert(p.prog.VoidPtr(), b.Alloc(elem, true))
+}
+
+func (e *coroSyncFastEmitter) allocAsyncBox() llssa.Expr {
+	resSlotType := e.p.prog.Type(e.abi.resultSlotType, llssa.InGo)
+	return e.p.allocCoroSyncBox(e.b, resSlotType)
+}
+
 func (e *coroSyncFastEmitter) emitBailStart() {
 	if e.tryMode {
 		e.b.Return(e.p.prog.BoolVal(false))
@@ -2538,13 +2784,34 @@ func (e *coroSyncFastEmitter) emitBailStart() {
 	e.b.Jump(e.bailStart)
 }
 
+func (e *coroSyncFastEmitter) emitResumePostCall() {
+	nullPtr := e.p.prog.Nil(e.p.prog.VoidPtr())
+	if e.ramp.singleAwaitBoxed {
+		callSlotType := e.p.prog.Type(coro.ResultSlotType(e.ramp.singleAwaitResults), llssa.InGo)
+		boxPtr := e.p.allocCoroSyncBox(e.b, callSlotType)
+		typedBox := e.b.Convert(e.p.prog.Pointer(callSlotType), boxPtr)
+		e.b.StoreKnownNonNil(typedBox, e.b.LoadKnownNonNil(e.singleAwaitTmpSlot))
+		e.emitSlowCallWithSlot(2, nullPtr, boxPtr, e.singleAwaitPreEnv)
+		return
+	}
+	e.emitSlowCallWithSlot(2, llssa.Nil, llssa.Nil, e.singleAwaitPreEnv)
+}
+
 func (e *coroSyncFastEmitter) emitSlowCall(tag uint8, preChild llssa.Expr, vals map[ssa.Value]llssa.Expr) {
+	e.emitSlowCallWithSlot(tag, preChild, llssa.Nil, vals)
+}
+
+func (e *coroSyncFastEmitter) emitSlowCallWithSlot(tag uint8, preChild, preResultSlot llssa.Expr, vals map[ssa.Value]llssa.Expr) {
 	nullPtr := e.p.prog.Nil(e.p.prog.VoidPtr())
 	outArg := e.resultSlot
-	if e.abi.resultCount == 0 {
+	var asyncBox llssa.Expr
+	if e.boxMode {
+		asyncBox = e.allocAsyncBox()
+		outArg = asyncBox
+	} else if e.abi.resultCount == 0 {
 		outArg = nullPtr
 	}
-	args := make([]llssa.Expr, 0, len(e.paramExprs)+4+len(e.ramp.liveValues))
+	args := make([]llssa.Expr, 0, len(e.paramExprs)+5+len(e.ramp.liveValues))
 	args = append(args, e.task, outArg)
 	args = append(args, e.paramExprs...)
 	if len(e.ramp.slowTargets) > 0 || e.ramp.kind == coroSyncRampSingleAwait {
@@ -2555,6 +2822,12 @@ func (e *coroSyncFastEmitter) emitSlowCall(tag uint8, preChild llssa.Expr, vals 
 				preChild = nullPtr
 			}
 			args = append(args, preChild)
+			if e.ramp.singleAwaitBoxed {
+				if preResultSlot.IsNil() {
+					preResultSlot = nullPtr
+				}
+				args = append(args, preResultSlot)
+			}
 		}
 		required := e.ramp.liveInByTag[tag]
 		for _, lv := range e.ramp.liveValues {
@@ -2570,7 +2843,12 @@ func (e *coroSyncFastEmitter) emitSlowCall(tag uint8, preChild llssa.Expr, vals 
 			args = append(args, e.p.prog.Zero(e.p.type_(lv.Type(), llssa.InGo)))
 		}
 	}
-	e.b.Return(e.b.Call(e.slowFn.Expr, args...))
+	child := e.b.Call(e.slowFn.Expr, args...)
+	if e.boxMode {
+		e.returnBoxPair(child, asyncBox)
+		return
+	}
+	e.b.Return(child)
 }
 
 func (e *coroSyncFastEmitter) evalValue(v ssa.Value, vals map[ssa.Value]llssa.Expr) llssa.Expr {
@@ -2624,6 +2902,10 @@ func (e *coroSyncFastEmitter) emitOutcomePropagateCall(status, typeWord, dataWor
 		typeWord,
 		dataWord,
 	)
+	if e.boxMode {
+		e.returnBoxPair(handle, e.p.prog.Nil(e.p.prog.VoidPtr()))
+		return
+	}
 	e.b.Return(handle)
 }
 
@@ -2654,7 +2936,7 @@ func (e *coroSyncFastEmitter) emitNode(node *coroSyncFastNode, parentEnv coroSyn
 		e.emitSlowCall(node.resumeTag, llssa.Nil, parentEnv.vals)
 		return
 	case coroSyncFastExitResumePostCall:
-		e.emitSlowCall(2, llssa.Nil, e.singleAwaitPreEnv)
+		e.emitResumePostCall()
 		return
 	}
 
@@ -2736,9 +3018,27 @@ func (e *coroSyncFastEmitter) emitNode(node *coroSyncFastNode, parentEnv coroSyn
 				env.vals[v] = e.b.MakeInterface(t, e.evalValue(v.X, env.vals))
 			}
 		case *ssa.Slice:
-			// Planner proves every surviving Slice on the fast tree is an
-			// identity reslice x[0:] with zero runtime helper calls.
-			env.vals[v] = e.evalValue(v.X, env.vals)
+			x := e.evalValue(v.X, env.vals)
+			if v.Low == nil || coroSyncIsZeroIntConst(v.Low) || env.zero[v.Low] {
+				env.vals[v] = x
+			} else {
+				low := e.evalValue(v.Low, env.vals)
+				high := e.b.SliceLen(x)
+				limit := e.b.SliceCap(x)
+				nlow, nhigh, nmax, outOfRange := e.b.SliceBounds(low, high, llssa.Nil, limit)
+				if !outOfRange.IsNil() {
+					failBlk, contBlk := e.b.Func.MakeBlock(), e.b.Func.MakeBlock()
+					e.b.IfWithBranchWeights(outOfRange, failBlk, contBlk, 1, 1000)
+					e.b.SetBlockEx(failBlk, llssa.AtEnd, false)
+					if e.inSingleAwaitPost {
+						e.emitResumePostCall()
+					} else {
+						e.emitBailStart()
+					}
+					e.b.SetBlockContinuation(contBlk)
+				}
+				env.vals[v] = e.b.SliceUnchecked(x, nlow, nhigh, nmax)
+			}
 		case *ssa.Alloc:
 			elem := e.p.type_(v.Type().(*types.Pointer).Elem(), llssa.InGo)
 			if e.localAllocs == nil {
@@ -2911,6 +3211,7 @@ func (e *coroSyncFastEmitter) emitDirectOutcomeCall(callee *ssa.Function, args [
 
 func (e *coroSyncFastEmitter) emitSingleAwait(call *ssa.Call, postNode *coroSyncFastNode, env coroSyncEmitEnv) {
 	phys := e.ramp.singleAwaitPlan
+	callResults := e.ramp.singleAwaitResults
 	nullPtr := e.p.prog.Nil(e.p.prog.VoidPtr())
 	syncCompleted := e.b.Func.MakeBlock()
 
@@ -2919,6 +3220,42 @@ func (e *coroSyncFastEmitter) emitSingleAwait(call *ssa.Call, postNode *coroSync
 		e.b.IfWithBranchWeights(e.b.BinOp(token.NEQ, child, nullPtr), asyncBlk, syncCompleted, 1, 1000)
 		e.b.SetBlockEx(asyncBlk, llssa.AtEnd, false)
 		e.emitSlowCall(1, child, env.vals)
+	}
+
+	outSlotArg := e.resultSlot
+	if callResults == nil || callResults.Len() == 0 {
+		if phys.control == coroPhysicalControlDirectAwait || phys.control == coroPhysicalControlExactInterfaceAwait {
+			// Pass a non-nil sentinel so a void sync-fast ramp knows it is
+			// awaited (not spawned) without allocating a result slot.
+			outSlotArg = e.task
+		} else {
+			outSlotArg = nullPtr
+		}
+	}
+
+	if e.ramp.singleAwaitBoxed {
+		args := e.evalCallArgs(call, env.vals)
+		if phys.control == coroPhysicalControlExactInterfaceAwait {
+			args = append([]llssa.Expr{e.evalValue(phys.controlReceiver, env.vals)}, args...)
+		}
+		callSlotType := e.p.prog.Type(coro.ResultSlotType(callResults), llssa.InGo)
+		tmpSlot := e.entryAlloca(callSlotType)
+		e.singleAwaitTmpSlot = tmpSlot
+		boxFn := e.p.coroSyncBoxHelperFunc(phys.controlTarget)
+		pair := e.b.Call(boxFn.Expr, append([]llssa.Expr{e.task, e.b.Convert(e.p.prog.VoidPtr(), tmpSlot)}, args...)...)
+		child := e.b.Extract(pair, 0)
+		asyncOut := e.b.Extract(pair, 1)
+		asyncBlk := e.b.Func.MakeBlock()
+		e.b.IfWithBranchWeights(e.b.BinOp(token.NEQ, child, nullPtr), asyncBlk, syncCompleted, 1, 1000)
+		e.b.SetBlockEx(asyncBlk, llssa.AtEnd, false)
+		e.emitSlowCallWithSlot(1, child, asyncOut, env.vals)
+
+		e.b.SetBlockEx(syncCompleted, llssa.AtEnd, false)
+		e.singleAwaitPreEnv = cloneMap(env.vals)
+		e.inSingleAwaitPost = true
+		env.vals[call] = e.loadSlotTuple(tmpSlot, callResults)
+		e.emitNode(postNode, env)
+		return
 	}
 
 	switch phys.control {
@@ -2931,7 +3268,7 @@ func (e *coroSyncFastEmitter) emitSingleAwait(call *ssa.Call, postNode *coroSync
 		if kind != goFunc || calleeFn == nil {
 			panic("sync-ramp single-await target did not resolve to a Go entry")
 		}
-		branchChild(e.b.Call(calleeFn.Expr, append([]llssa.Expr{e.task, e.resultSlot}, args...)...))
+		branchChild(e.b.Call(calleeFn.Expr, append([]llssa.Expr{e.task, outSlotArg}, args...)...))
 
 	case coroPhysicalControlManagedInterfaceAwait, coroPhysicalControlDispatchAwait:
 		var fnVal llssa.Expr
@@ -2970,11 +3307,11 @@ func (e *coroSyncFastEmitter) emitSingleAwait(call *ssa.Call, postNode *coroSync
 		switch phys.dispatchEntry {
 		case coro.ManagedEntryCoroutine:
 			sel := e.b.PrepareCoroDispatchStructuredOnly(fnVal, opts, false)
-			branchChild(e.b.CallPreparedCoroDispatchCoroOnly(sel, e.task, e.resultSlot, args))
+			branchChild(e.b.CallPreparedCoroDispatchCoroOnly(sel, e.task, outSlotArg, args))
 		case coro.ManagedEntryOutcomePlain:
 			sel := e.b.PrepareCoroDispatchStructuredOnly(fnVal, opts, false)
 			comp := e.completionSlot()
-			e.b.CallPreparedCoroDispatchOutcomeOnly(sel, e.task, e.resultSlot, e.b.Convert(e.p.prog.VoidPtr(), comp), args)
+			e.b.CallPreparedCoroDispatchOutcomeOnly(sel, e.task, outSlotArg, e.b.Convert(e.p.prog.VoidPtr(), comp), args)
 			e.checkOutcomeCompletionTo(comp, call.Pos(), syncCompleted)
 		default:
 			sel := e.b.PrepareCoroDispatchCall(fnVal, opts)
@@ -2984,17 +3321,19 @@ func (e *coroSyncFastEmitter) emitSingleAwait(call *ssa.Call, postNode *coroSync
 			e.b.If(sel.HasOutcome(), outcomeBlk, plainBlk)
 
 			e.b.SetBlockEx(coroBlk, llssa.AtEnd, false)
-			branchChild(e.b.CallPreparedCoroDispatchCoro(sel, e.task, e.resultSlot, args))
+			branchChild(e.b.CallPreparedCoroDispatchCoro(sel, e.task, outSlotArg, args))
 
 			e.b.SetBlockEx(outcomeBlk, llssa.AtEnd, false)
 			comp := e.completionSlot()
-			e.b.CallPreparedCoroDispatchOutcome(sel, e.task, e.resultSlot, e.b.Convert(e.p.prog.VoidPtr(), comp), args)
+			e.b.CallPreparedCoroDispatchOutcome(sel, e.task, outSlotArg, e.b.Convert(e.p.prog.VoidPtr(), comp), args)
 			e.checkOutcomeCompletionTo(comp, call.Pos(), syncCompleted)
 
 			e.b.SetBlockEx(plainBlk, llssa.AtEnd, false)
 			plainRes := e.b.CallPreparedCoroDispatchPlain(sel, args)
-			typedOut := e.b.Convert(e.p.prog.Pointer(e.p.prog.Type(e.abi.resultSlotType, llssa.InGo)), e.resultSlot)
-			e.p.storeCoroDynamicDispatchResult(e.b, typedOut, plainRes, dabi.signature.Results())
+			if callResults != nil && callResults.Len() > 0 {
+				typedOut := e.b.Convert(e.p.prog.Pointer(e.p.prog.Type(e.abi.resultSlotType, llssa.InGo)), outSlotArg)
+				e.p.storeCoroDynamicDispatchResult(e.b, typedOut, plainRes, dabi.signature.Results())
+			}
 			e.b.Jump(syncCompleted)
 		}
 	default:
@@ -3005,8 +3344,11 @@ func (e *coroSyncFastEmitter) emitSingleAwait(call *ssa.Call, postNode *coroSync
 	// Snapshot pre-call env before post-call blocks can rebind loop Phis so
 	// ResumePostCall (mode==2) restores the exact pre-call live values.
 	e.singleAwaitPreEnv = cloneMap(env.vals)
-	typedOut := e.b.Convert(e.p.prog.Pointer(e.p.prog.Type(e.abi.resultSlotType, llssa.InGo)), e.resultSlot)
-	env.vals[call] = e.loadSlotTuple(typedOut, coroPhysicalNormalizeSourceSignature(e.fn.Signature).Results())
+	e.inSingleAwaitPost = true
+	if callResults != nil && callResults.Len() > 0 {
+		typedOut := e.b.Convert(e.p.prog.Pointer(e.p.prog.Type(e.abi.resultSlotType, llssa.InGo)), outSlotArg)
+		env.vals[call] = e.loadSlotTuple(typedOut, callResults)
+	}
 	e.emitNode(postNode, env)
 }
 
@@ -3060,6 +3402,11 @@ func (e *coroSyncFastEmitter) emitFastReturn(ret *ssa.Return, vals map[ssa.Value
 		e.b.Return(e.p.prog.BoolVal(true))
 		return
 	}
+	if e.boxMode {
+		nullPtr := e.p.prog.Nil(e.p.prog.VoidPtr())
+		e.returnBoxPair(nullPtr, nullPtr)
+		return
+	}
 	e.b.Return(e.p.prog.Nil(e.p.prog.VoidPtr()))
 }
 
@@ -3070,7 +3417,32 @@ func (e *coroSyncFastEmitter) emitTailCall(call *ssa.Call, target *ssa.Function,
 		e.b.Jump(e.callerDoneBlk)
 		return
 	}
-	calleeFn, _, kind := e.p.compileFunctionEntry(e.p.mustFunctionSymbol(target))
+	entry := e.p.mustFunctionSymbol(target)
+	if e.boxMode {
+		if targetPlan, err := entry.sealedPhysicalFunctionPlan(); err == nil &&
+			targetPlan != nil && targetPlan.syncRamp != nil && targetPlan.syncRamp.hasBoxHelper {
+			boxFn := e.p.coroSyncBoxHelperFunc(target)
+			e.b.Return(e.b.Call(boxFn.Expr, append([]llssa.Expr{e.task, e.resultSlot}, args...)...))
+			return
+		}
+		calleeFn, _, kind := e.p.compileFunctionEntry(entry)
+		if kind != goFunc || calleeFn == nil {
+			panic("sync-ramp tail-call target did not resolve to a Go entry")
+		}
+		asyncBox := e.allocAsyncBox()
+		child := e.b.Call(calleeFn.Expr, append([]llssa.Expr{e.task, asyncBox}, args...)...)
+		nullPtr := e.p.prog.Nil(e.p.prog.VoidPtr())
+		syncBlk, asyncBlk := e.b.Func.MakeBlock(), e.b.Func.MakeBlock()
+		e.b.IfWithBranchWeights(e.b.BinOp(token.EQL, child, nullPtr), syncBlk, asyncBlk, 1, 1000)
+		e.b.SetBlockEx(syncBlk, llssa.AtEnd, false)
+		slotPtrType := e.p.prog.Pointer(e.p.prog.Type(e.abi.resultSlotType, llssa.InGo))
+		e.b.StoreKnownNonNil(e.b.Convert(slotPtrType, e.resultSlot), e.b.LoadKnownNonNil(e.b.Convert(slotPtrType, asyncBox)))
+		e.returnBoxPair(nullPtr, nullPtr)
+		e.b.SetBlockEx(asyncBlk, llssa.AtEnd, false)
+		e.returnBoxPair(child, asyncBox)
+		return
+	}
+	calleeFn, _, kind := e.p.compileFunctionEntry(entry)
 	if kind != goFunc || calleeFn == nil {
 		panic("sync-ramp tail-call target did not resolve to a Go entry")
 	}
@@ -3224,19 +3596,32 @@ func (p *context) joinCoroSyncSlowSingleAwait(b llssa.Builder, call *ssa.Call, n
 		return normalResult
 	}
 	state.singleAwaitDone = true
-	results := coroPhysicalNormalizeSourceSignature(p.goFn.Signature).Results()
-	slot := p.coroFrameAlloca(p.type_(call.Type(), llssa.InGo))
+	results := state.plan.singleAwaitResults
 	joinBlk := p.fn.MakeBlock()
+	if results == nil || results.Len() == 0 {
+		b.Jump(joinBlk)
+
+		b.SetBlockEx(state.resumeAwaitBlk, llssa.AtEnd, false)
+		p.awaitCoroSyncSlowPreChild(b, state.preChildParam, llssa.Nil, results)
+		b.Jump(joinBlk)
+
+		b.SetBlockEx(state.resumePostBlk, llssa.AtEnd, false)
+		b.Jump(joinBlk)
+
+		b.SetBlockContinuation(joinBlk)
+		return normalResult
+	}
+	slot := p.coroFrameAlloca(p.type_(call.Type(), llssa.InGo))
 
 	b.StoreKnownNonNil(slot, normalResult)
 	b.Jump(joinBlk)
 
 	b.SetBlockEx(state.resumeAwaitBlk, llssa.AtEnd, false)
-	b.StoreKnownNonNil(slot, p.awaitCoroSyncSlowPreChild(b, state.preChildParam, results))
+	b.StoreKnownNonNil(slot, p.awaitCoroSyncSlowPreChild(b, state.preChildParam, state.preResultSlotParam, results))
 	b.Jump(joinBlk)
 
 	b.SetBlockEx(state.resumePostBlk, llssa.AtEnd, false)
-	b.StoreKnownNonNil(slot, p.loadCoroSyncSlowIncomingResult(b, results))
+	b.StoreKnownNonNil(slot, p.loadCoroSyncSlowIncomingResult(b, state.preResultSlotParam, results))
 	b.Jump(joinBlk)
 
 	b.SetBlockContinuation(joinBlk)

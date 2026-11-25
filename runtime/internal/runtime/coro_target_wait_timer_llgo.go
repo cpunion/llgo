@@ -110,24 +110,29 @@ func coroTargetBuildPollSnapshotV1(
 // thread sleep/wakeup round-trip while immediately falling back to blocking
 // sleep whenever no descriptor becomes ready.
 func coroNativeTryFastPollCompletionV1(driver *coro.ExecutorDriver) (ready, ok bool) {
+	woke, posted, valid := coroNativeTryFastPollCompletionDetailedV1(driver)
+	return woke || posted, valid
+}
+
+func coroNativeTryFastPollCompletionDetailedV1(driver *coro.ExecutorDriver) (woke, posted, ok bool) {
 	if driver != &coroProgramExecutorDriverV1State {
-		return false, true
+		return false, false, true
 	}
 	scanLimit, scanOK := coro.PollOperationScanLimit(&coroProgramPollSourceV1State)
 	if !scanOK {
-		return false, false
+		return false, false, false
 	}
 	if scanLimit == 0 {
-		return false, true
+		return false, false, true
 	}
 	domain, domainOK := coroNativeFleetActiveDomainForRouteV1(1)
 	if !domainOK {
-		return false, true
+		return false, false, true
 	}
 	pipe := &domain.doorbell
 	count, built := coroTargetBuildPollSnapshotV1(pipe, 0, false, false)
 	if !built || count <= 1 {
-		return false, built
+		return false, false, built
 	}
 	entries := &coroNativePollEntriesV1
 	for attempt := uint32(0); attempt < coroNativePollFastProbeBudgetV1; attempt++ {
@@ -140,31 +145,31 @@ func coroNativeTryFastPollCompletionV1(driver *coro.ExecutorDriver) (ready, ok b
 				continue
 			}
 			// Let the authoritative blocking wait path classify descriptor errors.
-			return false, true
+			return false, false, true
 		}
 		if nReady == 0 {
 			continue
 		}
 		if entries[0].Revents&corodoorbell.PollBadFD != 0 {
-			return false, true
+			return false, false, true
 		}
-		woke := false
 		if entries[0].Revents&(corodoorbell.PollRead|corodoorbell.PollError|corodoorbell.PollHangup) != 0 {
 			if !pipe.Drain() {
-				return false, false
+				return false, false, false
 			}
 			woke = true
 		}
-		posted, postOK := coroTargetPostPollEventsV1(count)
+		var postOK bool
+		posted, postOK = coroTargetPostPollEventsV1(count)
 		if !postOK {
-			return false, false
+			return false, false, false
 		}
 		if woke || posted {
-			return true, true
+			return woke, posted, true
 		}
-		return false, true
+		return false, false, true
 	}
-	return false, true
+	return false, false, true
 }
 
 func coroTargetWaitExecutorV1(pipe *corodoorbell.Pipe, deadline int64, hasDeadline bool) bool {

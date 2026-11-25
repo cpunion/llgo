@@ -530,6 +530,29 @@ func BeginParkSetWithDefault(state *ParkState, expected, seed, defaultCaseID uin
 }
 
 func attachParkOperation(state *ParkState, ticket ParkTicket, wait *WaitSetRecord, record *OperationRecord, caseID uint32) bool {
+	if !AuditEnabled && wait != nil {
+		if state == nil || state.phase != parkPreparing || ticket != state.ticket ||
+			state.attached >= state.expected || record == nil || record.phase != operationReserved ||
+			(state.hasDefault && state.winnerCase == caseID) {
+			return false
+		}
+		record.link = ParkLink{
+			park:      state,
+			wait:      wait,
+			operation: record,
+			next:      state.head,
+			ticket:    ticket,
+			caseID:    caseID,
+			rank:      parkCaseRank(state.seed, caseID),
+		}
+		if state.head != nil {
+			state.head.previous = &record.link
+		}
+		record.phase = operationActive
+		state.head = &record.link
+		state.attached++
+		return true
+	}
 	validState := wait != nil && validPreparingParkStateHeader(state, ticket) || wait == nil && validParkState(state)
 	if !validState || state.phase != parkPreparing || ticket != state.ticket ||
 		!validParkTicket(ticket) || state.attached >= state.expected || record == nil || record.phase != operationReserved ||

@@ -884,7 +884,7 @@ func TestExecutorFleetDistributionAuditsOnlyBoundedSelectedPrefix(t *testing.T) 
 	fleet := new(ExecutorFleet)
 	source := bindExecutorFleetManualFixture(t, fleet)
 	target := bindExecutorFleetManualFixture(t, fleet)
-	tasks := make([]*yieldingTestG, 18)
+	tasks := make([]*yieldingTestG, 2*int(RunnableTransferMailboxCapacity)+2)
 	for index := range tasks {
 		tasks[index] = newYieldingTestG(t, "fleet-bounded-audit")
 		scratch := new(P)
@@ -913,10 +913,10 @@ func TestExecutorFleetDistributionAuditsOnlyBoundedSelectedPrefix(t *testing.T) 
 	}
 	source.p.readyCount = readyCount
 
-	// Corrupt a task beyond the maximum eight-entry transfer prefix. The full
+	// Corrupt a task beyond the maximum transfer prefix. The full
 	// diagnostic catches it, while the hot path validates and moves only the
 	// exact bounded prefix selected for this transaction.
-	distant := tasks[12].g
+	distant := tasks[int(RunnableTransferMailboxCapacity)+4].g
 	distantState := distant.state
 	distant.state = GDead
 	if validReadyQueue(source.p) {
@@ -1328,4 +1328,100 @@ func TestExecutorFleetBindPreflightAndLifetimeCapacity(t *testing.T) {
 	if !fleet.AllRetired() || late.Route != OperationRoutePostInvalid {
 		t.Fatal("exhausted fleet retained resources or accepted invalid ingress")
 	}
+}
+
+func TestExecutorFleetHasPeerRunnableDemandTracksLifecycle(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	source := bindExecutorFleetManualFixture(t, fleet)
+	peerA := bindExecutorFleetManualFixture(t, fleet)
+	peerB := bindExecutorFleetManualFixture(t, fleet)
+	defer func() {
+		closeExecutorFleetFixture(t, fleet, peerB)
+		closeExecutorFleetFixture(t, fleet, peerA)
+		closeExecutorFleetFixture(t, fleet, source)
+	}()
+
+	srcRoute := uint16(source.handle.Route)
+	peerARoute := uint16(peerA.handle.Route)
+	peerBRoute := uint16(peerB.handle.Route)
+
+	if fleet.HasPeerRunnableDemand(0) || fleet.HasPeerRunnableDemand(ExecutorFleetCapacity+1) {
+		t.Fatal("out-of-range source route must not report peer demand")
+	}
+	if fleet.HasPeerRunnableDemand(srcRoute) {
+		t.Fatal("fresh fleet unexpectedly reported peer demand")
+	}
+	// Self-demand must not report peer demand for the requesting route itself.
+	if !fleet.RequestPNeutralRunnable(source.handle, source.p) {
+		t.Fatal("request demand on source")
+	}
+	if fleet.HasPeerRunnableDemand(srcRoute) || !fleet.HasPeerRunnableDemand(peerARoute) {
+		t.Fatalf("self demand visibility wrong: src=%t peerA=%t",
+			fleet.HasPeerRunnableDemand(srcRoute), fleet.HasPeerRunnableDemand(peerARoute))
+	}
+	if _, ok := fleet.CancelPNeutralRunnableRequest(source.handle, source.p); !ok {
+		t.Fatal("cancel source demand")
+	}
+	if fleet.HasPeerRunnableDemand(peerARoute) {
+		t.Fatal("canceled demand lingered in demandMask")
+	}
+
+	// Publish demand on peerA and peerB, then consume one via distribution.
+	if !fleet.RequestPNeutralRunnable(peerA.handle, peerA.p) ||
+		!fleet.RequestPNeutralRunnable(peerB.handle, peerB.p) {
+		t.Fatal("request peer demand")
+	}
+	if !fleet.HasPeerRunnableDemand(srcRoute) {
+		t.Fatal("expected peer demand visible to source")
+	}
+	// Supply two P-neutral tasks so source keeps one and transfers one to peerA.
+	enqueueNeutral := func(name string) *yieldingTestG {
+		task := newYieldingTestG(t, name)
+		scratch := new(P)
+		yieldRunnableForTransfer(t, scratch, task)
+		runnable, ok := NextRunnable(scratch)
+		if !ok || runnable != task.g || !Enqueue(source.p, task.g) {
+			t.Fatalf("prepare neutral task %s", name)
+		}
+		return task
+	}
+	task1 := enqueueNeutral("demand-task-1")
+	task2 := enqueueNeutral("demand-task-2")
+	dist, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+	if !ok || !dist.Valid() || dist.Target != peerA.handle || dist.Count != 1 {
+		t.Fatalf("first distribution = (%+v, %t)", dist, ok)
+	}
+	// peerB still demands work.
+	if !fleet.HasPeerRunnableDemand(srcRoute) || !fleet.HasPeerRunnableDemand(peerARoute) ||
+		fleet.HasPeerRunnableDemand(peerBRoute) {
+		t.Fatalf("demand mask after first distribution wrong: src=%t peerA=%t peerB=%t",
+			fleet.HasPeerRunnableDemand(srcRoute),
+			fleet.HasPeerRunnableDemand(peerARoute),
+			fleet.HasPeerRunnableDemand(peerBRoute))
+	}
+	// Withdrawing demand on peerB clears the remaining peer bit.
+	if _, _, status := fleet.TryWithdrawPNeutralRunnables(peerB.handle, peerB.p, 1); status != RunnableTransferDrainComplete {
+		t.Fatalf("withdraw peerB demand = %d", status)
+	}
+	if fleet.HasPeerRunnableDemand(srcRoute) {
+		t.Fatal("peer demand remained set after all peers satisfied or withdrawn")
+	}
+
+	// Drain peerA and finish both tasks cleanly before closing routes.
+	if moved, _, status := fleet.TryDrainPNeutralRunnables(peerA.handle, peerA.p, 4); status != RunnableTransferDrainComplete || moved != 1 {
+		t.Fatalf("drain peerA = (%d, %d)", moved, status)
+	}
+	if _, _, ok := PollExecutor(peerA.driver); !ok {
+		t.Fatal("acknowledge peerA executor request")
+	}
+	finishFleetSimpleTask := func(fixture *executorFleetManualFixture, task *yieldingTestG) {
+		g, ok := NextRunnable(fixture.p)
+		if !ok || g != task.g {
+			t.Fatalf("next runnable on route %d = (%p, %t), want %p", fixture.handle.Route, g, ok, task.g)
+		}
+		action := beginWaitTestResume(t, fixture.p, task)
+		finishExecutorFleetTask(t, fixture, task, action)
+	}
+	finishFleetSimpleTask(source, task2)
+	finishFleetSimpleTask(peerA, task1)
 }

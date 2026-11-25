@@ -1559,3 +1559,20 @@ func TestExecutorRunDestroyReceiptIsStableAndHandleFree(t *testing.T) {
 	closeTestExecutorDriver(t, driver)
 	runtime.KeepAlive(task.frame.memory)
 }
+
+func TestContinueIssuedExecutorParentResumeGuards(t *testing.T) {
+	if ContinueIssuedExecutorParentResume(nil, nil, Action{}) {
+		t.Fatal("nil driver must fail closed")
+	}
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithManual(t, p)
+	defer closeTestExecutorDriver(t, driver)
+	g := new(G)
+	dummy := new(byte)
+	next := Action{Kind: ActionCheckResume, Handle: unsafe.Pointer(dummy)}
+	// Under host AuditEnabled builds, parent chaining must remain disabled so
+	// every bounded reduction passes full audit validation.
+	if AuditEnabled && ContinueIssuedExecutorParentResume(driver, g, next) {
+		t.Fatal("parent resume chaining must stay disabled when AuditEnabled is true")
+	}
+}

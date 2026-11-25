@@ -299,16 +299,19 @@ uint64_t __llgo_runtime_poll_read_attempt_v1(
     void *address,
     uintptr_t size)
 {
-    int saved_errno = errno;
+    int *ep = &errno;
+    int saved_errno = *ep;
     ssize_t result = recv(
         (int)fd,
         address,
         llgo_runtime_poll_bounded_size_v1(size),
         MSG_DONTWAIT);
-    int error = result < 0 ? errno : 0;
-    uint64_t packed = llgo_runtime_poll_pack_io_attempt_v1(result, error);
-    errno = saved_errno;
-    return packed;
+    int error = 0;
+    if (result < 0) {
+        error = *ep;
+        *ep = saved_errno;
+    }
+    return llgo_runtime_poll_pack_io_attempt_v1(result, error);
 }
 
 uint64_t __llgo_runtime_poll_write_attempt_v1(
@@ -316,16 +319,19 @@ uint64_t __llgo_runtime_poll_write_attempt_v1(
     void *address,
     uintptr_t size)
 {
-    int saved_errno = errno;
+    int *ep = &errno;
+    int saved_errno = *ep;
     ssize_t result = send(
         (int)fd,
         address,
         llgo_runtime_poll_bounded_size_v1(size),
         MSG_DONTWAIT);
-    int error = result < 0 ? errno : 0;
-    uint64_t packed = llgo_runtime_poll_pack_io_attempt_v1(result, error);
-    errno = saved_errno;
-    return packed;
+    int error = 0;
+    if (result < 0) {
+        error = *ep;
+        *ep = saved_errno;
+    }
+    return llgo_runtime_poll_pack_io_attempt_v1(result, error);
 }
 
 /*

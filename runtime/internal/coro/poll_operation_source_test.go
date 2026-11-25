@@ -575,3 +575,180 @@ func TestPollOperationV2SharesWaitSetWithTimerV2(t *testing.T) {
 		t.Fatal("release mixed timer/poll source set")
 	}
 }
+
+func TestPollOperationV2CompleteOwnerPollEventDirectAndFallbacks(t *testing.T) {
+	setupDirectPoll := func(name string, deadline int64) (*pollParkOwnerFixture, *ResumePacket) {
+		t.Helper()
+		fixture := &pollParkOwnerFixture{
+			p:        new(P),
+			driver:   new(ExecutorDriver),
+			registry: new(ExecutorRegistry),
+			poll:     new(PollOperationSource),
+			task:     newYieldingTestG(t, name),
+		}
+		packet := new(ResumePacket)
+		registered := registerTestExecutor(t, fixture.registry)
+		if !BindExecutorSourceCatalogAtRoute(
+			fixture.driver, fixture.p, fixture.registry, registered, RouteID(7),
+			ExecutorSourceCatalog{Poll: fixture.poll},
+		) {
+			t.Fatalf("bind %s poll owner", name)
+		}
+		if !Enqueue(fixture.p, fixture.task.g) {
+			t.Fatalf("enqueue %s", name)
+		}
+		if next, ok := NextRunnableAt(fixture.p, 0); !ok || next != fixture.task.g {
+			t.Fatalf("dequeue %s", name)
+		}
+		fixture.action = beginWaitTestResume(t, fixture.p, fixture.task)
+		fixture.task.frame.header.SuspendReason = uint16(SuspendPark)
+		fixture.task.frame.header.Lifecycle = uint16(FrameSuspended)
+		var prepared bool
+		fixture.ticket, fixture.handle, fixture.operation, fixture.executor, prepared = PrepareCurrentExecutorPollPark(
+			fixture.driver, fixture.task.g, fixture.task.handle, fixture.task.frame.header,
+			&fixture.wait, 1, 1, 42, PollInterestRead, deadline,
+		)
+		if !prepared || !BindSingleWaitSetResumePacket(&fixture.wait, packet, fixture.operation) {
+			t.Fatalf("prepare/bind %s Poll V2 park", name)
+		}
+		if parked, ok := Resumed(fixture.p, fixture.task.g, fixture.action); !ok || parked.Kind != ActionPark {
+			t.Fatalf("commit %s Poll V2 park = (%+v, %t)", name, parked, ok)
+		}
+		if _, promoted, ok := PollExecutorAt(fixture.driver, 0); !ok || promoted != 0 {
+			t.Fatalf("initial idle poll %s = (%d, %t)", name, promoted, ok)
+		}
+		return fixture, packet
+	}
+	resumeDirectPoll := func(fixture *pollParkOwnerFixture, packet *ResumePacket, now int64) (ParkOutcome, uint32, TaskCancelKind, ResumeResultKind, uint8) {
+		t.Helper()
+		if next, ok := NextRunnableAt(fixture.p, now); !ok || next != fixture.task.g {
+			t.Fatalf("dequeue resumed %s = (%p, %t)", fixture.task.name, next, ok)
+		}
+		action, ok := BeginRunG(fixture.p, fixture.task.g)
+		if !ok || action.Kind != ActionCheckResume {
+			t.Fatalf("begin resumed %s = (%+v, %t)", fixture.task.name, action, ok)
+		}
+		fixture.action, ok = Checked(fixture.p, fixture.task.g, action, false)
+		if !ok || fixture.action.Kind != ActionResume {
+			t.Fatalf("activate resumed %s = (%+v, %t)", fixture.task.name, fixture.action, ok)
+		}
+		outcome, caseID, cancel, resultKind, small, taken := TakeResumePacket(fixture.task.g, fixture.ticket, packet, nil)
+		if !taken {
+			t.Fatalf("take %s Poll V2 resume packet", fixture.task.name)
+		}
+		return outcome, caseID, cancel, resultKind, small
+	}
+
+	// 1. Direct owner completion path: zero-deadline single-case poll completes
+	// directly and raises driver.run.readyDebt when the bounded runner is active.
+	direct, directPacket := setupDirectPoll("poll-v2-owner-direct", 0)
+	for i := 0; i < 4; i++ {
+		step, ok := NextExecutorRunStepAt(direct.driver, 0)
+		if !ok {
+			t.Fatalf("bounded idle step %d failed", i)
+		}
+		if step.Kind == ExecutorRunStepIdle {
+			break
+		}
+		if step.Kind != ExecutorRunStepSource || i == 3 {
+			t.Fatalf("enter bounded idle before direct event = (%+v, %t)", step, ok)
+		}
+	}
+	if completed, ok := CompleteOwnerPollEventV2(direct.driver, direct.operation, PollOperationReady); !ok || !completed {
+		t.Fatalf("direct owner poll completion = (%t, %t), want (true, true)", completed, ok)
+	}
+	if !direct.driver.run.readyDebt {
+		t.Fatal("direct owner poll completion did not raise driver.run.readyDebt")
+	}
+	if !EnterExecutorRunCompatibility(direct.driver) {
+		t.Fatal("return to compatibility mode after direct owner poll completion")
+	}
+	outcome, caseID, cancel, resultKind, small := resumeDirectPoll(direct, directPacket, 0)
+	if outcome != ParkOutcomeCompleted || caseID != 1 || cancel != TaskCancelNone ||
+		resultKind != ResumeResultPoll || PollOperationResult(small) != PollOperationReady {
+		t.Fatalf("direct owner poll resume = (%d, %d, %d, %d, %d)", outcome, caseID, cancel, resultKind, small)
+	}
+	direct.yieldCloseAndFinish(t)
+
+	// 2. Non-zero deadline must decline direct completion (completed=false, ok=true)
+	// so the regular deadline-aware epoch resolver arbitrates the race.
+	withDL, dlPacket := setupDirectPoll("poll-v2-owner-deadline", 12345)
+	if completed, ok := CompleteOwnerPollEventV2(withDL.driver, withDL.operation, PollOperationReady); !ok || completed {
+		t.Fatalf("deadline poll direct completion = (%t, %t), want (false, true)", completed, ok)
+	}
+	if withDL.poll.PostPollOperationV2(withDL.operation, PollOperationReady) != PollOperationPosted {
+		t.Fatal("post deadline poll fallback")
+	}
+	if _, promoted, ok := PollExecutorAt(withDL.driver, 100); !ok || promoted != 1 {
+		t.Fatalf("poll executor fallback = (%d, %t)", promoted, ok)
+	}
+	outcomeDL, caseDL, cancelDL, resultKindDL, smallDL := resumeDirectPoll(withDL, dlPacket, 100)
+	if outcomeDL != ParkOutcomeCompleted || caseDL != 1 || cancelDL != TaskCancelNone ||
+		resultKindDL != ResumeResultPoll || PollOperationResult(smallDL) != PollOperationReady {
+		t.Fatalf("deadline fallback resume = (%d, %d, %d, %d, %d)", outcomeDL, caseDL, cancelDL, resultKindDL, smallDL)
+	}
+	withDL.yieldCloseAndFinish(t)
+}
+
+func TestHasReadySurplusLocalYieldHintAndTrailingDestroy(t *testing.T) {
+	p := new(P)
+	g1 := &G{runAction: ActionCheckResume}
+	g2 := &G{runAction: ActionCheckResume}
+	gDestroy := &G{runAction: ActionCheckDestroy}
+
+	// Single suspended/resumed ready G does not report surplus, whereas a lone
+	// never-run initial P-neutral G matches DistributePNeutralRunnable's
+	// single-runnable sharing exception so an idle peer P can claim it.
+	p.readyHead, p.readyTail, p.readyCount = g1, g1, 1
+	if HasReadySurplus(p, false) {
+		t.Fatal("single non-initial runnable must not report surplus")
+	}
+	initHeader := HeaderV1{
+		Lifecycle:     uint16(FrameInitialSuspended),
+		SuspendReason: uint16(SuspendNone),
+	}
+	initFrame := &Frame{state: FrameInitialSuspended, header: &initHeader}
+	gInitial := &G{root: initFrame, active: initFrame, runnableAffinity: runnableAnyOwner}
+	p.readyHead, p.readyTail, p.readyCount = gInitial, gInitial, 1
+	if !HasReadySurplus(p, false) {
+		t.Fatal("single initial P-neutral runnable must report surplus for idle peer distribution")
+	}
+	gInitial.runnableAffinity = runnableCurrentOwner
+	if HasReadySurplus(p, false) {
+		t.Fatal("single owner-pinned initial runnable must not report surplus")
+	}
+	gInitial.runnableAffinity = runnableAnyOwner
+	p.localYieldHint = true
+	if HasReadySurplus(p, false) {
+		t.Fatal("localYieldHint must suppress single initial runnable surplus")
+	}
+	if p.localYieldHint {
+		t.Fatal("localYieldHint must clear after suppressing single runnable")
+	}
+
+	// Two ready Gs with one trailing ActionCheckDestroy stay local.
+	p.readyHead, p.readyTail, p.readyCount = gDestroy, g1, 2
+	if HasReadySurplus(p, false) {
+		t.Fatal("trailing ActionCheckDestroy pair must not report surplus")
+	}
+	p.readyHead, p.readyTail, p.readyCount = g1, gDestroy, 2
+	if HasReadySurplus(p, false) {
+		t.Fatal("tail ActionCheckDestroy pair must not report surplus")
+	}
+
+	// Two real runnable Gs report surplus unless localYieldHint suppressed it.
+	p.readyHead, p.readyTail, p.readyCount = g1, g2, 2
+	if !HasReadySurplus(p, false) {
+		t.Fatal("two real runnables must report surplus")
+	}
+	p.localYieldHint = true
+	if HasReadySurplus(p, true) {
+		t.Fatal("localYieldHint must suppress single-peer voluntary yield surplus")
+	}
+	if p.localYieldHint {
+		t.Fatal("localYieldHint must clear once consumed at readyCount<=2")
+	}
+	if !HasReadySurplus(p, false) {
+		t.Fatal("subsequent check after hint clear must report surplus")
+	}
+}

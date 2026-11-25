@@ -449,6 +449,47 @@ func resolveSingleIrreversiblePark(
 	return CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}, true
 }
 
+// resolveSingleReadyPollPark collapses the fixed single-operation decision for
+// an already delivered non-canceled poll wait. Because poll readiness is
+// physically one-shot and there is no competing case or cancellation, this
+// produces the exact same post-commit ParkState and OperationRecord state as
+// Discover -> Park -> TryCommitPollOperationV2 -> Settle -> Finalize.
+func resolveSingleReadyPollPark(
+	state *ParkState,
+	ticket ParkTicket,
+	record *OperationRecord,
+) (CompletionResolution, bool) {
+	if state == nil || state.resolving || state.phase != parkParked || state.ticket != ticket ||
+		!validParkTicket(ticket) || state.cancelKind != ParkCancelNone ||
+		state.taskCancelKind != TaskCancelNone || state.taskCancelPhase != taskCancelIdle ||
+		state.expected != 1 || state.attached != 1 || state.hasDefault ||
+		state.outcome != ParkOutcomePending || state.winnerCase != 0 ||
+		state.winnerID != (OperationID{}) || state.winnerRecord != nil ||
+		state.head == nil || state.head.previous != nil || state.head.next != nil ||
+		state.head.operation != record || record == nil ||
+		(AuditEnabled && !validPendingParkResolutionLink(state, ticket, state.head)) ||
+		operationCandidateMode(record) != OperationCommitReadyThenTryCommit ||
+		!operationCandidateIsPublished(record) ||
+		operationCandidateState(record) != OperationCommitReady ||
+		record.resultState != operationResultEmpty {
+		return CompletionResolution{}, false
+	}
+	record.resultState = operationResultOwned
+	if !commitOperationCandidate(record) {
+		record.resultState = operationResultEmpty
+		return CompletionResolution{}, false
+	}
+	state.seed = 0
+	state.phase = parkDetaching
+	record.resultTicket = ticket
+	record.disposition = OperationDispositionWinner
+	state.outcome = ParkOutcomeCompleted
+	state.winnerCase = record.link.caseID
+	state.winnerID = record.id
+	state.winnerRecord = record
+	return CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}, true
+}
+
 func beginParkSnapshotResolution(state *ParkState, ticket ParkTicket, cursor *parkResolutionCursor, fullAudit bool) bool {
 	if cursor == nil || *cursor != (parkResolutionCursor{}) || state == nil || state.resolving ||
 		state.phase != parkParked || state.ticket != ticket || !validParkTicket(ticket) ||

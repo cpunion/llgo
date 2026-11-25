@@ -38,13 +38,16 @@ func coroPanicBoundaryCurrentG(task *coro.G) *g {
 // physical coroutine resume and saves the G's logical defer cursor. boundary
 // and env have native activation lifetime and must not survive a suspension.
 func coroPanicBoundaryPush(task *coro.G, handle unsafe.Pointer, boundary *Defer, env unsafe.Pointer) bool {
+	return coroPanicBoundaryPushWithG(coroPanicBoundaryCurrentG(task), task, handle, boundary, env)
+}
+
+func coroPanicBoundaryPushWithG(gp *g, task *coro.G, handle unsafe.Pointer, boundary *Defer, env unsafe.Pointer) bool {
 	if coro.AuditEnabled {
 		if task == nil || handle == nil || boundary == nil || env == nil ||
 			*boundary != (Defer{}) || !coro.ResumePanicBoundaryActiveCompiler(task, handle) {
 			return false
 		}
 	}
-	gp := coroPanicBoundaryCurrentG(task)
 	if gp == nil || gp.m == nil || (coro.AuditEnabled && gp.m.curg != gp) {
 		return false
 	}
@@ -82,7 +85,10 @@ const (
 )
 
 func coroPanicBoundaryPopStatus(task *coro.G, handle unsafe.Pointer, boundary *Defer) uint32 {
-	gp := coroPanicBoundaryCurrentG(task)
+	return coroPanicBoundaryPopStatusWithG(coroPanicBoundaryCurrentG(task), task, handle, boundary)
+}
+
+func coroPanicBoundaryPopStatusWithG(gp *g, task *coro.G, handle unsafe.Pointer, boundary *Defer) uint32 {
 	if coro.AuditEnabled {
 		if !validCoroPanicBoundary(task, handle, boundary, gp) {
 			return coroPanicBoundaryPopInvalidRecord
@@ -106,6 +112,10 @@ func coroPanicBoundaryPopStatus(task *coro.G, handle unsafe.Pointer, boundary *D
 
 func coroPanicBoundaryPop(task *coro.G, handle unsafe.Pointer, boundary *Defer) bool {
 	return coroPanicBoundaryPopStatus(task, handle, boundary) == coroPanicBoundaryPopOK
+}
+
+func coroPanicBoundaryPopWithG(gp *g, task *coro.G, handle unsafe.Pointer, boundary *Defer) bool {
+	return coroPanicBoundaryPopStatusWithG(gp, task, handle, boundary) == coroPanicBoundaryPopOK
 }
 
 // coroPanicBoundaryStage owns the siglongjmp return. Rethrow has selected this

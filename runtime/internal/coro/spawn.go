@@ -387,7 +387,7 @@ func CommitSpawnCompiler(parent, child *G, handle unsafe.Pointer) bool {
 		p := child.spawnP
 		root := child.frames
 		if root != nil {
-			if p.readyCount != 0 && !RequestPreempt(parent) {
+			if p.readyCount >= RunnableTransferMailboxCapacity && !RequestPreempt(parent) {
 				return false
 			}
 			child.root = root

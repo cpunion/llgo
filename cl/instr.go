@@ -3491,7 +3491,7 @@ func (p *context) callEx(
 			if act != llssa.Call || ds != nil {
 				panic("llgo.coroPollWait requires an exact direct call")
 			}
-			ret = p.compileCoroPollWait(b, args)
+			ret = p.compileCoroPollWait(b, args, nil)
 		case llgoCoroControlledTimerWait:
 			if act != llssa.Call || ds != nil {
 				panic("llgo.coroControlledTimerWait requires an exact direct call")

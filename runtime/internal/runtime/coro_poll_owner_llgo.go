@@ -96,7 +96,7 @@ func __llgo_coro_poll_park_v2(
 	}
 	task := (*coro.G)(g)
 	driver, wantExecutor, wantRoute, ok := coro.CurrentExecutorPollDriver(task)
-	if !ok || !ensureCoroPollOperationCapacityV1(driver, task, coroRuntimePollCapacityV1) {
+	if !ok {
 		coroPollAbortV2("cannot resolve coroutine Poll V2 owner")
 		return
 	}
@@ -112,6 +112,24 @@ func __llgo_coro_poll_park_v2(
 		pollInterest,
 		deadline,
 	)
+	if !prepared {
+		if !ensureCoroPollOperationCapacityV1(driver, task, coroRuntimePollCapacityV1) {
+			coroPollAbortV2("cannot resolve coroutine Poll V2 owner")
+			return
+		}
+		ticket, poll, operation, executor, prepared = coro.PrepareCurrentExecutorPollPark(
+			driver,
+			task,
+			handle,
+			(*coro.HeaderV1)(header),
+			&state.wait,
+			1,
+			1,
+			fd,
+			pollInterest,
+			deadline,
+		)
+	}
 	if !prepared || executor != wantExecutor || operation.Route() != wantRoute {
 		coroPollAbortV2("cannot prepare coroutine Poll V2 park")
 		return

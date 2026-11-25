@@ -243,6 +243,14 @@ func (sources *ExecutorSourceSet) usesMonotonicTime() bool {
 	return sources != nil && (sources.timers != nil || sources.poll != nil)
 }
 
+func (sources *ExecutorSourceSet) needsMonotonicTimeNow() bool {
+	if sources == nil {
+		return false
+	}
+	return (sources.timers != nil && sources.timers.activeCount != 0) ||
+		(sources.poll != nil && sources.poll.deadlineCount != 0)
+}
+
 func (sources *ExecutorSourceSet) acceptsScan(p *P, now int64, withDeadline bool) bool {
 	return validExecutorSourceSet(sources, p) &&
 		withDeadline == sources.usesMonotonicTime() && (!withDeadline || now >= 0)
@@ -574,12 +582,19 @@ func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVi
 // Deadline sources are sampled by drain and represented by the aggregate
 // deadline; future deadlines are not pending runnable work.
 func (sources *ExecutorSourceSet) pending(p *P) bool {
-	return validExecutorSourceSetHeader(sources, p) &&
-		(p.affectedWaitHead != nil || sources.poll != nil && sources.poll.Pending() ||
-			sources.manual != nil && sources.manual.Pending() ||
-			sources.worker != nil && sources.worker.Pending() ||
-			sources.channel != nil && sources.channel.Pending() ||
-			sources.control != nil && sources.control.Pending())
+	if AuditEnabled {
+		if !validExecutorSourceSetHeader(sources, p) {
+			return false
+		}
+	} else if sources == nil || p == nil {
+		return false
+	}
+	return p.affectedWaitHead != nil ||
+		sources.poll != nil && preemptLoad(&sources.poll.pending) != 0 ||
+		sources.manual != nil && preemptLoad(&sources.manual.pending) != 0 ||
+		sources.worker != nil && preemptLoad(&sources.worker.pending) != 0 ||
+		sources.channel != nil && preemptLoad(&sources.channel.pending) != 0 ||
+		sources.control != nil && preemptLoad(&sources.control.pending) != 0
 }
 
 func (sources *ExecutorSourceSet) nextDeadline(p *P) (deadline int64, hasDeadline, ok bool) {

@@ -364,6 +364,22 @@ func activateWaitSetRecordUnchecked(p *P, g *G, record *WaitSetRecord) {
 		// affected-set visit.
 		return
 	}
+	if record.resumeKind == resumeBindingSingle && g.park.attached == 1 &&
+		g.park.head != nil && g.park.head.operation != nil &&
+		g.park.head.operation.id.Source() == OperationSourcePoll &&
+		!operationCandidateIsPublished(g.park.head.operation) &&
+		!g.park.head.operation.cancelRequested &&
+		g.park.cancelKind == ParkCancelNone &&
+		g.park.taskCancelKind == TaskCancelNone &&
+		g.park.taskCancelPhase == taskCancelIdle &&
+		p.executor != nil && p.executor.sources.poll != nil &&
+		p.executor.sources.poll.deadlineCount == 0 {
+		// A zero-deadline single poll operation has no owner-side candidate at
+		// activation time. Any concurrent producer publication (readiness or
+		// close) sets source.pending=1 and marks the wait affected during drain;
+		// cancellation and deadline updates also publish explicitly.
+		return
+	}
 
 	// Every newly parked set receives one initial visit. This catches an owner
 	// completion published during preparation without adding an always-live G

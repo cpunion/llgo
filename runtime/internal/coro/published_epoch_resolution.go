@@ -677,6 +677,58 @@ func resolveSingleOwnerTimerStep(
 	return true, advancePublishedEpochWaitAfterCleared(sources, cursor, p, step)
 }
 
+// resolveSingleOwnerPollStep collapses the fixed one-case delivered poll wait
+// into one charged common reduction, mirroring resolveSingleOwnerTimerStep.
+// Canceled, multi-event, or non-quiesced waits fall back to the general cursor.
+func resolveSingleOwnerPollStep(
+	sources *ExecutorSourceSet,
+	p *P,
+	cursor *publishedEpochResolveCursor,
+	step *publishedEpochResolveStep,
+) (handled, ok bool) {
+	if sources == nil || sources.poll == nil || cursor == nil || step == nil ||
+		cursor.phase != publishedEpochResolveDiscover || cursor.wait == nil ||
+		cursor.wait.resumeKind != resumeBindingSingle {
+		return false, false
+	}
+	wait := cursor.wait
+	if wait.g == nil {
+		return true, false
+	}
+	state := &wait.g.park
+	if state.cancelKind != ParkCancelNone || state.taskCancelKind != TaskCancelNone ||
+		state.taskCancelPhase != taskCancelIdle || wait.work != waitSetWorkResolving ||
+		cursor.link == nil || cursor.link != state.head || cursor.link.next != nil ||
+		state.expected != 1 || state.attached != 1 ||
+		cursor.claim != nil || cursor.forced != nil ||
+		cursor.claimOwned || cursor.hasChannel || cursor.waitRetry || cursor.waitAwait {
+		return false, false
+	}
+	link, record := cursor.link, cursor.link.operation
+	if record == nil || record.id.Source() != OperationSourcePoll ||
+		record.id.Route() != sources.poll.route || link.wait != wait {
+		return false, false
+	}
+	packet := (*ResumePacket)(wait.resume)
+	if !validBoundResumePacket(packet, wait.ticket) || packet.source != record.id {
+		return false, false
+	}
+	resolution, applied, valid := sources.poll.tryApplySingleOwnerPollV2One(p, state, wait, record)
+	if !valid {
+		return true, false
+	}
+	if !applied {
+		return false, false
+	}
+	if retry, await, settled := finishWaitSetApplyProgress(wait, false, false); !settled || retry || await || !promoteReadyWaitSet(sources, p, wait) {
+		return true, false
+	}
+	step.resolution = resolution
+	step.applyVisits = 1
+	step.promoted = 1
+	return true, advancePublishedEpochWaitAfterCleared(sources, cursor, p, step)
+}
+
 // resolvePublishedEpochStep advances exactly one explicitly charged common
 // resolution action. The caller owns step so its scratch storage remains in
 // the caller's activation instead of becoming a heap-backed named result when
@@ -708,6 +760,9 @@ func resolvePublishedEpochStep(
 		return false
 	}
 	if handled, resolved := resolveSingleOwnerTimerStep(sources, p, cursor, step); handled {
+		return resolved
+	}
+	if handled, resolved := resolveSingleOwnerPollStep(sources, p, cursor, step); handled {
 		return resolved
 	}
 
