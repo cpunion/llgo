@@ -592,10 +592,12 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 		} else if ready {
 			return true
 		}
-		if ready, spinOK := coroNativeFleetPeerPreSleepSpinV1(handle, domain); !spinOK {
-			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer pre-sleep spin failed")
-		} else if ready {
-			return true
+		if !peer.shutdown {
+			if ready, spinOK := coroNativeFleetPeerPreSleepSpinV1(handle, domain); !spinOK {
+				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer pre-sleep spin failed")
+			} else if ready {
+				return true
+			}
 		}
 		freshNow, freshClockOK := coroNativeFleetPhysicalOwnerClockV1()
 		if !freshClockOK {

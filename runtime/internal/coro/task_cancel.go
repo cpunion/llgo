@@ -407,6 +407,7 @@ func requestTaskCancellationOwned(p *P, g *G, kind TaskCancelKind, proof taskCan
 		g.park.taskCancelPhase = taskCancelShieldedRequested
 		return true
 	}
+	alreadyRequested := g.park.taskCancelPhase == taskCancelRequested && strongest == g.park.taskCancelKind
 	if wait == nil {
 		if !applyTaskCancellationToParkOwned(g, strongest, proof) {
 			return false
@@ -420,6 +421,7 @@ func requestTaskCancellationOwned(p *P, g *G, kind TaskCancelKind, proof taskCan
 			}
 			if parkKind > g.park.cancelKind {
 				g.park.cancelKind = parkKind
+				alreadyRequested = false
 			}
 		case parkDetaching, parkReady:
 		default:
@@ -431,7 +433,7 @@ func requestTaskCancellationOwned(p *P, g *G, kind TaskCancelKind, proof taskCan
 	if direct != nil {
 		return requestDirectChannelCancellation(direct)
 	}
-	if wait != nil {
+	if wait != nil && (!alreadyRequested || g.park.phase != parkDetaching || wait.work != waitSetWorkAwaitingExternal) {
 		appendAffectedWaitSetUnchecked(p, wait)
 	}
 	return true
