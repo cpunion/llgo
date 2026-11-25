@@ -1108,9 +1108,10 @@ func TestExecutorFleetWithdrawJoinsClaimBeforeFinalDrain(t *testing.T) {
 			}
 			publish := func() {
 				t.Helper()
-				single := [1]*G{task.g}
+				var batch [RunnableTransferMailboxCapacity]*G
+				batch[0] = task.g
 				id, count, request, ok := fleet.publishPreparedPNeutralRunnableBatchAndRequest(
-					target.handle, source.p, single[:],
+					target.handle, source.p, &batch, 1,
 				)
 				if !ok || !id.Valid() || count != 1 || request != ExecutorRequestPublished {
 					t.Fatalf("publish claimed transfer = (%+v,%d,%d,%t)", id, count, request, ok)

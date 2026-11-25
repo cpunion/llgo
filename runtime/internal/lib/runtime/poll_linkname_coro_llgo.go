@@ -53,7 +53,6 @@ func llgoCoroPollDescStateV1(ctx uintptr) uint64
 //go:linkname llgoCoroPollDescDeadlineV1 C.__llgo_runtime_poll_desc_deadline_v1
 func llgoCoroPollDescDeadlineV1(ctx uintptr, mode int32) int64
 
-//llgo:coro contract foreign.v1 progress=executor-safe affinity=any-thread reentry=none memory=by-value
 //go:linkname llgoCoroPollDescPrepareWaitV1 C.__llgo_runtime_poll_desc_prepare_wait_v1
 func llgoCoroPollDescPrepareWaitV1(ctx uintptr, mode int32) uint64
 
@@ -202,22 +201,12 @@ func poll_runtime_pollClose(ctx uintptr) {
 }
 
 //llgo:coro contract foreign.v1 progress=executor-safe affinity=any-thread reentry=none memory=borrow-until-return
-//go:linkname llgoCoroPollCheckedReadAttemptPackedV1 C.__llgo_runtime_poll_checked_read_attempt_v1
-func llgoCoroPollCheckedReadAttemptPackedV1(ctx uintptr, fd int32, address unsafe.Pointer, size uintptr) uint64
-
-//llgo:coro contract foreign.v1 progress=executor-safe affinity=any-thread reentry=none memory=borrow-until-return
-//go:linkname llgoCoroPollCheckedWriteAttemptPackedV1 C.__llgo_runtime_poll_checked_write_attempt_v1
-func llgoCoroPollCheckedWriteAttemptPackedV1(ctx uintptr, fd int32, address unsafe.Pointer, size uintptr) uint64
-
-//llgo:coro contract foreign.v1 progress=executor-safe affinity=any-thread reentry=none memory=borrow-until-return
 //go:linkname llgoCoroPollReadAttemptPackedV1 C.__llgo_runtime_poll_read_attempt_v1
 func llgoCoroPollReadAttemptPackedV1(fd int32, address unsafe.Pointer, size uintptr) uint64
 
 //llgo:coro contract foreign.v1 progress=executor-safe affinity=any-thread reentry=none memory=borrow-until-return
 //go:linkname llgoCoroPollWriteAttemptPackedV1 C.__llgo_runtime_poll_write_attempt_v1
 func llgoCoroPollWriteAttemptPackedV1(fd int32, address unsafe.Pointer, size uintptr) uint64
-
-const coroPollAttemptNotTakenV1 uint64 = 1 << 63
 
 func pollCoroReadAttemptV1(
 	fd int32,
@@ -250,30 +239,31 @@ func pollCoroAttemptEligible(ctx uintptr, fd int, size int) bool {
 		!pollDescClosing(state) && int32(fd) == pollDescFD(state)
 }
 
+func pollCoroCheckedAttemptEligible(ctx uintptr, fd int, size int, mode int32) bool {
+	if ctx == 0 || fd < 0 || uintptr(fd) > uintptr(^uint32(0)>>1) || size < 0 {
+		return false
+	}
+	state := llgoCoroPollDescPrepareWaitV1(ctx, mode)
+	return state&(coroPollDescInlineStreamV1|coroPollDescClosingV1|coroPollDescHasDeadlineV1) == coroPollDescInlineStreamV1 &&
+		int32(fd) == pollDescFD(state)
+}
+
 //llgo:managedlink
 //go:linkname poll_runtime_pollCheckedReadAttempt internal/poll.runtime_pollCheckedReadAttempt
 func poll_runtime_pollCheckedReadAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (int, int, bool) {
-	if ctx == 0 || fd < 0 || uintptr(fd) > uintptr(^uint32(0)>>1) || size < 0 {
+	if !pollCoroCheckedAttemptEligible(ctx, fd, size, 'r') {
 		return 0, 0, false
 	}
-	packed := llgoCoroPollCheckedReadAttemptPackedV1(ctx, int32(fd), address, uintptr(size))
-	if packed&coroPollAttemptNotTakenV1 != 0 {
-		return 0, 0, false
-	}
-	return int(int32(uint32(packed))), int(uint32(packed >> 32)), true
+	return pollCoroReadAttemptV1(int32(fd), address, uintptr(size))
 }
 
 //llgo:managedlink
 //go:linkname poll_runtime_pollCheckedWriteAttempt internal/poll.runtime_pollCheckedWriteAttempt
 func poll_runtime_pollCheckedWriteAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (int, int, bool) {
-	if ctx == 0 || fd < 0 || uintptr(fd) > uintptr(^uint32(0)>>1) || size < 0 {
+	if !pollCoroCheckedAttemptEligible(ctx, fd, size, 'w') {
 		return 0, 0, false
 	}
-	packed := llgoCoroPollCheckedWriteAttemptPackedV1(ctx, int32(fd), address, uintptr(size))
-	if packed&coroPollAttemptNotTakenV1 != 0 {
-		return 0, 0, false
-	}
-	return int(int32(uint32(packed))), int(uint32(packed >> 32)), true
+	return pollCoroWriteAttemptV1(int32(fd), address, uintptr(size))
 }
 
 //llgo:managedlink

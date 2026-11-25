@@ -426,14 +426,29 @@ func preflightPNeutralRunnableBatch(
 // already audited every candidate's frame chain. A later asynchronous preempt
 // request may shorten the batch, but it cannot invalidate an earlier durable
 // publication.
+func publishPreparedPNeutralRunnableSingle(
+	mailbox *RunnableTransferMailbox,
+	source *P,
+	candidate *G,
+) (RunnableTransferID, bool) {
+	if mailbox == nil || mailbox.magic != runnableTransferMailboxMagic || mailbox.owner == nil ||
+		source == nil || source == mailbox.owner || candidate == nil ||
+		!tryRunnableTransferGate(mailbox) {
+		return RunnableTransferID{}, false
+	}
+	id, published := publishPNeutralRunnableLocked(mailbox, source, candidate)
+	releaseRunnableTransferGate(mailbox)
+	return id, published
+}
+
 func publishPreparedPNeutralRunnableBatch(
 	mailbox *RunnableTransferMailbox,
 	source *P,
-	candidates []*G,
+	candidates *[RunnableTransferMailboxCapacity]*G,
+	prepared uint32,
 ) (first RunnableTransferID, count uint32) {
-	prepared := uint32(len(candidates))
 	if mailbox == nil || mailbox.magic != runnableTransferMailboxMagic || mailbox.owner == nil ||
-		source == nil || source == mailbox.owner ||
+		source == nil || source == mailbox.owner || candidates == nil ||
 		prepared == 0 || prepared > RunnableTransferMailboxCapacity ||
 		!tryRunnableTransferGate(mailbox) {
 		return RunnableTransferID{}, 0
@@ -513,7 +528,7 @@ func PublishPNeutralRunnableBatch(
 	if prepared == 0 {
 		return RunnableTransferID{}, 0
 	}
-	return publishPreparedPNeutralRunnableBatch(mailbox, source, candidates[:prepared])
+	return publishPreparedPNeutralRunnableBatch(mailbox, source, &candidates, prepared)
 }
 
 func importPNeutralRunnableLocked(mailbox *RunnableTransferMailbox, owner *P, id RunnableTransferID) bool {

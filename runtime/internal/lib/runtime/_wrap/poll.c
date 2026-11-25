@@ -323,64 +323,6 @@ static size_t llgo_runtime_poll_bounded_size_v1(uintptr_t size)
     return (size_t)size;
 }
 
-#define LLGO_RUNTIME_POLL_ATTEMPT_NOT_TAKEN_V1 (UINT64_C(1) << 63)
-
-uint64_t __llgo_runtime_poll_checked_read_attempt_v1(
-    uintptr_t context,
-    int32_t fd,
-    void *address,
-    uintptr_t size)
-{
-    const struct llgo_runtime_poll_desc_v1 *desc =
-        (const struct llgo_runtime_poll_desc_v1 *)context;
-    if (desc == NULL || desc->inline_stream == 0 || desc->fd != fd ||
-        atomic_load_explicit(&desc->closing, memory_order_acquire) != 0 ||
-        atomic_load_explicit(&desc->read_deadline, memory_order_acquire) != 0) {
-        return LLGO_RUNTIME_POLL_ATTEMPT_NOT_TAKEN_V1;
-    }
-    int *ep = &errno;
-    int saved_errno = *ep;
-    ssize_t result = recv(
-        (int)fd,
-        address,
-        llgo_runtime_poll_bounded_size_v1(size),
-        MSG_DONTWAIT);
-    int error = 0;
-    if (result < 0) {
-        error = *ep;
-        *ep = saved_errno;
-    }
-    return llgo_runtime_poll_pack_io_attempt_v1(result, error);
-}
-
-uint64_t __llgo_runtime_poll_checked_write_attempt_v1(
-    uintptr_t context,
-    int32_t fd,
-    void *address,
-    uintptr_t size)
-{
-    const struct llgo_runtime_poll_desc_v1 *desc =
-        (const struct llgo_runtime_poll_desc_v1 *)context;
-    if (desc == NULL || desc->inline_stream == 0 || desc->fd != fd ||
-        atomic_load_explicit(&desc->closing, memory_order_acquire) != 0 ||
-        atomic_load_explicit(&desc->write_deadline, memory_order_acquire) != 0) {
-        return LLGO_RUNTIME_POLL_ATTEMPT_NOT_TAKEN_V1;
-    }
-    int *ep = &errno;
-    int saved_errno = *ep;
-    ssize_t result = send(
-        (int)fd,
-        address,
-        llgo_runtime_poll_bounded_size_v1(size),
-        MSG_DONTWAIT);
-    int error = 0;
-    if (result < 0) {
-        error = *ep;
-        *ep = saved_errno;
-    }
-    return llgo_runtime_poll_pack_io_attempt_v1(result, error);
-}
-
 uint64_t __llgo_runtime_poll_read_attempt_v1(
     int32_t fd,
     void *address,

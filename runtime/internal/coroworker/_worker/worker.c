@@ -884,9 +884,8 @@ static bool llgo_coro_worker_call_array_v1(
     sigjmp_buf landing;
     struct llgo_coro_worker_fault_tls_v1 scope;
     struct llgo_coro_worker_fault_tls_v1 *fault_state = &scope;
-    struct llgo_coro_worker_fault_thread_v1 *thread = NULL;
+    struct llgo_coro_worker_fault_thread_v1 *thread = &llgo_coro_worker_fault_thread_v1;
     if (trace_target != 0) {
-        thread = &llgo_coro_worker_fault_thread_v1;
         if (thread->active != NULL) {
             return false;
         }
