@@ -1055,10 +1055,12 @@ func TestCoroPureSSANilComparisonsFollowGoSemantics(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
 import "unsafe"
 func Interface(value error) bool { return value != nil }
+func InterfaceNilConst() bool { return error(nil) != nil }
+func AnyNilConst() bool { return any(nil) == nil }
 func Slice(value []byte) bool { return value == nil }
 func Unsafe(value unsafe.Pointer) bool { return value != nil }
 `)
-	for _, name := range []string{"Interface", "Slice", "Unsafe"} {
+	for _, name := range []string{"Interface", "InterfaceNilConst", "AnyNilConst", "Slice", "Unsafe"} {
 		fn := ssaPkg.Func(name)
 		audit := &coroPhysicalPureSSAAudit{fn: fn, reachableBlocks: coroPhysicalConstantReachableBlocks(fn)}
 		found := false
@@ -1076,6 +1078,68 @@ func Unsafe(value unsafe.Pointer) bool { return value != nil }
 		}
 		if !found {
 			t.Fatalf("%s fixture has no binary nil comparison", name)
+		}
+	}
+}
+
+func TestCoroPureSSATypedNilInterfaceConstantComparisonAcceptsElidedHelpers(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	ssaPkg, _, files := buildGoSSAPkg(t, `package foo
+func Child() {}
+func CompareNilInterfaces() bool {
+	Child()
+	return error(nil) != nil || any(nil) == nil
+}
+`)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	fn := ssaPkg.Func("CompareNilInterfaces")
+	child := ssaPkg.Func("Child")
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+		{Function: fn, Demand: coro.AsyncDemand},
+	}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: 1,
+		ClassifyFunction: func(f *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if f == child {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatalf("typed nil-interface constant comparison failed coroutine lowering: %v", err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify module: %v", err)
+	}
+	ir := requireCoroPhysicalFunction(t, module, "foo.CompareNilInterfaces").String()
+	for _, forbidden := range []string{"EfaceEqual", "IfaceType"} {
+		if strings.Contains(ir, forbidden) {
+			t.Fatalf("typed nil-interface comparison emitted forbidden helper %q:\n%s", forbidden, ir)
 		}
 	}
 }

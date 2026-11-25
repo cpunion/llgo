@@ -28,7 +28,9 @@ func TestCoroInterfaceNilComparisonElidesOnlyExactHelpers(t *testing.T) {
 	pkg, _, _ := buildGoSSAPkg(t, `package foo
 func ErrorNil(value error) bool { return value == nil }
 func ErrorNilReverse(value error) bool { return nil != value }
+func ErrorNilConst() bool { return error(nil) != nil }
 func AnyNil(value any) bool { return value != nil }
+func AnyNilConst() bool { return any(nil) == nil }
 func Dynamic(left,right any) bool { return left == right }
 func Slice(value []byte) bool { return value == nil }
 func Generic[T ~*int](value T) bool { return value == nil }
@@ -36,7 +38,16 @@ func Generic[T ~*int](value T) bool { return value == nil }
 	for _, test := range []struct {
 		name string
 		want bool
-	}{{"ErrorNil", true}, {"ErrorNilReverse", true}, {"AnyNil", true}, {"Dynamic", false}, {"Slice", false}, {"Generic", false}} {
+	}{
+		{"ErrorNil", true},
+		{"ErrorNilReverse", true},
+		{"ErrorNilConst", true},
+		{"AnyNil", true},
+		{"AnyNilConst", true},
+		{"Dynamic", false},
+		{"Slice", false},
+		{"Generic", false},
+	} {
 		t.Run(test.name, func(t *testing.T) {
 			fn := pkg.Func(test.name)
 			found := false
