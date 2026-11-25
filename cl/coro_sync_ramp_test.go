@@ -892,3 +892,134 @@ func Root(a *Addr) (int, bool) {
 		t.Fatalf("Addr.encode ramp=%+v, want ResumeSlow", ramp)
 	}
 }
+
+func TestCoroSyncRampBoxedSingleAwaitAndDemandBoxHelper(t *testing.T) {
+	// Verify that a SingleAwait caller whose awaited TailSlow callee returns
+	// results uses the demand-emitted .box helper (and supports dynamic s[low:]
+	// with bounds checking), while an unreferenced TailSlow callee emits no .box.
+	program := newEmissionTestProgram()
+	program.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	demoPkg := program.addPackage(t, "demo", `package demo
+import _ "unsafe"
+
+//go:linkname yieldNow llgo.coroYield
+func yieldNow()
+
+func slowWrite(b []byte) (int, int) {
+	yieldNow()
+	return len(b), 0
+}
+
+func tryWrite(b []byte) (int, int, bool) {
+	if len(b) > 0 && b[0] == 1 {
+		return len(b), 0, true
+	}
+	return 0, 0, false
+}
+
+func WriteUsed(b []byte) (int, int) {
+	if n, e, ok := tryWrite(b); ok {
+		return n, e
+	}
+	return slowWrite(b)
+}
+
+func WriteUnused(b []byte) (int, int) {
+	if n, e, ok := tryWrite(b); ok {
+		return n, e
+	}
+	return slowWrite(b)
+}
+
+func WriteFull(b []byte) int {
+	total := 0
+	for len(b) != 0 {
+		n, e := WriteUsed(b)
+		if e != 0 {
+			return -1
+		}
+		total += n
+		b = b[n:]
+	}
+	return total
+}
+
+func Root(b []byte) int {
+	a := WriteFull(b)
+	c, _ := WriteUnused(b)
+	return a + c
+}
+`)
+	program.ssa.Build()
+	inputs := []EmissionPackage{{SSA: demoPkg.ssa, Files: []*ast.File{demoPkg.file}}}
+	prog, compilation, _, pkg := compileCoroSyncRampTestPackages(
+		t, inputs, demoPkg.ssa.Func("Root"), 0, coro.DynamicUnknownOnly,
+	)
+	defer prog.Dispose()
+
+	usedRamp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("WriteUsed"))
+	if usedRamp == nil || usedRamp.kind != coroSyncRampTailSlow || !usedRamp.hasBoxHelper {
+		t.Fatalf("WriteUsed ramp=%+v, want TailSlow with demand-marked hasBoxHelper", usedRamp)
+	}
+	unusedRamp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("WriteUnused"))
+	if unusedRamp == nil || unusedRamp.kind != coroSyncRampTailSlow || unusedRamp.hasBoxHelper {
+		t.Fatalf("WriteUnused ramp=%+v, want TailSlow without unreferenced .box helper", unusedRamp)
+	}
+	fullRamp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("WriteFull"))
+	if fullRamp == nil || fullRamp.kind != coroSyncRampSingleAwait || !fullRamp.singleAwaitBoxed {
+		t.Fatalf("WriteFull ramp=%+v, want boxed SingleAwait", fullRamp)
+	}
+
+	irText := pkg.Module().String()
+	if !strings.Contains(irText, `"demo.WriteUsed$coro.box"`) {
+		t.Fatalf("module did not emit demand-marked WriteUsed$coro.box:\n%s", irText)
+	}
+	if strings.Contains(irText, `"demo.WriteUnused$coro.box"`) {
+		t.Fatalf("module unexpectedly emitted unreferenced WriteUnused$coro.box")
+	}
+}
+
+func TestCoroSyncRampExcludesDeclaredInitAndWeightedSpawnPreempt(t *testing.T) {
+	// Declared init#1 must never be split into a TailSlow sync ramp, and spawn
+	// post-safepoints must charge coroSpawnPreemptWeight against the countdown.
+	program := newEmissionTestProgram()
+	program.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	demoPkg := program.addPackage(t, "demo", `package demo
+import _ "unsafe"
+
+//go:linkname yieldNow llgo.coroYield
+func yieldNow()
+
+var sink int
+
+func plain() { sink++ }
+func worker() { yieldNow() }
+
+func init() {
+	plain()
+	worker()
+}
+
+func SpawnMany(n int) {
+	for i := 0; i < n; i++ {
+		go worker()
+	}
+}
+`)
+	program.ssa.Build()
+	inputs := []EmissionPackage{{SSA: demoPkg.ssa, Files: []*ast.File{demoPkg.file}}}
+	prog, compilation, _, pkg := compileCoroSyncRampTestPackages(
+		t, inputs, demoPkg.ssa.Func("SpawnMany"), 0, coro.DynamicUnknownOnly,
+	)
+	defer prog.Dispose()
+
+	if initFn := demoPkg.ssa.Func("init#1"); initFn != nil {
+		if ramp := sealedSyncRampForTest(t, compilation, initFn); ramp != nil {
+			t.Fatalf("declared init#1 unexpectedly received sync ramp %+v", ramp)
+		}
+	}
+	spawnIR := requireCoroPhysicalFunction(t, pkg.Module(), "demo.SpawnMany").String()
+	if !strings.Contains(spawnIR, "sub i32 ") || !strings.Contains(spawnIR, ", 16") {
+		t.Fatalf("SpawnMany did not emit weighted spawn preemption decrement (16):\n%s", spawnIR)
+	}
+}

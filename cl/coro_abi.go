@@ -228,6 +228,13 @@ const coroPreemptInstructionBudget = 64
 // activation resets it, so it is not live across a scheduler-visible suspend.
 const coroPreemptCheckpointStride uint64 = 2048
 
+// coroSpawnPreemptWeight charges a goroutine spawn more heavily against the
+// frame-local safepoint countdown than an ordinary loop backedge so tight
+// spawn bursts yield within ~120 goroutines (keeping live bursts inside the
+// process frame/task cache while delivering full mailbox batches to peer Ps)
+// without adding a runtime call to every spawn.
+const coroSpawnPreemptWeight uint64 = 16
+
 type coroPhysicalABI struct {
 	version                       uint32
 	hash                          [16]byte
@@ -1312,6 +1319,10 @@ func (c *coroBodyContext) suspendForChild(b llssa.Builder, line llssa.Expr) uint
 }
 
 func (c *coroBodyContext) pollAndSuspendForPreempt(b llssa.Builder) uint32 {
+	return c.pollAndSuspendForPreemptWithWeight(b, 1)
+}
+
+func (c *coroBodyContext) pollAndSuspendForPreemptWithWeight(b llssa.Builder, weight uint64) uint32 {
 	if c.abi.version < coroPhysicalABIVersionV1 || c.preemptPoll.IsNil() || c.yieldPrepare.IsNil() {
 		panic("coroutine preemption requires PhysicalABIV1 poll and scheduler handoff hooks")
 	}
@@ -1319,9 +1330,9 @@ func (c *coroBodyContext) pollAndSuspendForPreempt(b llssa.Builder) uint32 {
 		panic("coroutine preemption has no private countdown")
 	}
 	remaining := b.Load(c.preemptCountdown)
-	one := b.Prog.IntVal(1, b.Prog.Uint32())
-	b.Store(c.preemptCountdown, b.BinOp(token.SUB, remaining, one))
-	due := b.BinOp(token.LEQ, remaining, one)
+	step := b.Prog.IntVal(weight, b.Prog.Uint32())
+	b.Store(c.preemptCountdown, b.BinOp(token.SUB, remaining, step))
+	due := b.BinOp(token.LEQ, remaining, step)
 	stateID := c.nextState
 	// Only the stride boundary reaches a potentially suspending block. The hot
 	// edge performs one frame-local decrement and no call, so CoroSplit/O2 can

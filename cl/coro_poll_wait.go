@@ -71,18 +71,36 @@ func (p *context) requireCoroPollWaitBody(b llssa.Builder) *coroBodyContext {
 // a compiler-owned PollParkV2 transaction. Only the copied scalar descriptor
 // identity crosses the stack cut. The opaque source, WaitSet, lease, and
 // cancellation state stay in fixed typed storage that LLVM spills into the
-// stackless coroutine frame.
-func (p *context) compileCoroPollWait(b llssa.Builder, args []ssa.Value) llssa.Expr {
+// stackless coroutine frame. When precompiled is non-nil it lowers an inlined
+// direct wrapper using a reusable entry-block frame slot.
+func (p *context) compileCoroPollWait(b llssa.Builder, args []ssa.Value, precompiled []llssa.Expr) llssa.Expr {
 	body := p.requireCoroPollWaitBody(b)
-	if len(args) != 4 {
-		panic("llgo.coroPollWait requires exactly (uintptr, int32, uint32, int64) arguments")
+	var context, fd, interest, deadline llssa.Expr
+	reusableSlot := len(precompiled) != 0
+	if reusableSlot {
+		if len(precompiled) != 4 {
+			panic("llgo.coroPollWait requires exactly (uintptr, int32, uint32, int64) arguments")
+		}
+		context, fd, interest, deadline = precompiled[0], precompiled[1], precompiled[2], precompiled[3]
+	} else {
+		if len(args) != 4 {
+			panic("llgo.coroPollWait requires exactly (uintptr, int32, uint32, int64) arguments")
+		}
+		context = p.compileValue(b, args[0])
+		fd = p.compileValue(b, args[1])
+		interest = p.compileValue(b, args[2])
+		deadline = p.compileValue(b, args[3])
 	}
-	context := p.compileValue(b, args[0])
-	fd := p.compileValue(b, args[1])
-	interest := p.compileValue(b, args[2])
-	deadline := p.compileValue(b, args[3])
-	state := b.Alloc(p.prog.RuntimeType("CoroPollParkV2"), false)
-	result := b.Alloc(p.prog.Uint32(), false)
+	stateType := p.prog.RuntimeType("CoroPollParkV2")
+	var state, result llssa.Expr
+	if reusableSlot {
+		state = p.coroFrameAlloca(stateType)
+		b.StoreKnownNonNil(state, p.prog.Zero(stateType))
+		result = p.coroFrameAlloca(p.prog.Uint32())
+	} else {
+		state = b.Alloc(stateType, false)
+		result = b.Alloc(p.prog.Uint32(), false)
+	}
 
 	body.emitCoroParkOperation(p, b, coroParkOperation{
 		prepare: func(active llssa.Builder, _, _ uint32) llssa.Expr {
@@ -121,4 +139,70 @@ func (p *context) compileCoroPollWait(b llssa.Builder, args []ssa.Value) llssa.E
 		shutdown: coroPollResumeShutdownV2,
 	})
 	return b.Load(result)
+}
+
+// canInlineCoroPollWaitWrapper reports whether callee is a single-block
+// pass-through wrapper (`return llgo.coroPollWait(p0, p1, p2, p3)`, or a thin
+// forwarding wrapper to one) that can be lowered directly into the caller's
+// ParkABIV2 coroutine frame without allocating intermediate child frames.
+func (p *context) canInlineCoroPollWaitWrapper(body *coroBodyContext, b llssa.Builder, callee *ssa.Function) bool {
+	plan := p.coroEmissionPlan()
+	if body == nil || plan == nil || plan.frameRetentionABI != CoroFrameRetentionParkABIV2 ||
+		b.Func != p.fn || body.abi.version < coroPhysicalABIVersionV1 ||
+		body.completion == nil || body.finalSuspend == nil ||
+		body.unsupportedRunDecision == nil || body.cancelRunDecision == nil {
+		return false
+	}
+	if p.emissionUniverse == nil || p.emissionUniverse.coroProgramIR == nil {
+		return false
+	}
+	ir := p.emissionUniverse.coroProgramIR
+	cur := callee
+	for depth := 0; depth < 3; depth++ {
+		if cur == nil || len(cur.Blocks) != 1 || len(cur.Params) != 4 ||
+			len(cur.FreeVars) != 0 || cur.Recover != nil || hasNoInlineDirective(cur) {
+			return false
+		}
+		var callInstr *ssa.Call
+		var retInstr *ssa.Return
+		for _, ins := range cur.Blocks[0].Instrs {
+			switch v := ins.(type) {
+			case *ssa.DebugRef:
+				continue
+			case *ssa.Call:
+				if callInstr != nil || len(v.Call.Args) != 4 {
+					return false
+				}
+				for i := 0; i < 4; i++ {
+					if v.Call.Args[i] != cur.Params[i] {
+						return false
+					}
+				}
+				callInstr = v
+			case *ssa.Return:
+				retInstr = v
+			default:
+				return false
+			}
+		}
+		if callInstr == nil || retInstr == nil || len(retInstr.Results) != 1 || retInstr.Results[0] != callInstr {
+			return false
+		}
+		frozen, found, err := ir.callSitePlan(callInstr)
+		if err != nil || !found {
+			return false
+		}
+		if frozen.plan.Intrinsic && frozen.opcode == llgoCoroPollWait {
+			return true
+		}
+		next := callInstr.Call.StaticCallee()
+		if next == nil || next == cur {
+			return false
+		}
+		if canonical, ok := p.emissionUniverse.Resolve(next); ok && canonical != nil {
+			next = canonical
+		}
+		cur = next
+	}
+	return false
 }

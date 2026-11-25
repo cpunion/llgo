@@ -832,7 +832,19 @@ func (c *Compilation) preflightCoroPlan() error {
 				common.Method.Pkg() != nil && common.Method.Pkg().Path() == "reflect" &&
 				common.Method.Name() == "MethodByName"
 		}
-		planCoroPhysicalSyncRamps(physicalStage, plan, universe.coroProgramIR, universe.Resolve, recoverCheck, reflectCheck)
+		hasAllocZ := true
+		if universe.CompleteRuntimeABI() {
+			hasAllocZ = false
+			if rtPkg := universe.byPath[llssa.PkgRuntime]; rtPkg != nil {
+				if allocZ := universe.canonicalAlias(rtPkg.ssa.Func("AllocZ")); allocZ != nil {
+					if allocPlan, ok := plan.FunctionPlan(allocZ); ok &&
+						(allocPlan.Emission == coro.EmitPlain || plan.HasRawPlainVariant(allocZ)) {
+						hasAllocZ = true
+					}
+				}
+			}
+		}
+		planCoroPhysicalSyncRamps(physicalStage, plan, universe.coroProgramIR, universe.Resolve, recoverCheck, reflectCheck, hasAllocZ)
 		if err := universe.coroProgramIR.commitPhysicalFunctionPlans(physicalStage, physicalExpected); err != nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine physical preflight: commit ProgramIR: %w", err)
 			return
