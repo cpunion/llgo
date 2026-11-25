@@ -365,8 +365,7 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 	}
 	ringOK := returnRequested &&
 		coro.ExecutorRequestAccepted(request) &&
-		(!coroNativeFleetRequestNeedsRingV1(boundary.domain, request) ||
-			boundary.domain.doorbell.Ring())
+		boundary.domain.doorbell.Ring()
 	if !returnRequested && !alreadyReturned {
 		coroRuntimeAbort("native direct replacement return state invalid")
 	}
