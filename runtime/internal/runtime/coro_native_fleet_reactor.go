@@ -374,7 +374,15 @@ func coroNativeFleetTryFastPollCompletionV1(handle coro.ExecutorFleetHandle) (re
 	if scanLimit == 0 {
 		return false, true
 	}
-	physical, built := coroNativeFleetBuildPhysicalWaitV1(handle, 0, false)
+	deadline, hasDeadline := int64(0), false
+	if coro.PollOperationHasDeadline(poll) {
+		var deadlineOK bool
+		deadline, hasDeadline, deadlineOK = coro.NextExecutorTimerDeadline(domain.driverOwnerV1())
+		if !deadlineOK || deadline < 0 || !hasDeadline && deadline != 0 {
+			return false, false
+		}
+	}
+	physical, built := coroNativeFleetBuildPhysicalWaitV1(handle, deadline, hasDeadline)
 	if !built || physical.count <= 1 {
 		return false, built
 	}

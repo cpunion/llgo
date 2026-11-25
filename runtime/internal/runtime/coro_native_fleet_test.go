@@ -57,6 +57,7 @@ type coroNativeFleetTestTask struct {
 
 	pollMode      bool
 	pollFD        int32
+	pollDeadline  int64
 	pollDriver    *coro.ExecutorDriver
 	pollWait      coro.WaitSetRecord
 	pollTicket    coro.ParkTicket
@@ -161,7 +162,7 @@ func testCoroNativeFleetHandleResume(handle unsafe.Pointer) {
 				901,
 				task.pollFD,
 				coro.PollInterestRead,
-				0,
+				task.pollDeadline,
 			)
 			if !ok {
 				failCoroNativeFleetRunTestTaskV1(task, "prepare routed poll park failed")
@@ -1090,5 +1091,109 @@ func TestCoroNativeFleetQuiescentMaskTracksStandbySleepAndWake(t *testing.T) {
 	}
 	if coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)&peerBit != 0 {
 		t.Fatal("woken peer must clear its quiescent bit")
+	}
+}
+
+func TestCoroNativeFleetTryFastPollCompletionSupportsPollDeadline(t *testing.T) {
+	saved := coroNativeFleetV1State
+	savedPoll := coroNativeFleetPollSetsV1
+	savedMask := coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)
+	coroNativeFleetV1State = coroNativeFleetStateV1{}
+	coroNativeFleetPollSetsV1 = [coroNativeFleetDomainCapacityV1]unsafe.Pointer{}
+	coroNativeAtomicStoreV1(&coroNativeFleetQuiescentMaskV1, 0)
+	t.Cleanup(func() {
+		for i := uint32(0); i < coroNativeFleetV1State.domainCount; i++ {
+			if !coroNativeFleetV1State.domains[i].doorbell.Close() {
+				t.Error("close test doorbell")
+			}
+		}
+		coroNativeFleetV1State, coroNativeFleetPollSetsV1 = saved, savedPoll
+		coroNativeAtomicStoreV1(&coroNativeFleetQuiescentMaskV1, savedMask)
+	})
+	if !coroNativeFleetStartStateV1(&coroNativeFleetV1State, 2) {
+		t.Fatal("start two routes")
+	}
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readPipe.Close()
+	defer writePipe.Close()
+
+	domain := &coroNativeFleetV1State.domains[1]
+	handle := domain.handle
+	task := newCoroNativeFleetTestTask(t, &domain.p)
+	task.pollMode = true
+	task.pollFD = int32(readPipe.Fd())
+	task.pollDeadline = 5_000_000_000
+	task.pollDriver = &domain.driver
+	coroNativeFleetRunTestV1.Lock()
+	if coroNativeFleetRunTestV1.tasks == nil {
+		coroNativeFleetRunTestV1.tasks = make(map[unsafe.Pointer]*coroNativeFleetTestTask)
+	}
+	coroNativeFleetRunTestV1.tasks[task.handle] = task
+	coroNativeFleetRunTestV1.Unlock()
+	t.Cleanup(func() {
+		coroNativeFleetRunTestV1.Lock()
+		delete(coroNativeFleetRunTestV1.tasks, task.handle)
+		coroNativeFleetRunTestV1.Unlock()
+	})
+	epoch, ok := coroNativeFleetBeginOwnerEpochV1(handle)
+	if !ok {
+		t.Fatal("begin peer owner epoch")
+	}
+	parked := false
+	for attempt := 0; attempt < 64; attempt++ {
+		result := coroNativeFleetRunOwnerEpochV1(handle, epoch, 20, 8)
+		if result.stop == coroRunIdleV1 {
+			parked = true
+			break
+		}
+		if result.stop != coroRunSliceBudgetV1 {
+			t.Fatalf("run peer to deadline poll idle = %+v", result)
+		}
+	}
+	if !parked || !task.pollPrepared {
+		t.Fatalf("peer task did not park on deadline poll (parked=%t prepared=%t)", parked, task.pollPrepared)
+	}
+	// Non-ready fd with an active deadline must succeed with ready=false, ok=true
+	// instead of failing physical-wait deadline validation.
+	ready, probeOK := coroNativeFleetTryFastPollCompletionV1(handle)
+	if !probeOK || ready {
+		t.Fatalf("TryFastPollCompletion(pending deadline) = (ready=%t, ok=%t), want (false, true)", ready, probeOK)
+	}
+	// Once the fd becomes readable, the fast probe must post readiness cleanly.
+	if _, err := writePipe.Write([]byte{'x'}); err != nil {
+		t.Fatal(err)
+	}
+	ready, probeOK = coroNativeFleetTryFastPollCompletionV1(handle)
+	if !probeOK || !ready {
+		t.Fatalf("TryFastPollCompletion(ready deadline) = (ready=%t, ok=%t), want (true, true)", ready, probeOK)
+	}
+	completed := false
+	for attempt := 0; attempt < 64; attempt++ {
+		result := coroNativeFleetRunOwnerEpochV1(handle, epoch, 21, 8)
+		switch result.stop {
+		case coroRunSliceBudgetV1:
+			continue
+		case coroRunDestroyCommitV1:
+			action, committed := coroNativeFleetCommitOwnerDestroyV1(handle, epoch, result.g, result.action)
+			if !committed || action.Kind != coro.ActionComplete || action.Handle != nil {
+				t.Fatalf("commit deadline poll completion = (%+v, %t)", action, committed)
+			}
+			completed = true
+		default:
+			t.Fatalf("resume peer after fast poll probe = %+v", result)
+		}
+		if completed {
+			break
+		}
+	}
+	if !completed || !task.pollFinished || !task.complete || !task.destroyed || task.runFailure != "" {
+		t.Fatalf("deadline poll task did not complete (completed=%t finished=%t complete=%t destroyed=%t failure=%q)",
+			completed, task.pollFinished, task.complete, task.destroyed, task.runFailure)
+	}
+	if !coroNativeFleetEnterOwnerCompatibilityV1(handle, epoch) || !coroNativeFleetFinishOwnerEpochV1(handle, epoch) {
+		t.Fatal("finish peer owner epoch")
 	}
 }

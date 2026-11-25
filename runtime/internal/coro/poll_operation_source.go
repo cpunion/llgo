@@ -204,6 +204,12 @@ func PollOperationScanLimit(source *PollOperationSource) (uint32, bool) {
 	return source.scanLimit, validSourceScanLimit(source.scanLimit, capacity)
 }
 
+// PollOperationHasDeadline reports whether any active poll slot currently
+// carries a non-zero monotonic deadline.
+func PollOperationHasDeadline(source *PollOperationSource) bool {
+	return source != nil && source.deadlineCount != 0
+}
+
 func pollOperationSlotAt(source *PollOperationSource, index uint32) (*pollOperationSlot, bool) {
 	capacity := PollOperationConfiguredCapacity(source)
 	if index >= capacity {

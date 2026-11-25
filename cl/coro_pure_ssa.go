@@ -2560,6 +2560,20 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 		return a.requireNoRuntimeHelpers(op)
 	}
 	if (op.Op == token.EQL || op.Op == token.NEQ) &&
+		(coroInterfaceType(a.typeOf(op.X.Type())) && coroFrameRetentionNilConst(op.Y) ||
+			coroInterfaceType(a.typeOf(op.Y.Type())) && coroFrameRetentionNilConst(op.X)) {
+		if err := validateCoroPhysicalSSAValueType(a.typeOf(op.Type())); err != nil {
+			return "empty-interface nil comparison has unsupported result type: " + err.Error()
+		}
+		// Physical codegen compares the empty-interface type word directly. The
+		// ordinary helper inventory still records LLSSA's EfaceEqual recipe (and
+		// permits IfaceType for future interface normalization), but neither call
+		// is emitted by this exact instruction. Checking this before the generic
+		// nil-const branch also covers typed nil-interface constant comparisons
+		// such as nil:Iface != nil:Iface.
+		return a.requireOnlyCompilerElidedRuntimeHelpers(op, "EfaceEqual", "IfaceType")
+	}
+	if (op.Op == token.EQL || op.Op == token.NEQ) &&
 		coroFrameRetentionNilConst(op.X) && coroFrameRetentionNilConst(op.Y) {
 		if err := validateCoroPhysicalSSAValueType(a.typeOf(op.Type())); err != nil {
 			return "nil constant equality has unsupported result type: " + err.Error()
@@ -2587,18 +2601,6 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 			// must remain a demanded no-suspend/no-unwind body in the frozen plan.
 			return a.requireFrozenExactRuntimeHelper(op, helper)
 		}
-	}
-	if (op.Op == token.EQL || op.Op == token.NEQ) &&
-		(coroInterfaceType(a.typeOf(op.X.Type())) && coroFrameRetentionNilConst(op.Y) ||
-			coroInterfaceType(a.typeOf(op.Y.Type())) && coroFrameRetentionNilConst(op.X)) {
-		if err := validateCoroPhysicalSSAValueType(a.typeOf(op.Type())); err != nil {
-			return "empty-interface nil comparison has unsupported result type: " + err.Error()
-		}
-		// Physical codegen compares the empty-interface type word directly. The
-		// ordinary helper inventory still records LLSSA's EfaceEqual recipe (and
-		// permits IfaceType for future interface normalization), but neither call
-		// is emitted by this exact instruction.
-		return a.requireOnlyCompilerElidedRuntimeHelpers(op, "EfaceEqual", "IfaceType")
 	}
 	if op.Op == token.EQL || op.Op == token.NEQ {
 		leftInterface, leftOK := types.Unalias(a.typeOf(op.X.Type())).Underlying().(*types.Interface)
