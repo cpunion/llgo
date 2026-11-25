@@ -46,6 +46,7 @@ struct llgo_runtime_poll_desc_v1 {
 
 #define LLGO_RUNTIME_POLL_DESC_CLOSING_V1 (UINT64_C(1) << 32)
 #define LLGO_RUNTIME_POLL_DESC_INLINE_STREAM_V1 (UINT64_C(1) << 33)
+#define LLGO_RUNTIME_POLL_DESC_HAS_DEADLINE_V1 (UINT64_C(1) << 34)
 
 static uint64_t llgo_runtime_poll_desc_pack_state_v1(
     const struct llgo_runtime_poll_desc_v1 *desc,
@@ -110,15 +111,15 @@ int64_t __llgo_runtime_poll_desc_deadline_v1(
         return 0;
     }
     if (mode == 'r') {
-        return atomic_load_explicit(&desc->read_deadline, memory_order_seq_cst);
+        return atomic_load_explicit(&desc->read_deadline, memory_order_acquire);
     }
     if (mode == 'w') {
-        return atomic_load_explicit(&desc->write_deadline, memory_order_seq_cst);
+        return atomic_load_explicit(&desc->write_deadline, memory_order_acquire);
     }
     int64_t read_deadline =
-        atomic_load_explicit(&desc->read_deadline, memory_order_seq_cst);
+        atomic_load_explicit(&desc->read_deadline, memory_order_acquire);
     int64_t write_deadline =
-        atomic_load_explicit(&desc->write_deadline, memory_order_seq_cst);
+        atomic_load_explicit(&desc->write_deadline, memory_order_acquire);
     if (read_deadline == 0) {
         return write_deadline;
     }
@@ -126,6 +127,34 @@ int64_t __llgo_runtime_poll_desc_deadline_v1(
         return read_deadline;
     }
     return write_deadline;
+}
+
+/*
+ * Combined state + deadline-presence snapshot for poll wait preparation so the
+ * common zero-deadline EAGAIN -> park path crosses Go->C once by value without
+ * passing a pointer out-parameter.
+ */
+uint64_t __llgo_runtime_poll_desc_prepare_wait_v1(
+    uintptr_t context,
+    int32_t mode)
+{
+    const struct llgo_runtime_poll_desc_v1 *desc =
+        (const struct llgo_runtime_poll_desc_v1 *)context;
+    if (desc == NULL) {
+        return LLGO_RUNTIME_POLL_DESC_CLOSING_V1;
+    }
+    uint32_t closing = atomic_load_explicit(&desc->closing, memory_order_acquire);
+    int64_t deadline = 0;
+    if (mode == 'r') {
+        deadline = atomic_load_explicit(&desc->read_deadline, memory_order_acquire);
+    } else if (mode == 'w') {
+        deadline = atomic_load_explicit(&desc->write_deadline, memory_order_acquire);
+    }
+    uint64_t state = llgo_runtime_poll_desc_pack_state_v1(desc, closing);
+    if (deadline != 0) {
+        state |= LLGO_RUNTIME_POLL_DESC_HAS_DEADLINE_V1;
+    }
+    return state;
 }
 
 void __llgo_runtime_poll_desc_set_deadline_v1(

@@ -59,6 +59,7 @@ func (m *channelMutex) Lock() {
 		// The atomic retry is deliberately the only wait operation. The holder
 		// cannot suspend or call scheduler code, so progress never depends on
 		// waking a coroutine parked behind this gate.
+		channelMutexSpinUntilIdle(&m.state)
 	}
 }
 

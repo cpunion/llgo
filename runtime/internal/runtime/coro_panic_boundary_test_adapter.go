@@ -73,6 +73,14 @@ func promoteSignalFaultPC() {}
 
 var coroPanicBoundaryTestSignalDepth uint32
 
+func signalFaultBoundaryEnterM(*m) bool {
+	return signalFaultBoundaryEnter()
+}
+
+func signalFaultBoundaryExitM(*m) bool {
+	return signalFaultBoundaryExit()
+}
+
 func signalFaultBoundaryEnter() bool {
 	coroPanicBoundaryTestSignalDepth++
 	return true

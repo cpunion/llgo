@@ -99,3 +99,7 @@ func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivati
 func coroReleaseRuntimeContext(task *coro.G, local unsafe.Pointer) bool {
 	return task != nil && local != nil
 }
+
+func coroReleaseRuntimeContextAtRoute(task *coro.G, local unsafe.Pointer, _ uint16) bool {
+	return coroReleaseRuntimeContext(task, local)
+}

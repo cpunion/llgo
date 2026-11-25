@@ -109,4 +109,33 @@ bool __llgo_coro_worker_call_words_v2(
     uintptr_t a8,
     uintptr_t result_address);
 
+uint32_t __llgo_coro_worker_call_solo4_v1(
+    uintptr_t function,
+    uintptr_t trace_target,
+    uint32_t argc,
+    uintptr_t a0,
+    uintptr_t a1,
+    uintptr_t a2,
+    uintptr_t a3,
+    uintptr_t r1_address,
+    uintptr_t r2_address,
+    uintptr_t errno_address);
+
+uint32_t __llgo_coro_worker_call_solo_v1(
+    uintptr_t function,
+    uintptr_t trace_target,
+    uint32_t argc,
+    uintptr_t a0,
+    uintptr_t a1,
+    uintptr_t a2,
+    uintptr_t a3,
+    uintptr_t a4,
+    uintptr_t a5,
+    uintptr_t a6,
+    uintptr_t a7,
+    uintptr_t a8,
+    uintptr_t r1_address,
+    uintptr_t r2_address,
+    uintptr_t errno_address);
+
 #endif

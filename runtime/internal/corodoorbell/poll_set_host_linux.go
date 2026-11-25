@@ -8,7 +8,11 @@ import (
 )
 
 func nativePollSet(first *PollFD, count uint32, timeoutMS int32) (int, int32) {
-	timeout := syscall.NsecToTimespec(int64(timeoutMS) * deadlineNanosPerMilli)
+	return nativePollSetNano(first, count, int64(timeoutMS)*deadlineNanosPerMilli)
+}
+
+func nativePollSetNano(first *PollFD, count uint32, timeoutNS int64) (int, int32) {
+	timeout := syscall.NsecToTimespec(timeoutNS)
 	result, _, errno := syscall.Syscall6(
 		syscall.SYS_PPOLL,
 		uintptr(unsafe.Pointer(first)),

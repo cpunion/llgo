@@ -89,7 +89,9 @@ func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) ui
 	if !ok {
 		coroRuntimeAbort("invalid coroutine child outcome consume")
 	}
-	coroReleaseDiscardedPanicTraceV1(task)
+	if coro.AuditEnabled || snapshot.Status != coro.CompletionReturn {
+		coroReleaseDiscardedPanicTraceV1(task)
+	}
 	*(*unsafe.Pointer)(typeOut) = snapshot.TypeWord
 	*(*unsafe.Pointer)(dataOut) = snapshot.DataWord
 	return uint32(snapshot.Status)

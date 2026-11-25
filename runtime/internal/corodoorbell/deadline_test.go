@@ -53,3 +53,34 @@ func TestDeadlinePollTimeout(t *testing.T) {
 		})
 	}
 }
+
+func TestDeadlinePollTimeoutNano(t *testing.T) {
+	maxInt64 := int64(^uint64(0) >> 1)
+	tests := []struct {
+		name      string
+		now       int64
+		deadline  int64
+		timeoutNS int64
+		reached   bool
+		ok        bool
+	}{
+		{name: "zero", ok: true, reached: true},
+		{name: "past", now: 7, deadline: 6, ok: true, reached: true},
+		{name: "exact", now: 7, deadline: 7, ok: true, reached: true},
+		{name: "one nanosecond", deadline: 1, timeoutNS: 1, ok: true},
+		{name: "sub millisecond exact", now: 100_000, deadline: 1_000_000, timeoutNS: 900_000, ok: true},
+		{name: "bounded", deadline: PollFaultContainmentNanoseconds + 1, timeoutNS: PollFaultContainmentNanoseconds, ok: true},
+		{name: "maximum", deadline: maxInt64, timeoutNS: PollFaultContainmentNanoseconds, ok: true},
+		{name: "negative now", now: -1},
+		{name: "negative deadline", deadline: -1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			timeoutNS, reached, ok := DeadlinePollTimeoutNano(test.now, test.deadline)
+			if timeoutNS != test.timeoutNS || reached != test.reached || ok != test.ok {
+				t.Fatalf("DeadlinePollTimeoutNano(%d, %d) = (%d, %t, %t), want (%d, %t, %t)",
+					test.now, test.deadline, timeoutNS, reached, ok, test.timeoutNS, test.reached, test.ok)
+			}
+		})
+	}
+}

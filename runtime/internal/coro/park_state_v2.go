@@ -455,13 +455,21 @@ func BeginParkSet(state *ParkState, expected, seed uint32) (ParkTicket, bool) {
 	if state == nil || expected > MaxSelectOperationCases {
 		return ParkTicket{}, false
 	}
-	if state.phase == parkIdle {
-		if !validParkState(state) {
+	if AuditEnabled {
+		if state.phase == parkIdle {
+			if !validParkState(state) {
+				return ParkTicket{}, false
+			}
+		} else if (state.phase != parkConsumed && state.phase != parkDelivered) || !validParkState(state) ||
+			state.attached != 0 || state.head != nil {
 			return ParkTicket{}, false
 		}
-	} else if (state.phase != parkConsumed && state.phase != parkDelivered) || !validParkState(state) ||
-		state.attached != 0 || state.head != nil {
-		return ParkTicket{}, false
+	} else {
+		if state.phase != parkIdle &&
+			((state.phase != parkConsumed && state.phase != parkDelivered) ||
+				state.attached != 0 || state.head != nil) {
+			return ParkTicket{}, false
+		}
 	}
 	ticket, ok := nextParkTicket(state.ticket)
 	if !ok {
@@ -684,6 +692,26 @@ func sortParkLinksByRank(state *ParkState) bool {
 }
 
 func SealParkSet(state *ParkState, ticket ParkTicket) bool {
+	if !AuditEnabled {
+		if state == nil || state.phase != parkPreparing || ticket != state.ticket || state.attached != state.expected {
+			return false
+		}
+		if state.expected > 1 {
+			if !sortParkLinksByRank(state) {
+				return false
+			}
+			var previous *ParkLink
+			for link := state.head; link != nil; link = link.next {
+				if previous != nil && previous.rank >= link.rank {
+					return false
+				}
+				previous = link
+			}
+		}
+		state.seed = 0
+		state.phase = parkSealed
+		return true
+	}
 	if !validParkState(state) || state.phase != parkPreparing || ticket != state.ticket || state.attached != state.expected {
 		return false
 	}
@@ -713,7 +741,11 @@ func SealParkSet(state *ParkState, ticket ParkTicket) bool {
 // as the current G park. Completions may already be published in operation
 // records, but they are resolved only after this transition.
 func CommitParkSet(state *ParkState, ticket ParkTicket) bool {
-	if !validParkState(state) || state.phase != parkSealed || ticket != state.ticket {
+	if AuditEnabled {
+		if !validParkState(state) || state.phase != parkSealed || ticket != state.ticket {
+			return false
+		}
+	} else if state == nil || state.phase != parkSealed || ticket != state.ticket {
 		return false
 	}
 	if state.taskCancelPhase == taskCancelRequested &&

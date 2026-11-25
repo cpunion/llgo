@@ -44,7 +44,7 @@ bool __llgo_coro_alloc_cache_put_v1(void *pointer, uintptr_t size);
 
 enum {
 	bounded_size = 256,
-	bounded_capacity = 512,
+	bounded_capacity = 512 + 64,
 	compact_size = 576,
 	large_compact_size = 1152,
 	recursive_size = 1280,

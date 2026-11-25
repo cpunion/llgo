@@ -68,7 +68,12 @@ func coroBindRuntimeContextAt(task *coro.G, parentG *g, ctx *coroRuntimeContext,
 		!coroInheritExecutionDomainTask(task, (*coro.G)(parentG.startarg)) {
 		return false
 	}
-	gp := initCoroRuntimeContext(ctx, parentG, _Grunnable)
+	gp := initCoroRuntimeContextUntracked(ctx, parentG, _Grunnable)
+	if embedded {
+		retainCoroG(0)
+	} else {
+		retainG()
+	}
 	gp.localContext = &ctx.local
 	gp.isMain = !embedded
 	gp.coroEmbedded = embedded
@@ -83,7 +88,7 @@ func coroBindRuntimeContextAt(task *coro.G, parentG *g, ctx *coroRuntimeContext,
 			coroRuntimeAbort("cannot roll back execution-domain inheritance")
 		}
 	}
-	discardCoroRuntimeContext(ctx, !embedded)
+	discardCoroRuntimeContext(ctx, !embedded, embedded)
 	return false
 }
 
@@ -182,7 +187,7 @@ func coroInitializeTaskAllocationRuntimeContextCompiler(
 	gp.isMain = false
 	gp.coroEmbedded = true
 	gp.startarg = unsafe.Pointer(task)
-	retainG()
+	retainCoroG(uint16(coro.RunningTaskRoute(parent)))
 	return true
 }
 
@@ -413,6 +418,10 @@ func coroLeaveRuntimeContext(task *coro.G, activation coroRuntimeContextActivati
 // coroReleaseRuntimeContext tears down the runtime sidecar after the scheduler
 // has made the G terminal but before its scanned task allocation is cleared.
 func coroReleaseRuntimeContext(task *coro.G, raw unsafe.Pointer) bool {
+	return coroReleaseRuntimeContextAtRoute(task, raw, 0)
+}
+
+func coroReleaseRuntimeContextAtRoute(task *coro.G, raw unsafe.Pointer, route uint16) bool {
 	ctx := (*coroRuntimeContext)(raw)
 	if coro.AuditEnabled {
 		if !validCoroRuntimeTaskContext(task, ctx) {
@@ -445,14 +454,18 @@ func coroReleaseRuntimeContext(task *coro.G, raw unsafe.Pointer) bool {
 		setgstatus(gp, _Gdead)
 	}
 	gp.context = nil
-	releaseGAndCheckDeadlock()
+	if embedded {
+		releaseCoroGAndCheckDeadlock(route)
+	} else {
+		releaseGAndCheckDeadlock()
+	}
 	if !embedded {
 		FreeRoot(unsafe.Pointer(ctx))
 	}
 	return true
 }
 
-func discardCoroRuntimeContext(ctx *coroRuntimeContext, freeContext bool) {
+func discardCoroRuntimeContext(ctx *coroRuntimeContext, freeContext, embedded bool) {
 	if ctx == nil {
 		return
 	}
@@ -463,7 +476,11 @@ func discardCoroRuntimeContext(ctx *coroRuntimeContext, freeContext bool) {
 	releasePanicPCStore(&ctx.g)
 	ctx.g.context = nil
 	ctx.g.coroEmbedded = false
-	releaseG()
+	if embedded {
+		releaseCoroG(0)
+	} else {
+		releaseG()
+	}
 	if freeContext {
 		FreeRoot(unsafe.Pointer(ctx))
 	}

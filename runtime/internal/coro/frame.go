@@ -1053,6 +1053,27 @@ func PrepareYield(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
 // Completion may have been published early in an OperationRecord, but no
 // callback receives G, ParkState, or an LLVM handle.
 func PrepareParkSet(g *G, handle unsafe.Pointer, header *HeaderV1, ticket ParkTicket, record *WaitSetRecord) bool {
+	if !AuditEnabled {
+		if g == nil || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
+			g.isWaiting() || g.park.phase != parkSealed || ticket != g.park.ticket ||
+			record == nil || record.g != g || record.ticket != ticket || record.state != waitSetRecordPreparing {
+			return false
+		}
+		frame := g.active
+		if frame == nil || frame.handle != handle || frame.header != header || frame.state != FrameActive ||
+			frame.parkWait != nil ||
+			header.SuspendReason != uint16(SuspendPark) ||
+			header.Lifecycle != uint16(FrameSuspended) {
+			return false
+		}
+		if !CommitParkSet(&g.park, ticket) {
+			return false
+		}
+		record.state = waitSetRecordCommitted
+		frame.parkWait = record
+		g.pending = pendingTransition{kind: pendingParkSet, from: frame}
+		return true
+	}
 	if !ValidG(g) || !resumeGateTaken(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
 		g.isWaiting() ||
 		!validParkState(&g.park) || g.park.phase != parkSealed || ticket != g.park.ticket ||
@@ -1738,10 +1759,10 @@ func RetainPendingPanicTraceFrame(g *G, raw unsafe.Pointer, total uintptr) bool 
 func retainPendingPanicTraceFrame(
 	g *G, frame *Frame, raw unsafe.Pointer, total uintptr,
 ) bool {
-	if !ValidG(g) || frame == nil || raw == nil {
+	if frame == nil || !frame.retainPanicTrace || raw == nil || !ValidG(g) {
 		return false
 	}
-	if !frame.retainPanicTrace || frame.parent == nil ||
+	if frame.parent == nil ||
 		frame.parent.completion.status != CompletionPanic ||
 		frame.parent.completion.child != frame.handle ||
 		frame.parent.completion.typeWord == nil {
@@ -1771,7 +1792,7 @@ func RetainPendingPanicTraceFrameCompiler(
 // raw. Runtime adapters must call this terminal form only when they own a
 // no-return panic reporter.
 func RetainPanicTraceFrame(g *G, raw unsafe.Pointer, total uintptr) bool {
-	if !ValidG(g) || !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) {
+	if g == nil || !g.panicUnwind || !ValidG(g) || !publishedPanicRecord(&g.panicRecord) {
 		return false
 	}
 	record := &g.panicRecord
@@ -1783,7 +1804,7 @@ func RetainPanicTraceFrame(g *G, raw unsafe.Pointer, total uintptr) bool {
 func RetainPanicTraceFrameCompiler(
 	g *G, metadata, raw unsafe.Pointer, total uintptr,
 ) bool {
-	if !ValidG(g) || metadata == nil || !g.panicUnwind ||
+	if g == nil || !g.panicUnwind || metadata == nil || !ValidG(g) ||
 		!publishedPanicRecord(&g.panicRecord) {
 		return false
 	}
@@ -1797,7 +1818,7 @@ func RetainPanicTraceFrameCompiler(
 // It is true only between a successful recovery/replacement transaction and
 // the synchronous runtime hook that releases the detached allocations.
 func PanicTraceDiscardPending(g *G) bool {
-	return ValidG(g) && stagedPanicTraceDiscard(g)
+	return stagedPanicTraceDiscard(g) && ValidG(g)
 }
 
 // TakeDiscardedPanicTraceFrame pops one allocation from a trace staged by an

@@ -615,6 +615,12 @@ func PollExecutorAt(driver *ExecutorDriver, now int64) (timers, promoted int, ok
 	return scan.timers, scan.promoted, ok
 }
 
+// ExecutorHasActiveTimer reports in O(1) whether driver's bound timer table
+// currently holds any active timer without auditing unrelated driver state.
+func ExecutorHasActiveTimer(driver *ExecutorDriver) bool {
+	return driver != nil && driver.sources.timers != nil && driver.sources.timers.activeCount != 0
+}
+
 // NextExecutorTimerDeadline exposes the scheduler owner's current earliest
 // active absolute deadline without draining it. Platform wait adapters use it
 // to choose a sleep deadline; scheduler-service preemption is independent of

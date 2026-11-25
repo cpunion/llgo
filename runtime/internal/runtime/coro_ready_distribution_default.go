@@ -97,3 +97,14 @@ func coroTargetRetirePhysicalOwnerV1(*coro.P, *coro.ExecutorDriver) bool {
 }
 
 func coroTargetHandleOSThreadReadyV1(*coro.P, *coro.ExecutorDriver) bool { return false }
+
+func coroTargetHasFleetPeersV1() bool {
+	return false
+}
+
+func coroTargetTryInSlicePeerIdlePollV1(
+	coroRunTargetCapabilityV1,
+	*coro.ExecutorDriver,
+) (woke, posted, ok bool) {
+	return false, false, true
+}

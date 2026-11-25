@@ -19,3 +19,14 @@ func nativePollSet(first *PollFD, count uint32, timeoutMS int32) (int, int32) {
 	}
 	return int(result), 0
 }
+
+func nativePollSetNano(first *PollFD, count uint32, timeoutNS int64) (int, int32) {
+	timeoutMS := int32(timeoutNS / deadlineNanosPerMilli)
+	if timeoutNS%deadlineNanosPerMilli != 0 {
+		timeoutMS++
+	}
+	if timeoutMS > physicalPollMaxMS {
+		timeoutMS = physicalPollMaxMS
+	}
+	return nativePollSet(first, count, timeoutMS)
+}

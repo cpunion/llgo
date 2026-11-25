@@ -318,11 +318,14 @@ func coroFinishRunSliceCompatibility(
 	case coroRunDestroyCommitV1:
 		var next coro.Action
 		var committed bool
-		if result.g == main && coroProgramLifecycleV1State == coroProgramMainGoexitV1 {
-			// A command root which ended through Goexit is no longer runnable, but
-			// its executor remains the event/routing domain for background Gs. The
-			// ordinary domain commit finalizes only this G and deliberately avoids
-			// the last-local-root terminal-close transaction.
+		if coroProgramLifecycleV1State == coroProgramMainGoexitV1 &&
+			(result.g == main || coroTargetHasFleetPeersV1()) {
+			// A command root which ended through Goexit is no longer runnable,
+			// and background Gs may still execute on peer fleet domains even
+			// after the adopted program P drains its last local G. The ordinary
+			// domain commit finalizes only this G and avoids closing the fleet
+			// out from under active peers; the final runtime-context release
+			// owns the standard main-Goexit deadlock report.
 			next, committed = coro.CommitExecutorRunDomainDestroy(
 				driver,
 				result.g,

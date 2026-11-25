@@ -25,11 +25,32 @@ const deadlineNanosPerMilli int64 = 1_000_000
 // the logical timer or readiness deadline.
 const PollFaultContainmentMilliseconds int32 = physicalPollMaxMS
 
+// PollFaultContainmentNanoseconds is the nanosecond form of the same fault-
+// containment bound for kqueue/ppoll physical waits.
+const PollFaultContainmentNanoseconds int64 = int64(physicalPollMaxMS) * deadlineNanosPerMilli
+
 // DeadlinePollTimeout exposes the one shared absolute-to-relative conversion
 // to the target poll-set owner. A timeout is rounded up and fault-containment
 // bounded, so it is never itself proof that deadline has elapsed.
 func DeadlinePollTimeout(now, deadline int64) (timeoutMS int32, reached, ok bool) {
 	return deadlinePollTimeout(now, deadline)
+}
+
+// DeadlinePollTimeoutNano converts one absolute monotonic deadline into an
+// exact fault-containment-bounded nanosecond wait timeout without rounding up
+// to integer milliseconds.
+func DeadlinePollTimeoutNano(now, deadline int64) (timeoutNS int64, reached, ok bool) {
+	if now < 0 || deadline < 0 {
+		return 0, false, false
+	}
+	if deadline <= now {
+		return 0, true, true
+	}
+	delta := deadline - now
+	if delta > PollFaultContainmentNanoseconds {
+		delta = PollFaultContainmentNanoseconds
+	}
+	return delta, false, true
 }
 
 // deadlinePollTimeout converts one absolute monotonic deadline into a bounded

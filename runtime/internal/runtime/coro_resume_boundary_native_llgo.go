@@ -44,7 +44,9 @@ func coroHandleResumePhysicalV1(task *coro.G, handle unsafe.Pointer, panicBounda
 	// retained after pop/stage closes the boundary.
 	boundary := (*Defer)(c.Alloca(unsafe.Sizeof(Defer{})))
 	env := (*SigjmpBuf)(c.AllocaSigjmpBuf())
-	*boundary = Defer{}
+	if coro.AuditEnabled {
+		*boundary = Defer{}
+	}
 	gp := coroPanicBoundaryCurrentG(task)
 	for {
 		landed := c.Sigsetjmp(unsafe.Pointer(env), c.Int(0))

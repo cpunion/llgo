@@ -52,6 +52,11 @@ func TestWaitPollSetRejectsInvalidPhysicalShape(t *testing.T) {
 			t.Fatalf("invalid poll shape returned ready:%d errno:%d", ready, errno)
 		}
 	}
+	for _, timeoutNS := range []int64{-1, PollFaultContainmentNanoseconds + 1} {
+		if ready, errno := WaitPollSetNano(&entry, 1, timeoutNS); ready != -1 || errno != -1 {
+			t.Fatalf("invalid nano poll timeout %d returned ready:%d errno:%d", timeoutNS, ready, errno)
+		}
+	}
 }
 
 func TestWaitPollSetCarriesMoreThanOneLogicalPage(t *testing.T) {

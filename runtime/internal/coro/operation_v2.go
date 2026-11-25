@@ -610,13 +610,14 @@ func PrepareOperationAtGeneration(record *OperationRecord, desired OperationID) 
 	}
 	switch record.phase {
 	case operationUnused:
-		if *record != (OperationRecord{}) {
+		if AuditEnabled && *record != (OperationRecord{}) {
 			return false
 		}
 	case operationReusable:
 		previous := record.id
 		if !previous.Valid() || previous.SourceSlot != desired.SourceSlot ||
-			desired.Generation <= previous.Generation || *record != (OperationRecord{id: previous, phase: operationReusable}) {
+			desired.Generation <= previous.Generation ||
+			(AuditEnabled && *record != (OperationRecord{id: previous, phase: operationReusable})) {
 			return false
 		}
 	default:

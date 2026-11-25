@@ -135,11 +135,26 @@ func coroNativeTryFastPollCompletionDetailedV1(driver *coro.ExecutorDriver) (wok
 		return false, false, built
 	}
 	entries := &coroNativePollEntriesV1
+	// On loopback TCP with no active timer or poll deadline, kernel netisr
+	// delivery can trail send() by a few microseconds. Giving the in-slice
+	// kqueue/ppoll probe a tiny 50us window (with the doorbell pipe always in
+	// entries[0] for immediate external wakes) avoids falling through to a
+	// second blocking poll + 3x monotonic clock reads + sleep/wake transition.
+	probeTimeoutNS := int64(0)
+	if !coro.PollOperationHasDeadline(&coroProgramPollSourceV1State) &&
+		!coro.ExecutorHasActiveTimer(driver) {
+		probeTimeoutNS = 50_000
+	}
 	for attempt := uint32(0); attempt < coroNativePollFastProbeBudgetV1; attempt++ {
-		for index := uint32(0); index < count; index++ {
-			entries[index].Revents = 0
+		if attempt > 0 {
+			for index := uint32(0); index < count; index++ {
+				entries[index].Revents = 0
+			}
 		}
 		nReady, errno := corodoorbell.WaitPollSet(&entries[0], count, 0)
+		if nReady == 0 && probeTimeoutNS > 0 {
+			nReady, errno = corodoorbell.WaitPollSetNano(&entries[0], count, probeTimeoutNS)
+		}
 		if nReady < 0 {
 			if corodoorbell.PollInterrupted(errno) {
 				continue
@@ -189,14 +204,14 @@ func coroTargetWaitExecutorV1(pipe *corodoorbell.Pipe, deadline int64, hasDeadli
 			return true
 		}
 
-		timeoutMS := corodoorbell.PollFaultContainmentMilliseconds
+		timeoutNS := corodoorbell.PollFaultContainmentNanoseconds
 		if hasDeadline {
 			now, clockOK := coroclock.MonotonicNano()
 			if !clockOK {
 				return false
 			}
 			var reached bool
-			timeoutMS, reached, ok = corodoorbell.DeadlinePollTimeout(now, deadline)
+			timeoutNS, reached, ok = corodoorbell.DeadlinePollTimeoutNano(now, deadline)
 			if !ok {
 				return false
 			}
@@ -210,7 +225,7 @@ func coroTargetWaitExecutorV1(pipe *corodoorbell.Pipe, deadline int64, hasDeadli
 		for index := uint32(0); index < count; index++ {
 			entries[index].Revents = 0
 		}
-		ready, errno := corodoorbell.WaitPollSet(&entries[0], count, timeoutMS)
+		ready, errno := corodoorbell.WaitPollSetNano(&entries[0], count, timeoutNS)
 		if ready < 0 {
 			if corodoorbell.PollInterrupted(errno) {
 				continue

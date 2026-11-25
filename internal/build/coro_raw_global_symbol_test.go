@@ -233,6 +233,7 @@ func TestCoroRawLLGoFilesInfersClosedExecutorLeaves(t *testing.T) {
 		"llgo_caller_frame_mark",
 		"__llgo_runtime_poll_desc_state_v1",
 		"__llgo_runtime_poll_desc_deadline_v1",
+		"__llgo_runtime_poll_desc_prepare_wait_v1",
 		"__llgo_runtime_poll_desc_set_deadline_v1",
 		"__llgo_runtime_poll_desc_mark_closing_v1",
 		"__llgo_runtime_poll_desc_publish_operation_v1",

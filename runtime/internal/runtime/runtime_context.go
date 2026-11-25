@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/internal/coro"
 )
 
 // coroRuntimeContext is the state which follows one stackless logical G. M and
@@ -54,15 +55,49 @@ const coroRuntimeContextGOffset = unsafe.Offsetof(coroRuntimeContext{}.g)
 var _ [runtimeContextCoreOffset]byte = [0]byte{}
 var _ [coroRuntimeContextGOffset]byte = [0]byte{}
 
+const coroGCountShardBias = uint64(1) << 62
+
+type coroGCountShard struct {
+	state uint64
+	_     [56]byte
+}
+
+var (
+	_ [8 - coro.ExecutorFleetCapacity]byte
+	_ [coro.ExecutorFleetCapacity - 8]byte
+)
+
+// coroGCountShards holds biased per-route live-G counters for embedded
+// stackless goroutines so concurrent spawn/exit across Ps never bounce
+// sched.gstate's cache line. Bit 63 mirrors mainExitedBit so normal exits
+// perform a single atomic operation on one route-local cache line.
+var coroGCountShards = [coro.ExecutorFleetCapacity]coroGCountShard{
+	{state: coroGCountShardBias},
+	{state: coroGCountShardBias},
+	{state: coroGCountShardBias},
+	{state: coroGCountShardBias},
+	{state: coroGCountShardBias},
+	{state: coroGCountShardBias},
+	{state: coroGCountShardBias},
+	{state: coroGCountShardBias},
+}
+
 var sched struct {
 	goidgen uint64
+	_pad0   [56]byte
 	midgen  int64
 	pidgen  int32
+	_pad1   [52]byte
 
-	// gstate packs the live/registered logical-context count with the
+	// gstate packs the unsharded/global live logical-context count with the
 	// main-exited bit. One atomic word makes the native main-Goexit decision
 	// independent of release order.
 	gstate uint64
+	// gstateSeq counts retains observed after mainExitedBit is set so gState
+	// retries across concurrent post-Goexit cross-shard spawn/exit chains
+	// without adding atomic traffic to normal spawn/exit paths.
+	gstateSeq uint64
+	_pad2     [48]byte
 }
 
 // signalPanicPCStore is the allocation-free fallback used only when a legacy

@@ -64,6 +64,16 @@ func WaitPollSet(first *PollFD, count uint32, timeoutMS int32) (ready int, errno
 	return nativePollSet(first, count, timeoutMS)
 }
 
+// WaitPollSetNano performs the same bounded owner-thread poll pass with
+// nanosecond timeout precision for kqueue/ppoll backends.
+func WaitPollSetNano(first *PollFD, count uint32, timeoutNS int64) (ready int, errno int32) {
+	if first == nil || count == 0 || count > PollSetCapacity ||
+		timeoutNS < 0 || timeoutNS > PollFaultContainmentNanoseconds {
+		return -1, -1
+	}
+	return nativePollSetNano(first, count, timeoutNS)
+}
+
 // PollInterrupted classifies the only retryable physical wait error. The
 // caller owns absolute-deadline resampling between interrupted passes.
 func PollInterrupted(errno int32) bool {

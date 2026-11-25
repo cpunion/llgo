@@ -741,6 +741,12 @@ func TestSoloSyscallEligibleAndRestoreAfterWithdraw(t *testing.T) {
 	if !SoloSyscallEligible(driver, task.g) {
 		t.Fatal("expected clean solo active resume to be SoloSyscallEligible")
 	}
+	if route, ok := SoloSyscallEligibleTask(task.g); !ok || route != driver.route {
+		t.Fatalf("SoloSyscallEligibleTask = (%v, %t), want (%v, true)", route, ok, driver.route)
+	}
+	if _, ok := SoloSyscallEligibleTask(nil); ok {
+		t.Fatal("SoloSyscallEligibleTask(nil) must fail closed")
+	}
 
 	// External request disables solo eligibility.
 	if result := registry.Request(handle); result != ExecutorRequestPublished {
@@ -748,6 +754,9 @@ func TestSoloSyscallEligibleAndRestoreAfterWithdraw(t *testing.T) {
 	}
 	if SoloSyscallEligible(driver, task.g) {
 		t.Fatal("requested executor must not be SoloSyscallEligible")
+	}
+	if _, ok := SoloSyscallEligibleTask(task.g); ok {
+		t.Fatal("requested executor must not pass SoloSyscallEligibleTask")
 	}
 	if _, ok := registry.Acknowledge(handle); !ok {
 		t.Fatal("Acknowledge request")
