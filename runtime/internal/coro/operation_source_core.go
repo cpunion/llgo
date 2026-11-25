@@ -89,10 +89,18 @@ func producerSourceSlotReusable(slot *producerSourceSlot) bool {
 // fail-closed; the caller may restore Free only after consuming a
 // source-specific unpublished reservation with resetProducerSourceSlot.
 func beginProducerSourceSlot(slot *producerSourceSlot) (uint32, bool) {
-	if !producerSourceSlotReusable(slot) {
+	if slot == nil || preemptLoad(&slot.state) != uint32(producerSourceFree) {
 		return 0, false
 	}
 	previous := preemptLoad(&slot.generation)
+	inflight := preemptLoad(&slot.inflight)
+	if previous == 0 {
+		if inflight != 0 && inflight != producerAdmissionClosed {
+			return 0, false
+		}
+	} else if inflight != producerAdmissionClosed {
+		return 0, false
+	}
 	return sealAndBeginProducerSourceSlot(slot, previous)
 }
 
@@ -101,9 +109,15 @@ func beginProducerSourceSlot(slot *producerSourceSlot) (uint32, bool) {
 // header with this previous generation; this helper must still tolerate a
 // guessed producer entering immediately after that observation.
 func sealAndBeginProducerSourceSlot(slot *producerSourceSlot, previous uint32) (uint32, bool) {
-	if previous == ^uint32(0) || !producerAdmissionSeal(&slot.inflight) ||
-		!producerAdmissionQuiesced(&slot.inflight) ||
-		!preemptCompareAndSwap(&slot.state, uint32(producerSourceFree), uint32(producerSourceInitializing)) {
+	if previous == ^uint32(0) {
+		return 0, false
+	}
+	if preemptLoad(&slot.inflight) != producerAdmissionClosed {
+		if !producerAdmissionSeal(&slot.inflight) || !producerAdmissionQuiesced(&slot.inflight) {
+			return 0, false
+		}
+	}
+	if !preemptCompareAndSwap(&slot.state, uint32(producerSourceFree), uint32(producerSourceInitializing)) {
 		return 0, false
 	}
 	generation := previous + 1
@@ -190,6 +204,13 @@ func markProducerSourceQuiesced(slot *producerSourceSlot) bool {
 func recycleProducerSourceSlot(slot *producerSourceSlot) bool {
 	return producerSourceSlotQuiesced(slot) &&
 		preemptCompareAndSwap(&slot.state, uint32(producerSourceQuiesced), uint32(producerSourceFree))
+}
+
+// recycleClosingQuiescedProducerSourceSlot collapses Closing -> Quiesced -> Free
+// once the owner has proven producerAdmissionClosed on a quiesced slot.
+func recycleClosingQuiescedProducerSourceSlot(slot *producerSourceSlot) bool {
+	return producerSourceSlotQuiesced(slot) &&
+		preemptCompareAndSwap(&slot.state, uint32(producerSourceClosing), uint32(producerSourceFree))
 }
 
 // routedProducerSource is the scheduler-owned binding plus the producer's

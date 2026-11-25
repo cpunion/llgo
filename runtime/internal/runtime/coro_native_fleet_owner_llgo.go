@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	coroNativeFleetRunBudgetV1 uint32 = 128
+	coroNativeFleetRunBudgetV1 uint32 = 256
 )
 
 type coroNativeFleetPhysicalLifecycleV1 uint8
@@ -587,10 +587,12 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 		} else if ready {
 			return true
 		}
-		if ready, fastOK := coroNativeFleetTryFastPollCompletionV1(handle); !fastOK {
-			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer poll probe failed")
-		} else if ready {
-			return true
+		if !result.polledIdle {
+			if ready, fastOK := coroNativeFleetTryFastPollCompletionV1(handle); !fastOK {
+				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer poll probe failed")
+			} else if ready {
+				return true
+			}
 		}
 		if !peer.shutdown {
 			if ready, spinOK := coroNativeFleetPeerPreSleepSpinV1(handle, domain); !spinOK {
@@ -654,12 +656,20 @@ func coroNativeFleetPeerPreSleepSpinV1(
 	domain *coroNativeFleetDomainV1,
 ) (ready, ok bool) {
 	_ = handle
+	if poll := domain.pollOwnerV1(); poll != nil {
+		if scanLimit, scanOK := coro.PollOperationScanLimit(poll); scanOK && scanLimit > 0 {
+			return false, true
+		}
+	}
 	driver := domain.driverOwnerV1()
 	stop := &coroNativeFleetPhysicalOwnerV1State.stop
 	for i := 0; i < coroNativePreSleepTightSpinsV1; i++ {
-		if stop.Sealed() || coro.ExecutorDriverHasPendingExternalWork(driver) {
+		if coroObserveGCV1() || stop.Sealed() || coro.ExecutorDriverHasPendingExternalWork(driver) {
 			return true, true
 		}
+	}
+	if coroNativePreSleepYieldRoundsV1 == 0 {
+		return false, true
 	}
 	start, clockOK := coroNativeFleetPhysicalOwnerClockV1()
 	if !clockOK {
@@ -668,11 +678,11 @@ func coroNativeFleetPeerPreSleepSpinV1(
 	for round := 0; round < coroNativePreSleepYieldRoundsV1; round++ {
 		_ = corofleet.Yield()
 		for i := 0; i < coroNativePreSleepBurstSpinsV1; i++ {
-			if stop.Sealed() || coro.ExecutorDriverHasPendingExternalWork(driver) {
+			if coroObserveGCV1() || stop.Sealed() || coro.ExecutorDriverHasPendingExternalWork(driver) {
 				return true, true
 			}
 		}
-		if round&7 == 7 {
+		if round&3 == 3 {
 			now, ok := coroNativeFleetPhysicalOwnerClockV1()
 			if !ok {
 				return false, false

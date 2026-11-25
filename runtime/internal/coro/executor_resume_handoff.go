@@ -298,6 +298,27 @@ func ExecutorResumeHandoffCompensationRequired(
 		executorRunSourceRequested(driver), true
 }
 
+// SoloSyscallEligibleTask resolves task's active executor route and verifies
+// SoloSyscallEligible in one owner-only check without duplicate P/driver audits.
+func SoloSyscallEligibleTask(task *G) (RouteID, bool) {
+	if task == nil {
+		return 0, false
+	}
+	p := task.runP
+	if p == nil || p.current != task || !p.inResume {
+		return 0, false
+	}
+	driver := p.executor
+	if driver == nil || driver.p != p || !driver.route.Valid() ||
+		driver.sources.route != driver.route {
+		return 0, false
+	}
+	if !SoloSyscallEligible(driver, task) {
+		return 0, false
+	}
+	return driver.route, true
+}
+
 // SoloSyscallEligible reports whether driver and task are in a clean,
 // uncontended active resume with zero local runnable work, zero external
 // waits, zero active timers, zero control operations, zero owner-local or
@@ -323,8 +344,9 @@ func SoloSyscallEligible(driver *ExecutorDriver, task *G) bool {
 		return false
 	}
 	if ownerLocalCompletionPending(driver) ||
-		executorRunSourceRequested(driver) ||
-		!executorDirectChannelInboxIdle(driver) {
+		!executorDirectChannelInboxIdle(driver) ||
+		driver.run.sourceMore ||
+		executorRunExternalSourceRequestedNoDirect(driver) {
 		return false
 	}
 	return true
@@ -358,7 +380,13 @@ func DriverQuiescentForSleep(driver *ExecutorDriver) bool {
 // DriverIdleUnrequested observes the atomic executor gate for driver without
 // inspecting owner-only scheduler fields.
 func DriverIdleUnrequested(driver *ExecutorDriver) bool {
-	return driver != nil && driver.registry != nil &&
+	if driver == nil {
+		return false
+	}
+	if !AuditEnabled {
+		return driver.requestGate != nil && preemptLoad(driver.requestGate) == executorGateIdleArmed
+	}
+	return driver.registry != nil &&
 		driver.registry.ObserveIdleUnrequested(driver.handle)
 }
 

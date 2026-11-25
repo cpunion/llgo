@@ -23,6 +23,9 @@ import c "github.com/xgo-dev/llgo/runtime/internal/clite"
 // its own context, so the final goroutine observes both facts atomically.
 func releaseGAndCheckDeadlock() {
 	remaining, mainExited := releaseG()
+	if mainExited {
+		remaining, mainExited = gState()
+	}
 	if remaining == 0 && mainExited {
 		fatal("no goroutines (main called runtime.Goexit) - deadlock!")
 		c.Exit(2)

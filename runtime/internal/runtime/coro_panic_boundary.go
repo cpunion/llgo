@@ -59,7 +59,7 @@ func coroPanicBoundaryPushWithG(gp *g, task *coro.G, handle unsafe.Pointer, boun
 		Args: unsafe.Pointer(gp.defer_),
 	}
 	gp.m.signalFaultBoundary = boundary
-	if !signalFaultBoundaryEnter() {
+	if !signalFaultBoundaryEnterM(gp.m) {
 		gp.m.signalFaultBoundary = boundary.Link
 		*boundary = Defer{}
 		return false
@@ -102,11 +102,13 @@ func coroPanicBoundaryPopStatusWithG(gp *g, task *coro.G, handle unsafe.Pointer,
 	if ptr := gp.panic_; ptr != nil && (*panicNode)(ptr).defer_ == boundary {
 		return coroPanicBoundaryPopActivePanic
 	}
-	if !signalFaultBoundaryExit() {
+	if !signalFaultBoundaryExitM(gp.m) {
 		return coroPanicBoundaryPopInvalidRecord
 	}
 	gp.m.signalFaultBoundary = boundary.Link
-	*boundary = Defer{}
+	if coro.AuditEnabled {
+		*boundary = Defer{}
+	}
 	return coroPanicBoundaryPopOK
 }
 
@@ -188,7 +190,7 @@ func __llgo_coro_panic_boundary_enabled_v1(g unsafe.Pointer) bool {
 //export __llgo_coro_panic_boundary_take_v1
 func __llgo_coro_panic_boundary_take_v1(g, handle unsafe.Pointer) unsafe.Pointer {
 	task := (*coro.G)(g)
-	if task == nil || handle == nil || !coroPanicBoundaryCapability(task) {
+	if task == nil || handle == nil {
 		return nil
 	}
 	gp := coroPanicBoundaryCurrentG(task)
@@ -198,7 +200,7 @@ func __llgo_coro_panic_boundary_take_v1(g, handle unsafe.Pointer) unsafe.Pointer
 	if gp == nil || gp.panic_ == nil {
 		return nil
 	}
-	if !coro.ResumePanicBoundaryMayLand(task, handle) {
+	if !coroPanicBoundaryCapability(task) || !coro.ResumePanicBoundaryMayLand(task, handle) {
 		return nil
 	}
 	node := (*panicNode)(gp.panic_)

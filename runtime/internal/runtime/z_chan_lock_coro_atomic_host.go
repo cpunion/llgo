@@ -23,3 +23,8 @@ import "sync/atomic"
 func channelMutexCompareAndSwap(address *uint32, old, new uint32) bool {
 	return atomic.CompareAndSwapUint32(address, old, new)
 }
+
+func channelMutexSpinUntilIdle(address *uint32) {
+	for atomic.LoadUint32(address) != channelOwnerGateIdle {
+	}
+}

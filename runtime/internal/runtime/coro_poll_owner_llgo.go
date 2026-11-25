@@ -231,7 +231,20 @@ func __llgo_coro_poll_resume_v2(g, storage unsafe.Pointer) uint32 {
 			return 0
 		}
 	}
-	*state = CoroPollParkV2{}
+	if coro.AuditEnabled {
+		*state = CoroPollParkV2{}
+	} else {
+		// promoteReadyWaitSetUnchecked already zeroed state.wait and
+		// TakeResumePacket already zeroed state.packet.
+		state.magic = 0
+		state.context = 0
+		state.interest = 0
+		state.deadline = 0
+		state.ticket = coro.ParkTicket{}
+		state.poll = coro.PollOperationHandle{}
+		state.operation = coro.OperationID{}
+		state.executor = coro.ExecutorHandle{}
+	}
 	return status
 }
 

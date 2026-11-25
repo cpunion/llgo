@@ -37,6 +37,15 @@ func TaskStorageSize() uintptr {
 	return unsafe.Sizeof(G{})
 }
 
+// RunningTaskRoute returns the bound executor route of a running task's
+// current P, or 0 when unbound. Callers use it only as a cache-line shard hint.
+func RunningTaskRoute(g *G) RouteID {
+	if g == nil || g.runP == nil || g.runP.executor == nil {
+		return 0
+	}
+	return g.runP.executor.route
+}
+
 // TakeCachedGoid returns the next amortized logical-G identifier cached on the
 // running parent's current P. The boolean is false when the cache is empty or
 // no current P is attached; callers then refill from the runtime generator.

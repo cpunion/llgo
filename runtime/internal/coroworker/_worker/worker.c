@@ -672,29 +672,35 @@ struct llgo_coro_worker_fault_tls_v1 {
     volatile sig_atomic_t handling;
 };
 
-static _Thread_local struct llgo_coro_worker_fault_tls_v1 *
-    llgo_coro_worker_fault_tls_v1;
-static _Thread_local int llgo_coro_worker_fault_signals_ready_v1;
+struct llgo_coro_worker_fault_thread_v1 {
+    struct llgo_coro_worker_fault_tls_v1 *active;
+    int signals_ready;
+};
+
+static _Thread_local struct llgo_coro_worker_fault_thread_v1
+    llgo_coro_worker_fault_thread_v1;
 
 uintptr_t __llgo_coro_worker_fault_suspend_v1(void) {
-    struct llgo_coro_worker_fault_tls_v1 *state = llgo_coro_worker_fault_tls_v1;
+    struct llgo_coro_worker_fault_thread_v1 *thread = &llgo_coro_worker_fault_thread_v1;
+    struct llgo_coro_worker_fault_tls_v1 *state = thread->active;
     if (state == NULL || state->active == 0 || state->handling != 0) {
         return 0;
     }
-    llgo_coro_worker_fault_tls_v1 = NULL;
+    thread->active = NULL;
     state->active = 0;
     return (uintptr_t)state;
 }
 
 bool __llgo_coro_worker_fault_resume_v1(uintptr_t scope) {
+    struct llgo_coro_worker_fault_thread_v1 *thread = &llgo_coro_worker_fault_thread_v1;
     struct llgo_coro_worker_fault_tls_v1 *state =
         (struct llgo_coro_worker_fault_tls_v1 *)scope;
-    if (state == NULL || llgo_coro_worker_fault_tls_v1 != NULL ||
+    if (state == NULL || thread->active != NULL ||
         state->active != 0 || state->handling != 0 || state->landing == NULL) {
         return false;
     }
     state->active = 1;
-    llgo_coro_worker_fault_tls_v1 = state;
+    thread->active = state;
     return true;
 }
 
@@ -773,7 +779,7 @@ int __llgo_coro_worker_try_fault_v1(
     int signum,
     siginfo_t *info,
     void *context) {
-    struct llgo_coro_worker_fault_tls_v1 *state = llgo_coro_worker_fault_tls_v1;
+    struct llgo_coro_worker_fault_tls_v1 *state = llgo_coro_worker_fault_thread_v1.active;
     if (state != NULL && state->active != 0 &&
         state->handling == 0 && state->landing != NULL &&
         (info == NULL || info->si_code > 0)) {
@@ -853,14 +859,15 @@ static bool llgo_coro_worker_unblock_fault_signals_v1(int only_signal) {
     return pthread_sigmask(SIG_UNBLOCK, &signals, NULL) == 0;
 }
 
-static bool llgo_coro_worker_prepare_fault_signals_v1(void) {
-    if (llgo_coro_worker_fault_signals_ready_v1 != 0) {
+static bool llgo_coro_worker_prepare_fault_signals_v1(
+    struct llgo_coro_worker_fault_thread_v1 *thread) {
+    if (thread->signals_ready != 0) {
         return true;
     }
     if (!llgo_coro_worker_unblock_fault_signals_v1(0)) {
         return false;
     }
-    llgo_coro_worker_fault_signals_ready_v1 = 1;
+    thread->signals_ready = 1;
     return true;
 }
 
@@ -874,12 +881,13 @@ static bool llgo_coro_worker_call_array_v1(
         return false;
     }
 
-    memset(result, 0, sizeof(*result));
     sigjmp_buf landing;
     struct llgo_coro_worker_fault_tls_v1 scope;
     struct llgo_coro_worker_fault_tls_v1 *fault_state = &scope;
+    struct llgo_coro_worker_fault_thread_v1 *thread = NULL;
     if (trace_target != 0) {
-        if (llgo_coro_worker_fault_tls_v1 != NULL) {
+        thread = &llgo_coro_worker_fault_thread_v1;
+        if (thread->active != NULL) {
             return false;
         }
         /*
@@ -889,25 +897,25 @@ static bool llgo_coro_worker_call_array_v1(
          * every foreign call adds an atomic/library boundary to the hottest
          * worker path without strengthening that certificate.
          */
-        if (llgo_coro_worker_fault_signals_ready_v1 == 0 &&
+        if (thread->signals_ready == 0 &&
             (pthread_once(
                  &llgo_coro_worker_fault_once_v1,
                  llgo_coro_worker_fault_install_v1) != 0 ||
              !llgo_coro_worker_fault_ready_v1 ||
-             !llgo_coro_worker_prepare_fault_signals_v1())) {
+             !llgo_coro_worker_prepare_fault_signals_v1(thread))) {
             return false;
         }
         fault_state->landing = &landing;
         fault_state->trace_target = trace_target;
-        fault_state->fault_pc = 0;
-        fault_state->fault = LLGO_CORO_WORKER_FAULT_NONE_V1;
-        fault_state->signal_number = 0;
         fault_state->handling = 0;
         if (sigsetjmp(landing, 0) != 0) {
             int fault_signal = (int)fault_state->signal_number;
-            llgo_coro_worker_fault_tls_v1 = NULL;
+            thread->active = NULL;
             fault_state->active = 0;
             fault_state->landing = NULL;
+            result->r1 = 0;
+            result->r2 = 0;
+            result->error = 0;
             result->fault = (uintptr_t)fault_state->fault;
             result->fault_pc = (uintptr_t)fault_state->fault_pc;
             result->fault_target = fault_state->trace_target;
@@ -921,10 +929,11 @@ static bool llgo_coro_worker_call_array_v1(
                     result->fault == LLGO_CORO_WORKER_FAULT_DIVIDE_V1);
         }
         fault_state->active = 1;
-        llgo_coro_worker_fault_tls_v1 = fault_state;
+        thread->active = fault_state;
     }
 
-    errno = 0;
+    int *ep = &errno;
+    *ep = 0;
     uintptr_t r1;
     switch (argc) {
     case 0:
@@ -962,10 +971,10 @@ static bool llgo_coro_worker_call_array_v1(
     }
 
     if (trace_target != 0) {
-        if (llgo_coro_worker_fault_tls_v1 != fault_state) {
+        if (thread->active != fault_state) {
             return false;
         }
-        llgo_coro_worker_fault_tls_v1 = NULL;
+        thread->active = NULL;
         fault_state->active = 0;
     }
 
@@ -976,7 +985,10 @@ static bool llgo_coro_worker_call_array_v1(
      */
     result->r1 = r1;
     result->r2 = 0;
-    result->error = (uintptr_t)errno;
+    result->error = (uintptr_t)*ep;
+    result->fault = LLGO_CORO_WORKER_FAULT_NONE_V1;
+    result->fault_pc = 0;
+    result->fault_target = 0;
     return true;
 }
 
@@ -1003,6 +1015,228 @@ bool __llgo_coro_worker_call_words_v2(
         argc,
         args,
         (struct llgo_coro_worker_result_v1 *)result_address);
+}
+
+static __attribute__((noinline)) uint32_t llgo_coro_worker_solo_fault_finish_v1(
+    struct llgo_coro_worker_fault_thread_v1 *thread,
+    struct llgo_coro_worker_fault_tls_v1 *fault_state,
+    uintptr_t *r1_out,
+    uintptr_t *r2_out,
+    uintptr_t *errno_out) {
+    int fault_signal = (int)fault_state->signal_number;
+    uint32_t fault = (uint32_t)fault_state->fault;
+    uintptr_t fault_pc = (uintptr_t)fault_state->fault_pc;
+    thread->active = NULL;
+    fault_state->active = 0;
+    fault_state->landing = NULL;
+    fault_state->trace_target = 0;
+    fault_state->fault_pc = 0;
+    fault_state->fault = LLGO_CORO_WORKER_FAULT_NONE_V1;
+    fault_state->signal_number = 0;
+    fault_state->handling = 0;
+    *r1_out = fault_pc;
+    *r2_out = 0;
+    *errno_out = 0;
+    if (!llgo_coro_worker_unblock_fault_signals_v1(fault_signal) ||
+        (fault != LLGO_CORO_WORKER_FAULT_MEMORY_V1 &&
+         fault != LLGO_CORO_WORKER_FAULT_DIVIDE_V1)) {
+        return UINT32_C(3);
+    }
+    return fault;
+}
+
+/*
+ * Compact 0..4-argument solo-syscall leaf: avoids passing 5 unused stack
+ * arguments on common POSIX syscalls (read, write, lseek, open, close, fstat).
+ */
+uint32_t __llgo_coro_worker_call_solo4_v1(
+    uintptr_t function,
+    uintptr_t trace_target,
+    uint32_t argc,
+    uintptr_t a0,
+    uintptr_t a1,
+    uintptr_t a2,
+    uintptr_t a3,
+    uintptr_t r1_address,
+    uintptr_t r2_address,
+    uintptr_t errno_address) {
+    uintptr_t *r1_out = (uintptr_t *)r1_address;
+    uintptr_t *r2_out = (uintptr_t *)r2_address;
+    uintptr_t *errno_out = (uintptr_t *)errno_address;
+    if (function == 0 || trace_target == 0 || argc > 4 ||
+        r1_out == NULL || r2_out == NULL || errno_out == NULL) {
+        return UINT32_C(3);
+    }
+
+    sigjmp_buf landing;
+    struct llgo_coro_worker_fault_tls_v1 scope;
+    struct llgo_coro_worker_fault_tls_v1 *fault_state = &scope;
+    struct llgo_coro_worker_fault_thread_v1 *thread = &llgo_coro_worker_fault_thread_v1;
+    if (thread->active != NULL) {
+        return UINT32_C(3);
+    }
+    if (__builtin_expect(thread->signals_ready == 0, 0) &&
+        (pthread_once(
+             &llgo_coro_worker_fault_once_v1,
+             llgo_coro_worker_fault_install_v1) != 0 ||
+         !llgo_coro_worker_fault_ready_v1 ||
+         !llgo_coro_worker_prepare_fault_signals_v1(thread))) {
+        return UINT32_C(3);
+    }
+    fault_state->landing = &landing;
+    fault_state->trace_target = trace_target;
+    fault_state->handling = 0;
+    if (__builtin_expect(sigsetjmp(landing, 0) != 0, 0)) {
+        return llgo_coro_worker_solo_fault_finish_v1(
+            thread, fault_state, r1_out, r2_out, errno_out);
+    }
+    fault_state->active = 1;
+    thread->active = fault_state;
+
+    int *ep = &errno;
+    *ep = 0;
+    uintptr_t r1;
+    switch (argc) {
+    case 0:
+        r1 = ((llgo_coro_worker_fn0_v1)function)();
+        break;
+    case 1:
+        r1 = ((llgo_coro_worker_fn1_v1)function)(a0);
+        break;
+    case 2:
+        r1 = ((llgo_coro_worker_fn2_v1)function)(a0, a1);
+        break;
+    case 3:
+        r1 = ((llgo_coro_worker_fn3_v1)function)(a0, a1, a2);
+        break;
+    default:
+        r1 = ((llgo_coro_worker_fn4_v1)function)(a0, a1, a2, a3);
+        break;
+    }
+
+    if (__builtin_expect(thread->active != fault_state, 0)) {
+        return UINT32_C(3);
+    }
+    thread->active = NULL;
+    fault_state->active = 0;
+
+    *r1_out = r1;
+    *r2_out = 0;
+    *errno_out = (uintptr_t)*ep;
+    return LLGO_CORO_WORKER_FAULT_NONE_V1;
+}
+
+/*
+ * Direct solo-syscall leaf: dispatches register arguments without copying into
+ * a temporary args array or staging a 48-byte result struct. Returns 0 on
+ * normal completion, LLGO_CORO_WORKER_FAULT_{MEMORY,DIVIDE}_V1 on a caught
+ * hardware fault (with the interrupted PC written to *r1_out), and 3 on an
+ * invalid contract/state.
+ */
+uint32_t __llgo_coro_worker_call_solo_v1(
+    uintptr_t function,
+    uintptr_t trace_target,
+    uint32_t argc,
+    uintptr_t a0,
+    uintptr_t a1,
+    uintptr_t a2,
+    uintptr_t a3,
+    uintptr_t a4,
+    uintptr_t a5,
+    uintptr_t a6,
+    uintptr_t a7,
+    uintptr_t a8,
+    uintptr_t r1_address,
+    uintptr_t r2_address,
+    uintptr_t errno_address) {
+    uintptr_t *r1_out = (uintptr_t *)r1_address;
+    uintptr_t *r2_out = (uintptr_t *)r2_address;
+    uintptr_t *errno_out = (uintptr_t *)errno_address;
+    if (function == 0 || trace_target == 0 || argc > LLGO_CORO_WORKER_MAX_ARGS_V1 ||
+        r1_out == NULL || r2_out == NULL || errno_out == NULL) {
+        return UINT32_C(3);
+    }
+
+    sigjmp_buf landing;
+    struct llgo_coro_worker_fault_tls_v1 scope;
+    struct llgo_coro_worker_fault_tls_v1 *fault_state = &scope;
+    struct llgo_coro_worker_fault_thread_v1 *thread = &llgo_coro_worker_fault_thread_v1;
+    if (thread->active != NULL) {
+        return UINT32_C(3);
+    }
+    if (__builtin_expect(thread->signals_ready == 0, 0) &&
+        (pthread_once(
+             &llgo_coro_worker_fault_once_v1,
+             llgo_coro_worker_fault_install_v1) != 0 ||
+         !llgo_coro_worker_fault_ready_v1 ||
+         !llgo_coro_worker_prepare_fault_signals_v1(thread))) {
+        return UINT32_C(3);
+    }
+    fault_state->landing = &landing;
+    fault_state->trace_target = trace_target;
+    fault_state->handling = 0;
+    if (__builtin_expect(sigsetjmp(landing, 0) != 0, 0)) {
+        return llgo_coro_worker_solo_fault_finish_v1(
+            thread, fault_state, r1_out, r2_out, errno_out);
+    }
+    fault_state->active = 1;
+    thread->active = fault_state;
+
+    int *ep = &errno;
+    *ep = 0;
+    uintptr_t r1;
+    if (__builtin_expect(argc <= 4, 1)) {
+        switch (argc) {
+        case 0:
+            r1 = ((llgo_coro_worker_fn0_v1)function)();
+            break;
+        case 1:
+            r1 = ((llgo_coro_worker_fn1_v1)function)(a0);
+            break;
+        case 2:
+            r1 = ((llgo_coro_worker_fn2_v1)function)(a0, a1);
+            break;
+        case 3:
+            r1 = ((llgo_coro_worker_fn3_v1)function)(a0, a1, a2);
+            break;
+        default:
+            r1 = ((llgo_coro_worker_fn4_v1)function)(a0, a1, a2, a3);
+            break;
+        }
+    } else {
+        switch (argc) {
+        case 5:
+            r1 = ((llgo_coro_worker_fn5_v1)function)(a0, a1, a2, a3, a4);
+            break;
+        case 6:
+            r1 = ((llgo_coro_worker_fn6_v1)function)(a0, a1, a2, a3, a4, a5);
+            break;
+        case 7:
+            r1 = ((llgo_coro_worker_fn7_v1)function)(a0, a1, a2, a3, a4, a5, a6);
+            break;
+        case 8:
+            r1 = ((llgo_coro_worker_fn8_v1)function)(a0, a1, a2, a3, a4, a5, a6, a7);
+            break;
+        case 9:
+            r1 = ((llgo_coro_worker_fn9_v1)function)(a0, a1, a2, a3, a4, a5, a6, a7, a8);
+            break;
+        default:
+            thread->active = NULL;
+            fault_state->active = 0;
+            return UINT32_C(3);
+        }
+    }
+
+    if (__builtin_expect(thread->active != fault_state, 0)) {
+        return UINT32_C(3);
+    }
+    thread->active = NULL;
+    fault_state->active = 0;
+
+    *r1_out = r1;
+    *r2_out = 0;
+    *errno_out = (uintptr_t)*ep;
+    return LLGO_CORO_WORKER_FAULT_NONE_V1;
 }
 
 /*

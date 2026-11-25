@@ -76,6 +76,16 @@ type WaitSetRecord struct {
 // park. It must run before any record-aware OperationRecord is attached or
 // made producer-visible, so initialization itself cannot fail after admission.
 func PrepareWaitSetRecord(record *WaitSetRecord, g *G, ticket ParkTicket) bool {
+	if !AuditEnabled {
+		if record == nil || record.state != waitSetRecordUnused || g == nil ||
+			!validParkTicket(ticket) || g.park.phase != parkPreparing || g.park.ticket != ticket {
+			return false
+		}
+		record.g = g
+		record.ticket = ticket
+		record.state = waitSetRecordPreparing
+		return true
+	}
 	if record == nil || *record != (WaitSetRecord{}) || !ValidG(g) || !validParkTicket(ticket) ||
 		!validParkState(&g.park) || g.park.phase != parkPreparing || g.park.ticket != ticket {
 		return false

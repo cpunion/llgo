@@ -29,8 +29,9 @@ import "unsafe"
 // sequentially with zero kernel mutex sleeps and zero retained RSS.
 type gcFreeBatcher struct {
 	drainLock   uint32
-	_           uint32
+	_pad0       [60]byte
 	pendingHead unsafe.Pointer
+	_pad1       [56]byte
 }
 
 var defaultGCFreeBatcher gcFreeBatcher

@@ -107,24 +107,30 @@ func (fd *FD) LLGoTryRead(p []byte) (int, error, uint8) {
 		return 0, nil, LLGoTryDoneSlowUnlock
 	}
 	ctx := fd.pd.runtimeCtx
-	if ctx != 0 {
-		if runtime_pollReset(ctx, 'r') != 0 {
-			if fd.llgoTryUnlock(mutexRLock, mutexRMask) {
-				return 0, nil, LLGoTryFallback
-			}
-			return 0, nil, LLGoTryFallbackSlowUnlock
-		}
-	}
 	if fd.IsStream && len(p) > maxRW {
 		p = p[:maxRW]
 	}
 	if ctx != 0 {
-		n, errno, attempted := runtime_pollReadAttempt(
+		n, errno, attempted := runtime_pollCheckedReadAttempt(
 			ctx,
 			fd.Sysfd,
 			llgoCoroPollBufferAddress(p),
 			len(p),
 		)
+		if !attempted {
+			if runtime_pollReset(ctx, 'r') != 0 {
+				if fd.llgoTryUnlock(mutexRLock, mutexRMask) {
+					return 0, nil, LLGoTryFallback
+				}
+				return 0, nil, LLGoTryFallbackSlowUnlock
+			}
+			n, errno, attempted = runtime_pollReadAttempt(
+				ctx,
+				fd.Sysfd,
+				llgoCoroPollBufferAddress(p),
+				len(p),
+			)
+		}
 		if attempted {
 			if errno == 0 {
 				err := fd.eofError(n, nil)
@@ -203,25 +209,39 @@ func (fd *FD) LLGoReadWaitPrepare() (ctx uintptr, pfd int32, interest uint32, de
 // non-blocking read attempt while holding fd's read lock. Acyclic and
 // convertErr-free so it compiles to EmitOutcomePlain (zero coroutine frame).
 func (fd *FD) LLGoReadWaitFinishAndRead(ctx uintptr, p []byte, waitResult uint32) (n int, err error, status uint8, pollStatus int) {
-	st, retry := runtime_pollFinishWait(ctx, 'r', waitResult)
-	if retry {
-		return 0, nil, LLGoTryWaitLocked, 0
-	}
-	if st != 0 {
-		if fd.llgoTryUnlock(mutexRLock, mutexRMask) {
-			return 0, nil, LLGoTryDone, st
-		}
-		return 0, nil, LLGoTryDoneSlowUnlock, st
-	}
 	if fd.IsStream && len(p) > maxRW {
 		p = p[:maxRW]
 	}
-	nn, errno, attempted := runtime_pollReadAttempt(
-		ctx,
-		fd.Sysfd,
-		llgoCoroPollBufferAddress(p),
-		len(p),
-	)
+	var nn, errno int
+	var attempted bool
+	if waitResult == 1 {
+		// Common PollOperationReady path: checked read verifies !closing,
+		// no deadline, inline stream, and matching fd in a single C call.
+		nn, errno, attempted = runtime_pollCheckedReadAttempt(
+			ctx,
+			fd.Sysfd,
+			llgoCoroPollBufferAddress(p),
+			len(p),
+		)
+	}
+	if !attempted {
+		st, retry := runtime_pollFinishWait(ctx, 'r', waitResult)
+		if retry {
+			return 0, nil, LLGoTryWaitLocked, 0
+		}
+		if st != 0 {
+			if fd.llgoTryUnlock(mutexRLock, mutexRMask) {
+				return 0, nil, LLGoTryDone, st
+			}
+			return 0, nil, LLGoTryDoneSlowUnlock, st
+		}
+		nn, errno, attempted = runtime_pollReadAttempt(
+			ctx,
+			fd.Sysfd,
+			llgoCoroPollBufferAddress(p),
+			len(p),
+		)
+	}
 	if !attempted || errno == int(syscall.EINTR) {
 		return 0, nil, LLGoTryFallback, 0
 	}
@@ -307,15 +327,23 @@ func (fd *FD) LLGoReadWaitLocked(p []byte) (int, error) {
 // llgoTryWriteStream runs one bounded non-blocking write attempt on a pollable
 // stream socket while the caller holds fd's write lock.
 func (fd *FD) llgoTryWriteStream(ctx uintptr, p []byte) (int, error, uint8) {
-	if runtime_pollReset(ctx, 'w') != 0 {
-		return 0, nil, LLGoTryFallback
-	}
-	n, errno, attempted := runtime_pollWriteAttempt(
+	n, errno, attempted := runtime_pollCheckedWriteAttempt(
 		ctx,
 		fd.Sysfd,
 		llgoCoroPollBufferAddress(p),
 		len(p),
 	)
+	if !attempted {
+		if runtime_pollReset(ctx, 'w') != 0 {
+			return 0, nil, LLGoTryFallback
+		}
+		n, errno, attempted = runtime_pollWriteAttempt(
+			ctx,
+			fd.Sysfd,
+			llgoCoroPollBufferAddress(p),
+			len(p),
+		)
+	}
 	if !attempted {
 		return 0, nil, LLGoTryFallback
 	}
@@ -497,6 +525,8 @@ func (fd *FD) LLGoTrySeek(offset int64, whence int) (int64, error, uint8) {
 	return ret, err, LLGoTryDoneSlowUnlock
 }
 
+func runtime_pollCheckedReadAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (result int, errno int, attempted bool)
+func runtime_pollCheckedWriteAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (result int, errno int, attempted bool)
 func runtime_pollReadAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (result int, errno int, attempted bool)
 func runtime_pollWriteAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (result int, errno int, attempted bool)
 func runtime_pollPrepareWait(ctx uintptr, mode int) (fd int32, interest uint32, deadline int64, status int)

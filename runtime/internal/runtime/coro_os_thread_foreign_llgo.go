@@ -365,7 +365,8 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 	}
 	ringOK := returnRequested &&
 		coro.ExecutorRequestAccepted(request) &&
-		boundary.domain.doorbell.Ring()
+		(!coroNativeFleetRequestNeedsRingV1(boundary.domain, request) ||
+			boundary.domain.doorbell.Ring())
 	if !returnRequested && !alreadyReturned {
 		coroRuntimeAbort("native direct replacement return state invalid")
 	}
@@ -375,7 +376,12 @@ func (boundary *coroNativeForeignBoundaryV1) reclaimReplacementV1() bool {
 	if returnRequested && !ringOK {
 		coroRuntimeAbort("native direct replacement doorbell failed")
 	}
+	spins := 0
 	for returnRequested && ringOK && !boundary.parent.handoff.Returned(boundary.baton) {
+		if spins < 64 {
+			spins++
+			continue
+		}
 		if corofleet.Yield() != 0 {
 			ringOK = false
 		}
@@ -867,8 +873,8 @@ func coroNativeSyscallSoloFastEligibleV1(task *coro.G) bool {
 	if coroKeyedAtomicLoadUint32(&coroNativeForeignDetachedCountV1) != 0 {
 		return false
 	}
-	driver, route, ok := coro.CurrentExecutorDriverForCompilerTask(task)
-	if !ok || !route.Valid() {
+	route, ok := coro.SoloSyscallEligibleTask(task)
+	if !ok {
 		return false
 	}
 	if !coroNativeFleetV1State.execution.SoloActive(route) {
@@ -876,30 +882,20 @@ func coroNativeSyscallSoloFastEligibleV1(task *coro.G) bool {
 	}
 	started := coroNativeAtomicLoadV1(&coroNativeFleetPhysicalOwnerV1State.started)
 	if started == 0 {
-		if route != 1 {
-			return false
-		}
-	} else {
-		totalRoutes := started + 1
-		if totalRoutes > coroNativeFleetV1State.domainCount {
-			return false
-		}
-		peerMask := ((uint32(1) << totalRoutes) - 1) &^ (uint32(1) << (uint32(route) - 1))
-		if coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)&peerMask != peerMask {
-			return false
-		}
-		for r := uint32(1); r <= totalRoutes; r++ {
-			if r == uint32(route) {
-				continue
-			}
-			if !coro.DriverIdleUnrequested(coroNativeFleetV1State.domains[r-1].driverOwnerV1()) {
-				return false
-			}
-		}
+		return route == 1
 	}
-	return coro.SoloSyscallEligible(driver, task)
+	totalRoutes := started + 1
+	if totalRoutes > coroNativeFleetV1State.domainCount {
+		return false
+	}
+	peerMask := ((uint32(1) << totalRoutes) - 1) &^ (uint32(1) << (uint32(route) - 1))
+	if coroNativeAtomicLoadV1(&coroNativeFleetQuiescentMaskV1)&peerMask != peerMask {
+		return false
+	}
+	return coroNativeFleetV1State.fleet.PeersIdleUnrequested(route, totalRoutes)
 }
 
+//go:noinline
 func coroNativeForeignWordCallV1(
 	task *coro.G,
 	mode coro.ExecutorResumeHandoffMode,
@@ -918,11 +914,8 @@ func coroNativeForeignWordCallV1(
 		coroRuntimeAbort("invalid native direct foreign call")
 	}
 	var boundary coroNativeForeignBoundaryV1
-	solo := lazyCompensation && coroNativeSyscallSoloFastEligibleV1(task)
-	if !solo {
-		if !boundary.beginV1(task, mode, lazyCompensation) {
-			coroRuntimeAbort("native direct foreign call cannot detach active resume")
-		}
+	if !boundary.beginV1(task, mode, lazyCompensation) {
+		coroRuntimeAbort("native direct foreign call cannot detach active resume")
 	}
 	var result coroworker.Result
 	callOK := coroWorkerCallWordsV2(
@@ -930,10 +923,8 @@ func coroNativeForeignWordCallV1(
 		a0, a1, a2, a3, a4, a5, a6, a7, a8,
 		uintptr(unsafe.Pointer(&result)),
 	)
-	if !solo {
-		if !boundary.finishV1() {
-			coroRuntimeAbort("native direct foreign call cannot reacquire managed execution")
-		}
+	if !boundary.finishV1() {
+		coroRuntimeAbort("native direct foreign call cannot reacquire managed execution")
 	}
 	if !callOK {
 		coroRuntimeAbort("native direct foreign call failed")
@@ -971,8 +962,17 @@ func __llgo_coro_native_syscall_call_v1(
 	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 	r1, r2, errno *uintptr,
 ) uint32 {
+	task := (*coro.G)(g)
+	if coroNativeSyscallSoloFastEligibleV1(task) {
+		return coroNativeSyscallSoloDirectV1(
+			task,
+			function, traceTarget, argc,
+			a0, a1, a2, a3, a4, a5, a6, a7, a8,
+			r1, r2, errno,
+		)
+	}
 	return coroNativeForeignWordCallV1(
-		(*coro.G)(g),
+		task,
 		coro.ExecutorResumeHandoffSameMForeign,
 		true,
 		function, traceTarget, argc,

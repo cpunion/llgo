@@ -112,6 +112,47 @@ static uintptr_t untrapped_helper(void) {
     return leaf();
 }
 
+static uintptr_t sum4(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d) {
+    return a + b + c + d;
+}
+
+static uintptr_t sum5(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
+    return a + b + c + d + e;
+}
+
+static int solo_fault4(void) {
+    uintptr_t r1 = 0, r2 = 9, err = 9;
+    uint32_t f = __llgo_coro_worker_call_solo4_v1(
+        (uintptr_t)leaf, (uintptr_t)leaf, 0, 0, 0, 0, 0,
+        (uintptr_t)&r1, (uintptr_t)&r2, (uintptr_t)&err);
+    return f == LLGO_CORO_WORKER_FAULT_MEMORY_V1 && r1 != 0 && r2 == 0 && err == 0;
+}
+
+static int solo_fault9(void) {
+    uintptr_t r1 = 0, r2 = 9, err = 9;
+    uint32_t f = __llgo_coro_worker_call_solo_v1(
+        (uintptr_t)leaf, (uintptr_t)leaf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        (uintptr_t)&r1, (uintptr_t)&r2, (uintptr_t)&err);
+    return f == LLGO_CORO_WORKER_FAULT_MEMORY_V1 && r1 != 0 && r2 == 0 && err == 0;
+}
+
+static int solo_calls(void) {
+    uintptr_t r1 = 0, r2 = 9, err = 9;
+    if (__llgo_coro_worker_call_solo4_v1(
+            (uintptr_t)sum4, (uintptr_t)sum4, 4, 1, 2, 3, 4,
+            (uintptr_t)&r1, (uintptr_t)&r2, (uintptr_t)&err) != LLGO_CORO_WORKER_FAULT_NONE_V1 ||
+        r1 != 10 || r2 != 0 || err != 0) {
+        return 0;
+    }
+    if (__llgo_coro_worker_call_solo_v1(
+            (uintptr_t)sum5, (uintptr_t)sum5, 5, 1, 2, 3, 4, 5, 0, 0, 0, 0,
+            (uintptr_t)&r1, (uintptr_t)&r2, (uintptr_t)&err) != LLGO_CORO_WORKER_FAULT_NONE_V1 ||
+        r1 != 15 || r2 != 0 || err != 0) {
+        return 0;
+    }
+    return solo_fault4() && solo_fault9();
+}
+
 int main(int argc, char **argv) {
     (void)argv;
     struct sigaction action;
@@ -124,6 +165,7 @@ int main(int argc, char **argv) {
     llgo_install_coro_fault_handler(managed_capture);
     for (int i = 0; i < 10; ++i) {
         if (!fault()) return 2;
+        if (!solo_calls()) return 8;
         struct llgo_coro_worker_result_v1 result;
         if (!invoke((uintptr_t)callback, (uintptr_t)callback, &result) ||
             result.fault != 0 || result.r1 != 7) return 3;

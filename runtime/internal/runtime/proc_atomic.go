@@ -18,12 +18,15 @@
 
 package runtime
 
-import "github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
+import (
+	c "github.com/xgo-dev/llgo/runtime/internal/clite"
+	"github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
+)
 
 const (
 	mainExitedBit  = uint64(1) << 63
 	gCountMask     = mainExitedBit - 1
-	goidCacheBatch = uint64(64)
+	goidCacheBatch = uint64(256)
 )
 
 func nextGoidBatch() (first, end uint64) {
@@ -66,8 +69,27 @@ func nextPid(pp *p) int32 {
 	return atomic.Add(&sched.pidgen, int32(1))
 }
 
+func coroGCountShardIndex(route uint16) int {
+	if route == 0 {
+		return 0
+	}
+	index := int(route - 1)
+	if index >= len(coroGCountShards) {
+		return index % len(coroGCountShards)
+	}
+	return index
+}
+
 func retainG() {
-	atomic.Add(&sched.gstate, uint64(1))
+	if atomic.Add(&sched.gstate, uint64(1))&mainExitedBit != 0 {
+		atomic.Add(&sched.gstateSeq, uint64(1))
+	}
+}
+
+func retainCoroG(route uint16) {
+	if atomic.Add(&coroGCountShards[coroGCountShardIndex(route)].state, uint64(1))&mainExitedBit != 0 {
+		atomic.Add(&sched.gstateSeq, uint64(1))
+	}
 }
 
 // releaseG drops one registered context and returns the remaining count and
@@ -80,13 +102,51 @@ func releaseG() (remaining uint64, mainExited bool) {
 	return state & gCountMask, state&mainExitedBit != 0
 }
 
+func releaseCoroG(route uint16) {
+	atomic.Sub(&coroGCountShards[coroGCountShardIndex(route)].state, uint64(1))
+}
+
+func releaseCoroGAndCheckDeadlock(route uint16) {
+	state := atomic.Sub(&coroGCountShards[coroGCountShardIndex(route)].state, uint64(1)) - 1
+	if state&mainExitedBit == 0 {
+		return
+	}
+	remaining, mainExited := gState()
+	if remaining == 0 && mainExited {
+		fatal("no goroutines (main called runtime.Goexit) - deadlock!")
+		c.Exit(2)
+	}
+}
+
 func markMainExited() {
+	// Mark every shard before sched.gstate so any gState() observing
+	// sched.gstate&mainExitedBit != 0 is guaranteed that all prior retains are
+	// visible in their shards and all later retains observe mainExitedBit and
+	// advance gstateSeq before returning.
+	for i := range coroGCountShards {
+		atomic.Or(&coroGCountShards[i].state, mainExitedBit)
+	}
 	atomic.Or(&sched.gstate, mainExitedBit)
 }
 
 func gState() (count uint64, mainExited bool) {
-	state := atomic.Load(&sched.gstate)
-	return state & gCountMask, state&mainExitedBit != 0
+	for {
+		seq := atomic.Load(&sched.gstateSeq)
+		state := atomic.Load(&sched.gstate)
+		exited := state&mainExitedBit != 0
+		total := int64(state & gCountMask)
+		for i := range coroGCountShards {
+			shard := atomic.Load(&coroGCountShards[i].state)
+			total += int64(shard&gCountMask) - int64(coroGCountShardBias)
+		}
+		if exited && atomic.Load(&sched.gstateSeq) != seq {
+			continue
+		}
+		if total < 0 {
+			total = 0
+		}
+		return uint64(total), exited
+	}
 }
 
 func readgstatus(gp *g) uint32 {

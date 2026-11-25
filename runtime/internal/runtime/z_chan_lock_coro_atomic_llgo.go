@@ -24,3 +24,8 @@ func channelMutexCompareAndSwap(address *uint32, old, new uint32) bool {
 	_, swapped := catomic.CompareAndExchange(address, old, new)
 	return swapped
 }
+
+func channelMutexSpinUntilIdle(address *uint32) {
+	for catomic.Load(address) != channelOwnerGateIdle {
+	}
+}

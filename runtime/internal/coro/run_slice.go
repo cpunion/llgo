@@ -149,10 +149,18 @@ type ExecutorRunActionStep struct {
 	Action     Action
 }
 
+func executorRunExternalSourceRequestedNoDirect(driver *ExecutorDriver) bool {
+	if driver.sources.pending(driver.p) || preemptLoad(&driver.p.schedule) != scheduleIdle {
+		return true
+	}
+	if !AuditEnabled {
+		return driver.requestGate != nil && preemptLoad(driver.requestGate)&executorGateRequested != 0
+	}
+	return driver.registry.ObserveRequested(driver.handle)
+}
+
 func executorRunExternalSourceRequested(driver *ExecutorDriver) bool {
-	return executorDirectChannelCompletionPending(driver) || driver.sources.pending(driver.p) ||
-		driver.registry.ObserveRequested(driver.handle) ||
-		preemptLoad(&driver.p.schedule) != scheduleIdle
+	return executorDirectChannelCompletionPending(driver) || executorRunExternalSourceRequestedNoDirect(driver)
 }
 
 // ExecutorDriverHasPendingExternalWork performs a lock-free atomic check for
@@ -475,7 +483,7 @@ func nextExecutorRunActionValidated(
 	if executorDirectChannelCompletionPending(driver) || ownerLocalCompletionPending(driver) {
 		return ExecutorRunActionStep{}, false, true
 	}
-	sourceReq := executorRunSourceRequested(driver)
+	sourceReq := driver.run.sourceMore || executorRunExternalSourceRequestedNoDirect(driver)
 	if !AuditEnabled && driver.run.actionsSinceSource == executorRunSourceQuantum &&
 		!sourceReq && !driver.sources.needsMonotonicTimeNow() {
 		driver.run.actionsSinceSource = 0

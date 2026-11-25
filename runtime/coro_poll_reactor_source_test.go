@@ -39,7 +39,8 @@ func TestCoroNativePollReactorSharesExecutorWait(t *testing.T) {
 		"coroNativePollIDsV2",
 		"coroTargetPostPollEventsV1(count)",
 		"pipe.ConsumeRetainedWake()",
-		"corodoorbell.DeadlinePollTimeout(",
+		"corodoorbell.DeadlinePollTimeoutNano(",
+		"corodoorbell.WaitPollSetNano(",
 	} {
 		if !strings.Contains(body, required) {
 			t.Errorf("%s lacks shared-reactor marker %q", source, required)
@@ -89,8 +90,8 @@ func TestCoroNativeFleetPollReactorKeepsOneExactPhysicalWaitPrimitive(t *testing
 		"coroNativeFleetPhysicalWaitIdleV1",
 		"coroNativeFleetPhysicalWaitActiveV1",
 		"domain.doorbell.ConsumeRetainedWake()",
-		"corodoorbell.DeadlinePollTimeout(now, wait.deadline)",
-		"corodoorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS)",
+		"corodoorbell.DeadlinePollTimeoutNano(now, wait.deadline)",
+		"corodoorbell.WaitPollSetNano(&storage.entries[0], wait.count, timeoutNS)",
 		"coroNativeFleetPostPollV1(",
 		"storage.operations[entry-1]",
 		"coroNativeFleetWaitPassRetryV1",

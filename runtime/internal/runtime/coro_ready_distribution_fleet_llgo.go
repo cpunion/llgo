@@ -181,18 +181,29 @@ func coroTargetAfterStableRunActionV1(
 		sourceDomain.pOwnerV1() != source || sourceDomain.handle.Route != route {
 		return false, coroTargetReadyDistributionFailV1("native ready distribution source route mismatch")
 	}
-	_ = yieldAction
-	distribution, distributionOK := state.fleet.DistributePNeutralRunnable(
-		sourceDomain.handle,
-		source,
-	)
-	if !distributionOK {
-		return false, coroTargetReadyDistributionFailV1("native ready distribution core rejected owner")
+	for pass := uint32(1); pass < state.domainCount; pass++ {
+		distribution, distributionOK := state.fleet.DistributePNeutralRunnable(
+			sourceDomain.handle,
+			source,
+		)
+		if !distributionOK {
+			return false, coroTargetReadyDistributionFailV1("native ready distribution core rejected owner")
+		}
+		if !distribution.Valid() {
+			return distributed, true
+		}
+		if !coroTargetPublishReadyDistributionV1(state, distribution) {
+			return false, false
+		}
+		distributed = true
+		if coroNativeFleetPhysicalOwnerV1State.stop.Sealed() ||
+			distribution.Count < 32 ||
+			!state.fleet.HasPeerRunnableDemand(target.sourceRoute) ||
+			!coro.HasReadySurplus(source, yieldAction) {
+			break
+		}
 	}
-	if !distribution.Valid() {
-		return false, true
-	}
-	return true, coroTargetPublishReadyDistributionV1(state, distribution)
+	return distributed, true
 }
 
 func coroTargetPublishReadyDistributionV1(
@@ -237,6 +248,9 @@ func coroTargetAfterSourceReductionV1(
 	}
 	if state.lifecycle != coroNativeFleetActiveV1 {
 		return false, coroTargetReadyDistributionFailV1("native source distribution fleet is not active")
+	}
+	if !state.fleet.HasPeerRunnableDemand(target.sourceRoute) {
+		return false, true
 	}
 	route := uint32(target.sourceRoute)
 	if route == 0 || route > state.domainCount {
@@ -499,4 +513,27 @@ func coroTargetHandleOSThreadSuspendV1(p *coro.P, driver *coro.ExecutorDriver, t
 
 func coroTargetHandleOSThreadReadyV1(p *coro.P, driver *coro.ExecutorDriver) bool {
 	return coroNativeRotateOSThreadOwnersV1(p, driver, nil)
+}
+
+func coroTargetHasFleetPeersV1() bool {
+	return coroNativeFleetV1State.lifecycle == coroNativeFleetActiveV1 &&
+		coroNativeAtomicLoadV1(&coroNativeFleetPhysicalOwnerV1State.started) != 0
+}
+
+func coroTargetTryInSlicePeerIdlePollV1(
+	target coroRunTargetCapabilityV1,
+	driver *coro.ExecutorDriver,
+) (woke, posted, ok bool) {
+	if target.sourceRoute < 2 || coroNativeFleetPhysicalOwnerV1State.stop.Sealed() {
+		return false, false, true
+	}
+	state := &coroNativeFleetV1State
+	if state.lifecycle != coroNativeFleetActiveV1 || uint32(target.sourceRoute) > state.domainCount {
+		return false, false, false
+	}
+	domain := &state.domains[uint32(target.sourceRoute)-1]
+	if domain.lifecycle != coroNativeFleetDomainActiveV1 || domain.driverOwnerV1() != driver {
+		return false, false, false
+	}
+	return coroNativeFleetTryFastPollCompletionDetailedV1(domain.handle)
 }

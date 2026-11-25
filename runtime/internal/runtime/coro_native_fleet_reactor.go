@@ -259,10 +259,10 @@ func coroNativeFleetWaitPhysicalPassAtV1(
 		return coroNativeFleetPhysicalWaitWakeV1
 	}
 
-	timeoutMS := corodoorbell.PollFaultContainmentMilliseconds
+	timeoutNS := corodoorbell.PollFaultContainmentNanoseconds
 	if wait.hasDeadline {
 		var reached bool
-		timeoutMS, reached, ok = corodoorbell.DeadlinePollTimeout(now, wait.deadline)
+		timeoutNS, reached, ok = corodoorbell.DeadlinePollTimeoutNano(now, wait.deadline)
 		if !ok {
 			return coroNativeFleetPhysicalWaitInvalidV1
 		}
@@ -273,7 +273,7 @@ func coroNativeFleetWaitPhysicalPassAtV1(
 	for index := uint32(0); index < wait.count; index++ {
 		storage.entries[index].Revents = 0
 	}
-	ready, errno := corodoorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS)
+	ready, errno := corodoorbell.WaitPollSetNano(&storage.entries[0], wait.count, timeoutNS)
 	if ready < 0 {
 		if corodoorbell.PollInterrupted(errno) {
 			return coroNativeFleetPhysicalWaitRetryV1
@@ -359,53 +359,62 @@ func coroNativeFleetWaitOwnerPassAtV1(
 // probe for a peer route that already has active poll operations, avoiding the
 // full idle/sleep/quota round-trip when loopback readiness has already arrived.
 func coroNativeFleetTryFastPollCompletionV1(handle coro.ExecutorFleetHandle) (ready, ok bool) {
+	woke, posted, valid := coroNativeFleetTryFastPollCompletionDetailedV1(handle)
+	return woke || posted, valid
+}
+
+func coroNativeFleetTryFastPollCompletionDetailedV1(handle coro.ExecutorFleetHandle) (woke, posted, ok bool) {
 	domain, _, valid := coroNativeFleetWaitStorageV1(handle)
 	if !valid {
-		return false, false
+		return false, false, false
 	}
 	poll := domain.pollOwnerV1()
 	if poll == nil {
-		return false, true
+		return false, false, true
 	}
 	scanLimit, scanOK := coro.PollOperationScanLimit(poll)
 	if !scanOK {
-		return false, false
+		return false, false, false
 	}
 	if scanLimit == 0 {
-		return false, true
+		return false, false, true
 	}
 	deadline, hasDeadline := int64(0), false
-	if coro.PollOperationHasDeadline(poll) {
+	hasPollDeadline := coro.PollOperationHasDeadline(poll)
+	if hasPollDeadline {
 		var deadlineOK bool
 		deadline, hasDeadline, deadlineOK = coro.NextExecutorTimerDeadline(domain.driverOwnerV1())
 		if !deadlineOK || deadline < 0 || !hasDeadline && deadline != 0 {
-			return false, false
+			return false, false, false
 		}
 	}
 	physical, built := coroNativeFleetBuildPhysicalWaitV1(handle, deadline, hasDeadline)
 	if !built || physical.count <= 1 {
-		return false, built
+		return false, false, built
 	}
 	_, storage, storageOK := coroNativeFleetWaitStorageV1(handle)
 	if !storageOK || storage == nil {
-		return false, false
+		return false, false, false
 	}
-	for index := uint32(0); index < physical.count; index++ {
-		storage.entries[index].Revents = 0
+	probeTimeoutNS := int64(0)
+	if !hasPollDeadline && !coro.ExecutorHasActiveTimer(domain.driverOwnerV1()) {
+		probeTimeoutNS = 50_000
 	}
 	nReady, errno := corodoorbell.WaitPollSet(&storage.entries[0], physical.count, 0)
+	if nReady == 0 && probeTimeoutNS > 0 {
+		nReady, errno = corodoorbell.WaitPollSetNano(&storage.entries[0], physical.count, probeTimeoutNS)
+	}
 	if nReady <= 0 {
 		_ = errno
-		return false, true
+		return false, false, true
 	}
 	if storage.entries[0].Revents&corodoorbell.PollBadFD != 0 {
-		return false, true
+		return false, false, true
 	}
-	woke := false
 	if storage.entries[0].Revents&
 		(corodoorbell.PollRead|corodoorbell.PollError|corodoorbell.PollHangup) != 0 {
 		if !domain.doorbell.Drain() {
-			return false, false
+			return false, false, false
 		}
 		woke = true
 	}
@@ -418,9 +427,9 @@ func coroNativeFleetTryFastPollCompletionV1(handle coro.ExecutorFleetHandle) (re
 			storage.operations[entry-1],
 			coro.PollOperationReady,
 		); !ok {
-			return false, false
+			return false, false, false
 		} else if completed {
-			woke = true
+			posted = true
 			continue
 		}
 		if !coroNativeFleetPhysicalPollPostAcceptedV1(
@@ -430,9 +439,9 @@ func coroNativeFleetTryFastPollCompletionV1(handle coro.ExecutorFleetHandle) (re
 			),
 			coroNativeFleetPhysicalWaitActiveV1,
 		) {
-			return false, false
+			return false, false, false
 		}
-		woke = true
+		posted = true
 	}
-	return woke, true
+	return woke, posted, true
 }

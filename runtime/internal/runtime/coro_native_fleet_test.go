@@ -116,6 +116,7 @@ func coroReleaseCompletedTask(g *coro.G) bool {
 func coroReleaseCompletedTaskReceipt(
 	g *coro.G,
 	_ coro.CompletedTaskReleaseReceipt,
+	_ uint16,
 ) bool {
 	return coroReleaseCompletedTask(g)
 }

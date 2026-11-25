@@ -42,11 +42,20 @@ func nextPid(pp *p) int32 {
 func retainG() {
 }
 
+func retainCoroG(route uint16) {
+}
+
 // Bare-metal has no atomic goroutine counter. Returning one remaining
 // goroutine intentionally disables native pthread main-Goexit deadlock
 // detection for this single-context backend.
 func releaseG() (remaining uint64, mainExited bool) {
 	return 1, false
+}
+
+func releaseCoroG(route uint16) {
+}
+
+func releaseCoroGAndCheckDeadlock(route uint16) {
 }
 
 // Bare-metal keeps its existing single-context behavior.

@@ -29,7 +29,7 @@ const (
 // RunnableTransferMailboxCapacity is the fixed target-neutral capacity of one
 // runnable migration mailbox. A target profile may shard mailboxes, but it may
 // not silently turn this bound into an allocating or unbounded queue.
-const RunnableTransferMailboxCapacity uint32 = 32
+const RunnableTransferMailboxCapacity uint32 = 256
 
 const runnableTransferMailboxMagic uint32 = 0x52544d31 // "RTM1"
 
@@ -429,11 +429,11 @@ func preflightPNeutralRunnableBatch(
 func publishPreparedPNeutralRunnableBatch(
 	mailbox *RunnableTransferMailbox,
 	source *P,
-	candidates *[RunnableTransferMailboxCapacity]*G,
-	prepared uint32,
+	candidates []*G,
 ) (first RunnableTransferID, count uint32) {
+	prepared := uint32(len(candidates))
 	if mailbox == nil || mailbox.magic != runnableTransferMailboxMagic || mailbox.owner == nil ||
-		source == nil || source == mailbox.owner || candidates == nil ||
+		source == nil || source == mailbox.owner ||
 		prepared == 0 || prepared > RunnableTransferMailboxCapacity ||
 		!tryRunnableTransferGate(mailbox) {
 		return RunnableTransferID{}, 0
@@ -513,7 +513,7 @@ func PublishPNeutralRunnableBatch(
 	if prepared == 0 {
 		return RunnableTransferID{}, 0
 	}
-	return publishPreparedPNeutralRunnableBatch(mailbox, source, &candidates, prepared)
+	return publishPreparedPNeutralRunnableBatch(mailbox, source, candidates[:prepared])
 }
 
 func importPNeutralRunnableLocked(mailbox *RunnableTransferMailbox, owner *P, id RunnableTransferID) bool {

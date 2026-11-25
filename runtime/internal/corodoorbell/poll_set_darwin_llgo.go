@@ -27,15 +27,27 @@ var (
 //go:linkname nativeCPollSet C.__llgo_coro_doorbell_poll_set_v1
 func nativeCPollSet(first *PollFD, count c.Uint, timeout c.Int) uint64
 
+//go:linkname nativeCPollSetNano C.__llgo_coro_doorbell_poll_set_ns_v1
+func nativeCPollSetNano(first *PollFD, count c.Uint, timeoutNS int64) uint64
+
 //go:linkname nativeCPollBindState C.__llgo_coro_doorbell_poll_bind_state_v1
 func nativeCPollBindState(closeEpoch *uint32, ownedFDs *uint32)
 
-func nativePollSet(first *PollFD, count uint32, timeoutMS int32) (int, int32) {
+func ensureDarwinPollStateBound() {
 	if atomic.LoadUint32(&darwinPollStateBound) == 0 {
 		nativeCPollBindState(&darwinPollCloseEpoch, &darwinOwnedPollFDs[0])
 		atomic.StoreUint32(&darwinPollStateBound, 1)
 	}
+}
+
+func nativePollSet(first *PollFD, count uint32, timeoutMS int32) (int, int32) {
+	ensureDarwinPollStateBound()
 	return unpackNativeDoorbellResult(nativeCPollSet(first, c.Uint(count), c.Int(timeoutMS)))
+}
+
+func nativePollSetNano(first *PollFD, count uint32, timeoutNS int64) (int, int32) {
+	ensureDarwinPollStateBound()
+	return unpackNativeDoorbellResult(nativeCPollSetNano(first, c.Uint(count), timeoutNS))
 }
 
 // NotifyDescriptorClosed bumps the Darwin kqueue descriptor-close epoch so

@@ -420,8 +420,7 @@ func clearSignalFaultPC(mp *m) {
 	mp.signalFaultState &= signalFaultBoundaryMask
 }
 
-func signalFaultBoundaryEnter() bool {
-	mp := signalFaultM(getg())
+func signalFaultBoundaryEnterM(mp *m) bool {
 	if mp == nil || mp.signalFaultState&signalFaultBoundaryMask == signalFaultBoundaryMask {
 		return false
 	}
@@ -429,13 +428,20 @@ func signalFaultBoundaryEnter() bool {
 	return true
 }
 
-func signalFaultBoundaryExit() bool {
-	mp := signalFaultM(getg())
+func signalFaultBoundaryExitM(mp *m) bool {
 	if mp == nil || mp.signalFaultState&signalFaultBoundaryMask == 0 {
 		return false
 	}
 	mp.signalFaultState -= signalFaultBoundaryUnit
 	return true
+}
+
+func signalFaultBoundaryEnter() bool {
+	return signalFaultBoundaryEnterM(signalFaultM(getg()))
+}
+
+func signalFaultBoundaryExit() bool {
+	return signalFaultBoundaryExitM(signalFaultM(getg()))
 }
 
 func signalFaultBoundaryActive() bool {

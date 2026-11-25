@@ -1108,10 +1108,9 @@ func TestExecutorFleetWithdrawJoinsClaimBeforeFinalDrain(t *testing.T) {
 			}
 			publish := func() {
 				t.Helper()
-				var candidates [RunnableTransferMailboxCapacity]*G
-				candidates[0] = task.g
+				single := [1]*G{task.g}
 				id, count, request, ok := fleet.publishPreparedPNeutralRunnableBatchAndRequest(
-					target.handle, source.p, &candidates, 1,
+					target.handle, source.p, single[:],
 				)
 				if !ok || !id.Valid() || count != 1 || request != ExecutorRequestPublished {
 					t.Fatalf("publish claimed transfer = (%+v,%d,%d,%t)", id, count, request, ok)
@@ -1424,4 +1423,62 @@ func TestExecutorFleetHasPeerRunnableDemandTracksLifecycle(t *testing.T) {
 	}
 	finishFleetSimpleTask(source, task2)
 	finishFleetSimpleTask(peerA, task1)
+}
+
+func TestExecutorFleetPeersIdleUnrequested(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	a := bindExecutorFleetManualFixture(t, fleet)
+	pB := new(P)
+	driverB := new(ExecutorDriver)
+	timersB := new(TimerRegistrationTable)
+	manualB := new(ManualOperationSource)
+	handleB, ok := BindExecutorFleet(fleet, driverB, pB, ExecutorSourceCatalog{
+		Timers: timersB,
+		Manual: manualB,
+	})
+	if !ok {
+		t.Fatal("bind timer-capable fleet peer B")
+	}
+	b := &executorFleetManualFixture{p: pB, driver: driverB, manual: manualB, handle: handleB}
+	defer func() {
+		closeExecutorFleetFixture(t, fleet, b)
+		closeExecutorFleetFixture(t, fleet, a)
+	}()
+
+	routeA := RouteID(a.handle.Route)
+	routeB := RouteID(b.handle.Route)
+
+	if fleet.PeersIdleUnrequested(routeA, 2) {
+		t.Fatal("active peer B must not satisfy PeersIdleUnrequested")
+	}
+	if fleet.PeersIdleUnrequested(0, 2) || fleet.PeersIdleUnrequested(routeA, 0) ||
+		fleet.PeersIdleUnrequested(routeA, ExecutorFleetCapacity+1) {
+		t.Fatal("invalid route/count arguments must fail closed")
+	}
+
+	// Arm peer B into IdleArmed.
+	if prepared, ok := PrepareExecutorStandbyAt(b.driver, 100); !ok || !prepared {
+		t.Fatalf("PrepareExecutorStandbyAt(b) = (%t, %t)", prepared, ok)
+	}
+	if sleep, _, _, ok := CommitExecutorSleepAt(b.driver, 100); !ok || !sleep {
+		t.Fatalf("CommitExecutorSleepAt(b) = (%t, %t)", sleep, ok)
+	}
+	if !fleet.PeersIdleUnrequested(routeA, 2) {
+		t.Fatal("expected idle unrequested peer B to satisfy PeersIdleUnrequested")
+	}
+	if fleet.PeersIdleUnrequested(routeB, 2) {
+		t.Fatal("active peer A must not satisfy PeersIdleUnrequested for route B")
+	}
+
+	// Requesting peer B transitions it out of IdleArmed.
+	if req := fleet.RequestExecutor(b.handle); req != ExecutorRequestIdleWake {
+		t.Fatalf("RequestExecutor(b) = %v, want IdleWake", req)
+	}
+	if fleet.PeersIdleUnrequested(routeA, 2) {
+		t.Fatal("requested peer B must not satisfy PeersIdleUnrequested")
+	}
+	if !WakeExecutorAt(b.driver, 101) {
+		t.Fatal("WakeExecutorAt(b)")
+	}
+	drainTimerAwareExecutorRunSources(t, b.driver, 102)
 }

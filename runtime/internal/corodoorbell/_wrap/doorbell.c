@@ -30,6 +30,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdint.h>
+#include <time.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <stdatomic.h>
@@ -42,6 +43,7 @@
 #define LLGO_DOORBELL_WRITE_SIZE_V1 1u
 #define LLGO_DOORBELL_POLL_CAPACITY_V1 1025u
 #define LLGO_DOORBELL_POLL_MAX_MS_V1 1000
+#define LLGO_DOORBELL_POLL_MAX_NS_V1 ((int64_t)LLGO_DOORBELL_POLL_MAX_MS_V1 * 1000000LL)
 
 #if defined(__APPLE__)
 typedef uint32_t llgo_doorbell_nfds_v1;
@@ -158,7 +160,7 @@ struct llgo_doorbell_kq_watch_v2 {
 };
 
 struct llgo_doorbell_kq_slot_v2 {
-    _Atomic int32_t doorbell_fd;
+    _Alignas(64) _Atomic int32_t doorbell_fd;
     _Atomic int32_t kq_fd;
     uint32_t close_epoch;
     uint32_t watch_count;
@@ -271,7 +273,10 @@ static int llgo_doorbell_kq_contains_v2(
 static struct llgo_doorbell_kq_slot_v2 *llgo_doorbell_kq_find_or_claim_v2(int32_t doorbell_fd)
 {
     uint32_t i;
-    for (i = 0; i < LLGO_DOORBELL_KQ_SLOTS_V2; i++) {
+    if (atomic_load_explicit(&llgo_doorbell_kq_slots_v2[0].doorbell_fd, memory_order_acquire) == doorbell_fd) {
+        return &llgo_doorbell_kq_slots_v2[0];
+    }
+    for (i = 1; i < LLGO_DOORBELL_KQ_SLOTS_V2; i++) {
         if (atomic_load_explicit(&llgo_doorbell_kq_slots_v2[i].doorbell_fd, memory_order_acquire) == doorbell_fd) {
             return &llgo_doorbell_kq_slots_v2[i];
         }
@@ -299,7 +304,7 @@ static struct llgo_doorbell_kq_slot_v2 *llgo_doorbell_kq_find_or_claim_v2(int32_
 static __attribute__((noinline)) int llgo_doorbell_kevent_poll_set_slow_v2(
     struct pollfd *fds,
     uint32_t count,
-    int32_t timeout_ms,
+    int64_t timeout_ns,
     uint64_t *result_out)
 {
     struct llgo_doorbell_kq_watch_v2 desired[LLGO_DOORBELL_KQ_WATCH_CAP_V2];
@@ -395,8 +400,8 @@ static __attribute__((noinline)) int llgo_doorbell_kevent_poll_set_slow_v2(
         }
     }
 
-    ts.tv_sec = timeout_ms / 1000;
-    ts.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
+    ts.tv_sec = (time_t)(timeout_ns / 1000000000LL);
+    ts.tv_nsec = (long)(timeout_ns % 1000000000LL);
 
     for (pass = 0; pass < 2; pass++) {
         int nev;
@@ -522,7 +527,7 @@ static __attribute__((noinline)) int llgo_doorbell_kevent_poll_set_slow_v2(
 static int llgo_doorbell_kevent_poll_set_v2(
     struct pollfd *fds,
     uint32_t count,
-    int32_t timeout_ms,
+    int64_t timeout_ns,
     uint64_t *result_out)
 {
     if (count > 0 && count <= LLGO_DOORBELL_KQ_FAST_CAP_V2 &&
@@ -537,7 +542,7 @@ static int llgo_doorbell_kevent_poll_set_v2(
             int32_t kq = atomic_load_explicit(&slot->kq_fd, memory_order_relaxed);
             if (kq >= 0 && slot->close_epoch == epoch &&
                 ((slot->watch_count == count) ||
-                 (timeout_ms == 0 && slot->watch_count >= count &&
+                 (timeout_ns == 0 && slot->watch_count >= count &&
                   slot->watch_count <= LLGO_DOORBELL_KQ_FAST_CAP_V2))) {
                 uint32_t i;
                 int matched = 1;
@@ -562,17 +567,23 @@ static int llgo_doorbell_kevent_poll_set_v2(
                     fds[i].revents = 0;
                 }
                 if (matched && slot->watch_count == count) {
-                    /* Verify no duplicate fds[i] masked an extra cached watch. */
-                    for (i = 0; i < count; i++) {
-                        uint32_t j;
-                        for (j = i + 1; j < count; j++) {
-                            if (fds[i].fd == fds[j].fd && fds[i].events == fds[j].events) {
-                                matched = 0;
+                    if (count == 2) {
+                        if (fds[0].fd == fds[1].fd && fds[0].events == fds[1].events) {
+                            matched = 0;
+                        }
+                    } else if (count > 2) {
+                        /* Verify no duplicate fds[i] masked an extra cached watch. */
+                        for (i = 0; i < count; i++) {
+                            uint32_t j;
+                            for (j = i + 1; j < count; j++) {
+                                if (fds[i].fd == fds[j].fd && fds[i].events == fds[j].events) {
+                                    matched = 0;
+                                    break;
+                                }
+                            }
+                            if (!matched) {
                                 break;
                             }
-                        }
-                        if (!matched) {
-                            break;
                         }
                     }
                 }
@@ -582,8 +593,13 @@ static int llgo_doorbell_kevent_poll_set_v2(
                     int nev;
                     int k;
                     int32_t ready_entries = 0;
-                    ts.tv_sec = timeout_ms / 1000;
-                    ts.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
+                    if (timeout_ns < 1000000000LL) {
+                        ts.tv_sec = 0;
+                        ts.tv_nsec = (long)timeout_ns;
+                    } else {
+                        ts.tv_sec = (time_t)(timeout_ns / 1000000000LL);
+                        ts.tv_nsec = (long)(timeout_ns % 1000000000LL);
+                    }
                     nev = kevent((int)kq, 0, 0, events, (int)LLGO_DOORBELL_KQ_FAST_CAP_V2, &ts);
                     if (nev == 0) {
                         *result_out = llgo_doorbell_result_v1(0, 0);
@@ -592,42 +608,43 @@ static int llgo_doorbell_kevent_poll_set_v2(
                     if (nev > 0) {
                         int has_error = 0;
                         for (k = 0; k < nev; k++) {
-                            if ((events[k].flags & EV_ERROR) != 0) {
+                            struct kevent *ev = &events[k];
+                            if ((ev->flags & EV_ERROR) != 0) {
                                 has_error = 1;
                                 break;
                             }
-                        }
-                        if (!has_error) {
-                            for (k = 0; k < nev; k++) {
-                                struct kevent *ev = &events[k];
-                                int32_t ev_fd = (int32_t)ev->ident;
-                                short revent = 0;
-                                if (ev->filter == EVFILT_READ) {
-                                    revent = POLLIN;
-                                } else if (ev->filter == EVFILT_WRITE) {
-                                    revent = POLLOUT;
-                                } else {
-                                    continue;
-                                }
-                                if ((ev->flags & EV_EOF) != 0) {
-                                    revent |= POLLHUP;
-                                }
-                                if (ev->fflags != 0) {
-                                    revent |= POLLERR;
-                                }
-                                for (i = 0; i < count; i++) {
-                                    if (fds[i].fd == ev_fd &&
-                                        ((ev->filter == EVFILT_READ && fds[i].events == POLLIN) ||
-                                         (ev->filter == EVFILT_WRITE && fds[i].events == POLLOUT))) {
-                                        if (fds[i].revents == 0) {
-                                            ready_entries++;
-                                        }
-                                        fds[i].revents |= revent;
+                            int32_t ev_fd = (int32_t)ev->ident;
+                            short revent = 0;
+                            if (ev->filter == EVFILT_READ) {
+                                revent = POLLIN;
+                            } else if (ev->filter == EVFILT_WRITE) {
+                                revent = POLLOUT;
+                            } else {
+                                continue;
+                            }
+                            if ((ev->flags & EV_EOF) != 0) {
+                                revent |= POLLHUP;
+                            }
+                            if (ev->fflags != 0) {
+                                revent |= POLLERR;
+                            }
+                            for (i = 0; i < count; i++) {
+                                if (fds[i].fd == ev_fd &&
+                                    ((ev->filter == EVFILT_READ && fds[i].events == POLLIN) ||
+                                     (ev->filter == EVFILT_WRITE && fds[i].events == POLLOUT))) {
+                                    if (fds[i].revents == 0) {
+                                        ready_entries++;
                                     }
+                                    fds[i].revents |= revent;
                                 }
                             }
+                        }
+                        if (!has_error) {
                             *result_out = llgo_doorbell_result_v1(ready_entries, 0);
                             return 1;
+                        }
+                        for (i = 0; i < count; i++) {
+                            fds[i].revents = 0;
                         }
                     } else {
                         int err = errno;
@@ -640,7 +657,7 @@ static int llgo_doorbell_kevent_poll_set_v2(
             }
         }
     }
-    return llgo_doorbell_kevent_poll_set_slow_v2(fds, count, timeout_ms, result_out);
+    return llgo_doorbell_kevent_poll_set_slow_v2(fds, count, timeout_ns, result_out);
 }
 #endif
 
@@ -672,28 +689,55 @@ uint64_t __llgo_coro_doorbell_poll_one_v1(
         : llgo_doorbell_result_v1((int32_t)result, 0);
 }
 
-uint64_t __llgo_coro_doorbell_poll_set_v1(
+uint64_t __llgo_coro_doorbell_poll_set_ns_v1(
     struct pollfd *fds,
     llgo_doorbell_nfds_v1 count,
-    int32_t timeout_ms)
+    int64_t timeout_ns)
 {
     int result;
     if (fds == 0 || count == 0 || count > LLGO_DOORBELL_POLL_CAPACITY_V1 ||
-        timeout_ms < 0 || timeout_ms > LLGO_DOORBELL_POLL_MAX_MS_V1) {
+        timeout_ns < 0 || timeout_ns > LLGO_DOORBELL_POLL_MAX_NS_V1) {
         return llgo_doorbell_result_v1(-1, EINVAL);
     }
 #if defined(__APPLE__)
     {
         uint64_t kq_result = 0;
-        if (llgo_doorbell_kevent_poll_set_v2(fds, (uint32_t)count, timeout_ms, &kq_result)) {
+        if (llgo_doorbell_kevent_poll_set_v2(fds, (uint32_t)count, timeout_ns, &kq_result)) {
             return kq_result;
         }
     }
+    {
+        int32_t timeout_ms = (int32_t)(timeout_ns / 1000000LL);
+        if (timeout_ns % 1000000LL != 0) {
+            timeout_ms++;
+        }
+        if (timeout_ms > LLGO_DOORBELL_POLL_MAX_MS_V1) {
+            timeout_ms = LLGO_DOORBELL_POLL_MAX_MS_V1;
+        }
+        result = poll(fds, (nfds_t)count, (int)timeout_ms);
+    }
+#else
+    {
+        struct timespec ts;
+        ts.tv_sec = (time_t)(timeout_ns / 1000000000LL);
+        ts.tv_nsec = (long)(timeout_ns % 1000000000LL);
+        result = ppoll(fds, (nfds_t)count, &ts, 0);
+    }
 #endif
-    result = poll(fds, (nfds_t)count, (int)timeout_ms);
     return result < 0
         ? llgo_doorbell_result_v1(-1, errno)
         : llgo_doorbell_result_v1((int32_t)result, 0);
+}
+
+uint64_t __llgo_coro_doorbell_poll_set_v1(
+    struct pollfd *fds,
+    llgo_doorbell_nfds_v1 count,
+    int32_t timeout_ms)
+{
+    if (timeout_ms < 0 || timeout_ms > LLGO_DOORBELL_POLL_MAX_MS_V1) {
+        return llgo_doorbell_result_v1(-1, EINVAL);
+    }
+    return __llgo_coro_doorbell_poll_set_ns_v1(fds, count, (int64_t)timeout_ms * 1000000LL);
 }
 
 #endif

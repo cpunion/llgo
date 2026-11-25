@@ -586,15 +586,22 @@ func (sources *ExecutorSourceSet) pending(p *P) bool {
 		if !validExecutorSourceSetHeader(sources, p) {
 			return false
 		}
-	} else if sources == nil || p == nil {
+		return p.affectedWaitHead != nil ||
+			sources.poll != nil && preemptLoad(&sources.poll.pending) != 0 ||
+			sources.manual != nil && preemptLoad(&sources.manual.pending) != 0 ||
+			sources.worker != nil && preemptLoad(&sources.worker.pending) != 0 ||
+			sources.channel != nil && preemptLoad(&sources.channel.pending) != 0 ||
+			sources.control != nil && preemptLoad(&sources.control.pending) != 0
+	}
+	if sources == nil || p == nil {
 		return false
 	}
 	return p.affectedWaitHead != nil ||
-		sources.poll != nil && preemptLoad(&sources.poll.pending) != 0 ||
-		sources.manual != nil && preemptLoad(&sources.manual.pending) != 0 ||
-		sources.worker != nil && preemptLoad(&sources.worker.pending) != 0 ||
-		sources.channel != nil && preemptLoad(&sources.channel.pending) != 0 ||
-		sources.control != nil && preemptLoad(&sources.control.pending) != 0
+		sources.poll != nil && sources.poll.scanLimit != 0 && preemptLoad(&sources.poll.pending) != 0 ||
+		sources.manual != nil && sources.manual.scanLimit != 0 && preemptLoad(&sources.manual.pending) != 0 ||
+		sources.worker != nil && sources.worker.scanLimit != 0 && preemptLoad(&sources.worker.pending) != 0 ||
+		sources.channel != nil && sources.channel.scanLimit != 0 && preemptLoad(&sources.channel.pending) != 0 ||
+		sources.control != nil && sources.control.scanLimit != 0 && preemptLoad(&sources.control.pending) != 0
 }
 
 func (sources *ExecutorSourceSet) nextDeadline(p *P) (deadline int64, hasDeadline, ok bool) {

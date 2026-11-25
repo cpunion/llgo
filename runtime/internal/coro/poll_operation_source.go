@@ -419,17 +419,19 @@ func CanReservePollOperationV2(p *P, source *PollOperationSource) bool {
 }
 
 func beginPollOperationV2Producer(slot *pollOperationSlot, generation uint32) bool {
-	if slot == nil || generation == 0 || !producerSourceSlotReusable(&slot.v2Producer) {
+	if slot == nil || generation == 0 {
 		return false
 	}
 	prepared, ok := beginProducerSourceSlot(&slot.v2Producer)
 	if !ok || prepared > generation {
 		return false
 	}
-	// V1 uses may have advanced the authoritative physical generation since the
-	// previous V2 reservation. Admission is still sealed in Initializing, so it
-	// is safe to skip those consumed generations before release publication.
-	preemptStore(&slot.v2Producer.generation, generation)
+	if prepared != generation {
+		// V1 uses may have advanced the authoritative physical generation since the
+		// previous V2 reservation. Admission is still sealed in Initializing, so it
+		// is safe to skip those consumed generations before release publication.
+		preemptStore(&slot.v2Producer.generation, generation)
+	}
 	return true
 }
 
@@ -605,9 +607,16 @@ func (source *PollOperationSource) SnapshotAt(
 	}
 	switch slot.state {
 	case pollOperationFree:
+		if !AuditEnabled {
+			return PollOperationSnapshot{}, false, true
+		}
 		return PollOperationSnapshot{}, false, reusablePollOperationSlot(source, slot, index)
 	case pollOperationActive:
-		if !validLivePollOperation(source, slot, p, index) {
+		if AuditEnabled {
+			if !validLivePollOperation(source, slot, p, index) {
+				return PollOperationSnapshot{}, false, false
+			}
+		} else if slot.generation == 0 || slot.fd < 0 {
 			return PollOperationSnapshot{}, false, false
 		}
 		id, idOK := pollOperationIDFor(source, index, slot.generation)
@@ -625,6 +634,9 @@ func (source *PollOperationSource) SnapshotAt(
 			Interest: slot.interest,
 		}, true, true
 	case pollOperationDelivered, pollOperationCanceled:
+		if !AuditEnabled {
+			return PollOperationSnapshot{}, false, true
+		}
 		return PollOperationSnapshot{}, false, validLivePollOperation(source, slot, p, index)
 	default:
 		return PollOperationSnapshot{}, false, false
@@ -1287,7 +1299,8 @@ func CompleteOwnerPollEventV2(
 		_ = driver.registry.Request(driver.handle)
 		return true, true
 	}
-	if preemptLoad(&slot.v2Producer.state) == uint32(producerSourceClosing) &&
+	closingQuiesced := !AuditEnabled && preemptLoad(&slot.v2Producer.state) == uint32(producerSourceClosing)
+	if !closingQuiesced && preemptLoad(&slot.v2Producer.state) == uint32(producerSourceClosing) &&
 		!markProducerSourceQuiesced(&slot.v2Producer) {
 		return false, false
 	}
@@ -1301,7 +1314,11 @@ func CompleteOwnerPollEventV2(
 	slot.deadline = 0
 	slot.v2Result = PollOperationResultInvalid
 	preemptStore(&slot.v2Mailbox, uint32(pollOperationMailboxEmpty))
-	if !recycleProducerSourceSlot(&slot.v2Producer) {
+	if closingQuiesced {
+		if !recycleClosingQuiescedProducerSourceSlot(&slot.v2Producer) {
+			return false, false
+		}
+	} else if !recycleProducerSourceSlot(&slot.v2Producer) {
 		return false, false
 	}
 	slot.state = pollOperationFree

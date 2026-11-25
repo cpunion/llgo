@@ -2490,6 +2490,17 @@ func coroMaterializeDirectChannelCompletionV1(
 		*waiter = chanWaiter{}
 		return coro.CommitDirectChannelCompletion(completion, small)
 	}
+	if matched && !waiter.queued {
+		// A matched producer already dequeued waiter under ch.mutex (or never
+		// enqueued it) and published waiter.status before releasing completion
+		// into this owner's direct-channel inbox. No channel queue retains a
+		// reference to waiter, so materialization needs no ch.mutex acquisition.
+		if small == coro.ResumeSmallInvalid || !waitStatus(small).done() || waiter.status != waitStatus(small) {
+			return false
+		}
+		*waiter = chanWaiter{}
+		return coro.CommitDirectChannelCompletion(completion, small)
+	}
 	ch.mutex.Lock()
 	if waiter.send {
 		ch.sendq.remove(waiter)

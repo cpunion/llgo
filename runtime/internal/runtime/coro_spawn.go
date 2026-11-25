@@ -84,11 +84,12 @@ func coroFinishCompletedTaskRelease(
 	local, raw unsafe.Pointer,
 	taskSize uintptr,
 	owned, ok bool,
+	route uint16,
 ) bool {
 	if !ok {
 		return false
 	}
-	if !coroReleaseRuntimeContext(g, local) {
+	if !coroReleaseRuntimeContextAtRoute(g, local, route) {
 		return false
 	}
 	if !owned {
@@ -105,10 +106,11 @@ func coroFinishCompletedTaskRelease(
 func coroReleaseCompletedTaskReceipt(
 	g *coroG,
 	receipt coro.CompletedTaskReleaseReceipt,
+	route uint16,
 ) bool {
 	local, raw, taskSize, owned, ok := coro.ReleaseCompletedTaskReceipt(receipt)
 	if ok {
-		return coroFinishCompletedTaskRelease(g, local, raw, taskSize, owned, true)
+		return coroFinishCompletedTaskRelease(g, local, raw, taskSize, owned, true, route)
 	}
 	return coroReleaseCompletedTask(g)
 }
@@ -126,7 +128,7 @@ func coroReleaseCompletedTask(g *coroG) bool {
 		}
 		local, raw, taskSize, owned, ok = coro.ReleaseCompletedTaskCompiler(g)
 	}
-	return coroFinishCompletedTaskRelease(g, local, raw, taskSize, owned, ok)
+	return coroFinishCompletedTaskRelease(g, local, raw, taskSize, owned, ok, 0)
 }
 
 //export __llgo_coro_spawn_begin_v1

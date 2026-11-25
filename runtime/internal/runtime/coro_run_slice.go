@@ -165,7 +165,9 @@ func (policy coroRunPolicyV1) valid() bool {
 
 // coroRunPhysicalActionV1 is the indivisible runtime half of one runner action
 // reduction. Neither Checked's ActionResume/ActionDestroy nor a freed handle is
-// observable at a reducer return boundary.
+// observable at a reducer return boundary. When contextEntered is non-nil, the
+// caller owns leaving an installed logical runtime G after a fused
+// completion-destroy/parent-resume chain for the same g finishes.
 func coroRunPhysicalActionV1(
 	p *coro.P,
 	driver *coro.ExecutorDriver,
@@ -173,6 +175,8 @@ func coroRunPhysicalActionV1(
 	action coro.Action,
 	runtimeContext unsafe.Pointer,
 	fuseCompletionDestroy bool,
+	contextEntered *bool,
+	activation *coroRuntimeContextActivationV1,
 ) (next coro.Action, advanced, committed, fusedDestroy bool) {
 	switch action.Kind {
 	case coro.ActionCheckResume:
@@ -185,19 +189,37 @@ func coroRunPhysicalActionV1(
 		// landing is a separate service and may be omitted for this frame.
 		needsRuntimeContext = needsRuntimeContext || panicBoundary || coro.ExecutionDomainEnabled()
 		if needsRuntimeContext {
-			activation, entered := coroEnterRuntimeContextFrom(g, runtimeContext)
-			if !entered {
-				return coro.Action{}, false, false, false
-			}
-			if panicBoundary {
-				if !coroHandleResumePhysicalV1(g, next.Handle, true) {
-					return coro.Action{}, false, false, false
+			if contextEntered != nil {
+				if !*contextEntered {
+					act, entered := coroEnterRuntimeContextFrom(g, runtimeContext)
+					if !entered {
+						return coro.Action{}, false, false, false
+					}
+					*activation = act
+					*contextEntered = true
+				}
+				if panicBoundary {
+					if !coroHandleResumePhysicalV1(g, next.Handle, true) {
+						return coro.Action{}, false, false, false
+					}
+				} else {
+					coroHandleResume(next.Handle)
 				}
 			} else {
-				coroHandleResume(next.Handle)
-			}
-			if !coroLeaveRuntimeContext(g, activation) {
-				return coro.Action{}, false, false, false
+				act, entered := coroEnterRuntimeContextFrom(g, runtimeContext)
+				if !entered {
+					return coro.Action{}, false, false, false
+				}
+				if panicBoundary {
+					if !coroHandleResumePhysicalV1(g, next.Handle, true) {
+						return coro.Action{}, false, false, false
+					}
+				} else {
+					coroHandleResume(next.Handle)
+				}
+				if !coroLeaveRuntimeContext(g, act) {
+					return coro.Action{}, false, false, false
+				}
 			}
 		} else {
 			// Keep the overwhelmingly common path identical to the pre-boundary
@@ -341,11 +363,14 @@ func coroReduceExecutorRunActionPreparedV1(
 	var next coro.Action
 	var advanced, committed bool
 	var extraUsed, extraResumes, extraDestroys uint32
+	var activation coroRuntimeContextActivationV1
+	contextEntered := false
 	extraBudget := remaining - baseCost
 	for {
 		var fusedDestroy bool
 		next, advanced, committed, fusedDestroy = coroRunPhysicalActionV1(
 			p, driver, g, action, runtimeContext, extraUsed < extraBudget,
+			&contextEntered, &activation,
 		)
 		if !fusedDestroy {
 			break
@@ -364,6 +389,9 @@ func coroReduceExecutorRunActionPreparedV1(
 		extraUsed++
 		extraResumes++
 		action = next
+	}
+	if contextEntered && !coroLeaveRuntimeContext(g, activation) {
+		return false, false
 	}
 	// The physical resume may have changed program lifecycle. Re-read the live
 	// policy before selecting the scheduler commit placement.
@@ -477,7 +505,7 @@ func coroReduceExecutorRunActionPreparedV1(
 	case coro.ActionComplete:
 		isMain := g == policy.main
 		retireOwner := coro.ActionRetiresPhysicalOwner(next)
-		if !coroReleaseCompletedTaskReceipt(g, releaseReceipt) {
+		if !coroReleaseCompletedTaskReceipt(g, releaseReceipt, target.sourceRoute) {
 
 			return false, false
 		}
@@ -712,6 +740,29 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 				_ = coroFinishManagedExecutionV1(driver, held)
 
 				return coroRunResultV1{}
+			}
+			if step.Kind == coro.ExecutorRunStepIdle &&
+				!target.physicalReturn &&
+				coro.HasWaiting(p) {
+				woke, posted, fastOK := coroTargetTryInSlicePeerIdlePollV1(target, driver)
+				if !fastOK {
+					_ = coroFinishManagedExecutionV1(driver, held)
+
+					return coroRunResultV1{}
+				}
+				if woke {
+					if !coroFinishManagedExecutionV1(driver, held) {
+						return coroRunResultV1{}
+					}
+					result.used++
+					result.stop = coroRunAgainV1
+					return result
+				}
+				if posted {
+					result.used++
+					continue
+				}
+				result.polledIdle = true
 			}
 			terminal, reduced = coroReduceExecutorRunStepV1(
 				p, driver, coroRunPolicyV1{}, target, step, runtimeContext,
