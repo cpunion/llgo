@@ -53,9 +53,15 @@ enum {
     llgo_coro_alloc_cache_bytes_per_bin = 128 * 1024,
     /* Per-thread magazine for the hot 256..1024B frame/task classes. Batching
        16 objects per global lock acquisition cuts multi-P spinlock traffic by
-       16x while keeping exact per-bin capacity bounds on single-thread fills. */
+       16x while keeping exact per-bin capacity bounds on single-thread fills.
+       Magazines live in a fixed static pool keyed via pthread_key_t rather
+       than C11 _Thread_local so (1) thread-exit destructors never race with
+       platform TLV teardown (e.g. Darwin dyld freeing _Thread_local before
+       dynamic pthread_key destructors), (2) BDWGC always scans cached pointers
+       in static storage, and (3) zero dynamic allocations are required. */
     llgo_coro_alloc_tls_batch = 16,
     llgo_coro_alloc_tls_max = 32,
+    llgo_coro_alloc_tls_pool_size = 64,
 };
 
 struct llgo_coro_alloc_cache_bin_v1 {
@@ -73,18 +79,18 @@ struct llgo_coro_alloc_tls_bin_v1 {
 };
 
 struct llgo_coro_alloc_tls_cache_v1 {
-    bool registered;
+    _Alignas(64) _Atomic(uint32_t) in_use;
     struct llgo_coro_alloc_tls_bin_v1 bins[llgo_coro_alloc_cache_small_count];
 };
 
 static struct llgo_coro_alloc_cache_bin_v1
     llgo_coro_alloc_cache_bins_v1[llgo_coro_alloc_cache_bin_count];
 
-static _Thread_local struct llgo_coro_alloc_tls_cache_v1
-    llgo_coro_alloc_tls_cache_v1;
+static struct llgo_coro_alloc_tls_cache_v1
+    llgo_coro_alloc_tls_pool_v1[llgo_coro_alloc_tls_pool_size];
 static pthread_once_t llgo_coro_alloc_tls_key_once_v1 = PTHREAD_ONCE_INIT;
 static pthread_key_t llgo_coro_alloc_tls_key_v1;
-static bool llgo_coro_alloc_tls_key_ready_v1;
+static _Atomic(bool) llgo_coro_alloc_tls_key_ready_v1;
 
 static int llgo_coro_alloc_cache_index_v1(uintptr_t size) {
     if (size >= llgo_coro_alloc_cache_small_min &&
@@ -174,30 +180,64 @@ static void llgo_coro_alloc_tls_destroy_v1(void *raw) {
         atomic_store_explicit(&bin->count, c + n, memory_order_relaxed);
         llgo_coro_alloc_cache_unlock_v1(bin);
     }
-    cache->registered = false;
+    atomic_store_explicit(&cache->in_use, 0, memory_order_release);
 }
 
 static void llgo_coro_alloc_tls_init_key_v1(void) {
     if (pthread_key_create(
             &llgo_coro_alloc_tls_key_v1,
             llgo_coro_alloc_tls_destroy_v1) == 0) {
-        llgo_coro_alloc_tls_key_ready_v1 = true;
+        atomic_store_explicit(
+            &llgo_coro_alloc_tls_key_ready_v1,
+            true,
+            memory_order_release);
     }
 }
 
-static bool llgo_coro_alloc_tls_register_v1(
-    struct llgo_coro_alloc_tls_cache_v1 *cache) {
-    pthread_once(
-        &llgo_coro_alloc_tls_key_once_v1,
-        llgo_coro_alloc_tls_init_key_v1);
-    if (!llgo_coro_alloc_tls_key_ready_v1) {
-        return false;
+static struct llgo_coro_alloc_tls_cache_v1 *llgo_coro_alloc_tls_acquire_v1(
+    void) {
+    for (int i = 0; i < llgo_coro_alloc_tls_pool_size; ++i) {
+        struct llgo_coro_alloc_tls_cache_v1 *slot =
+            &llgo_coro_alloc_tls_pool_v1[i];
+        uint32_t expected = 0;
+        if (atomic_compare_exchange_strong_explicit(
+                &slot->in_use,
+                &expected,
+                1,
+                memory_order_acquire,
+                memory_order_relaxed)) {
+            if (pthread_setspecific(llgo_coro_alloc_tls_key_v1, slot) == 0) {
+                return slot;
+            }
+            atomic_store_explicit(&slot->in_use, 0, memory_order_release);
+            return NULL;
+        }
     }
-    if (pthread_setspecific(llgo_coro_alloc_tls_key_v1, cache) != 0) {
-        return false;
+    return NULL;
+}
+
+static struct llgo_coro_alloc_tls_cache_v1 *llgo_coro_alloc_tls_get_v1(
+    bool create) {
+    if (!atomic_load_explicit(
+            &llgo_coro_alloc_tls_key_ready_v1, memory_order_acquire)) {
+        if (!create) {
+            return NULL;
+        }
+        pthread_once(
+            &llgo_coro_alloc_tls_key_once_v1,
+            llgo_coro_alloc_tls_init_key_v1);
+        if (!atomic_load_explicit(
+                &llgo_coro_alloc_tls_key_ready_v1, memory_order_acquire)) {
+            return NULL;
+        }
     }
-    cache->registered = true;
-    return true;
+    struct llgo_coro_alloc_tls_cache_v1 *cache =
+        (struct llgo_coro_alloc_tls_cache_v1 *)pthread_getspecific(
+            llgo_coro_alloc_tls_key_v1);
+    if (cache != NULL || !create) {
+        return cache;
+    }
+    return llgo_coro_alloc_tls_acquire_v1();
 }
 
 void *__llgo_coro_alloc_cache_take_v1(uintptr_t size) {
@@ -207,27 +247,32 @@ void *__llgo_coro_alloc_cache_take_v1(uintptr_t size) {
     }
     if (index < llgo_coro_alloc_cache_small_count) {
         struct llgo_coro_alloc_tls_cache_v1 *cache =
-            &llgo_coro_alloc_tls_cache_v1;
-        struct llgo_coro_alloc_tls_bin_v1 *tbin = &cache->bins[index];
-        void *local = tbin->head;
-        if (local != NULL) {
-            tbin->head = *(void **)local;
-            tbin->count--;
-            *(void **)local = NULL;
-            return local;
+            llgo_coro_alloc_tls_get_v1(false);
+        if (cache != NULL) {
+            struct llgo_coro_alloc_tls_bin_v1 *tbin = &cache->bins[index];
+            void *local = tbin->head;
+            if (local != NULL) {
+                tbin->head = *(void **)local;
+                tbin->count--;
+                *(void **)local = NULL;
+                return local;
+            }
         }
         struct llgo_coro_alloc_cache_bin_v1 *bin =
             &llgo_coro_alloc_cache_bins_v1[index];
         if (atomic_load_explicit(&bin->count, memory_order_relaxed) == 0) {
             return NULL;
         }
-        bool use_tls = cache->registered || llgo_coro_alloc_tls_register_v1(cache);
+        if (cache == NULL) {
+            cache = llgo_coro_alloc_tls_get_v1(true);
+        }
         llgo_coro_alloc_cache_lock_v1(bin);
         void *result = bin->head;
         if (result != NULL) {
             void *next = *(void **)result;
             uint32_t taken = 1;
-            if (use_tls && next != NULL) {
+            if (cache != NULL && next != NULL) {
+                struct llgo_coro_alloc_tls_bin_v1 *tbin = &cache->bins[index];
                 void *batch_head = next;
                 void *batch_tail = next;
                 uint32_t stash = 1;
@@ -284,9 +329,12 @@ bool __llgo_coro_alloc_cache_put_v1(void *pointer, uintptr_t size) {
         return false;
     }
     if (index < llgo_coro_alloc_cache_small_count) {
+        if (atomic_load_explicit(&bin->count, memory_order_relaxed) >= cap) {
+            return false;
+        }
         struct llgo_coro_alloc_tls_cache_v1 *cache =
-            &llgo_coro_alloc_tls_cache_v1;
-        if (cache->registered || llgo_coro_alloc_tls_register_v1(cache)) {
+            llgo_coro_alloc_tls_get_v1(true);
+        if (cache != NULL) {
             struct llgo_coro_alloc_tls_bin_v1 *tbin = &cache->bins[index];
             uint32_t gcount =
                 atomic_load_explicit(&bin->count, memory_order_relaxed);

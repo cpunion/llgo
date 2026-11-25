@@ -197,6 +197,7 @@ func initialPNeutralRunnable(g *G, queued bool) bool {
 
 func initialPNeutralRunnableState(g *G) bool {
 	return g != nil && g.active != nil && g.active == g.root &&
+		g.active.header != nil &&
 		g.active.state == FrameInitialSuspended &&
 		g.active.header.SuspendReason == uint16(SuspendNone) &&
 		g.active.header.Lifecycle == uint16(FrameInitialSuspended)

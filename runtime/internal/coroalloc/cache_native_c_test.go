@@ -207,6 +207,22 @@ int main(void) {
             return 20;
         }
     }
+    /* Exercise thread-exit magazine drain and slot reuse across >64 threads
+       with simultaneous TLV churn so pthread_key teardown is always safe. */
+    for (int wave = 0; wave < 4; ++wave) {
+        pthread_t exit_threads[24];
+        for (int index = 0; index < 24; ++index) {
+            if (pthread_create(&exit_threads[index], NULL, exercise_cache, NULL) != 0) {
+                return 34;
+            }
+        }
+        for (int index = 0; index < 24; ++index) {
+            void *result = (void *)(uintptr_t)1;
+            if (pthread_join(exit_threads[index], &result) != 0 || result != NULL) {
+                return 35;
+            }
+        }
+    }
     for (;;) {
         void *pointer =
             __llgo_coro_alloc_cache_take_v1(concurrent_size);

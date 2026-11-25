@@ -1025,11 +1025,13 @@ func HasWaiting(p *P) bool {
 	return p != nil && p.parkWaitHead != nil && p.parkWaitTail != nil
 }
 
-// HasReadySurplus reports whether p has no running G and more than one queued
-// runnable G, so sharing ready work with an idle peer increases parallelism
-// rather than migrating the owner's sole runnable G away. A single-peer
-// voluntary wait yield (e.g. WaitGroup.Wait yielding to its sole spawned child)
-// keeps that pair local on p so the child completes without cross-P wakeup.
+// HasReadySurplus reports whether p has no running G and queued runnable work
+// eligible for peer sharing: either more than one real runnable G, or a lone
+// never-run initial P-neutral G (matching DistributePNeutralRunnable's single-
+// runnable exception so a freshly spawned goroutine can migrate to an idle P
+// when its parent parks or exits). A single-peer voluntary wait yield (e.g.
+// WaitGroup.Wait yielding to its sole spawned child) keeps that pair local on
+// p so the child completes without cross-P wakeup.
 func HasReadySurplus(p *P, yieldAction bool) bool {
 	if p == nil || p.current != nil {
 		return false
@@ -1047,8 +1049,14 @@ func HasReadySurplus(p *P, yieldAction bool) bool {
 		}
 		p.localYieldHint = false
 	}
-	if p.readyCount <= 1 {
+	if p.readyCount == 0 {
 		return false
+	}
+	if p.readyCount == 1 {
+		head := p.readyHead
+		return head != nil &&
+			head.runnableAffinity == runnableAnyOwner &&
+			initialPNeutralRunnableState(head)
 	}
 	if p.readyCount == 2 && p.readyHead != nil &&
 		(p.readyHead.runAction == ActionCheckDestroy ||

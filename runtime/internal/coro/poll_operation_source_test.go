@@ -696,10 +696,34 @@ func TestHasReadySurplusLocalYieldHintAndTrailingDestroy(t *testing.T) {
 	g2 := &G{runAction: ActionCheckResume}
 	gDestroy := &G{runAction: ActionCheckDestroy}
 
-	// Single ready G never has surplus.
+	// Single suspended/resumed ready G does not report surplus, whereas a lone
+	// never-run initial P-neutral G matches DistributePNeutralRunnable's
+	// single-runnable sharing exception so an idle peer P can claim it.
 	p.readyHead, p.readyTail, p.readyCount = g1, g1, 1
 	if HasReadySurplus(p, false) {
-		t.Fatal("single runnable must not report surplus")
+		t.Fatal("single non-initial runnable must not report surplus")
+	}
+	initHeader := HeaderV1{
+		Lifecycle:     uint16(FrameInitialSuspended),
+		SuspendReason: uint16(SuspendNone),
+	}
+	initFrame := &Frame{state: FrameInitialSuspended, header: &initHeader}
+	gInitial := &G{root: initFrame, active: initFrame, runnableAffinity: runnableAnyOwner}
+	p.readyHead, p.readyTail, p.readyCount = gInitial, gInitial, 1
+	if !HasReadySurplus(p, false) {
+		t.Fatal("single initial P-neutral runnable must report surplus for idle peer distribution")
+	}
+	gInitial.runnableAffinity = runnableCurrentOwner
+	if HasReadySurplus(p, false) {
+		t.Fatal("single owner-pinned initial runnable must not report surplus")
+	}
+	gInitial.runnableAffinity = runnableAnyOwner
+	p.localYieldHint = true
+	if HasReadySurplus(p, false) {
+		t.Fatal("localYieldHint must suppress single initial runnable surplus")
+	}
+	if p.localYieldHint {
+		t.Fatal("localYieldHint must clear after suppressing single runnable")
 	}
 
 	// Two ready Gs with one trailing ActionCheckDestroy stay local.
