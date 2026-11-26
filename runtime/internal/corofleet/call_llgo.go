@@ -125,6 +125,13 @@ func StopStandby(joined *uint32) c.Int
 //go:linkname Yield C.__llgo_coro_fleet_owner_yield_v1
 func Yield() c.Int
 
+// Pause executes a bounded user-space CPU relax loop (yield/pause) so idle
+// fleet executors can catch imminent work transfers without hammering kernel
+// sched_yield traps.
+//
+//go:linkname Pause C.__llgo_coro_fleet_owner_pause_v1
+func Pause(spins uint32)
+
 // StopFactory seals the scalar request rendezvous and strongly joins the clean
 // template after every scheduler owner has returned and been joined.
 // terminalOwnerToken is zero on the original program M. A clean program

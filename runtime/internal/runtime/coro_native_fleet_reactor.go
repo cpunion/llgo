@@ -400,9 +400,12 @@ func coroNativeFleetTryFastPollCompletionDetailedV1(handle coro.ExecutorFleetHan
 	if !hasPollDeadline && !coro.ExecutorHasActiveTimer(domain.driverOwnerV1()) {
 		probeTimeoutNS = 50_000
 	}
-	nReady, errno := corodoorbell.WaitPollSet(&storage.entries[0], physical.count, 0)
-	if nReady == 0 && probeTimeoutNS > 0 {
+	var nReady int
+	var errno int32
+	if probeTimeoutNS > 0 {
 		nReady, errno = corodoorbell.WaitPollSetNano(&storage.entries[0], physical.count, probeTimeoutNS)
+	} else {
+		nReady, errno = corodoorbell.WaitPollSet(&storage.entries[0], physical.count, 0)
 	}
 	if nReady <= 0 {
 		_ = errno

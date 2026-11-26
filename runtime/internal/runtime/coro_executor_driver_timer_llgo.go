@@ -91,9 +91,11 @@ func coroProgramNextRunStepV1(
 
 const (
 	coroNativePreSleepTightSpinsV1  = 32
-	coroNativePreSleepYieldRoundsV1 = 32
-	coroNativePreSleepBurstSpinsV1  = 16
-	coroNativePreSleepBudgetNSV1    = 30_000
+	coroNativePreSleepPauseRoundsV1 = 1024
+	coroNativePreSleepPauseSpinsV1  = 64
+	coroNativePreSleepYieldRoundsV1 = 1
+	coroNativePreSleepBurstSpinsV1  = 8
+	coroNativePreSleepBudgetNSV1    = 80_000
 )
 
 func coroProgramTryInSliceIdlePollV1(driver *coro.ExecutorDriver) (woke, posted, ok bool) {
@@ -113,12 +115,27 @@ func coroProgramPreSleepSpinV1(driver *coro.ExecutorDriver) (ready, ok bool) {
 			return true, true
 		}
 	}
-	if coroNativePreSleepYieldRoundsV1 == 0 {
-		return false, true
-	}
 	start, clockOK := coroclock.MonotonicNano()
 	if !clockOK {
 		return false, false
+	}
+	for round := 0; round < coroNativePreSleepPauseRoundsV1; round++ {
+		corofleet.Pause(coroNativePreSleepPauseSpinsV1)
+		if coroObserveGCV1() || coro.ExecutorDriverHasPendingExternalWork(driver) {
+			return true, true
+		}
+		if coroProgramLifecycleV1State != coroProgramRunningV1 {
+			return true, true
+		}
+		if round&31 == 31 {
+			now, ok := coroclock.MonotonicNano()
+			if !ok {
+				return false, false
+			}
+			if now-start >= coroNativePreSleepBudgetNSV1 {
+				break
+			}
+		}
 	}
 	for round := 0; round < coroNativePreSleepYieldRoundsV1; round++ {
 		_ = corofleet.Yield()
@@ -129,15 +146,6 @@ func coroProgramPreSleepSpinV1(driver *coro.ExecutorDriver) (ready, ok bool) {
 		}
 		if coroProgramLifecycleV1State != coroProgramRunningV1 {
 			return true, true
-		}
-		if round&3 == 3 {
-			now, ok := coroclock.MonotonicNano()
-			if !ok {
-				return false, false
-			}
-			if now-start >= coroNativePreSleepBudgetNSV1 {
-				break
-			}
 		}
 	}
 	return false, true

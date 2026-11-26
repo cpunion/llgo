@@ -396,7 +396,13 @@ func CommitSpawnCompiler(parent, child *G, handle unsafe.Pointer) bool {
 		p := child.spawnP
 		root := child.frames
 		if root != nil {
-			if p.readyCount >= RunnableTransferMailboxCapacity && !RequestPreempt(parent) {
+			preemptThreshold := RunnableTransferMailboxCapacity
+			if p.readyCount >= 96 && p.executor != nil && p.executor.servicePressure != nil {
+				if limit, ok := p.executor.servicePressure.Limit(); ok && limit > 1 {
+					preemptThreshold = 96
+				}
+			}
+			if p.readyCount >= preemptThreshold && !RequestPreempt(parent) {
 				return false
 			}
 			child.root = root

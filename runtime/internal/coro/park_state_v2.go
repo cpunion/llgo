@@ -435,7 +435,11 @@ func materializeConsumedParkStateUnchecked(
 }
 
 func deliverMaterializedParkResume(state *ParkState, ticket ParkTicket) bool {
-	if !validMaterializedParkState(state, ticket) {
+	if AuditEnabled {
+		if !validMaterializedParkState(state, ticket) {
+			return false
+		}
+	} else if state == nil || state.phase != parkMaterialized || state.ticket != ticket {
 		return false
 	}
 	kind, phase := state.taskCancelKind, state.taskCancelPhase

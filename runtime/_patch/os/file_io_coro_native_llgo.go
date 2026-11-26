@@ -34,7 +34,7 @@ func (f *File) llgoReadSlow(b []byte, n int, err error, status uint8) (int, erro
 	case poll.LLGoTryDone:
 	case poll.LLGoTryDoneSlowUnlock:
 		f.pfd.LLGoSlowReadUnlock()
-	case poll.LLGoTryWaitLocked:
+	case poll.LLGoTryWaitLocked, poll.LLGoTryWaitLockedNoDeadline:
 		n, err = f.pfd.LLGoReadWaitLocked(b)
 	case poll.LLGoTryFallbackSlowUnlock:
 		f.pfd.LLGoSlowReadUnlock()

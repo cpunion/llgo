@@ -1645,20 +1645,24 @@ func BeginIssuedExecutorResumeRuntimeContext(
 		}
 	}
 	needsRuntimeContext = mode.requiresRuntimeContext()
-	if g.park.phase == parkMaterialized && g.park.directChannel &&
+	if !AuditEnabled && (g.park.phase == parkIdle || g.park.phase == parkDelivered) &&
+		g.park.taskCancelPhase != taskCancelRequested {
+		p.runDecision = RunDecision{}
+	} else if g.park.phase == parkMaterialized &&
+		(g.park.directChannel || !AuditEnabled) &&
 		g.park.taskCancelKind == TaskCancelNone && g.park.taskCancelPhase == taskCancelIdle {
-		// The direct-channel materializer published this exact owner-only
-		// certificate before enqueueing G, and the issued selector removed G
-		// immediately before this resume. Construct its small decision here;
-		// the general helper remains authoritative for source-backed parks and
-		// the cancellation race, which must claim the task token.
+		// The materializer published this exact owner-only certificate before
+		// enqueueing G, and the issued selector removed G immediately before
+		// this resume. Construct its small decision here; the general helper
+		// remains authoritative for source-backed parks and the cancellation
+		// race, which must claim the task token.
 		p.runDecision = RunDecision{
 			g:             g,
 			ticket:        g.park.ticket,
 			caseID:        g.park.winnerCase,
 			outcome:       g.park.outcome,
 			materialized:  true,
-			directChannel: true,
+			directChannel: g.park.directChannel,
 		}
 	} else if !prepareIssuedRunDecision(p, g) {
 		return Action{}, false, false, false

@@ -47,6 +47,23 @@ struct llgo_runtime_poll_desc_v1 {
 #define LLGO_RUNTIME_POLL_DESC_CLOSING_V1 (UINT64_C(1) << 32)
 #define LLGO_RUNTIME_POLL_DESC_INLINE_STREAM_V1 (UINT64_C(1) << 33)
 #define LLGO_RUNTIME_POLL_DESC_HAS_DEADLINE_V1 (UINT64_C(1) << 34)
+#define LLGO_RUNTIME_POLL_DESC_MIN_ADDR_V1 ((uintptr_t)0x1000u)
+
+/*
+ * Reject NULL and the entire nil-fault page (plus top-of-address-space
+ * wrap-around headroom) before casting context to a descriptor pointer so
+ * every field access is provably >= 0x1000 and cannot trigger a default Go
+ * nil-page memory panic.
+ */
+static inline struct llgo_runtime_poll_desc_v1 *llgo_runtime_poll_desc_ptr_v1(
+    uintptr_t context)
+{
+    if (context - LLGO_RUNTIME_POLL_DESC_MIN_ADDR_V1 >
+        UINTPTR_MAX - (LLGO_RUNTIME_POLL_DESC_MIN_ADDR_V1 * 2u)) {
+        return NULL;
+    }
+    return (struct llgo_runtime_poll_desc_v1 *)context;
+}
 
 static uint64_t llgo_runtime_poll_desc_pack_state_v1(
     const struct llgo_runtime_poll_desc_v1 *desc,
@@ -92,7 +109,7 @@ void __llgo_runtime_poll_desc_free_v1(uintptr_t context)
 uint64_t __llgo_runtime_poll_desc_state_v1(uintptr_t context)
 {
     const struct llgo_runtime_poll_desc_v1 *desc =
-        (const struct llgo_runtime_poll_desc_v1 *)context;
+        llgo_runtime_poll_desc_ptr_v1(context);
     if (desc == NULL) {
         return LLGO_RUNTIME_POLL_DESC_CLOSING_V1;
     }
@@ -106,7 +123,7 @@ int64_t __llgo_runtime_poll_desc_deadline_v1(
     int32_t mode)
 {
     const struct llgo_runtime_poll_desc_v1 *desc =
-        (const struct llgo_runtime_poll_desc_v1 *)context;
+        llgo_runtime_poll_desc_ptr_v1(context);
     if (desc == NULL) {
         return 0;
     }
@@ -139,7 +156,7 @@ uint64_t __llgo_runtime_poll_desc_prepare_wait_v1(
     int32_t mode)
 {
     const struct llgo_runtime_poll_desc_v1 *desc =
-        (const struct llgo_runtime_poll_desc_v1 *)context;
+        llgo_runtime_poll_desc_ptr_v1(context);
     if (desc == NULL) {
         return LLGO_RUNTIME_POLL_DESC_CLOSING_V1;
     }
@@ -163,7 +180,7 @@ void __llgo_runtime_poll_desc_set_deadline_v1(
     int64_t deadline)
 {
     struct llgo_runtime_poll_desc_v1 *desc =
-        (struct llgo_runtime_poll_desc_v1 *)context;
+        llgo_runtime_poll_desc_ptr_v1(context);
     if (desc == NULL) {
         return;
     }
@@ -180,7 +197,7 @@ void __llgo_runtime_poll_desc_set_deadline_v1(
 uint64_t __llgo_runtime_poll_desc_mark_closing_v1(uintptr_t context)
 {
     struct llgo_runtime_poll_desc_v1 *desc =
-        (struct llgo_runtime_poll_desc_v1 *)context;
+        llgo_runtime_poll_desc_ptr_v1(context);
     if (desc == NULL) {
         return LLGO_RUNTIME_POLL_DESC_CLOSING_V1;
     }
@@ -210,7 +227,7 @@ uint64_t __llgo_runtime_poll_desc_load_operation_v1(
     uint32_t interest)
 {
     struct llgo_runtime_poll_desc_v1 *desc =
-        (struct llgo_runtime_poll_desc_v1 *)context;
+        llgo_runtime_poll_desc_ptr_v1(context);
     _Atomic uint64_t *operation =
         llgo_runtime_poll_desc_operation_v1(desc, interest);
     if (operation == NULL) {
@@ -232,7 +249,7 @@ uint32_t __llgo_runtime_poll_desc_publish_operation_v1(
     uint32_t generation)
 {
     struct llgo_runtime_poll_desc_v1 *desc =
-        (struct llgo_runtime_poll_desc_v1 *)context;
+        llgo_runtime_poll_desc_ptr_v1(context);
     _Atomic uint64_t *operation =
         llgo_runtime_poll_desc_operation_v1(desc, interest);
     if (operation == NULL || source_slot == 0 || generation == 0) {
@@ -261,7 +278,7 @@ uint32_t __llgo_runtime_poll_desc_clear_operation_v1(
     uint32_t generation)
 {
     struct llgo_runtime_poll_desc_v1 *desc =
-        (struct llgo_runtime_poll_desc_v1 *)context;
+        llgo_runtime_poll_desc_ptr_v1(context);
     _Atomic uint64_t *operation =
         llgo_runtime_poll_desc_operation_v1(desc, interest);
     if (operation == NULL || source_slot == 0 || generation == 0) {

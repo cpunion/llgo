@@ -76,11 +76,14 @@ const (
 
 type executorRequestSlot struct {
 	// Every platform-visible word is an aligned uint32 atomic. The first slice
-	// deliberately has no scheduler-owned pointer suffix.
+	// deliberately has no scheduler-owned pointer suffix. Pad each slot to 128
+	// bytes so distinct Ps never false-share request gates on 64-byte or
+	// 128-byte cache-line CPUs (e.g. Apple Silicon).
 	state      uint32
 	generation uint32
 	inflight   uint32
 	gate       uint32
+	_          [112]byte
 }
 
 // ExecutorRegistry owns stable request gates. It must remain at a stable

@@ -151,9 +151,12 @@ func coroNativeTryFastPollCompletionDetailedV1(driver *coro.ExecutorDriver) (wok
 				entries[index].Revents = 0
 			}
 		}
-		nReady, errno := corodoorbell.WaitPollSet(&entries[0], count, 0)
-		if nReady == 0 && probeTimeoutNS > 0 {
+		var nReady int
+		var errno int32
+		if probeTimeoutNS > 0 {
 			nReady, errno = corodoorbell.WaitPollSetNano(&entries[0], count, probeTimeoutNS)
+		} else {
+			nReady, errno = corodoorbell.WaitPollSet(&entries[0], count, 0)
 		}
 		if nReady < 0 {
 			if corodoorbell.PollInterrupted(errno) {

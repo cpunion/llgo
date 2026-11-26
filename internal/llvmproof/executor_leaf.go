@@ -24,6 +24,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -137,7 +138,9 @@ func ProveExecutorLeaf(module llvm.Module, symbol string) (ExecutorLeafProof, er
 					)
 				}
 				if callee.IntrinsicID() != 0 {
-					mayFault = mayFault || !(executorLeafTLSAddressIntrinsic(callee) || executorLeafCurrentFrameAddress(instruction))
+					mayFault = mayFault || !(executorLeafTLSAddressIntrinsic(callee) ||
+						executorLeafCurrentFrameAddress(instruction) ||
+						executorLeafPureNonFaultingIntrinsic(callee))
 					if err := validateExecutorLeafIntrinsic(callee); err != nil {
 						return fmt.Errorf(
 							"function %q calls intrinsic %q: %w",
@@ -210,7 +213,497 @@ func executorLeafMemoryMayFault(module llvm.Module, function, instruction llvm.V
 			return false
 		}
 	}
+	if executorLeafGuardedNonLowPageAccess(module, function, instruction, address, valueType) {
+		return false
+	}
 	return true
+}
+
+const executorLeafNilPageBytes = 0x1000
+
+// executorLeafPureNonFaultingIntrinsic admits pure, total scalar integer LLVM
+// intrinsics that perform no memory access, division, or trapping operation.
+func executorLeafPureNonFaultingIntrinsic(callee llvm.Value) bool {
+	if callee.IsAFunction().IsNil() || callee.IntrinsicID() == 0 {
+		return false
+	}
+	name := callee.Name()
+	for _, prefix := range []string{
+		"llvm.smin.",
+		"llvm.smax.",
+		"llvm.umin.",
+		"llvm.umax.",
+		"llvm.abs.",
+		"llvm.bswap.",
+		"llvm.bitreverse.",
+		"llvm.ctpop.",
+		"llvm.ctlz.",
+		"llvm.cttz.",
+		"llvm.fshl.",
+		"llvm.fshr.",
+	} {
+		if strings.HasPrefix(name, prefix) {
+			return callee.GlobalValueType().ReturnType().TypeKind() == llvm.IntegerTypeKind
+		}
+	}
+	return false
+}
+
+// On 64-bit Darwin and Linux, default Go memory panics (without
+// runtime/debug.SetPanicOnFault, which arms fault boundaries dynamically for
+// the whole program) only recover faults whose address lies in the nil page
+// [0, 0x1000). When a dominating branch guard proves that an integer-derived
+// base pointer plus its bounded non-negative offset and access span stay
+// strictly within [0x1000, UINT64_MAX] without wrapping, this access cannot
+// trigger a default native nil-page fault.
+func executorLeafGuardedNonLowPageAccess(
+	module llvm.Module,
+	function, instruction, address llvm.Value,
+	valueType llvm.Type,
+) bool {
+	opcode := instruction.InstructionOpcode()
+	if (opcode == llvm.Load || opcode == llvm.Store) && instruction.IsVolatile() {
+		return false
+	}
+	triple := strings.ToLower(module.Target())
+	if !(strings.HasPrefix(triple, "aarch64-") || strings.HasPrefix(triple, "arm64-") || strings.HasPrefix(triple, "x86_64-")) ||
+		!(strings.Contains(triple, "-apple-") || strings.Contains(triple, "-linux-")) {
+		return false
+	}
+	if module.DataLayout() == "" {
+		return false
+	}
+	layout := llvm.NewTargetData(module.DataLayout())
+	defer layout.Dispose()
+	if layout.PointerSize() != 8 {
+		return false
+	}
+	accessBytes := layout.TypeAllocSize(valueType)
+	if accessBytes == 0 || accessBytes > executorLeafNilPageBytes {
+		return false
+	}
+	base, _, maxOff, ok := executorLeafIntToPtrBaseOffset(address, layout, 0)
+	if !ok || maxOff > math.MaxUint64-accessBytes {
+		return false
+	}
+	span := maxOff + accessBytes
+	targetBlock := instruction.InstructionParent()
+	if targetBlock.IsNil() {
+		return false
+	}
+	minValid, maxValid, ok := executorLeafDominatingIntRange(function, targetBlock, base)
+	if !ok || minValid > maxValid {
+		return false
+	}
+	return minValid >= executorLeafNilPageBytes && span <= math.MaxUint64-maxValid
+}
+
+func executorLeafIntToPtrBaseOffset(
+	address llvm.Value,
+	layout llvm.TargetData,
+	depth int,
+) (llvm.Value, uint64, uint64, bool) {
+	if address.IsNil() || depth > 16 {
+		return llvm.Value{}, 0, 0, false
+	}
+	switch address.InstructionOpcode() {
+	case llvm.IntToPtr:
+		if address.OperandsCount() < 1 {
+			return llvm.Value{}, 0, 0, false
+		}
+		base := address.Operand(0)
+		if base.Type().TypeKind() != llvm.IntegerTypeKind || base.Type().IntTypeWidth() != 64 {
+			return llvm.Value{}, 0, 0, false
+		}
+		return base, 0, 0, true
+	case llvm.BitCast:
+		if address.OperandsCount() < 1 {
+			return llvm.Value{}, 0, 0, false
+		}
+		return executorLeafIntToPtrBaseOffset(address.Operand(0), layout, depth+1)
+	case llvm.GetElementPtr:
+		if address.OperandsCount() < 2 {
+			return llvm.Value{}, 0, 0, false
+		}
+		base, bMin, bMax, ok := executorLeafIntToPtrBaseOffset(address.Operand(0), layout, depth+1)
+		if !ok {
+			return llvm.Value{}, 0, 0, false
+		}
+		dMin, dMax, ok := executorLeafGEPOffsetRange(address, layout)
+		if !ok || bMin > math.MaxUint64-dMin || bMax > math.MaxUint64-dMax {
+			return llvm.Value{}, 0, 0, false
+		}
+		return base, bMin + dMin, bMax + dMax, true
+	case llvm.Select:
+		if address.OperandsCount() < 3 {
+			return llvm.Value{}, 0, 0, false
+		}
+		b1, min1, max1, ok1 := executorLeafIntToPtrBaseOffset(address.Operand(1), layout, depth+1)
+		b2, min2, max2, ok2 := executorLeafIntToPtrBaseOffset(address.Operand(2), layout, depth+1)
+		if !ok1 || !ok2 || b1 != b2 {
+			return llvm.Value{}, 0, 0, false
+		}
+		return b1, min(min1, min2), max(max1, max2), true
+	case llvm.PHI:
+		count := address.IncomingCount()
+		if count == 0 {
+			return llvm.Value{}, 0, 0, false
+		}
+		var base llvm.Value
+		var minOff, maxOff uint64
+		for i := 0; i < count; i++ {
+			b, lo, hi, ok := executorLeafIntToPtrBaseOffset(address.IncomingValue(i), layout, depth+1)
+			if !ok {
+				return llvm.Value{}, 0, 0, false
+			}
+			if i == 0 {
+				base, minOff, maxOff = b, lo, hi
+			} else {
+				if b != base {
+					return llvm.Value{}, 0, 0, false
+				}
+				minOff = min(minOff, lo)
+				maxOff = max(maxOff, hi)
+			}
+		}
+		return base, minOff, maxOff, true
+	default:
+		return llvm.Value{}, 0, 0, false
+	}
+}
+
+func executorLeafGEPOffsetRange(gep llvm.Value, layout llvm.TargetData) (uint64, uint64, bool) {
+	curType := gep.GEPSourceElementType()
+	if curType.IsNil() {
+		return 0, 0, false
+	}
+	var totalMin, totalMax uint64
+	operandCount := gep.OperandsCount()
+	for idx := 1; idx < operandCount; idx++ {
+		indexVal := gep.Operand(idx)
+		if idx == 1 {
+			elemSize := layout.TypeAllocSize(curType)
+			iMin, iMax, ok := executorLeafNonNegativeConstRange(indexVal, 0)
+			if !ok {
+				return 0, 0, false
+			}
+			if elemSize > 0 && (iMin > math.MaxUint64/elemSize || iMax > math.MaxUint64/elemSize) {
+				return 0, 0, false
+			}
+			lo, hi := iMin*elemSize, iMax*elemSize
+			if totalMin > math.MaxUint64-lo || totalMax > math.MaxUint64-hi {
+				return 0, 0, false
+			}
+			totalMin += lo
+			totalMax += hi
+			continue
+		}
+		switch curType.TypeKind() {
+		case llvm.StructTypeKind:
+			if indexVal.IsAConstantInt().IsNil() {
+				return 0, 0, false
+			}
+			field := indexVal.SExtValue()
+			elements := curType.StructElementTypes()
+			if field < 0 || int(field) >= len(elements) {
+				return 0, 0, false
+			}
+			off := layout.ElementOffset(curType, int(field))
+			if totalMin > math.MaxUint64-off || totalMax > math.MaxUint64-off {
+				return 0, 0, false
+			}
+			totalMin += off
+			totalMax += off
+			curType = elements[field]
+		case llvm.ArrayTypeKind:
+			curType = curType.ElementType()
+			elemSize := layout.TypeAllocSize(curType)
+			iMin, iMax, ok := executorLeafNonNegativeConstRange(indexVal, 0)
+			if !ok {
+				return 0, 0, false
+			}
+			if elemSize > 0 && (iMin > math.MaxUint64/elemSize || iMax > math.MaxUint64/elemSize) {
+				return 0, 0, false
+			}
+			lo, hi := iMin*elemSize, iMax*elemSize
+			if totalMin > math.MaxUint64-lo || totalMax > math.MaxUint64-hi {
+				return 0, 0, false
+			}
+			totalMin += lo
+			totalMax += hi
+		default:
+			return 0, 0, false
+		}
+	}
+	return totalMin, totalMax, true
+}
+
+func executorLeafNonNegativeConstRange(val llvm.Value, depth int) (uint64, uint64, bool) {
+	if val.IsNil() || depth > 16 {
+		return 0, 0, false
+	}
+	if !val.IsAConstantInt().IsNil() {
+		if val.Type().IntTypeWidth() > 64 {
+			return 0, 0, false
+		}
+		signed := val.SExtValue()
+		if signed < 0 {
+			return 0, 0, false
+		}
+		u := uint64(signed)
+		return u, u, true
+	}
+	switch val.InstructionOpcode() {
+	case llvm.ZExt:
+		if val.OperandsCount() < 1 {
+			return 0, 0, false
+		}
+		src := val.Operand(0)
+		if !src.IsAConstantInt().IsNil() && src.Type().IntTypeWidth() <= 64 {
+			u := src.ZExtValue()
+			return u, u, true
+		}
+		return executorLeafNonNegativeConstRange(src, depth+1)
+	case llvm.Select:
+		if val.OperandsCount() < 3 {
+			return 0, 0, false
+		}
+		lo1, hi1, ok1 := executorLeafNonNegativeConstRange(val.Operand(1), depth+1)
+		lo2, hi2, ok2 := executorLeafNonNegativeConstRange(val.Operand(2), depth+1)
+		if !ok1 || !ok2 {
+			return 0, 0, false
+		}
+		return min(lo1, lo2), max(hi1, hi2), true
+	case llvm.PHI:
+		count := val.IncomingCount()
+		if count == 0 {
+			return 0, 0, false
+		}
+		var lo, hi uint64
+		for i := 0; i < count; i++ {
+			vLo, vHi, ok := executorLeafNonNegativeConstRange(val.IncomingValue(i), depth+1)
+			if !ok {
+				return 0, 0, false
+			}
+			if i == 0 {
+				lo, hi = vLo, vHi
+			} else {
+				lo = min(lo, vLo)
+				hi = max(hi, vHi)
+			}
+		}
+		return lo, hi, true
+	default:
+		return 0, 0, false
+	}
+}
+
+func executorLeafDominatingIntRange(
+	function llvm.Value,
+	targetBlock llvm.BasicBlock,
+	base llvm.Value,
+) (uint64, uint64, bool) {
+	entry := function.EntryBasicBlock()
+	if entry.IsNil() || !executorLeafBlockReachableWithoutEdge(entry, targetBlock, llvm.BasicBlock{}, llvm.BasicBlock{}) {
+		return 0, 0, false
+	}
+	var lo uint64 = 0
+	var hi uint64 = math.MaxUint64
+	found := false
+	for block := function.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+		term := block.LastInstruction()
+		if term.IsNil() || term.InstructionOpcode() != llvm.Br || term.SuccessorsCount() != 2 {
+			continue
+		}
+		trueBB := term.Successor(0)
+		falseBB := term.Successor(1)
+		if trueBB == falseBB {
+			continue
+		}
+		cond := term.Operand(0)
+		for _, edge := range []struct {
+			succ  llvm.BasicBlock
+			taken bool
+		}{
+			{trueBB, true},
+			{falseBB, false},
+		} {
+			eLo, eHi, ok := executorLeafBranchConditionRange(cond, edge.taken, base)
+			if !ok {
+				continue
+			}
+			if !executorLeafBlockReachableWithoutEdge(entry, targetBlock, block, edge.succ) {
+				if !found {
+					lo, hi, found = eLo, eHi, true
+				} else {
+					lo = max(lo, eLo)
+					hi = min(hi, eHi)
+				}
+			}
+		}
+	}
+	return lo, hi, found
+}
+
+func executorLeafBlockReachableWithoutEdge(
+	entry, target, skipPred, skipSucc llvm.BasicBlock,
+) bool {
+	visited := make(map[llvm.BasicBlock]bool)
+	stack := []llvm.BasicBlock{entry}
+	visited[entry] = true
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if cur == target {
+			return true
+		}
+		term := cur.LastInstruction()
+		if term.IsNil() {
+			continue
+		}
+		count := term.SuccessorsCount()
+		for i := 0; i < count; i++ {
+			next := term.Successor(i)
+			if cur == skipPred && next == skipSucc {
+				continue
+			}
+			if !visited[next] {
+				visited[next] = true
+				stack = append(stack, next)
+			}
+		}
+	}
+	return false
+}
+
+// executorLeafBranchConditionRange extracts a sound unsigned interval [lo, hi]
+// for base implied when cond evaluates to taken. It recognizes modular shift
+// comparisons `(base + C) <cmp> K` (and `sub base, L` as `base + (-L)`).
+func executorLeafBranchConditionRange(
+	cond llvm.Value,
+	taken bool,
+	base llvm.Value,
+) (uint64, uint64, bool) {
+	if cond.IsNil() || cond.InstructionOpcode() != llvm.ICmp || cond.OperandsCount() < 2 {
+		return 0, 0, false
+	}
+	pred := cond.IntPredicate()
+	lhs := cond.Operand(0)
+	rhs := cond.Operand(1)
+	if !lhs.IsAConstantInt().IsNil() && rhs.IsAConstantInt().IsNil() {
+		lhs, rhs = rhs, lhs
+		pred = executorLeafSwapIntPredicate(pred)
+	}
+	if rhs.IsAConstantInt().IsNil() || lhs.Type().TypeKind() != llvm.IntegerTypeKind || lhs.Type().IntTypeWidth() != 64 {
+		return 0, 0, false
+	}
+	if !taken {
+		pred = executorLeafInvertIntPredicate(pred)
+	}
+	shift, ok := executorLeafIntShiftFromBase(lhs, base)
+	if !ok {
+		return 0, 0, false
+	}
+	bound := rhs.ZExtValue()
+	// Normalize pred to either:
+	//   y >= minY  (lowerBound == true)
+	//   y <= maxY  (lowerBound == false)
+	// where y = (base + shift) mod 2^64.
+	var lowerBound bool
+	var limit uint64
+	switch pred {
+	case llvm.IntUGE:
+		lowerBound, limit = true, bound
+	case llvm.IntUGT:
+		if bound == math.MaxUint64 {
+			return 0, 0, false
+		}
+		lowerBound, limit = true, bound+1
+	case llvm.IntULE:
+		lowerBound, limit = false, bound
+	case llvm.IntULT:
+		if bound == 0 {
+			return 0, 0, false
+		}
+		lowerBound, limit = false, bound-1
+	default:
+		return 0, 0, false
+	}
+	if lowerBound {
+		// (base + shift) mod 2^64 in [limit, MaxUint64]
+		// Maps to a single non-wrapping interval for base iff shift <= limit.
+		if shift > limit {
+			return 0, 0, false
+		}
+		return limit - shift, math.MaxUint64 - shift, true
+	}
+	// (base + shift) mod 2^64 in [0, limit]
+	// Write base - subOff = base + shift, so subOff = -shift (mod 2^64).
+	// Maps to a single non-wrapping interval [subOff, subOff + limit] iff subOff <= MaxUint64 - limit.
+	subOff := -shift
+	if subOff > math.MaxUint64-limit {
+		return 0, 0, false
+	}
+	return subOff, subOff + limit, true
+}
+
+func executorLeafIntShiftFromBase(expr, base llvm.Value) (uint64, bool) {
+	if expr == base {
+		return 0, true
+	}
+	if expr.IsNil() || expr.OperandsCount() < 2 {
+		return 0, false
+	}
+	switch expr.InstructionOpcode() {
+	case llvm.Add:
+		a, b := expr.Operand(0), expr.Operand(1)
+		if a == base && !b.IsAConstantInt().IsNil() {
+			return b.ZExtValue(), true
+		}
+		if b == base && !a.IsAConstantInt().IsNil() {
+			return a.ZExtValue(), true
+		}
+	case llvm.Sub:
+		a, b := expr.Operand(0), expr.Operand(1)
+		if a == base && !b.IsAConstantInt().IsNil() {
+			return -b.ZExtValue(), true
+		}
+	}
+	return 0, false
+}
+
+func executorLeafSwapIntPredicate(pred llvm.IntPredicate) llvm.IntPredicate {
+	switch pred {
+	case llvm.IntULT:
+		return llvm.IntUGT
+	case llvm.IntULE:
+		return llvm.IntUGE
+	case llvm.IntUGT:
+		return llvm.IntULT
+	case llvm.IntUGE:
+		return llvm.IntULE
+	default:
+		return pred
+	}
+}
+
+func executorLeafInvertIntPredicate(pred llvm.IntPredicate) llvm.IntPredicate {
+	switch pred {
+	case llvm.IntULT:
+		return llvm.IntUGE
+	case llvm.IntULE:
+		return llvm.IntUGT
+	case llvm.IntUGT:
+		return llvm.IntULE
+	case llvm.IntUGE:
+		return llvm.IntULT
+	case llvm.IntEQ:
+		return llvm.IntNE
+	case llvm.IntNE:
+		return llvm.IntEQ
+	default:
+		return pred
+	}
 }
 
 // A level-zero frameaddress reads the current frame register, never an older

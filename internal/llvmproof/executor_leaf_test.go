@@ -108,6 +108,154 @@ define i32 @divide(i32 %value, i32 %divisor) {
 	}
 }
 
+func TestExecutorLeafGuardedNonLowPageAccesses(t *testing.T) {
+	module := parseExecutorLeafModule(t, `
+target datalayout = "e-p:64:64-i64:64-n8:16:32:64-S128"
+target triple = "aarch64-apple-macosx26.0.0"
+
+declare i64 @llvm.smin.i64(i64, i64) nocallback nofree nosync nounwind willreturn
+
+define i64 @folded_range_guard(i64 %ctx, i32 %mode) {
+entry:
+  %shifted = add i64 %ctx, 4096
+  %bad = icmp ult i64 %shifted, 8192
+  %base = inttoptr i64 %ctx to ptr
+  br i1 %bad, label %ret_zero, label %ok
+ok:
+  switch i32 %mode, label %both [
+    i32 1, label %r
+    i32 2, label %w
+  ]
+r:
+  br label %join
+w:
+  br label %join
+join:
+  %off = phi i64 [ 8, %r ], [ 16, %w ]
+  %ptr = getelementptr inbounds nuw i8, ptr %base, i64 %off
+  %val = load atomic i64, ptr %ptr acquire, align 8
+  ret i64 %val
+both:
+  %p1 = getelementptr inbounds nuw i8, ptr %base, i64 8
+  %v1 = load atomic i64, ptr %p1 acquire, align 8
+  %p2 = getelementptr inbounds nuw i8, ptr %base, i64 16
+  %v2 = load atomic i64, ptr %p2 acquire, align 8
+  %min = call i64 @llvm.smin.i64(i64 %v1, i64 %v2)
+  ret i64 %min
+ret_zero:
+  ret i64 0
+}
+
+define i32 @sub_range_guard_cmpxchg(i64 %ctx, i64 %desired) {
+entry:
+  %diff = sub i64 %ctx, 4096
+  %bad = icmp ugt i64 %diff, -8193
+  br i1 %bad, label %ret_zero, label %ok
+ok:
+  %base = inttoptr i64 %ctx to ptr
+  %p = getelementptr inbounds i8, ptr %base, i64 24
+  %res = cmpxchg ptr %p, i64 0, i64 %desired seq_cst seq_cst, align 8
+  %okflag = extractvalue { i64, i1 } %res, 1
+  %out = zext i1 %okflag to i32
+  ret i32 %out
+ret_zero:
+  ret i32 0
+}
+
+define i64 @split_two_bounds(i64 %ctx) {
+entry:
+  %low = icmp ult i64 %ctx, 4096
+  br i1 %low, label %ret_zero, label %check_high
+check_high:
+  %high = icmp ugt i64 %ctx, -4097
+  br i1 %high, label %ret_zero, label %ok
+ok:
+  %base = inttoptr i64 %ctx to ptr
+  %val = load i64, ptr %base, align 8
+  ret i64 %val
+ret_zero:
+  ret i64 0
+}
+
+define i64 @too_low_bound(i64 %ctx) {
+entry:
+  %shifted = add i64 %ctx, 4096
+  %bad = icmp ult i64 %shifted, 8191
+  br i1 %bad, label %ret_zero, label %ok
+ok:
+  %base = inttoptr i64 %ctx to ptr
+  %val = load i64, ptr %base, align 8
+  ret i64 %val
+ret_zero:
+  ret i64 0
+}
+
+define i64 @missing_upper_bound(i64 %ctx) {
+entry:
+  %low = icmp ult i64 %ctx, 4096
+  br i1 %low, label %ret_zero, label %ok
+ok:
+  %base = inttoptr i64 %ctx to ptr
+  %p = getelementptr inbounds i8, ptr %base, i64 8
+  %val = load i64, ptr %p, align 8
+  ret i64 %val
+ret_zero:
+  ret i64 0
+}
+
+define i64 @offset_exceeds_headroom(i64 %ctx) {
+entry:
+  %shifted = add i64 %ctx, 4096
+  %bad = icmp ult i64 %shifted, 8192
+  br i1 %bad, label %ret_zero, label %ok
+ok:
+  %base = inttoptr i64 %ctx to ptr
+  %p = getelementptr inbounds i8, ptr %base, i64 4096
+  %val = load i64, ptr %p, align 8
+  ret i64 %val
+ret_zero:
+  ret i64 0
+}
+
+define i64 @bypassed_guard(i64 %ctx, i1 %skip) {
+entry:
+  br i1 %skip, label %ok, label %check
+check:
+  %shifted = add i64 %ctx, 4096
+  %bad = icmp ult i64 %shifted, 8192
+  br i1 %bad, label %ret_zero, label %ok
+ok:
+  %base = inttoptr i64 %ctx to ptr
+  %val = load i64, ptr %base, align 8
+  ret i64 %val
+ret_zero:
+  ret i64 0
+}`)
+	tests := []struct {
+		name     string
+		mayFault bool
+	}{
+		{"folded_range_guard", false},
+		{"sub_range_guard_cmpxchg", false},
+		{"split_two_bounds", false},
+		{"too_low_bound", true},
+		{"missing_upper_bound", true},
+		{"offset_exceeds_headroom", true},
+		{"bypassed_guard", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			proof, err := ProveExecutorLeaf(module, tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if proof.MayFault != tc.mayFault {
+				t.Fatalf("MayFault = %t, want %t", proof.MayFault, tc.mayFault)
+			}
+		})
+	}
+}
+
 func TestProveExecutorLeafAcceptsExactTerminalIntrinsics(t *testing.T) {
 	module := parseExecutorLeafModule(t, `
 declare void @llvm.debugtrap()

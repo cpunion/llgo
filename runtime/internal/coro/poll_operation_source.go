@@ -1268,7 +1268,11 @@ func CompleteOwnerPollEventV2(
 		return false, true
 	}
 	packet := (*ResumePacket)(wait.resume)
-	if !validBoundResumePacket(packet, wait.ticket) || packet.source != id {
+	if AuditEnabled {
+		if !validBoundResumePacket(packet, wait.ticket) || packet.source != id {
+			return false, true
+		}
+	} else if packet == nil || packet.state != resumePacketBound || packet.ticket != wait.ticket || packet.source != id {
 		return false, true
 	}
 	g := wait.g
@@ -1280,7 +1284,8 @@ func CompleteOwnerPollEventV2(
 		(AuditEnabled && (!validParkWaitQueueHeader(p) || !validReadyQueueHeader(p) || !validActiveWaitSetRecordFast(p, wait))) {
 		return false, true
 	}
-	switch beginProducerSourceClose(&slot.v2Producer) {
+	closeResult := beginProducerSourceClose(&slot.v2Producer)
+	switch closeResult {
 	case producerSourceCloseStarted, producerSourceAlreadyClosing, producerSourceAlreadyQuiesced:
 	default:
 		return false, false
@@ -1299,7 +1304,8 @@ func CompleteOwnerPollEventV2(
 		_ = driver.registry.Request(driver.handle)
 		return true, true
 	}
-	closingQuiesced := !AuditEnabled && preemptLoad(&slot.v2Producer.state) == uint32(producerSourceClosing)
+	closingQuiesced := !AuditEnabled && (closeResult == producerSourceCloseStarted ||
+		preemptLoad(&slot.v2Producer.state) == uint32(producerSourceClosing))
 	if !closingQuiesced && preemptLoad(&slot.v2Producer.state) == uint32(producerSourceClosing) &&
 		!markProducerSourceQuiesced(&slot.v2Producer) {
 		return false, false
@@ -1313,7 +1319,9 @@ func CompleteOwnerPollEventV2(
 	slot.fd = 0
 	slot.deadline = 0
 	slot.v2Result = PollOperationResultInvalid
-	preemptStore(&slot.v2Mailbox, uint32(pollOperationMailboxEmpty))
+	if AuditEnabled {
+		preemptStore(&slot.v2Mailbox, uint32(pollOperationMailboxEmpty))
+	}
 	if closingQuiesced {
 		if !recycleClosingQuiescedProducerSourceSlot(&slot.v2Producer) {
 			return false, false

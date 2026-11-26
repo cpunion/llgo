@@ -59,7 +59,7 @@ const coroGCountShardBias = uint64(1) << 62
 
 type coroGCountShard struct {
 	state uint64
-	_     [56]byte
+	_     [120]byte
 }
 
 var (
@@ -84,10 +84,10 @@ var coroGCountShards = [coro.ExecutorFleetCapacity]coroGCountShard{
 
 var sched struct {
 	goidgen uint64
-	_pad0   [56]byte
+	_pad0   [120]byte
 	midgen  int64
 	pidgen  int32
-	_pad1   [52]byte
+	_pad1   [116]byte
 
 	// gstate packs the unsharded/global live logical-context count with the
 	// main-exited bit. One atomic word makes the native main-Goexit decision
@@ -97,7 +97,7 @@ var sched struct {
 	// retries across concurrent post-Goexit cross-shard spawn/exit chains
 	// without adding atomic traffic to normal spawn/exit paths.
 	gstateSeq uint64
-	_pad2     [48]byte
+	_pad2     [112]byte
 }
 
 // signalPanicPCStore is the allocation-free fallback used only when a legacy

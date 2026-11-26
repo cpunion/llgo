@@ -1483,3 +1483,94 @@ func TestExecutorFleetPeersIdleUnrequested(t *testing.T) {
 	}
 	drainTimerAwareExecutorRunSources(t, b.driver, 102)
 }
+
+func TestDistributePNeutralRunnableForYieldBalancedAcrossPeers(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	source := bindExecutorFleetManualFixture(t, fleet)
+	peerA := bindExecutorFleetManualFixture(t, fleet)
+	peerB := bindExecutorFleetManualFixture(t, fleet)
+	defer func() {
+		closeExecutorFleetFixture(t, fleet, peerB)
+		closeExecutorFleetFixture(t, fleet, peerA)
+		closeExecutorFleetFixture(t, fleet, source)
+	}()
+
+	const total = 18
+	tasks := make([]*yieldingTestG, total)
+	for i := range tasks {
+		tasks[i] = newYieldingTestG(t, "balanced-yield-task")
+		if !Enqueue(source.p, tasks[i].g) {
+			t.Fatalf("enqueue task %d", i)
+		}
+	}
+	if !fleet.RequestPNeutralRunnable(peerA.handle, peerA.p) ||
+		!fleet.RequestPNeutralRunnable(peerB.handle, peerB.p) {
+		t.Fatal("request demand from two peers")
+	}
+	distA, ok := fleet.DistributePNeutralRunnableForYield(source.handle, source.p)
+	if !ok || !distA.Valid() || distA.Count < 4 || distA.Count >= total-1 {
+		t.Fatalf("first balanced yield distribution = (%+v, %t)", distA, ok)
+	}
+	distB, ok := fleet.DistributePNeutralRunnableForYield(source.handle, source.p)
+	if !ok || !distB.Valid() || distB.Target == distA.Target || distB.Count < 4 {
+		t.Fatalf("second balanced yield distribution = (%+v, %t)", distB, ok)
+	}
+	if source.p.readyCount == 0 {
+		t.Fatal("source must retain at least one runnable task")
+	}
+	if distA.Count+distB.Count+source.p.readyCount != total {
+		t.Fatalf("task count mismatch: %d + %d + %d != %d", distA.Count, distB.Count, source.p.readyCount, total)
+	}
+	drainAndFinish := func(fixture *executorFleetManualFixture) {
+		moved, _, status := fleet.TryDrainPNeutralRunnables(fixture.handle, fixture.p, RunnableTransferMailboxCapacity)
+		if status != RunnableTransferDrainComplete || moved == 0 {
+			t.Fatalf("drain route %d = (%d, %d)", fixture.handle.Route, moved, status)
+		}
+		if _, _, ok := PollExecutor(fixture.driver); !ok {
+			t.Fatalf("poll route %d", fixture.handle.Route)
+		}
+		for fixture.p.readyCount > 0 {
+			g, ok := NextRunnable(fixture.p)
+			if !ok {
+				t.Fatalf("next runnable on route %d", fixture.handle.Route)
+			}
+			var found *yieldingTestG
+			for _, task := range tasks {
+				if task.g == g {
+					found = task
+					break
+				}
+			}
+			if found == nil {
+				t.Fatalf("unknown task %p on route %d", g, fixture.handle.Route)
+			}
+			action := beginWaitTestResume(t, fixture.p, found)
+			if fixture.p.readyCount > 0 {
+				finishWaitTestTask(t, fixture.p, found, action)
+			} else {
+				finishExecutorFleetTask(t, fixture, found, action)
+			}
+		}
+	}
+	drainAndFinish(peerA)
+	drainAndFinish(peerB)
+	for source.p.readyCount > 0 {
+		g, ok := NextRunnable(source.p)
+		if !ok {
+			t.Fatal("next runnable on source")
+		}
+		var found *yieldingTestG
+		for _, task := range tasks {
+			if task.g == g {
+				found = task
+				break
+			}
+		}
+		action := beginWaitTestResume(t, source.p, found)
+		if source.p.readyCount > 0 {
+			finishWaitTestTask(t, source.p, found, action)
+		} else {
+			finishExecutorFleetTask(t, source, found, action)
+		}
+	}
+}

@@ -255,6 +255,30 @@ func coroTargetPublishDirectChannelCompletionV1(
 	return accepted && requestOK && leaveOK
 }
 
+func coroTargetPublishDirectChannelCompletionBatchV1(
+	owner *coro.ExecutorDriver,
+	route coro.RouteID,
+	head, tail *coro.DirectChannelCompletion,
+) bool {
+	domain, ok := coroNativeFleetActiveDomainForRouteV1(route)
+	if !ok || owner == nil || head == nil || tail == nil ||
+		domain.driverOwnerV1() != owner || !domain.ingress.Enter() {
+		return false
+	}
+	if domain.lifecycle != coroNativeFleetDomainActiveV1 || domain.driverOwnerV1() != owner ||
+		domain.handle.Route != uint32(route) ||
+		!coro.PublishExecutorDirectChannelCompletionBatch(owner, head, tail) {
+		_, _ = domain.ingress.Leave()
+		return false
+	}
+	result := coroNativeFleetV1State.fleet.RequestExecutor(domain.handle)
+	accepted := result == coro.ExecutorRequestPublished ||
+		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
+	requestOK := coroNativeFleetFinishExecutorRequestV1(domain, result)
+	_, leaveOK := domain.ingress.Leave()
+	return accepted && requestOK && leaveOK
+}
+
 // coroTargetRequestControlledTimerV2 requests the exact owner after
 // time.Timer atomically publishes a new logical generation. The timer catalog
 // owns no producer callback: its next owner scan observes the retained control

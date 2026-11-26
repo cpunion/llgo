@@ -791,9 +791,10 @@ func ChanClose(p *Chan) {
 	}
 }
 
-func dequeueClosedRecvStepLocked(
+func dequeueClosedRecvStepBatchedLocked(
 	p *Chan,
 	context *coroChanExternalCommitContextV1,
+	batches *coroChanDirectCloseBatchesV1,
 ) coroChanQueueStepV1 {
 	if p == nil || !p.closed {
 		return coroChanQueueInvalidV1
@@ -801,6 +802,20 @@ func dequeueClosedRecvStepLocked(
 	w := p.recvq.dequeue()
 	if w == nil {
 		return coroChanQueueIdleV1
+	}
+	if w.direct != nil {
+		result := prepareDirectCoroRecvWaiterLockedV1(w, nil, p.elemsize, waitRecvClosed)
+		switch result {
+		case coroChanMatchCommitted:
+			if !finishDirectCoroChannelCompletionBatchedV1(w, waitRecvClosed, context, batches) {
+				return coroChanQueueInvalidV1
+			}
+			return coroChanQueueCommittedV1
+		case coroChanMatchDiscarded:
+			return coroChanQueueDiscardedV1
+		default:
+			return coroChanQueueInvalidV1
+		}
 	}
 	switch result := completeRecvWaiterWithContext(
 		w, nil, p.elemsize, waitRecvClosed, context,
@@ -817,9 +832,17 @@ func dequeueClosedRecvStepLocked(
 	}
 }
 
-func dequeueClosedSendStepLocked(
+func dequeueClosedRecvStepLocked(
 	p *Chan,
 	context *coroChanExternalCommitContextV1,
+) coroChanQueueStepV1 {
+	return dequeueClosedRecvStepBatchedLocked(p, context, nil)
+}
+
+func dequeueClosedSendStepBatchedLocked(
+	p *Chan,
+	context *coroChanExternalCommitContextV1,
+	batches *coroChanDirectCloseBatchesV1,
 ) coroChanQueueStepV1 {
 	if p == nil || !p.closed {
 		return coroChanQueueInvalidV1
@@ -827,6 +850,20 @@ func dequeueClosedSendStepLocked(
 	w := p.sendq.dequeue()
 	if w == nil {
 		return coroChanQueueIdleV1
+	}
+	if w.direct != nil {
+		result := prepareDirectCoroSendWaiterLockedV1(w, nil, w.size, waitSendClosed)
+		switch result {
+		case coroChanMatchCommitted:
+			if !finishDirectCoroChannelCompletionBatchedV1(w, waitSendClosed, context, batches) {
+				return coroChanQueueInvalidV1
+			}
+			return coroChanQueueCommittedV1
+		case coroChanMatchDiscarded:
+			return coroChanQueueDiscardedV1
+		default:
+			return coroChanQueueInvalidV1
+		}
 	}
 	switch result := completeSendWaiterWithContext(w, waitSendClosed, context); result {
 	case coroChanMatchCommitted:
@@ -841,6 +878,13 @@ func dequeueClosedSendStepLocked(
 	}
 }
 
+func dequeueClosedSendStepLocked(
+	p *Chan,
+	context *coroChanExternalCommitContextV1,
+) coroChanQueueStepV1 {
+	return dequeueClosedSendStepBatchedLocked(p, context, nil)
+}
+
 // drainClosedChanWaitersLocked publishes every currently claimable waiter.
 // Claim contention is not corruption: the competing select/cancel owner will
 // eventually resume and remove that exact node. Its resume tail calls this
@@ -850,27 +894,30 @@ func drainClosedChanWaitersLocked(
 	p *Chan,
 	context *coroChanExternalCommitContextV1,
 ) bool {
+	var batches coroChanDirectCloseBatchesV1
 	for {
-		switch dequeueClosedRecvStepLocked(p, context) {
+		switch dequeueClosedRecvStepBatchedLocked(p, context, &batches) {
 		case coroChanQueueCommittedV1, coroChanQueueDiscardedV1:
 			continue
 		case coroChanQueueBlockedV1:
-			return true
+			return batches.flushAll()
 		case coroChanQueueIdleV1:
 			goto send
 		default:
+			_ = batches.flushAll()
 			return false
 		}
 	}
 
 send:
 	for {
-		switch dequeueClosedSendStepLocked(p, context) {
+		switch dequeueClosedSendStepBatchedLocked(p, context, &batches) {
 		case coroChanQueueCommittedV1, coroChanQueueDiscardedV1:
 			continue
 		case coroChanQueueIdleV1, coroChanQueueBlockedV1:
-			return true
+			return batches.flushAll()
 		default:
+			_ = batches.flushAll()
 			return false
 		}
 	}

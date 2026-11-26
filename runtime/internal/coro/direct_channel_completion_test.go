@@ -392,3 +392,104 @@ func TestDirectChannelParkRejectsInterruptingOrInvalidTaskStop(t *testing.T) {
 		}
 	}
 }
+
+func TestDirectChannelParkReversibleAndRollback(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithManual(t, p)
+	defer closeTestExecutorDriver(t, driver)
+	task := newYieldingTestG(t, "reversible-compact-park")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue reversible park task")
+	}
+	if next, valid := NextRunnable(p); !valid || next != task.g {
+		t.Fatal("select reversible park task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	driver.run.issued = ActionCheckResume
+	beforePark := task.g.park
+	beforePending := task.g.pending
+	beforeReason := task.frame.header.SuspendReason
+	beforeLifecycle := task.frame.header.Lifecycle
+
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	storage := new(DirectChannelParkStorageV1)
+	owner, route, undo := PrepareCurrentDirectChannelParkReversible(
+		task.g, task.handle, task.frame.header, storage,
+	)
+	if owner != driver || route != driver.route || !undo.valid || task.g.active.parkWait == nil {
+		t.Fatalf("PrepareCurrentDirectChannelParkReversible = (%p, %d, %+v)", owner, route, undo)
+	}
+	if !RollbackUnpublishedDirectChannelPark(task.g, task.handle, task.frame.header, storage, undo) {
+		t.Fatal("RollbackUnpublishedDirectChannelPark failed")
+	}
+	if task.g.park != beforePark || task.g.pending != beforePending || task.g.active.parkWait != nil ||
+		*storage != (DirectChannelParkStorageV1{}) ||
+		task.frame.header.SuspendReason != beforeReason ||
+		task.frame.header.Lifecycle != beforeLifecycle {
+		t.Fatalf("rollback left dirty state: park=%+v pending=%+v wait=%p reason=%d life=%d",
+			task.g.park, task.g.pending, task.g.active.parkWait,
+			task.frame.header.SuspendReason, task.frame.header.Lifecycle)
+	}
+	// A second rollback on the already-cleared storage must fail closed.
+	if RollbackUnpublishedDirectChannelPark(task.g, task.handle, task.frame.header, storage, undo) {
+		t.Fatal("duplicate rollback must fail closed")
+	}
+	driver.run.issued = ActionInvalid
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare completion after rollback")
+	}
+	next, ok := Resumed(p, task.g, action)
+	if !ok || next.Kind != ActionCheckDestroy {
+		t.Fatalf("resume after rollback = (%+v, %t)", next, ok)
+	}
+	next, ok = Checked(p, task.g, next, true)
+	if !ok || next.Kind != ActionDestroy {
+		t.Fatalf("checked destroy after rollback = (%+v, %t)", next, ok)
+	}
+	releaseTestFrame(t, task.g, task.frame)
+	receipt, ok := DestroyedBounded(p, task.g, next)
+	if !ok || receipt.Kind != ActionCommitDestroy {
+		t.Fatalf("destroyed bounded after rollback = (%+v, %t)", receipt, ok)
+	}
+	if complete, ok := CommitExecutorRunDomainDestroy(driver, task.g, receipt); !ok || complete.Kind != ActionComplete {
+		t.Fatalf("domain destroy after rollback = (%+v, %t)", complete, ok)
+	}
+	runtime.KeepAlive(task.frame)
+}
+
+func TestPublishExecutorDirectChannelCompletionBatch(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithManual(t, p)
+	defer closeTestExecutorDriver(t, driver)
+
+	var nodes [3]DirectChannelCompletion
+	for i := range nodes {
+		nodes[i].owner = driver
+		nodes[i].route = driver.route
+		preemptStore(&nodes[i].state, uint32(directChannelCompletionMatched))
+		if !PrepareDirectChannelCompletionForBatch(&nodes[i]) {
+			t.Fatalf("PrepareDirectChannelCompletionForBatch[%d] failed", i)
+		}
+	}
+	LinkDirectChannelCompletionBatch(&nodes[0], &nodes[1])
+	LinkDirectChannelCompletionBatch(&nodes[1], &nodes[2])
+	if !PublishExecutorDirectChannelCompletionBatch(driver, &nodes[0], &nodes[2]) {
+		t.Fatal("PublishExecutorDirectChannelCompletionBatch failed")
+	}
+	for i := range nodes {
+		got, ok := takeExecutorDirectChannelCompletion(driver)
+		if !ok || got != &nodes[i] {
+			t.Fatalf("take[%d] = (%p, %t), want (%p, true)", i, got, ok, &nodes[i])
+		}
+	}
+	if !executorDirectChannelInboxIdle(driver) {
+		t.Fatal("batch direct completion did not leave inbox idle")
+	}
+	if PublishExecutorDirectChannelCompletionBatch(nil, &nodes[0], &nodes[2]) ||
+		PublishExecutorDirectChannelCompletionBatch(driver, nil, &nodes[2]) {
+		t.Fatal("invalid batch publish arguments must fail closed")
+	}
+}

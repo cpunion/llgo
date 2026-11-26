@@ -43,6 +43,7 @@ int __llgo_coro_fleet_owner_discard_returned_v1(
 int __llgo_coro_fleet_owner_retire_self_v1(uint32_t slot);
 int __llgo_coro_fleet_owner_stop_standby_v1(uint32_t *joined);
 int __llgo_coro_fleet_owner_yield_v1(void);
+void __llgo_coro_fleet_owner_pause_v1(uint32_t spins);
 int __llgo_coro_fleet_factory_stop_v2(uint32_t terminal_owner_token);
 
 #endif

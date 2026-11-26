@@ -23,6 +23,10 @@ import (
 	"unsafe"
 )
 
+func freeBatchLoad(ptr *uint32) uint32 {
+	return atomic.LoadUint32(ptr)
+}
+
 func freeBatchCAS(ptr *uint32, old, new uint32) bool {
 	return atomic.CompareAndSwapUint32(ptr, old, new)
 }

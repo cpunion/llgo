@@ -955,29 +955,68 @@ func ResumedExecutorRun(
 		p.action = next
 		return next, false, true
 	}
+	if !AuditEnabled && g != nil && p.current == g && g.runP == p && p.inResume &&
+		p.inlineAwaitDepth == 0 && p.action == action && p.runDecisionTaken && g.active != nil &&
+		g.pending.from == g.active && g.active.handle == action.Handle {
+		frame := g.active
+		switch g.pending.kind {
+		case pendingAwait:
+			child := g.pending.target
+			if child != nil && child.parent == frame && frame.header != nil && child.header != nil &&
+				frame.header.Lifecycle == uint16(FrameSuspended) &&
+				child.header.Lifecycle == uint16(FrameInitialSuspended) && child.handle != nil {
+				g.pending = pendingTransition{}
+				p.inResume = false
+				p.runDecisionTaken = false
+				frame.state = FrameSuspended
+				g.active = child
+				g.state = GRunning
+				next = Action{Kind: ActionCheckResume, Handle: child.handle}
+				p.action = next
+				return next, false, true
+			}
+		case pendingComplete:
+			if g.pending.target == nil && frame.parent != nil && frame != g.root && !g.panicUnwind &&
+				frame.header != nil && frame.header.Lifecycle == uint16(FrameFinalSuspended) &&
+				frame.header.SuspendReason == uint16(SuspendFrameComplete) &&
+				frame.parent.completion.status != CompletionPanic {
+				g.pending = pendingTransition{}
+				p.inResume = false
+				p.runDecisionTaken = false
+				g.state = GDispatching
+				g.active = frame.parent
+				frame.state = FrameDestroyPending
+				frame.header.Lifecycle = uint16(FrameDestroyPending)
+				g.destroyTarget = frame
+				g.setDestroysRoot(false)
+				next = Action{Kind: ActionCheckDestroy, Handle: action.Handle}
+				p.action = next
+				return next, false, true
+			}
+		}
+	}
 	if g != nil && g.pending.kind == pendingCompilerYield {
 		next, ok = resumedExecutorCompilerYield(driver, p, g, action)
-	} else if g != nil && g.pending.kind == pendingParkSet && g.pending.directChannel && g.active != nil &&
+	} else if g != nil && g.pending.kind == pendingParkSet && g.active != nil &&
 		g.pending.from == g.active && g.active.handle == action.Handle &&
-		g.active.parkWait != nil && g.active.parkWait.directChannel {
-		// PrepareCurrentDirectChannelPark installed the pending direct marker
-		// only after building the complete frame/wait/park graph. The issued
-		// action and current/inResume relation freeze every owner field until
-		// this adjacent return from llvm.coro.resume; a peer may change only the
-		// completion's atomic word. Consume that certificate in one flat commit
-		// instead of calling the generic Resumed graph validator. An inline child
-		// may be the deepest active frame while action still names its physical
-		// outer resume; that ancestry is intentionally left to Resumed.
+		g.active.parkWait != nil &&
+		(g.pending.directChannel && g.active.parkWait.directChannel ||
+			!AuditEnabled && !g.pending.directChannel && !g.active.parkWait.directChannel &&
+				g.pending.target == nil && g.park.phase == parkParked && !g.isWaiting() &&
+				!g.isQueued() && g.nextReady == nil && g.transferState == runnableTransferGIdle &&
+				g.active.header != nil &&
+				g.active.header.SuspendReason == uint16(SuspendPark) &&
+				g.active.header.Lifecycle == uint16(FrameSuspended)) {
 		frame := g.pending.from
+		wait := frame.parkWait
 		if p.current != g || g.runP != p || !p.inResume || p.inlineAwaitDepth != 0 ||
 			p.action != action || !p.runDecisionTaken || frame == nil || frame != g.active ||
-			frame.handle != action.Handle || frame.parkWait != g.active.parkWait ||
-			frame.parkWait.resumeKind != resumeBindingDirectChannel ||
-			!canAccountWaitSetExternal(p, g, frame.parkWait) ||
+			frame.handle != action.Handle ||
+			(g.pending.directChannel && wait.resumeKind != resumeBindingDirectChannel) ||
+			!canAccountWaitSetExternal(p, g, wait) ||
 			!acknowledgeSuspendedGPreempt(g) {
 			return Action{}, false, false
 		}
-		wait := frame.parkWait
 		g.pending = pendingTransition{}
 		frame.state = FrameSuspended
 		p.inResume = false
@@ -1159,6 +1198,42 @@ func ContinueIssuedExecutorParentResume(
 		driver.run.actionsSinceSource = 0
 	}
 	driver.run.issued = ActionCheckResume
+	driver.run.blocked = false
+	driver.run.actionsSinceSource++
+	return true
+}
+
+// ContinueIssuedExecutorChildResume chains a same-G awaited child resume
+// directly after ActionCheckResume returned ActionCheckResume (await) when no
+// peer G, source event, direct-channel completion, cancellation, or OS-thread
+// lock handoff competes for the P. This keeps multi-frame sync-ramp awaits
+// (such as tcpRoundTrip -> io.ReadAtLeast -> net.(*conn).llgoReadSlow) inside
+// a single runtime-context activation without ready-queue round-trips.
+func ContinueIssuedExecutorChildResume(
+	driver *ExecutorDriver,
+	g *G,
+	next Action,
+) bool {
+	if AuditEnabled || driver == nil || driver.p == nil || g == nil ||
+		driver.run.issued != ActionCheckResume ||
+		next.Kind != ActionCheckResume || next.Handle == nil {
+		return false
+	}
+	p := driver.p
+	if p.readyHead != nil || p.osThreadLockOwner != nil || p.foreignReentry != nil ||
+		g.park.taskCancelKind != TaskCancelNone || g.panicUnwind ||
+		g.osThreadLockDepth != 0 ||
+		executorDirectChannelCompletionPending(driver) ||
+		ownerLocalCompletionPending(driver) ||
+		executorRunSourceRequested(driver) {
+		return false
+	}
+	if driver.run.actionsSinceSource >= executorRunSourceQuantum {
+		if driver.sources.needsMonotonicTimeNow() {
+			return false
+		}
+		driver.run.actionsSinceSource = 0
+	}
 	driver.run.blocked = false
 	driver.run.actionsSinceSource++
 	return true

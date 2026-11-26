@@ -450,10 +450,88 @@ func resolveCoroChannelExternalContextV1(
 	return context
 }
 
-func finishDirectCoroChannelCompletionV1(
+const coroChanDirectCloseBatchLimitV1 uint32 = 64
+
+type coroChanDirectCloseRouteBatchV1 struct {
+	owner *coro.ExecutorDriver
+	head  *coro.DirectChannelCompletion
+	tail  *coro.DirectChannelCompletion
+	count uint32
+}
+
+type coroChanDirectCloseBatchesV1 struct {
+	routes [coro.ExecutorFleetCapacity]coroChanDirectCloseRouteBatchV1
+	active uint32
+}
+
+func (b *coroChanDirectCloseBatchesV1) flushRoute(index uint32) bool {
+	entry := &b.routes[index]
+	if entry.count == 0 {
+		return true
+	}
+	owner, head, tail := entry.owner, entry.head, entry.tail
+	*entry = coroChanDirectCloseRouteBatchV1{}
+	b.active &^= uint32(1) << index
+	return coroTargetPublishDirectChannelCompletionBatchV1(
+		owner,
+		coro.RouteID(index+1),
+		head,
+		tail,
+	)
+}
+
+func (b *coroChanDirectCloseBatchesV1) flushAll() bool {
+	for b.active != 0 {
+		for index := uint32(0); index < coro.ExecutorFleetCapacity; index++ {
+			if b.active&(uint32(1)<<index) == 0 {
+				continue
+			}
+			if !b.flushRoute(index) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (b *coroChanDirectCloseBatchesV1) appendCompletion(
+	owner *coro.ExecutorDriver,
+	route coro.RouteID,
+	completion *coro.DirectChannelCompletion,
+) bool {
+	if !route.Valid() || uint32(route) > coro.ExecutorFleetCapacity || owner == nil || completion == nil {
+		return false
+	}
+	if !coro.PrepareDirectChannelCompletionForBatch(completion) {
+		return false
+	}
+	index := uint32(route) - 1
+	entry := &b.routes[index]
+	if entry.count == 0 {
+		entry.owner = owner
+		entry.head = completion
+		entry.tail = completion
+		entry.count = 1
+		b.active |= uint32(1) << index
+		return true
+	}
+	if entry.owner != owner {
+		return false
+	}
+	coro.LinkDirectChannelCompletionBatch(entry.tail, completion)
+	entry.tail = completion
+	entry.count++
+	if entry.count >= coroChanDirectCloseBatchLimitV1 {
+		return b.flushRoute(index)
+	}
+	return true
+}
+
+func finishDirectCoroChannelCompletionBatchedV1(
 	waiter *chanWaiter,
 	status waitStatus,
 	context *coroChanExternalCommitContextV1,
+	batches *coroChanDirectCloseBatchesV1,
 ) bool {
 	if waiter == nil || waiter.direct == nil || waiter.coro != nil || !status.done() {
 		return false
@@ -472,10 +550,21 @@ func finishDirectCoroChannelCompletionV1(
 	case coro.DirectChannelCompletionFinishOwnerPublished:
 		return true
 	case coro.DirectChannelCompletionFinishNeedsTarget:
+		if batches != nil {
+			return batches.appendCompletion(owner, route, waiter.direct)
+		}
 		return coroTargetPublishDirectChannelCompletionV1(owner, route, waiter.direct)
 	default:
 		return false
 	}
+}
+
+func finishDirectCoroChannelCompletionV1(
+	waiter *chanWaiter,
+	status waitStatus,
+	context *coroChanExternalCommitContextV1,
+) bool {
+	return finishDirectCoroChannelCompletionBatchedV1(waiter, status, context, nil)
 }
 
 func prepareDirectCoroRecvWaiterLockedV1(
@@ -1992,6 +2081,26 @@ func __llgo_coro_chan_recv_buffer_try_v1(channel, elem unsafe.Pointer, eltSize u
 	return coroChanResumeRecvOK
 }
 
+func rollbackCoroChanParkStateV2(
+	task *coro.G,
+	handle unsafe.Pointer,
+	frameHeader *coro.HeaderV1,
+	state *CoroChanParkV1,
+	undo coro.DirectChannelParkUndoV1,
+) {
+	state.magic = 0
+	state.waiter.ch = nil
+	state.waiter.elem = nil
+	state.waiter.size = 0
+	state.waiter.send = false
+	state.waiter.direct = nil
+	if !coro.RollbackUnpublishedDirectChannelPark(
+		task, handle, frameHeader, &state.DirectChannelParkStorageV1, undo,
+	) {
+		coroRuntimeAbort("cannot roll back unpublished coroutine channel park")
+	}
+}
+
 // tryOrParkCoroChanV2 is the single-lock compiler transaction for an ordinary
 // one-case channel operation. A ready endpoint returns its typed status without
 // touching the coroutine header or park storage. Only the not-ready edge
@@ -2037,7 +2146,49 @@ func tryOrParkCoroChanV2(
 		return coroChanResumeInvalid
 	}
 
-	ch.mutex.Lock()
+	var (
+		prepared       bool
+		preparedDriver *coro.ExecutorDriver
+		preparedRoute  coro.RouteID
+		preparedUndo   coro.DirectChannelParkUndoV1
+	)
+	if !tryLockChannelMutex(&ch.mutex) {
+		// Under multi-P contention on this channel gate, prepare the
+		// owner-local park record before spinning on the lock. If the channel
+		// is still not ready once acquired, the critical section shrinks to a
+		// 4-instruction queue link; if it became ready in the meantime, we
+		// roll back the unpublished owner-local state after unlocking.
+		if !coro.ExecutionDomainEnabled() && state.magic == 0 && !state.Ticket.Valid() {
+			frameHeader.SuspendReason = uint16(coro.SuspendPark)
+			frameHeader.Lifecycle = uint16(coro.FrameSuspended)
+			frameHeader.Line = line
+			state.waiter.ch = ch
+			state.waiter.elem = elem
+			state.waiter.size = size
+			state.waiter.send = send
+			state.waiter.direct = &state.Completion
+			preparedDriver, preparedRoute, preparedUndo = coro.PrepareCurrentDirectChannelParkReversible(
+				task,
+				handle,
+				frameHeader,
+				&state.DirectChannelParkStorageV1,
+			)
+			if preparedDriver != nil {
+				state.magic = coroChanParkMagicV1
+				prepared = true
+			} else {
+				frameHeader.SuspendReason = uint16(coro.SuspendNone)
+				frameHeader.Lifecycle = uint16(coro.FrameActive)
+				frameHeader.Line = 0
+				state.waiter.ch = nil
+				state.waiter.elem = nil
+				state.waiter.size = 0
+				state.waiter.send = false
+				state.waiter.direct = nil
+			}
+		}
+		ch.mutex.Lock()
+	}
 	var resolved coroChanExternalCommitContextV1
 	context := (*coroChanExternalCommitContextV1)(nil)
 	if send && ch.recvq.first != nil || !send && ch.sendq.first != nil {
@@ -2048,16 +2199,21 @@ func tryOrParkCoroChanV2(
 		ready, closed := chanTrySendLockedWithContext(ch, elem, size, context)
 		if ready && !closed {
 			ch.mutex.Unlock()
+			if prepared {
+				rollbackCoroChanParkStateV2(task, handle, frameHeader, state, preparedUndo)
+			}
 			return coroChanResumeSendOK
 		}
 		if !closed {
-			driver, _ := prepareCoroChanParkStateV2(
-				task, handle, frameHeader, state, ch, elem, size, send, stateID, line,
-			)
-			if driver == nil {
-				ch.mutex.Unlock()
-				coroRuntimeAbort("cannot prepare coroutine channel send park")
-				return coroChanResumeInvalid
+			if !prepared {
+				driver, _ := prepareCoroChanParkStateV2(
+					task, handle, frameHeader, state, ch, elem, size, send, stateID, line,
+				)
+				if driver == nil {
+					ch.mutex.Unlock()
+					coroRuntimeAbort("cannot prepare coroutine channel send park")
+					return coroChanResumeInvalid
+				}
 			}
 			ch.sendq.enqueue(&state.waiter)
 			ch.mutex.Unlock()
@@ -2066,13 +2222,16 @@ func tryOrParkCoroChanV2(
 		// Preserve the existing explicit-status fault route: a send on a closed
 		// channel materializes a typed completion and reports the fault only from
 		// the post-suspend resume gate, never by unwinding across llvm.coro.resume.
-		driver, route := prepareCoroChanParkStateV2(
-			task, handle, frameHeader, state, ch, elem, size, send, stateID, line,
-		)
-		if driver == nil {
-			ch.mutex.Unlock()
-			coroRuntimeAbort("cannot prepare closed coroutine channel send")
-			return coroChanResumeInvalid
+		driver, route := preparedDriver, preparedRoute
+		if !prepared {
+			driver, route = prepareCoroChanParkStateV2(
+				task, handle, frameHeader, state, ch, elem, size, send, stateID, line,
+			)
+			if driver == nil {
+				ch.mutex.Unlock()
+				coroRuntimeAbort("cannot prepare closed coroutine channel send")
+				return coroChanResumeInvalid
+			}
 		}
 		closedContext := coroChanExternalCommitContextV1{
 			current: task, driver: driver, route: route,
@@ -2096,17 +2255,22 @@ func tryOrParkCoroChanV2(
 	recvOK, ready := chanTryRecvLockedWithContext(ch, elem, size, context)
 	if ready {
 		ch.mutex.Unlock()
+		if prepared {
+			rollbackCoroChanParkStateV2(task, handle, frameHeader, state, preparedUndo)
+		}
 		if recvOK {
 			return coroChanResumeRecvOK
 		}
 		return coroChanResumeRecvClosed
 	}
-	if driver, _ := prepareCoroChanParkStateV2(
-		task, handle, frameHeader, state, ch, elem, size, send, stateID, line,
-	); driver == nil {
-		ch.mutex.Unlock()
-		coroRuntimeAbort("cannot prepare coroutine channel receive park")
-		return coroChanResumeInvalid
+	if !prepared {
+		if driver, _ := prepareCoroChanParkStateV2(
+			task, handle, frameHeader, state, ch, elem, size, send, stateID, line,
+		); driver == nil {
+			ch.mutex.Unlock()
+			coroRuntimeAbort("cannot prepare coroutine channel receive park")
+			return coroChanResumeInvalid
+		}
 	}
 	ch.recvq.enqueue(&state.waiter)
 	ch.mutex.Unlock()
