@@ -271,6 +271,9 @@ func nextReusableTimerRegistrationSlot(table *TimerRegistrationTable) (uint32, *
 }
 
 func timerRegistrationSlotAt(table *TimerRegistrationTable, index uint32) (*timerRegistrationSlot, bool) {
+	if !AuditEnabled && table != nil && index < TimerRegistrationPageCapacity {
+		return &table.slots[index], true
+	}
 	capacity := TimerRegistrationConfiguredCapacity(table)
 	if index >= capacity {
 		return nil, false
@@ -726,6 +729,52 @@ func (table *TimerRegistrationTable) DrainDue(now int64) (completed int, deadlin
 // fixed now sample from its first entry through resolution, matching the
 // legacy all-slot DrainDue semantics even when the host yields between slots.
 func (table *TimerRegistrationTable) drainDueSlotFor(owner *P, now int64, index uint32) (completed int, deadline int64, hasDeadline, ok bool) {
+	if !AuditEnabled {
+		if table == nil || now < 0 {
+			return 0, 0, false, false
+		}
+		var slot *timerRegistrationSlot
+		if index < TimerRegistrationPageCapacity {
+			slot = &table.slots[index]
+		} else {
+			var slotOK bool
+			slot, slotOK = timerRegistrationSlotAt(table, index)
+			if !slotOK {
+				return 0, 0, false, false
+			}
+		}
+		if slot.state != timerRegistrationActive {
+			return 0, 0, false, true
+		}
+		if slot.control != nil && preemptLoad(slot.control) != slot.controlWord {
+			if slot.record.link.wait == nil ||
+				!RequestWaitSetCancel(owner, slot.record.link.wait, ParkCancelOperation) {
+				return 0, 0, false, false
+			}
+			return 0, 0, false, true
+		}
+		if slot.deadline <= now {
+			id := slot.record.id
+			if handled, published := table.publishSingleOwnerTimerDue(owner, slot); handled {
+				if !published {
+					return 0, 0, false, false
+				}
+				return 1, 0, false, true
+			}
+			if PublishOperationCompletion(&slot.record, id) != OperationCompletionPublished {
+				return 0, 0, false, false
+			}
+			if slot.record.link.wait == nil || !MarkWaitSetAffected(owner, slot.record.link.wait) {
+				return 0, 0, false, false
+			}
+			if !table.detachActiveTimer(slot) {
+				return 0, 0, false, false
+			}
+			slot.state = timerRegistrationDelivered
+			return 1, 0, false, true
+		}
+		return 0, slot.deadline, true, true
+	}
 	if table == nil || table.owner != owner || now < 0 || index >= TimerRegistrationConfiguredCapacity(table) {
 		return 0, 0, false, false
 	}

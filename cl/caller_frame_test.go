@@ -1511,3 +1511,93 @@ func TestRuntimeSourceFilename(t *testing.T) {
 		t.Fatalf("nil-target runtime filename = %q, want unchanged %q", got, native)
 	}
 }
+
+func TestCoroInstrNeedsLogicalCallerLocationPrunesAndDeduplicates(t *testing.T) {
+	ssaPkg, fset, _ := buildGoSSAPkg(t, `package foo
+
+import "runtime"
+
+type box struct{ x, y int }
+
+func helper(v int) int { return v + 1 }
+
+func target(s []int, b *box) int {
+	a := -len(s)
+	var local box
+	local.x = a
+	local.y = cap(s)
+	sum := helper(local.x) + helper(local.y)
+	_, _, line, _ := runtime.Caller(0)
+	defer helper(line)
+	return sum + b.x
+}
+`)
+	fn := ssaPkg.Func("target")
+	if fn == nil {
+		t.Fatal("missing target function")
+	}
+	ctx := &context{fset: fset, goFn: fn}
+
+	var sawPureBuiltin, sawNegUnOp, sawLocalFieldAddr, sawParamFieldAddr bool
+	var helperCalls int
+	var helperNeedsUpdate int
+	var sawCallerUpdate, sawDeferUpdate, sawRunDefersUpdate bool
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			need := coroInstrNeedsLogicalCallerLocation(ctx, instr)
+			switch v := instr.(type) {
+			case *gossa.Call:
+				if b, ok := v.Call.Value.(*gossa.Builtin); ok && (b.Name() == "len" || b.Name() == "cap") {
+					sawPureBuiltin = true
+					if need {
+						t.Errorf("pure builtin %s unexpectedly requested UpdateLogicalCallerLocation", b.Name())
+					}
+				} else if callee := v.Call.StaticCallee(); callee != nil {
+					if callee.Name() == "helper" {
+						helperCalls++
+						if need {
+							helperNeedsUpdate++
+						}
+					} else if callee.Name() == "Caller" {
+						sawCallerUpdate = need
+					}
+				}
+			case *gossa.UnOp:
+				if v.Op == token.SUB {
+					sawNegUnOp = true
+					if need {
+						t.Errorf("non-deref UnOp %v unexpectedly requested UpdateLogicalCallerLocation", v)
+					}
+				}
+			case *gossa.FieldAddr:
+				if _, isAlloc := v.X.(*gossa.Alloc); isAlloc {
+					sawLocalFieldAddr = true
+					if need {
+						t.Errorf("proven-non-nil local FieldAddr %v unexpectedly requested UpdateLogicalCallerLocation", v)
+					}
+				} else {
+					sawParamFieldAddr = true
+					if !need {
+						t.Errorf("nullable param FieldAddr %v lost UpdateLogicalCallerLocation", v)
+					}
+				}
+			case *gossa.Defer:
+				sawDeferUpdate = need
+			case *gossa.RunDefers:
+				sawRunDefersUpdate = need
+			}
+		}
+	}
+	if !sawPureBuiltin || !sawNegUnOp || !sawLocalFieldAddr || !sawParamFieldAddr {
+		t.Fatalf("missing expected SSA shapes: builtin=%t neg=%t localField=%t paramField=%t",
+			sawPureBuiltin, sawNegUnOp, sawLocalFieldAddr, sawParamFieldAddr)
+	}
+	if helperCalls != 2 || helperNeedsUpdate != 1 {
+		t.Fatalf("same-line helper calls = %d, updates = %d; want 2 calls deduplicated to 1 update",
+			helperCalls, helperNeedsUpdate)
+	}
+	if !sawCallerUpdate || !sawDeferUpdate || !sawRunDefersUpdate {
+		t.Fatalf("required updates missing: runtime.Caller=%t defer=%t runDefers=%t",
+			sawCallerUpdate, sawDeferUpdate, sawRunDefersUpdate)
+	}
+}

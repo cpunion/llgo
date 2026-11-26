@@ -90,22 +90,60 @@ type callerLocationToken struct {
 // continue to use the entry-based Record helpers.
 func PushCallerLocationFrame(tokenPointer unsafe.Pointer, entry uintptr, name, file string, startLine int) {
 	store := callerLocationStoreForGoroutine()
-	store.stack = append(store.stack, CallerFrame{
-		PC:        entry,
-		Entry:     entry,
-		Function:  name,
-		File:      file,
-		Line:      startLine,
-		StartLine: startLine,
-	})
+	n := len(store.stack)
+	if n < cap(store.stack) {
+		store.stack = store.stack[:n+1]
+		store.stack[n] = CallerFrame{
+			PC:        entry,
+			Entry:     entry,
+			Function:  name,
+			File:      file,
+			Line:      startLine,
+			StartLine: startLine,
+		}
+	} else {
+		store.stack = append(store.stack, CallerFrame{
+			PC:        entry,
+			Entry:     entry,
+			Function:  name,
+			File:      file,
+			Line:      startLine,
+			StartLine: startLine,
+		})
+	}
 	if tokenPointer != nil {
 		token := (*callerLocationToken)(tokenPointer)
 		token.store = unsafe.Pointer(store)
-		token.frameIndex = len(store.stack) - 1
+		token.frameIndex = n
 	}
 }
 
 func PopCallerLocationFrame(entry uintptr) {
+	if popCallerLocationFrameFast(entry) {
+		return
+	}
+	popCallerLocationFrameSlow(entry)
+}
+
+func popCallerLocationFrameFast(entry uintptr) bool {
+	store := callerLocationStoreCurrent
+	if store == nil || entry == 0 {
+		return true
+	}
+	oldLen := len(store.stack)
+	if oldLen == 0 {
+		return true
+	}
+	top := oldLen - 1
+	if store.stack[top].Entry == entry {
+		store.stack[top] = CallerFrame{}
+		store.stack = store.stack[:top]
+		return true
+	}
+	return false
+}
+
+func popCallerLocationFrameSlow(entry uintptr) {
 	store := callerLocationStoreCurrent
 	if store == nil || entry == 0 {
 		return
@@ -170,9 +208,11 @@ func UpdateLogicalCallerLocation(tokenPointer unsafe.Pointer, entry uintptr, fil
 	if frame.Entry != entry {
 		return
 	}
-	frame.File = file
-	frame.Line = line
-	frame.captured = 0
+	if frame.Line != line || (*String)(unsafe.Pointer(&frame.File)).data != (*String)(unsafe.Pointer(&file)).data {
+		frame.File = file
+		frame.Line = line
+		frame.captured = 0
+	}
 }
 
 func updateCurrentFrame(entry uintptr, name, file string, line int) {

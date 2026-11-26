@@ -9,28 +9,87 @@
 
 package runtime
 
-import "unsafe"
+import (
+	"unsafe"
 
-func memhash32(p unsafe.Pointer, seed uintptr) uintptr {
+	"github.com/xgo-dev/llgo/runtime/internal/runtime/goarch"
+)
+
+func memhashWord32(v uint32, seed uintptr) uintptr {
 	a, b := mix32(uint32(seed), uint32(4^hashkey[0]))
-	t := readUnaligned32(p)
-	a ^= t
-	b ^= t
+	a ^= v
+	b ^= v
 	a, b = mix32(a, b)
 	a, b = mix32(a, b)
 	return uintptr(a ^ b)
+}
+
+func memhashWord64(v uint64, seed uintptr) uintptr {
+	a, b := mix32(uint32(seed), uint32(8^hashkey[0]))
+	if goarch.BigEndian {
+		a ^= uint32(v >> 32)
+		b ^= uint32(v)
+	} else {
+		a ^= uint32(v)
+		b ^= uint32(v >> 32)
+	}
+	a, b = mix32(a, b)
+	a, b = mix32(a, b)
+	return uintptr(a ^ b)
+}
+
+func memhash32(p unsafe.Pointer, seed uintptr) uintptr {
+	return memhashWord32(readUnaligned32(p), seed)
 }
 
 func memhash64(p unsafe.Pointer, seed uintptr) uintptr {
-	a, b := mix32(uint32(seed), uint32(8^hashkey[0]))
-	a ^= readUnaligned32(p)
-	b ^= readUnaligned32(add(p, 4))
-	a, b = mix32(a, b)
-	a, b = mix32(a, b)
-	return uintptr(a ^ b)
+	return memhashWord64(readUnaligned64(p), seed)
 }
 
 func memhash(p unsafe.Pointer, seed, s uintptr) uintptr {
+	if h, ok := memhashShort(p, seed, s); ok {
+		return h
+	}
+	return memhashLong(p, seed, s)
+}
+
+func memhashShort(p unsafe.Pointer, seed, s uintptr) (uintptr, bool) {
+	if s > 24 {
+		return 0, false
+	}
+	a, b := mix32(uint32(seed), uint32(s^hashkey[0]))
+	if s == 0 {
+		return uintptr(a ^ b), true
+	}
+	if s > 8 {
+		a ^= readUnaligned32(p)
+		b ^= readUnaligned32(add(p, 4))
+		a, b = mix32(a, b)
+		p = add(p, 8)
+		s -= 8
+		if s > 8 {
+			a ^= readUnaligned32(p)
+			b ^= readUnaligned32(add(p, 4))
+			a, b = mix32(a, b)
+			p = add(p, 8)
+			s -= 8
+		}
+	}
+	if s >= 4 {
+		a ^= readUnaligned32(p)
+		b ^= readUnaligned32(add(p, s-4))
+	} else {
+		t := uint32(*(*byte)(p))
+		t |= uint32(*(*byte)(add(p, s>>1))) << 8
+		t |= uint32(*(*byte)(add(p, s-1))) << 16
+		b ^= t
+	}
+	a, b = mix32(a, b)
+	a, b = mix32(a, b)
+	return uintptr(a ^ b), true
+}
+
+func memhashLong(p unsafe.Pointer, seed, s uintptr) uintptr {
 	a, b := mix32(uint32(seed), uint32(s^hashkey[0]))
 	if s == 0 {
 		return uintptr(a ^ b)

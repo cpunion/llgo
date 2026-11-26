@@ -123,8 +123,11 @@ func get[T any](key thread.Key) T {
 }
 
 func set[T any](key thread.Key, destructor func(*T), value T) {
-	s := ensureSlot(key, destructor)
-	s.value = value
+	if ptr := key.Get(); ptr != nil {
+		(*slot[T])(ptr).value = value
+		return
+	}
+	setSlow(key, destructor, value)
 }
 
 func clear[T any](key thread.Key) {
@@ -135,28 +138,31 @@ func clear[T any](key thread.Key) {
 	}
 }
 
-func ensureSlot[T any](key thread.Key, destructor func(*T)) *slot[T] {
-	if ptr := key.Get(); ptr != nil {
-		return (*slot[T])(ptr)
-	}
+func setSlow[T any](key thread.Key, destructor func(*T), value T) {
 	size := unsafe.Sizeof(slot[T]{})
 	mem := c.Calloc(1, size)
 	if mem == nil {
 		panic("tls: failed to allocate thread slot")
 	}
 	s := (*slot[T])(mem)
+	s.value = value
 	s.destructor = destructor
+	// Register GC roots before publishing mem to pthread TLS. Under stackless
+	// coroutines, registerSlot may suspend on a worker thread (GC_add_roots)
+	// and resume on a different OS thread; publishing first would allow the
+	// original OS thread to exit and free mem while this coroutine is still
+	// suspended before registerSlot completes or before writing s.value.
+	registerSlot(s)
 	if existing := key.Get(); existing != nil {
-		c.Free(mem)
-		return (*slot[T])(existing)
+		(*slot[T])(existing).value = value
+		releaseSlot(mem, s)
+		return
 	}
 	if ret := key.Set(mem); ret != 0 {
-		c.Free(mem)
+		releaseSlot(mem, s)
 		c.Fprintf(c.Stderr, c.Str("tls: thread-local value installation failed (error=%d)\n"), ret)
 		panic("tls: failed to set thread local storage value")
 	}
-	registerSlot(s)
-	return s
 }
 
 func slotDestructor[T any](ptr c.Pointer) {

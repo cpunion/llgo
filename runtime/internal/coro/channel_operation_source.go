@@ -231,6 +231,9 @@ func channelOperationPageReady(source *ChannelOperationSource, page uint32) (*op
 }
 
 func channelOperationSlotAt(source *ChannelOperationSource, index uint32) (*channelOperationSlot, bool) {
+	if !AuditEnabled && source != nil && index < ChannelOperationPageCapacity {
+		return &source.slots[index], true
+	}
 	if index >= ChannelOperationConfiguredCapacity(source) {
 		return nil, false
 	}
@@ -538,6 +541,9 @@ func channelOperationCommitDomainCompatible(
 	if source == nil || state == nil || wait == nil || !validParkTicket(ticket) ||
 		claim == nil && state.expected != 1 {
 		return false
+	}
+	if !AuditEnabled {
+		return true
 	}
 	limit, valid := channelOperationScanLimit(source)
 	if !valid {

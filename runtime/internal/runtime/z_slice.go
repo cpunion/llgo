@@ -135,18 +135,20 @@ func nextslicecap(newLen, oldCap int) int {
 	if oldCap < threshold {
 		return doublecap
 	}
-	for {
-		// Transition from growing 2x for small slices
-		// to growing 1.25x for large slices. This formula
-		// gives a smooth-ish transition between the two.
+	// Transition from growing 2x for small slices to growing 1.25x for large
+	// slices. Since oldCap >= threshold and newLen <= 2*oldCap, each step grows
+	// newcap by strictly more than 1.25x (1.25^4 > 2), so at most four steps
+	// are ever needed to reach newLen or overflow (where uint(newcap) >=
+	// uint(newLen) because newLen > 0). Unrolling keeps nextslicecap,
+	// GrowSlice, and SliceAppend loop-free plain outcome helpers.
+	newcap += (newcap + 3*threshold) >> 2
+	if uint(newcap) < uint(newLen) {
 		newcap += (newcap + 3*threshold) >> 2
-
-		// We need to check `newcap >= newLen` and whether `newcap` overflowed.
-		// newLen is guaranteed to be larger than zero, hence
-		// when newcap overflows then `uint(newcap) > uint(newLen)`.
-		// This allows to check for both with the same comparison.
-		if uint(newcap) >= uint(newLen) {
-			break
+		if uint(newcap) < uint(newLen) {
+			newcap += (newcap + 3*threshold) >> 2
+			if uint(newcap) < uint(newLen) {
+				newcap += (newcap + 3*threshold) >> 2
+			}
 		}
 	}
 

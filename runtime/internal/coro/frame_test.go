@@ -753,3 +753,108 @@ func TestIndependentSinglePSchedulersRace(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestReleaseOrRetainFrameCompilerPaths(t *testing.T) {
+	newCompilerFrame := func(t *testing.T, g *G, handle, parent unsafe.Pointer) (
+		memory []byte, storage, descriptor unsafe.Pointer, header *HeaderV1, frame *Frame, size, align uintptr,
+	) {
+		t.Helper()
+		metaOff := (unsafe.Sizeof(HeaderV1{}) + unsafe.Alignof(Frame{}) - 1) &^ (unsafe.Alignof(Frame{}) - 1)
+		size = metaOff + unsafe.Sizeof(Frame{}) + 16
+		align = 16
+		total, ok := CompilerFrameAllocationSize(size, align)
+		if !ok {
+			t.Fatal("CompilerFrameAllocationSize rejected")
+		}
+		memory = make([]byte, total)
+		desc := &FrameDescriptorV1{Version: 1, ResultAlign: 1, Function: "test.compilerRelease"}
+		descriptor = unsafe.Pointer(desc)
+		storage, ok = RegisterFrameCompilerPrepared(g, unsafe.Pointer(&memory[0]), total, size, align, descriptor)
+		if !ok {
+			t.Fatal("RegisterFrameCompilerPrepared rejected")
+		}
+		header = (*HeaderV1)(storage)
+		metadata := unsafe.Add(storage, metaOff)
+		if !PublishFrameV3Compiler(g, handle, header, storage, metadata, descriptor, nil) {
+			t.Fatal("PublishFrameV3Compiler rejected")
+		}
+		header.Parent = parent
+		frame = (*Frame)(metadata)
+		return
+	}
+
+	t.Run("ordinary_release_not_retained", func(t *testing.T) {
+		g := new(G)
+		if !InitG(g) {
+			t.Fatal("InitG")
+		}
+		handle := unsafe.Pointer(new(byte))
+		memory, storage, descriptor, header, frame, size, align := newCompilerFrame(t, g, handle, nil)
+		frame.state = FrameDestroyPending
+		header.Lifecycle = uint16(FrameDestroyPending)
+		g.destroyTarget = frame
+		raw, total, retained, ok := ReleaseOrRetainFrameCompiler(g, storage, size, align, descriptor)
+		if !ok || retained || raw != unsafe.Pointer(&memory[0]) || total != uintptr(len(memory)) ||
+			g.frames != nil || g.destroyTarget != nil || header.Lifecycle != uint16(FrameDestroyed) {
+			t.Fatalf("ordinary release = (%p,%d,%t,%t), want (%p,%d,false,true)",
+				raw, total, retained, ok, &memory[0], len(memory))
+		}
+		runtime.KeepAlive(memory)
+	})
+
+	t.Run("pending_panic_frame_retained", func(t *testing.T) {
+		g := new(G)
+		if !InitG(g) {
+			t.Fatal("InitG")
+		}
+		parentHandle, handle := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+		parentMem, _, _, _, parentFrame, _, _ := newCompilerFrame(t, g, parentHandle, nil)
+		memory, storage, descriptor, header, frame, size, align := newCompilerFrame(t, g, handle, parentHandle)
+		frame.parent = parentFrame
+		parentFrame.completion = CompletionRecord{
+			child:    handle,
+			status:   CompletionPanic,
+			typeWord: unsafe.Pointer(new(byte)),
+			dataWord: unsafe.Pointer(new(byte)),
+		}
+		frame.state = FrameDestroyPending
+		frame.retainPanicTrace = true
+		header.Lifecycle = uint16(FrameDestroyPending)
+		g.destroyTarget = frame
+		raw, total, retained, ok := ReleaseOrRetainFrameCompiler(g, storage, size, align, descriptor)
+		if !ok || !retained || raw != unsafe.Pointer(&memory[0]) || total != uintptr(len(memory)) {
+			t.Fatalf("pending panic release = (%p,%d,%t,%t), want retained=true ok=true", raw, total, retained, ok)
+		}
+		runtime.KeepAlive(parentMem)
+		runtime.KeepAlive(memory)
+	})
+
+	t.Run("terminal_unhandled_panic_retained", func(t *testing.T) {
+		g := new(G)
+		if !InitG(g) {
+			t.Fatal("InitG")
+		}
+		handle := unsafe.Pointer(new(byte))
+		memory, storage, descriptor, header, frame, size, align := newCompilerFrame(t, g, handle, nil)
+		frame.state = FrameDestroyPending
+		header.Lifecycle = uint16(FrameDestroyPending)
+		g.destroyTarget = frame
+		g.panicUnwind = true
+		g.panicRecord = PanicRecord{
+			status:   uint32(ExplicitStatusPanic),
+			typeWord: unsafe.Pointer(new(byte)),
+			dataWord: unsafe.Pointer(new(byte)),
+		}
+		raw, total, retained, ok := ReleaseOrRetainFrameCompiler(g, storage, size, align, descriptor)
+		if !ok || !retained || raw != unsafe.Pointer(&memory[0]) || total != uintptr(len(memory)) {
+			t.Fatalf("terminal panic release = (%p,%d,%t,%t), want retained=true ok=true", raw, total, retained, ok)
+		}
+		runtime.KeepAlive(memory)
+	})
+
+	t.Run("invalid_rejected", func(t *testing.T) {
+		if _, _, retained, ok := ReleaseOrRetainFrameCompiler(nil, nil, 0, 0, nil); ok || retained {
+			t.Fatalf("nil release = (retained=%t, ok=%t)", retained, ok)
+		}
+	})
+}

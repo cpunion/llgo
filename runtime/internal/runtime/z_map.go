@@ -139,11 +139,25 @@ type llgoMapIter struct {
 	ready bool
 }
 
-func NewMapIter(t *maptype, h *hmap) *llgoMapIter {
-	var it llgoMapIter
-	mapiterinit(t, h, &it.hiter)
+func newMapIterFast(t *maptype, h *hmap) (*llgoMapIter, bool) {
+	it := new(llgoMapIter)
+	ok := mapiterinitFast(t, h, &it.hiter)
 	it.ready = true
-	return &it
+	return it, ok
+}
+
+func NewMapIter(t *maptype, h *hmap) *llgoMapIter {
+	it, ok := newMapIterFast(t, h)
+	if ok {
+		return it
+	}
+	return finishNewMapIterSlow(it)
+}
+
+func finishNewMapIterSlow(it *llgoMapIter) *llgoMapIter {
+	mapiternextSlow(&it.hiter)
+	it.ready = true
+	return it
 }
 
 func MapIterNext(it *llgoMapIter) (ok bool, k unsafe.Pointer, v unsafe.Pointer) {
@@ -153,9 +167,23 @@ func MapIterNext(it *llgoMapIter) (ok bool, k unsafe.Pointer, v unsafe.Pointer) 
 		return
 	}
 	if !it.ready {
-		mapiternext(&it.hiter)
+		if !mapiternextFast(&it.hiter) {
+			return mapIterNextSlow(it)
+		}
 		it.ready = true
 	}
+	if it.key == nil {
+		return
+	}
+	ok = true
+	k, v = it.key, it.elem
+	it.ready = false
+	return
+}
+
+func mapIterNextSlow(it *llgoMapIter) (ok bool, k unsafe.Pointer, v unsafe.Pointer) {
+	mapiternextSlow(&it.hiter)
+	it.ready = true
 	if it.key == nil {
 		return
 	}

@@ -153,7 +153,7 @@ const (
 	coroSyncRampMaxInstrs       = 160
 	coroSyncRampMaxLiveValues   = 4
 	coroSyncRampMaxSlowTargets  = 6
-	coroSyncRampMaxOutcomeCalls = 2
+	coroSyncRampMaxOutcomeCalls = 4
 	coroSyncRampInlineMaxInstrs = 28
 )
 

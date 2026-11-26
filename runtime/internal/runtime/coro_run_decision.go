@@ -89,8 +89,7 @@ func zeroTicketCoroRunDecisionTaskV1(
 //
 //export __llgo_coro_run_decision_take_zero_v1
 func __llgo_coro_run_decision_take_zero_v1(g unsafe.Pointer) uint32 {
-	outcome, caseID, taskKind, sourceSlot, generation, ok := coro.TakeRunDecisionWordsCompiler((*coro.G)(g), 0, 0)
-	task, valid := zeroTicketCoroRunDecisionTaskV1(outcome, caseID, taskKind, sourceSlot, generation, ok)
+	task, valid := coro.TakeZeroTicketRunDecisionCompiler((*coro.G)(g))
 	if !valid {
 		coroRuntimeAbort("invalid zero-ticket coroutine run decision")
 		return 0
