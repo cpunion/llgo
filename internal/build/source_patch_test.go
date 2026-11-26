@@ -1230,6 +1230,38 @@ func testFreestandingInternalLinuxSyscallFailsClosed(t *testing.T, tags string) 
 	}
 }
 
+func TestNativeLinuxInternalSyscallUsesCoroAdapterPatch(t *testing.T) {
+	for _, arch := range []string{"amd64", "arm64"} {
+		t.Run(arch, func(t *testing.T) {
+			changed, overlay, files, err := applySourcePatchForPkg(nil, nil, env.LLGoRuntimeDir(), runtime.GOROOT(), "internal/runtime/syscall/linux", sourcePatchBuildContext{
+				goos:      "linux",
+				goarch:    arch,
+				goversion: runtime.Version(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed || len(files) != 1 || filepath.Base(files[0]) != "syscall_linux_coro.go" {
+				t.Fatalf("native linux/%s internal syscall patch changed=%v files=%v, want [syscall_linux_coro.go]", arch, changed, files)
+			}
+			asmFile := filepath.Join(runtime.GOROOT(), "src", "internal", "runtime", "syscall", "linux", "asm_linux_"+arch+".s")
+			if got := string(overlay[asmFile]); got != "// replaced by LLGo source patch\n" {
+				t.Fatalf("overlay[%q] = %q, want assembly replacement", asmFile, got)
+			}
+			original := filepath.Join(runtime.GOROOT(), "src", "internal", "runtime", "syscall", "linux", "syscall_linux.go")
+			parsed, err := parser.ParseFile(token.NewFileSet(), original, overlay[original], 0)
+			if err != nil {
+				t.Fatalf("parse filtered internal syscall source: %v", err)
+			}
+			for _, decl := range parsed.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "Syscall6" {
+					t.Fatal("filtered GOROOT internal syscall retained its assembly declaration")
+				}
+			}
+		})
+	}
+}
+
 func TestNamedWebAssemblySyscallSourcePatchExcludesNativeLinuxAdapters(t *testing.T) {
 	overlay, packageFiles, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       "linux",

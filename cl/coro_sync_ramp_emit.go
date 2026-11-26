@@ -661,7 +661,7 @@ func (e *coroSyncFastEmitter) emitNilGuard(ptr llssa.Expr, mutated bool, pos tok
 	} else {
 		nullPtr := e.p.prog.Nil(e.p.prog.VoidPtr())
 		e.emitOutcomePropagateCall(
-			e.p.prog.IntVal(coroAwaitCompletionFaultNil, e.p.prog.Uint32()),
+			e.p.prog.IntVal(coroOutcomePropagateLocalFaultNil, e.p.prog.Uint32()),
 			nullPtr, nullPtr, pos,
 		)
 	}
@@ -1233,10 +1233,11 @@ func (p *context) coroOutcomePropagateCoroutine() llssa.Function {
 	traceAppend := p.pkg.NewFunc(abi.panicTraceAppendHook, coroPanicTraceAppendSignature(), llssa.InC).Expr
 	faultPrepare := p.pkg.NewFunc(coroFaultPrepareHookV1, coroFaultPrepareSignature(), llssa.InC).Expr
 
-	panicked, faulted, goexited, invalid := fn.MakeBlock(), fn.MakeBlock(), fn.MakeBlock(), fn.MakeBlock()
+	panicked, faulted, localFaulted, goexited, invalid := fn.MakeBlock(), fn.MakeBlock(), fn.MakeBlock(), fn.MakeBlock(), fn.MakeBlock()
 	sw := b.Switch(status, invalid)
 	sw.Case(p.prog.IntVal(coroAwaitCompletionPanic, p.prog.Uint32()), panicked)
 	sw.Case(p.prog.IntVal(coroAwaitCompletionFaultNil, p.prog.Uint32()), faulted)
+	sw.Case(p.prog.IntVal(coroOutcomePropagateLocalFaultNil, p.prog.Uint32()), localFaulted)
 	sw.Case(p.prog.IntVal(coroAwaitCompletionGoexit, p.prog.Uint32()), goexited)
 	sw.End(b)
 
@@ -1249,6 +1250,14 @@ func (p *context) coroOutcomePropagateCoroutine() llssa.Function {
 	nullPtr := p.prog.Nil(p.prog.VoidPtr())
 	b.CoroAtomicLogicalPanicTraceAppend(traceAppend, body.task, desc, nullPtr, nullPtr, line,
 		p.prog.IntVal(coroLogicalPanicTraceNilPropagate, p.prog.Uint32()))
+	body.publishStateValue(b, coroSuspendPanic, coroLifecycleFinalSuspended, line)
+	b.Call(faultPrepare, body.task, body.coro.Handle(), b.Convert(p.prog.VoidPtr(), body.header),
+		p.prog.IntVal(uint64(coroFaultNilV1), p.prog.Uint32()))
+	b.Jump(body.finalSuspend)
+
+	b.SetBlockEx(localFaulted, llssa.AtEnd, false)
+	b.CoroAtomicLogicalPanicTraceAppend(traceAppend, body.task, desc, nullPtr, nullPtr, line,
+		p.prog.IntVal(coroLogicalPanicTraceNilNew, p.prog.Uint32()))
 	body.publishStateValue(b, coroSuspendPanic, coroLifecycleFinalSuspended, line)
 	b.Call(faultPrepare, body.task, body.coro.Handle(), b.Convert(p.prog.VoidPtr(), body.header),
 		p.prog.IntVal(uint64(coroFaultNilV1), p.prog.Uint32()))

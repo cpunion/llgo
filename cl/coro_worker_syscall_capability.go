@@ -434,19 +434,15 @@ func freezeCoroWorkerSyscallTrapPolicy(
 		len(call.Common().Args)-1 != wordArgs || len(call.Common().Args) < 2 {
 		return policy, fmt.Errorf("Linux syscall adapter has no exact trap operand")
 	}
-	unsafeValues, err := coroLinuxUnsafeSyscallValues(analysis)
-	if err != nil {
-		return policy, err
-	}
-	pointerResultValues, err := coroLinuxPointerResultSyscallValues(analysis)
+	trapTable, err := coroLinuxSyscallTrapPolicyTable(analysis)
 	if err != nil {
 		return policy, err
 	}
 	trap := call.Common().Args[1]
 	if value, exact := coroWorkerSyscallConstantWord(trap); exact {
-		safe, reason := coroLinuxSyscallTrapWorkerSafe(value, unsafeValues)
+		safe, reason := coroLinuxSyscallTrapWorkerSafe(value, trapTable)
 		policy.certified = safe
-		policy.foreignPointerResultMask = pointerResultValues[value]
+		policy.foreignPointerResultMask = trapTable.pointerResultValues[value]
 		policy.identity = framedEmissionKey(
 			"llgo-coro-linux-syscall-trap-v1",
 			"constant", strconv.FormatUint(value, 10),
@@ -464,7 +460,7 @@ func freezeCoroWorkerSyscallTrapPolicy(
 		return policy, nil
 	}
 	incoming, owners, certified, reason, err := coroLinuxSyscallTrapParameterInventory(
-		analysis, parameter, unsafeValues, pointerResultValues, make(map[*ssa.Parameter]bool),
+		analysis, parameter, trapTable, make(map[*ssa.Parameter]bool),
 	)
 	if err != nil {
 		return policy, err
@@ -501,7 +497,8 @@ func coroLinuxSyscallAdapterWordArgs(shadow CoroCallableShadowSink) (wordArgs in
 		switch {
 		case strings.HasSuffix(symbol, "__llgo_linux_syscall3_v1"):
 			arity = 4
-		case strings.HasSuffix(symbol, "__llgo_linux_syscall6_v1"):
+		case strings.HasSuffix(symbol, "__llgo_linux_syscall6_v1"),
+			strings.HasSuffix(symbol, "__llgo_linux_internal_syscall6_v1"):
 			arity = 7
 		default:
 			sawOther = true
@@ -530,8 +527,7 @@ func coroLinuxSyscallAdapterWordArgs(shadow CoroCallableShadowSink) (wordArgs in
 func coroLinuxSyscallTrapParameterInventory(
 	analysis *coroLinuxSyscallTrapAnalysis,
 	parameter *ssa.Parameter,
-	unsafeValues map[uint64]string,
-	pointerResultValues map[uint64]uint8,
+	trapTable coroLinuxSyscallTrapTable,
 	visiting map[*ssa.Parameter]bool,
 ) (incoming []coroWorkerSyscallIncomingEdge, owners map[*ssa.Function]none, certified bool, reason string, err error) {
 	owners = make(map[*ssa.Function]none)
@@ -578,8 +574,8 @@ func coroLinuxSyscallTrapParameterInventory(
 			value, exact := coroWorkerSyscallConstantWord(source)
 			safe, unsafeReason := false, "linux-syscall-non-word-trap"
 			if exact {
-				safe, unsafeReason = coroLinuxSyscallTrapWorkerSafe(value, unsafeValues)
-				edge.foreignPointerResultMask = pointerResultValues[value]
+				safe, unsafeReason = coroLinuxSyscallTrapWorkerSafe(value, trapTable)
+				edge.foreignPointerResultMask = trapTable.pointerResultValues[value]
 			}
 			edge.certified = safe
 			edge.reason = unsafeReason
@@ -589,7 +585,7 @@ func coroLinuxSyscallTrapParameterInventory(
 			)
 		case *ssa.Parameter:
 			nested, nestedOwners, nestedCertified, nestedReason, nestedErr :=
-				coroLinuxSyscallTrapParameterInventory(analysis, source, unsafeValues, pointerResultValues, visiting)
+				coroLinuxSyscallTrapParameterInventory(analysis, source, trapTable, visiting)
 			if nestedErr != nil {
 				return nil, nil, false, "", nestedErr
 			}
@@ -744,18 +740,74 @@ func coroWorkerSyscallConstantWord(value ssa.Value) (uint64, bool) {
 	return constant.Uint64Val(literal.Value)
 }
 
-func coroLinuxSyscallTrapWorkerSafe(value uint64, unsafeValues map[uint64]string) (bool, string) {
-	if name := unsafeValues[value]; name != "" {
+type coroLinuxSyscallTrapTable struct {
+	unsafeValues        map[uint64]string
+	allowedValues       map[uint64]bool
+	pointerResultValues map[uint64]uint8
+}
+
+func coroLinuxSyscallTrapWorkerSafe(value uint64, table coroLinuxSyscallTrapTable) (bool, string) {
+	if name := table.unsafeValues[value]; name != "" {
 		return false, "linux-syscall-trap-" + strings.ToLower(name)
+	}
+	if table.allowedValues != nil && !table.allowedValues[value] {
+		return false, "linux-syscall-trap-unlisted"
 	}
 	return true, ""
 }
 
-func coroLinuxSyscallConstantPackage(analysis *coroLinuxSyscallTrapAnalysis) (*types.Package, error) {
+func coroLinuxSyscallTrapPolicyTable(analysis *coroLinuxSyscallTrapAnalysis) (coroLinuxSyscallTrapTable, error) {
+	pkg, isInternalOnly, err := coroLinuxSyscallConstantPackage(analysis)
+	if err != nil {
+		return coroLinuxSyscallTrapTable{}, err
+	}
+	unsafeValues, err := coroLinuxUnsafeSyscallValuesFromPkg(pkg)
+	if err != nil {
+		return coroLinuxSyscallTrapTable{}, err
+	}
+	pointerResultValues, err := coroLinuxPointerResultSyscallValuesFromPkg(pkg)
+	if err != nil {
+		return coroLinuxSyscallTrapTable{}, err
+	}
+	var allowedValues map[uint64]bool
+	if isInternalOnly {
+		// Programs importing only runtime -> internal/runtime/cgroup ->
+		// internal/runtime/syscall/linux do not import package syscall. Keep the
+		// policy strictly fail-closed by positively allowing only the exact
+		// worker-safe constants defined in internal/runtime/syscall/linux.
+		allowedValues = make(map[uint64]bool)
+		for _, name := range []string{
+			"SYS_CLOSE", "SYS_OPENAT", "SYS_READ", "SYS_PREAD64",
+			"SYS_EPOLL_CREATE1", "SYS_EPOLL_CTL", "SYS_EPOLL_PWAIT", "SYS_EPOLL_PWAIT2",
+			"SYS_EVENTFD2", "SYS_FCNTL", "SYS_UNAME", "SYS_MPROTECT",
+		} {
+			object := pkg.Scope().Lookup(name)
+			constantObject, ok := object.(*types.Const)
+			if !ok || constantObject == nil {
+				continue
+			}
+			value, exact := constant.Uint64Val(constantObject.Val())
+			if !exact {
+				return coroLinuxSyscallTrapTable{}, fmt.Errorf("Linux syscall constant %s is not a target word", name)
+			}
+			if unsafeValues[value] == "" {
+				allowedValues[value] = true
+			}
+		}
+	}
+	return coroLinuxSyscallTrapTable{
+		unsafeValues:        unsafeValues,
+		allowedValues:       allowedValues,
+		pointerResultValues: pointerResultValues,
+	}, nil
+}
+
+func coroLinuxSyscallConstantPackage(analysis *coroLinuxSyscallTrapAnalysis) (*types.Package, bool, error) {
 	if analysis == nil {
-		return nil, fmt.Errorf("Linux syscall trap policy has no target syscall constant package")
+		return nil, false, fmt.Errorf("Linux syscall trap policy has no target syscall constant package")
 	}
 	var syscallPackage *types.Package
+	var internalLinuxPackage *types.Package
 	for _, function := range analysis.functions {
 		if function == nil || function.Pkg == nil || function.Pkg.Pkg == nil {
 			continue
@@ -765,31 +817,36 @@ func coroLinuxSyscallConstantPackage(analysis *coroLinuxSyscallTrapAnalysis) (*t
 			syscallPackage = pkg
 			break
 		}
+		if pkg.Path() == "internal/runtime/syscall/linux" {
+			internalLinuxPackage = pkg
+		}
 		for _, imported := range pkg.Imports() {
 			if imported.Path() == "syscall" {
 				syscallPackage = imported
 				break
+			}
+			if imported.Path() == "internal/runtime/syscall/linux" {
+				internalLinuxPackage = imported
 			}
 		}
 		if syscallPackage != nil {
 			break
 		}
 	}
-	if syscallPackage == nil {
-		return nil, fmt.Errorf("Linux syscall trap policy has no target syscall constant package")
+	if syscallPackage != nil {
+		return syscallPackage, false, nil
 	}
-	return syscallPackage, nil
+	if internalLinuxPackage != nil {
+		return internalLinuxPackage, true, nil
+	}
+	return nil, false, fmt.Errorf("Linux syscall trap policy has no target syscall constant package")
 }
 
-// coroLinuxPointerResultSyscallValues records kernel operations whose first
+// coroLinuxPointerResultSyscallValuesFromPkg records kernel operations whose first
 // result word is an address rather than an ordinary integer. The target
 // syscall package supplies the architecture-specific numbers; callers never
 // maintain per-architecture tables or source annotations.
-func coroLinuxPointerResultSyscallValues(analysis *coroLinuxSyscallTrapAnalysis) (map[uint64]uint8, error) {
-	syscallPackage, err := coroLinuxSyscallConstantPackage(analysis)
-	if err != nil {
-		return nil, err
-	}
+func coroLinuxPointerResultSyscallValuesFromPkg(syscallPackage *types.Package) (map[uint64]uint8, error) {
 	values := make(map[uint64]uint8)
 	for _, name := range []string{
 		"SYS_MMAP", "SYS_MMAP2", "SYS_MREMAP", "SYS_SHMAT", "SYS_BRK",
@@ -808,11 +865,7 @@ func coroLinuxPointerResultSyscallValues(analysis *coroLinuxSyscallTrapAnalysis)
 	return values, nil
 }
 
-func coroLinuxUnsafeSyscallValues(analysis *coroLinuxSyscallTrapAnalysis) (map[uint64]string, error) {
-	syscallPackage, err := coroLinuxSyscallConstantPackage(analysis)
-	if err != nil {
-		return nil, err
-	}
+func coroLinuxUnsafeSyscallValuesFromPkg(syscallPackage *types.Package) (map[uint64]string, error) {
 	// These operations are no-return, process-control, or observe/mutate the
 	// calling kernel thread. They need the RawCritical/target-M protocol and
 	// cannot be moved to an arbitrary bounded worker. Read-only credentials

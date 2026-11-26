@@ -600,6 +600,9 @@ func shouldSkipPlan9AsmSFilesForTarget(conf *Config, pkgPath string) bool {
 	if pkgPath == "internal/chacha8rand" && conf.Goarch != "wasm" {
 		return true
 	}
+	if pkgPath == "internal/runtime/syscall/linux" && conf.Goos == "linux" {
+		return true
+	}
 	if conf.Target == "" || conf.Goarch != "arm" {
 		return false
 	}

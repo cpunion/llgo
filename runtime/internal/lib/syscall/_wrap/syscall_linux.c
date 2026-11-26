@@ -58,4 +58,21 @@ uintptr_t __llgo_linux_syscall6_v1(
     return result == -1L ? UINTPTR_MAX : (uintptr_t)(unsigned long)result;
 }
 
+/*
+ * Dedicated physical symbol for internal/runtime/syscall/linux.Syscall6 so
+ * callable-shadow analysis preserves a 1:1 bijection between each Go trampoline
+ * target and its C symbol even when both syscall and internal/runtime/syscall/linux
+ * are linked into the same program.
+ */
+uintptr_t __llgo_linux_internal_syscall6_v1(
+    uintptr_t number,
+    uintptr_t a1,
+    uintptr_t a2,
+    uintptr_t a3,
+    uintptr_t a4,
+    uintptr_t a5,
+    uintptr_t a6) {
+    return __llgo_linux_syscall6_v1(number, a1, a2, a3, a4, a5, a6);
+}
+
 #endif

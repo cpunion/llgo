@@ -157,7 +157,14 @@ const (
 	coroSyncRampInlineMaxInstrs = 28
 )
 
-const coroOutcomePropagateHelperNameV1 = "__llgo_coro_outcome_propagate_v1"
+const (
+	coroOutcomePropagateHelperNameV1 = "__llgo_coro_outcome_propagate_v1"
+	// coroOutcomePropagateLocalFaultNil distinguishes a nil-pointer fault
+	// originating inside the sync-fast ramp itself (after a prior call mutated
+	// observable state) from coroAwaitCompletionFaultNil propagated out of an
+	// already-traced child $outcome call.
+	coroOutcomePropagateLocalFaultNil uint64 = 8
+)
 
 // coroSyncPlanner bundles read-only frozen planning context shared across all
 // sync-fast ramp passes. It consumes only frozen ProgramIR/SSAPlan facts and

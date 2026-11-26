@@ -3834,10 +3834,11 @@ func needsNamedClosureChange(got, want types.Type) bool {
 }
 
 func (p *context) reflectTypeMethodCheck(call *ssa.CallCommon, method *types.Func) (check llssa.ReflectMethodCheck) {
-	if !isReflectType(call.Value.Type()) {
+	if call == nil || call.Value == nil || method == nil {
 		return
 	}
-	if pkg := method.Pkg(); pkg == nil || pkg.Path() != "reflect" {
+	exactReflectType := isReflectType(call.Value.Type()) && method.Pkg() != nil && method.Pkg().Path() == "reflect"
+	if !exactReflectType && !isReflectTypeMethodInterfaceCall(call.Value.Type(), method) {
 		return
 	}
 	switch method.Name() {
@@ -3867,6 +3868,47 @@ func (p *context) reflectTypeMethodCheck(call *ssa.CallCommon, method *types.Fun
 	}
 	p.pkg.NeedAbiInit |= check.Kind
 	return
+}
+
+// isReflectTypeMethodInterfaceCall reports whether an interface call can
+// dynamically dispatch to (*reflect.rtype).Method or (*reflect.rtype).MethodByName
+// through a structural user-defined interface (for example
+// `type MyType interface { MethodByName(string) (reflect.Method, bool) }`).
+func isReflectTypeMethodInterfaceCall(recvType types.Type, method *types.Func) bool {
+	if recvType == nil || method == nil {
+		return false
+	}
+	if _, isIface := types.Unalias(recvType).Underlying().(*types.Interface); !isIface {
+		return false
+	}
+	sig, ok := method.Type().(*types.Signature)
+	if !ok || sig.Variadic() {
+		return false
+	}
+	params := sig.Params()
+	results := sig.Results()
+	switch method.Name() {
+	case "Method":
+		return params.Len() == 1 && results.Len() == 1 &&
+			types.Identical(params.At(0).Type(), types.Typ[types.Int]) &&
+			isReflectNamedType(results.At(0).Type(), "Method")
+	case "MethodByName":
+		return params.Len() == 1 && results.Len() == 2 &&
+			types.Identical(params.At(0).Type(), types.Typ[types.String]) &&
+			isReflectNamedType(results.At(0).Type(), "Method") &&
+			types.Identical(results.At(1).Type(), types.Typ[types.Bool])
+	default:
+		return false
+	}
+}
+
+func isReflectNamedType(t types.Type, name string) bool {
+	named, ok := types.Unalias(t).(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj != nil && obj.Name() == name && obj.Pkg() != nil && obj.Pkg().Path() == "reflect"
 }
 
 // markReflectTypeMethodByNameCall attaches one source-level dynamic
