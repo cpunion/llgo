@@ -465,6 +465,49 @@ func RegisterFrameCompiler(
 	return RegisterFrameCompilerPrepared(g, raw, total, size, align, descriptor)
 }
 
+// RegisterFrameCompilerPreparedPtr is the single-pointer variant of
+// RegisterFrameCompilerPrepared for __llgo_coro_frame_alloc_v1. Valid frame
+// storage is never nil, so returning nil on failure eliminates the multi-return
+// aggregate alloca and allows LLVM to inline the hot receipt store directly.
+func RegisterFrameCompilerPreparedPtr(
+	g *G, raw unsafe.Pointer, total, size, align uintptr, descriptor unsafe.Pointer,
+) unsafe.Pointer {
+	if !AuditEnabled {
+		if g == nil || raw == nil || descriptor == nil || total == 0 ||
+			align == 0 || align&(align-1) != 0 {
+			return nil
+		}
+		storage := unsafe.Add(raw, unsafe.Sizeof(compilerFrameAllocationReceiptV1{}))
+		if uintptr(storage)&(align-1) != 0 {
+			return registerFrameCompilerPreparedMisalignedPtr(raw, total, align)
+		}
+		receipt := (*compilerFrameAllocationReceiptV1)(unsafe.Add(storage, -int(unsafe.Sizeof(compilerFrameAllocationReceiptV1{}))))
+		*receipt = compilerFrameAllocationReceiptV1{raw: raw, total: total}
+		return storage
+	}
+	return registerFrameCompilerPreparedAuditPtr(g, raw, total, size, align, descriptor)
+}
+
+//go:noinline
+func registerFrameCompilerPreparedMisalignedPtr(raw unsafe.Pointer, total, align uintptr) unsafe.Pointer {
+	storage, ok := registerFrameCompilerPreparedMisaligned(raw, total, align)
+	if !ok {
+		return nil
+	}
+	return storage
+}
+
+//go:noinline
+func registerFrameCompilerPreparedAuditPtr(
+	g *G, raw unsafe.Pointer, total, size, align uintptr, descriptor unsafe.Pointer,
+) unsafe.Pointer {
+	storage, ok := registerFrameCompilerPreparedAudit(g, raw, total, size, align, descriptor)
+	if !ok {
+		return nil
+	}
+	return storage
+}
+
 // RegisterFrameCompilerPrepared consumes the exact total returned by the
 // adjacent CompilerFrameAllocationSize call in the runtime allocator adapter.
 // It still validates every address it will write, but does not recompute the
@@ -970,30 +1013,39 @@ func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1
 					g.pending = pendingTransition{kind: pendingComplete, from: frame}
 					return true
 				}
-			} else if frame == g.root && g.frames == frame && frame.next == nil &&
-				g.pending.kind == pendingNone && g.park.taskCancelPhase != taskCancelRequested &&
-				g.park.taskCancelKind == TaskCancelNone {
-				if g.park == (ParkState{}) && loadGPreempt(g) == preemptIdle {
-					g.pending = pendingTransition{kind: pendingCompilerRootComplete, from: frame}
-					return true
-				}
-				if g.park.phase == parkDelivered {
-					g.park = ParkState{}
-				}
-				g.pending = pendingTransition{kind: pendingComplete, from: frame}
-				return true
-			} else if frame.parent != nil &&
-				g.pending.kind == pendingNone &&
-				g.park.taskCancelPhase != taskCancelRequested &&
-				frame.parent.completion.status == completionArmed &&
-				frame.parent.completion.child == handle {
-				frame.parent.completion.status = CompletionReturn
-				g.pending = pendingTransition{kind: pendingComplete, from: frame}
-				return true
+			} else {
+				return prepareCompleteStatusDepthZeroCompiler(g, frame, handle, header)
 			}
 		}
 	}
 	return prepareCompleteStatusCompilerSlow(g, handle, header, status)
+}
+
+//go:noinline
+func prepareCompleteStatusDepthZeroCompiler(g *G, frame *Frame, handle unsafe.Pointer, header *HeaderV1) bool {
+	if frame == g.root && g.frames == frame && frame.next == nil &&
+		g.pending.kind == pendingNone && g.park.taskCancelPhase != taskCancelRequested &&
+		g.park.taskCancelKind == TaskCancelNone {
+		if g.park == (ParkState{}) && loadGPreempt(g) == preemptIdle {
+			g.pending = pendingTransition{kind: pendingCompilerRootComplete, from: frame}
+			return true
+		}
+		if g.park.phase == parkDelivered {
+			g.park = ParkState{}
+		}
+		g.pending = pendingTransition{kind: pendingComplete, from: frame}
+		return true
+	}
+	if frame.parent != nil &&
+		g.pending.kind == pendingNone &&
+		g.park.taskCancelPhase != taskCancelRequested &&
+		frame.parent.completion.status == completionArmed &&
+		frame.parent.completion.child == handle {
+		frame.parent.completion.status = CompletionReturn
+		g.pending = pendingTransition{kind: pendingComplete, from: frame}
+		return true
+	}
+	return prepareCompleteStatusCompilerSlow(g, handle, header, CompletionReturn)
 }
 
 //go:noinline

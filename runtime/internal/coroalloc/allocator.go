@@ -128,6 +128,42 @@ func FreeTask(ptr unsafe.Pointer, size uintptr) bool {
 	return free(ptr, size)
 }
 
+// CacheAllocationSize returns the bucket size used by the native frame cache
+// for an allocation of size bytes. Non-caching targets return size unchanged.
+func CacheAllocationSize(size uintptr) uintptr {
+	return cacheAllocationSize(size)
+}
+
+// FrameCacheEnabled reports whether this target uses the native frame cache.
+func FrameCacheEnabled() bool {
+	return cacheEnabled
+}
+
+// AllocFrameBucket allocates a zero-filled frame from an already-computed
+// cache bucket size so callers that checked a per-P cache first do not compute
+// CacheAllocationSize a second time on miss.
+func AllocFrameBucket(allocationSize uintptr) unsafe.Pointer {
+	if !backendAllocationsAreZeroed || !Ready() || allocationSize == 0 {
+		return nil
+	}
+	if ptr := cacheTake(allocationSize); ptr != nil {
+		return ptr
+	}
+	return backendAllocFrame(allocationSize)
+}
+
+// FreeFrameBucket releases a frame using an already-computed bucket size and
+// exact used byte count.
+func FreeFrameBucket(ptr unsafe.Pointer, allocationSize, usedSize uintptr) bool {
+	if !Ready() || ptr == nil || allocationSize == 0 || usedSize == 0 {
+		return false
+	}
+	if cachePut(ptr, allocationSize, usedSize) {
+		return true
+	}
+	return backendFreeFrame(ptr, allocationSize)
+}
+
 func alloc(size uintptr) unsafe.Pointer {
 	allocationSize := cacheAllocationSize(size)
 	if ptr := cacheTake(allocationSize); ptr != nil {
@@ -138,7 +174,7 @@ func alloc(size uintptr) unsafe.Pointer {
 
 func free(ptr unsafe.Pointer, size uintptr) bool {
 	allocationSize := cacheAllocationSize(size)
-	if cachePut(ptr, allocationSize) {
+	if cachePut(ptr, allocationSize, size) {
 		return true
 	}
 	return backendFreeFrame(ptr, allocationSize)

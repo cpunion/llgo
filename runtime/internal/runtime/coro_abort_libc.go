@@ -39,6 +39,7 @@ func coroTerminalFputs(s *c.Char, fp c.FilePtr) c.Int
 //go:linkname coroTerminalFputc C.fputc
 func coroTerminalFputc(ch c.Int, fp c.FilePtr) c.Int
 
+//go:noinline
 func coroRuntimeAbort(message string) {
 	// Scheduler/runtime ABI failures happen on the executor stack and cannot
 	// enter the general formatting or panic machinery: either path may require a

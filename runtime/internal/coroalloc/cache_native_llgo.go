@@ -28,6 +28,8 @@ import "unsafe"
 // cache derives the same bin index with arithmetic rather than a search.
 // Larger, uncommon ranges retain powers of two and outliers retain the
 // backend's exact-size path.
+const cacheEnabled = true
+
 func cacheAllocationSize(size uintptr) uintptr {
 	return nativeCacheAllocationSize(size)
 }
@@ -42,5 +44,5 @@ func cacheAllocationSize(size uintptr) uintptr {
 func cacheTake(size uintptr) unsafe.Pointer
 
 //llgo:coro noblock
-//go:linkname cachePut C.__llgo_coro_alloc_cache_put_v1
-func cachePut(ptr unsafe.Pointer, size uintptr) bool
+//go:linkname cachePut C.__llgo_coro_alloc_cache_put_used_v1
+func cachePut(ptr unsafe.Pointer, size, used uintptr) bool

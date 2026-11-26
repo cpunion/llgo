@@ -767,24 +767,51 @@ func assertCoroAwaitCompletionCleanupControlFlow(t *testing.T, function llvm.Val
 				continue
 			}
 			terminator := block.LastInstruction()
-			if terminator.IsNil() || terminator.InstructionOpcode() != llvm.Br || terminator.SuccessorsCount() != 2 {
+			if terminator.IsNil() {
 				continue
 			}
-			first := coroTestFirstReachableAwaitConsumes(terminator.Successor(0), normalBlock, canceledBlock)
-			second := coroTestFirstReachableAwaitConsumes(terminator.Successor(1), normalBlock, canceledBlock)
 			switch instruction.CalledValue().Name() {
 			case coroRunDecisionTakeZeroHookV1:
+				if terminator.InstructionOpcode() != llvm.Br || terminator.SuccessorsCount() != 2 {
+					continue
+				}
+				first := coroTestFirstReachableAwaitConsumes(terminator.Successor(0), normalBlock, canceledBlock)
+				second := coroTestFirstReachableAwaitConsumes(terminator.Successor(1), normalBlock, canceledBlock)
 				if first == coroTestAwaitConsumeNormal && second == coroTestAwaitConsumeCanceled ||
 					first == coroTestAwaitConsumeCanceled && second == coroTestAwaitConsumeNormal {
 					gateFound = true
 				}
-			case coroAwaitInlineFinishHookV2:
-				// The inline-complete edge reaches only normal consume. The
-				// suspend edge re-enters the run-decision gate and can first
-				// reach cancellation as well as the normal continuation.
-				if first == coroTestAwaitConsumeNormal && second&coroTestAwaitConsumeCanceled != 0 ||
-					second == coroTestAwaitConsumeNormal && first&coroTestAwaitConsumeCanceled != 0 {
-					inlineFound = true
+			case coroAwaitInlineFinishHookV3:
+				// The inline-complete edges (fast ReturnDone and slow NeedDestroy)
+				// reach only normal consume. The suspend edge re-enters the
+				// run-decision gate and can first reach cancellation as well as
+				// the normal continuation.
+				switch terminator.InstructionOpcode() {
+				case llvm.Br:
+					if terminator.SuccessorsCount() != 2 {
+						continue
+					}
+					first := coroTestFirstReachableAwaitConsumes(terminator.Successor(0), normalBlock, canceledBlock)
+					second := coroTestFirstReachableAwaitConsumes(terminator.Successor(1), normalBlock, canceledBlock)
+					if first == coroTestAwaitConsumeNormal && second&coroTestAwaitConsumeCanceled != 0 ||
+						second == coroTestAwaitConsumeNormal && first&coroTestAwaitConsumeCanceled != 0 {
+						inlineFound = true
+					}
+				case llvm.Switch:
+					defaultReach := coroTestFirstReachableAwaitConsumes(terminator.Successor(0), normalBlock, canceledBlock)
+					var fastOK, destroyOK bool
+					for successor := 1; successor < terminator.SuccessorsCount(); successor++ {
+						reach := coroTestFirstReachableAwaitConsumes(terminator.Successor(successor), normalBlock, canceledBlock)
+						switch terminator.GetSwitchCaseValue(successor).ZExtValue() {
+						case coroAwaitInlineFinishReturnDone:
+							fastOK = reach == coroTestAwaitConsumeNormal
+						case coroAwaitInlineFinishNeedDestroy:
+							destroyOK = reach == coroTestAwaitConsumeNormal
+						}
+					}
+					if fastOK && destroyOK && defaultReach&coroTestAwaitConsumeCanceled != 0 {
+						inlineFound = true
+					}
 				}
 			}
 		}

@@ -212,6 +212,203 @@ func TestCompilerInlineAwaitFusesBorrowedDestroyAndConsume(t *testing.T) {
 	runtime.KeepAlive(fixture.child.memory)
 }
 
+func TestCompilerInlineAwaitFusedReturnReleaseDynamic(t *testing.T) {
+	fixture := newInlineAwaitFixtureForCompiler(t, true)
+	child := FrameFromStorage(fixture.child.storage)
+	parent := FrameFromStorage(fixture.parent.storage)
+	wantRaw := fixture.child.header.AllocationBase
+	wantTotal := child.allocationSize
+	fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareCompleteStatusCompiler(
+		fixture.g, fixture.child.handle, fixture.child.header, CompletionReturn,
+	) {
+		t.Fatal("publish compiler inline child return")
+	}
+	raw, total, settled := FinishInlineAwaitReturnReleaseCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle,
+	)
+	if AuditEnabled {
+		if settled || raw != nil || total != 0 {
+			t.Fatalf("AuditEnabled unexpectedly settled fused release: (%p, %d, %t)", raw, total, settled)
+		}
+		if fixture.g.active != child || fixture.g.frames != child || fixture.p.inlineAwaitDepth != 1 {
+			t.Fatalf("AuditEnabled decline mutated state: active=%p frames=%p depth=%d",
+				fixture.g.active, fixture.g.frames, fixture.p.inlineAwaitDepth)
+		}
+		runtime.KeepAlive(fixture.parent.memory)
+		runtime.KeepAlive(fixture.child.memory)
+		return
+	}
+	if !settled || raw != wantRaw || total != wantTotal {
+		t.Fatalf("fused dynamic release = (%p, %d, %t), want (%p, %d, true)",
+			raw, total, settled, wantRaw, wantTotal)
+	}
+	if fixture.g.pending != (pendingTransition{}) || fixture.g.destroyTarget != nil ||
+		fixture.g.frames != parent || fixture.g.active != parent ||
+		fixture.p.inlineAwaitDepth != 0 || child.next != nil ||
+		child.state != FrameDestroyed ||
+		fixture.child.header.Lifecycle != uint16(FrameDestroyed) ||
+		parent.state != FrameActive ||
+		parent.completion != (CompletionRecord{}) ||
+		fixture.parent.header.SuspendReason != uint16(SuspendNone) ||
+		fixture.parent.header.Lifecycle != uint16(FrameActive) {
+		t.Fatalf("fused dynamic release left unexpected state: pending=%+v target=%p frames=%p active=%p depth=%d child=%+v parent=%+v",
+			fixture.g.pending, fixture.g.destroyTarget, fixture.g.frames, fixture.g.active,
+			fixture.p.inlineAwaitDepth, child, parent)
+	}
+	runtime.KeepAlive(fixture.parent.memory)
+	runtime.KeepAlive(fixture.child.memory)
+}
+
+func TestCompilerInlineAwaitFusedReturnReleaseBorrowed(t *testing.T) {
+	fixture := newInlineAwaitFixtureForCompiler(t, true)
+	child := FrameFromStorage(fixture.child.storage)
+	parent := FrameFromStorage(fixture.parent.storage)
+	child.properties |= frameBorrowedStorage
+	child.allocationSize = 0
+	fixture.child.header.AllocationBase = unsafe.Pointer(child)
+	fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareCompleteStatusCompiler(
+		fixture.g, fixture.child.handle, fixture.child.header, CompletionReturn,
+	) {
+		t.Fatal("publish borrowed compiler inline child return")
+	}
+	raw, total, settled := FinishInlineAwaitReturnReleaseCompiler(
+		fixture.g, fixture.parent.handle, fixture.child.handle,
+	)
+	if AuditEnabled {
+		if settled || raw != nil || total != 0 {
+			t.Fatalf("AuditEnabled unexpectedly settled borrowed fused release: (%p, %d, %t)", raw, total, settled)
+		}
+		runtime.KeepAlive(fixture.parent.memory)
+		runtime.KeepAlive(fixture.child.memory)
+		return
+	}
+	if !settled || raw != nil || total != 0 {
+		t.Fatalf("fused borrowed release = (%p, %d, %t), want (nil, 0, true)", raw, total, settled)
+	}
+	if fixture.g.pending != (pendingTransition{}) || fixture.g.destroyTarget != nil ||
+		fixture.g.frames != parent || fixture.g.active != parent ||
+		fixture.p.inlineAwaitDepth != 0 || child.next != nil ||
+		child.state != FrameDestroyed || parent.state != FrameActive ||
+		parent.completion != (CompletionRecord{}) ||
+		fixture.parent.header.SuspendReason != uint16(SuspendNone) ||
+		fixture.parent.header.Lifecycle != uint16(FrameActive) {
+		t.Fatalf("fused borrowed release left unexpected state")
+	}
+	runtime.KeepAlive(fixture.parent.memory)
+	runtime.KeepAlive(fixture.child.memory)
+}
+
+func TestCompilerInlineAwaitFusedReturnReleaseDeclinesExceptionalWithoutMutation(t *testing.T) {
+	// Panic, Goexit, retained panic trace, panicUnwind, mismatched handle, and
+	// non-head frame must all decline cleanly so the slow destroy+consume path runs.
+	t.Run("panic", func(t *testing.T) {
+		fixture := newInlineAwaitFixtureForCompiler(t, true)
+		typeWord, dataWord := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+		fixture.child.header.SuspendReason = uint16(SuspendPanic)
+		fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+		if !PreparePanic(fixture.g, fixture.child.handle, fixture.child.header, typeWord, dataWord) {
+			t.Fatal("PreparePanic")
+		}
+		if raw, total, settled := FinishInlineAwaitReturnReleaseCompiler(
+			fixture.g, fixture.parent.handle, fixture.child.handle,
+		); settled || raw != nil || total != 0 {
+			t.Fatalf("panic unexpectedly settled: (%p, %d, %t)", raw, total, settled)
+		}
+		if got := FinishInlineAwait(fixture.g, fixture.parent.handle, fixture.child.handle, true); got != InlineAwaitDestroy {
+			t.Fatalf("fallback FinishInlineAwait after panic decline = %d, want destroy", got)
+		}
+		runtime.KeepAlive(typeWord)
+		runtime.KeepAlive(dataWord)
+		runtime.KeepAlive(fixture.parent.memory)
+		runtime.KeepAlive(fixture.child.memory)
+	})
+
+	t.Run("goexit", func(t *testing.T) {
+		fixture := newInlineAwaitFixtureForCompiler(t, true)
+		fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)
+		fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+		if !PrepareCompleteStatusCompiler(fixture.g, fixture.child.handle, fixture.child.header, CompletionGoexit) {
+			t.Fatal("PrepareCompleteStatusCompiler(Goexit)")
+		}
+		if raw, total, settled := FinishInlineAwaitReturnReleaseCompiler(
+			fixture.g, fixture.parent.handle, fixture.child.handle,
+		); settled || raw != nil || total != 0 {
+			t.Fatalf("goexit unexpectedly settled: (%p, %d, %t)", raw, total, settled)
+		}
+		if got := FinishInlineAwait(fixture.g, fixture.parent.handle, fixture.child.handle, true); got != InlineAwaitDestroy {
+			t.Fatalf("fallback FinishInlineAwait after goexit decline = %d, want destroy", got)
+		}
+		runtime.KeepAlive(fixture.parent.memory)
+		runtime.KeepAlive(fixture.child.memory)
+	})
+
+	t.Run("retainPanicTrace", func(t *testing.T) {
+		fixture := newInlineAwaitFixtureForCompiler(t, true)
+		child := FrameFromStorage(fixture.child.storage)
+		child.retainPanicTrace = true
+		fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)
+		fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+		if !PrepareCompleteStatusCompiler(fixture.g, fixture.child.handle, fixture.child.header, CompletionReturn) {
+			t.Fatal("PrepareCompleteStatusCompiler")
+		}
+		if raw, total, settled := FinishInlineAwaitReturnReleaseCompiler(
+			fixture.g, fixture.parent.handle, fixture.child.handle,
+		); settled || raw != nil || total != 0 {
+			t.Fatalf("retainPanicTrace unexpectedly settled: (%p, %d, %t)", raw, total, settled)
+		}
+		if fixture.g.frames != child || fixture.g.active != child || fixture.p.inlineAwaitDepth != 1 {
+			t.Fatal("retainPanicTrace decline mutated state")
+		}
+		runtime.KeepAlive(fixture.parent.memory)
+		runtime.KeepAlive(fixture.child.memory)
+	})
+
+	t.Run("mismatchedHandle", func(t *testing.T) {
+		fixture := newInlineAwaitFixtureForCompiler(t, true)
+		child := FrameFromStorage(fixture.child.storage)
+		fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)
+		fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+		if !PrepareCompleteStatusCompiler(fixture.g, fixture.child.handle, fixture.child.header, CompletionReturn) {
+			t.Fatal("PrepareCompleteStatusCompiler")
+		}
+		wrong := unsafe.Pointer(new(byte))
+		if raw, total, settled := FinishInlineAwaitReturnReleaseCompiler(
+			fixture.g, fixture.parent.handle, wrong,
+		); settled || raw != nil || total != 0 {
+			t.Fatalf("mismatched handle unexpectedly settled: (%p, %d, %t)", raw, total, settled)
+		}
+		if fixture.g.frames != child || fixture.g.active != child || fixture.p.inlineAwaitDepth != 1 {
+			t.Fatal("mismatched handle decline mutated state")
+		}
+		runtime.KeepAlive(wrong)
+		runtime.KeepAlive(fixture.parent.memory)
+		runtime.KeepAlive(fixture.child.memory)
+	})
+
+	t.Run("suspendFastPath", func(t *testing.T) {
+		fixture := newInlineAwaitFixtureForCompiler(t, true)
+		fixture.child.header.SuspendReason = uint16(SuspendYield)
+		fixture.child.header.Lifecycle = uint16(FrameSuspended)
+		if !PrepareYieldCompiler(fixture.g, fixture.child.handle, fixture.child.header) {
+			t.Fatal("PrepareYieldCompiler")
+		}
+		got := FinishInlineAwaitSuspendCompiler(fixture.g)
+		if AuditEnabled {
+			if got || fixture.p.inlineAwaitDepth != 1 {
+				t.Fatalf("AuditEnabled unexpectedly took suspend fast path: got=%t depth=%d", got, fixture.p.inlineAwaitDepth)
+			}
+		} else if !got || fixture.p.inlineAwaitDepth != 0 {
+			t.Fatalf("FinishInlineAwaitSuspendCompiler = %t, depth=%d, want true, 0", got, fixture.p.inlineAwaitDepth)
+		}
+		runtime.KeepAlive(fixture.parent.memory)
+		runtime.KeepAlive(fixture.child.memory)
+	})
+}
+
 func TestCompilerInlineAwaitPanicRetainsCompatibilityProtocol(t *testing.T) {
 	fixture := newInlineAwaitFixtureForCompiler(t, true)
 	typeWord, dataWord := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))

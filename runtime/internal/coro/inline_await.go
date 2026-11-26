@@ -553,6 +553,126 @@ func FinishInlineAwait(
 	return InlineAwaitSuspend
 }
 
+// FinishInlineAwaitSuspendCompiler commits the dominant non-done inline-await
+// unwind under !AuditEnabled without entering FinishInlineAwait's full graph
+// validator.
+func FinishInlineAwaitSuspendCompiler(g *G) bool {
+	if !AuditEnabled && g != nil && g.runP != nil {
+		p := g.runP
+		if p.inlineAwaitDepth != 0 &&
+			g.pending.kind != pendingNone && g.pending.kind != pendingInlineStart {
+			p.inlineAwaitDepth--
+			return true
+		}
+	}
+	return false
+}
+
+// FinishInlineAwaitReturnReleaseInto is the single-bool out-parameter variant
+// of FinishInlineAwaitReturnReleaseCompiler so __llgo_coro_await_inline_finish_v3
+// avoids an sret aggregate and inlines the hot unlink/reactivate path directly.
+func FinishInlineAwaitReturnReleaseInto(
+	g *G, parentHandle, childHandle unsafe.Pointer,
+	rawOut *unsafe.Pointer, totalOut *uintptr,
+) bool {
+	if !AuditEnabled && g != nil && g.runP != nil {
+		p := g.runP
+		pending := g.pending
+		child := pending.from
+		if pending.kind == pendingComplete && p.inlineAwaitDepth != 0 &&
+			child != nil && child == g.active && child.handle == childHandle &&
+			g.frames == child && g.destroyTarget == nil &&
+			!child.retainPanicTrace && !g.panicUnwind && child.header != nil {
+			parent := child.parent
+			if parent != nil && parent.handle == parentHandle &&
+				child.next == parent && parent.header != nil &&
+				parent.completion.status == CompletionReturn &&
+				parent.completion.typeWord == nil && parent.completion.dataWord == nil {
+				var raw unsafe.Pointer
+				var total uintptr
+				if !child.borrowedStorage() {
+					raw = child.header.AllocationBase
+					total = child.allocationSize
+					if raw == nil || total == 0 {
+						return false
+					}
+				}
+				g.frames = parent
+				child.next = nil
+				child.state = FrameDestroyed
+				child.header.Lifecycle = uint16(FrameDestroyed)
+				g.active = parent
+				g.pending = pendingTransition{}
+				p.inlineAwaitDepth--
+				parent.state = FrameActive
+				parent.header.SuspendReason = uint16(SuspendNone)
+				parent.header.Lifecycle = uint16(FrameActive)
+				parent.completion.child = nil
+				parent.completion.status = 0
+				*rawOut = raw
+				*totalOut = total
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// FinishInlineAwaitReturnReleaseCompiler fuses inline-await finish, dynamic or
+// borrowed child frame unlink, and parent reactivation into a single runtime
+// transition for the dominant normal-return fast path under !AuditEnabled.
+//
+// All Go defers execute before final suspend, so at llvm.coro.done=true the
+// child coroutine's .destroy function performs only llvm.coro.free ->
+// __llgo_coro_frame_free_v1. Returning the raw allocation receipt directly
+// lets __llgo_coro_await_inline_finish_v3 release dynamic storage in place
+// (or skip freeing for borrowed storage) without entering the indirect
+// .destroy, frame-free, and destroy-consume hooks.
+//
+// AuditEnabled, panic, Goexit, cancellation, recovered returns, retained panic
+// traces, and any non-canonical frame chain decline without mutation so the
+// caller takes the pre-existing llvm.coro.destroy + compatibility lane.
+func FinishInlineAwaitReturnReleaseCompiler(
+	g *G, parentHandle, childHandle unsafe.Pointer,
+) (raw unsafe.Pointer, total uintptr, settled bool) {
+	if !AuditEnabled && g != nil && g.runP != nil {
+		p := g.runP
+		pending := g.pending
+		child := pending.from
+		if pending.kind == pendingComplete && p.inlineAwaitDepth != 0 &&
+			child != nil && child == g.active && child.handle == childHandle &&
+			g.frames == child && g.destroyTarget == nil &&
+			!child.retainPanicTrace && !g.panicUnwind && child.header != nil {
+			parent := child.parent
+			if parent != nil && parent.handle == parentHandle &&
+				child.next == parent && parent.header != nil &&
+				parent.completion.status == CompletionReturn &&
+				parent.completion.typeWord == nil && parent.completion.dataWord == nil {
+				if !child.borrowedStorage() {
+					raw = child.header.AllocationBase
+					total = child.allocationSize
+					if raw == nil || total == 0 {
+						return nil, 0, false
+					}
+				}
+				g.frames = parent
+				child.next = nil
+				child.state = FrameDestroyed
+				child.header.Lifecycle = uint16(FrameDestroyed)
+				g.active = parent
+				g.pending = pendingTransition{}
+				p.inlineAwaitDepth--
+				parent.state = FrameActive
+				parent.header.SuspendReason = uint16(SuspendNone)
+				parent.header.Lifecycle = uint16(FrameActive)
+				parent.completion = CompletionRecord{}
+				return raw, total, true
+			}
+		}
+	}
+	return nil, 0, false
+}
+
 // FinishInlineAwaitReturnCompiler commits the dominant normal-return
 // transaction directly from its private pendingComplete certificate. The
 // caller has just observed llvm.coro.done=true; keeping that physical fact out

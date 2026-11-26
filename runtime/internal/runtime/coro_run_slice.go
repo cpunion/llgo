@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	"github.com/xgo-dev/llgo/runtime/internal/coro"
+	"github.com/xgo-dev/llgo/runtime/internal/coroalloc"
 )
 
 // These compiler-owned C ABI wrappers are emitted in the program entry module.
@@ -45,6 +46,67 @@ func coroHandleDestroyCommitted(g *coro.G, handle unsafe.Pointer) bool {
 	}
 	coroHandleDestroy(handle)
 	return coro.CommitFrameDestroyCompiler(g, handle)
+}
+
+const (
+	coroAwaitInlineFinishReturnDoneV3  uint32 = 0
+	coroAwaitInlineFinishSuspendV3     uint32 = 1
+	coroAwaitInlineFinishNeedDestroyV3 uint32 = 2
+)
+
+//export __llgo_coro_await_inline_finish_v3
+func __llgo_coro_await_inline_finish_v3(g, parent, child unsafe.Pointer, done bool) uint32 {
+	task := (*coro.G)(g)
+	if done {
+		var raw unsafe.Pointer
+		var total uintptr
+		if coro.FinishInlineAwaitReturnReleaseInto(task, parent, child, &raw, &total) {
+			if raw != nil {
+				if coroalloc.FrameCacheEnabled() {
+					bucket := coroalloc.CacheAllocationSize(total)
+					if !coro.PutCachedFrame(task, raw, bucket, total) {
+						coroFrameFreeSlowBucketV1(raw, bucket, total)
+					}
+				} else {
+					coroFrameFreeSlowV1(raw, total)
+				}
+			}
+			return coroAwaitInlineFinishReturnDoneV3
+		}
+	} else if coro.FinishInlineAwaitSuspendCompiler(task) {
+		return coroAwaitInlineFinishSuspendV3
+	}
+	return coroAwaitInlineFinishSlowV3(task, parent, child, done)
+}
+
+//go:noinline
+func coroFrameFreeSlowBucketV1(raw unsafe.Pointer, bucket, total uintptr) {
+	if !coroalloc.FreeFrameBucket(raw, bucket, total) {
+		coroRuntimeAbort("coroutine frame release failed")
+	}
+}
+
+//go:noinline
+func coroFrameFreeSlowV1(raw unsafe.Pointer, total uintptr) {
+	if !coroalloc.FreeFrame(raw, total) {
+		coroRuntimeAbort("coroutine frame release failed")
+	}
+}
+
+//go:noinline
+func coroAwaitInlineFinishSlowV3(task *coro.G, parent, child unsafe.Pointer, done bool) uint32 {
+	if done && coro.FinishInlineAwaitReturnCompiler(task, parent, child) {
+		return coroAwaitInlineFinishNeedDestroyV3
+	}
+	switch coro.FinishInlineAwait(task, parent, child, done) {
+	case coro.InlineAwaitSuspend:
+		return coroAwaitInlineFinishSuspendV3
+	case coro.InlineAwaitDestroy:
+		return coroAwaitInlineFinishNeedDestroyV3
+	default:
+		coroRuntimeAbort("invalid coroutine inline child finish")
+		return coroAwaitInlineFinishSuspendV3
+	}
 }
 
 //export __llgo_coro_await_inline_finish_v2
