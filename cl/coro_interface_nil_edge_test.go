@@ -19,6 +19,7 @@
 package cl
 
 import (
+	"slices"
 	"testing"
 
 	"golang.org/x/tools/go/ssa"
@@ -65,6 +66,58 @@ func Generic[T ~*int](value T) bool { return value == nil }
 					}
 					if coroCompilerElidesImplicitFaultRuntimeHelper(op, "AllocZ") {
 						t.Error("nil comparison elided unrelated helper")
+					}
+				}
+			}
+			if !found {
+				t.Fatal("missing SSA compare")
+			}
+		})
+	}
+}
+
+func TestCoroInterfaceNilComparisonPlainHelpersElided(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/ifacenil", `package ifacenil
+func ErrorNil(value error) bool { return value == nil }
+func ErrorNilReverse(value error) bool { return nil == value }
+func AnyNil(value any) bool { return value != nil }
+func DynamicError(left, right error) bool { return left == right }
+func DynamicAny(left, right any) bool { return left != right }
+`)
+	testProg.ssa.Build()
+	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	for _, test := range []struct {
+		name      string
+		wantEface bool
+		wantIface bool
+	}{
+		{"ErrorNil", false, false},
+		{"ErrorNilReverse", false, false},
+		{"AnyNil", false, false},
+		{"DynamicError", true, true},
+		{"DynamicAny", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fn := pkg.ssa.Func(test.name)
+			ctx, err := universe.functionABIContext(fn, owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, block := range fn.Blocks {
+				for _, inst := range block.Instrs {
+					op, ok := inst.(*ssa.BinOp)
+					if !ok {
+						continue
+					}
+					found = true
+					helpers := universe.plainRepresentationRuntimeHelpers(ctx, op)
+					if got := slices.Contains(helpers, "EfaceEqual"); got != test.wantEface {
+						t.Errorf("%s: plain EfaceEqual=%t want %t (helpers=%v)", op, got, test.wantEface, helpers)
+					}
+					if got := slices.Contains(helpers, "IfaceType"); got != test.wantIface {
+						t.Errorf("%s: plain IfaceType=%t want %t (helpers=%v)", op, got, test.wantIface, helpers)
 					}
 				}
 			}

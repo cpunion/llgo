@@ -2495,7 +2495,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = b.BinOp(v.Op, typeWord, nilType)
 			break
 		}
-		if !physicalPlanned && p.compilation.immutablePlan() != nil {
+		if !physicalPlanned && p.immutablePlan() != nil {
 			if value := coroInterfaceNilComparisonOperand(v); value != nil {
 				if _, ok := types.Unalias(p.patchType(value.Type())).Underlying().(*types.Interface); ok {
 					physical := p.compileValue(b, value)

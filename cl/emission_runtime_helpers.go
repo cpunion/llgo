@@ -796,6 +796,19 @@ func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.I
 		if plainStackCStr && helper == "AllocU" {
 			continue
 		}
+		if binop, ok := instr.(*ssa.BinOp); ok && (helper == "EfaceEqual" || helper == "IfaceType") {
+			if value := coroInterfaceNilComparisonOperand(binop); value != nil {
+				typ := value.Type()
+				if ctx != nil {
+					typ = ctx.patchType(typ)
+				}
+				if _, iface := types.Unalias(typ).Underlying().(*types.Interface); iface {
+					// Interface-vs-nil equality checks only the interface type word
+					// directly in both physical and plain/raw coroutine bodies.
+					continue
+				}
+			}
+		}
 		if helper == "UpdateLogicalCallerLocation" {
 			// A managed physical body owns only a logical shadow-stack frame;
 			// its legacy-stack twin still needs the original native-PC record.
