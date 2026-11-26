@@ -886,12 +886,23 @@ type SSAPlan struct {
 	// analysis run's concrete MaxPlainInstructions budget. Keeping the accepted
 	// proof beside SSAPlan lets physical validation distinguish it from a trusted
 	// policy that independently suppressed preemption.
-	boundedCycles map[*ssa.Function]uint64
-	functionIDs   FunctionIDConfig
+	boundedCycles        map[*ssa.Function]uint64
+	maxPlainInstructions int
+	functionIDs          FunctionIDConfig
 	// The frontend relation is frozen with this plan, like FunctionIDConfig's
 	// package identity relation. All callable consumers use the same source
 	// projection as CHA rather than reconstructing raw/physical equivalence.
 	dynamicSignature func(*ssa.Function, *types.Signature) (*types.Signature, error)
+}
+
+// MaxPlainInstructions returns the concrete MaxPlainInstructions budget used
+// during AnalyzeSSA (DefaultMaxPlainInstructions when unspecified, or negative
+// when the cost seed was disabled).
+func (p *SSAPlan) MaxPlainInstructions() int {
+	if p == nil {
+		return DefaultMaxPlainInstructions
+	}
+	return p.maxPlainInstructions
 }
 
 // CallableSignature returns the canonical source signature used by this
@@ -2496,6 +2507,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		callableContracts:       make(map[*ssa.Function]CallableContractCertificate),
 		assemblyNoSuspend:       make(map[*ssa.Function]string),
 		boundedCycles:           boundedCycles,
+		maxPlainInstructions:    maxPlain,
 		functionIDs:             config.FunctionIDs,
 		dynamicSignature:        config.DynamicSignature,
 	}

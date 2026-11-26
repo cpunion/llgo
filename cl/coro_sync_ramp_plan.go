@@ -21,6 +21,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"math/big"
 	"sort"
 
 	"github.com/xgo-dev/llgo/internal/coro"
@@ -58,6 +59,12 @@ const (
 	// completion check or slow tail-call. Direct coroutine callers inline the
 	// fast path in their own frame while dynamic/spawned callers use $coro.
 	coroSyncRampCallerInlineYield
+	// coroSyncRampBoundedLoop executes a pure read-only single-natural-loop
+	// leaf coroutine synchronously for up to a compile-time proven backedge
+	// budget derived from DefaultMaxPlainInstructions, bailing out cleanly to
+	// $coro.slow (preserving full preemption) whenever the work bound is
+	// exceeded or a nil/bounds guard trips.
+	coroSyncRampBoundedLoop
 )
 
 type coroSyncFastExitKind uint8
@@ -127,11 +134,32 @@ type coroSyncSlowAugCFG struct {
 	splitBlockReentered bool
 }
 
+type coroSyncLoopEntryGuardKind uint8
+
+const (
+	coroSyncLoopEntryGuardNone coroSyncLoopEntryGuardKind = iota
+	coroSyncLoopEntryGuardValue
+	coroSyncLoopEntryGuardLen
+	coroSyncLoopEntryGuardCap
+)
+
+type coroSyncBoundedLoopPlan struct {
+	header          *ssa.BasicBlock
+	latch           *ssa.BasicBlock
+	entryPred       *ssa.BasicBlock
+	liveBlocks      map[*ssa.BasicBlock]bool
+	maxBackedges    uint32
+	entryGuardKind  coroSyncLoopEntryGuardKind
+	entryGuardValue ssa.Value
+	entryGuardLimit uint64
+}
+
 type coroPhysicalSyncRampPlan struct {
 	kind               coroSyncRampKind
 	hasTryHelper       bool
 	hasBoxHelper       bool
 	root               *coroSyncFastNode
+	boundedLoop        *coroSyncBoundedLoopPlan
 	slowTargets        []coroSyncSlowTarget
 	liveValues         []ssa.Value
 	liveInByTag        map[uint8]map[ssa.Value]bool
@@ -170,6 +198,7 @@ const (
 // sync-fast ramp passes. It consumes only frozen ProgramIR/SSAPlan facts and
 // never matches package paths, function names, or source digests.
 type coroSyncPlanner struct {
+	prog               llssa.Program
 	whole              *coro.SSAPlan
 	ir                 *coroProgramIR
 	roots              map[*ssa.Function]bool
@@ -186,6 +215,7 @@ type coroSyncPlanner struct {
 // seals them.
 func planCoroPhysicalSyncRamps(
 	stage *coroPhysicalPlanStage,
+	prog llssa.Program,
 	whole *coro.SSAPlan,
 	ir *coroProgramIR,
 	resolve func(*ssa.Function) (*ssa.Function, bool),
@@ -234,6 +264,7 @@ func planCoroPhysicalSyncRamps(
 	})
 
 	pl := &coroSyncPlanner{
+		prog:         prog,
 		whole:        whole,
 		ir:           ir,
 		roots:        roots,
@@ -429,6 +460,9 @@ func (pl *coroSyncPlanner) planOne(plan *coroPhysicalFunctionPlan) *coroPhysical
 		return directRamp
 	}
 	if ramp := pl.planSingleAwait(plan, cyclic); ramp != nil {
+		return ramp
+	}
+	if ramp := pl.planBoundedLoopLeaf(plan, cyclic); ramp != nil {
 		return ramp
 	}
 	return nil
@@ -1950,6 +1984,319 @@ func (pl *coroSyncPlanner) planSingleAwait(
 		singleAwaitBoxed:   chosenBoxed,
 		singleAwaitResults: chosenResults,
 		needsSlowSplit:     true,
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Strategy 4: BoundedLoopLeaf (pure read-only single-loop leaf with work bound)
+// -----------------------------------------------------------------------------
+
+func (pl *coroSyncPlanner) planBoundedLoopLeaf(
+	plan *coroPhysicalFunctionPlan,
+	cyclic map[*ssa.BasicBlock]bool,
+) *coroPhysicalSyncRampPlan {
+	if pl.prog == nil || len(cyclic) == 0 {
+		return nil
+	}
+	fn := plan.function
+	if len(fn.Blocks) == 0 || !plan.reachableBlocks[fn.Blocks[0]] {
+		return nil
+	}
+
+	liveSuccs := func(blk *ssa.BasicBlock) []*ssa.BasicBlock {
+		if blk == nil || len(blk.Instrs) == 0 || !plan.reachableBlocks[blk] {
+			return nil
+		}
+		switch term := blk.Instrs[len(blk.Instrs)-1].(type) {
+		case *ssa.Jump:
+			if len(blk.Succs) == 1 && plan.reachableBlocks[blk.Succs[0]] {
+				return blk.Succs
+			}
+		case *ssa.If:
+			if len(blk.Succs) != 2 {
+				return nil
+			}
+			if kv, ok := coroSyncStaticBranch(term, pl.ir, nil); ok {
+				succ := blk.Succs[1]
+				if kv {
+					succ = blk.Succs[0]
+				}
+				if plan.reachableBlocks[succ] {
+					return []*ssa.BasicBlock{succ}
+				}
+				return nil
+			}
+			var out []*ssa.BasicBlock
+			for _, s := range blk.Succs {
+				if plan.reachableBlocks[s] {
+					out = append(out, s)
+				}
+			}
+			return out
+		}
+		return nil
+	}
+
+	// Collect blocks reachable from entry over live edges.
+	liveBlocks := map[*ssa.BasicBlock]bool{fn.Blocks[0]: true}
+	queue := []*ssa.BasicBlock{fn.Blocks[0]}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, succ := range liveSuccs(cur) {
+			if !liveBlocks[succ] {
+				liveBlocks[succ] = true
+				queue = append(queue, succ)
+			}
+		}
+	}
+	if len(liveBlocks) > coroSyncRampMaxNodes {
+		return nil
+	}
+
+	// Reject duplicate live predecessor edges and oversized bodies.
+	totalInstrs := 0
+	hasReturn := false
+	for _, blk := range fn.Blocks {
+		if !liveBlocks[blk] {
+			continue
+		}
+		if len(blk.Instrs) == 0 {
+			return nil
+		}
+		seenPred := make(map[*ssa.BasicBlock]bool, len(blk.Preds))
+		for _, pred := range blk.Preds {
+			if !liveBlocks[pred] {
+				continue
+			}
+			// Check if edge pred -> blk is actually live.
+			edgeLive := false
+			for _, s := range liveSuccs(pred) {
+				if s == blk {
+					edgeLive = true
+					break
+				}
+			}
+			if !edgeLive {
+				continue
+			}
+			if seenPred[pred] {
+				return nil
+			}
+			seenPred[pred] = true
+		}
+		totalInstrs += len(blk.Instrs)
+		if totalInstrs > coroSyncRampMaxInstrs {
+			return nil
+		}
+		// Reject duplicate successors on an If terminator (same block on both arms).
+		if ifTerm, isIf := blk.Instrs[len(blk.Instrs)-1].(*ssa.If); isIf {
+			if _, isStatic := coroSyncStaticBranch(ifTerm, pl.ir, nil); !isStatic &&
+				len(blk.Succs) == 2 && blk.Succs[0] == blk.Succs[1] {
+				return nil
+			}
+		}
+	}
+
+	budget := pl.whole.MaxPlainInstructions()
+	if budget <= 0 {
+		budget = coro.DefaultMaxPlainInstructions
+	}
+
+	evaluated := func(ins ssa.Instruction) bool {
+		return plan.instructions[ins].semantic.evaluated
+	}
+	blockCost := func(blk *ssa.BasicBlock) uint64 {
+		var cost uint64
+		for _, ins := range blk.Instrs {
+			phys := plan.instructions[ins]
+			if phys.semantic.evaluated && !phys.semantic.debug {
+				cost++
+			}
+		}
+		return cost
+	}
+
+	proof, ok := coroProveBoundedLoopTripBudget(
+		pl.prog, fn, liveBlocks, evaluated, blockCost, liveSuccs, uint64(budget),
+	)
+	if !ok || proof.maxBackedges == 0 {
+		return nil
+	}
+
+	entryPred := proof.loop.header.Preds[proof.loop.entryPred]
+	if !liveBlocks[entryPred] || !liveBlocks[proof.loop.latch] {
+		return nil
+	}
+
+	// Verify every instruction in every live block is strictly pure read-only
+	// so bailing out to $coro.slow from any guard or trip-budget check has zero
+	// observable side effects.
+	for _, blk := range fn.Blocks {
+		if !liveBlocks[blk] {
+			continue
+		}
+		for i, ins := range blk.Instrs {
+			if i == len(blk.Instrs)-1 {
+				switch term := ins.(type) {
+				case *ssa.Return:
+					hasReturn = true
+				case *ssa.Jump:
+					if len(blk.Succs) != 1 || !liveBlocks[blk.Succs[0]] {
+						return nil
+					}
+				case *ssa.If:
+					if len(blk.Succs) != 2 {
+						return nil
+					}
+					if _, isStatic := coroSyncStaticBranch(term, pl.ir, nil); !isStatic {
+						if !liveBlocks[blk.Succs[0]] || !liveBlocks[blk.Succs[1]] {
+							return nil
+						}
+					}
+				default:
+					return nil
+				}
+				continue
+			}
+			phys := plan.instructions[ins]
+			switch v := ins.(type) {
+			case *ssa.DebugRef:
+				continue
+			case *ssa.RunDefers:
+				if plan.cleanup != nil {
+					return nil
+				}
+				continue
+			case *ssa.Phi:
+				if len(v.Edges) != len(blk.Preds) {
+					return nil
+				}
+				for idx, pred := range blk.Preds {
+					if !liveBlocks[pred] {
+						continue
+					}
+					edge := v.Edges[idx]
+					if edge == nil {
+						return nil
+					}
+					switch edge.(type) {
+					case *ssa.Parameter, *ssa.Const, *ssa.Global, *ssa.Function, ssa.Instruction:
+					default:
+						return nil
+					}
+				}
+				continue
+			case *ssa.Call:
+				if !isPureLenCapBuiltin(v) ||
+					phys.control != coroPhysicalControlNone ||
+					phys.operation != coroPhysicalOperationNone ||
+					phys.outcome != coroPhysicalOutcomeNone {
+					return nil
+				}
+				continue
+			case *ssa.IndexAddr:
+				if !phys.semantic.evaluated || phys.elideValue ||
+					phys.control != coroPhysicalControlNone ||
+					phys.operation != coroPhysicalOperationNone ||
+					phys.outcome != coroPhysicalOutcomeNone ||
+					phys.recipe != coroPhysicalInstructionIndexAddr ||
+					(phys.container != coroPhysicalContainerSlice && phys.container != coroPhysicalContainerArrayPointer) {
+					return nil
+				}
+				refs := v.Referrers()
+				if refs == nil {
+					return nil
+				}
+				for _, ref := range *refs {
+					if _, isDbg := ref.(*ssa.DebugRef); isDbg {
+						continue
+					}
+					un, isUn := ref.(*ssa.UnOp)
+					if !isUn || un.Op != token.MUL || un.X != v {
+						return nil
+					}
+				}
+				continue
+			case *ssa.Index:
+				if !phys.semantic.evaluated || phys.elideValue ||
+					phys.control != coroPhysicalControlNone ||
+					phys.operation != coroPhysicalOperationNone ||
+					phys.outcome != coroPhysicalOutcomeNone ||
+					phys.recipe != coroPhysicalInstructionIndex ||
+					(phys.container != coroPhysicalContainerString &&
+						phys.container != coroPhysicalContainerSlice &&
+						phys.container != coroPhysicalContainerArrayPointer) {
+					return nil
+				}
+				continue
+			case *ssa.Alloc, *ssa.Store, *ssa.Slice:
+				return nil
+			default:
+				mayMut, _, allowed := coroSyncFastPureInstrAllowed(plan, ins, phys, false, false, nil)
+				if !allowed || mayMut {
+					return nil
+				}
+			}
+		}
+	}
+	if !hasReturn {
+		return nil
+	}
+
+	loopPlan := &coroSyncBoundedLoopPlan{
+		header:       proof.loop.header,
+		latch:        proof.loop.latch,
+		entryPred:    entryPred,
+		liveBlocks:   liveBlocks,
+		maxBackedges: proof.maxBackedges,
+	}
+
+	// When the loop has no interior early exits (every exit is through header's
+	// canonical `i < bound` check with step +1), emit an O(1) entry fast-reject
+	// on the entryPred -> header edge so long inputs bail to $coro.slow before
+	// executing even one loop iteration.
+	if !proof.hasInteriorExit &&
+		proof.loop.step.Cmp(big.NewInt(1)) == 0 &&
+		proof.loop.operator == token.LSS &&
+		proof.start.Sign() >= 0 {
+		limitBig := new(big.Int).Add(proof.start, new(big.Int).SetUint64(uint64(proof.maxBackedges)))
+		if limitBig.IsUint64() && coroIntegerFits(limitBig, proof.loop.minimum, proof.loop.maximum) {
+			domEntry := func(v ssa.Value) bool {
+				switch x := v.(type) {
+				case *ssa.Parameter, *ssa.Const, *ssa.Global:
+					return true
+				case ssa.Instruction:
+					return x.Block() != nil && liveBlocks[x.Block()] && x.Block().Dominates(entryPred)
+				default:
+					return false
+				}
+			}
+			switch bv := proof.loop.boundValue.(type) {
+			case *ssa.Call:
+				if isPureLenCapBuiltin(bv) && domEntry(bv.Call.Args[0]) {
+					if bv.Common().Value.(*ssa.Builtin).Name() == "len" {
+						loopPlan.entryGuardKind = coroSyncLoopEntryGuardLen
+					} else {
+						loopPlan.entryGuardKind = coroSyncLoopEntryGuardCap
+					}
+					loopPlan.entryGuardValue = bv.Call.Args[0]
+					loopPlan.entryGuardLimit = limitBig.Uint64()
+				}
+			default:
+				if domEntry(bv) {
+					loopPlan.entryGuardKind = coroSyncLoopEntryGuardValue
+					loopPlan.entryGuardValue = bv
+					loopPlan.entryGuardLimit = limitBig.Uint64()
+				}
+			}
+		}
+	}
+
+	return &coroPhysicalSyncRampPlan{
+		kind:           coroSyncRampBoundedLoop,
+		boundedLoop:    loopPlan,
+		needsSlowSplit: true,
 	}
 }
 
