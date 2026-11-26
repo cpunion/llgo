@@ -164,3 +164,50 @@ func TestTakeRunDecisionWordsRejectsNonzeroEpochWithZeroGeneration(t *testing.T)
 		t.Fatalf("invalid scalar ticket = (%d,%d,%d,%d,%d,%t)", outcome, caseID, taskKind, sourceSlot, generation, ok)
 	}
 }
+
+func TestTakeZeroTicketRunDecisionCompilerFastAndSlowPaths(t *testing.T) {
+	t.Run("ordinary_zero_decision_once", func(t *testing.T) {
+		p := new(P)
+		task := newYieldingTestG(t, "zero-ticket-normal")
+		action := beginWaitTestResumeWithoutGate(t, p, task)
+		if kind, ok := TakeZeroTicketRunDecisionCompiler(task.g); !ok || kind != uint32(TaskCancelNone) || !p.runDecisionTaken {
+			t.Fatalf("TakeZeroTicketRunDecisionCompiler = (%d, %t), taken=%t", kind, ok, p.runDecisionTaken)
+		}
+		if kind, ok := TakeZeroTicketRunDecisionCompiler(task.g); ok || kind != 0 {
+			t.Fatalf("duplicate TakeZeroTicketRunDecisionCompiler = (%d, %t)", kind, ok)
+		}
+		finishWaitTestTask(t, p, task, action)
+	})
+
+	t.Run("inline_start_consumes_pending", func(t *testing.T) {
+		f, _ := pendingBoundaryCompilerFixture(t)
+		if kind, ok := TakeZeroTicketRunDecisionCompiler(f.g); !ok || kind != uint32(TaskCancelNone) ||
+			f.g.pending.kind != pendingNone {
+			t.Fatalf("inline start = (%d, %t), pending=%d", kind, ok, f.g.pending.kind)
+		}
+	})
+
+	t.Run("task_cancellation_falls_through_slow", func(t *testing.T) {
+		p := new(P)
+		task := newYieldingTestG(t, "zero-ticket-cancel")
+		if !Enqueue(p, task.g) || !RequestTaskCancellation(p, task.g, TaskCancelAbort) {
+			t.Fatal("enqueue/request abort cancellation")
+		}
+		if g, ok := NextRunnable(p); !ok || g != task.g {
+			t.Fatal("dequeue cancelled task")
+		}
+		_ = beginWaitTestResume(t, p, task)
+		if kind, ok := TakeZeroTicketRunDecisionCompiler(task.g); !ok || kind != uint32(TaskCancelAbort) {
+			t.Fatalf("cancelled zero-ticket = (%d, %t), want (%d, true)", kind, ok, TaskCancelAbort)
+		}
+		if kind, ok := TakeZeroTicketRunDecisionCompiler(task.g); ok || kind != 0 {
+			t.Fatalf("duplicate cancelled zero-ticket = (%d, %t)", kind, ok)
+		}
+	})
+
+	t.Run("nil_g_rejected", func(t *testing.T) {
+		if kind, ok := TakeZeroTicketRunDecisionCompiler(nil); ok || kind != 0 {
+			t.Fatalf("nil G zero-ticket = (%d, %t)", kind, ok)
+		}
+	})
+}

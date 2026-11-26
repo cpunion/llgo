@@ -60,6 +60,38 @@ func PrepareInlineAwaitCompiler(
 	if !AuditEnabled && recoverType == nil && recoverData == nil && g != nil && g.runP != nil {
 		p := g.runP
 		parent, child := g.active, g.frames
+		if parent != nil && parent.handle == parentHandle && child != nil && child != parent &&
+			child.handle == childHandle {
+			parent.completion.child = childHandle
+			parent.completion.status = completionArmed
+			child.parent = parent
+			if parent.properties&frameDeferredPanicScope != 0 {
+				child.properties |= frameDeferredPanicScope
+			} else {
+				child.properties &^= frameDeferredPanicScope
+			}
+			if p.inlineAwaitDepth >= maxInlineAwaitDepth {
+				g.pending = pendingTransition{kind: pendingAwait, from: parent, target: child}
+				return InlineAwaitDeclined
+			}
+			parent.state = FrameSuspended
+			child.state = FrameActive
+			g.active = child
+			g.pending = pendingTransition{kind: pendingInlineStart, from: parent, target: child}
+			p.inlineAwaitDepth++
+			return InlineAwaitStarted
+		}
+	}
+	return prepareInlineAwaitCompilerSlow(g, parentHandle, childHandle, recoverType, recoverData)
+}
+
+//go:noinline
+func prepareInlineAwaitCompilerSlow(
+	g *G, parentHandle, childHandle, recoverType, recoverData unsafe.Pointer,
+) InlineAwaitDisposition {
+	if !AuditEnabled && recoverType == nil && recoverData == nil && g != nil && g.runP != nil {
+		p := g.runP
+		parent, child := g.active, g.frames
 		if parent != nil && parent.handle == parentHandle && child != nil {
 			if child.handle != childHandle {
 				child = findFrame(g, childHandle)
@@ -550,6 +582,13 @@ func FinishInlineAwaitReturnCompiler(
 		}
 		return false
 	}
+	return finishInlineAwaitReturnCompilerSlow(g, parentHandle, childHandle)
+}
+
+//go:noinline
+func finishInlineAwaitReturnCompilerSlow(
+	g *G, parentHandle, childHandle unsafe.Pointer,
+) bool {
 	if ValidG(g) && parentHandle != nil && childHandle != nil && g.runP != nil {
 		p := g.runP
 		pending := g.pending
@@ -704,6 +743,13 @@ func CommitInlineAwaitReturnPhysicalDestroyCompiler(
 		parent.completion = CompletionRecord{}
 		return true
 	}
+	return commitInlineAwaitReturnPhysicalDestroyCompilerSlow(g, parentHandle, childHandle)
+}
+
+//go:noinline
+func commitInlineAwaitReturnPhysicalDestroyCompilerSlow(
+	g *G, parentHandle, childHandle unsafe.Pointer,
+) bool {
 	if ValidG(g) && parentHandle != nil && childHandle != nil && !g.destroysRoot() {
 		pending := g.pending
 		parent := pending.from

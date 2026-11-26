@@ -11,9 +11,49 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/runtime/goarch"
 )
 
+func mapFast64SlotMatch(b *bmap, i uintptr, key uint64) bool {
+	return *(*uint64)(add(unsafe.Pointer(b), dataOffset+i*8)) == key && !isEmpty(bucketTophash(b, i))
+}
+
+func mapLookupFast64Bucket(t *maptype, b *bmap, key uint64) (unsafe.Pointer, bool) {
+	if mapFast64SlotMatch(b, 0, key) {
+		return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*8+0*uintptr(t.ValueSize)), true
+	}
+	if mapFast64SlotMatch(b, 1, key) {
+		return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*8+1*uintptr(t.ValueSize)), true
+	}
+	if mapFast64SlotMatch(b, 2, key) {
+		return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*8+2*uintptr(t.ValueSize)), true
+	}
+	if mapFast64SlotMatch(b, 3, key) {
+		return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*8+3*uintptr(t.ValueSize)), true
+	}
+	if mapFast64SlotMatch(b, 4, key) {
+		return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*8+4*uintptr(t.ValueSize)), true
+	}
+	if mapFast64SlotMatch(b, 5, key) {
+		return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*8+5*uintptr(t.ValueSize)), true
+	}
+	if mapFast64SlotMatch(b, 6, key) {
+		return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*8+6*uintptr(t.ValueSize)), true
+	}
+	if mapFast64SlotMatch(b, 7, key) {
+		return add(unsafe.Pointer(b), dataOffset+abi.MapBucketCount*8+7*uintptr(t.ValueSize)), true
+	}
+	return nil, false
+}
+
 func mapaccess1_fast64(t *maptype, h *hmap, key uint64) unsafe.Pointer {
+	elem, ovf := mapaccess1_fast64_fast(t, h, key)
+	if ovf == nil {
+		return elem
+	}
+	return mapaccess1_fast64_overflow(t, ovf, key)
+}
+
+func mapaccess1_fast64_fast(t *maptype, h *hmap, key uint64) (unsafe.Pointer, *bmap) {
 	if h == nil || h.count == 0 {
-		return unsafe.Pointer(&zeroVal[0])
+		return unsafe.Pointer(&zeroVal[0]), nil
 	}
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map read and map write")
@@ -23,7 +63,7 @@ func mapaccess1_fast64(t *maptype, h *hmap, key uint64) unsafe.Pointer {
 		// One-bucket table. No need to hash.
 		b = (*bmap)(h.buckets)
 	} else {
-		hash := maptypehash(t, noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+		hash := memhashWord64(key, uintptr(h.hash0))
 		m := bucketMask(h.B)
 		b = (*bmap)(add(h.buckets, (hash&m)*uintptr(t.BucketSize)))
 		if c := h.oldbuckets; c != nil {
@@ -37,6 +77,17 @@ func mapaccess1_fast64(t *maptype, h *hmap, key uint64) unsafe.Pointer {
 			}
 		}
 	}
+	if elem, ok := mapLookupFast64Bucket(t, b, key); ok {
+		return elem, nil
+	}
+	ovf := b.overflow(t)
+	if ovf == nil {
+		return unsafe.Pointer(&zeroVal[0]), nil
+	}
+	return nil, ovf
+}
+
+func mapaccess1_fast64_overflow(t *maptype, b *bmap, key uint64) unsafe.Pointer {
 	for ; b != nil; b = b.overflow(t) {
 		for i, k := uintptr(0), b.keys(); i < abi.MapBucketCount; i, k = i+1, add(k, 8) {
 			if *(*uint64)(k) == key && !isEmpty(b.tophash[i]) {
@@ -57,8 +108,16 @@ func mapaccess1_fast64(t *maptype, h *hmap, key uint64) unsafe.Pointer {
 //
 //go:linkname mapaccess2_fast64
 func mapaccess2_fast64(t *maptype, h *hmap, key uint64) (unsafe.Pointer, bool) {
+	elem, ok, ovf := mapaccess2_fast64_fast(t, h, key)
+	if ovf == nil {
+		return elem, ok
+	}
+	return mapaccess2_fast64_overflow(t, ovf, key)
+}
+
+func mapaccess2_fast64_fast(t *maptype, h *hmap, key uint64) (unsafe.Pointer, bool, *bmap) {
 	if h == nil || h.count == 0 {
-		return unsafe.Pointer(&zeroVal[0]), false
+		return unsafe.Pointer(&zeroVal[0]), false, nil
 	}
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map read and map write")
@@ -68,7 +127,7 @@ func mapaccess2_fast64(t *maptype, h *hmap, key uint64) (unsafe.Pointer, bool) {
 		// One-bucket table. No need to hash.
 		b = (*bmap)(h.buckets)
 	} else {
-		hash := maptypehash(t, noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+		hash := memhashWord64(key, uintptr(h.hash0))
 		m := bucketMask(h.B)
 		b = (*bmap)(add(h.buckets, (hash&m)*uintptr(t.BucketSize)))
 		if c := h.oldbuckets; c != nil {
@@ -82,6 +141,17 @@ func mapaccess2_fast64(t *maptype, h *hmap, key uint64) (unsafe.Pointer, bool) {
 			}
 		}
 	}
+	if elem, ok := mapLookupFast64Bucket(t, b, key); ok {
+		return elem, true, nil
+	}
+	ovf := b.overflow(t)
+	if ovf == nil {
+		return unsafe.Pointer(&zeroVal[0]), false, nil
+	}
+	return nil, false, ovf
+}
+
+func mapaccess2_fast64_overflow(t *maptype, b *bmap, key uint64) (unsafe.Pointer, bool) {
 	for ; b != nil; b = b.overflow(t) {
 		for i, k := uintptr(0), b.keys(); i < abi.MapBucketCount; i, k = i+1, add(k, 8) {
 			if *(*uint64)(k) == key && !isEmpty(b.tophash[i]) {
@@ -110,7 +180,7 @@ func mapassign_fast64(t *maptype, h *hmap, key uint64) unsafe.Pointer {
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map writes")
 	}
-	hash := maptypehash(t, noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+	hash := memhashWord64(key, uintptr(h.hash0))
 
 	// Set hashWriting after calling t.hasher for consistency with mapassign.
 	h.flags ^= hashWriting
@@ -207,7 +277,7 @@ func mapassign_fast64ptr(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map writes")
 	}
-	hash := maptypehash(t, noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+	hash := memhashWord64(uint64(uintptr(key)), uintptr(h.hash0))
 
 	// Set hashWriting after calling t.hasher for consistency with mapassign.
 	h.flags ^= hashWriting
@@ -294,7 +364,7 @@ func mapdelete_fast64(t *maptype, h *hmap, key uint64) {
 		fatal("concurrent map writes")
 	}
 
-	hash := maptypehash(t, noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+	hash := memhashWord64(key, uintptr(h.hash0))
 
 	// Set hashWriting after calling t.hasher for consistency with mapdelete
 	h.flags ^= hashWriting
@@ -424,7 +494,7 @@ func evacuate_fast64(t *maptype, h *hmap, oldbucket uintptr) {
 				if !h.sameSizeGrow() {
 					// Compute hash to make our evacuation decision (whether we need
 					// to send this key/elem to bucket x or bucket y).
-					hash := maptypehash(t, k, uintptr(h.hash0))
+					hash := memhash64(k, uintptr(h.hash0))
 					if hash&newbit != 0 {
 						useY = 1
 					}

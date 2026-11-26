@@ -24,11 +24,21 @@ const (
 )
 
 func memhash(p unsafe.Pointer, seed, s uintptr) uintptr {
+	if h, ok := memhashShort(p, seed, s); ok {
+		return h
+	}
+	return memhashLong(p, seed, s)
+}
+
+func memhashShort(p unsafe.Pointer, seed, s uintptr) (uintptr, bool) {
+	if s > 48 {
+		return 0, false
+	}
 	var a, b uintptr
 	seed ^= hashkey[0] ^ m1
 	switch {
 	case s == 0:
-		return seed
+		return seed, true
 	case s < 4:
 		a = uintptr(*(*byte)(p))
 		a |= uintptr(*(*byte)(add(p, s>>1))) << 8
@@ -47,36 +57,59 @@ func memhash(p unsafe.Pointer, seed, s uintptr) uintptr {
 		b = r8(add(p, s-8))
 	default:
 		l := s
-		if l > 48 {
-			seed1 := seed
-			seed2 := seed
-			for ; l > 48; l -= 48 {
-				seed = mix(r8(p)^m2, r8(add(p, 8))^seed)
-				seed1 = mix(r8(add(p, 16))^m3, r8(add(p, 24))^seed1)
-				seed2 = mix(r8(add(p, 32))^m4, r8(add(p, 40))^seed2)
-				p = add(p, 48)
-			}
-			seed ^= seed1 ^ seed2
-		}
-		for ; l > 16; l -= 16 {
+		seed = mix(r8(p)^m2, r8(add(p, 8))^seed)
+		p = add(p, 16)
+		l -= 16
+		if l > 16 {
 			seed = mix(r8(p)^m2, r8(add(p, 8))^seed)
 			p = add(p, 16)
+			l -= 16
 		}
 		a = r8(add(p, l-16))
 		b = r8(add(p, l-8))
 	}
+	return mix(m5^s, mix(a^m2, b^seed)), true
+}
 
+func memhashLong(p unsafe.Pointer, seed, s uintptr) uintptr {
+	seed ^= hashkey[0] ^ m1
+	l := s
+	if l > 48 {
+		seed1 := seed
+		seed2 := seed
+		for ; l > 48; l -= 48 {
+			seed = mix(r8(p)^m2, r8(add(p, 8))^seed)
+			seed1 = mix(r8(add(p, 16))^m3, r8(add(p, 24))^seed1)
+			seed2 = mix(r8(add(p, 32))^m4, r8(add(p, 40))^seed2)
+			p = add(p, 48)
+		}
+		seed ^= seed1 ^ seed2
+	}
+	for ; l > 16; l -= 16 {
+		seed = mix(r8(p)^m2, r8(add(p, 8))^seed)
+		p = add(p, 16)
+	}
+	a := r8(add(p, l-16))
+	b := r8(add(p, l-8))
 	return mix(m5^s, mix(a^m2, b^seed))
 }
 
-func memhash32(p unsafe.Pointer, seed uintptr) uintptr {
-	a := r4(p)
+func memhashWord32(v uint32, seed uintptr) uintptr {
+	a := uintptr(v)
 	return mix(m5^4, mix(a^m2, a^seed^hashkey[0]^m1))
 }
 
-func memhash64(p unsafe.Pointer, seed uintptr) uintptr {
-	a := r8(p)
+func memhashWord64(v uint64, seed uintptr) uintptr {
+	a := uintptr(v)
 	return mix(m5^8, mix(a^m2, a^seed^hashkey[0]^m1))
+}
+
+func memhash32(p unsafe.Pointer, seed uintptr) uintptr {
+	return memhashWord32(readUnaligned32(p), seed)
+}
+
+func memhash64(p unsafe.Pointer, seed uintptr) uintptr {
+	return memhashWord64(readUnaligned64(p), seed)
 }
 
 func mix(a, b uintptr) uintptr {

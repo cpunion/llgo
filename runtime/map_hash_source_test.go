@@ -41,13 +41,25 @@ func TestMapHashingUsesStaticTypeMetadata(t *testing.T) {
 		}
 	}
 
+	fastHashMarkers := map[string][]string{
+		"map_fast32.go":  {"memhash32(", "memhashWord32("},
+		"map_fast64.go":  {"memhash64(", "memhashWord64("},
+		"map_faststr.go": {"strhash(", "memhashShort(", "memhash("},
+	}
 	for _, name := range []string{"map_fast32.go", "map_fast64.go", "map_faststr.go"} {
 		source, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatal(err)
 		}
 		text := string(source)
-		if !strings.Contains(text, "maptypehash(t,") {
+		matched := strings.Contains(text, "maptypehash(t,")
+		for _, marker := range fastHashMarkers[name] {
+			if strings.Contains(text, marker) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			t.Errorf("%s does not use the static map hash path", name)
 		}
 		if strings.Contains(text, ".Hasher(") {

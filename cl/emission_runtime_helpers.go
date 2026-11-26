@@ -949,6 +949,101 @@ func (u *EmissionUniverse) materializeRuntimeHelperReference(ownerFn *ssa.Functi
 	return canonical, true, nil
 }
 
+// coroInstrEligibleForLogicalCallerLocation reports whether instr can panic or
+// transfer control to a caller-observing callee, and resolves its normalized
+// (file, line). Pure non-panicking operations (non-deref UnOp, pure builtins,
+// and FieldAddr on proven-non-nil pointers) cannot change observable caller or
+// panic state.
+func coroInstrEligibleForLogicalCallerLocation(ctx *context, instr ssa.Instruction) (string, int, bool) {
+	if ctx == nil || instr == nil {
+		return "", 0, false
+	}
+	switch v := instr.(type) {
+	case *ssa.Call:
+		if b, ok := v.Call.Value.(*ssa.Builtin); ok {
+			switch b.Name() {
+			case "len", "cap", "min", "max", "real", "imag", "complex":
+				return "", 0, false
+			}
+		}
+	case ssa.CallInstruction:
+	case *ssa.UnOp:
+		if v.Op != token.MUL || ctx.addressValueProvenNonNilAt(v.X, v) {
+			return "", 0, false
+		}
+	case *ssa.FieldAddr:
+		if ctx.addressValueProvenNonNilAt(v.X, v) {
+			return "", 0, false
+		}
+	case *ssa.IndexAddr, *ssa.Index, *ssa.Slice,
+		*ssa.TypeAssert, *ssa.SliceToArrayPointer, *ssa.MapUpdate,
+		*ssa.RunDefers, *ssa.Panic, *ssa.Send:
+	case *ssa.Return:
+		if !ctx.returnNeedsImplicitRunDefers(v) {
+			return "", 0, false
+		}
+	default:
+		return "", 0, false
+	}
+	pos := ctx.logicalCallerLocationPos(instr)
+	position, recordable := runtimeLocationPosition(ctx.fset, pos)
+	if !recordable {
+		return "", 0, false
+	}
+	filename := position.Filename
+	if ctx.prog != nil {
+		filename = runtimeSourceFilename(
+			ctx.prog.Target(),
+			directiveFilename(ctx.fset, pos, position.Filename, ctx.sourceLine),
+		)
+	}
+	if filename == "" {
+		return "", 0, false
+	}
+	return filename, position.Line, true
+}
+
+// coroInstrNeedsLogicalCallerLocation deduplicates consecutive same-(file,line)
+// logical-caller updates within one SSA basic block. Each frame owns its own
+// shadow-stack slot, so intervening callees never overwrite this frame's line.
+func coroInstrNeedsLogicalCallerLocation(ctx *context, instr ssa.Instruction) bool {
+	file, line, ok := coroInstrEligibleForLogicalCallerLocation(ctx, instr)
+	if !ok {
+		return false
+	}
+	switch v := instr.(type) {
+	case *ssa.Defer, *ssa.RunDefers, *ssa.Return:
+		return true
+	case ssa.CallInstruction:
+		if v.Common() != nil && isRuntimeCallerLookupFunc(v.Common().StaticCallee()) {
+			return true
+		}
+	}
+	blk := instr.Block()
+	if blk == nil {
+		return true
+	}
+	idx := -1
+	for i, candidate := range blk.Instrs {
+		if candidate == instr {
+			idx = i
+			break
+		}
+	}
+	for i := idx - 1; i >= 0; i-- {
+		prev := blk.Instrs[i]
+		if _, isDefer := prev.(*ssa.Defer); isDefer {
+			continue
+		}
+		prevFile, prevLine, prevOK := coroInstrEligibleForLogicalCallerLocation(ctx, prev)
+		if !prevOK {
+			continue
+		}
+		return prevFile != file || prevLine != line
+	}
+	return true
+}
+
 // classifyCoroRuntimeHelpers is the sole raw-SSA helper classifier. Only the
 // ProgramModelBuilder path above may call it; analysis, preflight and emission
 // consume the frozen coroEmissionSitePlan instead.
@@ -978,27 +1073,10 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		add("EnsureLogicalLocalInitializer")
 	}
 	if ctx.shouldEmitLogicalCallerFrames() {
-		_, recordableLocation := runtimeLocationPosition(ctx.fset, ctx.logicalCallerLocationPos(instr))
-		addLocation := func() {
-			if recordableLocation {
-				add("UpdateLogicalCallerLocation")
-			}
+		if coroInstrNeedsLogicalCallerLocation(ctx, instr) {
+			add("UpdateLogicalCallerLocation")
 		}
-		switch v := instr.(type) {
-		case ssa.CallInstruction:
-			addLocation()
-		case *ssa.UnOp:
-			if v.Op != token.ARROW {
-				addLocation()
-			}
-		case *ssa.FieldAddr, *ssa.IndexAddr, *ssa.Index, *ssa.Slice,
-			*ssa.TypeAssert, *ssa.SliceToArrayPointer, *ssa.MapUpdate,
-			*ssa.RunDefers, *ssa.Panic, *ssa.Send:
-			addLocation()
-		case *ssa.Return:
-			if ctx.returnNeedsImplicitRunDefers(v) {
-				addLocation()
-			}
+		if _, isReturn := instr.(*ssa.Return); isReturn {
 			add("PopCallerLocationFrame")
 		}
 	}

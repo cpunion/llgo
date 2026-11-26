@@ -29,19 +29,48 @@ import "github.com/xgo-dev/llgo/runtime/internal/coro"
 func coroNativeMActivateDeferredReplacementV1(
 	domain *coroNativeFleetDomainV1,
 ) bool {
+	res, parent, parentSlot, done := coroNativeMActivateDeferredReplacementFastV1(domain)
+	if done {
+		return res
+	}
+	return coroNativeMActivateDeferredReplacementArmedV1(domain, parent, parentSlot)
+}
+
+func coroNativeMActivateDeferredReplacementFastV1(
+	domain *coroNativeFleetDomainV1,
+) (res bool, parent *coroNativeMOwnerV1, parentSlot uint32, done bool) {
 	if domain == nil || domain.driverOwnerV1() == nil ||
 		domain.handle.Route == 0 ||
 		domain.handle.Route > coroNativeFleetDomainCapacityV1 {
-		return false
+		return false, nil, 0, true
 	}
-	parentSlot := coroNativeAtomicLoadV1(
+	parentSlot = coroNativeAtomicLoadV1(
 		&coroNativeMDirectoryV1State.active[domain.handle.Route-1],
 	)
-	parent, ownerOK := coroNativeMOwnerForSlotV1(parentSlot)
+	var ownerOK bool
+	parent, ownerOK = coroNativeMOwnerForSlotV1(parentSlot)
 	if !ownerOK || parent == nil || parentSlot == 0 ||
 		parent.handle != domain.handle {
-		return false
+		return false, nil, 0, true
 	}
+	_, phase, valid := parent.deferred.Observe()
+	if !valid {
+		return false, nil, 0, true
+	}
+	if phase == coro.DeferredExecutorHandoffIdle ||
+		phase == coro.DeferredExecutorHandoffStarting ||
+		phase == coro.DeferredExecutorHandoffQueued ||
+		phase == coro.DeferredExecutorHandoffStarted {
+		return true, nil, 0, true
+	}
+	return false, parent, parentSlot, false
+}
+
+func coroNativeMActivateDeferredReplacementArmedV1(
+	domain *coroNativeFleetDomainV1,
+	parent *coroNativeMOwnerV1,
+	parentSlot uint32,
+) bool {
 	for {
 		slot, phase, valid := parent.deferred.Observe()
 		if !valid {

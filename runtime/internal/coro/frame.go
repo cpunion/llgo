@@ -312,6 +312,10 @@ type compilerFrameAllocationReceiptV1 struct {
 	total uintptr
 }
 
+// CompilerFrameAllocationReceiptSize is the compile-time size of the compact
+// two-word prefix prepended to dynamic compiler coroutine frame allocations.
+const CompilerFrameAllocationReceiptSize = unsafe.Sizeof(compilerFrameAllocationReceiptV1{})
+
 // CompilerFrameAllocationSize is the compact compiler-owned allocation shape.
 // Every coroutine already reserves BorrowedFrameStorageV2 inside its LLVM
 // frame for allocation elision. Dynamic frames use that same storage instead
@@ -477,16 +481,30 @@ func RegisterFrameCompilerPrepared(
 		}
 		storage := unsafe.Add(raw, unsafe.Sizeof(compilerFrameAllocationReceiptV1{}))
 		if uintptr(storage)&(align-1) != 0 {
-			var ok bool
-			storage, ok = compilerAlignedStorage(raw, align)
-			if !ok {
-				return nil, false
-			}
+			return registerFrameCompilerPreparedMisaligned(raw, total, align)
 		}
 		receipt := (*compilerFrameAllocationReceiptV1)(unsafe.Add(storage, -int(unsafe.Sizeof(compilerFrameAllocationReceiptV1{}))))
 		*receipt = compilerFrameAllocationReceiptV1{raw: raw, total: total}
 		return storage, true
 	}
+	return registerFrameCompilerPreparedAudit(g, raw, total, size, align, descriptor)
+}
+
+//go:noinline
+func registerFrameCompilerPreparedMisaligned(raw unsafe.Pointer, total, align uintptr) (unsafe.Pointer, bool) {
+	storage, ok := compilerAlignedStorage(raw, align)
+	if !ok {
+		return nil, false
+	}
+	receipt := (*compilerFrameAllocationReceiptV1)(unsafe.Add(storage, -int(unsafe.Sizeof(compilerFrameAllocationReceiptV1{}))))
+	*receipt = compilerFrameAllocationReceiptV1{raw: raw, total: total}
+	return storage, true
+}
+
+//go:noinline
+func registerFrameCompilerPreparedAudit(
+	g *G, raw unsafe.Pointer, total, size, align uintptr, descriptor unsafe.Pointer,
+) (unsafe.Pointer, bool) {
 	if !ValidG(g) || raw == nil || descriptor == nil || total == 0 ||
 		align == 0 || align&(align-1) != 0 ||
 		uintptr(raw)%unsafe.Alignof(Frame{}) != 0 {
@@ -644,53 +662,76 @@ func PublishFrameV3Compiler(
 		if g == nil || handle == nil || header == nil || metadata == nil || descriptor == nil {
 			return false
 		}
-		mode, ok := descriptorRuntimeContextMode(descriptor)
-		if !ok {
+		desc := (*FrameDescriptorV1)(descriptor)
+		if desc.Version != 1 || desc.Flags&^frameDescriptorAllowedFlagsV1 != 0 {
 			return false
 		}
-		if storage != nil {
-			receiptSize := unsafe.Sizeof(compilerFrameAllocationReceiptV1{})
-			receipt := (*compilerFrameAllocationReceiptV1)(unsafe.Add(storage, -int(receiptSize)))
-			frame := (*Frame)(metadata)
-			*header = HeaderV1{
-				G:              unsafe.Pointer(g),
-				Descriptor:     descriptor,
-				AllocationBase: receipt.raw,
-				ResultSlot:     resultSlot,
-				SuspendReason:  uint16(SuspendNone),
-				Lifecycle:      uint16(FrameInitialSuspended),
-			}
-			frame.owner = g
-			frame.handle = handle
-			frame.header = header
-			frame.allocationSize = receipt.total
-			frame.state = FrameInitialSuspended
-			frame.runtimeContext = mode
-			frame.next = g.frames
-			g.frames = frame
-			receipt.total = uintptr(unsafe.Pointer(frame))
-			return true
+		mode := frameRuntimeContextRequired
+		if desc.Flags&FrameDescriptorNoRuntimeContextV1 != 0 {
+			mode = frameRuntimeContextNotRequired
 		}
+		if desc.Flags&FrameDescriptorNoNativeFaultBoundaryV1 != 0 {
+			mode |= frameRuntimeContextNoNativeFault
+		}
+		if storage == nil {
+			return publishFrameV3CompilerBorrowed(g, handle, header, metadata, descriptor, resultSlot, mode)
+		}
+		receiptSize := unsafe.Sizeof(compilerFrameAllocationReceiptV1{})
+		receipt := (*compilerFrameAllocationReceiptV1)(unsafe.Add(storage, -int(receiptSize)))
+		frame := (*Frame)(metadata)
 		*header = HeaderV1{
 			G:              unsafe.Pointer(g),
 			Descriptor:     descriptor,
-			AllocationBase: metadata,
+			AllocationBase: receipt.raw,
 			ResultSlot:     resultSlot,
 			SuspendReason:  uint16(SuspendNone),
 			Lifecycle:      uint16(FrameInitialSuspended),
 		}
-		Zero(metadata, unsafe.Sizeof(Frame{}))
-		frame := (*Frame)(metadata)
 		frame.owner = g
 		frame.handle = handle
 		frame.header = header
+		frame.allocationSize = receipt.total
 		frame.state = FrameInitialSuspended
 		frame.runtimeContext = mode
-		frame.properties = frameBorrowedStorage
 		frame.next = g.frames
 		g.frames = frame
+		receipt.total = uintptr(unsafe.Pointer(frame))
 		return true
 	}
+	return publishFrameV3CompilerAudit(g, handle, header, storage, metadata, descriptor, resultSlot)
+}
+
+//go:noinline
+func publishFrameV3CompilerBorrowed(
+	g *G, handle unsafe.Pointer, header *HeaderV1, metadata,
+	descriptor, resultSlot unsafe.Pointer, mode frameRuntimeContextMode,
+) bool {
+	*header = HeaderV1{
+		G:              unsafe.Pointer(g),
+		Descriptor:     descriptor,
+		AllocationBase: metadata,
+		ResultSlot:     resultSlot,
+		SuspendReason:  uint16(SuspendNone),
+		Lifecycle:      uint16(FrameInitialSuspended),
+	}
+	Zero(metadata, unsafe.Sizeof(Frame{}))
+	frame := (*Frame)(metadata)
+	frame.owner = g
+	frame.handle = handle
+	frame.header = header
+	frame.state = FrameInitialSuspended
+	frame.runtimeContext = mode
+	frame.properties = frameBorrowedStorage
+	frame.next = g.frames
+	g.frames = frame
+	return true
+}
+
+//go:noinline
+func publishFrameV3CompilerAudit(
+	g *G, handle unsafe.Pointer, header *HeaderV1, storage, metadata,
+	descriptor, resultSlot unsafe.Pointer,
+) bool {
 	if !ValidG(g) || handle == nil || header == nil || metadata == nil || descriptor == nil {
 		return false
 	}
@@ -952,6 +993,11 @@ func PrepareCompleteStatusCompiler(g *G, handle unsafe.Pointer, header *HeaderV1
 			}
 		}
 	}
+	return prepareCompleteStatusCompilerSlow(g, handle, header, status)
+}
+
+//go:noinline
+func prepareCompleteStatusCompilerSlow(g *G, handle unsafe.Pointer, header *HeaderV1, status CompletionStatus) bool {
 	if status == CompletionReturn && g != nil && handle != nil && header != nil {
 		frame := g.active
 		if frame != nil && frame.handle == handle && frame.header == header &&
@@ -1176,26 +1222,97 @@ func ReleaseFrameCompiler(
 ) (metadata, raw unsafe.Pointer, total uintptr, ok bool) {
 	if !AuditEnabled && g != nil {
 		frame := g.destroyTarget
-		if frame != nil && frame.header != nil && !frame.borrowedStorage() {
-			if g.frames == frame {
-				g.frames = frame.next
-				frame.next = nil
-			} else if !unlinkFrame(g, frame) {
-				frame = nil
+		if frame != nil && frame.header != nil && !frame.borrowedStorage() && g.frames == frame {
+			g.frames = frame.next
+			frame.next = nil
+			allocationBase := frame.header.AllocationBase
+			allocationSize := frame.allocationSize
+			frame.state = FrameDestroyed
+			frame.panicLine = frame.header.Line
+			frame.header.Lifecycle = uint16(FrameDestroyed)
+			g.destroyTarget = nil
+			if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
+				g.pending.from == frame.parent {
+				g.pending.target = nil
 			}
-			if frame != nil {
-				allocationBase := frame.header.AllocationBase
-				allocationSize := frame.allocationSize
-				frame.state = FrameDestroyed
-				frame.panicLine = frame.header.Line
-				frame.header.Lifecycle = uint16(FrameDestroyed)
-				g.destroyTarget = nil
-				if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
-					g.pending.from == frame.parent {
-					g.pending.target = nil
-				}
-				return unsafe.Pointer(frame), allocationBase, allocationSize, true
+			return unsafe.Pointer(frame), allocationBase, allocationSize, true
+		}
+	}
+	return releaseFrameCompilerSlow(g, storage, size, align, descriptor)
+}
+
+// ReleaseOrRetainFrameCompiler fuses ReleaseFrameCompiler with the panic-trace
+// retention check for __llgo_coro_frame_free_v1. On the ordinary non-panicking
+// dynamic frame path under !AuditEnabled, this completes in a single leaf call
+// without crossing the package boundary twice more to query panic retention.
+func ReleaseOrRetainFrameCompiler(
+	g *G, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer,
+) (raw unsafe.Pointer, total uintptr, retained, ok bool) {
+	if !AuditEnabled && g != nil {
+		frame := g.destroyTarget
+		if frame != nil && frame.header != nil && !frame.borrowedStorage() && g.frames == frame {
+			g.frames = frame.next
+			frame.next = nil
+			allocationBase := frame.header.AllocationBase
+			allocationSize := frame.allocationSize
+			frame.state = FrameDestroyed
+			frame.panicLine = frame.header.Line
+			frame.header.Lifecycle = uint16(FrameDestroyed)
+			g.destroyTarget = nil
+			if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
+				g.pending.from == frame.parent {
+				g.pending.target = nil
 			}
+			if !frame.retainPanicTrace && !g.panicUnwind {
+				return allocationBase, allocationSize, false, true
+			}
+			return retainReleasedFrameCompilerSlow(g, frame, allocationBase, allocationSize)
+		}
+	}
+	return releaseOrRetainFrameCompilerSlow(g, storage, size, align, descriptor)
+}
+
+//go:noinline
+func retainReleasedFrameCompilerSlow(
+	g *G, frame *Frame, raw unsafe.Pointer, total uintptr,
+) (unsafe.Pointer, uintptr, bool, bool) {
+	metadata := unsafe.Pointer(frame)
+	retained := RetainPendingPanicTraceFrameCompiler(g, metadata, raw, total) ||
+		RetainPanicTraceFrameCompiler(g, metadata, raw, total)
+	return raw, total, retained, true
+}
+
+//go:noinline
+func releaseOrRetainFrameCompilerSlow(
+	g *G, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer,
+) (unsafe.Pointer, uintptr, bool, bool) {
+	metadata, raw, total, ok := ReleaseFrameCompiler(g, storage, size, align, descriptor)
+	if !ok {
+		return nil, 0, false, false
+	}
+	retained := RetainPendingPanicTraceFrameCompiler(g, metadata, raw, total) ||
+		RetainPanicTraceFrameCompiler(g, metadata, raw, total)
+	return raw, total, retained, true
+}
+
+//go:noinline
+func releaseFrameCompilerSlow(
+	g *G, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer,
+) (metadata, raw unsafe.Pointer, total uintptr, ok bool) {
+	if !AuditEnabled && g != nil {
+		frame := g.destroyTarget
+		if frame != nil && frame.header != nil && !frame.borrowedStorage() && unlinkFrame(g, frame) {
+			allocationBase := frame.header.AllocationBase
+			allocationSize := frame.allocationSize
+			frame.state = FrameDestroyed
+			frame.panicLine = frame.header.Line
+			frame.header.Lifecycle = uint16(FrameDestroyed)
+			g.destroyTarget = nil
+			if g.pending.kind == pendingInlineDestroy && g.pending.target == frame &&
+				g.pending.from == frame.parent {
+				g.pending.target = nil
+			}
+			return unsafe.Pointer(frame), allocationBase, allocationSize, true
 		}
 	}
 	preempt := uint32(preemptDisabled)

@@ -129,7 +129,11 @@ func LocalPackage(cacheSlot *unsafe.Pointer, size, align uintptr) unsafe.Pointer
 //
 //go:noinline
 func LocalPackageLogical(cacheSlot *unsafe.Pointer, size, align uintptr) unsafe.Pointer {
-	ctx := getg().localContext
+	gp := getgIfPresent()
+	if gp == nil {
+		gp = getg()
+	}
+	ctx := gp.localContext
 	if ctx == nil {
 		coroRuntimeAbort("local variable accessed outside a logical Go context")
 		return nil
@@ -137,6 +141,9 @@ func LocalPackageLogical(cacheSlot *unsafe.Pointer, size, align uintptr) unsafe.
 	if cacheSlot == nil {
 		coroRuntimeAbort("nil logical local package key")
 		return nil
+	}
+	if head := ctx.blocks; head != nil && head.cacheSlot == cacheSlot {
+		return head.data
 	}
 	for block := ctx.blocks; block != nil; block = block.next {
 		if block.cacheSlot == cacheSlot {

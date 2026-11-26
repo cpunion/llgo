@@ -73,14 +73,14 @@ func TestItabCacheUsesCanonicalLockFreePublication(t *testing.T) {
 
 	core := readAtomicMetadataSource(t, atomicCacheCore)
 	findBeforeCAS := strings.Index(core, "if winner := findPair(head, first, second); winner != nil")
-	publication := strings.Index(core, "compareAndSwapPointer(&table.head")
+	publication := strings.Index(core, "compareAndSwapPointer(bucket,")
 	if findBeforeCAS < 0 || publication < 0 || findBeforeCAS >= publication {
 		t.Fatalf("PairTable.Intern no longer performs full snapshot recheck before CAS publication")
 	}
 	for _, required := range []string{
 		"candidate := &pairEntry{first: first, second: second, value: value}",
 		"for {",
-		"head := table.load()",
+		"head := (*pairEntry)(loadPointer(bucket))",
 		"candidate.next = head",
 	} {
 		if !strings.Contains(core, required) {

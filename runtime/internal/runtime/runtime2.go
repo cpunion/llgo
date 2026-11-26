@@ -69,8 +69,12 @@ type g struct {
 	m            *m
 
 	atomicstatus uint32
-	goid         uint64
-	parentGoid   uint64
+	// fastrand0 occupies existing alignment padding before goid; paired with
+	// fastrand1 in tail padding below, each goroutine gets a lock-free 64-bit
+	// PRNG state without increasing sizeof(g) on 64-bit targets.
+	fastrand0  uint32
+	goid       uint64
+	parentGoid uint64
 
 	startfn goroutineFunc
 	// startarg belongs to the pthread entry only until mstart consumes and
@@ -91,6 +95,7 @@ type g struct {
 	// context stored in a spawned task envelope from independently rooted
 	// pthread/bootstrap contexts without retaining a redundant root pointer.
 	coroEmbedded bool
+	fastrand1    uint32
 }
 
 // m represents the host execution resource running Go code. Platform-specific

@@ -1508,6 +1508,26 @@ func CoroChanSelectTry(g unsafe.Pointer, ops ...ChanOp) (isel int, recvOK, tryOK
 		var resolved coroChanExternalCommitContextV1
 		context := (*coroChanExternalCommitContextV1)(nil)
 		if op.Send {
+			if !coro.ExecutionDomainEnabled() && !op.C.closed {
+				if op.C.dataqsiz > 0 && op.C.recvq.first == nil {
+					if op.C.qcount < op.C.dataqsiz {
+						copyChanElem(chanBuf(op.C, op.C.sendx), op.Val, op.C.elemsize)
+						op.C.sendx++
+						if op.C.sendx == op.C.dataqsiz {
+							op.C.sendx = 0
+						}
+						op.C.qcount++
+						op.C.mutex.Unlock()
+						return index, true, true, false
+					}
+					op.C.mutex.Unlock()
+					continue
+				}
+				if op.C.dataqsiz == 0 && op.C.recvq.first == nil {
+					op.C.mutex.Unlock()
+					continue
+				}
+			}
 			if op.C.recvq.first != nil {
 				resolved = coroChannelExternalContextForTaskV1(task)
 				context = &resolved
@@ -1520,6 +1540,29 @@ func CoroChanSelectTry(g unsafe.Pointer, ops ...ChanOp) (isel int, recvOK, tryOK
 				return -1, false, false, true
 			}
 		} else {
+			if !coro.ExecutionDomainEnabled() {
+				if op.C.dataqsiz > 0 {
+					if op.C.qcount > 0 && op.C.sendq.first == nil {
+						elemSize := op.C.elemsize
+						copyChanElem(op.Val, chanBuf(op.C, op.C.recvx), elemSize)
+						zeroChanRecv(chanBuf(op.C, op.C.recvx), elemSize)
+						op.C.recvx++
+						if op.C.recvx == op.C.dataqsiz {
+							op.C.recvx = 0
+						}
+						op.C.qcount--
+						op.C.mutex.Unlock()
+						return index, true, true, false
+					}
+					if op.C.qcount == 0 && !op.C.closed {
+						op.C.mutex.Unlock()
+						continue
+					}
+				} else if op.C.sendq.first == nil && !op.C.closed {
+					op.C.mutex.Unlock()
+					continue
+				}
+			}
 			if op.C.sendq.first != nil {
 				resolved = coroChannelExternalContextForTaskV1(task)
 				context = &resolved

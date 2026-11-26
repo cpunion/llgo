@@ -441,6 +441,61 @@ func publishExecutorCatalogReduction(driver *ExecutorDriver) bool {
 			return driver.poll.advanceCatalogSource(&driver.sources)
 		}
 	}
+	if !AuditEnabled && source == executorCatalogTimers {
+		transaction, sources, p := &driver.poll, &driver.sources, driver.p
+		table := sources.timers
+		limit := table.scanLimit
+		if limit == 0 || uint32(transaction.cursor) >= limit {
+			return false
+		}
+		now := transaction.now
+		end := uint32(transaction.cursor) + executorTimerCatalogBatchQuantum
+		if end > limit {
+			end = limit
+		}
+		for index := uint32(transaction.cursor); index < end; index++ {
+			var slot *timerRegistrationSlot
+			if index < TimerRegistrationPageCapacity {
+				slot = &table.slots[index]
+			} else {
+				var ok bool
+				slot, ok = timerRegistrationSlotAt(table, index)
+				if !ok {
+					return false
+				}
+			}
+			if slot.state != timerRegistrationActive {
+				continue
+			}
+			if slot.control != nil && preemptLoad(slot.control) != slot.controlWord {
+				if slot.record.link.wait == nil ||
+					!RequestWaitSetCancel(p, slot.record.link.wait, ParkCancelOperation) {
+					return false
+				}
+				continue
+			}
+			if slot.deadline <= now {
+				completed, _, _, ok := table.drainDueSlotFor(p, now, index)
+				if !ok {
+					return false
+				}
+				transaction.total.timers += completed
+				transaction.total.completed += completed
+				continue
+			}
+			if !transaction.hasDeadline || slot.deadline < transaction.deadline {
+				transaction.deadline, transaction.hasDeadline = slot.deadline, true
+			}
+		}
+		transaction.cursor = uint16(end)
+		if end == limit {
+			if !table.commitTimerRegistrationMinimum(transaction.deadline, transaction.hasDeadline) ||
+				!transaction.advanceCatalogSource(sources) {
+				return false
+			}
+		}
+		return true
+	}
 	limit := uint32(1)
 	switch source {
 	case executorCatalogTimers:

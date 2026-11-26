@@ -62,7 +62,7 @@ func TestPairTableConcurrentInternReturnsCanonicalWinner(t *testing.T) {
 	}
 
 	matches := 0
-	for entry := table.load(); entry != nil; entry = entry.next {
+	for entry := table.loadBucket(unsafe.Pointer(firstKey), unsafe.Pointer(secondKey)); entry != nil; entry = entry.next {
 		if entry.first == unsafe.Pointer(firstKey) && entry.second == unsafe.Pointer(secondKey) {
 			matches++
 		}

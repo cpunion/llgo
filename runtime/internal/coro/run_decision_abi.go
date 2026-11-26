@@ -50,6 +50,38 @@ func TakeRunDecisionWords(
 	return uint32(parkOutcome), selectedCase, uint32(task), operation.SourceSlot, operation.Generation, true
 }
 
+// TakeZeroTicketRunDecisionCompiler is the fast scalar gate for
+// __llgo_coro_run_decision_take_zero_v1. Under !AuditEnabled, inline-await
+// child entry and ordinary zero-decision resume complete without constructing
+// the 6-value generic word tuple or entering the slow validation body.
+func TakeZeroTicketRunDecisionCompiler(g *G) (uint32, bool) {
+	if !AuditEnabled && g != nil {
+		if g.pending.kind == pendingInlineStart {
+			g.pending = pendingTransition{}
+			return 0, true
+		}
+		if p := g.runP; p != nil && !p.runDecisionTaken && p.runDecision == (RunDecision{}) {
+			p.runDecisionTaken = true
+			return 0, true
+		}
+	}
+	return takeZeroTicketRunDecisionSlow(g)
+}
+
+//go:noinline
+func takeZeroTicketRunDecisionSlow(g *G) (uint32, bool) {
+	outcome, caseID, taskKind, sourceSlot, generation, ok := TakeRunDecisionWordsCompiler(g, 0, 0)
+	if !ok || outcome != 0 || caseID != 0 || sourceSlot != 0 || generation != 0 {
+		return 0, false
+	}
+	switch taskKind {
+	case uint32(TaskCancelNone), uint32(TaskCancelAbort), uint32(TaskCancelShutdown):
+		return taskKind, true
+	default:
+		return 0, false
+	}
+}
+
 // TakeRunDecisionWordsCompiler is the compiler-owned scalar gate. A nested
 // static child's initial zero-ticket resume directly consumes the adjacent
 // pendingInlineStart certificate. A scheduler-issued all-zero decision uses

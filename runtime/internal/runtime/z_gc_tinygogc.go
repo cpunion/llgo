@@ -27,14 +27,14 @@ import (
 // AllocU allocates uninitialized memory.
 func AllocU(size uintptr) unsafe.Pointer {
 	ret := tinygogc.Alloc(size)
-	recordMemProfileAlloc(size)
+	recordMemProfileAllocHint(size, uintptr(ret))
 	return ret
 }
 
 // AllocZ allocates zero-initialized memory.
 func AllocZ(size uintptr) unsafe.Pointer {
 	ret := tinygogc.Alloc(size)
-	recordMemProfileAlloc(size)
+	recordMemProfileAllocHint(size, uintptr(ret))
 	return ret
 }
 

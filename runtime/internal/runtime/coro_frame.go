@@ -25,7 +25,23 @@ import (
 
 //export __llgo_coro_frame_alloc_v1
 func __llgo_coro_frame_alloc_v1(g unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) unsafe.Pointer {
-	total, ok := coro.CompilerFrameAllocationSize(size, align)
+	var total uintptr
+	var ok bool
+	if !coro.AuditEnabled {
+		if align != 0 && align&(align-1) == 0 {
+			const receiptSize = coro.CompilerFrameAllocationReceiptSize
+			max := ^uintptr(0)
+			if align-1 <= max-receiptSize {
+				overhead := receiptSize + (align - 1)
+				if size <= max-overhead {
+					total = size + overhead
+					ok = true
+				}
+			}
+		}
+	} else {
+		total, ok = coro.CompilerFrameAllocationSize(size, align)
+	}
 	if !ok {
 		coroRuntimeAbort("invalid coroutine frame allocation size")
 	}
@@ -138,15 +154,14 @@ func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status ui
 //export __llgo_coro_frame_free_v1
 func __llgo_coro_frame_free_v1(g, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) {
 	task := (*coro.G)(g)
-	metadata, raw, total, ok := coro.ReleaseFrameCompiler(task, storage, size, align, descriptor)
-	if !ok {
-		coroRuntimeAbort("invalid coroutine frame destruction")
-	}
 	// A managed child panic remains recoverable by its parent. An unhandled
 	// task panic also retains its terminal chain: every native executor owner
 	// uses the same no-return reporter, not only the static command G.
-	if coro.RetainPendingPanicTraceFrameCompiler(task, metadata, raw, total) ||
-		coro.RetainPanicTraceFrameCompiler(task, metadata, raw, total) {
+	raw, total, retained, ok := coro.ReleaseOrRetainFrameCompiler(task, storage, size, align, descriptor)
+	if !ok {
+		coroRuntimeAbort("invalid coroutine frame destruction")
+	}
+	if retained {
 		return
 	}
 	if !coroalloc.FreeFrame(raw, total) {

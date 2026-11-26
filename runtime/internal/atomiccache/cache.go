@@ -30,15 +30,27 @@ type pairEntry struct {
 	next   *pairEntry
 }
 
-// PairTable is a monotonic cache keyed by an identity pair. Entries are fully
-// initialized before publication and never removed, so a reader may retain and
-// traverse any loaded snapshot across coroutine preemption.
+const pairBucketCount = 256
+
+// PairTable is a monotonic hash-bucketed cache keyed by an identity pair.
+// Entries are fully initialized before publication and never removed, so a
+// reader may retain and traverse any loaded snapshot across coroutine
+// preemption.
 type PairTable struct {
-	head unsafe.Pointer // *pairEntry
+	buckets [pairBucketCount]unsafe.Pointer // *pairEntry
 }
 
-func (table *PairTable) load() *pairEntry {
-	return (*pairEntry)(loadPointer(&table.head))
+func pairBucketIndex(first, second uintptr) uintptr {
+	h := ((first >> 4) * 2654435761) ^ ((second >> 4) * 2246822519)
+	return (h ^ (h >> 16)) & (pairBucketCount - 1)
+}
+
+func (table *PairTable) bucket(first, second unsafe.Pointer) *unsafe.Pointer {
+	return &table.buckets[pairBucketIndex(uintptr(first), uintptr(second))]
+}
+
+func (table *PairTable) loadBucket(first, second unsafe.Pointer) *pairEntry {
+	return (*pairEntry)(loadPointer(table.bucket(first, second)))
 }
 
 func findPair(head *pairEntry, first, second unsafe.Pointer) unsafe.Pointer {
@@ -51,21 +63,39 @@ func findPair(head *pairEntry, first, second unsafe.Pointer) unsafe.Pointer {
 }
 
 func (table *PairTable) Find(first, second unsafe.Pointer) unsafe.Pointer {
-	return findPair(table.load(), first, second)
+	entry := table.loadBucket(first, second)
+	if entry == nil {
+		return nil
+	}
+	if entry.first == first && entry.second == second {
+		return entry.value
+	}
+	next := entry.next
+	if next == nil {
+		return nil
+	}
+	if next.first == first && next.second == second {
+		return next.value
+	}
+	if next.next == nil {
+		return nil
+	}
+	return findPair(next.next, first, second)
 }
 
 // Intern returns the canonical value for (first, second). A failed CAS always
-// causes a complete rescan of the new head snapshot before publication is
-// retried, so racing publishers cannot both become canonical winners.
+// causes a complete rescan of the new bucket head snapshot before publication
+// is retried, so racing publishers cannot both become canonical winners.
 func (table *PairTable) Intern(first, second, value unsafe.Pointer) unsafe.Pointer {
+	bucket := table.bucket(first, second)
 	candidate := &pairEntry{first: first, second: second, value: value}
 	for {
-		head := table.load()
+		head := (*pairEntry)(loadPointer(bucket))
 		if winner := findPair(head, first, second); winner != nil {
 			return winner
 		}
 		candidate.next = head
-		if compareAndSwapPointer(&table.head, unsafe.Pointer(head), unsafe.Pointer(candidate)) {
+		if compareAndSwapPointer(bucket, unsafe.Pointer(head), unsafe.Pointer(candidate)) {
 			return value
 		}
 	}

@@ -389,24 +389,207 @@ func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets un
 	return buckets, nextOverflow
 }
 
+func bucketTophash(b *bmap, i uintptr) uint8 {
+	return *(*uint8)(add(unsafe.Pointer(b), i))
+}
+
+func setBucketTophash(b *bmap, i uintptr, v uint8) {
+	*(*uint8)(add(unsafe.Pointer(b), i)) = v
+}
+
+func mapGenericSlotProbe(t *maptype, b *bmap, i uintptr, key unsafe.Pointer, top uint8) (matched, stop, needSlow bool) {
+	th := bucketTophash(b, i)
+	if th != top {
+		return false, th == emptyRest, false
+	}
+	k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.KeySize))
+	eq, ok := typeequalFast(t.Key, key, k)
+	if !ok {
+		return false, false, true
+	}
+	return eq, false, false
+}
+
+func mapGenericLookupPrimary(t *maptype, b *bmap, key unsafe.Pointer, top uint8) (slot uintptr, found, needSlow bool) {
+	if m, s, slow := mapGenericSlotProbe(t, b, 0, key, top); slow {
+		return 0, false, true
+	} else if m {
+		return 0, true, false
+	} else if s {
+		return 0, false, false
+	}
+	if m, s, slow := mapGenericSlotProbe(t, b, 1, key, top); slow {
+		return 0, false, true
+	} else if m {
+		return 1, true, false
+	} else if s {
+		return 0, false, false
+	}
+	if m, s, slow := mapGenericSlotProbe(t, b, 2, key, top); slow {
+		return 0, false, true
+	} else if m {
+		return 2, true, false
+	} else if s {
+		return 0, false, false
+	}
+	if m, s, slow := mapGenericSlotProbe(t, b, 3, key, top); slow {
+		return 0, false, true
+	} else if m {
+		return 3, true, false
+	} else if s {
+		return 0, false, false
+	}
+	if m, s, slow := mapGenericSlotProbe(t, b, 4, key, top); slow {
+		return 0, false, true
+	} else if m {
+		return 4, true, false
+	} else if s {
+		return 0, false, false
+	}
+	if m, s, slow := mapGenericSlotProbe(t, b, 5, key, top); slow {
+		return 0, false, true
+	} else if m {
+		return 5, true, false
+	} else if s {
+		return 0, false, false
+	}
+	if m, s, slow := mapGenericSlotProbe(t, b, 6, key, top); slow {
+		return 0, false, true
+	} else if m {
+		return 6, true, false
+	} else if s {
+		return 0, false, false
+	}
+	if m, _, slow := mapGenericSlotProbe(t, b, 7, key, top); slow {
+		return 0, false, true
+	} else if m {
+		return 7, true, false
+	}
+	return 0, false, false
+}
+
+func mapGenericAssignSlotProbe(t *maptype, b *bmap, i uintptr, key unsafe.Pointer, top uint8, inserti uintptr) (nextInserti uintptr, hit, stop, needSlow bool) {
+	th := bucketTophash(b, i)
+	if th != top {
+		if isEmpty(th) && inserti == bucketCnt {
+			inserti = i
+		}
+		return inserti, false, th == emptyRest, false
+	}
+	k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.KeySize))
+	eq, ok := typeequalFast(t.Key, key, k)
+	if !ok {
+		return inserti, false, false, true
+	}
+	return inserti, eq, false, false
+}
+
+func mapGenericAssignPrimary(t *maptype, b *bmap, key unsafe.Pointer, top uint8) (slot uintptr, hit, needSlow bool) {
+	inserti := uintptr(bucketCnt)
+	var m, s, slow bool
+	if inserti, m, s, slow = mapGenericAssignSlotProbe(t, b, 0, key, top, inserti); slow {
+		return 0, false, true
+	} else if m {
+		return 0, true, false
+	} else if s {
+		return inserti, false, false
+	}
+	if inserti, m, s, slow = mapGenericAssignSlotProbe(t, b, 1, key, top, inserti); slow {
+		return 0, false, true
+	} else if m {
+		return 1, true, false
+	} else if s {
+		return inserti, false, false
+	}
+	if inserti, m, s, slow = mapGenericAssignSlotProbe(t, b, 2, key, top, inserti); slow {
+		return 0, false, true
+	} else if m {
+		return 2, true, false
+	} else if s {
+		return inserti, false, false
+	}
+	if inserti, m, s, slow = mapGenericAssignSlotProbe(t, b, 3, key, top, inserti); slow {
+		return 0, false, true
+	} else if m {
+		return 3, true, false
+	} else if s {
+		return inserti, false, false
+	}
+	if inserti, m, s, slow = mapGenericAssignSlotProbe(t, b, 4, key, top, inserti); slow {
+		return 0, false, true
+	} else if m {
+		return 4, true, false
+	} else if s {
+		return inserti, false, false
+	}
+	if inserti, m, s, slow = mapGenericAssignSlotProbe(t, b, 5, key, top, inserti); slow {
+		return 0, false, true
+	} else if m {
+		return 5, true, false
+	} else if s {
+		return inserti, false, false
+	}
+	if inserti, m, s, slow = mapGenericAssignSlotProbe(t, b, 6, key, top, inserti); slow {
+		return 0, false, true
+	} else if m {
+		return 6, true, false
+	} else if s {
+		return inserti, false, false
+	}
+	if inserti, m, _, slow = mapGenericAssignSlotProbe(t, b, 7, key, top, inserti); slow {
+		return 0, false, true
+	} else if m {
+		return 7, true, false
+	}
+	return inserti, false, false
+}
+
 // mapaccess1 returns a pointer to h[key].  Never returns nil, instead
 // it will return a reference to the zero object for the elem type if
 // the key is not in the map.
 // NOTE: The returned pointer may keep the whole map live, so don't
 // hold onto it for very long.
 func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
-	// if raceenabled && h != nil {
-	// 	callerpc := getcallerpc()
-	// 	pc := abi.FuncPCABIInternal(mapaccess1)
-	// 	racereadpc(unsafe.Pointer(h), callerpc, pc)
-	// 	raceReadObjectPC(t.Key, key, callerpc, pc)
-	// }
-	// if msanenabled && h != nil {
-	// 	msanread(key, t.Key.Size_)
-	// }
-	// if asanenabled && h != nil {
-	// 	asanread(key, t.Key.Size_)
-	// }
+	if elem := mapaccess1_fast(t, h, key); elem != nil {
+		return elem
+	}
+	return mapaccess1_slow(t, h, key)
+}
+
+func mapaccess1_fast(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
+	if h == nil || h.count == 0 {
+		if t.HashMightPanic() {
+			if _, ok := typehashFast(t.Key, key, 0); !ok {
+				return nil
+			}
+		}
+		return unsafe.Pointer(&zeroVal[0])
+	}
+	if h.flags&hashWriting != 0 {
+		fatal("concurrent map read and map write")
+	}
+	if h.oldbuckets != nil || t.IndirectKey() || t.IndirectElem() {
+		return nil
+	}
+	hash, ok := typehashFast(t.Key, key, uintptr(h.hash0))
+	if !ok {
+		return nil
+	}
+	b := (*bmap)(add(h.buckets, (hash&bucketMask(h.B))*uintptr(t.BucketSize)))
+	if b.overflow(t) != nil {
+		return nil
+	}
+	slot, found, needSlow := mapGenericLookupPrimary(t, b, key, tophash(hash))
+	if needSlow {
+		return nil
+	}
+	if found {
+		return add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.KeySize)+slot*uintptr(t.ValueSize))
+	}
+	return unsafe.Pointer(&zeroVal[0])
+}
+
+func mapaccess1_slow(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	if h == nil || h.count == 0 {
 		if t.HashMightPanic() {
 			typehashImpl(t.Key, key, 0) // see issue 23734
@@ -456,6 +639,46 @@ bucketloop:
 }
 
 func mapaccess2(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, bool) {
+	if elem, ok := mapaccess2_fast(t, h, key); elem != nil {
+		return elem, ok
+	}
+	return mapaccess2_slow(t, h, key)
+}
+
+func mapaccess2_fast(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, bool) {
+	if h == nil || h.count == 0 {
+		if t.HashMightPanic() {
+			if _, ok := typehashFast(t.Key, key, 0); !ok {
+				return nil, false
+			}
+		}
+		return unsafe.Pointer(&zeroVal[0]), false
+	}
+	if h.flags&hashWriting != 0 {
+		fatal("concurrent map read and map write")
+	}
+	if h.oldbuckets != nil || t.IndirectKey() || t.IndirectElem() {
+		return nil, false
+	}
+	hash, ok := typehashFast(t.Key, key, uintptr(h.hash0))
+	if !ok {
+		return nil, false
+	}
+	b := (*bmap)(add(h.buckets, (hash&bucketMask(h.B))*uintptr(t.BucketSize)))
+	if b.overflow(t) != nil {
+		return nil, false
+	}
+	slot, found, needSlow := mapGenericLookupPrimary(t, b, key, tophash(hash))
+	if needSlow {
+		return nil, false
+	}
+	if found {
+		return add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.KeySize)+slot*uintptr(t.ValueSize)), true
+	}
+	return unsafe.Pointer(&zeroVal[0]), false
+}
+
+func mapaccess2_slow(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, bool) {
 	// if raceenabled && h != nil {
 	// 	callerpc := getcallerpc()
 	// 	pc := abi.FuncPCABIInternal(mapaccess2)
@@ -578,6 +801,66 @@ func mapaccess2_fat(t *maptype, h *hmap, key, zero unsafe.Pointer) (unsafe.Point
 
 // Like mapaccess, but allocates a slot for the key if it is not present in the map.
 func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
+	if elem := mapassign_fast(t, h, key); elem != nil {
+		return elem
+	}
+	return mapassign_slow(t, h, key)
+}
+
+func mapAssignPrimaryCommit(t *maptype, h *hmap, b *bmap, key unsafe.Pointer, top uint8, slot uintptr, hit bool) unsafe.Pointer {
+	if hit {
+		if t.NeedKeyUpdate() {
+			k := add(unsafe.Pointer(b), dataOffset+slot*uintptr(t.KeySize))
+			typedmemmove(t.Key, k, key)
+		}
+		elem := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.KeySize)+slot*uintptr(t.ValueSize))
+		if h.flags&hashWriting == 0 {
+			fatal("concurrent map writes")
+		}
+		h.flags &^= hashWriting
+		return elem
+	}
+	if slot < bucketCnt && !overLoadFactor(h.count+1, h.B) && !tooManyOverflowBuckets(h.noverflow, h.B) {
+		insertk := add(unsafe.Pointer(b), dataOffset+slot*uintptr(t.KeySize))
+		elem := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.KeySize)+slot*uintptr(t.ValueSize))
+		typedmemmove(t.Key, insertk, key)
+		setBucketTophash(b, slot, top)
+		h.count++
+		if h.flags&hashWriting == 0 {
+			fatal("concurrent map writes")
+		}
+		h.flags &^= hashWriting
+		return elem
+	}
+	h.flags &^= hashWriting
+	return nil
+}
+
+func mapassign_fast(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
+	if h == nil || h.buckets == nil || h.growing() || t.IndirectKey() || t.IndirectElem() {
+		return nil
+	}
+	if h.flags&hashWriting != 0 {
+		fatal("concurrent map writes")
+	}
+	hash, ok := typehashFast(t.Key, key, uintptr(h.hash0))
+	if !ok {
+		return nil
+	}
+	h.flags ^= hashWriting
+	b := (*bmap)(add(h.buckets, (hash&bucketMask(h.B))*uintptr(t.BucketSize)))
+	if b.overflow(t) == nil {
+		top := tophash(hash)
+		slot, hit, needSlow := mapGenericAssignPrimary(t, b, key, top)
+		if !needSlow {
+			return mapAssignPrimaryCommit(t, h, b, key, top, slot, hit)
+		}
+	}
+	h.flags &^= hashWriting
+	return nil
+}
+
+func mapassign_slow(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	if h == nil {
 		panic(plainError("assignment to entry in nil map"))
 	}
@@ -696,6 +979,85 @@ done:
 }
 
 func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
+	if mapdelete_fast(t, h, key) {
+		return
+	}
+	mapdelete_slow(t, h, key)
+}
+
+func mapDeletePrimaryClear(t *maptype, h *hmap, b *bmap, slot uintptr) bool {
+	// Handle the non-trailing slot or singleton slot-0 case without the
+	// multi-slot emptyOne->emptyRest backward scan loop.
+	nextIsRest := slot == bucketCnt-1 || bucketTophash(b, slot+1) == emptyRest
+	if nextIsRest && slot != 0 {
+		h.flags &^= hashWriting
+		return false
+	}
+	if t.Key.PtrBytes != 0 {
+		k := add(unsafe.Pointer(b), dataOffset+slot*uintptr(t.KeySize))
+		memclrHasPointers(k, t.Key.Size_)
+	}
+	e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.KeySize)+slot*uintptr(t.ValueSize))
+	if t.Elem.PtrBytes != 0 {
+		memclrHasPointers(e, t.Elem.Size_)
+	} else {
+		memclrNoHeapPointers(e, t.Elem.Size_)
+	}
+	if nextIsRest {
+		setBucketTophash(b, slot, emptyRest)
+	} else {
+		setBucketTophash(b, slot, emptyOne)
+	}
+	h.count--
+	if h.count == 0 {
+		h.hash0 = fastrand()
+	}
+	if h.flags&hashWriting == 0 {
+		fatal("concurrent map writes")
+	}
+	h.flags &^= hashWriting
+	return true
+}
+
+func mapdelete_fast(t *maptype, h *hmap, key unsafe.Pointer) bool {
+	if h == nil || h.count == 0 {
+		if t.HashMightPanic() {
+			if _, ok := typehashFast(t.Key, key, 0); !ok {
+				return false
+			}
+		}
+		return true
+	}
+	if h.flags&hashWriting != 0 {
+		fatal("concurrent map writes")
+	}
+	if h.growing() || t.IndirectKey() || t.IndirectElem() {
+		return false
+	}
+	hash, ok := typehashFast(t.Key, key, uintptr(h.hash0))
+	if !ok {
+		return false
+	}
+	h.flags ^= hashWriting
+	b := (*bmap)(add(h.buckets, (hash&bucketMask(h.B))*uintptr(t.BucketSize)))
+	if b.overflow(t) == nil {
+		slot, found, needSlow := mapGenericLookupPrimary(t, b, key, tophash(hash))
+		if !needSlow {
+			if !found {
+				if h.flags&hashWriting == 0 {
+					fatal("concurrent map writes")
+				}
+				h.flags &^= hashWriting
+				return true
+			}
+			return mapDeletePrimaryClear(t, h, b, slot)
+		}
+	}
+	h.flags &^= hashWriting
+	return false
+}
+
+func mapdelete_slow(t *maptype, h *hmap, key unsafe.Pointer) {
 	// if raceenabled && h != nil {
 	// 	callerpc := getcallerpc()
 	// 	pc := abi.FuncPCABIInternal(mapdelete)
@@ -811,21 +1173,11 @@ search:
 	h.flags &^= hashWriting
 }
 
-// mapiterinit initializes the hiter struct used for ranging over maps.
-// The hiter struct pointed to by 'it' is allocated on the stack
-// by the compilers order pass or on the heap by reflect_mapiterinit.
-// Both need to have zeroed hiter since the struct contains pointers.
-func mapiterinit(t *maptype, h *hmap, it *hiter) {
-	// if raceenabled && h != nil {
-	// 	callerpc := getcallerpc()
-	// 	racereadpc(unsafe.Pointer(h), callerpc, abi.FuncPCABIInternal(mapiterinit))
-	// }
-
+func mapiterinitFast(t *maptype, h *hmap, it *hiter) bool {
 	it.t = t
 	if h == nil || h.count == 0 {
-		return
+		return true
 	}
-
 	if unsafe.Sizeof(hiter{})/goarch.PtrSize != 12 {
 		throw("hash_iter size incorrect") // see cmd/compile/internal/reflectdata/reflect.go
 	}
@@ -835,10 +1187,6 @@ func mapiterinit(t *maptype, h *hmap, it *hiter) {
 	it.B = h.B
 	it.buckets = h.buckets
 	if t.Bucket.PtrBytes == 0 {
-		// Allocate the current slice and remember pointers to both current and old.
-		// This preserves all relevant overflow buckets alive even if
-		// the table grows and/or overflow buckets are added to the table
-		// while we are iterating.
 		h.createOverflow()
 		it.overflow = h.extra.overflow
 		it.oldoverflow = h.extra.oldoverflow
@@ -863,10 +1211,158 @@ func mapiterinit(t *maptype, h *hmap, it *hiter) {
 		atomicOr8(&h.flags, iterator|oldIterator)
 	}
 
-	mapiternext(it)
+	return mapiternextFast(it)
+}
+
+// mapiterinit initializes the hiter struct used for ranging over maps.
+// The hiter struct pointed to by 'it' is allocated on the stack
+// by the compilers order pass or on the heap by reflect_mapiterinit.
+// Both need to have zeroed hiter since the struct contains pointers.
+func mapiterinit(t *maptype, h *hmap, it *hiter) {
+	if mapiterinitFast(t, h, it) {
+		return
+	}
+	mapiternextSlow(it)
+}
+
+func mapIterProbeSlotFast(t *maptype, b *bmap, it *hiter, bucket uintptr, i uint8) (found, needSlow bool) {
+	offi := (i + it.offset) & (bucketCnt - 1)
+	th := bucketTophash(b, uintptr(offi))
+	if isEmpty(th) || th == evacuatedEmpty {
+		return false, false
+	}
+	if th == evacuatedX || th == evacuatedY {
+		return false, true
+	}
+	k := add(unsafe.Pointer(b), dataOffset+uintptr(offi)*uintptr(t.KeySize))
+	if t.IndirectKey() {
+		k = *((*unsafe.Pointer)(k))
+	}
+	e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.KeySize)+uintptr(offi)*uintptr(t.ValueSize))
+	if t.IndirectElem() {
+		e = *((*unsafe.Pointer)(e))
+	}
+	it.key = k
+	it.elem = e
+	it.bucket = bucket
+	if it.bptr != b {
+		it.bptr = b
+	}
+	it.i = i + 1
+	it.checkBucket = noCheck
+	return true, false
+}
+
+func mapIterScanBucketFast(t *maptype, b *bmap, it *hiter, bucket uintptr, startI uint8) (found, needSlow bool) {
+	if startI <= 0 {
+		if f, s := mapIterProbeSlotFast(t, b, it, bucket, 0); f || s {
+			return f, s
+		}
+	}
+	if startI <= 1 {
+		if f, s := mapIterProbeSlotFast(t, b, it, bucket, 1); f || s {
+			return f, s
+		}
+	}
+	if startI <= 2 {
+		if f, s := mapIterProbeSlotFast(t, b, it, bucket, 2); f || s {
+			return f, s
+		}
+	}
+	if startI <= 3 {
+		if f, s := mapIterProbeSlotFast(t, b, it, bucket, 3); f || s {
+			return f, s
+		}
+	}
+	if startI <= 4 {
+		if f, s := mapIterProbeSlotFast(t, b, it, bucket, 4); f || s {
+			return f, s
+		}
+	}
+	if startI <= 5 {
+		if f, s := mapIterProbeSlotFast(t, b, it, bucket, 5); f || s {
+			return f, s
+		}
+	}
+	if startI <= 6 {
+		if f, s := mapIterProbeSlotFast(t, b, it, bucket, 6); f || s {
+			return f, s
+		}
+	}
+	if startI <= 7 {
+		if f, s := mapIterProbeSlotFast(t, b, it, bucket, 7); f || s {
+			return f, s
+		}
+	}
+	return false, false
+}
+
+func mapiternextFast(it *hiter) bool {
+	h := it.h
+	if h.flags&hashWriting != 0 {
+		fatal("concurrent map iteration and map write")
+	}
+	if h.growing() {
+		return false
+	}
+	t := it.t
+	bucket := it.bucket
+	b := it.bptr
+	i := it.i
+	if b != nil && it.checkBucket != noCheck {
+		return false
+	}
+	if b != nil {
+		if found, needSlow := mapIterScanBucketFast(t, b, it, bucket, i); needSlow {
+			return false
+		} else if found {
+			return true
+		}
+		if b.overflow(t) != nil {
+			return false
+		}
+		b = nil
+	}
+	if bucket == it.startBucket && it.wrapped {
+		it.key = nil
+		it.elem = nil
+		it.bptr = nil
+		it.i = 0
+		return true
+	}
+	b = (*bmap)(add(it.buckets, bucket*uintptr(t.BucketSize)))
+	nextBucket := bucket + 1
+	wrapped := it.wrapped
+	if nextBucket == bucketShift(it.B) {
+		nextBucket = 0
+		wrapped = true
+	}
+	if found, needSlow := mapIterScanBucketFast(t, b, it, nextBucket, 0); needSlow {
+		return false
+	} else if found {
+		it.wrapped = wrapped
+		return true
+	}
+	if b.overflow(t) == nil && nextBucket == it.startBucket && wrapped {
+		it.key = nil
+		it.elem = nil
+		it.bptr = nil
+		it.bucket = nextBucket
+		it.wrapped = true
+		it.i = 0
+		return true
+	}
+	return false
 }
 
 func mapiternext(it *hiter) {
+	if mapiternextFast(it) {
+		return
+	}
+	mapiternextSlow(it)
+}
+
+func mapiternextSlow(it *hiter) {
 	h := it.h
 	// if raceenabled {
 	// 	callerpc := getcallerpc()

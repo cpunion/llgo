@@ -184,3 +184,122 @@ func TestInterfaceEqualityAcceptsDistinctItabsForSameDynamicType(t *testing.T) {
 		t.Fatal("interface values with different dynamic types compare equal")
 	}
 }
+
+func TestTypeHashAndEqualFastMatchSlow(t *testing.T) {
+	intType := staticTestType(abi.Int, unsafe.Sizeof(int(0)), "int")
+	intType.TFlag = abi.TFlagRegularMemory
+	u32Type := staticTestType(abi.Uint32, 4, "uint32")
+	u32Type.TFlag = abi.TFlagRegularMemory
+	stringType := staticTestType(abi.String, unsafe.Sizeof(""), "string")
+
+	// Direct-iface and non-direct-iface empty interface keys
+	efaceType := &abi.InterfaceType{
+		Type: abi.Type{
+			Size_: unsafe.Sizeof(eface{}),
+			Kind_: uint8(abi.Interface),
+			Str_:  "interface {}",
+		},
+	}
+	ptrType := staticTestType(abi.Pointer, unsafe.Sizeof(uintptr(0)), "*int")
+	ptrType.TFlag = abi.TFlagRegularMemory
+	ptrType.Kind_ |= abi.KindDirectIface
+	target1, target2 := 1, 2
+	e1 := eface{_type: ptrType, data: unsafe.Pointer(&target1)}
+	e2 := eface{_type: ptrType, data: unsafe.Pointer(&target1)}
+	e3 := eface{_type: ptrType, data: unsafe.Pointer(&target2)}
+	for _, seed := range []uintptr{0, 17, 0x9e3779b9} {
+		hFast, ok := typehashFast(&efaceType.Type, unsafe.Pointer(&e1), seed)
+		if !ok {
+			t.Fatal("typehashFast did not handle direct-iface pointer")
+		}
+		if hSlow := typehashSlow(&efaceType.Type, unsafe.Pointer(&e1), seed); hFast != hSlow {
+			t.Fatalf("direct-iface hash mismatch: fast=%#x slow=%#x", hFast, hSlow)
+		}
+	}
+	if eq, ok := typeequalFast(&efaceType.Type, unsafe.Pointer(&e1), unsafe.Pointer(&e2)); !ok || !eq {
+		t.Fatalf("direct-iface equal = (%t, %t), want (true, true)", eq, ok)
+	}
+	if eq, ok := typeequalFast(&efaceType.Type, unsafe.Pointer(&e1), unsafe.Pointer(&e3)); !ok || eq {
+		t.Fatalf("direct-iface unequal = (%t, %t), want (false, true)", eq, ok)
+	}
+
+	s1, s2 := "alpha-key", "alpha-key"
+	es1 := eface{_type: stringType, data: unsafe.Pointer(&s1)}
+	es2 := eface{_type: stringType, data: unsafe.Pointer(&s2)}
+	if hFast, ok := typehashFast(&efaceType.Type, unsafe.Pointer(&es1), 42); !ok || hFast != typehashSlow(&efaceType.Type, unsafe.Pointer(&es1), 42) {
+		t.Fatalf("string eface fast/slow mismatch: fast=%#x ok=%t slow=%#x", hFast, ok, typehashSlow(&efaceType.Type, unsafe.Pointer(&es1), 42))
+	}
+	if eq, ok := typeequalFast(&efaceType.Type, unsafe.Pointer(&es1), unsafe.Pointer(&es2)); !ok || !eq {
+		t.Fatalf("string eface equal = (%t, %t), want (true, true)", eq, ok)
+	}
+
+	// 4-field struct key (matches net/http.connectMethodKey shape)
+	type fourKey struct {
+		A string
+		B string
+		C uint32
+		D int
+	}
+	sType := &abi.StructType{
+		Type: abi.Type{
+			Size_: unsafe.Sizeof(fourKey{}),
+			Kind_: uint8(abi.Struct),
+			Str_:  "fourKey",
+		},
+		Fields: []abi.StructField{
+			{Name_: "A", Typ: stringType, Offset: unsafe.Offsetof(fourKey{}.A)},
+			{Name_: "B", Typ: stringType, Offset: unsafe.Offsetof(fourKey{}.B)},
+			{Name_: "C", Typ: u32Type, Offset: unsafe.Offsetof(fourKey{}.C)},
+			{Name_: "D", Typ: intType, Offset: unsafe.Offsetof(fourKey{}.D)},
+		},
+	}
+	k1 := fourKey{"http", "127.0.0.1:8080", 7, 99}
+	k2 := fourKey{"http", "127.0.0.1:8080", 7, 99}
+	k3 := fourKey{"http", "127.0.0.1:8080", 8, 99}
+	hFast, ok := typehashFast(&sType.Type, unsafe.Pointer(&k1), 12345)
+	if !ok {
+		t.Fatal("typehashFast did not handle 4-field struct")
+	}
+	if hSlow := typehashSlow(&sType.Type, unsafe.Pointer(&k1), 12345); hFast != hSlow {
+		t.Fatalf("4-field struct hash mismatch: fast=%#x slow=%#x", hFast, hSlow)
+	}
+	if eq, ok := typeequalFast(&sType.Type, unsafe.Pointer(&k1), unsafe.Pointer(&k2)); !ok || !eq {
+		t.Fatalf("4-field struct equal = (%t, %t), want (true, true)", eq, ok)
+	}
+	if eq, ok := typeequalFast(&sType.Type, unsafe.Pointer(&k1), unsafe.Pointer(&k3)); !ok || eq {
+		t.Fatalf("4-field struct unequal = (%t, %t), want (false, true)", eq, ok)
+	}
+}
+
+func TestMemhashShortAndWordMatchReference(t *testing.T) {
+	buf := make([]byte, 64)
+	for i := range buf {
+		buf[i] = byte(i*37 + 11)
+	}
+	for _, seed := range []uintptr{0, 1, 0x12345678} {
+		for n := uintptr(0); n <= 48; n++ {
+			var p unsafe.Pointer
+			if n > 0 {
+				p = unsafe.Pointer(&buf[0])
+			}
+			got, ok := memhashShort(p, seed, n)
+			if n <= 24 && !ok {
+				t.Fatalf("memhashShort rejected len %d", n)
+			}
+			if ok && n > 16 {
+				want := memhashLong(p, seed, n)
+				if got != want {
+					t.Fatalf("memhashShort(len=%d, seed=%#x)=%#x != memhashLong=%#x", n, seed, got, want)
+				}
+			}
+		}
+		v32 := uint32(0x13579bdf)
+		if got, want := memhashWord32(v32, seed), memhash32(unsafe.Pointer(&v32), seed); got != want {
+			t.Fatalf("memhashWord32=%#x != memhash32=%#x", got, want)
+		}
+		v64 := uint64(0x0123456789abcdef)
+		if got, want := memhashWord64(v64, seed), memhash64(unsafe.Pointer(&v64), seed); got != want {
+			t.Fatalf("memhashWord64=%#x != memhash64=%#x", got, want)
+		}
+	}
+}

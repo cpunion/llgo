@@ -388,6 +388,9 @@ func validResumeCleanupPlan(record *WaitSetRecord, plan *ResumeCleanupPlan) bool
 // the same compiler-owned frame graph again. Public binding and whole-G audit
 // boundaries continue to call validResumeCleanupPlan.
 func validTrustedResumeCleanupPlanState(record *WaitSetRecord, plan *ResumeCleanupPlan) bool {
+	if !AuditEnabled {
+		return record != nil && plan != nil && plan.packet != nil && record.g != nil
+	}
 	if record == nil || plan == nil || record.resume != unsafe.Pointer(plan) ||
 		record.resumeKind != resumeBindingCleanup || plan.verified != resumeCleanupPlanVerifiedV1 ||
 		plan.packet == nil || plan.packet.state != resumePacketBound ||
@@ -434,10 +437,12 @@ func beginResumeCleanup(record *WaitSetRecord, plan *ResumeCleanupPlan) bool {
 		if caseID == 0 || caseID > plan.count || !lease.Valid() {
 			return false
 		}
-		id := resumeCleanupIDAt(plan, caseID-1)
-		leaseID, leaseOK := lease.ID()
-		if id == nil || !leaseOK || *id != leaseID {
-			return false
+		if AuditEnabled {
+			id := resumeCleanupIDAt(plan, caseID-1)
+			leaseID, leaseOK := lease.ID()
+			if id == nil || !leaseOK || *id != leaseID {
+				return false
+			}
 		}
 	case ParkOutcomeCanceled:
 		if caseID != 0 || lease.Valid() {
@@ -448,7 +453,7 @@ func beginResumeCleanup(record *WaitSetRecord, plan *ResumeCleanupPlan) bool {
 	}
 	plan.outcome, plan.caseID, plan.lease = outcome, caseID, lease
 	plan.phase = resumeCleanupRuntime
-	return validTrustedResumeCleanupPlanState(record, plan)
+	return !AuditEnabled || validTrustedResumeCleanupPlanState(record, plan)
 }
 
 // ResumeCleanupStep is one direct-runtime typed cleanup reduction. The
@@ -727,6 +732,72 @@ func finishSingleClaimlessResumeCleanup(
 	return true, finalizeResumeCleanup(record, plan)
 }
 
+// finishSmallSelectResumeCleanup collapses Confirm -> Claim -> Result ->
+// Recycle -> Finalize for small non-audited channel select cleanup plans so a
+// 2..4 case select wakeup avoids 6+ extra scheduler cursor round-trips while
+// preserving the exact same ordering and invariants.
+func finishSmallSelectResumeCleanup(
+	sources *ExecutorSourceSet,
+	p *P,
+	record *WaitSetRecord,
+	plan *ResumeCleanupPlan,
+) (finalized bool, ok bool) {
+	for index := uint32(0); index < plan.count; index++ {
+		id := resumeCleanupIDAt(plan, index)
+		if id == nil || *id != (OperationID{}) && !confirmResumeCleanupOperation(sources, p, *id) {
+			return false, false
+		}
+	}
+	if !sources.channel.ResetSelectClaimAfterConfirmed(p, plan.claim, plan.count, plan.count) {
+		return false, false
+	}
+	if plan.lease.Valid() {
+		if plan.outcome != ParkOutcomeCompleted || plan.caseID == 0 {
+			return false, false
+		}
+		id := resumeCleanupIDAt(plan, plan.caseID-1)
+		if id == nil || *id == (OperationID{}) {
+			return false, false
+		}
+		result, taken := takeResumeCleanupResult(
+			sources,
+			p,
+			*id,
+			plan.lease,
+			&plan.packet.scalar,
+			&plan.small,
+		)
+		if !taken {
+			return false, false
+		}
+		plan.result = result
+		preferredRoute, routeOK := resumeCleanupCompletionRoute(sources, p, *id)
+		if !routeOK || !setConsumedParkPreferredRoute(
+			&record.g.park,
+			plan.ticket,
+			preferredRoute,
+		) {
+			return false, false
+		}
+	} else if plan.outcome == ParkOutcomeCompleted {
+		return false, false
+	}
+	plan.lease = OperationResultLease{}
+	for index := uint32(0); index < plan.count; index++ {
+		id := resumeCleanupIDAt(plan, index)
+		if id == nil {
+			return false, false
+		}
+		if *id != (OperationID{}) {
+			if !recycleResumeCleanupOperation(sources, p, *id) {
+				return false, false
+			}
+			*id = OperationID{}
+		}
+	}
+	return true, finalizeResumeCleanup(record, plan)
+}
+
 // advanceResumeCleanupCore performs one source-neutral bounded reduction after
 // the runtime has removed every typed queue node.
 func advanceResumeCleanupCore(
@@ -742,6 +813,10 @@ func advanceResumeCleanupCore(
 	if plan.phase == resumeCleanupConfirm && plan.index == 0 && plan.count == 1 &&
 		plan.runtime == 1 && plan.claim == nil {
 		return finishSingleClaimlessResumeCleanup(sources, p, record, plan)
+	}
+	if !AuditEnabled && plan.phase == resumeCleanupConfirm && plan.index == 0 &&
+		plan.count <= 4 && plan.claim != nil && plan.kind == ResumeCleanupChannelSelect {
+		return finishSmallSelectResumeCleanup(sources, p, record, plan)
 	}
 	switch plan.phase {
 	case resumeCleanupConfirm:

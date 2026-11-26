@@ -674,9 +674,52 @@ func chanTryRecvLocked(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, try
 }
 
 func ChanTryRecv(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, tryOK bool) {
-	if p == nil {
-		return false, false
+	if r, t, handled := chanTryRecvFast(p, v, eltSize); handled {
+		return r, t
 	}
+	return chanTryRecvSlow(p, v, eltSize)
+}
+
+func chanTryRecvFast(p *Chan, v unsafe.Pointer, eltSize int) (recvOK, tryOK, handled bool) {
+	if p == nil {
+		return false, false, true
+	}
+	if coro.ExecutionDomainEnabled() {
+		return false, false, false
+	}
+	p.mutex.Lock()
+	if p.dataqsiz > 0 {
+		if p.qcount == 0 {
+			if !p.closed {
+				p.mutex.Unlock()
+				return false, false, true
+			}
+			elemSize := p.elemsize
+			zeroChanRecv(v, elemSize)
+			p.mutex.Unlock()
+			return false, true, true
+		}
+		if p.sendq.first == nil {
+			elemSize := p.elemsize
+			copyChanElem(v, chanBuf(p, p.recvx), elemSize)
+			zeroChanRecv(chanBuf(p, p.recvx), elemSize)
+			p.recvx++
+			if p.recvx == p.dataqsiz {
+				p.recvx = 0
+			}
+			p.qcount--
+			p.mutex.Unlock()
+			return true, true, true
+		}
+	} else if p.sendq.first == nil && !p.closed {
+		p.mutex.Unlock()
+		return false, false, true
+	}
+	p.mutex.Unlock()
+	return false, false, false
+}
+
+func chanTryRecvSlow(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, tryOK bool) {
 	p.mutex.Lock()
 	recvOK, tryOK = chanTryRecvLocked(p, v, eltSize)
 	p.mutex.Unlock()

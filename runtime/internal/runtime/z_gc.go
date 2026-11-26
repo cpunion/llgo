@@ -28,14 +28,14 @@ import (
 // AllocU allocates uninitialized memory.
 func AllocU(size uintptr) unsafe.Pointer {
 	ret := coroRuntimeGCMalloc(size)
-	recordMemProfileAlloc(size)
+	recordMemProfileAllocHint(size, uintptr(ret))
 	return ret
 }
 
 // AllocZ allocates zero-initialized memory.
 func AllocZ(size uintptr) unsafe.Pointer {
 	ret := coroRuntimeGCMalloc(size)
-	recordMemProfileAlloc(size)
+	recordMemProfileAllocHint(size, uintptr(ret))
 	return c.Memset(ret, 0, size)
 }
 

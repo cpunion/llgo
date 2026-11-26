@@ -94,8 +94,16 @@ func NewItab(inter *InterfaceType, typ *Type) *Itab {
 	if i := findItab(inter, typ); i != nil {
 		return i
 	}
+	return newItabSlow(inter, typ)
+}
+
+func newItabSlow(inter *InterfaceType, typ *Type) *Itab {
 	n := len(inter.Methods)
-	size := itabHdrSize + uintptr(n)*pointerSize
+	allocMethods := n
+	if allocMethods == 0 {
+		allocMethods = 1
+	}
+	size := itabHdrSize + uintptr(allocMethods)*pointerSize
 	ptr := AllocU(size)
 
 	ret := (*itab)(ptr)
@@ -124,10 +132,7 @@ func NewItab(inter *InterfaceType, typ *Type) *Itab {
 			*c.Advance(data, i) = fn
 		}
 	}
-	if ret.fun[0] != nil {
-		return addItab(ret)
-	}
-	return ret
+	return addItab(ret)
 }
 
 // findMethod searches for an interface method in the type's method set.
@@ -206,6 +211,9 @@ func MatchesClosure(T, V *abi.Type) bool {
 	}
 	if V.IsClosure() {
 		V = V.StructType().Fields[0].Typ
+	}
+	if T == V {
+		return true
 	}
 	return identicalFuncType(T, V)
 }
@@ -295,24 +303,67 @@ func interfaceImplementation(T, V *abi.Type) (missing *abi.Imethod, ok bool) {
 
 // Implements reports whether the type V implements the interface type T.
 func Implements(T, V *abi.Type) bool {
+	if T == nil || V == nil || T.Kind() != abi.Interface {
+		return false
+	}
+	t := (*abi.InterfaceType)(unsafe.Pointer(T))
+	if len(t.Methods) == 0 {
+		return true
+	}
+	if V.Kind() != abi.Interface {
+		if i := findItab(t, V); i != nil {
+			return i.fun[0] != nil
+		}
+		return implementsConcreteSlow(t, V)
+	}
+	return implementsInterfaceSlow(T, V)
+}
+
+func implementsConcreteSlow(t *abi.InterfaceType, V *abi.Type) bool {
+	i := newItabSlow(t, V)
+	return i != nil && i.fun[0] != nil
+}
+
+func implementsInterfaceSlow(T, V *abi.Type) bool {
 	_, ok := interfaceImplementation(T, V)
 	return ok
 }
 
 func EfaceEqual(v, u eface) bool {
+	if eq, handled := efaceEqualFast(v, u); handled {
+		return eq
+	}
+	return efaceEqualSlow(v._type, v.data, u.data)
+}
+
+func efaceEqualFast(v, u eface) (eq, handled bool) {
 	if v._type == nil || u._type == nil {
-		return v._type == u._type
+		return v._type == u._type, true
 	}
-	if v._type != u._type {
-		return false
+	t := v._type
+	if t != u._type {
+		return false, true
 	}
-	if v._type.Equal == nil {
-		panic(errorString("comparing uncomparable type " + v._type.String()))
+	if t.Equal == nil {
+		return false, false
 	}
-	if isDirectIface(v._type) {
-		return v.data == u.data
+	if isDirectIface(t) {
+		return v.data == u.data, true
 	}
-	return typeequal(v._type, v.data, u.data)
+	if t.TFlag&abi.TFlagRegularMemory != 0 {
+		return memequal(v.data, u.data, t.Size_, t.Align_), true
+	}
+	if t.Kind() == abi.String {
+		return strequal(v.data, u.data), true
+	}
+	return false, false
+}
+
+func efaceEqualSlow(t *_type, p, q unsafe.Pointer) bool {
+	if t.Equal == nil {
+		panic(errorString("comparing uncomparable type " + t.String()))
+	}
+	return typeequal(t, p, q)
 }
 
 func (v eface) Kind() abi.Kind {
