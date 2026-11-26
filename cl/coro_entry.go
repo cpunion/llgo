@@ -844,7 +844,7 @@ func (c *Compilation) preflightCoroPlan() error {
 				}
 			}
 		}
-		planCoroPhysicalSyncRamps(physicalStage, plan, universe.coroProgramIR, universe.Resolve, recoverCheck, reflectCheck, hasAllocZ)
+		planCoroPhysicalSyncRamps(physicalStage, universe.prog, plan, universe.coroProgramIR, universe.Resolve, recoverCheck, reflectCheck, hasAllocZ)
 		if err := universe.coroProgramIR.commitPhysicalFunctionPlans(physicalStage, physicalExpected); err != nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine physical preflight: commit ProgramIR: %w", err)
 			return

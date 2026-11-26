@@ -1077,3 +1077,336 @@ func Entry(flag bool) {
 		t.Fatalf("expected local nil fault case (i32 8) in %s:\n%s", coroOutcomePropagateHelperNameV1, irText)
 	}
 }
+
+func TestCoroSyncRampBoundedLoopLeafEarlyExitFullScanAndCallerPreempt(t *testing.T) {
+	program := newEmissionTestProgram()
+	program.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	demoPkg := program.addPackage(t, "demo", `package demo
+
+var escapeTbl = [128]uint8{'"': 1, '\\': 1, '<': 1, '>': 1, '&': 1}
+var tokenTbl = [128]bool{'a': true, 'b': true, '-': true}
+
+func ConsumeWS(b []byte) (n int) {
+	for len(b) > n && (b[n] == ' ' || b[n] == '\t' || b[n] == '\r' || b[n] == '\n') {
+		n++
+	}
+	return n
+}
+
+func ConsumeStr(b []byte) (n int) {
+	if len(b) > 0 && b[0] == '"' {
+		n++
+		for len(b) > n && b[n] < 128 && escapeTbl[b[n]] == 0 {
+			n++
+		}
+		if uint(len(b)) > uint(n) && b[n] == '"' {
+			n++
+			return n
+		}
+	}
+	return 0
+}
+
+func ValidName(v string) bool {
+	if len(v) == 0 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] >= 128 || !tokenTbl[v[i]] {
+			return false
+		}
+	}
+	return true
+}
+
+func SumBytes(b []byte) int {
+	sum := 0
+	for i := 0; i < len(b); i++ {
+		sum += int(b[i])
+	}
+	return sum
+}
+
+func RepeatedShortCaller(b []byte, limit int) int {
+	total := 0
+	for i := 0; i < limit; i++ {
+		total += ConsumeWS(b)
+	}
+	return total
+}
+
+func Root(b []byte, s string, limit int) int {
+	n := ConsumeWS(b) + ConsumeStr(b) + SumBytes(b) + RepeatedShortCaller(b, limit)
+	if ValidName(s) {
+		n++
+	}
+	return n
+}
+`)
+	program.ssa.Build()
+	inputs := []EmissionPackage{{SSA: demoPkg.ssa, Files: []*ast.File{demoPkg.file}}}
+
+	// Use production DefaultMaxPlainInstructions (128) via SSAConfig.MaxPlainInstructions == 0.
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, inputs, EmissionUniverseOptions{
+		CoroProgramPredicates: coro.ProgramPredicateRequirements{
+			Mask: coro.ProgramPredicateMask(),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := demoPkg.ssa.Func("Root")
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(root.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(root.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		DynamicResolution:    coro.DynamicUnknownOnly,
+		MaxPlainInstructions: 0, // production default: 128
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyLocalBody:    universe.CoroLocalBodyFacts,
+		ClassifyLoweredCalls: universe.CoroLoweredCalls,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compilation := &Compilation{
+		CoroPlan:         plan,
+		EmissionUniverse: universe,
+		PanicABI:         coro.PanicExplicitStatusABIV0,
+	}
+	enableCoroPreemptCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, demoPkg.ssa, []*ast.File{demoPkg.file}, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("LLVM verify failed: %v\n%s", err, pkg.Module().String())
+	}
+
+	for _, tc := range []struct {
+		name           string
+		wantEntryGuard coroSyncLoopEntryGuardKind
+	}{
+		{"ConsumeWS", coroSyncLoopEntryGuardNone},
+		{"ConsumeStr", coroSyncLoopEntryGuardNone},
+		{"ValidName", coroSyncLoopEntryGuardNone},
+		{"SumBytes", coroSyncLoopEntryGuardLen},
+	} {
+		fn := demoPkg.ssa.Func(tc.name)
+		ramp := sealedSyncRampForTest(t, compilation, fn)
+		if ramp == nil || ramp.kind != coroSyncRampBoundedLoop || ramp.boundedLoop == nil {
+			t.Fatalf("%s ramp=%+v, want coroSyncRampBoundedLoop", tc.name, ramp)
+		}
+		if ramp.boundedLoop.maxBackedges == 0 {
+			t.Fatalf("%s maxBackedges=0, want >= 1", tc.name)
+		}
+		if ramp.boundedLoop.entryGuardKind != tc.wantEntryGuard {
+			t.Fatalf("%s entryGuardKind=%d, want %d", tc.name, ramp.boundedLoop.entryGuardKind, tc.wantEntryGuard)
+		}
+		if !ramp.returnsNullableHandle() || !ramp.needsSlowSplit {
+			t.Fatalf("%s ramp must return nullable handle and split .slow", tc.name)
+		}
+	}
+
+	irText := pkg.Module().String()
+	for _, name := range []string{"ConsumeWS", "ConsumeStr", "ValidName", "SumBytes"} {
+		rampIR := extractLLVMFuncDef(t, irText, "demo."+name+"$coro")
+		if strings.Contains(rampIR, "__llgo_coro_frame_alloc") {
+			t.Fatalf("%s$coro fast ramp unexpectedly allocates a coroutine frame:\n%s", name, rampIR)
+		}
+		if !strings.Contains(rampIR, `"demo.`+name+`$coro.slow"`) {
+			t.Fatalf("%s$coro fast ramp missing .slow fallback:\n%s", name, rampIR)
+		}
+		slowIR := extractLLVMFuncDef(t, irText, "demo."+name+"$coro.slow")
+		if !strings.Contains(slowIR, coroPreemptPollHookV1) {
+			t.Fatalf("%s$coro.slow lost loop preemption poll:\n%s", name, slowIR)
+		}
+	}
+
+	// Verify that RepeatedShortCaller's looping coroutine body (either $coro or
+	// $coro.slow when SingleAwait peels iteration 0) retains its preemption
+	// countdown and that the child==nil sync-fast return edge NEVER resets the
+	// caller's countdown.
+	callerFn := pkg.Module().NamedFunction("demo.RepeatedShortCaller$coro.slow")
+	if callerFn.IsNil() {
+		callerFn = requireCoroPhysicalFunction(t, pkg.Module(), "demo.RepeatedShortCaller")
+	}
+	callerIR := callerFn.String()
+	if !strings.Contains(callerIR, coroPreemptPollHookV1) {
+		t.Fatalf("RepeatedShortCaller lost caller preemption poll:\n%s", callerIR)
+	}
+	var countdown llvm.Value
+	var syncEdges []llvm.BasicBlock
+	for _, blk := range callerFn.BasicBlocks() {
+		for ins := blk.FirstInstruction(); !ins.IsNil(); ins = llvm.NextInstruction(ins) {
+			if ins.InstructionOpcode() == llvm.Store && !ins.Operand(0).IsAConstantInt().IsNil() &&
+				ins.Operand(0).ZExtValue() == coroPreemptCheckpointStride {
+				countdown = ins.Operand(1)
+			}
+			if ins.InstructionOpcode() == llvm.Call && ins.CalledValue().Name() == "demo.ConsumeWS$coro" {
+				if term := blk.LastInstruction(); !term.IsNil() && term.InstructionOpcode() == llvm.Br && term.SuccessorsCount() == 2 {
+					// icmp ne ptr %child, null -> succ(0)=async, succ(1)=sync
+					syncEdges = append(syncEdges, term.Successor(1))
+				}
+			}
+		}
+	}
+	if countdown.IsNil() || len(syncEdges) == 0 {
+		t.Fatalf("failed to locate caller countdown or sync-fast edge in RepeatedShortCaller:\n%s", callerIR)
+	}
+	for _, syncBlk := range syncEdges {
+		if coroInlineReturnReachesCountdownReset(syncBlk, countdown) {
+			t.Fatalf("sync-fast return of bounded-loop callee must NOT reset caller preemptCountdown:\n%s", callerIR)
+		}
+	}
+}
+
+func TestCoroSyncRampBoundedLoopLeafRejections(t *testing.T) {
+	program := newEmissionTestProgram()
+	program.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	demoPkg := program.addPackage(t, "demo", `package demo
+
+var sink int
+
+//go:noinline
+func helper(x byte) int { return int(x) + 1 }
+
+func MutatingLoop(b []byte) int {
+	for i := 0; i < len(b); i++ {
+		b[i] = 0
+	}
+	return len(b)
+}
+
+func CallingLoop(b []byte) int {
+	s := 0
+	for i := 0; i < len(b); i++ {
+		s += helper(b[i])
+	}
+	return s
+}
+
+func NestedLoop(b []byte) int {
+	s := 0
+	for i := 0; i < len(b); i++ {
+		for j := 0; j < len(b); j++ {
+			s += int(b[j])
+		}
+	}
+	return s
+}
+
+func NonCanonicalLoop(n int) int {
+	c := 0
+	for n > 0 {
+		n >>= 1
+		c++
+	}
+	return c
+}
+
+//go:noinline
+func NoInlineLoop(b []byte) (n int) {
+	for len(b) > n && b[n] == ' ' {
+		n++
+	}
+	return n
+}
+
+func GlobalMutLoop(b []byte) int {
+	for i := 0; i < len(b); i++ {
+		sink += int(b[i])
+	}
+	return sink
+}
+
+func Root(b []byte, n int) int {
+	return MutatingLoop(b) + CallingLoop(b) + NestedLoop(b) + NonCanonicalLoop(n) + NoInlineLoop(b) + GlobalMutLoop(b)
+}
+`)
+	program.ssa.Build()
+	inputs := []EmissionPackage{{SSA: demoPkg.ssa, Files: []*ast.File{demoPkg.file}}}
+	prog, compilation, _, _ := compileCoroSyncRampTestPackages(
+		t, inputs, demoPkg.ssa.Func("Root"), 0, coro.DynamicUnknownOnly,
+	)
+	defer prog.Dispose()
+
+	for _, name := range []string{
+		"MutatingLoop",
+		"CallingLoop",
+		"NestedLoop",
+		"NonCanonicalLoop",
+		"NoInlineLoop",
+		"GlobalMutLoop",
+	} {
+		if ramp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func(name)); ramp != nil {
+			t.Fatalf("%s unexpectedly received sync ramp %+v, want nil", name, ramp)
+		}
+	}
+
+	// Verify budget enforcement: with MaxPlainInstructions=8, even a clean loop
+	// leaf cannot fit 2 passes inside the budget and must be rejected.
+	t.Run("budget-too-small-rejected", func(t *testing.T) {
+		p2 := newEmissionTestProgram()
+		p2.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+		pkg2 := p2.addPackage(t, "demo2", `package demo2
+func ConsumeWS(b []byte) (n int) {
+	for len(b) > n && (b[n] == ' ' || b[n] == '\t') {
+		n++
+	}
+	return n
+}
+func Root(b []byte) int { return ConsumeWS(b) }
+`)
+		p2.ssa.Build()
+		prog2 := newLLSSAProg(t)
+		defer prog2.Dispose()
+		u2, err := PrepareEmissionUniverseWithOptions(prog2, nil, []EmissionPackage{{SSA: pkg2.ssa, Files: []*ast.File{pkg2.file}}}, EmissionUniverseOptions{
+			CoroProgramPredicates: coro.ProgramPredicateRequirements{Mask: coro.ProgramPredicateMask()},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		root2 := pkg2.ssa.Func("Root")
+		su2, err := coro.NewSSAEmissionUniverse(root2.Prog, u2.Functions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fids := u2.FunctionIDConfig()
+		fids.CoroABI = coro.PhysicalABIV1
+		fids.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+		fids.ArchiveReady = true
+		plan2, err := coro.AnalyzeSSA(root2.Prog, coro.Roots{{Function: root2, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			EmissionUniverse:     su2,
+			FunctionIDs:          fids,
+			DynamicResolution:    coro.DynamicUnknownOnly,
+			MaxPlainInstructions: 8,
+			OutcomeMode:          coro.OutcomeExplicitStatus,
+			ClassifyLocalBody:    u2.CoroLocalBodyFacts,
+			ClassifyLoweredCalls: u2.CoroLoweredCalls,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		comp2 := &Compilation{CoroPlan: plan2, EmissionUniverse: u2, PanicABI: coro.PanicExplicitStatusABIV0}
+		enableCoroPreemptCompilation(comp2)
+		if _, _, err := NewPackageExWithEmbedOptions(prog2, nil, nil, nil, pkg2.ssa, []*ast.File{pkg2.file}, goembed.VarMap{}, PackageOptions{Compilation: comp2}); err != nil {
+			t.Fatal(err)
+		}
+		if ramp := sealedSyncRampForTest(t, comp2, pkg2.ssa.Func("ConsumeWS")); ramp != nil {
+			t.Fatalf("ConsumeWS under tiny budget=8 unexpectedly got sync ramp %+v", ramp)
+		}
+	})
+}

@@ -350,7 +350,11 @@ func (p *context) compileCoroSyncRampPhysicalBody(
 				boxEmitter.emitSlowCall(0, nullPtr, nil)
 
 				bb.SetBlockEx(fastEntry, llssa.AtEnd, false)
-				boxEmitter.emitNode(ramp.root, newCoroSyncEmitEnv())
+				if ramp.kind == coroSyncRampBoundedLoop {
+					boxEmitter.emitBoundedLoopCFG()
+				} else {
+					boxEmitter.emitNode(ramp.root, newCoroSyncEmitEnv())
+				}
 			}
 			bb.EndBuild()
 			bb.Dispose()
@@ -397,7 +401,11 @@ func (p *context) compileCoroSyncRampPhysicalBody(
 	emitter.emitSlowCall(0, nullPtr, nil)
 
 	b.SetBlockEx(fastEntry, llssa.AtEnd, false)
-	emitter.emitNode(ramp.root, newCoroSyncEmitEnv())
+	if ramp.kind == coroSyncRampBoundedLoop {
+		emitter.emitBoundedLoopCFG()
+	} else {
+		emitter.emitNode(ramp.root, newCoroSyncEmitEnv())
+	}
 }
 
 func (p *context) compileCoroCallerInlineYieldAwait(
@@ -666,6 +674,311 @@ func (e *coroSyncFastEmitter) emitNilGuard(ptr llssa.Expr, mutated bool, pos tok
 		)
 	}
 	e.b.SetBlockContinuation(contBlk)
+}
+
+func (e *coroSyncFastEmitter) emitBoundedLoopCFG() {
+	loop := e.ramp.boundedLoop
+	if loop == nil {
+		panic("sync-ramp bounded-loop emission requires boundedLoop plan")
+	}
+
+	var ir *coroProgramIR
+	if e.p.emissionUniverse != nil {
+		ir = e.p.emissionUniverse.coroProgramIR
+	}
+
+	// Visit all live blocks in dominator-tree preorder so every non-Phi SSA
+	// value is emitted before any block that uses it.
+	var order []*ssa.BasicBlock
+	var collectDom func(blk *ssa.BasicBlock)
+	collectDom = func(blk *ssa.BasicBlock) {
+		if blk == nil || !loop.liveBlocks[blk] {
+			return
+		}
+		order = append(order, blk)
+		for _, child := range blk.Dominees() {
+			collectDom(child)
+		}
+	}
+	collectDom(e.fn.Blocks[0])
+
+	llvmBlocks := make(map[*ssa.BasicBlock]llssa.BasicBlock, len(order))
+	for _, blk := range order {
+		llvmBlocks[blk] = e.b.Func.MakeBlock()
+	}
+	var preheaderBlk llssa.BasicBlock
+	if loop.entryGuardKind != coroSyncLoopEntryGuardNone {
+		preheaderBlk = e.b.Func.MakeBlock()
+	}
+	backedgeCheckBlk := e.b.Func.MakeBlock()
+	backedgeContBlk := e.b.Func.MakeBlock()
+
+	edgeTarget := func(from, to *ssa.BasicBlock) llssa.BasicBlock {
+		if from == loop.latch && to == loop.header {
+			return backedgeCheckBlk
+		}
+		if preheaderBlk != nil && from == loop.entryPred && to == loop.header {
+			return preheaderBlk
+		}
+		return llvmBlocks[to]
+	}
+
+	// Track which CFG edges were actually emitted so Pass 2 wires exact Phis.
+	type cfgEdge struct{ from, to *ssa.BasicBlock }
+	emittedEdges := make(map[cfgEdge]bool, len(order)*2)
+	recordTarget := func(from, to *ssa.BasicBlock) llssa.BasicBlock {
+		emittedEdges[cfgEdge{from, to}] = true
+		return edgeTarget(from, to)
+	}
+
+	e.b.Jump(llvmBlocks[e.fn.Blocks[0]])
+
+	vals := make(map[ssa.Value]llssa.Expr, len(order)*4)
+	type pendingPhi struct {
+		llvmPhi llssa.Phi
+		ssaPhi  *ssa.Phi
+	}
+	var pendingPhis []pendingPhi
+	var remPhi llssa.Phi
+	u32 := e.p.prog.Uint32()
+
+	for _, blk := range order {
+		e.b.SetBlock(llvmBlocks[blk])
+		if blk == loop.header {
+			remPhi = e.b.Phi(u32)
+		}
+		end := len(blk.Instrs) - 1
+		for i := 0; i < end; i++ {
+			ins := blk.Instrs[i]
+			phys := e.plan.instructions[ins]
+			switch v := ins.(type) {
+			case *ssa.DebugRef, *ssa.RunDefers:
+			case *ssa.Phi:
+				phi := e.b.Phi(e.p.type_(v.Type(), llssa.InGo))
+				vals[v] = phi.Expr
+				pendingPhis = append(pendingPhis, pendingPhi{llvmPhi: phi, ssaPhi: v})
+			case *ssa.Extract:
+				vals[v] = e.b.Extract(e.evalValue(v.Tuple, vals), v.Index)
+			case *ssa.Field:
+				vals[v] = e.b.Field(e.evalValue(v.X, vals), v.Field)
+			case *ssa.FieldAddr:
+				x := e.evalValue(v.X, vals)
+				if phys.recipe == coroPhysicalInstructionFieldAddr && phys.nilGuard {
+					e.emitNilGuard(x, false, v.Pos())
+				}
+				vals[v] = e.b.FieldAddrKnownNonNil(x, v.Field)
+			case *ssa.BinOp:
+				if phys.recipe == coroPhysicalInstructionInterfaceNilCompare {
+					val := e.evalValue(phys.valueOperand, vals)
+					vals[v] = e.b.BinOp(v.Op, e.b.InterfaceTypeWord(val), e.p.prog.Nil(e.p.prog.VoidPtr()))
+				} else if cval, ok := foldConstComparison(v); ok {
+					vals[v] = e.p.prog.BoolVal(cval)
+				} else {
+					x := e.evalValueAs(v.X, v.Y.Type(), vals)
+					y := e.evalValueAs(v.Y, v.X.Type(), vals)
+					switch v.Op {
+					case token.QUO, token.REM:
+						vals[v] = e.b.BinOpWithNonZeroDivisor(v.Op, x, y)
+					case token.SHL, token.SHR:
+						vals[v] = e.b.BinOpWithNonNegativeShiftCount(v.Op, x, y)
+					default:
+						vals[v] = e.b.BinOp(v.Op, x, y)
+					}
+				}
+			case *ssa.UnOp:
+				x := e.evalValue(v.X, vals)
+				if v.Op == token.MUL {
+					if phys.recipe == coroPhysicalInstructionDeref && phys.nilGuard {
+						e.emitNilGuard(x, false, v.Pos())
+					}
+					t := e.p.type_(v.Type(), llssa.InGo)
+					if t.RawType() != nil && e.p.prog.SizeOf(t) == 0 {
+						vals[v] = e.p.prog.Zero(t)
+					} else {
+						vals[v] = e.b.LoadKnownNonNil(x)
+					}
+				} else {
+					vals[v] = e.b.UnOp(v.Op, x)
+				}
+			case *ssa.Convert:
+				if isUntypedNilConst(v.X) {
+					vals[v] = e.p.nilOf(v.Type())
+				} else {
+					vals[v] = e.b.Convert(e.p.type_(v.Type(), llssa.InGo), e.evalValue(v.X, vals))
+				}
+			case *ssa.ChangeType:
+				if isUntypedNilConst(v.X) {
+					vals[v] = e.p.nilOf(v.Type())
+				} else {
+					vals[v] = e.b.ChangeType(e.p.type_(v.Type(), llssa.InGo), e.evalValue(v.X, vals))
+				}
+			case *ssa.MakeInterface:
+				t := e.p.type_(v.Type(), llssa.InGo)
+				if isUntypedNilConst(v.X) {
+					vals[v] = e.p.prog.Nil(t)
+				} else {
+					vals[v] = e.b.MakeInterface(t, e.evalValue(v.X, vals))
+				}
+			case *ssa.Call:
+				if !isPureLenCapBuiltin(v) {
+					panic(fmt.Sprintf("sync-ramp bounded-loop unexpected call %s", v.String()))
+				}
+				vals[v] = e.b.BuiltinCall(v.Common().Value.(*ssa.Builtin).Name(), e.evalValue(v.Call.Args[0], vals))
+			case *ssa.IndexAddr:
+				base := e.evalValue(v.X, vals)
+				idx := e.evalValue(v.Index, vals)
+				if phys.nilGuard {
+					e.emitNilGuard(base, false, v.Pos())
+				}
+				normalized := idx
+				if phys.boundsGuard {
+					var limit llssa.Expr
+					switch phys.container {
+					case coroPhysicalContainerSlice:
+						limit = e.b.SliceLen(base)
+					case coroPhysicalContainerArrayPointer:
+						limit = e.p.prog.IntVal(uint64(phys.bound), e.p.prog.Int())
+					default:
+						panic("sync-ramp bounded-loop unsupported IndexAddr container")
+					}
+					var outOfRange llssa.Expr
+					normalized, outOfRange = e.b.IndexBounds(idx, limit)
+					if !outOfRange.IsNil() {
+						failBlk, contBlk := e.b.Func.MakeBlock(), e.b.Func.MakeBlock()
+						e.b.IfWithBranchWeights(outOfRange, failBlk, contBlk, 1, 1000)
+						e.b.SetBlockEx(failBlk, llssa.AtEnd, false)
+						e.emitBailStart()
+						e.b.SetBlockContinuation(contBlk)
+					}
+				}
+				vals[v] = e.b.IndexAddrUnchecked(base, normalized)
+			case *ssa.Index:
+				base := e.evalValue(v.X, vals)
+				idx := e.evalValue(v.Index, vals)
+				if phys.nilGuard {
+					e.emitNilGuard(base, false, v.Pos())
+				}
+				normalized := idx
+				if phys.boundsGuard {
+					var limit llssa.Expr
+					switch phys.container {
+					case coroPhysicalContainerString:
+						limit = e.b.StringLen(base)
+					case coroPhysicalContainerSlice:
+						limit = e.b.SliceLen(base)
+					case coroPhysicalContainerArrayPointer:
+						limit = e.p.prog.IntVal(uint64(phys.bound), e.p.prog.Int())
+					default:
+						panic("sync-ramp bounded-loop unsupported Index container")
+					}
+					var outOfRange llssa.Expr
+					normalized, outOfRange = e.b.IndexBounds(idx, limit)
+					if !outOfRange.IsNil() {
+						failBlk, contBlk := e.b.Func.MakeBlock(), e.b.Func.MakeBlock()
+						e.b.IfWithBranchWeights(outOfRange, failBlk, contBlk, 1, 1000)
+						e.b.SetBlockEx(failBlk, llssa.AtEnd, false)
+						e.emitBailStart()
+						e.b.SetBlockContinuation(contBlk)
+					}
+				}
+				switch phys.container {
+				case coroPhysicalContainerString:
+					vals[v] = e.b.IndexUnchecked(base, normalized, nil)
+				case coroPhysicalContainerSlice, coroPhysicalContainerArrayPointer:
+					vals[v] = e.b.LoadKnownNonNil(e.b.IndexAddrUnchecked(base, normalized))
+				default:
+					panic("sync-ramp bounded-loop unsupported Index container")
+				}
+			default:
+				panic(fmt.Sprintf("sync-ramp bounded-loop unsupported instruction %T", ins))
+			}
+		}
+
+		switch term := blk.Instrs[end].(type) {
+		case *ssa.Return:
+			e.emitFastReturn(term, vals)
+		case *ssa.Jump:
+			e.b.Jump(recordTarget(blk, blk.Succs[0]))
+		case *ssa.If:
+			if ir != nil {
+				if kv, ok := coroSyncStaticBranch(term, ir, nil); ok {
+					succ := blk.Succs[1]
+					if kv {
+						succ = blk.Succs[0]
+					}
+					e.b.Jump(recordTarget(blk, succ))
+					continue
+				}
+			}
+			cond := e.evalValue(term.Cond, vals)
+			e.b.If(cond, recordTarget(blk, blk.Succs[0]), recordTarget(blk, blk.Succs[1]))
+		default:
+			panic(fmt.Sprintf("sync-ramp bounded-loop unexpected terminator %T", term))
+		}
+	}
+
+	if preheaderBlk != nil {
+		e.b.SetBlock(preheaderBlk)
+		var boundExpr llssa.Expr
+		switch loop.entryGuardKind {
+		case coroSyncLoopEntryGuardValue:
+			boundExpr = e.evalValue(loop.entryGuardValue, vals)
+		case coroSyncLoopEntryGuardLen:
+			boundExpr = e.b.BuiltinCall("len", e.evalValue(loop.entryGuardValue, vals))
+		case coroSyncLoopEntryGuardCap:
+			boundExpr = e.b.BuiltinCall("cap", e.evalValue(loop.entryGuardValue, vals))
+		}
+		limitExpr := e.p.prog.IntVal(loop.entryGuardLimit, boundExpr.Type)
+		tooLong := e.b.BinOp(token.GTR, boundExpr, limitExpr)
+		e.b.IfWithBranchWeights(tooLong, e.bailStart, llvmBlocks[loop.header], 1, 1000)
+	}
+
+	// Emit single-backedge trip-budget guard: bail cleanly to $coro.slow when
+	// the proven work bound would be exceeded.
+	e.b.SetBlock(backedgeCheckBlk)
+	exhausted := e.b.BinOp(token.EQL, remPhi.Expr, e.p.prog.IntVal(0, u32))
+	e.b.IfWithBranchWeights(exhausted, e.bailStart, backedgeContBlk, 1, 1000)
+
+	e.b.SetBlock(backedgeContBlk)
+	remNext := e.b.BinOp(token.SUB, remPhi.Expr, e.p.prog.IntVal(1, u32))
+	e.b.Jump(llvmBlocks[loop.header])
+
+	// Pass 2: wire remPhi and all source SSA Phi incoming edges.
+	entryIncomingBlk := llvmBlocks[loop.entryPred]
+	if preheaderBlk != nil {
+		entryIncomingBlk = preheaderBlk
+	}
+	remPhi.AddIncoming(e.b, []llssa.BasicBlock{entryIncomingBlk, backedgeContBlk}, func(i int, _ llssa.BasicBlock) llssa.Expr {
+		if i == 0 {
+			return e.p.prog.IntVal(uint64(loop.maxBackedges), u32)
+		}
+		return remNext
+	})
+
+	for _, pp := range pendingPhis {
+		blk := pp.ssaPhi.Block()
+		var inBlks []llssa.BasicBlock
+		var inVals []ssa.Value
+		for idx, pred := range blk.Preds {
+			if !emittedEdges[cfgEdge{pred, blk}] {
+				continue
+			}
+			inBlk := llvmBlocks[pred]
+			if blk == loop.header {
+				if pred == loop.latch {
+					inBlk = backedgeContBlk
+				} else if preheaderBlk != nil && pred == loop.entryPred {
+					inBlk = preheaderBlk
+				}
+			}
+			inBlks = append(inBlks, inBlk)
+			inVals = append(inVals, pp.ssaPhi.Edges[idx])
+		}
+		pp.llvmPhi.AddIncoming(e.b, inBlks, func(i int, blk llssa.BasicBlock) llssa.Expr {
+			e.b.SetBlockEx(blk, llssa.BeforeLast, false)
+			return e.evalValueAs(inVals[i], pp.ssaPhi.Type(), vals)
+		})
+	}
 }
 
 func (e *coroSyncFastEmitter) emitNode(node *coroSyncFastNode, parentEnv coroSyncEmitEnv) {
