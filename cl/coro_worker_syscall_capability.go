@@ -497,7 +497,8 @@ func coroLinuxSyscallAdapterWordArgs(shadow CoroCallableShadowSink) (wordArgs in
 		switch {
 		case strings.HasSuffix(symbol, "__llgo_linux_syscall3_v1"):
 			arity = 4
-		case strings.HasSuffix(symbol, "__llgo_linux_syscall6_v1"):
+		case strings.HasSuffix(symbol, "__llgo_linux_syscall6_v1"),
+			strings.HasSuffix(symbol, "__llgo_linux_internal_syscall6_v1"):
 			arity = 7
 		default:
 			sawOther = true

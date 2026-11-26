@@ -27,8 +27,8 @@ import _ "unsafe"
 // Plan 9 assembly, so ProgramIR can certify exact constant traps (such as
 // cgroup Open/Close/Read/Pread) without leaking OpaqueSuspend into callers.
 //
-//go:linkname libc___llgo_linux_syscall6_v1_trampoline C.__llgo_linux_syscall6_v1
-func libc___llgo_linux_syscall6_v1_trampoline()
+//go:linkname libc___llgo_linux_internal_syscall6_v1_trampoline C.__llgo_linux_internal_syscall6_v1
+func libc___llgo_linux_internal_syscall6_v1_trampoline()
 
 //go:linkname llgoLinuxFuncPCABI0 llgo.funcPCABI0
 func llgoLinuxFuncPCABI0(fn any) uintptr
@@ -38,7 +38,7 @@ func llgoLinuxSyscall7(fn, trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, errno 
 
 func Syscall6(num, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, errno uintptr) {
 	r1, r2, errno = llgoLinuxSyscall7(
-		llgoLinuxFuncPCABI0(libc___llgo_linux_syscall6_v1_trampoline),
+		llgoLinuxFuncPCABI0(libc___llgo_linux_internal_syscall6_v1_trampoline),
 		num, a1, a2, a3, a4, a5, a6,
 	)
 	if r1 == ^uintptr(0) {
