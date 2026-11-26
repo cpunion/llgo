@@ -99,7 +99,7 @@ llvm.used:
 main.init$coro:
     __llgo_coro_await_consume_v1
     __llgo_coro_await_inline_destroy_consume_v4
-    __llgo_coro_await_inline_finish_v2
+    __llgo_coro_await_inline_finish_v3
     __llgo_coro_await_prepare_inline_v4
     __llgo_coro_complete_prepare_v2
     __llgo_coro_frame_alloc_v1
@@ -128,7 +128,7 @@ main.init$coro:
 main.main$coro:
     __llgo_coro_await_consume_v1
     __llgo_coro_await_inline_destroy_consume_v4
-    __llgo_coro_await_inline_finish_v2
+    __llgo_coro_await_inline_finish_v3
     __llgo_coro_await_prepare_inline_v4
     __llgo_coro_complete_prepare_v2
     __llgo_coro_fault_prepare_v1

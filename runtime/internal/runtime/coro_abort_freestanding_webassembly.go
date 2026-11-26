@@ -32,6 +32,7 @@ func coroFreestandingAbort()
 // executor stack. A scheduler invariant failure is therefore an immediate
 // target trap; richer diagnostics belong to an embedding-owned host
 // adapter or a future terminal WASI control operation.
+//go:noinline
 func coroRuntimeAbort(string) {
 	coroFreestandingAbort()
 	for {

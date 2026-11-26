@@ -41,6 +41,7 @@ func TestNativeCacheBoundsZeroesAndSerializes(t *testing.T) {
 
 void *__llgo_coro_alloc_cache_take_v1(uintptr_t size);
 bool __llgo_coro_alloc_cache_put_v1(void *pointer, uintptr_t size);
+bool __llgo_coro_alloc_cache_put_used_v1(void *pointer, uintptr_t size, uintptr_t used);
 
 enum {
 	bounded_size = 256,
@@ -231,6 +232,27 @@ int main(void) {
         }
         free(pointer);
     }
+
+    /* Verify exact-used zeroing clears [0, used) while leaving untouched tail
+       bytes intact, and verify 8192B TLS magazine round-trips cleanly. */
+    unsigned char *large_used = calloc(1, 8192);
+    if (large_used == NULL) {
+        return 36;
+    }
+    memset(large_used, 0xa5, 4247);
+    if (!__llgo_coro_alloc_cache_put_used_v1(large_used, 8192, 4247)) {
+        return 37;
+    }
+    unsigned char *large_got = __llgo_coro_alloc_cache_take_v1(8192);
+    if (large_got != large_used) {
+        return 38;
+    }
+    for (int byte = 0; byte < 8192; ++byte) {
+        if (large_got[byte] != 0) {
+            return 39;
+        }
+    }
+    free(large_got);
     return 0;
 }
 `

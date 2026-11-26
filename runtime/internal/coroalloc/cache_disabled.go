@@ -20,6 +20,8 @@ package coroalloc
 
 import "unsafe"
 
+const cacheEnabled = false
+
 func cacheAllocationSize(size uintptr) uintptr {
 	return size
 }
@@ -28,6 +30,6 @@ func cacheTake(uintptr) unsafe.Pointer {
 	return nil
 }
 
-func cachePut(unsafe.Pointer, uintptr) bool {
+func cachePut(unsafe.Pointer, uintptr, uintptr) bool {
 	return false
 }

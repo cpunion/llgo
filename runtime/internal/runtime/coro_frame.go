@@ -45,18 +45,48 @@ func __llgo_coro_frame_alloc_v1(g unsafe.Pointer, size, align uintptr, descripto
 	if !ok {
 		coroRuntimeAbort("invalid coroutine frame allocation size")
 	}
+	task := (*coro.G)(g)
+	var raw unsafe.Pointer
+	if coroalloc.FrameCacheEnabled() {
+		bucket := coroalloc.CacheAllocationSize(total)
+		raw = coro.TakeCachedFrame(task, bucket)
+		if raw == nil {
+			raw = coroFrameAllocSlowBucketV1(bucket)
+		}
+	} else {
+		raw = coroFrameAllocSlowV1(total)
+	}
+	storage := coro.RegisterFrameCompilerPreparedPtr(task, raw, total, size, align, descriptor)
+	if storage == nil {
+		coroFrameAllocRollbackV1(raw, total)
+	}
+	return storage
+}
+
+//go:noinline
+func coroFrameAllocSlowBucketV1(bucket uintptr) unsafe.Pointer {
+	raw := coroalloc.AllocFrameBucket(bucket)
+	if raw == nil {
+		coroRuntimeAbort("coroutine frame allocation failed")
+	}
+	return raw
+}
+
+//go:noinline
+func coroFrameAllocSlowV1(total uintptr) unsafe.Pointer {
 	raw := coroalloc.AllocFrame(total)
 	if raw == nil {
 		coroRuntimeAbort("coroutine frame allocation failed")
 	}
-	storage, ok := coro.RegisterFrameCompilerPrepared((*coro.G)(g), raw, total, size, align, descriptor)
-	if !ok {
-		if !coroalloc.FreeFrame(raw, total) {
-			coroRuntimeAbort("coroutine frame allocation rollback failed")
-		}
-		coroRuntimeAbort("invalid coroutine frame allocation")
+	return raw
+}
+
+//go:noinline
+func coroFrameAllocRollbackV1(raw unsafe.Pointer, total uintptr) {
+	if !coroalloc.FreeFrame(raw, total) {
+		coroRuntimeAbort("coroutine frame allocation rollback failed")
 	}
-	return storage
+	coroRuntimeAbort("invalid coroutine frame allocation")
 }
 
 //export __llgo_coro_frame_publish_v1

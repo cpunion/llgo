@@ -67,6 +67,10 @@ func Parent(limit uint32) uint32 {
 					}
 					if instruction.InstructionOpcode() == llvm.Call {
 						switch instruction.CalledValue().Name() {
+						case coroAwaitInlineFinishHookV3:
+							if term := block.LastInstruction(); !term.IsNil() && term.InstructionOpcode() == llvm.Br && term.SuccessorsCount() == 2 {
+								completed = append(completed, term.Successor(0))
+							}
 						case coroAwaitInlineDestroyConsumeHookV4:
 							completed = append(completed, block)
 						case coroAwaitConsumeHookV1:

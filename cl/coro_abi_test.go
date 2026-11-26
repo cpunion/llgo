@@ -657,7 +657,7 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 		coroPanicBoundaryTypeHookV1,
 		coroPanicBoundaryDataReleaseHookV1,
 		coroAwaitPrepareInlineHookV4,
-		coroAwaitInlineFinishHookV2,
+		coroAwaitInlineFinishHookV3,
 		coroAwaitInlineDestroyConsumeHookV4,
 		coroAwaitConsumeHookV1,
 		coroPreemptPollHookV1,
@@ -683,8 +683,8 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	if got := strings.Count(ir, "call i1 @"+coroAwaitPrepareInlineHookV4); got != 1 {
 		t.Fatalf("v4 fused await prepare/inline attempts = %d, want one Parent->Child handoff:\n%s", got, ir)
 	}
-	if got := strings.Count(ir, "call i1 @"+coroAwaitInlineFinishHookV2); got != 1 {
-		t.Fatalf("v2 inline await finishes = %d, want one Parent->Child ownership settlement:\n%s", got, ir)
+	if got := strings.Count(ir, "call i32 @"+coroAwaitInlineFinishHookV3); got != 1 {
+		t.Fatalf("v3 inline await finishes = %d, want one Parent->Child ownership settlement:\n%s", got, ir)
 	}
 	if got := strings.Count(ir, "call i32 @"+coroAwaitInlineDestroyConsumeHookV4); got != 1 {
 		t.Fatalf("v4 fused inline destroy/consume calls = %d, want one:\n%s", got, ir)
@@ -3813,7 +3813,7 @@ func assertCoroStaticChildAwait(t *testing.T, parent string, nativeFaultBoundary
 	}
 	resumeBlock := blockContaining(resumeCall)
 	doneCall := "call i1 @llvm.coro.done"
-	finishCall := "call i1 @" + coroAwaitInlineFinishHookV2
+	finishCall := "call i32 @" + coroAwaitInlineFinishHookV3
 	doneBlock := blockContaining(doneCall)
 	destroyCall := "call void @llvm.coro.destroy"
 	inlineCommitCall := "call i32 @" + coroAwaitInlineDestroyConsumeHookV4

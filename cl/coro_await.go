@@ -1568,15 +1568,35 @@ func (p *context) emitCoroStaticInlineAwait(
 
 	resume := p.fn.MakeBlock()
 	declined := p.fn.MakeBlock()
+	fastReturn := p.fn.MakeBlock()
+	notFastReturn := p.fn.MakeBlock()
 	destroy := p.fn.MakeBlock()
 	joined := p.fn.MakeBlock()
 	parent := body.coro.Handle()
-	b.If(startedInline, resume, declined)
+	b.IfWithBranchWeights(startedInline, resume, declined, 1000, 1)
 
 	b.SetBlockEx(resume, llssa.AtEnd, false)
 	p.emitCoroInlineChildResume(body, b, child)
 	done := b.CoroDone(child)
-	b.If(b.Call(finish.Expr, body.task, parent, child, done), destroy, declined)
+	finishKind := b.Call(finish.Expr, body.task, parent, child, done)
+	isFastReturn := b.BinOp(
+		token.EQL,
+		finishKind,
+		p.prog.IntVal(coroAwaitInlineFinishReturnDone, p.prog.Uint32()),
+	)
+	b.IfWithBranchWeights(isFastReturn, fastReturn, notFastReturn, 1000, 1)
+
+	b.SetBlockEx(fastReturn, llssa.AtEnd, false)
+	b.Store(statusWord, p.prog.IntVal(coroAwaitCompletionReturn, p.prog.Uint32()))
+	b.Jump(joined)
+
+	b.SetBlockEx(notFastReturn, llssa.AtEnd, false)
+	isNeedDestroy := b.BinOp(
+		token.EQL,
+		finishKind,
+		p.prog.IntVal(coroAwaitInlineFinishNeedDestroy, p.prog.Uint32()),
+	)
+	b.If(isNeedDestroy, destroy, declined)
 
 	b.SetBlockEx(declined, llssa.AtEnd, false)
 	b.Jump(joined)
@@ -1595,8 +1615,8 @@ func (p *context) emitCoroStaticInlineAwait(
 
 	b.SetBlockContinuation(joined)
 	completed := b.Phi(p.prog.Bool())
-	completed.AddIncoming(b, []llssa.BasicBlock{declined, destroy}, func(index int, _ llssa.BasicBlock) llssa.Expr {
-		return p.prog.BoolVal(index == 1)
+	completed.AddIncoming(b, []llssa.BasicBlock{declined, fastReturn, destroy}, func(index int, _ llssa.BasicBlock) llssa.Expr {
+		return p.prog.BoolVal(index != 0)
 	})
 	return completed.Expr
 }

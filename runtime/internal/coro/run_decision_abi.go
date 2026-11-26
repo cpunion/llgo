@@ -50,6 +50,37 @@ func TakeRunDecisionWords(
 	return uint32(parkOutcome), selectedCase, uint32(task), operation.SourceSlot, operation.Generation, true
 }
 
+// RunDecisionInvalidCode is the sentinel returned by
+// TakeZeroTicketRunDecisionCodeCompiler when a zero-ticket resume gate fails.
+const RunDecisionInvalidCode uint32 = ^uint32(0)
+
+// TakeZeroTicketRunDecisionCodeCompiler is the single-scalar variant of
+// TakeZeroTicketRunDecisionCompiler for __llgo_coro_run_decision_take_zero_v1.
+// Returning one uint32 avoids a multi-return aggregate alloca inside the fast
+// branches so LLVM inlines the gate directly into the C ABI export.
+func TakeZeroTicketRunDecisionCodeCompiler(g *G) uint32 {
+	if !AuditEnabled && g != nil {
+		if g.pending.kind == pendingInlineStart {
+			g.pending = pendingTransition{}
+			return 0
+		}
+		if p := g.runP; p != nil && !p.runDecisionTaken && p.runDecision.g == nil {
+			p.runDecisionTaken = true
+			return 0
+		}
+	}
+	return takeZeroTicketRunDecisionCodeSlow(g)
+}
+
+//go:noinline
+func takeZeroTicketRunDecisionCodeSlow(g *G) uint32 {
+	task, ok := takeZeroTicketRunDecisionSlow(g)
+	if !ok {
+		return RunDecisionInvalidCode
+	}
+	return task
+}
+
 // TakeZeroTicketRunDecisionCompiler is the fast scalar gate for
 // __llgo_coro_run_decision_take_zero_v1. Under !AuditEnabled, inline-await
 // child entry and ordinary zero-decision resume complete without constructing

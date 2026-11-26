@@ -140,6 +140,7 @@ const (
 	coroFramePublishHookV3                     = "__llgo_coro_frame_publish_v3"
 	coroAwaitPrepareInlineHookV4               = "__llgo_coro_await_prepare_inline_v4"
 	coroAwaitInlineFinishHookV2                = "__llgo_coro_await_inline_finish_v2"
+	coroAwaitInlineFinishHookV3                = "__llgo_coro_await_inline_finish_v3"
 	coroAwaitInlineDestroyConsumeHookV4        = "__llgo_coro_await_inline_destroy_consume_v4"
 	coroAwaitConsumeHookV1                     = "__llgo_coro_await_consume_v1"
 	coroPreemptPollHookV1                      = "__llgo_coro_preempt_poll_v1"
@@ -174,6 +175,12 @@ const (
 	coroKeyedResumeSuccessV2 uint64 = iota + 1
 	coroKeyedResumeTaskAbortV2
 	coroKeyedResumeShutdownV2
+)
+
+const (
+	coroAwaitInlineFinishReturnDone  uint64 = 0
+	coroAwaitInlineFinishSuspend     uint64 = 1
+	coroAwaitInlineFinishNeedDestroy uint64 = 2
 )
 
 const (
@@ -416,7 +423,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	descriptorPrefix := coroDescriptorPrefixV1
 	framePublishHook := coroFramePublishHookV3
 	awaitPrepareInlineHook := coroAwaitPrepareInlineHookV4
-	awaitInlineFinishHook := coroAwaitInlineFinishHookV2
+	awaitInlineFinishHook := coroAwaitInlineFinishHookV3
 	awaitInlineDestroyConsumeHook := coroAwaitInlineDestroyConsumeHookV4
 	awaitConsumeHook := coroAwaitConsumeHookV1
 	preemptPollHook := coroPreemptPollHookV1
@@ -901,7 +908,7 @@ func coroAwaitInlineFinishSignature() *types.Signature {
 		types.NewParam(token.NoPos, nil, "child", pointer),
 		types.NewParam(token.NoPos, nil, "done", types.Typ[types.Bool]),
 	)
-	results := types.NewTuple(types.NewParam(token.NoPos, nil, "destroy", types.Typ[types.Bool]))
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "kind", types.Typ[types.Uint32]))
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
 }
 

@@ -935,6 +935,7 @@ func coroProgramContinueSliceV2(
 // by the status-carrying compiler bootstrap. It is called only after the core
 // accepted the final-suspended root frame, so publishing mainExited cannot race
 // ahead of a malformed completion transaction.
+//go:noinline
 func coroProgramCommitMainGoexitV1(g *coroG) bool {
 	if coroProgramLifecycleV1State != coroProgramRunningV1 ||
 		g != &coroProgramGV1State {

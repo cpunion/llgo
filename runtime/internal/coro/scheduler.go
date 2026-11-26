@@ -222,6 +222,10 @@ type P struct {
 	// enters the atomic request poll only at a bounded checkpoint. An idle P
 	// keeps the exact zero value.
 	servicePreemptBudget uint32
+	// frameCache is an owner-P-private direct-mapped cache of zeroed native
+	// coroutine frame allocations for synchronous inline-await call chains.
+	// It is empty on embedded/wasm/baremetal targets and bypassed under AuditEnabled.
+	frameCache pFrameCache
 	// readyCount is owner-only metadata for the intrusive ready queue. It makes
 	// bounded work sharing independent of a whole-queue length scan while the
 	// head/tail/link audit remains available at lifecycle and debug gates.
