@@ -217,12 +217,19 @@ func pNeutralRunnableHeader(g *G, queued bool) bool {
 		if g == nil || g.state != GRunnable || g.isQueued() != queued ||
 			(!queued && g.nextReady != nil) || g.transferState != wantTransfer ||
 			g.runnableAffinity != runnableAnyOwner ||
-			!gPreemptStateAtDepthZero(g, wantPreempt) ||
 			g.taskControlLeases != 0 || g.runAction != ActionInvalid || g.osThreadLockDepth != 0 ||
 			g.pending.kind != pendingNone || g.destroyTarget != nil || g.destroysRoot() ||
 			g.isWaiting() || g.runP != nil ||
-			(g.park.phase != parkIdle && g.park.phase != parkMaterialized) ||
 			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || g.panicUnwind {
+			return false
+		}
+		if queued && g.initialRunPrepared && g.park.phase == parkIdle {
+			// A freshly-spawned initial task has never run; publish's atomic
+			// preemptIdle->preemptDisabled CAS validates preemption state.
+			return g.active != nil && g.active == g.root
+		}
+		if !gPreemptStateAtDepthZero(g, wantPreempt) ||
+			(g.park.phase != parkIdle && g.park.phase != parkMaterialized) {
 			return false
 		}
 		active := g.active
@@ -363,7 +370,7 @@ func publishPNeutralRunnableLocked(mailbox *RunnableTransferMailbox, source *P, 
 	slot.g = g
 	slot.state = runnableTransferSlotPublished
 	mailbox.tail = (mailbox.tail + 1) % RunnableTransferMailboxCapacity
-	mailbox.count++
+	preemptStore(&mailbox.count, mailbox.count+1)
 	return RunnableTransferID{Slot: slotIndex + 1, Generation: generation}, true
 }
 
@@ -485,6 +492,9 @@ func publishPreparedPNeutralRunnableBatch(
 			}
 			count++
 		}
+		if count != 0 {
+			preemptStore(&mailbox.count, mailbox.count)
+		}
 		releaseRunnableTransferGate(mailbox)
 		if count == 0 {
 			return RunnableTransferID{}, 0
@@ -557,7 +567,7 @@ func importPNeutralRunnableLocked(mailbox *RunnableTransferMailbox, owner *P, id
 	slot.source = nil
 	slot.g = nil
 	mailbox.head = (mailbox.head + 1) % RunnableTransferMailboxCapacity
-	mailbox.count--
+	preemptStore(&mailbox.count, mailbox.count-1)
 	return true
 }
 
@@ -597,6 +607,13 @@ func TryDrainPNeutralRunnables(
 	if !stableRunnableTransferP(owner) || owner.readyCount == ^uint32(0) {
 		return 0, false, RunnableTransferDrainOwnerUnstable
 	}
+	// Fast empty observation: loading gate (acquire) before count (acquire)
+	// synchronizes with any producer that finished publishing and released gate,
+	// avoiding an atomic CAS/store on every idle/empty drain check.
+	if !AuditEnabled && preemptLoad(&mailbox.gate) == runnableTransferGateIdle &&
+		preemptLoad(&mailbox.count) == 0 {
+		return 0, false, RunnableTransferDrainComplete
+	}
 	if !tryRunnableTransferGate(mailbox) {
 		return 0, false, RunnableTransferDrainContended
 	}
@@ -609,6 +626,7 @@ func TryDrainPNeutralRunnables(
 		for moved < budget && mailbox.count != 0 {
 			if owner.readyCount == ^uint32(0) {
 				more = true
+				preemptStore(&mailbox.count, mailbox.count)
 				releaseRunnableTransferGate(mailbox)
 				return moved, more, RunnableTransferDrainCorrupt
 			}
@@ -617,22 +635,24 @@ func TryDrainPNeutralRunnables(
 			if slot.state != runnableTransferSlotPublished || slot.source == nil ||
 				slot.source == owner || g == nil || g.transferState != runnableTransferGPublished {
 				more = mailbox.count != 0
+				preemptStore(&mailbox.count, mailbox.count)
 				releaseRunnableTransferGate(mailbox)
 				return moved, more, RunnableTransferDrainCorrupt
 			}
 			appendReadyUnchecked(owner, g)
 			g.transferState = runnableTransferGImported
-			if !compareAndSwapGPreemptStateAtDepthZero(g, preemptDisabled, preemptIdle) {
-				more = mailbox.count != 0
-				releaseRunnableTransferGate(mailbox)
-				return moved, more, RunnableTransferDrainCorrupt
-			}
+			// Publish moved g.preempt to preemptDisabled before entering the
+			// mailbox; no concurrent caller can transition out of Disabled.
+			preemptStore(preemptAddress(g), preemptIdle)
 			slot.state = runnableTransferSlotEmpty
 			slot.source = nil
 			slot.g = nil
 			mailbox.head = (mailbox.head + 1) % RunnableTransferMailboxCapacity
 			mailbox.count--
 			moved++
+		}
+		if moved != 0 {
+			preemptStore(&mailbox.count, mailbox.count)
 		}
 		more = mailbox.count != 0
 		releaseRunnableTransferGate(mailbox)

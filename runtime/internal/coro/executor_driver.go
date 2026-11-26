@@ -55,7 +55,11 @@ type ExecutorDriver struct {
 	// owner-only, and directChannelStub is the permanent one-word sentinel.
 	// Together they form an intrusive MPSC queue for frame-local one-case hchan
 	// completions. A node's owning frame remains pinned by its WaitSetRecord.
+	// Isolate producer-written directChannelHead on its own 128-byte cache line
+	// from owner-only local, directChannelTail, and run cursor fields.
+	_                 [120]byte
 	directChannelHead unsafe.Pointer
+	_                 [120]byte
 	directChannelTail unsafe.Pointer
 	directChannelStub unsafe.Pointer
 	run               executorRunCursor

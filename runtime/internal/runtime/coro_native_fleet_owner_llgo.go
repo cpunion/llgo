@@ -668,27 +668,30 @@ func coroNativeFleetPeerPreSleepSpinV1(
 			return true, true
 		}
 	}
-	if coroNativePreSleepYieldRoundsV1 == 0 {
-		return false, true
-	}
 	start, clockOK := coroNativeFleetPhysicalOwnerClockV1()
 	if !clockOK {
 		return false, false
 	}
-	for round := 0; round < coroNativePreSleepYieldRoundsV1; round++ {
-		_ = corofleet.Yield()
-		for i := 0; i < coroNativePreSleepBurstSpinsV1; i++ {
-			if coroObserveGCV1() || stop.Sealed() || coro.ExecutorDriverHasPendingExternalWork(driver) {
-				return true, true
-			}
+	for round := 0; round < coroNativePreSleepPauseRoundsV1; round++ {
+		corofleet.Pause(coroNativePreSleepPauseSpinsV1)
+		if coroObserveGCV1() || stop.Sealed() || coro.ExecutorDriverHasPendingExternalWork(driver) {
+			return true, true
 		}
-		if round&3 == 3 {
+		if round&31 == 31 {
 			now, ok := coroNativeFleetPhysicalOwnerClockV1()
 			if !ok {
 				return false, false
 			}
 			if now-start >= coroNativePreSleepBudgetNSV1 {
 				break
+			}
+		}
+	}
+	for round := 0; round < coroNativePreSleepYieldRoundsV1; round++ {
+		_ = corofleet.Yield()
+		for i := 0; i < coroNativePreSleepBurstSpinsV1; i++ {
+			if coroObserveGCV1() || stop.Sealed() || coro.ExecutorDriverHasPendingExternalWork(driver) {
+				return true, true
 			}
 		}
 	}

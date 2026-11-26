@@ -1576,3 +1576,18 @@ func TestContinueIssuedExecutorParentResumeGuards(t *testing.T) {
 		t.Fatal("parent resume chaining must stay disabled when AuditEnabled is true")
 	}
 }
+
+func TestContinueIssuedExecutorChildResumeGuards(t *testing.T) {
+	if ContinueIssuedExecutorChildResume(nil, nil, Action{}) {
+		t.Fatal("nil driver must fail closed")
+	}
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithManual(t, p)
+	defer closeTestExecutorDriver(t, driver)
+	g := new(G)
+	dummy := new(byte)
+	next := Action{Kind: ActionCheckResume, Handle: unsafe.Pointer(dummy)}
+	if AuditEnabled && ContinueIssuedExecutorChildResume(driver, g, next) {
+		t.Fatal("child resume chaining must stay disabled when AuditEnabled is true")
+	}
+}

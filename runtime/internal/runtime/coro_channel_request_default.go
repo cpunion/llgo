@@ -41,3 +41,15 @@ func coroTargetPublishDirectChannelCompletionV1(
 		coro.PublishExecutorDirectChannelCompletion(owner, completion) &&
 		coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State)
 }
+
+func coroTargetPublishDirectChannelCompletionBatchV1(
+	owner *coro.ExecutorDriver,
+	route coro.RouteID,
+	head, tail *coro.DirectChannelCompletion,
+) bool {
+	return owner == &coroProgramExecutorDriverV1State && route == coro.RouteID(1) &&
+		coroProgramExecutorBoundV1State &&
+		coroProgramExecutorHandleV1State != (coro.ExecutorHandle{}) &&
+		coro.PublishExecutorDirectChannelCompletionBatch(owner, head, tail) &&
+		coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State)
+}

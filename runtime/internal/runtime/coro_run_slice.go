@@ -372,18 +372,30 @@ func coroReduceExecutorRunActionPreparedV1(
 			p, driver, g, action, runtimeContext, extraUsed < extraBudget,
 			&contextEntered, &activation,
 		)
-		if !fusedDestroy {
-			break
+		if fusedDestroy {
+			extraUsed++
+			extraDestroys++
+			if !advanced || next.Kind != coro.ActionCheckResume || extraUsed >= extraBudget {
+				break
+			}
+			if policy.lifecycle != nil && *policy.lifecycle != coroProgramRunningV1 {
+				break
+			}
+			if !coro.ContinueIssuedExecutorParentResume(driver, g, next) {
+				break
+			}
+			extraUsed++
+			extraResumes++
+			action = next
+			continue
 		}
-		extraUsed++
-		extraDestroys++
-		if !advanced || next.Kind != coro.ActionCheckResume || extraUsed >= extraBudget {
+		if !advanced || committed || next.Kind != coro.ActionCheckResume || extraUsed >= extraBudget {
 			break
 		}
 		if policy.lifecycle != nil && *policy.lifecycle != coroProgramRunningV1 {
 			break
 		}
-		if !coro.ContinueIssuedExecutorParentResume(driver, g, next) {
+		if !coro.ContinueIssuedExecutorChildResume(driver, g, next) {
 			break
 		}
 		extraUsed++

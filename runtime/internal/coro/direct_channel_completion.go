@@ -181,6 +181,82 @@ func validCommittedCompactDirectChannelPark(g *G, frame *Frame, wait *WaitSetRec
 		park.cancelKind == ParkCancelNone && park.outcome == ParkOutcomePending
 }
 
+// DirectChannelParkUndoV1 records the two owner-local ParkState words mutated
+// by PrepareCurrentDirectChannelParkReversible so an unpublished park prepared
+// outside a contended hchan gate can be rolled back cleanly if the channel
+// turns out to be ready once the gate is acquired.
+type DirectChannelParkUndoV1 struct {
+	prevTicket ParkTicket
+	prevPhase  parkPhase
+	valid      bool
+}
+
+// PrepareCurrentDirectChannelParkReversible prepares the issued fast-path
+// one-case park outside a contended hchan lock and returns an owner-local undo
+// receipt. When the task is not on the issued idle/delivered fast path, it
+// returns a nil driver without mutating state so the caller falls back to the
+// ordinary locked path.
+func PrepareCurrentDirectChannelParkReversible(
+	g *G,
+	handle unsafe.Pointer,
+	header *HeaderV1,
+	storage *DirectChannelParkStorageV1,
+) (*ExecutorDriver, RouteID, DirectChannelParkUndoV1) {
+	if g == nil || handle == nil || header == nil || storage == nil {
+		return nil, 0, DirectChannelParkUndoV1{}
+	}
+	p := g.runP
+	if p == nil || p.executor == nil || p.executor.run.issued != ActionCheckResume {
+		return nil, 0, DirectChannelParkUndoV1{}
+	}
+	prevPhase := g.park.phase
+	if prevPhase != parkIdle && prevPhase != parkDelivered {
+		return nil, 0, DirectChannelParkUndoV1{}
+	}
+	prevTicket := g.park.ticket
+	driver, route := PrepareCurrentDirectChannelPark(g, handle, header, storage)
+	if driver == nil {
+		return nil, 0, DirectChannelParkUndoV1{}
+	}
+	return driver, route, DirectChannelParkUndoV1{
+		prevTicket: prevTicket,
+		prevPhase:  prevPhase,
+		valid:      true,
+	}
+}
+
+// RollbackUnpublishedDirectChannelPark restores owner-local G, frame, and
+// spill state prepared by PrepareCurrentDirectChannelParkReversible when the
+// waiter was never exposed on any hchan queue.
+func RollbackUnpublishedDirectChannelPark(
+	g *G,
+	handle unsafe.Pointer,
+	header *HeaderV1,
+	storage *DirectChannelParkStorageV1,
+	undo DirectChannelParkUndoV1,
+) bool {
+	if !undo.valid || g == nil || handle == nil || header == nil || storage == nil ||
+		g.active == nil || g.active.handle != handle || g.active.header != header ||
+		g.pending.kind != pendingParkSet || !g.pending.directChannel ||
+		g.pending.from != g.active || g.active.parkWait != &storage.Wait ||
+		preemptLoad(&storage.Completion.state) != uint32(directChannelCompletionBound) {
+		return false
+	}
+	g.park.ticket = undo.prevTicket
+	g.park.phase = undo.prevPhase
+	g.pending.kind = pendingNone
+	g.pending.directChannel = false
+	g.pending.from = nil
+	g.active.parkWait = nil
+	storage.Wait = WaitSetRecord{}
+	storage.Completion = DirectChannelCompletion{}
+	storage.Ticket = ParkTicket{}
+	header.SuspendReason = uint16(SuspendNone)
+	header.Lifecycle = uint16(FrameActive)
+	header.Line = 0
+	return true
+}
+
 // PrepareCurrentDirectChannelPark builds the source-free one-case park. Every
 // fallible owner/frame observation precedes the no-fail write suffix. The
 // caller publishes its typed hchan waiter only after this returns successfully.
@@ -696,6 +772,61 @@ func PublishExecutorDirectChannelCompletion(
 	// after the link, so a producer paused in this narrow interval cannot strand
 	// a sleeping executor.
 	preemptStorePointer((*unsafe.Pointer)(previous), unsafe.Pointer(completion))
+	return true
+}
+
+// PrepareDirectChannelCompletionForBatch transitions one matched completion to
+// Published with a nil intrusive link so a batch producer (such as close(ch))
+// can chain multiple completions for the same target route before splicing the
+// entire chain into the owner's MPSC inbox in one atomic exchange.
+func PrepareDirectChannelCompletionForBatch(
+	completion *DirectChannelCompletion,
+) bool {
+	if completion == nil || completion.owner == nil || !completion.route.Valid() ||
+		completion.route != completion.owner.route {
+		return false
+	}
+	state := directChannelCompletionState(preemptLoad(&completion.state))
+	if state != directChannelCompletionMatched && state != directChannelCompletionCanceled {
+		return false
+	}
+	if !preemptCompareAndSwap(
+		&completion.state, uint32(state), uint32(directChannelCompletionPublished),
+	) {
+		return false
+	}
+	preemptStorePointer(&completion.next, nil)
+	return true
+}
+
+// LinkDirectChannelCompletionBatch appends next after tail in a producer-local
+// chain whose nodes have already been prepared with
+// PrepareDirectChannelCompletionForBatch.
+func LinkDirectChannelCompletionBatch(tail, next *DirectChannelCompletion) {
+	preemptStorePointer(&tail.next, unsafe.Pointer(next))
+}
+
+// PublishExecutorDirectChannelCompletionBatch splices a pre-linked non-empty
+// chain [head..tail] of Published completions for driver onto the owner's MPSC
+// inbox with one atomic exchange and one release link.
+func PublishExecutorDirectChannelCompletionBatch(
+	driver *ExecutorDriver,
+	head, tail *DirectChannelCompletion,
+) bool {
+	if driver == nil || head == nil || tail == nil ||
+		head.owner != driver || tail.owner != driver ||
+		head.route != driver.route || tail.route != driver.route ||
+		driver.magic != executorDriverMagic ||
+		driver.p == nil || driver.p.executor != driver ||
+		preemptLoadPointer(&driver.directChannelHead) == nil {
+		return false
+	}
+	preemptStorePointer(&tail.next, nil)
+	previous := preemptSwapPointer(&driver.directChannelHead, unsafe.Pointer(tail))
+	if previous == nil || previous == unsafe.Pointer(head) || previous == unsafe.Pointer(tail) {
+		return false
+	}
+	preemptStorePointer((*unsafe.Pointer)(previous), unsafe.Pointer(head))
 	return true
 }
 

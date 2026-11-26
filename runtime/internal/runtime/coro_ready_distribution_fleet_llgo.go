@@ -166,7 +166,7 @@ func coroTargetAfterStableRunActionV1(
 	if state.lifecycle != coroNativeFleetActiveV1 {
 		return false, coroTargetReadyDistributionFailV1("native ready distribution fleet is not active")
 	}
-	if !state.fleet.HasPeerRunnableDemand(target.sourceRoute) {
+	if !coro.HasReadySurplus(source, yieldAction) || !state.fleet.HasPeerRunnableDemand(target.sourceRoute) {
 		return false, true
 	}
 	route := uint32(target.sourceRoute)
@@ -182,10 +182,19 @@ func coroTargetAfterStableRunActionV1(
 		return false, coroTargetReadyDistributionFailV1("native ready distribution source route mismatch")
 	}
 	for pass := uint32(1); pass < state.domainCount; pass++ {
-		distribution, distributionOK := state.fleet.DistributePNeutralRunnable(
-			sourceDomain.handle,
-			source,
-		)
+		var distribution coro.RunnableDistribution
+		var distributionOK bool
+		if yieldAction {
+			distribution, distributionOK = state.fleet.DistributePNeutralRunnableForYield(
+				sourceDomain.handle,
+				source,
+			)
+		} else {
+			distribution, distributionOK = state.fleet.DistributePNeutralRunnable(
+				sourceDomain.handle,
+				source,
+			)
+		}
 		if !distributionOK {
 			return false, coroTargetReadyDistributionFailV1("native ready distribution core rejected owner")
 		}
@@ -197,7 +206,6 @@ func coroTargetAfterStableRunActionV1(
 		}
 		distributed = true
 		if coroNativeFleetPhysicalOwnerV1State.stop.Sealed() ||
-			distribution.Count < 32 ||
 			!state.fleet.HasPeerRunnableDemand(target.sourceRoute) ||
 			!coro.HasReadySurplus(source, yieldAction) {
 			break

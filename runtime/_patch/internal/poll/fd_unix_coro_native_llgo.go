@@ -36,6 +36,7 @@ const (
 	LLGoTryFallback
 	LLGoTryFallbackSlowUnlock
 	LLGoTryWaitLocked
+	LLGoTryWaitLockedNoDeadline
 	LLGoTryPartialWrite
 	LLGoTryPartialWriteSlowUnlock
 )
@@ -117,6 +118,7 @@ func (fd *FD) LLGoTryRead(p []byte) (int, error, uint8) {
 			llgoCoroPollBufferAddress(p),
 			len(p),
 		)
+		checked := attempted
 		if !attempted {
 			if runtime_pollReset(ctx, 'r') != 0 {
 				if fd.llgoTryUnlock(mutexRLock, mutexRMask) {
@@ -140,6 +142,9 @@ func (fd *FD) LLGoTryRead(p []byte) (int, error, uint8) {
 				return n, err, LLGoTryDoneSlowUnlock
 			}
 			if errno == int(syscall.EAGAIN) && fd.pd.pollable() {
+				if checked {
+					return 0, nil, LLGoTryWaitLockedNoDeadline
+				}
 				return 0, nil, LLGoTryWaitLocked
 			}
 			if errno != int(syscall.EINTR) {
@@ -186,6 +191,12 @@ func LLGoPollWaitOne(ctx uintptr, fd int32, interest uint32, deadline int64) uin
 // LLGoPollError converts a non-zero netpoll status into the corresponding Go error.
 func (fd *FD) LLGoPollError(pollStatus int) error {
 	return convertErr(pollStatus, fd.isFile)
+}
+
+// LLGoReadWaitFastSnapshot returns the already-validated zero-deadline poll
+// descriptor identity after LLGoTryRead returned LLGoTryWaitLockedNoDeadline.
+func (fd *FD) LLGoReadWaitFastSnapshot() (ctx uintptr, pfd int32, interest uint32) {
+	return fd.pd.runtimeCtx, int32(fd.Sysfd), 1
 }
 
 // LLGoReadWaitPrepare prepares a poll wait while holding fd's read lock.

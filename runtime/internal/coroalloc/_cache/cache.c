@@ -65,12 +65,16 @@ enum {
 };
 
 struct llgo_coro_alloc_cache_bin_v1 {
-    _Alignas(64) _Atomic(uint32_t) lock;
+    _Alignas(128) _Atomic(uint32_t) lock;
     _Atomic(uint32_t) count;
     /* Zero is uninitialized; UINT32_MAX marks a class whose budget cannot
        retain even one object. */
     _Atomic(uint32_t) capacity;
     void *head;
+    /* Stack of pre-linked full llgo_coro_alloc_tls_batch-node magazines.
+       Each batch head stores the next batch pointer in word 1 (((void**)b)[1]),
+       which is zeroed before returning the object to callers. */
+    void *batch_head;
 };
 
 struct llgo_coro_alloc_tls_bin_v1 {
@@ -79,7 +83,7 @@ struct llgo_coro_alloc_tls_bin_v1 {
 };
 
 struct llgo_coro_alloc_tls_cache_v1 {
-    _Alignas(64) _Atomic(uint32_t) in_use;
+    _Alignas(128) _Atomic(uint32_t) in_use;
     struct llgo_coro_alloc_tls_bin_v1 bins[llgo_coro_alloc_cache_small_count];
 };
 
@@ -91,6 +95,12 @@ static struct llgo_coro_alloc_tls_cache_v1
 static pthread_once_t llgo_coro_alloc_tls_key_once_v1 = PTHREAD_ONCE_INIT;
 static pthread_key_t llgo_coro_alloc_tls_key_v1;
 static _Atomic(bool) llgo_coro_alloc_tls_key_ready_v1;
+/* Fast thread-local cache of the static pool slot owned by pthread_key_t.
+   llgo_coro_alloc_tls_destroy_v1 receives the slot directly from pthread_key_t
+   and NEVER accesses this _Thread_local variable, avoiding Darwin dyld TLV
+   teardown races while eliminating pthread_getspecific calls on hot paths. */
+static _Thread_local struct llgo_coro_alloc_tls_cache_v1 *
+    llgo_coro_alloc_tls_fast_v1;
 
 static inline int llgo_coro_alloc_cache_index_v1(uintptr_t size) {
     uintptr_t off = size - llgo_coro_alloc_cache_small_min;
@@ -212,6 +222,7 @@ static struct llgo_coro_alloc_tls_cache_v1 *llgo_coro_alloc_tls_acquire_v1(
                 memory_order_acquire,
                 memory_order_relaxed)) {
             if (pthread_setspecific(llgo_coro_alloc_tls_key_v1, slot) == 0) {
+                llgo_coro_alloc_tls_fast_v1 = slot;
                 return slot;
             }
             atomic_store_explicit(&slot->in_use, 0, memory_order_release);
@@ -239,25 +250,25 @@ llgo_coro_alloc_tls_slow_v1(bool create) {
     struct llgo_coro_alloc_tls_cache_v1 *cache =
         (struct llgo_coro_alloc_tls_cache_v1 *)pthread_getspecific(
             llgo_coro_alloc_tls_key_v1);
-    if (cache != NULL || !create) {
+    if (cache != NULL) {
+        llgo_coro_alloc_tls_fast_v1 = cache;
         return cache;
+    }
+    if (!create) {
+        return NULL;
     }
     return llgo_coro_alloc_tls_acquire_v1();
 }
 
 static inline struct llgo_coro_alloc_tls_cache_v1 *llgo_coro_alloc_tls_get_v1(
     bool create) {
-    if (__builtin_expect(
-            atomic_load_explicit(
-                &llgo_coro_alloc_tls_key_ready_v1, memory_order_acquire),
-            1)) {
-        struct llgo_coro_alloc_tls_cache_v1 *cache =
-            (struct llgo_coro_alloc_tls_cache_v1 *)pthread_getspecific(
-                llgo_coro_alloc_tls_key_v1);
-        if (__builtin_expect(cache != NULL || !create, 1)) {
-            return cache;
-        }
-        return llgo_coro_alloc_tls_acquire_v1();
+    struct llgo_coro_alloc_tls_cache_v1 *cache = llgo_coro_alloc_tls_fast_v1;
+    if (__builtin_expect(cache != NULL, 1)) {
+        return cache;
+    }
+    if (!create && !atomic_load_explicit(
+            &llgo_coro_alloc_tls_key_ready_v1, memory_order_acquire)) {
+        return NULL;
     }
     return llgo_coro_alloc_tls_slow_v1(create);
 }
@@ -289,7 +300,36 @@ void *__llgo_coro_alloc_cache_take_v1(uintptr_t size) {
             cache = llgo_coro_alloc_tls_get_v1(true);
         }
         llgo_coro_alloc_cache_lock_v1(bin);
+        void *batch = bin->batch_head;
+        if (batch != NULL && cache != NULL) {
+            void **words = (void **)batch;
+            bin->batch_head = words[1];
+            uint32_t c = atomic_load_explicit(&bin->count, memory_order_relaxed);
+            atomic_store_explicit(
+                &bin->count, c - llgo_coro_alloc_tls_batch, memory_order_relaxed);
+            llgo_coro_alloc_cache_unlock_v1(bin);
+            words[1] = NULL;
+            struct llgo_coro_alloc_tls_bin_v1 *tbin = &cache->bins[index];
+            tbin->head = words[0];
+            tbin->count = llgo_coro_alloc_tls_batch - 1;
+            words[0] = NULL;
+            return batch;
+        }
         void *result = bin->head;
+        if (result == NULL && batch != NULL) {
+            /* cache == NULL fallback: detach one node from batch_head and move
+               the remaining llgo_coro_alloc_tls_batch-1 nodes to bin->head. */
+            void **words = (void **)batch;
+            bin->batch_head = words[1];
+            words[1] = NULL;
+            result = batch;
+            bin->head = words[0];
+            uint32_t c = atomic_load_explicit(&bin->count, memory_order_relaxed);
+            atomic_store_explicit(&bin->count, c - 1, memory_order_relaxed);
+            llgo_coro_alloc_cache_unlock_v1(bin);
+            words[0] = NULL;
+            return result;
+        }
         if (result != NULL) {
             void *next = *(void **)result;
             uint32_t taken = 1;
@@ -363,28 +403,49 @@ bool __llgo_coro_alloc_cache_put_v1(void *pointer, uintptr_t size) {
                 atomic_load_explicit(&bin->count, memory_order_relaxed) >= cap) {
                 return false;
             }
-            /* Flush half of the thread-local magazine into the global bin under
-               one lock acquisition, respecting the exact bin capacity. */
+            /* Split a full batch from the thread-local magazine BEFORE
+               acquiring the global bin lock so the critical section is O(1). */
+            uint32_t want_flush = tbin->count >= llgo_coro_alloc_tls_batch
+                ? llgo_coro_alloc_tls_batch : tbin->count;
+            void *batch_head = tbin->head;
+            void *batch_tail = batch_head;
+            for (uint32_t i = 1; i < want_flush; ++i) {
+                batch_tail = *(void **)batch_tail;
+            }
+            void *rest_head = *(void **)batch_tail;
+
             llgo_coro_alloc_cache_lock_v1(bin);
             uint32_t count = atomic_load_explicit(&bin->count, memory_order_relaxed);
             uint32_t room = count < cap ? cap - count : 0;
-            uint32_t flush = tbin->count >= llgo_coro_alloc_tls_batch
-                ? llgo_coro_alloc_tls_batch : tbin->count;
-            if (flush > room) {
-                flush = room;
+            if (room >= want_flush && want_flush == llgo_coro_alloc_tls_batch) {
+                *(void **)batch_tail = NULL;
+                ((void **)batch_head)[1] = bin->batch_head;
+                bin->batch_head = batch_head;
+                atomic_store_explicit(&bin->count, count + want_flush, memory_order_relaxed);
+                llgo_coro_alloc_cache_unlock_v1(bin);
+                tbin->head = rest_head;
+                tbin->count -= want_flush;
+                memset(pointer, 0, size);
+                *(void **)pointer = tbin->head;
+                tbin->head = pointer;
+                tbin->count++;
+                return true;
             }
+            uint32_t flush = want_flush < room ? want_flush : room;
             if (flush > 0) {
-                void *batch_head = tbin->head;
-                void *batch_tail = batch_head;
-                for (uint32_t i = 1; i < flush; ++i) {
-                    batch_tail = *(void **)batch_tail;
+                if (flush < want_flush) {
+                    batch_tail = batch_head;
+                    for (uint32_t i = 1; i < flush; ++i) {
+                        batch_tail = *(void **)batch_tail;
+                    }
+                    rest_head = *(void **)batch_tail;
                 }
-                tbin->head = *(void **)batch_tail;
-                tbin->count -= flush;
                 *(void **)batch_tail = bin->head;
                 bin->head = batch_head;
                 atomic_store_explicit(&bin->count, count + flush, memory_order_relaxed);
                 llgo_coro_alloc_cache_unlock_v1(bin);
+                tbin->head = rest_head;
+                tbin->count -= flush;
                 memset(pointer, 0, size);
                 *(void **)pointer = tbin->head;
                 tbin->head = pointer;

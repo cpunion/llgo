@@ -151,6 +151,16 @@ func coroTargetPublishDirectChannelCompletionV1(
 		coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State)
 }
 
+func coroTargetPublishDirectChannelCompletionBatchV1(
+	owner *coro.ExecutorDriver,
+	route coro.RouteID,
+	head, tail *coro.DirectChannelCompletion,
+) bool {
+	return route == coro.RouteID(1) &&
+		coro.PublishExecutorDirectChannelCompletionBatch(owner, head, tail) &&
+		coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State)
+}
+
 type coroChannelAdapterFrame struct {
 	g          *coro.G
 	handle     unsafe.Pointer

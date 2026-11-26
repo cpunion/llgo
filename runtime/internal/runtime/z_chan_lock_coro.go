@@ -50,6 +50,14 @@ func (m *channelMutex) Init(_ *struct{}) int32 {
 	return 0
 }
 
+func tryLockChannelMutex(m *channelMutex) bool {
+	if m == nil {
+		coroRuntimeAbort("lock nil coroutine channel owner gate")
+		return false
+	}
+	return channelMutexCompareAndSwap(&m.state, channelOwnerGateIdle, channelOwnerGateHeld)
+}
+
 func (m *channelMutex) Lock() {
 	if m == nil {
 		coroRuntimeAbort("lock nil coroutine channel owner gate")

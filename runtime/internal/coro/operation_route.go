@@ -53,6 +53,7 @@ type operationRouteSlot struct {
 	worker           *WorkerOperationSource
 	channel          *ChannelOperationSource
 	control          *TaskControlSource
+	_                [48]byte
 }
 
 // OperationRouteRegistry maps the route bits carried by an OperationID to one

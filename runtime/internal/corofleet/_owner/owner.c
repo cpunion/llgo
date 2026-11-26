@@ -1252,6 +1252,18 @@ int __llgo_coro_fleet_owner_yield_v1(void) {
     return sched_yield();
 }
 
+void __llgo_coro_fleet_owner_pause_v1(uint32_t spins) {
+    for (uint32_t i = 0; i < spins; ++i) {
+#if defined(__aarch64__)
+        __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#else
+        __asm__ __volatile__("" ::: "memory");
+#endif
+    }
+}
+
 int __llgo_coro_fleet_factory_stop_v2(uint32_t terminal_owner_token) {
     struct llgo_coro_fleet_factory_v1 *factory =
         &llgo_coro_fleet_factory_v1;

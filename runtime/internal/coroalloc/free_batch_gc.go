@@ -29,15 +29,15 @@ import "unsafe"
 // sequentially with zero kernel mutex sleeps and zero retained RSS.
 type gcFreeBatcher struct {
 	drainLock   uint32
-	_pad0       [60]byte
+	_pad0       [124]byte
 	pendingHead unsafe.Pointer
-	_pad1       [56]byte
+	_pad1       [120]byte
 }
 
 var defaultGCFreeBatcher gcFreeBatcher
 
 func (b *gcFreeBatcher) tryAcquireDrain() bool {
-	return freeBatchCAS(&b.drainLock, 0, 1)
+	return freeBatchLoad(&b.drainLock) == 0 && freeBatchCAS(&b.drainLock, 0, 1)
 }
 
 func (b *gcFreeBatcher) releaseDrain() bool {

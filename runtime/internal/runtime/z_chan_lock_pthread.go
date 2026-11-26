@@ -23,3 +23,8 @@ import "github.com/xgo-dev/llgo/runtime/internal/sync"
 // channelMutex preserves the native-stack channel implementation for builds
 // that do not select the stackless single-P coroutine executor.
 type channelMutex = sync.Mutex
+
+func tryLockChannelMutex(m *channelMutex) bool {
+	m.Lock()
+	return true
+}

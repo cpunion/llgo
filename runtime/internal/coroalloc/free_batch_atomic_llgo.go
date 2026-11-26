@@ -24,6 +24,10 @@ import (
 	"github.com/xgo-dev/llgo/runtime/internal/sync/atomic"
 )
 
+func freeBatchLoad(ptr *uint32) uint32 {
+	return atomic.Load(ptr)
+}
+
 func freeBatchCAS(ptr *uint32, old, new uint32) bool {
 	_, swapped := atomic.CompareAndExchange(ptr, old, new)
 	return swapped

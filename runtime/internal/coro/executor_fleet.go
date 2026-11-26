@@ -107,6 +107,7 @@ const executorFleetMagic uint32 = 0x45584631 // "EXF1"
 type ExecutorFleet struct {
 	magic      uint32
 	demandMask uint32
+	_          [120]byte
 	executors  ExecutorRegistry
 	routes     OperationRouteRegistry
 	slots      [ExecutorFleetCapacity]executorFleetSlot
@@ -672,6 +673,26 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 	sourceHandle ExecutorFleetHandle,
 	source *P,
 ) (distribution RunnableDistribution, ok bool) {
+	return fleet.distributePNeutralRunnable(sourceHandle, source, false)
+}
+
+// DistributePNeutralRunnableForYield distributes surplus runnables after a
+// running G yielded (e.g. preempted inside a burst spawn loop). When a large
+// runnable backlog is queued ahead of the yielding producer, dividing
+// (readyCount-1)/demanded evenly across all demanded peers keeps the producer
+// local so it can resume promptly while peers execute in parallel.
+func (fleet *ExecutorFleet) DistributePNeutralRunnableForYield(
+	sourceHandle ExecutorFleetHandle,
+	source *P,
+) (distribution RunnableDistribution, ok bool) {
+	return fleet.distributePNeutralRunnable(sourceHandle, source, true)
+}
+
+func (fleet *ExecutorFleet) distributePNeutralRunnable(
+	sourceHandle ExecutorFleetHandle,
+	source *P,
+	yieldProducer bool,
+) (distribution RunnableDistribution, ok bool) {
 	sourceSlot, _, sourceOK := executorFleetSlotFor(fleet, sourceHandle)
 	if !sourceOK || preemptLoad(&sourceSlot.state) != uint32(executorFleetSlotActive) ||
 		sourceSlot.p != source || source == nil || !validReadyQueueHeader(source) ||
@@ -695,7 +716,7 @@ func (fleet *ExecutorFleet) DistributePNeutralRunnable(
 		}
 		return fleet.distributePNeutralSingle(sourceHandle, source, demandMask, candidate)
 	}
-	return fleet.distributePNeutralBatch(sourceHandle, source, demandMask)
+	return fleet.distributePNeutralBatch(sourceHandle, source, demandMask, yieldProducer)
 }
 
 func (fleet *ExecutorFleet) distributePNeutralSingle(
@@ -758,8 +779,21 @@ func (fleet *ExecutorFleet) distributePNeutralBatch(
 	sourceHandle ExecutorFleetHandle,
 	source *P,
 	demandMask uint32,
+	yieldProducer bool,
 ) (distribution RunnableDistribution, ok bool) {
-	batchLimit := source.readyCount / 2
+	demanded := uint32(0)
+	for bits := demandMask; bits != 0; bits &= bits - 1 {
+		demanded++
+	}
+	var batchLimit uint32
+	if yieldProducer && source.readyCount >= 16 && demanded > 0 {
+		batchLimit = (source.readyCount - 1) / demanded
+	} else {
+		batchLimit = source.readyCount / (demanded + 1)
+	}
+	if batchLimit == 0 {
+		batchLimit = 1
+	}
 	if batchLimit > RunnableTransferMailboxCapacity {
 		batchLimit = RunnableTransferMailboxCapacity
 	}
@@ -840,19 +874,18 @@ func (fleet *ExecutorFleet) DistributeMaterializedRunnableToPreferredRoute(
 		return RunnableDistribution{}, true
 	}
 	candidate := source.readyHead
+	// Check the O(1) causal route hint before walking frame chains so poll and
+	// timer wakeups (which carry preferred == 0) never scan frames unnecessarily.
+	preferred, preferredOK := MaterializedRunnablePreferredRoute(candidate)
+	if !preferredOK || preferred == 0 || uint32(preferred) > ExecutorFleetCapacity ||
+		preferred == RouteID(sourceHandle.Route) {
+		return RunnableDistribution{}, true
+	}
 	// This exact causal route needs only the selected continuation. Validate its
 	// complete frame chain, but do not walk unrelated runnable work. The
 	// prepared publication rechecks its O(1) queue/G header under the target
 	// mailbox gate.
 	if !pNeutralRunnable(candidate, true) {
-		return RunnableDistribution{}, true
-	}
-	preferred, preferredOK := MaterializedRunnablePreferredRoute(candidate)
-	if !preferredOK {
-		return RunnableDistribution{}, true
-	}
-	if preferred == 0 || uint32(preferred) > ExecutorFleetCapacity ||
-		preferred == RouteID(sourceHandle.Route) {
 		return RunnableDistribution{}, true
 	}
 	target := &fleet.slots[uint32(preferred)-1]
