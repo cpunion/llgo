@@ -176,6 +176,29 @@ func executorRunSourceRequested(driver *ExecutorDriver) bool {
 	return driver.run.sourceMore || executorRunExternalSourceRequested(driver)
 }
 
+const executorRunUrgentSourceQuantum uint8 = 8
+
+func executorRunSourceFairnessDue(driver *ExecutorDriver) bool {
+	if driver.run.actionsSinceSource < executorRunUrgentSourceQuantum {
+		return false
+	}
+	if driver.sources.urgentPending() {
+		return true
+	}
+	return driver.run.actionsSinceSource >= executorRunSourceQuantum &&
+		(driver.p.affectedWaitHead != nil || driver.sources.needsMonotonicTimeNow())
+}
+
+func executorRunReadyDebtBlocksSource(driver *ExecutorDriver) bool {
+	if !driver.run.readyDebt || executorRunSourceFairnessDue(driver) {
+		return false
+	}
+	if !AuditEnabled && driver.run.actionsSinceSource >= executorRunSourceQuantum {
+		driver.run.actionsSinceSource = 0
+	}
+	return true
+}
+
 func serviceExecutorRunSource(driver *ExecutorDriver, now int64, withDeadline bool) (ExecutorRunStep, bool) {
 	var progress ExecutorPollProgress
 	var ok bool
@@ -445,7 +468,8 @@ func nextExecutorRunActionValidated(
 	// existing debt first, so the ordinary unlocked head may cross directly into
 	// the adjacent dequeue/action reducer without replaying the complete idle-P
 	// tuple or probing lower-priority producer queues.
-	if combineDispatch && driver.run.readyDebt && driver.poll.phase == executorPollIdle &&
+	if combineDispatch && executorRunReadyDebtBlocksSource(driver) &&
+		driver.poll.phase == executorPollIdle &&
 		p.current == nil && p.osThreadLockOwner == nil && p.osThreadSuspensions == nil &&
 		p.osThreadSuspend == osThreadSuspendAttached && p.readyHead != nil {
 		step, ok = dispatchExecutorRunReadyAction(driver, p.readyHead, true)
@@ -476,7 +500,7 @@ func nextExecutorRunActionValidated(
 	// runnable as its bounded fairness payment. Dispatch that stable owner-local
 	// fact before probing producer queues again. Concurrent completion facts stay
 	// published and are observed immediately after this one physical action.
-	if driver.run.readyDebt && runnable != nil {
+	if executorRunReadyDebtBlocksSource(driver) && runnable != nil {
 		step, ok := dispatchExecutorRunReadyAction(driver, runnable, true)
 		return step, ok, ok
 	}
@@ -547,25 +571,29 @@ func nextExecutorRunStepAtValidated(
 	// A compact hchan completion is already a terminal typed fact and has no
 	// source epoch to acknowledge. Consume it before unrelated catalog work; the
 	// runtime adapter removes the typed queue node and commits the returned
-	// frame-local packet in this single explicit reduction.
-	if executorDirectChannelCompletionPending(driver) {
-		completion, taken := takeExecutorDirectChannelCompletion(driver)
-		if !taken {
-			return ExecutorRunStep{}, false
+	// frame-local packet in this single explicit reduction. Yield to pending
+	// urgent or timer-backed source service once the fairness quantum is due so
+	// continuous direct-channel traffic cannot starve mutex, I/O, or timer work.
+	if !executorRunSourceFairnessDue(driver) {
+		if executorDirectChannelCompletionPending(driver) {
+			completion, taken := takeExecutorDirectChannelCompletion(driver)
+			if !taken {
+				return ExecutorRunStep{}, false
+			}
+			if completion != nil {
+				return ExecutorRunStep{Kind: ExecutorRunStepDirectChannel, Direct: completion}, true
+			}
 		}
-		if completion != nil {
-			return ExecutorRunStep{Kind: ExecutorRunStepDirectChannel, Direct: completion}, true
+		// An owner-local completion has already published its exact typed source
+		// fact. Resolve it before starting an unrelated external A/ack/B epoch and
+		// before dispatching another G; typed cleanup still returns through the
+		// ordinary direct-runtime Materialize boundary.
+		if ownerLocalCompletionPending(driver) {
+			return nextExecutorRunLocalStep(driver)
 		}
-	}
-	// An owner-local completion has already published its exact typed source
-	// fact. Resolve it before starting an unrelated external A/ack/B epoch and
-	// before dispatching another G; typed cleanup still returns through the
-	// ordinary direct-runtime Materialize boundary.
-	if ownerLocalCompletionPending(driver) {
-		return nextExecutorRunLocalStep(driver)
 	}
 	runnable := nextOSThreadRunnable(p)
-	if driver.run.readyDebt {
+	if executorRunReadyDebtBlocksSource(driver) {
 		if runnable != nil {
 			return dispatchExecutorRunReady(driver, runnable, combineDispatch)
 		}

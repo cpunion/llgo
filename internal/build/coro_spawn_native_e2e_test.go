@@ -1194,7 +1194,9 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		"__llgo_coro_fault_payload_v2",
 		"github.com/xgo-dev/llgo/runtime/internal/coro.CommitSpawn",
 		"github.com/xgo-dev/llgo/runtime/internal/coro.BeginChannelExternalCommit",
-		"github.com/xgo-dev/llgo/runtime/internal/coro.BeginChannelExternalCommitPair",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.BeginDirectChannelSelectCompletion",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.CommitDirectChannelSelectCompletion",
+		"github.com/xgo-dev/llgo/runtime/internal/coro.TakeDirectChannelSelectResume",
 		"github.com/xgo-dev/llgo/runtime/internal/coro.RequestCommandShutdownDrain",
 		"github.com/xgo-dev/llgo/runtime/internal/coro.BeginCommandShutdown",
 	} {

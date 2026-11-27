@@ -996,6 +996,173 @@ func takeDirectChannelResumeCompatibility(
 	return outcome, task, small, true
 }
 
+// TakeDirectChannelSelectResume is the compiler-owned multi-case select resume
+// prologue backed by DirectChannelParkStorageV1. It consumes the P-owned
+// logical decision and frame-local completion word (carrying both winner caseID
+// and channel waitStatus) exactly once, preserving prompt task-cancellation
+// override even after P-neutral runnable migration.
+func TakeDirectChannelSelectResume(
+	g *G,
+	storage *DirectChannelParkStorageV1,
+) (
+	outcome ParkOutcome,
+	caseID uint32,
+	task TaskCancelKind,
+	small uint8,
+	ok bool,
+) {
+	if g == nil || storage == nil || !validParkTicket(storage.Ticket) {
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	p := g.runP
+	if p != nil && p.executor != nil && p.executor.run.issued == ActionCheckResume {
+		return takeIssuedDirectChannelSelectResume(g, storage)
+	}
+	return takeDirectChannelSelectResumeCompatibility(
+		g, storage.Ticket, &storage.Completion, &storage.Wait, unsafe.Pointer(storage),
+	)
+}
+
+func takeIssuedDirectChannelSelectResume(
+	g *G,
+	storage *DirectChannelParkStorageV1,
+) (
+	outcome ParkOutcome,
+	caseID uint32,
+	task TaskCancelKind,
+	small uint8,
+	ok bool,
+) {
+	expected := storage.Ticket
+	completion := &storage.Completion
+	wait := &storage.Wait
+	context := unsafe.Pointer(storage)
+	p := g.runP
+	if p == nil || p.executor == nil || p.executor.run.issued != ActionCheckResume ||
+		p.current != g || !p.inResume || p.runDecisionTaken {
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	decision := &p.runDecision
+	if decision.g != g || decision.ticket != expected || !decision.materialized ||
+		!decision.directChannel {
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	completionState := preemptLoad(&completion.state)
+	physicalSmall, physicalCaseID, unpackedOK := unpackDirectChannelResult(preemptLoad(&completion.small))
+	if completion.context != context || completion.wait != wait ||
+		completionState != uint32(directChannelCompletionMaterialized) || !unpackedOK {
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	switch decision.outcome {
+	case ParkOutcomeCompleted:
+		if decision.caseID == 0 || decision.caseID > MaxSelectOperationCases ||
+			decision.caseID != physicalCaseID || decision.task != TaskCancelNone ||
+			physicalSmall == ResumeSmallInvalid {
+			return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+		}
+		outcome, caseID, task, small = ParkOutcomeCompleted, decision.caseID, TaskCancelNone, physicalSmall
+	case ParkOutcomeCanceled:
+		if decision.caseID != 0 || !validTaskCancelKind(decision.task) {
+			return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+		}
+		outcome, caseID, task, small = ParkOutcomeCanceled, 0, decision.task, ResumeSmallInvalid
+	default:
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	park := &g.park
+	park.phase = parkDelivered
+	park.directChannel = false
+	park.seed = 0
+	park.cancelKind = ParkCancelNone
+	park.outcome = ParkOutcomePending
+	park.winnerCase = 0
+	*completion = DirectChannelCompletion{}
+	p.runDecision = RunDecision{}
+	p.runDecisionTaken = true
+	return outcome, caseID, task, small, true
+}
+
+func takeDirectChannelSelectResumeCompatibility(
+	g *G,
+	expected ParkTicket,
+	completion *DirectChannelCompletion,
+	wait *WaitSetRecord,
+	context unsafe.Pointer,
+) (
+	outcome ParkOutcome,
+	caseID uint32,
+	task TaskCancelKind,
+	small uint8,
+	ok bool,
+) {
+	if g == nil || g.magic != gMagic || !validParkTicket(expected) ||
+		completion == nil || wait == nil || context == nil {
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	p := g.runP
+	if p == nil || p.current != g || !p.inResume || g.state != GRunning ||
+		p.runDecisionTaken || p.action.Kind != ActionResume || p.action.Flags != 0 ||
+		p.action.Handle == nil || g.runP != p {
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	decision := &p.runDecision
+	if decision.g != g || decision.ticket != expected || !decision.materialized ||
+		!decision.directChannel || decision.lease != (OperationResultLease{}) {
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	physicalSmall, physicalCaseID, unpackedOK := unpackDirectChannelResult(preemptLoad(&completion.small))
+	if completion.context != context || completion.owner == nil ||
+		completion.wait != wait || !completion.route.Valid() ||
+		completion.owner.route != completion.route ||
+		preemptLoad(&completion.state) != uint32(directChannelCompletionMaterialized) ||
+		!unpackedOK {
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	park := &g.park
+	if park.phase != parkMaterialized || park.ticket != expected ||
+		!park.directChannel || park.resolving {
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	resultSmall := uint8(ResumeSmallInvalid)
+	resultCaseID := uint32(0)
+	switch decision.outcome {
+	case ParkOutcomeCompleted:
+		if decision.caseID == 0 || decision.caseID > MaxSelectOperationCases ||
+			decision.task != TaskCancelNone ||
+			park.outcome != ParkOutcomeCompleted || park.winnerCase != decision.caseID ||
+			physicalCaseID != decision.caseID || physicalSmall == ResumeSmallInvalid {
+			return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+		}
+		resultSmall = physicalSmall
+		resultCaseID = decision.caseID
+	case ParkOutcomeCanceled:
+		if decision.caseID != 0 || !validTaskCancelKind(decision.task) ||
+			(park.outcome == ParkOutcomeCompleted &&
+				(park.winnerCase == 0 || park.winnerCase > MaxSelectOperationCases ||
+					physicalCaseID != park.winnerCase || physicalSmall == ResumeSmallInvalid)) ||
+			(park.outcome == ParkOutcomeCanceled &&
+				(park.winnerCase != 0 || physicalCaseID != 0 || physicalSmall != ResumeSmallInvalid)) ||
+			(park.outcome != ParkOutcomeCompleted && park.outcome != ParkOutcomeCanceled) {
+			return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+		}
+	default:
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	if !validTaskCancelState(park.taskCancelKind, park.taskCancelPhase) {
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeSmallInvalid, false
+	}
+	outcome, caseID, task, small = decision.outcome, resultCaseID, decision.task, resultSmall
+	kind, phase := park.taskCancelKind, park.taskCancelPhase
+	*park = ParkState{
+		ticket: expected, phase: parkDelivered,
+		taskCancelKind: kind, taskCancelPhase: phase,
+	}
+	*completion = DirectChannelCompletion{}
+	p.runDecision = RunDecision{}
+	p.runDecisionTaken = true
+	return outcome, caseID, task, small, true
+}
+
 // TakeResumePacket is the typed resume prologue for general packet-backed parks. It
 // consumes the P-owned logical decision and frame-local result exactly once.
 // A task stop selected after migration suppresses the copied payload without

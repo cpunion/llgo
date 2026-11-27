@@ -198,7 +198,7 @@ func validMaterializedParkHeader(state *ParkState) bool {
 	switch state.outcome {
 	case ParkOutcomeCompleted:
 		if state.directChannel {
-			return state.winnerCase == 1
+			return state.winnerCase != 0 && state.winnerCase <= MaxSelectOperationCases
 		}
 		return state.winnerCase != 0
 	case ParkOutcomeDefault:

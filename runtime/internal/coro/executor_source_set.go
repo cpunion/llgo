@@ -604,6 +604,22 @@ func (sources *ExecutorSourceSet) pending(p *P) bool {
 		sources.control != nil && sources.control.scanLimit != 0 && preemptLoad(&sources.control.pending) != 0
 }
 
+// urgentPending reports an already-posted external wakeup from a non-timer
+// source (netpoll I/O, mutex/sema manual post, worker completion, or task
+// control). Unlike pending(), it intentionally excludes owner-local
+// affectedWaitHead visits (such as controlled timer registration), so
+// continuous direct-channel traffic can bound mutex/IO tail latency without
+// forcing redundant timer-table scans on every timer park.
+func (sources *ExecutorSourceSet) urgentPending() bool {
+	if sources == nil {
+		return false
+	}
+	return sources.poll != nil && sources.poll.scanLimit != 0 && preemptLoad(&sources.poll.pending) != 0 ||
+		sources.manual != nil && sources.manual.scanLimit != 0 && preemptLoad(&sources.manual.pending) != 0 ||
+		sources.worker != nil && sources.worker.scanLimit != 0 && preemptLoad(&sources.worker.pending) != 0 ||
+		sources.control != nil && sources.control.scanLimit != 0 && preemptLoad(&sources.control.pending) != 0
+}
+
 func (sources *ExecutorSourceSet) nextDeadline(p *P) (deadline int64, hasDeadline, ok bool) {
 	if !validExecutorSourceSet(sources, p) || !sources.usesMonotonicTime() {
 		return 0, false, false

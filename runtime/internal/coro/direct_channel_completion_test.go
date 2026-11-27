@@ -493,3 +493,158 @@ func TestPublishExecutorDirectChannelCompletionBatch(t *testing.T) {
 		t.Fatal("invalid batch publish arguments must fail closed")
 	}
 }
+
+func TestDirectChannelSelectCompletionMultiCaseAndRace(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithManual(t, p)
+
+	// 1. State-machine arbitration: competing losing cases observe Canceled once
+	//    another case acquires Bound->Effect, while Materialized/Unused stay Invalid.
+	probe := &DirectChannelCompletion{
+		owner: driver,
+		route: driver.route,
+		state: uint32(directChannelCompletionBound),
+	}
+	if got := BeginDirectChannelSelectCompletion(probe); got != DirectChannelCompletionBeginAcquired {
+		t.Fatalf("first select case acquire = %d, want acquired", got)
+	}
+	if got := BeginDirectChannelSelectCompletion(probe); got != DirectChannelCompletionBeginCanceled {
+		t.Fatalf("competing select case during Effect = %d, want canceled", got)
+	}
+	preemptStore(&probe.state, uint32(directChannelCompletionMatched))
+	if got := BeginDirectChannelSelectCompletion(probe); got != DirectChannelCompletionBeginCanceled {
+		t.Fatalf("competing select case during Matched = %d, want canceled", got)
+	}
+	preemptStore(&probe.state, uint32(directChannelCompletionTaken))
+	preemptStore(&probe.small, packDirectChannelResult(2, 3))
+	if got := BeginDirectChannelSelectCompletion(probe); got != DirectChannelCompletionBeginCanceled {
+		t.Fatalf("competing select case during Taken = %d, want canceled", got)
+	}
+	preemptStore(&probe.state, uint32(directChannelCompletionMaterialized))
+	if got := BeginDirectChannelSelectCompletion(probe); got != DirectChannelCompletionBeginInvalid {
+		t.Fatalf("select case after Materialized = %d, want invalid", got)
+	}
+
+	// 2. Full park -> select caseID=3 completion -> materialize -> P-neutral
+	//    migration -> late task cancellation -> TakeDirectChannelSelectResume.
+	task := newYieldingTestG(t, "direct-select-case3")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue direct-select task")
+	}
+	if next, ok := NextRunnable(p); !ok || next != task.g {
+		t.Fatalf("select direct-select task = (%p, %t)", next, ok)
+	}
+	action := beginWaitTestResume(t, p, task)
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+
+	storage := new(DirectChannelParkStorageV1)
+	if owner, route := PrepareCurrentDirectChannelPark(task.g, task.handle, task.frame.header, storage); owner != driver || route != driver.route {
+		t.Fatalf("PrepareCurrentDirectChannelPark = (%p, %d)", owner, route)
+	}
+	if parked, ok := Resumed(p, task.g, action); !ok || parked.Kind != ActionPark {
+		t.Fatalf("park direct-select task = (%+v, %t)", parked, ok)
+	}
+	if BeginDirectChannelSelectCompletion(&storage.Completion) != DirectChannelCompletionBeginAcquired {
+		t.Fatal("acquire direct-select case 3")
+	}
+	// Multi-case select must never inline-promote; same-P producer publishes to inbox.
+	if _, _, result := FinishDirectChannelSelectCompletionFromCompilerTask(
+		nil, &storage.Completion, 4, 3, driver.route,
+	); result != DirectChannelCompletionFinishNeedsTarget {
+		t.Fatalf("FinishDirectChannelSelectCompletionFromCompilerTask(nil) = %d, want NeedsTarget", result)
+	}
+	if !PublishExecutorDirectChannelCompletion(driver, &storage.Completion) {
+		t.Fatal("publish direct-select completion")
+	}
+	node, ok := takeExecutorDirectChannelCompletion(driver)
+	if !ok || node != &storage.Completion {
+		t.Fatalf("take direct-select completion = (%p, %t)", node, ok)
+	}
+	ctx, small, caseID, matched, snapOK := DirectChannelCompletionSelectSnapshot(node)
+	if !snapOK || ctx != unsafe.Pointer(storage) || small != 4 || caseID != 3 || !matched {
+		t.Fatalf("DirectChannelCompletionSelectSnapshot = (%p, %d, %d, %t, %t)", ctx, small, caseID, matched, snapOK)
+	}
+	if !CommitDirectChannelSelectCompletion(node, small, caseID) {
+		t.Fatal("CommitDirectChannelSelectCompletion failed")
+	}
+	if task.g.park.winnerCase != 3 || task.g.park.outcome != ParkOutcomeCompleted || !task.g.park.directChannel {
+		t.Fatalf("materialized select park = %+v", task.g.park)
+	}
+	if !RequestTaskCancellation(p, task.g, TaskCancelAbort) {
+		t.Fatal("request late task cancellation on materialized direct select")
+	}
+	if !validReadyQueue(p) || dequeueOSThreadRunnable(p) != task.g {
+		t.Fatal("dequeue materialized direct-select task")
+	}
+	check, ok := BeginRunG(p, task.g)
+	if !ok || check.Kind != ActionCheckResume {
+		t.Fatalf("BeginRunG direct-select = (%+v, %t)", check, ok)
+	}
+	resume, ok := Checked(p, task.g, check, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatalf("Checked direct-select = (%+v, %t)", resume, ok)
+	}
+	outcome, gotCase, cancelKind, gotSmall, taken := TakeDirectChannelSelectResume(task.g, storage)
+	if !taken || outcome != ParkOutcomeCanceled || gotCase != 0 ||
+		cancelKind != TaskCancelAbort || gotSmall != ResumeSmallInvalid {
+		t.Fatalf("TakeDirectChannelSelectResume = (%d, %d, %d, %d, %t)",
+			outcome, gotCase, cancelKind, gotSmall, taken)
+	}
+	runtime.KeepAlive(task.frame)
+}
+
+func TestDirectChannelSelectUrgentPendingFairness(t *testing.T) {
+	p := new(P)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	timers := new(TimerRegistrationTable)
+	manual := new(ManualOperationSource)
+	handle := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{
+		Timers: timers,
+		Manual: manual,
+	}) {
+		t.Fatal("bind fairness test executor driver")
+	}
+
+	task := newYieldingTestG(t, "urgent-fairness")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue fairness task")
+	}
+	driver.run.readyDebt = true
+	driver.run.actionsSinceSource = executorRunUrgentSourceQuantum
+
+	// Without urgent pending sources, readyDebt still precedes fallback poll below 64.
+	if !executorRunReadyDebtBlocksSource(driver) {
+		t.Fatal("readyDebt should still dispatch when no urgent source is pending")
+	}
+	// Mark manual source pending (models a woken sync.Mutex waiter).
+	manual.scanLimit = 1
+	preemptStore(&manual.pending, 1)
+	if executorRunReadyDebtBlocksSource(driver) {
+		t.Fatal("readyDebt must yield to urgent manual/poll pending source once urgent quantum is reached")
+	}
+	// Clear urgent pending and hit 64 with no active timers or affected waits:
+	// pure channel workloads keep dispatching readyDebt without empty scans.
+	preemptStore(&manual.pending, 0)
+	manual.scanLimit = 0
+	driver.run.actionsSinceSource = executorRunSourceQuantum
+	if !executorRunReadyDebtBlocksSource(driver) {
+		t.Fatal("readyDebt should stay fast at quantum when no timer or pending source exists")
+	}
+	// With an active timer (or affectedWaitHead), hitting 64 yields so timer
+	// expirations and cancellations cannot starve under direct-channel traffic.
+	timers.activeCount = 1
+	if executorRunReadyDebtBlocksSource(driver) {
+		t.Fatal("readyDebt must yield at executorRunSourceQuantum when timers are active")
+	}
+	timers.activeCount = 0
+	var wait WaitSetRecord
+	p.affectedWaitHead = &wait
+	if executorRunReadyDebtBlocksSource(driver) {
+		t.Fatal("readyDebt must yield at executorRunSourceQuantum when affectedWaitHead is non-nil")
+	}
+	p.affectedWaitHead = nil
+	runtime.KeepAlive(task.frame)
+}

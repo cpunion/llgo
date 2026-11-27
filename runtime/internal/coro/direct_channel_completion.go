@@ -97,12 +97,45 @@ const (
 	DirectChannelCompletionFinishNeedsTarget
 )
 
+const (
+	directChannelSmallMask = uint32(0xff)
+	directChannelCaseShift = 8
+)
+
+func packDirectChannelResult(small uint8, caseID uint32) uint32 {
+	if small == ResumeSmallInvalid {
+		return uint32(ResumeSmallInvalid)
+	}
+	return uint32(small) | caseID<<directChannelCaseShift
+}
+
+func unpackDirectChannelResult(word uint32) (small uint8, caseID uint32, ok bool) {
+	small = uint8(word & directChannelSmallMask)
+	rawCase := word >> directChannelCaseShift
+	if small == ResumeSmallInvalid {
+		if rawCase != 0 {
+			return ResumeSmallInvalid, 0, false
+		}
+		return ResumeSmallInvalid, 0, true
+	}
+	if rawCase > MaxSelectOperationCases {
+		return ResumeSmallInvalid, 0, false
+	}
+	if rawCase == 0 {
+		return small, 1, true
+	}
+	return small, rawCase, true
+}
+
 func directChannelCompletionLiveState(state directChannelCompletionState) bool {
 	return state >= directChannelCompletionBound && state <= directChannelCompletionTaken
 }
 
 func validDirectChannelCompletionSnapshot(completion *DirectChannelCompletion, state directChannelCompletionState, small uint32) bool {
-	if completion == nil || !directChannelCompletionLiveState(state) || small > uint32(^uint8(0)) {
+	if completion == nil || !directChannelCompletionLiveState(state) {
+		return false
+	}
+	if _, _, ok := unpackDirectChannelResult(small); !ok {
 		return false
 	}
 	if state == directChannelCompletionBound && small != uint32(ResumeSmallInvalid) {
@@ -491,6 +524,37 @@ func BeginDirectChannelCompletion(completion *DirectChannelCompletion) DirectCha
 	}
 }
 
+// BeginDirectChannelSelectCompletion claims the typed hchan effect for one
+// case of a compact multi-case select. Unlike a single-channel park, another
+// channel case of the same select may concurrently claim Effect/Matched/
+// Published/Taken while this losing waiter is still linked in its channel
+// queue. Once a peer wins Bound->Effect, its completion is irreversible, so
+// every competing case observes Canceled and discards its stale waiter without
+// retry or reconciliation.
+func BeginDirectChannelSelectCompletion(completion *DirectChannelCompletion) DirectChannelCompletionBeginResult {
+	if completion == nil {
+		return DirectChannelCompletionBeginInvalid
+	}
+	for {
+		switch directChannelCompletionState(preemptLoad(&completion.state)) {
+		case directChannelCompletionBound:
+			if preemptCompareAndSwap(
+				&completion.state,
+				uint32(directChannelCompletionBound),
+				uint32(directChannelCompletionEffect),
+			) {
+				return DirectChannelCompletionBeginAcquired
+			}
+		case directChannelCompletionEffect, directChannelCompletionMatched,
+			directChannelCompletionPublished, directChannelCompletionTaken,
+			directChannelCompletionCanceled:
+			return DirectChannelCompletionBeginCanceled
+		default:
+			return DirectChannelCompletionBeginInvalid
+		}
+	}
+}
+
 // AbortDirectChannelCompletion releases an acquired pre-effect claim. It is
 // used only when another endpoint cannot be committed under the same hchan
 // lock; no typed payload or waiter status may have changed yet.
@@ -503,14 +567,12 @@ func AbortDirectChannelCompletion(completion *DirectChannelCompletion) bool {
 		)
 }
 
-// FinishDirectChannelCompletion closes the typed effect and returns the exact
-// owner identity needed by the target publication shim.
-func FinishDirectChannelCompletion(
+func finishDirectChannelCompletionWord(
 	completion *DirectChannelCompletion,
-	small uint8,
+	smallWord uint32,
 	preferred RouteID,
 ) (*ExecutorDriver, RouteID, bool) {
-	if completion == nil || small == ResumeSmallInvalid || completion.owner == nil ||
+	if completion == nil || smallWord == uint32(ResumeSmallInvalid) || completion.owner == nil ||
 		!completion.route.Valid() || preferred != 0 && !preferred.Valid() ||
 		preemptLoad(&completion.state) != uint32(directChannelCompletionEffect) {
 		return nil, 0, false
@@ -519,7 +581,7 @@ func FinishDirectChannelCompletion(
 		(completion.wait == nil || !PublishExecutionDomainTask(completion.wait.g)) {
 		return nil, 0, false
 	}
-	preemptStore(&completion.small, uint32(small))
+	preemptStore(&completion.small, smallWord)
 	preemptStore(&completion.preferred, uint32(preferred))
 	if !preemptCompareAndSwap(
 		&completion.state,
@@ -529,6 +591,19 @@ func FinishDirectChannelCompletion(
 		return nil, 0, false
 	}
 	return completion.owner, completion.route, true
+}
+
+// FinishDirectChannelCompletion closes the typed effect and returns the exact
+// owner identity needed by the target publication shim.
+func FinishDirectChannelCompletion(
+	completion *DirectChannelCompletion,
+	small uint8,
+	preferred RouteID,
+) (*ExecutorDriver, RouteID, bool) {
+	if small == ResumeSmallInvalid {
+		return nil, 0, false
+	}
+	return finishDirectChannelCompletionWord(completion, uint32(small), preferred)
 }
 
 // validActiveDirectChannelWaitHeader proves the owner-local queue and G/frame
@@ -564,10 +639,30 @@ func completeDirectChannelWait(
 	expected directChannelCompletionState,
 	small uint8,
 ) bool {
+	caseID := uint32(0)
+	if small != ResumeSmallInvalid {
+		caseID = 1
+	}
+	return completeDirectChannelWaitWithCase(driver, completion, expected, small, caseID, false)
+}
+
+func completeDirectChannelWaitWithCase(
+	driver *ExecutorDriver,
+	completion *DirectChannelCompletion,
+	expected directChannelCompletionState,
+	small uint8,
+	caseID uint32,
+	multiSelect bool,
+) bool {
 	if driver == nil || completion == nil || completion.owner != driver || driver.p == nil ||
 		completion.wait == nil || completion.context == nil ||
-		completion.route != driver.route || preemptLoad(&completion.state) != uint32(expected) ||
-		preemptLoad(&completion.small) != uint32(small) {
+		completion.route != driver.route || preemptLoad(&completion.state) != uint32(expected) {
+		return false
+	}
+	gotSmall, gotCaseID, unpackedOK := unpackDirectChannelResult(preemptLoad(&completion.small))
+	if !unpackedOK || gotSmall != small ||
+		(small == ResumeSmallInvalid && (caseID != 0 || gotCaseID != 0)) ||
+		(small != ResumeSmallInvalid && (caseID == 0 || caseID > MaxSelectOperationCases || gotCaseID != caseID)) {
 		return false
 	}
 	wait, p := completion.wait, driver.p
@@ -606,12 +701,16 @@ func completeDirectChannelWait(
 		return false
 	}
 
-	outcome, caseID, resultSmall := ParkOutcomeCompleted, uint32(1), small
-	if canceled {
-		outcome, caseID, resultSmall = ParkOutcomeCanceled, 0, ResumeSmallInvalid
+	outcome, winnerCase := ParkOutcomeCompleted, caseID
+	resultWord := uint32(small)
+	if multiSelect {
+		resultWord = packDirectChannelResult(small, caseID)
 	}
-	materializeDirectChannelWaitUnchecked(
-		driver, completion, wait, state, resultSmall, outcome, caseID,
+	if canceled {
+		outcome, winnerCase, resultWord = ParkOutcomeCanceled, 0, uint32(ResumeSmallInvalid)
+	}
+	materializeDirectChannelWaitWordUnchecked(
+		driver, completion, wait, state, resultWord, outcome, winnerCase,
 	)
 	return true
 }
@@ -629,7 +728,21 @@ func materializeDirectChannelWaitUnchecked(
 	outcome ParkOutcome,
 	caseID uint32,
 ) {
-	preemptStore(&completion.small, uint32(resultSmall))
+	materializeDirectChannelWaitWordUnchecked(
+		driver, completion, wait, state, uint32(resultSmall), outcome, caseID,
+	)
+}
+
+func materializeDirectChannelWaitWordUnchecked(
+	driver *ExecutorDriver,
+	completion *DirectChannelCompletion,
+	wait *WaitSetRecord,
+	state *ParkState,
+	resultWord uint32,
+	outcome ParkOutcome,
+	caseID uint32,
+) {
+	preemptStore(&completion.small, resultWord)
 	// A compact Parked state owns no source/link payload. Its ticket and task
 	// cancellation receipt remain live; materialization changes only this small
 	// scalar overlay. Avoid clearing and reconstructing the complete ParkState.
@@ -642,7 +755,10 @@ func materializeDirectChannelWaitUnchecked(
 	preemptStore(&completion.state, uint32(directChannelCompletionMaterialized))
 	promoteReadyWaitSetUnchecked(driver.p, wait)
 	driver.run.blocked = false
-	driver.run.actionsSinceSource = 0
+	// Direct channel materialization did not poll external timer/IO sources.
+	// Retain actionsSinceSource so continuous channel/select traffic cannot
+	// starve pending timer cancellations or netpoll beyond one source quantum,
+	// while still publishing readyDebt for CommitExecutorRunSourceDistribution.
 	driver.run.readyDebt = true
 }
 
@@ -728,6 +844,54 @@ func FinishDirectChannelCompletionFromCompilerTask(
 		}
 	}
 	owner, route, ok := FinishDirectChannelCompletion(completion, small, preferred)
+	if !ok {
+		return nil, 0, DirectChannelCompletionFinishInvalid
+	}
+	if currentDriver == owner {
+		if !PublishExecutorDirectChannelCompletion(owner, completion) {
+			return nil, 0, DirectChannelCompletionFinishInvalid
+		}
+		return nil, 0, DirectChannelCompletionFinishOwnerPublished
+	}
+	return owner, route, DirectChannelCompletionFinishNeedsTarget
+}
+
+// FinishDirectChannelSelectCompletionFromCompilerTask is the multi-case select
+// counterpart of FinishDirectChannelCompletionFromCompilerTask. It records the
+// exact 1-based winner caseID alongside small and always publishes into the
+// owner's direct-channel inbox (never inline-promoting) so the owner can unlink
+// every losing channel waiter outside any producer's hchan mutex before G
+// becomes runnable.
+func FinishDirectChannelSelectCompletionFromCompilerTask(
+	current *G,
+	completion *DirectChannelCompletion,
+	small uint8,
+	caseID uint32,
+	fallback RouteID,
+) (*ExecutorDriver, RouteID, DirectChannelCompletionFinishResult) {
+	if completion == nil || small == ResumeSmallInvalid || caseID == 0 ||
+		caseID > MaxSelectOperationCases {
+		return nil, 0, DirectChannelCompletionFinishInvalid
+	}
+	preferred := fallback
+	var currentDriver *ExecutorDriver
+	if current != nil {
+		p := current.runP
+		if p != nil && p.current == current && p.inResume {
+			driver := p.executor
+			if driver != nil && driver.p == p && driver.route.Valid() &&
+				driver.sources.route == driver.route {
+				currentDriver = driver
+				preferred = driver.route
+			}
+		}
+	}
+	if preferred != 0 && !preferred.Valid() {
+		return nil, 0, DirectChannelCompletionFinishInvalid
+	}
+	owner, route, ok := finishDirectChannelCompletionWord(
+		completion, packDirectChannelResult(small, caseID), preferred,
+	)
 	if !ok {
 		return nil, 0, DirectChannelCompletionFinishInvalid
 	}
@@ -835,12 +999,24 @@ func PublishExecutorDirectChannelCompletionBatch(
 func DirectChannelCompletionSnapshot(
 	completion *DirectChannelCompletion,
 ) (context unsafe.Pointer, small uint8, matched bool, ok bool) {
+	context, small, _, matched, ok = DirectChannelCompletionSelectSnapshot(completion)
+	return context, small, matched, ok
+}
+
+// DirectChannelCompletionSelectSnapshot exposes the typed runtime reduction
+// payload including the 1-based winner caseID for multi-case direct select.
+func DirectChannelCompletionSelectSnapshot(
+	completion *DirectChannelCompletion,
+) (context unsafe.Pointer, small uint8, caseID uint32, matched bool, ok bool) {
 	if completion == nil || preemptLoad(&completion.state) != uint32(directChannelCompletionTaken) ||
-		completion.context == nil || preemptLoad(&completion.small) > uint32(^uint8(0)) {
-		return nil, ResumeSmallInvalid, false, false
+		completion.context == nil {
+		return nil, ResumeSmallInvalid, 0, false, false
 	}
-	small = uint8(preemptLoad(&completion.small))
-	return completion.context, small, small != ResumeSmallInvalid, true
+	small, caseID, ok = unpackDirectChannelResult(preemptLoad(&completion.small))
+	if !ok {
+		return nil, ResumeSmallInvalid, 0, false, false
+	}
+	return completion.context, small, caseID, small != ResumeSmallInvalid, true
 }
 
 // CommitDirectChannelCompletion consumes the typed runtime cleanup and
@@ -851,6 +1027,21 @@ func CommitDirectChannelCompletion(completion *DirectChannelCompletion, small ui
 	}
 	return completeDirectChannelWait(
 		completion.owner, completion, directChannelCompletionTaken, small,
+	)
+}
+
+// CommitDirectChannelSelectCompletion consumes multi-case select cleanup and
+// materializes the exact winner caseID before publishing G runnable.
+func CommitDirectChannelSelectCompletion(
+	completion *DirectChannelCompletion,
+	small uint8,
+	caseID uint32,
+) bool {
+	if completion == nil || completion.owner == nil {
+		return false
+	}
+	return completeDirectChannelWaitWithCase(
+		completion.owner, completion, directChannelCompletionTaken, small, caseID, true,
 	)
 }
 
