@@ -782,6 +782,9 @@ func (e *coroSyncFastEmitter) emitBoundedLoopCFG() {
 				if phys.recipe == coroPhysicalInstructionInterfaceNilCompare {
 					val := e.evalValue(phys.valueOperand, vals)
 					vals[v] = e.b.BinOp(v.Op, e.b.InterfaceTypeWord(val), e.p.prog.Nil(e.p.prog.VoidPtr()))
+				} else if (v.Op == token.EQL || v.Op == token.NEQ) &&
+					coroSyncIsConcreteInterfaceType(v.X.Type()) && coroSyncIsConcreteInterfaceType(v.Y.Type()) {
+					vals[v] = e.emitInterfaceCompare(v, vals, nil)
 				} else if cval, ok := foldConstComparison(v); ok {
 					vals[v] = e.p.prog.BoolVal(cval)
 				} else {
@@ -900,6 +903,22 @@ func (e *coroSyncFastEmitter) emitBoundedLoopCFG() {
 				default:
 					panic("sync-ramp bounded-loop unsupported Index container")
 				}
+			case *ssa.Alloc:
+				elem := e.p.type_(v.Type().(*types.Pointer).Elem(), llssa.InGo)
+				if e.localAllocs == nil {
+					e.localAllocs = make(map[*ssa.Alloc]llssa.Expr)
+				}
+				slot, ok := e.localAllocs[v]
+				if !ok {
+					slot = e.entryAlloca(elem)
+					e.localAllocs[v] = slot
+				}
+				e.b.StoreKnownNonNil(slot, e.p.prog.Zero(elem))
+				vals[v] = slot
+			case *ssa.Store:
+				addr := e.evalValue(v.Addr, vals)
+				val := e.evalValueAs(v.Val, v.Addr.Type().Underlying().(*types.Pointer).Elem(), vals)
+				e.b.StoreKnownNonNil(addr, val)
 			default:
 				panic(fmt.Sprintf("sync-ramp bounded-loop unsupported instruction %T", ins))
 			}
@@ -1110,20 +1129,7 @@ func (e *coroSyncFastEmitter) emitNode(node *coroSyncFastNode, parentEnv coroSyn
 				env.vals[v] = e.b.BinOp(v.Op, e.b.InterfaceTypeWord(val), e.p.prog.Nil(e.p.prog.VoidPtr()))
 			} else if (v.Op == token.EQL || v.Op == token.NEQ) &&
 				coroSyncIsConcreteInterfaceType(v.X.Type()) && coroSyncIsConcreteInterfaceType(v.Y.Type()) {
-				xNil := coroSyncIsNilInterfaceValue(v.X, env.nilIfaces)
-				yNil := coroSyncIsNilInterfaceValue(v.Y, env.nilIfaces)
-				switch {
-				case xNil && yNil:
-					env.vals[v] = e.p.prog.BoolVal(v.Op == token.EQL)
-				case xNil:
-					val := e.evalValue(v.Y, env.vals)
-					env.vals[v] = e.b.BinOp(v.Op, e.b.InterfaceTypeWord(val), e.p.prog.Nil(e.p.prog.VoidPtr()))
-				case yNil:
-					val := e.evalValue(v.X, env.vals)
-					env.vals[v] = e.b.BinOp(v.Op, e.b.InterfaceTypeWord(val), e.p.prog.Nil(e.p.prog.VoidPtr()))
-				default:
-					panic("sync-ramp dynamic interface comparison requires nil operand")
-				}
+				env.vals[v] = e.emitInterfaceCompare(v, env.vals, env.nilIfaces)
 			} else if cval, ok := foldConstComparison(v); ok {
 				env.vals[v] = e.p.prog.BoolVal(cval)
 			} else {
@@ -1253,7 +1259,7 @@ func (e *coroSyncFastEmitter) emitNode(node *coroSyncFastNode, parentEnv coroSyn
 			addr := e.evalValue(v.Addr, env.vals)
 			val := e.evalValueAs(v.Val, v.Addr.Type().Underlying().(*types.Pointer).Elem(), env.vals)
 			e.b.StoreKnownNonNil(addr, val)
-			if alloc, local := v.Addr.(*ssa.Alloc); !local || alloc.Heap {
+			if !ssaAddrStaysInLocalAlloc(v.Addr, e.fn) {
 				mutated = true
 			}
 		case *ssa.Call:
@@ -1285,6 +1291,56 @@ func (e *coroSyncFastEmitter) emitNode(node *coroSyncFastNode, parentEnv coroSyn
 		e.emitNode(node.falseNode, env)
 	default:
 		panic(fmt.Sprintf("sync-ramp unexpected exit kind %d", node.exitKind))
+	}
+}
+
+func (e *coroSyncFastEmitter) emitInterfaceCompare(
+	v *ssa.BinOp,
+	vals map[ssa.Value]llssa.Expr,
+	nilIfaces map[ssa.Value]bool,
+) llssa.Expr {
+	nullPtr := e.p.prog.Nil(e.p.prog.VoidPtr())
+	xNil := coroSyncIsNilInterfaceValue(v.X, nilIfaces)
+	yNil := coroSyncIsNilInterfaceValue(v.Y, nilIfaces)
+	switch {
+	case xNil && yNil:
+		return e.p.prog.BoolVal(v.Op == token.EQL)
+	case xNil:
+		val := e.evalValue(v.Y, vals)
+		return e.b.BinOp(v.Op, e.b.InterfaceTypeWord(val), nullPtr)
+	case yNil:
+		val := e.evalValue(v.X, vals)
+		return e.b.BinOp(v.Op, e.b.InterfaceTypeWord(val), nullPtr)
+	case coroSyncIsDirectPtrEmptyIfaceCompare(v.X, v.Y):
+		x := e.evalValue(v.X, vals)
+		y := e.evalValue(v.Y, vals)
+		eqType := e.b.BinOp(token.EQL, e.b.InterfaceTypeWord(x), e.b.InterfaceTypeWord(y))
+		eqData := e.b.BinOp(token.EQL, e.b.InterfaceData(x), e.b.InterfaceData(y))
+		eq := e.b.BinOp(token.AND, eqType, eqData)
+		if v.Op == token.NEQ {
+			return e.b.UnOp(token.NOT, eq)
+		}
+		return eq
+	default:
+		// Fast nil check: if either operand is nil at runtime, comparing the
+		// type words is exact and avoids EfaceEqual/IfaceEqual; if both are
+		// non-nil, bail cleanly to $coro.slow so full Go equality (including
+		// uncomparable-type panics) runs identically.
+		x := e.evalValue(v.X, vals)
+		y := e.evalValue(v.Y, vals)
+		tx := e.b.InterfaceTypeWord(x)
+		ty := e.b.InterfaceTypeWord(y)
+		bothNonNil := e.b.BinOp(token.AND, e.b.BinOp(token.NEQ, tx, nullPtr), e.b.BinOp(token.NEQ, ty, nullPtr))
+		bailBlk, contBlk := e.b.Func.MakeBlock(), e.b.Func.MakeBlock()
+		e.b.IfWithBranchWeights(bothNonNil, bailBlk, contBlk, 1, 1000)
+		e.b.SetBlockEx(bailBlk, llssa.AtEnd, false)
+		if e.inSingleAwaitPost {
+			e.emitResumePostCall()
+		} else {
+			e.emitBailStart()
+		}
+		e.b.SetBlockContinuation(contBlk)
+		return e.b.BinOp(v.Op, tx, ty)
 	}
 }
 
@@ -1385,7 +1441,11 @@ func (e *coroSyncFastEmitter) emitCall(
 	}
 	callee := call.Common().StaticCallee()
 	args := e.evalCallArgs(call, vals)
-	if !isRuntimeKeepAliveCall(call) {
+	canon := callee
+	if e.p.emissionUniverse != nil {
+		canon = e.p.emissionUniverse.canonicalAlias(callee)
+	}
+	if !isRuntimeKeepAliveCall(call) && !coroSyncPlainHelperIsPure(canon, e.p.immutablePlan()) {
 		*mutated = true
 	}
 	fnExpr, _, kind := e.p.compileFunction(callee)
@@ -1521,7 +1581,15 @@ func (e *coroSyncFastEmitter) emitSingleAwait(call *ssa.Call, postNode *coroSync
 			if phys.rawInterfaceReceiver {
 				fnVal = e.b.ImethodRawDataKnownNonNil(intf, call.Common().Method)
 			} else {
-				fnVal = e.b.Imethod(intf, call.Common().Method)
+				ifacePtrData, ok := e.p.immutablePlan().ResolveLoweredCall(e.fn, "IfacePtrData")
+				if !ok || ifacePtrData == nil {
+					panic("sync-ramp single-await missing resolved IfacePtrData helper")
+				}
+				if e.p.emissionUniverse != nil {
+					ifacePtrData = e.p.emissionUniverse.canonicalAlias(ifacePtrData)
+				}
+				data := e.emitDirectOutcomeCall(ifacePtrData, []llssa.Expr{intf}, call.Pos())
+				fnVal = e.b.ImethodWithData(intf, call.Common().Method, data)
 			}
 			sig = phys.controlSignature
 		} else {

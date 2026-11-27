@@ -1944,7 +1944,7 @@ func TestMakeInterfaceFromConstantUsesImmutableBacking(t *testing.T) {
 	dynamicBody.Return(dynamicBody.MakeInterface(errorType, dynamicFn.Param(0)))
 
 	constantIR := constantFn.impl.String()
-	if strings.Contains(constantIR, ".AllocU\"") {
+	if strings.Contains(constantIR, ".AllocU\"") || strings.Contains(constantIR, ".AllocAtomicU\"") {
 		t.Fatalf("constant interface conversion allocates:\n%s", constantIR)
 	}
 	if strings.Contains(constantIR, ".NewItab\"") {
@@ -1954,8 +1954,8 @@ func TestMakeInterfaceFromConstantUsesImmutableBacking(t *testing.T) {
 		t.Fatalf("constant interface conversion does not use static backing:\n%s", constantIR)
 	}
 	dynamicIR := dynamicFn.impl.String()
-	if !strings.Contains(dynamicIR, ".AllocU\"") {
-		t.Fatalf("dynamic interface conversion lost its required copy:\n%s", dynamicIR)
+	if !strings.Contains(dynamicIR, ".AllocAtomicU\"") {
+		t.Fatalf("dynamic pointer-free interface conversion did not use AllocAtomicU:\n%s", dynamicIR)
 	}
 	if strings.Contains(dynamicIR, ".NewItab\"") {
 		t.Fatalf("dynamic concrete-to-interface conversion builds an itab at runtime:\n%s", dynamicIR)

@@ -1601,3 +1601,71 @@ func target(s []int, b *box) int {
 			sawCallerUpdate, sawDeferUpdate, sawRunDefersUpdate)
 	}
 }
+
+func TestCoroInstrNeedsLogicalCallerLocationCrossBlockAndNonPanicking(t *testing.T) {
+	ssaPkg, fset, _ := buildGoSSAPkg(t, `package foo
+
+func check(x int) bool { return x > 0 }
+
+func target(a, b int, anyVal any, dst, src []byte) int {
+	if check(a) && check(b) {
+		v, ok := anyVal.(int)
+		copy(dst, src)
+		whole := dst[:]
+		if ok && len(whole) > 0 {
+			return v
+		}
+	}
+	return 0
+}
+`)
+	fn := ssaPkg.Func("target")
+	if fn == nil {
+		t.Fatal("missing target function")
+	}
+	ctx := &context{fset: fset, goFn: fn}
+
+	var checkCalls, checkUpdates int
+	var sawCommaOkAssert, sawCopyBuiltin, sawFullSlice bool
+	for _, blk := range fn.Blocks {
+		for _, instr := range blk.Instrs {
+			need := coroInstrNeedsLogicalCallerLocation(ctx, instr)
+			switch v := instr.(type) {
+			case *gossa.Call:
+				if b, ok := v.Call.Value.(*gossa.Builtin); ok && b.Name() == "copy" {
+					sawCopyBuiltin = true
+					if need {
+						t.Errorf("non-panicking copy builtin unexpectedly requested UpdateLogicalCallerLocation")
+					}
+				} else if callee := v.Call.StaticCallee(); callee != nil && callee.Name() == "check" {
+					checkCalls++
+					if need {
+						checkUpdates++
+					}
+				}
+			case *gossa.TypeAssert:
+				if v.CommaOk {
+					sawCommaOkAssert = true
+					if need {
+						t.Errorf("comma-ok TypeAssert unexpectedly requested UpdateLogicalCallerLocation")
+					}
+				}
+			case *gossa.Slice:
+				if v.Low == nil && v.High == nil && v.Max == nil {
+					sawFullSlice = true
+					if need {
+						t.Errorf("identity full Slice unexpectedly requested UpdateLogicalCallerLocation")
+					}
+				}
+			}
+		}
+	}
+	if checkCalls != 2 || checkUpdates != 1 {
+		t.Fatalf("short-circuit same-line check calls = %d, updates = %d; want 2 calls deduplicated to 1 update",
+			checkCalls, checkUpdates)
+	}
+	if !sawCommaOkAssert || !sawCopyBuiltin || !sawFullSlice {
+		t.Fatalf("missing expected SSA shapes: commaOk=%t copy=%t fullSlice=%t",
+			sawCommaOkAssert, sawCopyBuiltin, sawFullSlice)
+	}
+}

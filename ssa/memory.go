@@ -206,6 +206,15 @@ func AllocZHelperName(elem types.Type) string {
 	return "AllocZ"
 }
 
+// AllocUHelperName selects runtime.AllocAtomicU for pointer-free element types
+// and runtime.AllocU otherwise.
+func AllocUHelperName(elem types.Type) string {
+	if TypePointerFree(elem) {
+		return "AllocAtomicU"
+	}
+	return "AllocU"
+}
+
 // MakeSliceHelperName selects runtime.MakeSliceAtomic when sliceType's element
 // type is pointer-free and runtime.MakeSlice otherwise.
 func MakeSliceHelperName(sliceType types.Type) string {
@@ -266,6 +275,20 @@ func (b Builder) AllocU(elem Type, n ...int64) (ret Expr) {
 	prog := b.Prog
 	size := SizeOf(prog, elem, n...)
 	return Expr{b.allocUninited(size).impl, prog.Pointer(elem)}
+}
+
+// allocUForType allocates uninitialized space for one elem, selecting
+// runtime.AllocAtomicU for pointer-free element types when the configured
+// runtime provides it.
+func (b Builder) allocUForType(elem Type) Expr {
+	prog := b.Prog
+	pkg := b.Pkg
+	size := SizeOf(prog, elem)
+	helper := AllocUHelperName(elem.RawType())
+	if helper != "AllocU" && !pkg.hasRtFunc(helper) {
+		helper = "AllocU"
+	}
+	return Expr{b.InlineCall(pkg.rtFunc(helper), size).impl, prog.Pointer(elem)}
 }
 
 func (b Builder) allocUninited(size Expr) (ret Expr) {

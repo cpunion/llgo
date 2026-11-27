@@ -352,6 +352,10 @@ func coroRuntimeAllocZHelper(ctx *context, elem types.Type) string {
 	return coroRuntimeAllocHelperForContext(ctx, llssa.AllocZHelperName(elem), "AllocZ")
 }
 
+func coroRuntimeAllocUHelper(ctx *context, elem types.Type) string {
+	return coroRuntimeAllocHelperForContext(ctx, llssa.AllocUHelperName(elem), "AllocU")
+}
+
 func coroRuntimeMakeSliceHelper(ctx *context, sliceType types.Type) string {
 	return coroRuntimeAllocHelperForContext(ctx, llssa.MakeSliceHelperName(sliceType), "MakeSlice")
 }
@@ -992,7 +996,7 @@ func coroInstrEligibleForLogicalCallerLocation(ctx *context, instr ssa.Instructi
 	case *ssa.Call:
 		if b, ok := v.Call.Value.(*ssa.Builtin); ok {
 			switch b.Name() {
-			case "len", "cap", "min", "max", "real", "imag", "complex":
+			case "len", "cap", "min", "max", "real", "imag", "complex", "copy", "clear":
 				return "", 0, false
 			}
 		}
@@ -1005,8 +1009,16 @@ func coroInstrEligibleForLogicalCallerLocation(ctx *context, instr ssa.Instructi
 		if ctx.addressValueProvenNonNilAt(v.X, v) {
 			return "", 0, false
 		}
-	case *ssa.IndexAddr, *ssa.Index, *ssa.Slice,
-		*ssa.TypeAssert, *ssa.SliceToArrayPointer, *ssa.MapUpdate,
+	case *ssa.Slice:
+		if v.Low == nil && v.High == nil && v.Max == nil {
+			return "", 0, false
+		}
+	case *ssa.TypeAssert:
+		if v.CommaOk {
+			return "", 0, false
+		}
+	case *ssa.IndexAddr, *ssa.Index,
+		*ssa.SliceToArrayPointer, *ssa.MapUpdate,
 		*ssa.RunDefers, *ssa.Panic, *ssa.Send:
 	case *ssa.Return:
 		if !ctx.returnNeedsImplicitRunDefers(v) {
@@ -1070,6 +1082,29 @@ func coroInstrNeedsLogicalCallerLocation(ctx *context, instr ssa.Instruction) bo
 			continue
 		}
 		return prevFile != file || prevLine != line
+	}
+	// If this block has a unique predecessor chain (e.g. short-circuit &&/||
+	// or single-line branch splits), inherit the most recent logical location
+	// published along that dominating single-predecessor prefix. Merge blocks
+	// and loop headers have len(Preds) != 1 and always stop here.
+	cur := blk
+	for hops := 0; hops < 4 && len(cur.Preds) == 1; hops++ {
+		pred := cur.Preds[0]
+		if pred == nil || pred == blk || pred == cur {
+			break
+		}
+		for i := len(pred.Instrs) - 1; i >= 0; i-- {
+			prev := pred.Instrs[i]
+			if _, isDefer := prev.(*ssa.Defer); isDefer {
+				continue
+			}
+			prevFile, prevLine, prevOK := coroInstrEligibleForLogicalCallerLocation(ctx, prev)
+			if !prevOK {
+				continue
+			}
+			return prevFile != file || prevLine != line
+		}
+		cur = pred
 	}
 	return true
 }
@@ -2074,8 +2109,9 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 		!llssa.CanBuildStaticItab(target, physical) {
 		add("NewItab")
 	}
+	allocHelper := coroRuntimeAllocUHelper(ctx, physical)
 	if !emissionDirectIfaceType(physical) && !makeInterfaceUsesConstantBacking(makeInterface) {
-		add("AllocU")
+		add(allocHelper)
 	}
 	if unop, ok := makeInterface.X.(*ssa.UnOp); ok && unop.Op == token.MUL &&
 		emissionLargeOrZeroInterfaceDeref(physical, ctx.prog.PointerSize()) {
@@ -2083,8 +2119,8 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 			add("AssertNilDeref")
 		}
 		// MakeInterfaceFromPtr uses the indirect representation for both large
-		// and zero-sized values and therefore always copies through AllocU.
-		add("AllocU", "Typedmemmove")
+		// and zero-sized values and therefore always copies through AllocU/AllocAtomicU.
+		add(allocHelper, "Typedmemmove")
 	}
 }
 

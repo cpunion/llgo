@@ -5,6 +5,7 @@ package ssa
 import (
 	"go/token"
 	"go/types"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -70,6 +71,12 @@ func TestTypePointerFree(t *testing.T) {
 	if got := AllocZHelperName(ptrStruct); got != "AllocZ" {
 		t.Fatalf("AllocZHelperName(ptrStruct) = %q, want AllocZ", got)
 	}
+	if got := AllocUHelperName(podStruct); got != "AllocAtomicU" {
+		t.Fatalf("AllocUHelperName(podStruct) = %q, want AllocAtomicU", got)
+	}
+	if got := AllocUHelperName(ptrStruct); got != "AllocU" {
+		t.Fatalf("AllocUHelperName(ptrStruct) = %q, want AllocU", got)
+	}
 	if got := MakeSliceHelperName(types.NewSlice(types.Typ[types.Byte])); got != "MakeSliceAtomic" {
 		t.Fatalf("MakeSliceHelperName([]byte) = %q, want MakeSliceAtomic", got)
 	}
@@ -87,6 +94,7 @@ func TestTypePointerFree(t *testing.T) {
 func TestAtomicNoscanAllocationIR(t *testing.T) {
 	prog := NewProgram(nil)
 	defer prog.Dispose()
+	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
 	prog.SetRuntime(RuntimeTypesForTest(t))
 
 	pkg := prog.NewPackage("main", "main")
@@ -98,10 +106,14 @@ func TestAtomicNoscanAllocationIR(t *testing.T) {
 	}, nil)
 	ptrStruct := types.NewStruct([]*types.Var{
 		types.NewField(token.NoPos, nil, "p", types.NewPointer(types.Typ[types.Int]), false),
+		types.NewField(token.NoPos, nil, "n", types.Typ[types.Int64], false),
 	}, nil)
 
 	b.Alloc(prog.Type(podStruct, InGo), true)
 	b.Alloc(prog.Type(ptrStruct, InGo), true)
+	anyT := prog.Type(types.NewInterfaceType(nil, nil).Complete(), InGo)
+	b.MakeInterface(anyT, prog.Zero(prog.Type(podStruct, InGo)))
+	b.MakeInterface(anyT, prog.Zero(prog.Type(ptrStruct, InGo)))
 	byteArr := b.Alloc(prog.Type(types.NewArray(types.Typ[types.Byte], 16), InGo), true)
 	b.IndexAddr(byteArr, prog.IntVal(0, prog.Int()))
 
@@ -119,6 +131,8 @@ func TestAtomicNoscanAllocationIR(t *testing.T) {
 	for _, want := range []string{
 		`runtime.AllocAtomicZ"`,
 		`runtime.AllocZ"`,
+		`runtime.AllocAtomicU"`,
+		`runtime.AllocU"`,
 		`runtime.MakeSliceAtomic"`,
 		`runtime.MakeSlice"`,
 		`runtime.SliceAppendAtomic"`,
@@ -140,18 +154,19 @@ func TestAtomicNoscanAllocationIR(t *testing.T) {
 	})
 	fb := fallbackPkg.NewFunc("allocs", NoArgsNoRet, InGo).MakeBody(1)
 	fb.Alloc(prog.Type(podStruct, InGo), true)
+	fb.MakeInterface(anyT, prog.Zero(prog.Type(podStruct, InGo)))
 	fbs := fb.MakeSlice(byteSliceT, n, n)
 	fb.BuiltinCall("append", fbs, fbs)
 	fb.Return()
 	fb.EndBuild()
 
 	fir := fallbackPkg.String()
-	for _, forbidden := range []string{"AllocAtomicZ", "MakeSliceAtomic", "SliceAppendAtomic"} {
+	for _, forbidden := range []string{"AllocAtomicZ", "AllocAtomicU", "MakeSliceAtomic", "SliceAppendAtomic"} {
 		if strings.Contains(fir, forbidden) {
 			t.Fatalf("fallback IR unexpectedly contained %s:\n%s", forbidden, fir)
 		}
 	}
-	for _, want := range []string{`runtime.AllocZ"`, `runtime.MakeSlice"`, `runtime.SliceAppend"`} {
+	for _, want := range []string{`runtime.AllocZ"`, `runtime.AllocU"`, `runtime.MakeSlice"`, `runtime.SliceAppend"`} {
 		if !strings.Contains(fir, want) {
 			t.Fatalf("fallback IR missing %s:\n%s", want, fir)
 		}

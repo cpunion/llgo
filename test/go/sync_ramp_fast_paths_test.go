@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestSyncPoolLocalCacheAndSpill(t *testing.T) {
@@ -264,5 +265,72 @@ func TestDeferDiscardedSyncFastResultAndPanic(t *testing.T) {
 	}()
 	if !recovered || c != 2 {
 		t.Fatalf("recovered=%v counter=%d, want true, 2", recovered, c)
+	}
+}
+
+func TestStageOSyncRampInterfaceAndASCIISetPaths(t *testing.T) {
+	// 1. Direct-pointer empty-interface equality in context.(*cancelCtx).Value
+	//    and zero-slow-work promoted Deadline() wrappers.
+	type keyT struct{ name string }
+	k1 := &keyT{name: "k1"}
+	k2 := &keyT{name: "k2"}
+	base := context.WithValue(context.Background(), k1, int64(42))
+	ctx, cancel := context.WithTimeout(base, time.Second)
+	defer cancel()
+	if got := ctx.Value(k1); got != int64(42) {
+		t.Fatalf("ctx.Value(k1) = %v, want 42", got)
+	}
+	if got := ctx.Value(k2); got != nil {
+		t.Fatalf("ctx.Value(k2) = %v, want nil", got)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("ctx.Deadline() = ok:false, want true")
+	}
+	child, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	if dl, ok := child.Deadline(); !ok || dl.IsZero() {
+		t.Fatalf("promoted child.Deadline() = (%v, %v), want non-zero true", dl, ok)
+	}
+
+	// 2. BoundedLoop local-alloc + store (bytes/strings makeASCIISet) on both
+	//    short ASCII fast paths and non-ASCII / long slow paths.
+	if got := string(bytes.TrimLeft([]byte(" \t\r\nhello"), " \t\r\n")); got != "hello" {
+		t.Fatalf("bytes.TrimLeft ASCII = %q, want hello", got)
+	}
+	if got := strings.TrimLeft("abcbaz", "abc"); got != "z" {
+		t.Fatalf("strings.TrimLeft ASCII = %q, want z", got)
+	}
+	if got := string(bytes.TrimLeft([]byte("ééok"), "é")); got != "ok" {
+		t.Fatalf("bytes.TrimLeft non-ASCII = %q, want ok", got)
+	}
+
+	// 3. Pointer-free MakeInterface noscan boxing (AllocAtomicU) round-trip.
+	type pod struct {
+		A int64
+		B [4]uint16
+		C bool
+	}
+	var m sync.Map
+	wantPod := pod{A: 987654321, B: [4]uint16{1, 2, 3, 4}, C: true}
+	m.Store("pod", wantPod)
+	if v, ok := m.Load("pod"); !ok || v != wantPod {
+		t.Fatalf("sync.Map boxed pod = (%v, %v), want %+v", v, ok, wantPod)
+	}
+
+	// 4. Dynamic non-nil interface comparison must still panic on identical
+	//    uncomparable dynamic types via bailout to $coro.slow.
+	panicked := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		var a any = []int{1, 2}
+		var b any = []int{1, 2}
+		_ = (a == b)
+	}()
+	if !panicked {
+		t.Fatal("comparing two []int interfaces failed to panic")
 	}
 }

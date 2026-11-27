@@ -23,6 +23,7 @@ import (
 	"go/types"
 	"math/big"
 	"sort"
+	"strings"
 
 	"github.com/xgo-dev/llgo/internal/coro"
 	llssa "github.com/xgo-dev/llgo/ssa"
@@ -433,7 +434,8 @@ func coroSyncRampCanBox(fn *ssa.Function, ramp *coroPhysicalSyncRampPlan) bool {
 	}
 	fnSig := coroPhysicalNormalizeSourceSignature(fn.Signature)
 	return fnSig != nil && fnSig.Results().Len() > 0 &&
-		(ramp.kind == coroSyncRampTailSlow ||
+		(ramp.kind == coroSyncRampTryBailout ||
+			ramp.kind == coroSyncRampTailSlow ||
 			ramp.hasTryHelper ||
 			ramp.kind == coroSyncRampBoundedLoop ||
 			ramp.kind == coroSyncRampResumeSlow)
@@ -448,24 +450,24 @@ func (pl *coroSyncPlanner) canonicalFunc(fn *ssa.Function) *ssa.Function {
 	return fn
 }
 
-func (pl *coroSyncPlanner) planEligibleBase(plan *coroPhysicalFunctionPlan) (coro.FunctionPlan, bool) {
+func (pl *coroSyncPlanner) planEligibleBase(plan *coroPhysicalFunctionPlan) (coro.FunctionPlan, coroFunctionPreamblePlan, bool) {
 	if plan == nil || plan.function == nil || plan.owner == nil ||
 		plan.tailForward != nil || plan.critical != nil {
-		return coro.FunctionPlan{}, false
+		return coro.FunctionPlan{}, coroFunctionPreamblePlan{}, false
 	}
 	fn := plan.function
 	if len(fn.FreeVars) != 0 || len(fn.Blocks) == 0 ||
 		fn.Signature == nil || fn.Signature.Variadic() ||
 		hasNoInlineDirective(fn) || isCgoExternSymbol(fn) ||
 		pl.roots[fn] || isCoroProgramManagedEntry(fn) || fn.Name() == "main" {
-		return coro.FunctionPlan{}, false
+		return coro.FunctionPlan{}, coroFunctionPreamblePlan{}, false
 	}
 	logical, planned := pl.whole.FunctionPlan(fn)
 	if !planned || logical.External != coro.Defined ||
 		logical.Emission != coro.EmitCoroutine ||
 		logical.ManagedEntry != coro.ManagedEntryCoroutine ||
 		logical.Primary != coro.PrimaryCoroutine {
-		return coro.FunctionPlan{}, false
+		return coro.FunctionPlan{}, coroFunctionPreamblePlan{}, false
 	}
 	// Mirror coro_abi.go's deadCleanupRecover proof: fn.Recover is only live
 	// when ProgramIR retains NeedsCleanupFrame. Functions with deferred cleanup
@@ -475,34 +477,55 @@ func (pl *coroSyncPlanner) planEligibleBase(plan *coroPhysicalFunctionPlan) (cor
 	// while $coro.slow preserves the full cleanup/recover frame.
 	if fn.Recover != nil && logical.Exec.Contains(coro.NeedsCleanupFrame) {
 		if plan.cleanup == nil || (pl.needsRecover != nil && pl.needsRecover(fn)) {
-			return coro.FunctionPlan{}, false
+			return coro.FunctionPlan{}, coroFunctionPreamblePlan{}, false
 		}
 	}
 	preamble, err := pl.ir.functionPreambleForOwner(fn, plan.owner)
 	if err != nil {
-		return coro.FunctionPlan{}, false
+		return coro.FunctionPlan{}, coroFunctionPreamblePlan{}, false
 	}
-	if len(preamble.managedRuntimeHelpers) != 0 {
-		// Functions with deferred cleanup carry BindRecoverFrame in their
-		// preamble for $coro.slow. An early-return prefix that executes no
-		// ssa.Defer and has no slowTargets never enters cleanup, so it can
-		// safely bypass the preamble on the fast path.
-		if plan.cleanup == nil || len(preamble.managedRuntimeHelpers) != 1 ||
-			preamble.managedRuntimeHelpers[0] != "BindRecoverFrame" {
-			return coro.FunctionPlan{}, false
+	for _, helper := range preamble.managedRuntimeHelpers {
+		switch helper {
+		case "BindRecoverFrame":
+			// Functions with deferred cleanup carry BindRecoverFrame in their
+			// preamble for $coro.slow. An early-return prefix that executes no
+			// ssa.Defer and has no slowTargets never enters cleanup, so it can
+			// safely bypass the preamble on the fast path.
+			if plan.cleanup == nil {
+				return coro.FunctionPlan{}, coroFunctionPreamblePlan{}, false
+			}
+		case "PushCallerLocationFrame":
+			// Functions with logical caller frames can still execute a pure,
+			// non-panicking, caller-unobserving TryBailout fast path while
+			// $coro.slow retains Push/Update/PopCallerLocationFrame.
+		default:
+			return coro.FunctionPlan{}, coroFunctionPreamblePlan{}, false
 		}
 	}
 	if _, isDelivery := pl.ir.deliveryProducers[fn]; isDelivery {
-		return coro.FunctionPlan{}, false
+		return coro.FunctionPlan{}, coroFunctionPreamblePlan{}, false
 	}
-	if !coroSyncRampFunctionHasSlowWork(plan, pl.ir) {
-		return coro.FunctionPlan{}, false
+	// Sync-fast ramps lower expressions outside a managed coroutine frame and
+	// cannot invoke non-raw-plain locality helpers (LocalPackageLogical /
+	// EnsureLogicalLocalInitializer) for //llgo:gls or //llgo:tls globals.
+	if pl.ir != nil {
+		key := emissionFunctionOwnerKey{function: fn, owner: plan.owner}
+		for _, site := range pl.ir.sitePlans[key] {
+			if site.hasManagedRuntimeHelper("LocalPackageLogical") ||
+				site.hasManagedRuntimeHelper("EnsureLogicalLocalInitializer") {
+				return coro.FunctionPlan{}, coroFunctionPreamblePlan{}, false
+			}
+		}
 	}
-	return logical, true
+	if !coroSyncRampFunctionHasSlowWork(plan, pl.ir) &&
+		!(strings.HasPrefix(fn.Synthetic, "wrapper for ") && logical.Effect == coro.NoSuspend) {
+		return coro.FunctionPlan{}, coroFunctionPreamblePlan{}, false
+	}
+	return logical, preamble, true
 }
 
 func (pl *coroSyncPlanner) planBoundedLoopCandidate(plan *coroPhysicalFunctionPlan) *coroPhysicalSyncRampPlan {
-	logical, ok := pl.planEligibleBase(plan)
+	logical, _, ok := pl.planEligibleBase(plan)
 	if !ok || logical.Recursive || plan.cleanup != nil {
 		return nil
 	}
@@ -514,59 +537,158 @@ func (pl *coroSyncPlanner) planBoundedLoopCandidate(plan *coroPhysicalFunctionPl
 }
 
 func (pl *coroSyncPlanner) planOne(plan *coroPhysicalFunctionPlan) *coroPhysicalSyncRampPlan {
-	logical, ok := pl.planEligibleBase(plan)
+	logical, preamble, ok := pl.planEligibleBase(plan)
 	if !ok {
 		return nil
 	}
 	fn := plan.function
 	cyclic := cyclicBlocks(fn.Blocks)
+	hasSlowWork := coroSyncRampFunctionHasSlowWork(plan, pl.ir)
 
 	// Recursive coroutines (e.g. recursive descent parsers) may still execute a
 	// strictly non-recursive DirectFastCFG leaf fast path (tail-calling only
 	// non-recursive callees and bailing recursive branches to $coro.slow),
 	// guaranteeing zero native-stack recursion and full preemption.
 	if logical.Recursive {
-		if plan.cleanup != nil {
+		if plan.cleanup != nil || preamble.logicalCallerEntry {
 			return nil
 		}
 		directRamp := pl.planDirectFastCFG(plan, cyclic, true)
-		if directRamp != nil && coroSyncDirectRampHasWork(directRamp, len(cyclic) == 0) {
+		if directRamp != nil && (!hasSlowWork || coroSyncDirectRampHasWork(directRamp, len(cyclic) == 0)) {
 			directRamp.hasTryHelper = false
 			return directRamp
 		}
 		return nil
 	}
 
-	// Functions with deferred cleanup (e.g. context.(*cancelCtx).Done) can still
-	// take a pure TryBailout early-return prefix that never executes any
-	// ssa.Defer and never tail-calls another coroutine before returning or
-	// bailing out to $coro.slow (tag 0).
-	if plan.cleanup != nil {
+	// Functions with deferred cleanup (e.g. context.(*cancelCtx).Done) or a
+	// PushCallerLocationFrame preamble (e.g. reflect.Value.Elem/Addr/Pointer)
+	// can still take a pure TryBailout early-return prefix that never executes
+	// any ssa.Defer, never tail-calls another coroutine, and (when logical
+	// caller frames are active) cannot unwind or observe the caller stack;
+	// any guard/error/slow path bails to $coro.slow (tag 0).
+	if plan.cleanup != nil || preamble.logicalCallerEntry {
 		directRamp := pl.planDirectFastCFG(plan, cyclic, false)
 		if directRamp != nil && directRamp.kind == coroSyncRampTryBailout &&
-			len(directRamp.slowTargets) == 0 && coroSyncDirectRampHasWork(directRamp, len(cyclic) == 0) {
+			len(directRamp.slowTargets) == 0 &&
+			(!hasSlowWork || coroSyncDirectRampHasWork(directRamp, len(cyclic) == 0)) &&
+			(!preamble.logicalCallerEntry || pl.coroSyncFastTreeSafeWithoutCallerFrame(directRamp.root, plan)) {
 			return directRamp
 		}
 		return nil
 	}
 
-	if ramp := pl.planCallerInlineYield(plan, cyclic); ramp != nil {
-		return ramp
+	if hasSlowWork {
+		if ramp := pl.planCallerInlineYield(plan, cyclic); ramp != nil {
+			return ramp
+		}
 	}
 	// If DirectFastCFG matches only a pure entry guard (no atomics, calls, or
 	// tail-calls), prefer SingleAwait when available so wrappers like
-	// io.ReadAtLeast fast-path their awaited call too.
+	// io.ReadAtLeast fast-path their awaited call too. Functions forced to
+	// EmitCoroutine solely by interface/promoted-method ABI (!hasSlowWork)
+	// always benefit from a direct sync-fast ramp.
 	directRamp := pl.planDirectFastCFG(plan, cyclic, false)
-	if directRamp != nil && coroSyncDirectRampHasWork(directRamp, len(cyclic) == 0) {
+	if directRamp != nil && (!hasSlowWork || coroSyncDirectRampHasWork(directRamp, len(cyclic) == 0)) {
 		return directRamp
 	}
-	if ramp := pl.planSingleAwait(plan, cyclic); ramp != nil {
-		return ramp
-	}
-	if ramp := pl.planBoundedLoopLeaf(plan, cyclic); ramp != nil {
-		return ramp
+	if hasSlowWork {
+		if ramp := pl.planSingleAwait(plan, cyclic); ramp != nil {
+			return ramp
+		}
+		if ramp := pl.planBoundedLoopLeaf(plan, cyclic); ramp != nil {
+			return ramp
+		}
 	}
 	return nil
+}
+
+// coroSyncFastTreeSafeWithoutCallerFrame proves that a TryBailout fast-path
+// tree cannot panic/unwind, cannot observe runtime.Caller/Callers, and cannot
+// invoke any callee that itself pushes or observes a logical caller frame.
+// Any nil/bounds/dynamic-compare guard or unrecognized path bails to $coro.slow,
+// which executes PushCallerLocationFrame and UpdateLogicalCallerLocation.
+func (pl *coroSyncPlanner) coroSyncFastTreeSafeWithoutCallerFrame(
+	root *coroSyncFastNode,
+	plan *coroPhysicalFunctionPlan,
+) bool {
+	if root == nil {
+		return false
+	}
+	var check func(n *coroSyncFastNode) bool
+	check = func(n *coroSyncFastNode) bool {
+		if n == nil {
+			return true
+		}
+		if n.nodeHasPostMutNilGuard {
+			return false
+		}
+		for _, target := range n.tryCalls {
+			if !pl.targetHasReadOnlyTry(target) {
+				return false
+			}
+		}
+		if n.block != nil {
+			end := n.endInstr
+			if end < 0 {
+				end = len(n.block.Instrs) - 1
+			}
+			for i := n.startInstr; i < end; i++ {
+				call, isCall := n.block.Instrs[i].(*ssa.Call)
+				if !isCall {
+					continue
+				}
+				if isPureLenCapBuiltin(call) || isPureCopyBuiltin(call) || isRuntimeKeepAliveCall(call) {
+					continue
+				}
+				if _, ok := n.constBools[call]; ok {
+					continue
+				}
+				if _, ok := n.atomicOpcodes[call]; ok {
+					continue
+				}
+				if _, ok := n.inlineAtomics[call]; ok {
+					continue
+				}
+				if _, ok := n.tryCalls[call]; ok {
+					continue
+				}
+				phys := plan.instructions[call]
+				var callee *ssa.Function
+				if phys.control == coroPhysicalControlDirectOutcome {
+					callee = pl.canonicalFunc(phys.controlTarget)
+					if !pl.coroSyncOutcomeCalleeIsReadOnly(callee) {
+						return false
+					}
+				} else if pl.plainGoCallAllowed(call, phys) {
+					callee = pl.canonicalFunc(call.Common().StaticCallee())
+				} else {
+					return false
+				}
+				if callee == nil || isRuntimeCallerLookupFunc(callee) {
+					return false
+				}
+				calleeLogical, planned := pl.whole.FunctionPlan(callee)
+				if !planned || calleeLogical.Exec.Contains(coro.MayUnwind|coro.OpaqueExec|coro.BlockForeign) {
+					return false
+				}
+				if calleePreamble, err := pl.ir.functionPreambleForOwner(callee, plan.owner); err == nil && calleePreamble.logicalCallerEntry {
+					return false
+				}
+			}
+		}
+		switch n.exitKind {
+		case coroSyncFastExitReturn, coroSyncFastExitBailStart:
+			return true
+		case coroSyncFastExitJump:
+			return check(n.nextNode)
+		case coroSyncFastExitIf:
+			return check(n.trueNode) && check(n.falseNode)
+		default:
+			return false
+		}
+	}
+	return check(root)
 }
 
 func coroSyncDirectRampHasWork(ramp *coroPhysicalSyncRampPlan, acyclic bool) bool {
@@ -857,9 +979,16 @@ func coroSyncFastPureInstrAllowed(
 				if !coroSyncIsConcreteInterfaceType(v.X.Type()) || !coroSyncIsConcreteInterfaceType(v.Y.Type()) {
 					return false, false, false
 				}
-				if !coroSyncIsNilInterfaceValue(v.X, nilIfaces) && !coroSyncIsNilInterfaceValue(v.Y, nilIfaces) {
-					return false, false, false
+				if coroSyncIsNilInterfaceValue(v.X, nilIfaces) || coroSyncIsNilInterfaceValue(v.Y, nilIfaces) {
+					return false, false, true
 				}
+				if coroSyncIsDirectPtrEmptyIfaceCompare(v.X, v.Y) {
+					return false, false, true
+				}
+				// Dynamic non-nil interface comparison (e.g. err == io.ErrUnexpectedEOF):
+				// fast-path when either operand is nil at runtime and bail cleanly when
+				// both are non-nil so EfaceEqual/IfaceEqual runs in $coro.slow.
+				return false, true, true
 			default:
 				return false, false, false
 			}
@@ -1008,6 +1137,27 @@ func coroSyncIsNilInterfaceValue(v ssa.Value, nilIfaces map[ssa.Value]bool) bool
 	return false
 }
 
+// coroSyncIsDirectPtrEmptyIfaceCompare reports whether an interface equality
+// compares two empty interfaces where at least one operand is directly boxed
+// from a pointer/chan/unsafe.Pointer (all comparable, never panicking, and
+// stored directly in the interface's two words without heap indirection).
+func coroSyncIsDirectPtrEmptyIfaceCompare(x, y ssa.Value) bool {
+	if x == nil || y == nil {
+		return false
+	}
+	ix, okX := types.Unalias(x.Type()).Underlying().(*types.Interface)
+	iy, okY := types.Unalias(y.Type()).Underlying().(*types.Interface)
+	if !okX || !okY || !ix.Empty() || !iy.Empty() {
+		return false
+	}
+	return coroSyncIsDirectPtrMakeInterface(x) || coroSyncIsDirectPtrMakeInterface(y)
+}
+
+func coroSyncIsDirectPtrMakeInterface(v ssa.Value) bool {
+	mk, ok := v.(*ssa.MakeInterface)
+	return ok && !isUntypedNilConst(mk.X) && isDirectPointerIfaceValue(mk.X.Type())
+}
+
 func isSimplePtrOrUnsafe(t types.Type) bool {
 	switch u := t.(type) {
 	case *types.Pointer:
@@ -1075,6 +1225,24 @@ func isPureCopyBuiltin(call *ssa.Call) bool {
 // before a fast-path bailout leaves program state unchanged.
 func (pl *coroSyncPlanner) coroSyncOutcomeCalleeIsReadOnly(callee *ssa.Function) bool {
 	return pl.coroSyncOutcomeCalleeIsReadOnlyDepth(callee, 0)
+}
+
+func (pl *coroSyncPlanner) coroSyncOutcomeCalleeIsReadOnlyNoExplicitPanic(callee *ssa.Function) bool {
+	if !pl.coroSyncOutcomeCalleeIsReadOnly(callee) {
+		return false
+	}
+	callee = pl.canonicalFunc(callee)
+	if callee == nil {
+		return false
+	}
+	for _, blk := range callee.Blocks {
+		for _, ins := range blk.Instrs {
+			if _, isPanic := ins.(*ssa.Panic); isPanic {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (pl *coroSyncPlanner) coroSyncOutcomeCalleeIsReadOnlyDepth(callee *ssa.Function, depth int) bool {
@@ -2151,6 +2319,21 @@ func (pl *coroSyncPlanner) planDirectFastCFG(
 // Strategy 3: SingleAwait (pure prefix + 1 awaited call + post-call)
 // -----------------------------------------------------------------------------
 
+func (pl *coroSyncPlanner) ifacePtrDataOutcomeAvailable(caller *ssa.Function) bool {
+	if pl.whole == nil || caller == nil {
+		return false
+	}
+	target, ok := pl.whole.ResolveLoweredCall(caller, "IfacePtrData")
+	if !ok || target == nil {
+		return false
+	}
+	target = pl.canonicalFunc(target)
+	fp, planned := pl.whole.FunctionPlan(target)
+	return planned && fp.External == coro.Defined &&
+		fp.Emission == coro.EmitOutcomePlain &&
+		fp.ManagedEntry == coro.ManagedEntryOutcomePlain
+}
+
 func (pl *coroSyncPlanner) planSingleAwait(
 	plan *coroPhysicalFunctionPlan,
 	cyclic map[*ssa.BasicBlock]bool,
@@ -2186,7 +2369,10 @@ func (pl *coroSyncPlanner) planSingleAwait(
 			directTarget = phys.controlTarget
 			callSig = coroPhysicalNormalizeSourceSignature(phys.controlTarget.Signature)
 		case coroPhysicalControlManagedInterfaceAwait:
-			if phys.controlSignature == nil || phys.dispatchEntry == coro.ManagedEntryPlain || !phys.rawInterfaceReceiver {
+			if phys.controlSignature == nil || phys.dispatchEntry == coro.ManagedEntryPlain {
+				return nil, false, false
+			}
+			if !phys.rawInterfaceReceiver && !pl.ifacePtrDataOutcomeAvailable(fn) {
 				return nil, false, false
 			}
 			callSig = coroPhysicalNormalizeSourceSignature(phys.controlSignature)
@@ -2227,8 +2413,8 @@ func (pl *coroSyncPlanner) planSingleAwait(
 		return dst
 	}
 
-	var explorePost func(blk, pred *ssa.BasicBlock, startIdx, depth int, visits map[*ssa.BasicBlock]int, known map[string]bool, zeroInts map[ssa.Value]bool) *coroSyncFastNode
-	explorePost = func(blk, pred *ssa.BasicBlock, startIdx, depth int, visits map[*ssa.BasicBlock]int, known map[string]bool, zeroInts map[ssa.Value]bool) *coroSyncFastNode {
+	var explorePost func(blk, pred *ssa.BasicBlock, startIdx, depth, outcomeCalls int, visits map[*ssa.BasicBlock]int, known map[string]bool, zeroInts, nilIfaces map[ssa.Value]bool) *coroSyncFastNode
+	explorePost = func(blk, pred *ssa.BasicBlock, startIdx, depth, outcomeCalls int, visits map[*ssa.BasicBlock]int, known map[string]bool, zeroInts, nilIfaces map[ssa.Value]bool) *coroSyncFastNode {
 		fallback := &coroSyncFastNode{exitKind: coroSyncFastExitResumePostCall}
 		if blk == nil || !plan.reachableBlocks[blk] || depth > coroSyncRampMaxDepth || nodesUsed >= coroSyncRampMaxNodes {
 			return fallback
@@ -2242,6 +2428,8 @@ func (pl *coroSyncPlanner) planSingleAwait(
 		}
 		nodesUsed++
 		localZeroInts := cloneMap(zeroInts)
+		localNilIfaces := cloneMap(nilIfaces)
+		localOutcomeCalls := outcomeCalls
 		node := &coroSyncFastNode{block: blk, predBlock: pred, startInstr: startIdx, endInstr: -1, mutated: true}
 		for i := startIdx; i < len(blk.Instrs); i++ {
 			ins := blk.Instrs[i]
@@ -2252,7 +2440,7 @@ func (pl *coroSyncPlanner) planSingleAwait(
 					postHasReturn = true
 					return node
 				case *ssa.Jump:
-					node.exitKind, node.nextNode = coroSyncFastExitJump, explorePost(blk.Succs[0], blk, 0, depth+1, bumpVisit(visits, blk), known, localZeroInts)
+					node.exitKind, node.nextNode = coroSyncFastExitJump, explorePost(blk.Succs[0], blk, 0, depth+1, localOutcomeCalls, bumpVisit(visits, blk), known, localZeroInts, localNilIfaces)
 					return node
 				case *ssa.If:
 					nv := bumpVisit(visits, blk)
@@ -2261,12 +2449,12 @@ func (pl *coroSyncPlanner) planSingleAwait(
 						if kv {
 							succ = blk.Succs[0]
 						}
-						node.exitKind, node.nextNode = coroSyncFastExitJump, explorePost(succ, blk, 0, depth+1, nv, known, localZeroInts)
+						node.exitKind, node.nextNode = coroSyncFastExitJump, explorePost(succ, blk, 0, depth+1, localOutcomeCalls, nv, known, localZeroInts, localNilIfaces)
 						return node
 					}
 					node.exitKind, node.cond = coroSyncFastExitIf, term.Cond
-					node.trueNode = explorePost(blk.Succs[0], blk, 0, depth+1, nv, coroSyncCloneKnown(known, term.Cond, true), localZeroInts)
-					node.falseNode = explorePost(blk.Succs[1], blk, 0, depth+1, nv, coroSyncCloneKnown(known, term.Cond, false), localZeroInts)
+					node.trueNode = explorePost(blk.Succs[0], blk, 0, depth+1, localOutcomeCalls, nv, coroSyncCloneKnown(known, term.Cond, true), localZeroInts, localNilIfaces)
+					node.falseNode = explorePost(blk.Succs[1], blk, 0, depth+1, localOutcomeCalls, nv, coroSyncCloneKnown(known, term.Cond, false), localZeroInts, localNilIfaces)
 					return node
 				default:
 					return fallback
@@ -2280,66 +2468,7 @@ func (pl *coroSyncPlanner) planSingleAwait(
 				}
 				edge := phi.Edges[idx]
 				localZeroInts[phi] = coroSyncIsZeroIntConst(edge) || localZeroInts[edge]
-				continue
-			}
-			if call, ok := ins.(*ssa.Call); ok {
-				if isPureLenCapBuiltin(call) {
-					continue
-				}
-				return fallback
-			}
-			if mayMut, guardBail, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, false, true, localZeroInts, nil); !ok || mayMut || guardBail {
-				return fallback
-			}
-		}
-		return fallback
-	}
-
-	var explorePre func(blk, pred *ssa.BasicBlock, depth int, visits map[*ssa.BasicBlock]int, known map[string]bool, zeroInts map[ssa.Value]bool) *coroSyncFastNode
-	explorePre = func(blk, pred *ssa.BasicBlock, depth int, visits map[*ssa.BasicBlock]int, known map[string]bool, zeroInts map[ssa.Value]bool) *coroSyncFastNode {
-		bail := &coroSyncFastNode{exitKind: coroSyncFastExitBailStart}
-		if blk == nil || !plan.reachableBlocks[blk] || depth > coroSyncRampMaxDepth ||
-			nodesUsed >= coroSyncRampMaxNodes || visits[blk] >= 1 {
-			return bail
-		}
-		nodesUsed++
-		localZeroInts := cloneMap(zeroInts)
-		node := &coroSyncFastNode{block: blk, predBlock: pred, endInstr: -1}
-		for i, ins := range blk.Instrs {
-			if i == len(blk.Instrs)-1 {
-				switch term := ins.(type) {
-				case *ssa.Return:
-					node.exitKind, node.retInstr = coroSyncFastExitReturn, term
-					return node
-				case *ssa.Jump:
-					node.exitKind, node.nextNode = coroSyncFastExitJump, explorePre(blk.Succs[0], blk, depth+1, bumpVisit(visits, blk), known, localZeroInts)
-					return node
-				case *ssa.If:
-					nv := bumpVisit(visits, blk)
-					if kv, ok := coroSyncStaticBranch(term, pl.ir, known); ok {
-						succ := blk.Succs[1]
-						if kv {
-							succ = blk.Succs[0]
-						}
-						node.exitKind, node.nextNode = coroSyncFastExitJump, explorePre(succ, blk, depth+1, nv, known, localZeroInts)
-						return node
-					}
-					node.exitKind, node.cond = coroSyncFastExitIf, term.Cond
-					node.trueNode = explorePre(blk.Succs[0], blk, depth+1, nv, coroSyncCloneKnown(known, term.Cond, true), localZeroInts)
-					node.falseNode = explorePre(blk.Succs[1], blk, depth+1, nv, coroSyncCloneKnown(known, term.Cond, false), localZeroInts)
-					return node
-				default:
-					return bail
-				}
-			}
-			phys := plan.instructions[ins]
-			if phi, ok := ins.(*ssa.Phi); ok {
-				idx := coroSyncPhiEdgeIndex(phi, pred)
-				if idx < 0 {
-					return bail
-				}
-				edge := phi.Edges[idx]
-				localZeroInts[phi] = coroSyncIsZeroIntConst(edge) || localZeroInts[edge]
+				localNilIfaces[phi] = coroSyncIsNilInterfaceValue(edge, localNilIfaces)
 				continue
 			}
 			if call, ok := ins.(*ssa.Call); ok {
@@ -2349,6 +2478,87 @@ func (pl *coroSyncPlanner) planSingleAwait(
 				if pl.plainGoCallAllowed(call, phys) && coroSyncPlainHelperIsPure(pl.canonicalFunc(call.Common().StaticCallee()), pl.whole) {
 					continue
 				}
+				if pl.isDirectOutcomeCall(call, phys) && localOutcomeCalls < coroSyncRampMaxOutcomeCalls &&
+					pl.coroSyncOutcomeCalleeIsReadOnlyNoExplicitPanic(phys.controlTarget) {
+					localOutcomeCalls++
+					node.nodeHasOutcomeCall = true
+					continue
+				}
+				return fallback
+			}
+			if mayMut, guardBail, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, false, true, localZeroInts, localNilIfaces); !ok || mayMut || (guardBail && phys.nilGuard) {
+				return fallback
+			}
+			if mk, isMk := ins.(*ssa.MakeInterface); isMk && isUntypedNilConst(mk.X) {
+				localNilIfaces[mk] = true
+			}
+		}
+		return fallback
+	}
+
+	var explorePre func(blk, pred *ssa.BasicBlock, depth, outcomeCalls int, visits map[*ssa.BasicBlock]int, known map[string]bool, zeroInts, nilIfaces map[ssa.Value]bool) *coroSyncFastNode
+	explorePre = func(blk, pred *ssa.BasicBlock, depth, outcomeCalls int, visits map[*ssa.BasicBlock]int, known map[string]bool, zeroInts, nilIfaces map[ssa.Value]bool) *coroSyncFastNode {
+		bail := &coroSyncFastNode{exitKind: coroSyncFastExitBailStart}
+		if blk == nil || !plan.reachableBlocks[blk] || depth > coroSyncRampMaxDepth ||
+			nodesUsed >= coroSyncRampMaxNodes || visits[blk] >= 1 {
+			return bail
+		}
+		nodesUsed++
+		localZeroInts := cloneMap(zeroInts)
+		localNilIfaces := cloneMap(nilIfaces)
+		localOutcomeCalls := outcomeCalls
+		node := &coroSyncFastNode{block: blk, predBlock: pred, endInstr: -1}
+		for i, ins := range blk.Instrs {
+			if i == len(blk.Instrs)-1 {
+				switch term := ins.(type) {
+				case *ssa.Return:
+					node.exitKind, node.retInstr = coroSyncFastExitReturn, term
+					return node
+				case *ssa.Jump:
+					node.exitKind, node.nextNode = coroSyncFastExitJump, explorePre(blk.Succs[0], blk, depth+1, localOutcomeCalls, bumpVisit(visits, blk), known, localZeroInts, localNilIfaces)
+					return node
+				case *ssa.If:
+					nv := bumpVisit(visits, blk)
+					if kv, ok := coroSyncStaticBranch(term, pl.ir, known); ok {
+						succ := blk.Succs[1]
+						if kv {
+							succ = blk.Succs[0]
+						}
+						node.exitKind, node.nextNode = coroSyncFastExitJump, explorePre(succ, blk, depth+1, localOutcomeCalls, nv, known, localZeroInts, localNilIfaces)
+						return node
+					}
+					node.exitKind, node.cond = coroSyncFastExitIf, term.Cond
+					node.trueNode = explorePre(blk.Succs[0], blk, depth+1, localOutcomeCalls, nv, coroSyncCloneKnown(known, term.Cond, true), localZeroInts, localNilIfaces)
+					node.falseNode = explorePre(blk.Succs[1], blk, depth+1, localOutcomeCalls, nv, coroSyncCloneKnown(known, term.Cond, false), localZeroInts, localNilIfaces)
+					return node
+				default:
+					return bail
+				}
+			}
+			phys := plan.instructions[ins]
+			if phi, ok := ins.(*ssa.Phi); ok {
+				idx := coroSyncPhiEdgeIndex(phi, pred)
+				if idx < 0 {
+					return bail
+				}
+				edge := phi.Edges[idx]
+				localZeroInts[phi] = coroSyncIsZeroIntConst(edge) || localZeroInts[edge]
+				localNilIfaces[phi] = coroSyncIsNilInterfaceValue(edge, localNilIfaces)
+				continue
+			}
+			if call, ok := ins.(*ssa.Call); ok {
+				if isPureLenCapBuiltin(call) {
+					continue
+				}
+				if pl.plainGoCallAllowed(call, phys) && coroSyncPlainHelperIsPure(pl.canonicalFunc(call.Common().StaticCallee()), pl.whole) {
+					continue
+				}
+				if pl.isDirectOutcomeCall(call, phys) && localOutcomeCalls < coroSyncRampMaxOutcomeCalls &&
+					pl.coroSyncOutcomeCalleeIsReadOnlyNoExplicitPanic(phys.controlTarget) {
+					localOutcomeCalls++
+					node.nodeHasOutcomeCall = true
+					continue
+				}
 				if callRes, boxed, ok := isCandidate(call, phys); ok {
 					if chosenCall != nil {
 						return bail
@@ -2356,19 +2566,22 @@ func (pl *coroSyncPlanner) planSingleAwait(
 					chosenCall, chosenPlan, chosenResults, chosenBoxed = call, phys, callRes, boxed
 					node.endInstr, node.singleAwait = i, call
 					// Fresh branch facts post-call so revisited loop headers re-evaluate Phis.
-					node.singleAwaitPost = explorePost(blk, pred, i+1, depth+1, bumpVisit(visits, blk), make(map[string]bool), make(map[ssa.Value]bool))
+					node.singleAwaitPost = explorePost(blk, pred, i+1, depth+1, 0, bumpVisit(visits, blk), make(map[string]bool), make(map[ssa.Value]bool), make(map[ssa.Value]bool))
 					return node
 				}
 				return bail
 			}
-			if mayMut, _, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, false, false, localZeroInts, nil); !ok || mayMut {
+			if mayMut, _, ok := coroSyncFastPureInstrAllowed(plan, ins, phys, false, true, localZeroInts, localNilIfaces); !ok || mayMut {
 				return bail
+			}
+			if mk, isMk := ins.(*ssa.MakeInterface); isMk && isUntypedNilConst(mk.X) {
+				localNilIfaces[mk] = true
 			}
 		}
 		return bail
 	}
 
-	root := explorePre(fn.Blocks[0], nil, 0, make(map[*ssa.BasicBlock]int), make(map[string]bool), make(map[ssa.Value]bool))
+	root := explorePre(fn.Blocks[0], nil, 0, 0, make(map[*ssa.BasicBlock]int), make(map[string]bool), make(map[ssa.Value]bool), make(map[ssa.Value]bool))
 	if root == nil || chosenCall == nil || !postHasReturn {
 		return nil
 	}
@@ -2623,14 +2836,18 @@ func (pl *coroSyncPlanner) planBoundedLoopLeaf(
 				if refs == nil {
 					return nil
 				}
+				staysLocal := ssaAddrStaysInLocalAlloc(v, plan.function)
 				for _, ref := range *refs {
 					if _, isDbg := ref.(*ssa.DebugRef); isDbg {
 						continue
 					}
-					un, isUn := ref.(*ssa.UnOp)
-					if !isUn || un.Op != token.MUL || un.X != v {
-						return nil
+					if un, isUn := ref.(*ssa.UnOp); isUn && un.Op == token.MUL && un.X == v {
+						continue
 					}
+					if st, isSt := ref.(*ssa.Store); isSt && st.Addr == v && staysLocal {
+						continue
+					}
+					return nil
 				}
 				continue
 			case *ssa.Index:
@@ -2645,7 +2862,28 @@ func (pl *coroSyncPlanner) planBoundedLoopLeaf(
 					return nil
 				}
 				continue
-			case *ssa.Alloc, *ssa.Store, *ssa.Slice:
+			case *ssa.Alloc:
+				if v.Heap ||
+					phys.control != coroPhysicalControlNone ||
+					phys.operation != coroPhysicalOperationNone ||
+					phys.outcome != coroPhysicalOutcomeNone ||
+					(phys.recipe != coroPhysicalInstructionOrdinary &&
+						phys.recipe != coroPhysicalInstructionFrameAllocation &&
+						phys.recipe != coroPhysicalInstructionFrameBitcastAllocation) {
+					return nil
+				}
+				continue
+			case *ssa.Store:
+				if phys.control != coroPhysicalControlNone ||
+					phys.operation != coroPhysicalOperationNone ||
+					phys.outcome != coroPhysicalOutcomeNone ||
+					(phys.recipe != coroPhysicalInstructionOrdinary &&
+						phys.recipe != coroPhysicalInstructionStore) ||
+					!ssaAddrStaysInLocalAlloc(v.Addr, plan.function) {
+					return nil
+				}
+				continue
+			case *ssa.Slice:
 				return nil
 			default:
 				mayMut, _, allowed := coroSyncFastPureInstrAllowed(plan, ins, phys, false, false, nil, nil)
