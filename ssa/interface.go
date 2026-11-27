@@ -178,7 +178,7 @@ func iMethodOf(rawIntf *types.Interface, method *types.Func) int {
 
 // Imethod returns closure of an interface method.
 func (b Builder) Imethod(intf Expr, method *types.Func) Expr {
-	return b.imethod(intf, method, false, false)
+	return b.imethod(intf, method, false, false, Nil)
 }
 
 // ImethodRawDataKnownNonNil returns an interface method closure whose
@@ -188,16 +188,23 @@ func (b Builder) Imethod(intf Expr, method *types.Func) Expr {
 // entry. This is the zero-copy transport used by target-proven coroutine
 // interface dispatch; ordinary interface calls continue to use Imethod.
 func (b Builder) ImethodRawDataKnownNonNil(intf Expr, method *types.Func) Expr {
-	return b.imethod(intf, method, true, false)
+	return b.imethod(intf, method, true, false, Nil)
+}
+
+// ImethodWithData returns an interface method closure using an already
+// normalized receiver pointer computed by the caller (e.g. via an explicit
+// IfacePtrData$outcome call inside a sync-fast ramp).
+func (b Builder) ImethodWithData(intf Expr, method *types.Func, data Expr) Expr {
+	return b.imethod(intf, method, true, false, data)
 }
 
 // ImethodWithRecoverToken returns an interface method invocation whose code
 // pointer may also be used as recover-frame bookkeeping data.
 func (b Builder) ImethodWithRecoverToken(intf Expr, method *types.Func) Expr {
-	return b.imethod(intf, method, false, true)
+	return b.imethod(intf, method, false, true, Nil)
 }
 
-func (b Builder) imethod(intf Expr, method *types.Func, rawDataKnownNonNil, recoverToken bool) Expr {
+func (b Builder) imethod(intf Expr, method *types.Func, rawDataKnownNonNil, recoverToken bool, explicitData Expr) Expr {
 	prog := b.Prog
 	intfType := types.Unalias(intf.raw.Type)
 	patchedIntfType := prog.patch(intfType)
@@ -218,7 +225,9 @@ func (b Builder) imethod(intf Expr, method *types.Func, rawDataKnownNonNil, reco
 	i := iMethodOf(rawIntf, method)
 	b.recordUseIfaceMethod(rawIntf, i)
 	var data Expr
-	if rawDataKnownNonNil {
+	if !explicitData.IsNil() {
+		data = explicitData
+	} else if rawDataKnownNonNil {
 		data = b.InterfaceData(intf)
 	} else {
 		data = b.InlineCall(b.Pkg.rtFunc("IfacePtrData"), intf)
@@ -298,7 +307,7 @@ func (b Builder) makeInterface(tinter Type, x Expr, constantBacking bool) (ret E
 			vptr := b.Pkg.ConstAddress(x)
 			return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
 		}
-		vptr := b.AllocU(typ)
+		vptr := b.allocUForType(typ)
 		b.Store(vptr, x)
 		return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
 	}
@@ -309,7 +318,7 @@ func (b Builder) makeInterface(tinter Type, x Expr, constantBacking bool) (ret E
 			vptr := b.Pkg.ConstAddress(x)
 			return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
 		}
-		vptr := b.AllocU(typ)
+		vptr := b.allocUForType(typ)
 		b.Store(vptr, x)
 		return Expr{b.unsafeConcreteInterface(rawIntf, typ, tabi, vptr.impl), tinter}
 	}
@@ -366,7 +375,7 @@ func (b Builder) makeInterfaceFromPtr(tinter Type, ptr Expr, knownNonNil bool) (
 	}
 
 	b.recordUseIface(typ)
-	vptr := b.AllocU(typ)
+	vptr := b.allocUForType(typ)
 	dst := b.Convert(prog.VoidPtr(), vptr)
 	src := b.Convert(prog.VoidPtr(), ptr)
 	b.Call(b.Pkg.rtFunc("Typedmemmove"), tabi, dst, src)

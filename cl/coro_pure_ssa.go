@@ -999,7 +999,7 @@ func (a *coroPhysicalPureSSAAudit) validateMakeInterface(box *ssa.MakeInterface)
 	// cardinality and therefore also rejects duplicate or newly-added helpers.
 	expected := make([]string, 0, 4)
 	if needsAlloc {
-		expected = append(expected, "AllocU")
+		expected = append(expected, coroRuntimeAllocUHelper(a.ctx, physical.RawType()))
 	}
 	if needsNilCheck {
 		expected = append(expected, "AssertNilDeref")

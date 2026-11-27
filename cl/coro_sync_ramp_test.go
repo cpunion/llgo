@@ -1600,3 +1600,113 @@ func Root(b []byte, box *Box, v any, mu *int, x *int) int {
 		t.Fatalf("DeferDiscardCaller passed null result slot to value-returning sync-fast callee:\n%s", deferIR)
 	}
 }
+
+func TestCoroSyncRampStageOFeatures(t *testing.T) {
+	program := newEmissionTestProgram()
+	program.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	demoPkg := program.addPackage(t, "demo", `package demo
+
+import _ "unsafe"
+
+//go:linkname yieldNow llgo.coroYield
+func yieldNow()
+
+// 1. BoundedLoop with non-escaping local Alloc + Store (bytes.makeASCIISet shape).
+type asciiSet [128]bool
+
+func MakeASCIISet(chars string) (as asciiSet, ok bool) {
+	for i := 0; i < len(chars); i++ {
+		c := chars[i]
+		if c >= 128 {
+			return as, false
+		}
+		as[c] = true
+	}
+	return as, true
+}
+
+// 2. SingleAwait with dynamic slice + read-only $outcome call in pre-call and post-call.
+type decoder struct {
+	buf   []byte
+	flags uint32
+}
+
+func (d *decoder) allowInvalid() bool {
+	return d.flags&1 != 0
+}
+
+func (d *decoder) needMore(pos int) bool {
+	return pos >= len(d.buf)
+}
+
+func slowScan() (int, int) {
+	yieldNow()
+	return 0, 1
+}
+
+func scanToken(b []byte, allow bool) (int, int) {
+	if len(b) == 0 {
+		return slowScan()
+	}
+	if b[0] == '"' || allow {
+		return 1, 0
+	}
+	return slowScan()
+}
+
+func (d *decoder) ConsumeToken(pos int) (int, int) {
+	for {
+		n, code := scanToken(d.buf[pos:], d.allowInvalid())
+		if code != 0 || d.needMore(pos+n) {
+			yieldNow()
+			continue
+		}
+		return pos + n, code
+	}
+}
+
+func Root(s string, d *decoder) int {
+	set, ok := MakeASCIISet(s)
+	_ = set[0]
+	n, _ := d.ConsumeToken(0)
+	if ok {
+		return n + 1
+	}
+	return n
+}
+`)
+	program.ssa.Build()
+	inputs := []EmissionPackage{{SSA: demoPkg.ssa, Files: []*ast.File{demoPkg.file}}}
+	prog, compilation, _, pkg := compileCoroSyncRampTestPackages(
+		t, inputs, demoPkg.ssa.Func("Root"), 0, coro.DynamicCHAClosed,
+	)
+	defer prog.Dispose()
+
+	if ramp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("MakeASCIISet")); ramp == nil || ramp.kind != coroSyncRampBoundedLoop || !ramp.hasTryHelper {
+		t.Fatalf("MakeASCIISet ramp=%+v, want coroSyncRampBoundedLoop with hasTryHelper", ramp)
+	}
+
+	var consumeFn *ssa.Function
+	for _, fn := range compilation.EmissionUniverse.Functions() {
+		if fn.Pkg == demoPkg.ssa && fn.Name() == "ConsumeToken" {
+			consumeFn = fn
+		}
+	}
+	if consumeFn == nil {
+		t.Fatal("missing (*decoder).ConsumeToken")
+	}
+
+	if ramp := sealedSyncRampForTest(t, compilation, consumeFn); ramp == nil || ramp.kind != coroSyncRampSingleAwait {
+		t.Fatalf("(*decoder).ConsumeToken ramp=%+v, want coroSyncRampSingleAwait", ramp)
+	}
+
+	irText := pkg.Module().String()
+	consumeIR := extractLLVMFuncDef(t, irText, "demo.(*decoder).ConsumeToken$coro")
+	if strings.Contains(consumeIR, "__llgo_coro_frame_alloc") {
+		t.Fatalf("(*decoder).ConsumeToken$coro unexpectedly allocates a coroutine frame:\n%s", consumeIR)
+	}
+	asciiIR := extractLLVMFuncDef(t, irText, "demo.MakeASCIISet$coro.try")
+	if strings.Contains(asciiIR, "__llgo_coro_frame_alloc") {
+		t.Fatalf("MakeASCIISet$coro.try unexpectedly allocates a coroutine frame:\n%s", asciiIR)
+	}
+}
