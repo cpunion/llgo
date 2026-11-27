@@ -211,7 +211,9 @@ func isKnownNonNilArrayBase(v llvm.Value) bool {
 		if fn := call.CalledValue().IsAFunction(); !fn.IsNil() {
 			switch fn.Name() {
 			case "github.com/xgo-dev/llgo/runtime/internal/runtime.AllocU",
-				"github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ":
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.AllocZ",
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.AllocAtomicU",
+				"github.com/xgo-dev/llgo/runtime/internal/runtime.AllocAtomicZ":
 				return true
 			}
 		}
@@ -802,7 +804,11 @@ func (b Builder) MakeSlice(t Type, len, cap Expr) (ret Expr) {
 	len = b.FitIntSize(len)
 	cap = b.FitIntSize(cap)
 	telem := prog.Index(t)
-	ret = b.InlineCall(b.Pkg.rtFunc("MakeSlice"), len, cap, prog.IntVal(prog.SizeOf(telem), prog.Int()))
+	helper := MakeSliceHelperName(t.RawType())
+	if helper != "MakeSlice" && !b.Pkg.hasRtFunc(helper) {
+		helper = "MakeSlice"
+	}
+	ret = b.InlineCall(b.Pkg.rtFunc(helper), len, cap, prog.IntVal(prog.SizeOf(telem), prog.Int()))
 	ret.Type = t
 	return
 }

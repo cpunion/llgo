@@ -2365,24 +2365,28 @@ func (b Builder) BuiltinCall(fn string, args ...Expr) (ret Expr) {
 		if len(args) == 2 {
 			src := args[0]
 			if src.kind == vkSlice {
+				appendHelper := SliceAppendHelperName(src.Type.RawType())
+				if appendHelper != "SliceAppend" && !b.Pkg.hasRtFunc(appendHelper) {
+					appendHelper = "SliceAppend"
+				}
 				elem := args[1]
 				switch elem.kind {
 				case vkSlice:
 					etSize := b.Prog.SizeOf(b.Prog.Elem(elem.Type))
 					ret.Type = src.Type
-					ret.impl = b.InlineCall(b.Pkg.rtFunc("SliceAppend"),
+					ret.impl = b.InlineCall(b.Pkg.rtFunc(appendHelper),
 						src, b.SliceData(elem), b.SliceLen(elem), b.Prog.Val(int(etSize))).impl
 					return
 				case vkString:
 					etSize := b.Prog.SizeOf(b.Prog.Byte())
 					ret.Type = src.Type
-					ret.impl = b.InlineCall(b.Pkg.rtFunc("SliceAppend"),
+					ret.impl = b.InlineCall(b.Pkg.rtFunc(appendHelper),
 						src, b.StringData(elem), b.StringLen(elem), b.Prog.Val(int(etSize))).impl
 					return
 				default:
 					etSize := b.Prog.SizeOf(elem.Type)
 					ret.Type = src.Type
-					ret.impl = b.InlineCall(b.Pkg.rtFunc("SliceAppend"),
+					ret.impl = b.InlineCall(b.Pkg.rtFunc(appendHelper),
 						src, elem, b.Const(constant.MakeInt64(1), b.Prog.Int()), b.Prog.Val(int(etSize))).impl
 					return
 				}

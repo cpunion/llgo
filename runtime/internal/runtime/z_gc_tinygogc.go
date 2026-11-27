@@ -38,6 +38,16 @@ func AllocZ(size uintptr) unsafe.Pointer {
 	return ret
 }
 
+// AllocAtomicU allocates uninitialized pointer-free memory.
+func AllocAtomicU(size uintptr) unsafe.Pointer {
+	return AllocU(size)
+}
+
+// AllocAtomicZ allocates zero-initialized pointer-free memory.
+func AllocAtomicZ(size uintptr) unsafe.Pointer {
+	return AllocZ(size)
+}
+
 func AllocRoot(size uintptr) unsafe.Pointer {
 	return tinygogc.AllocOpaqueRooted(size)
 }

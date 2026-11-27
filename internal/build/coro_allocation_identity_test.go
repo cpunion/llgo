@@ -38,7 +38,7 @@ func TestCoroRepeatedAllocationIdentityCodegen(t *testing.T) {
 			t.Fatalf("missing source body %s", name)
 		}
 		wantHeap := name != "ImmediateBorrow"
-		if gotHeap := strings.Contains(body, "runtime.AllocZ"); gotHeap != wantHeap {
+		if gotHeap := strings.Contains(body, "runtime.AllocZ") || strings.Contains(body, "runtime.AllocAtomicZ"); gotHeap != wantHeap {
 			t.Fatalf("%s dynamic heap allocation=%v, want %v:\n%s", name, gotHeap, wantHeap, body)
 		}
 	}

@@ -34,6 +34,13 @@ void *__llgo_coro_runtime_gc_malloc_v1(size_t size) {
   return GC_malloc(size);
 }
 
+/* Pointer-free counterpart for compiler-proven and runtime-proven noscan
+ * allocations (e.g. strings, []byte, numeric/POD buffers). Preserves the exact
+ * same synchronous non-parking boundary as __llgo_coro_runtime_gc_malloc_v1. */
+void *__llgo_coro_runtime_gc_malloc_atomic_v1(size_t size) {
+  return GC_malloc_atomic(size);
+}
+
 /* A disappearing link is cleared before finalization. Keeping the address
  * complemented in Go is essential: uintptr alone is still a conservative GC
  * root. The link cell contains 1, not the referent, so it cannot retain it. */

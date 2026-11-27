@@ -512,21 +512,22 @@ func (a *coroPhysicalPureSSAAudit) managedHeapAllocationCapability(alloc *ssa.Al
 		fact.zeroSized = true
 		return fact, ""
 	}
-	if len(helpers) != 1 || helpers[0] != "AllocZ" {
-		return fact, "non-zero allocation does not lower through exactly one AllocZ helper"
+	wantHelper := coroRuntimeAllocZHelper(a.ctx, a.typeOf(pointer.Elem()))
+	if len(helpers) != 1 || helpers[0] != wantHelper {
+		return fact, "non-zero allocation does not lower through exactly one " + wantHelper + " helper"
 	}
-	if reason := a.requireFrozenCoroSafeRuntimeHelpers(alloc, "AllocZ"); reason != "" {
+	if reason := a.requireFrozenCoroSafeRuntimeHelpers(alloc, wantHelper); reason != "" {
 		return fact, reason
 	}
-	target, planned := a.plan.ResolveLoweredCall(a.fn, "AllocZ")
+	target, planned := a.plan.ResolveLoweredCall(a.fn, wantHelper)
 	if !planned || target == nil {
-		return fact, "AllocZ lacks one exact owner-scoped lowered-call target"
+		return fact, wantHelper + " lacks one exact owner-scoped lowered-call target"
 	}
 	targetPlan, planned := a.plan.FunctionPlan(target)
 	if !planned || targetPlan.ID == "" {
-		return fact, "AllocZ target lacks one canonical function plan"
+		return fact, wantHelper + " target lacks one canonical function plan"
 	}
-	fact.helper = "AllocZ"
+	fact.helper = wantHelper
 	fact.helperTarget = targetPlan.ID
 	fact.helperEmission = targetPlan.Emission
 	return fact, ""
@@ -727,7 +728,7 @@ func (a *coroPhysicalPureSSAAudit) validateIndex(index *ssa.Index) string {
 		// before an unchecked load.
 		if a.ctx != nil && emissionIndexNeedsManagedArrayTemporary(a.ctx, index) {
 			return a.requireCompilerElidedAndDirectNoSuspendRuntimeHelper(
-				index, "AllocZ", "PanicIndex", "PanicIndexU", "AssertNilDeref",
+				index, coroRuntimeAllocZHelper(a.ctx, a.typeOf(index.X.Type())), "PanicIndex", "PanicIndexU", "AssertNilDeref",
 			)
 		}
 		return a.requireOnlyCompilerElidedRuntimeHelpers(index, "PanicIndex", "PanicIndexU", "AssertNilDeref")
@@ -740,7 +741,7 @@ func (a *coroPhysicalPureSSAAudit) validateIndex(index *ssa.Index) string {
 		return "array index has unsupported result type: " + err.Error()
 	}
 	if a.ctx != nil && emissionIndexNeedsManagedArrayTemporary(a.ctx, index) {
-		return a.requireCompilerElidedAndDirectNoSuspendRuntimeHelper(index, "AllocZ")
+		return a.requireCompilerElidedAndDirectNoSuspendRuntimeHelper(index, coroRuntimeAllocZHelper(a.ctx, a.typeOf(index.X.Type())))
 	}
 	return a.requireNoRuntimeHelpers(index)
 }
@@ -768,7 +769,7 @@ func (a *coroPhysicalPureSSAAudit) validateSlice(slice *ssa.Slice) string {
 			if err := validateCoroPhysicalSSAValueType(a.typeOf(slice.Type())); err != nil {
 				return "synthetic MakeSlice result has unsupported type: " + err.Error()
 			}
-			return a.requireFrozenOutcomeRuntimeHelper(slice, "MakeSlice")
+			return a.requireFrozenOutcomeRuntimeHelper(slice, coroRuntimeMakeSliceHelper(a.ctx, a.typeOf(slice.Type())))
 		}
 	}
 
@@ -1207,7 +1208,7 @@ func (a *coroPhysicalPureSSAAudit) validateMakeSlice(makeSlice *ssa.MakeSlice) s
 	if err := validateCoroPhysicalSSAValueType(a.typeOf(makeSlice.Type())); err != nil {
 		return "MakeSlice result has unsupported type: " + err.Error()
 	}
-	return a.requireFrozenOutcomeRuntimeHelper(makeSlice, "MakeSlice")
+	return a.requireFrozenOutcomeRuntimeHelper(makeSlice, coroRuntimeMakeSliceHelper(a.ctx, a.typeOf(makeSlice.Type())))
 }
 
 func (a *coroPhysicalPureSSAAudit) validateMakeMap(makeMap *ssa.MakeMap) string {
@@ -3442,7 +3443,7 @@ func (a *coroPhysicalPureSSAAudit) validateAppendBuiltin(call *ssa.Call) string 
 			return "append has unsupported physical value type: " + err.Error()
 		}
 	}
-	return a.requireFrozenOutcomeRuntimeHelper(call, "SliceAppend")
+	return a.requireFrozenOutcomeRuntimeHelper(call, coroRuntimeSliceAppendHelper(a.ctx, destinationType))
 }
 
 // validateCopyBuiltin freezes Builder.BuiltinCall's two legal forms: copying

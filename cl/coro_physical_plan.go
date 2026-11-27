@@ -452,7 +452,7 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		if coroIndexPanicRuntimeHelper(helper) || helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
 			return true
 		}
-		if helper == "AllocZ" && plan.reuseValueAddress {
+		if (helper == "AllocZ" || helper == "AllocAtomicZ") && plan.reuseValueAddress {
 			return true
 		}
 	case coroPhysicalInstructionSlice:
@@ -489,7 +489,7 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 			return true
 		}
 	case coroPhysicalInstructionFrameAllocation, coroPhysicalInstructionBorrowedAllocation:
-		if helper == "AllocZ" {
+		if helper == "AllocZ" || helper == "AllocAtomicZ" {
 			return true
 		}
 	}

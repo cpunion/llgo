@@ -330,8 +330,38 @@ func prepareCoroEmissionFunctionShape(ctx *context, fn *ssa.Function, programs .
 	return shape, nil
 }
 
+func coroRuntimeAllocHelperForContext(ctx *context, atomicName, fallbackName string) string {
+	if atomicName == fallbackName || ctx == nil {
+		return fallbackName
+	}
+	if ctx.emissionUniverse != nil {
+		if rtPkg := ctx.emissionUniverse.byPath[llssa.PkgRuntime]; rtPkg != nil && rtPkg.ssa != nil {
+			if rtPkg.ssa.Func(atomicName) != nil {
+				return atomicName
+			}
+		}
+		return fallbackName
+	}
+	if ctx.prog != nil && ctx.prog.HasRuntimeFunc(atomicName) {
+		return atomicName
+	}
+	return fallbackName
+}
+
+func coroRuntimeAllocZHelper(ctx *context, elem types.Type) string {
+	return coroRuntimeAllocHelperForContext(ctx, llssa.AllocZHelperName(elem), "AllocZ")
+}
+
+func coroRuntimeMakeSliceHelper(ctx *context, sliceType types.Type) string {
+	return coroRuntimeAllocHelperForContext(ctx, llssa.MakeSliceHelperName(sliceType), "MakeSlice")
+}
+
+func coroRuntimeSliceAppendHelper(ctx *context, sliceType types.Type) string {
+	return coroRuntimeAllocHelperForContext(ctx, llssa.SliceAppendHelperName(sliceType), "SliceAppend")
+}
+
 func (shape coroEmissionFunctionShape) helperPlacement(instr ssa.Instruction, helper string) coroRuntimeHelperPlacement {
-	if allocation, ok := instr.(*ssa.Alloc); ok && helper == "AllocZ" {
+	if allocation, ok := instr.(*ssa.Alloc); ok && (helper == "AllocZ" || helper == "AllocAtomicZ") {
 		if _, relocated := shape.terminalResultAllocation[allocation]; relocated {
 			return coroRuntimeHelperAtPrologue
 		}
@@ -501,7 +531,7 @@ func (builder coroProgramIRBuilder) materializeLoweredRuntimeHelpers(ctx *contex
 		if sitePlan.plainAllocation.borrowed() {
 			sitePlan.plainRuntimeHelpers = slices.DeleteFunc(
 				sitePlan.plainRuntimeHelpers,
-				func(helper string) bool { return helper == "AllocZ" },
+				func(helper string) bool { return helper == "AllocZ" || helper == "AllocAtomicZ" },
 			)
 		}
 		preamble, err := u.coroProgramIR.functionPreambleDuringFreeze(ownerFn, ownerPkg)
@@ -1147,7 +1177,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		if coroAllocationUsesManagedStorage(ctx, v) && !scalarBitcast &&
 			!ctx.skipSyntheticMakeSliceAlloc(v) && !isEmissionVargsAlloc(ctx, v) {
 			if !emissionZeroSizedType(ctx.patchType(elem), ctx.prog.PointerSize()) {
-				add("AllocZ")
+				add(coroRuntimeAllocZHelper(ctx, ctx.patchType(elem)))
 			}
 		}
 	case *ssa.Defer:
@@ -1168,7 +1198,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 			add(emissionIndexPanicRuntimeHelper(ctx, v.Index))
 		}
 		if emissionIndexNeedsManagedArrayTemporary(ctx, v) {
-			add("AllocZ")
+			add(coroRuntimeAllocZHelper(ctx, ctx.patchType(v.X.Type())))
 		}
 	case *ssa.IndexAddr:
 		// compileValue consumes varargs IndexAddr nodes in the enclosing varargs
@@ -1195,7 +1225,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 		}
 	case *ssa.Slice:
 		if _, synthetic := ctx.syntheticMakeSliceCap(v); synthetic {
-			add("MakeSlice")
+			add(coroRuntimeMakeSliceHelper(ctx, ctx.patchType(v.Type())))
 			break
 		}
 		if emissionIsVargsAlloc(ctx, v.X) {
@@ -1238,7 +1268,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(
 			u.makeInterfaceRuntimeHelpers(ctx, v, add)
 		}
 	case *ssa.MakeSlice:
-		add("MakeSlice")
+		add(coroRuntimeMakeSliceHelper(ctx, ctx.patchType(v.Type())))
 	case *ssa.MakeMap:
 		add("MakeMap")
 	case *ssa.MakeClosure:
@@ -2229,7 +2259,11 @@ func (u *EmissionUniverse) builtinRuntimeHelpers(ctx *context, call *ssa.CallCom
 			}
 		}
 	case "append":
-		add("SliceAppend")
+		if len(args) >= 1 {
+			add(coroRuntimeSliceAppendHelper(ctx, ctx.patchType(args[0].Type())))
+		} else {
+			add("SliceAppend")
+		}
 	case "copy":
 		add("SliceCopy")
 	case "close":

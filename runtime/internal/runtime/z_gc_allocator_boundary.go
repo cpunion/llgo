@@ -33,3 +33,10 @@ import "unsafe"
 //llgo:coro sync
 //go:linkname coroRuntimeGCMalloc C.__llgo_coro_runtime_gc_malloc_v1
 func coroRuntimeGCMalloc(size uintptr) unsafe.Pointer
+
+// coroRuntimeGCMallocAtomic is the pointer-free (noscan) counterpart to
+// coroRuntimeGCMalloc for allocations proven to contain no GC-traced pointers.
+//
+//llgo:coro sync
+//go:linkname coroRuntimeGCMallocAtomic C.__llgo_coro_runtime_gc_malloc_atomic_v1
+func coroRuntimeGCMallocAtomic(size uintptr) unsafe.Pointer

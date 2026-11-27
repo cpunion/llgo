@@ -1002,6 +1002,7 @@ type aPackage struct {
 	// with a compiler-owned descriptor pointer.
 	interfaceMethodDescriptor func(string, *types.Func, *types.Signature, types.Type) (Expr, bool)
 	runtimeCall               RuntimeCallResolver
+	runtimeHelperAllowed      func(name string) bool
 	pythonCall                PythonCallResolver
 	runtimeFuncs              map[Type]string
 
@@ -1169,6 +1170,16 @@ func (p Package) materializeLLVMUsed(name string, values []llvm.Value) {
 	global.SetSection("llvm.metadata")
 }
 
+func (p Package) hasRtFunc(fnName string) bool {
+	if p.runtimeHelperAllowed != nil && !p.runtimeHelperAllowed(fnName) {
+		return false
+	}
+	if p.Prog == nil || !p.Prog.HasRuntimeFunc(fnName) {
+		return false
+	}
+	return true
+}
+
 func (p Package) rtFunc(fnName string) Expr {
 	return p.rtFuncAs(fnName, fnName)
 }
@@ -1289,6 +1300,13 @@ type RuntimeCallResolver func(b Builder, helper string, fn Expr, args []Expr) (r
 // preserves the legacy lowering, including the canonical function Type.
 func (p Package) SetResolveRuntimeCall(fn RuntimeCallResolver) {
 	p.runtimeCall = fn
+}
+
+// SetAllowRuntimeHelper optionally restricts which optional runtime helper
+// variants (such as AllocAtomicZ, MakeSliceAtomic, SliceAppendAtomic) may be
+// selected during lowering so lowering matches a frozen runtime universe.
+func (p Package) SetAllowRuntimeHelper(fn func(name string) bool) {
+	p.runtimeHelperAllowed = fn
 }
 
 // PythonCallResolver may replace one compiler-generated Python C-API call.

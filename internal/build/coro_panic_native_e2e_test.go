@@ -512,6 +512,12 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	allocZ := pkg.NewFunc(llssa.PkgRuntime+".AllocZ", newSignature([]types.Type{uintptrType}, []types.Type{pointer}), llssa.InGo)
 	allocZBody := allocZ.MakeBody(1)
 	allocZBody.Return(allocZBody.Call(calloc.Expr, prog.IntVal(1, prog.Uintptr()), allocZ.Param(0)))
+	allocAtomicU := pkg.NewFunc(llssa.PkgRuntime+".AllocAtomicU", newSignature([]types.Type{uintptrType}, []types.Type{pointer}), llssa.InGo)
+	allocAtomicUBody := allocAtomicU.MakeBody(1)
+	allocAtomicUBody.Return(allocAtomicUBody.Call(malloc.Expr, allocAtomicU.Param(0)))
+	allocAtomicZ := pkg.NewFunc(llssa.PkgRuntime+".AllocAtomicZ", newSignature([]types.Type{uintptrType}, []types.Type{pointer}), llssa.InGo)
+	allocAtomicZBody := allocAtomicZ.MakeBody(1)
+	allocAtomicZBody.Return(allocAtomicZBody.Call(calloc.Expr, prog.IntVal(1, prog.Uintptr()), allocAtomicZ.Param(0)))
 	// The concrete *byte panic value materializes pointer and byte type
 	// descriptors. Their equality callbacks are metadata-only in this fixture;
 	// provide exact test-island implementations instead of extracting alg.go and

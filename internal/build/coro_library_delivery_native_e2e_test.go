@@ -195,6 +195,8 @@ import "unsafe"
 func zero(uintptr) unsafe.Pointer
 func AllocZ(size uintptr) unsafe.Pointer { return zero(size) }
 func AllocU(size uintptr) unsafe.Pointer { return zero(size) }
+func AllocAtomicZ(size uintptr) unsafe.Pointer { return zero(size) }
+func AllocAtomicU(size uintptr) unsafe.Pointer { return zero(size) }
 //go:linkname abort C.abort
 //llgo:coro noblock
 func abort()

@@ -178,3 +178,90 @@ int main(void) {
 		t.Fatalf("initialize legacy collector: %v\n%s", err, out)
 	}
 }
+
+func TestBDWGCFreeSpaceDivisorPolicy(t *testing.T) {
+	flags, err := exec.Command("pkg-config", "--cflags", "--libs", "bdw-gc").Output()
+	if err != nil {
+		t.Skipf("BDWGC development files unavailable: %v", err)
+	}
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("C compiler unavailable")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "divisor.c")
+	program := `
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+#define GC_THREADS 1
+#include <gc/gc.h>
+#include <stdio.h>
+#include <stdlib.h>
+extern void __llgo_coro_gc_init_v1(void);
+#if GC_VERSION_MAJOR > 8 || (GC_VERSION_MAJOR == 8 && GC_VERSION_MINOR >= 2)
+int main(int argc, char **argv) {
+    if (argc > 1) {
+        GC_set_free_space_divisor(5);
+    }
+    __llgo_coro_gc_init_v1();
+    printf("%lu\n", (unsigned long)GC_get_free_space_divisor());
+    return 0;
+}
+#else
+int main(void) {
+    __llgo_coro_gc_init_v1();
+    puts("divisor unavailable");
+    return 0;
+}
+#endif
+`
+	if err := os.WriteFile(source, []byte(program), 0600); err != nil {
+		t.Fatal(err)
+	}
+	image := filepath.Join(dir, "divisor")
+	args := []string{"-std=c11", "-D_POSIX_C_SOURCE=200809L", source,
+		"internal/clite/bdwgc/_wrap/coro_init.c", "-o", image}
+	args = append(args, strings.Fields(string(flags))...)
+	if out, err := exec.Command(cc, args...).CombinedOutput(); err != nil {
+		t.Fatalf("compile divisor fixture: %v\n%s", err, out)
+	}
+	base := []string{}
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if name != "GC_FREE_SPACE_DIVISOR" {
+			base = append(base, entry)
+		}
+	}
+	run := func(t *testing.T, extra []string, preset bool) int {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, image)
+		if preset {
+			cmd.Args = append(cmd.Args, "preset")
+		}
+		cmd.Env = append(append([]string{}, base...), extra...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("run divisor fixture %v: %v\n%s", extra, err, out)
+		}
+		if strings.TrimSpace(string(out)) == "divisor unavailable" {
+			t.Skip("BDWGC before 8.2 has no public divisor setter")
+		}
+		var got int
+		if n, err := fmt.Sscan(string(out), &got); n != 1 || err != nil {
+			t.Fatalf("invalid divisor output: %q (%v)", out, err)
+		}
+		return got
+	}
+	if got := run(t, nil, false); got != 1 {
+		t.Fatalf("default divisor = %d, want 1", got)
+	}
+	if got := run(t, []string{"GC_FREE_SPACE_DIVISOR=4"}, false); got != 4 {
+		t.Fatalf("env override divisor = %d, want 4", got)
+	}
+	if got := run(t, nil, true); got != 5 {
+		t.Fatalf("embedder preset divisor = %d, want 5", got)
+	}
+}

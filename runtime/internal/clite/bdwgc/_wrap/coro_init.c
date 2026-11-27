@@ -25,8 +25,13 @@
  * Otherwise a valid initial Go execution quota also bounds parallel marking:
  * GOMAXPROCS=1 should not create one marker thread per host CPU. Later changes
  * to GOMAXPROCS still resize managed execution; this collector API is startup
- * only, so they do not resize an already initialized marker team. Older
- * collectors without the public marker-count setter keep their own policy.
+ * only, so they do not resize an already initialized marker team.
+ *
+ * Also align BDWGC's default free-space divisor (3 -> 1, ~2x live heap growth
+ * matching Go's GOGC=100) when neither an embedder nor GC_FREE_SPACE_DIVISOR
+ * overrides it, reducing STW frequency and request p99 latency without
+ * increasing idle or parked-goroutine memory footprint. Older collectors
+ * without the public 8.2 setters keep their own policy.
  */
 void __llgo_coro_gc_init_v1(void) {
 #if defined(GC_THREADS) && (defined(__APPLE__) || defined(__linux__)) && \
@@ -51,6 +56,10 @@ void __llgo_coro_gc_init_v1(void) {
                 ? (unsigned)online : 1;
             GC_set_markers_count(quota < available ? quota : available);
         }
+    }
+    if (!GC_is_init_called() && getenv("GC_FREE_SPACE_DIVISOR") == NULL &&
+        GC_get_free_space_divisor() == 3) {
+        GC_set_free_space_divisor(1);
     }
 #endif
     GC_init();

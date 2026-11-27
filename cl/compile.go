@@ -4494,6 +4494,9 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		ret.SetResolveMethodEntry(ctx.resolveMethodEntry)
 		ret.SetResolveInterfaceMethodDescriptor(ctx.resolveInterfaceMethodDescriptor)
 		ret.SetResolveRuntimeCall(ctx.resolveCoroLoweredRuntimeCall)
+		ret.SetAllowRuntimeHelper(func(name string) bool {
+			return coroRuntimeAllocHelperForContext(ctx, name, "") == name
+		})
 		ret.SetResolvePythonCall(ctx.resolveCoroPythonCall)
 	}
 

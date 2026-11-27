@@ -33,6 +33,9 @@ func TestCoroRuntimeAllocatorUsesPrivateSynchronousBoundary(t *testing.T) {
 	if got := strings.Count(allocatorText, "coroRuntimeGCMalloc(size)"); got != 2 {
 		t.Errorf("managed object allocator private calls = %d, want AllocU and AllocZ", got)
 	}
+	if got := strings.Count(allocatorText, "coroRuntimeGCMallocAtomic(size)"); got != 2 {
+		t.Errorf("managed atomic allocator private calls = %d, want AllocAtomicU and AllocAtomicZ", got)
+	}
 	if strings.Contains(allocatorText, "bdwgc.Malloc(size)") {
 		t.Error("managed object allocator still reaches the generic GC_malloc declaration")
 	}
