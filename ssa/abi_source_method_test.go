@@ -138,3 +138,89 @@ func TestABITypeSourceIdentityAcrossPrograms(t *testing.T) {
 		})
 	}
 }
+
+func TestPhysicalNamedABISymbolNamesIgnoreFileSetPositions(t *testing.T) {
+	runtimeTypes := RuntimeTypesForTest(t)
+	newProgram := func() Program {
+		p := NewProgram(nil)
+		p.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+		p.SetRuntime(runtimeTypes)
+		return p
+	}
+	typesPkg := types.NewPackage("example.com/pos", "pos")
+	cb := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+
+	// 1. Top-level struct with a func field and a non-zero FileSet token.Pos.
+	poolObj := types.NewTypeName(token.Pos(3148538), typesPkg, "Pool", nil)
+	poolNamed := types.NewNamed(poolObj, types.NewStruct([]*types.Var{
+		types.NewField(token.Pos(3148540), typesPkg, "New", cb, false),
+	}, nil), nil)
+	typesPkg.Scope().Insert(poolObj)
+
+	// 2. Generic top-level struct with a func field and a non-zero token.Pos.
+	anyIface := types.Universe.Lookup("any").Type().Underlying().(*types.Interface)
+	kParam := types.NewTypeParam(types.NewTypeName(token.Pos(3081676), typesPkg, "K", nil), anyIface)
+	vParam := types.NewTypeParam(types.NewTypeName(token.Pos(3081677), typesPkg, "V", nil), anyIface)
+	htObj := types.NewTypeName(token.Pos(3081675), typesPkg, "HashTrieMap", nil)
+	htOrigin := types.NewNamed(htObj, types.NewStruct([]*types.Var{
+		types.NewField(token.Pos(3081680), typesPkg, "eq", cb, false),
+	}, nil), nil)
+	htOrigin.SetTypeParams([]*types.TypeParam{kParam, vParam})
+	typesPkg.Scope().Insert(htObj)
+	htInstType, err := types.Instantiate(types.NewContext(), htOrigin, []types.Type{anyIface, anyIface}, false)
+	if err != nil {
+		t.Fatalf("instantiate HashTrieMap: %v", err)
+	}
+	htInst := htInstType.(*types.Named)
+
+	// 3. Function-local struct with a func field and a non-zero token.Pos.
+	fnScope := types.NewScope(typesPkg.Scope(), token.Pos(4000000), token.Pos(4000100), "fn")
+	localObj := types.NewTypeName(token.Pos(4000050), typesPkg, "localItem", nil)
+	localNamed := types.NewNamed(localObj, types.NewStruct([]*types.Var{
+		types.NewField(token.Pos(4000060), typesPkg, "fn", cb, false),
+	}, nil), nil)
+	fnScope.Insert(localObj)
+
+	// 4. Composite map containing converted named types.
+	mapTyp := types.NewMap(types.NewPointer(poolNamed), types.NewPointer(htInst))
+
+	producer := newProgram()
+	defer producer.Dispose()
+	pkg := producer.NewPackage("pos", "example.com/pos")
+	b := pkg.NewFunc("use", NoArgsNoRet, InC).MakeBody(1)
+
+	cases := []struct {
+		name    string
+		source  types.Type
+		wantSym string
+		wantPub bool
+	}{
+		{"top-level", poolNamed, "_llgo_example.com/pos.Pool", true},
+		{"generic-instance", htInst, "_llgo_example.com/pos.HashTrieMap[interface{},interface{}]", true},
+		{"function-local", localNamed, "_llgo_example.com/pos.localItem.0", false},
+		{"composite-map", mapTyp, "map[*_llgo_example.com/pos.Pool]*_llgo_example.com/pos.HashTrieMap[interface{},interface{}]", true},
+	}
+	physicals := make([]types.Type, len(cases))
+	for i, tc := range cases {
+		phys := producer.PhysicalType(tc.source, InGo)
+		physicals[i] = phys
+		b.abiType(phys)
+		got, pub := producer.abi.TypeName(phys)
+		if got != tc.wantSym || pub != tc.wantPub {
+			t.Fatalf("%s producer TypeName = (%q, %v), want (%q, %v)", tc.name, got, pub, tc.wantSym, tc.wantPub)
+		}
+	}
+	b.Return()
+
+	infos := producer.AbiTypes()
+	consumer := newProgram()
+	defer consumer.Dispose()
+	consumerPkg := consumer.NewPackage("consumer", "example.com/consumer")
+	consumerPkg.RegisterAbiTypes(infos)
+	for i, tc := range cases {
+		got, pub := consumer.abi.TypeName(physicals[i])
+		if got != tc.wantSym || pub != tc.wantPub {
+			t.Fatalf("%s consumer TypeName = (%q, %v), want (%q, %v)", tc.name, got, pub, tc.wantSym, tc.wantPub)
+		}
+	}
+}

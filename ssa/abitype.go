@@ -886,6 +886,7 @@ func (p Package) RegisterAbiTypes(infos []AbiTypeInfo) {
 		} else {
 			p.Prog.gocvt.recordSourceType(info.Raw, info.source)
 		}
+		p.Prog.gocvt.recordSourceTypeGraph(info.Raw, info.source, make(map[types.Type]struct{}))
 		if declared {
 			continue
 		}

@@ -356,6 +356,7 @@ func NewProgram(target *Target) Program {
 		debugInfoOptimized: target.effectiveOptLevel() != optlevel.O0,
 	}
 	prog.abi.Init(uintptr(prog.ptrSize), (*goProgram)(unsafe.Pointer(prog)))
+	prog.abi.SourceType = prog.SourceType
 	programCreated = true
 	return prog
 }

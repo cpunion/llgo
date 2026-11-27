@@ -132,9 +132,10 @@ func DataKindOf(raw types.Type, lvl int, is32Bits bool) (DataKind, types.Type, i
 
 // Builder is a helper for constructing ABI types.
 type Builder struct {
-	buf     []byte
-	PtrSize uintptr
-	Sizes   types.Sizes
+	buf        []byte
+	PtrSize    uintptr
+	Sizes      types.Sizes
+	SourceType func(types.Type) types.Type
 }
 
 // New creates a new ABI type Builder.
@@ -169,10 +170,11 @@ func (b *Builder) TypeName(t types.Type) (ret string, pub bool) {
 		ret, pub = b.TypeName(t.Elem())
 		return fmt.Sprintf("[%v]%s", t.Len(), ret), pub
 	case *types.Named:
-		o := t.Obj()
+		src := b.sourceNamed(t)
+		o := src.Obj()
 		pkg := o.Pkg()
-		ids := scopeIndices(o)
-		return "_llgo_" + FullName(pkg, NamedName(t)+ids), (pkg == nil || o.Exported() && ids == "")
+		ids := b.namedScopeIndices(t)
+		return "_llgo_" + FullName(pkg, b.namedName(t)+ids), (pkg == nil || o.Exported() && ids == "")
 	case *types.Interface:
 		if t.Empty() {
 			return "_llgo_any", true
@@ -201,12 +203,49 @@ func (b *Builder) TypeName(t types.Type) (ret string, pub bool) {
 	return
 }
 
+func (b *Builder) sourceNamed(t *types.Named) *types.Named {
+	if t == nil {
+		return nil
+	}
+	if b != nil && b.SourceType != nil {
+		if src, ok := types.Unalias(b.SourceType(t)).(*types.Named); ok && src != nil {
+			return src
+		}
+		if orig := t.Origin(); orig != nil && orig != t {
+			if src, ok := types.Unalias(b.SourceType(orig)).(*types.Named); ok && src != nil {
+				return src
+			}
+		}
+	}
+	return t
+}
+
+func (b *Builder) namedScopeIndices(t *types.Named) string {
+	src := b.sourceNamed(t)
+	if src == nil {
+		return ""
+	}
+	// Instantiated generics carry a synthesized TypeName whose Parent() is nil;
+	// consult the declaration's Origin() object so package-level and lexically
+	// scoped generics resolve their real scope chain instead of falling back to
+	// a process-local token.Pos.
+	obj := src.Obj()
+	if orig := src.Origin(); orig != nil && orig.Obj() != nil {
+		obj = orig.Obj()
+	}
+	return scopeIndices(obj)
+}
+
 func NamedName(t *types.Named) string {
+	return (*Builder)(nil).namedName(t)
+}
+
+func (b *Builder) namedName(t *types.Named) string {
 	if targs := t.TypeArgs(); targs != nil {
 		n := targs.Len()
 		infos := make([]string, n)
 		for i := 0; i < n; i++ {
-			infos[i] = typeArgString(targs.At(i))
+			infos[i] = b.typeArgString(targs.At(i))
 		}
 		return t.Obj().Name() + "[" + strings.Join(infos, ",") + "]"
 	}
@@ -214,9 +253,13 @@ func NamedName(t *types.Named) string {
 }
 
 func TypeArgs(typeArgs []types.Type) string {
+	return (*Builder)(nil).typeArgs(typeArgs)
+}
+
+func (b *Builder) typeArgs(typeArgs []types.Type) string {
 	targs := make([]string, len(typeArgs))
 	for i, t := range typeArgs {
-		targs[i] = typeArgString(t)
+		targs[i] = b.typeArgString(t)
 	}
 	return "[" + strings.Join(targs, ",") + "]"
 }
@@ -227,12 +270,10 @@ func namedLikeTypeArgString(obj types.Object, targs *types.TypeList) string {
 		n := targs.Len()
 		infos := make([]string, n)
 		for i := 0; i < n; i++ {
-			infos[i] = typeArgString(targs.At(i))
+			infos[i] = (*Builder)(nil).typeArgString(targs.At(i))
 		}
 		name += "[" + strings.Join(infos, ",") + "]"
 	}
-	// Distinct local types may share the same object name (e.g. in stdlib
-	// tests). Disambiguate them in symbol names using stable scope indices.
 	name += scopeIndices(obj)
 	if pkg := obj.Pkg(); pkg != nil {
 		return PathOf(pkg) + "." + name
@@ -240,10 +281,21 @@ func namedLikeTypeArgString(obj types.Object, targs *types.TypeList) string {
 	return name
 }
 
-func typeArgString(t types.Type) string {
+func (b *Builder) namedLikeTypeArgString(t *types.Named) string {
+	name := b.namedName(t)
+	// Distinct local types may share the same object name (e.g. in stdlib
+	// tests). Disambiguate them in symbol names using stable scope indices.
+	name += b.namedScopeIndices(t)
+	if pkg := t.Obj().Pkg(); pkg != nil {
+		return PathOf(pkg) + "." + name
+	}
+	return name
+}
+
+func (b *Builder) typeArgString(t types.Type) string {
 	switch t := t.(type) {
 	case *types.Alias:
-		return typeArgString(types.Unalias(t))
+		return b.typeArgString(types.Unalias(t))
 	case *types.Basic:
 		// byte and rune are aliases for uint8 and int32. go/types may cache a
 		// generic instance using either spelling, so ABI symbols must not
@@ -256,19 +308,19 @@ func typeArgString(t types.Type) string {
 		}
 		return t.String()
 	case *types.Named:
-		return namedLikeTypeArgString(t.Obj(), t.TypeArgs())
+		return b.namedLikeTypeArgString(t)
 	case *types.Pointer:
-		return "*" + typeArgString(t.Elem())
+		return "*" + b.typeArgString(t.Elem())
 	case *types.Slice:
-		return "[]" + typeArgString(t.Elem())
+		return "[]" + b.typeArgString(t.Elem())
 	case *types.Array:
-		return fmt.Sprintf("[%v]%s", t.Len(), typeArgString(t.Elem()))
+		return fmt.Sprintf("[%v]%s", t.Len(), b.typeArgString(t.Elem()))
 	case *types.Map:
-		return fmt.Sprintf("map[%s]%s", typeArgString(t.Key()), typeArgString(t.Elem()))
+		return fmt.Sprintf("map[%s]%s", b.typeArgString(t.Key()), b.typeArgString(t.Elem()))
 	case *types.Chan:
 		_, s := ChanDir(t.Dir())
 		elem := t.Elem()
-		elemStr := typeArgString(elem)
+		elemStr := b.typeArgString(elem)
 		// Keep canonical channel formatting for nested directional channels.
 		// Example: chan (<-chan int), not "chan <-chan int" (ambiguous).
 		if t.Dir() == types.SendRecv {
@@ -428,12 +480,19 @@ func (b *Builder) structHash(t *types.Struct) (ret []byte, pkg string) {
 	return
 }
 
+// isPackageScope reports whether scope is pkgScope or an equivalent top-level
+// package scope (such as the pre-merge scope of a typepatch.Merge'd package,
+// whose objects still point at the original package scope under types.Universe).
+func isPackageScope(scope, pkgScope *types.Scope) bool {
+	return scope != nil && (scope == pkgScope || scope.Parent() == types.Universe)
+}
+
 func scopeIndex(scope, root *types.Scope, id string) (string, bool) {
 	if scope == nil || root == nil {
 		return "", false
 	}
 	parent := scope.Parent()
-	if parent == nil {
+	if parent == nil || parent == types.Universe {
 		return "", false
 	}
 	n := parent.NumChildren()
@@ -443,7 +502,7 @@ func scopeIndex(scope, root *types.Scope, id string) (string, bool) {
 			break
 		}
 	}
-	if parent == root {
+	if isPackageScope(parent, root) {
 		return id, true
 	}
 	return scopeIndex(parent, root, id)
@@ -454,7 +513,7 @@ func scopeIndices(obj types.Object) string {
 	if pkg == nil {
 		return ""
 	}
-	if obj.Parent() != pkg.Scope() {
+	if !isPackageScope(obj.Parent(), pkg.Scope()) {
 		if ids, ok := scopeIndex(obj.Parent(), pkg.Scope(), ""); ok {
 			return ids
 		}
