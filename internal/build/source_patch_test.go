@@ -884,6 +884,8 @@ func TestNativeCoroTimeSleepUsesSourcePatch(t *testing.T) {
 		"func llgoCoroTimerStopV1(timer unsafe.Pointer) bool",
 		"//go:linkname llgoCoroTimerResetV1 runtime.llgoCoroTimerResetV1",
 		"func llgoCoroTimerResetV1(timer unsafe.Pointer, when, period int64) bool",
+		"//go:linkname llgoCoroAfterFuncV1 runtime.llgoCoroAfterFuncV1",
+		"func llgoCoroAfterFuncV1(when int64, f func()) unsafe.Pointer",
 		"func newTimer(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer) *Timer",
 		"return (*Timer)(llgoCoroTimerNewV1(when, period, f, arg, cp))",
 		"func stopTimer(timer *Timer) bool",
@@ -891,7 +893,7 @@ func TestNativeCoroTimeSleepUsesSourcePatch(t *testing.T) {
 		"func resetTimer(timer *Timer, when, period int64) bool",
 		"return llgoCoroTimerResetV1(unsafe.Pointer(timer), when, period)",
 		"func AfterFunc(d Duration, f func()) *Timer",
-		"return newTimer(when(d), 0, nil, f, nil)",
+		"return (*Timer)(llgoCoroAfterFuncV1(when(d), f))",
 	} {
 		if !strings.Contains(patchText, want) {
 			t.Fatalf("native coroutine time patch does not contain %q", want)
