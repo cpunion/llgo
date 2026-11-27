@@ -768,3 +768,188 @@ func TestExplicitPanicTerminalScheduleRaceDoesNotRedestroy(t *testing.T) {
 		})
 	}
 }
+
+func TestLogicalPanicTraceAdoptPropagateFromSuspendedAncestor(t *testing.T) {
+	// Model a physical caller P -> SingleAwait slow frame S -> outcome
+	// propagator H, where a panicking $outcome callee left its logical trace
+	// attached to P while S and H are ordinary suspended awaits above P.
+	fixture := newExplicitPanicFixture(t, 3)
+	root, mid, prop := fixture.frames[0], fixture.frames[1], fixture.frames[2]
+	typeWord, dataWord := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	otherType, otherData := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	descriptors := []*FrameDescriptorV1{
+		{Version: 1, Function: "reflect.flag.mustBeAssignableSlow", File: "/src/reflect.go"},
+		{Version: 1, Function: "reflect.Copy", File: "/src/reflect.go"},
+		{Version: 1, Flags: FrameDescriptorTraceHiddenV1, Function: "__llgo_coro_outcome_propagate_v1", File: "/src/prop.go"},
+		{Version: 1, Function: "main.mid", File: "/src/main.go"},
+		{Version: 1, Function: "main.root", File: "/src/main.go"},
+	}
+	prop.descriptor = unsafe.Pointer(descriptors[2])
+	prop.header.Descriptor = prop.descriptor
+	prop.header.Line = 30
+	mid.descriptor = unsafe.Pointer(descriptors[3])
+	mid.header.Descriptor = mid.descriptor
+	mid.header.Line = 20
+	root.descriptor = unsafe.Pointer(descriptors[4])
+	root.header.Descriptor = root.descriptor
+	root.header.Line = 10
+
+	// Mark ordinary managed await completions on root->mid and mid->prop.
+	rootFrame := FrameFromStorage(root.storage)
+	midFrame := FrameFromStorage(mid.storage)
+	propFrame := FrameFromStorage(prop.storage)
+	rootFrame.completion = CompletionRecord{status: completionArmed, child: mid.handle}
+	midFrame.completion = CompletionRecord{status: completionArmed, child: prop.handle}
+
+	total := LogicalPanicTraceFrameAllocationSize()
+	allocNode := func() ([]uintptr, unsafe.Pointer) {
+		words := make([]uintptr, (total+unsafe.Sizeof(uintptr(0))-1)/unsafe.Sizeof(uintptr(0)))
+		return words, unsafe.Pointer(&words[0])
+	}
+
+	// Simulate the logical trace left attached to rootFrame before S and H were awaited.
+	leafWords, leafRaw := allocNode()
+	leaf := (*Frame)(leafRaw)
+	leaf.owner = fixture.g
+	leaf.handle = leafRaw
+	leaf.header = (*HeaderV1)(unsafe.Pointer(descriptors[0]))
+	leaf.allocationSize = total
+	leaf.panicLine = 5
+	leaf.state = FrameTraceRetained
+	leaf.parent = rootFrame
+	leaf.completion = CompletionRecord{status: CompletionPanic, typeWord: typeWord, dataWord: dataWord}
+	fixture.g.panicTraceHead = leaf
+	fixture.g.panicTraceTail = leaf
+	fixture.g.panicTraceCount = 1
+
+	// Fail closed: ordinary Propagate must still reject ancestor carrier.
+	if PrepareLogicalPanicTrace(fixture.g, LogicalPanicTracePropagate, typeWord, dataWord) {
+		t.Fatal("ordinary LogicalPanicTracePropagate accepted ancestor carrier")
+	}
+	// Fail closed: AdoptPropagate must reject mismatched payload identity.
+	if PrepareLogicalPanicTrace(fixture.g, LogicalPanicTraceAdoptPropagate, otherType, otherData) {
+		t.Fatal("AdoptPropagate accepted mismatched payload identity")
+	}
+	// Fail closed: AdoptPropagate must never cross a recover-armed boundary.
+	rootFrame.completion = CompletionRecord{
+		status:   completionRecoverArmed,
+		child:    mid.handle,
+		typeWord: typeWord,
+		dataWord: dataWord,
+	}
+	if PrepareLogicalPanicTrace(fixture.g, LogicalPanicTraceAdoptPropagate, typeWord, dataWord) {
+		t.Fatal("AdoptPropagate crossed a recover-armed boundary")
+	}
+	// Restore ordinary await completion and verify AdoptPropagate succeeds.
+	rootFrame.completion = CompletionRecord{status: completionArmed, child: mid.handle}
+	if !PrepareLogicalPanicTrace(fixture.g, LogicalPanicTraceAdoptPropagate, typeWord, dataWord) {
+		t.Fatal("AdoptPropagate rejected valid ordinary-await ancestor carrier")
+	}
+	if panicTraceCarrier(fixture.g) != propFrame {
+		t.Fatalf("carrier after AdoptPropagate = %p, want propFrame %p", panicTraceCarrier(fixture.g), propFrame)
+	}
+	rampWords, rampRaw := allocNode()
+	if !RetainLogicalPanicTraceFrame(
+		fixture.g, rampRaw, total, unsafe.Pointer(descriptors[1]), 15,
+		LogicalPanicTraceAdoptPropagate, typeWord, dataWord,
+	) {
+		t.Fatal("RetainLogicalPanicTraceFrame after AdoptPropagate failed")
+	}
+
+	// Now propFrame publishes its child panic and is destroyed; carrier must
+	// advance cleanly back to midFrame with valid ancestry edges.
+	prop.header.SuspendReason = uint16(SuspendPanic)
+	prop.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PreparePanic(fixture.g, prop.handle, prop.header, typeWord, dataWord) {
+		t.Fatal("PreparePanic on outcome propagator after AdoptPropagate failed")
+	}
+	action := fixture.beginPanicDestroy(t)
+	if action.Kind != ActionDestroy || action.Handle != prop.handle {
+		t.Fatalf("destroy propFrame = %+v", action)
+	}
+	raw, released, ok := ReleaseFrame(fixture.g, prop.storage, prop.size, prop.align, prop.descriptor)
+	if !ok || !RetainPendingPanicTraceFrame(fixture.g, raw, released) {
+		t.Fatal("RetainPendingPanicTraceFrame on propFrame failed")
+	}
+	if panicTraceCarrier(fixture.g) != midFrame {
+		t.Fatalf("carrier after propFrame destroy = %p, want midFrame %p", panicTraceCarrier(fixture.g), midFrame)
+	}
+	// Verify every retained edge satisfies retainedPanicTraceFrame invariants.
+	gotFrames := []PanicTraceFrameSnapshot{}
+	for cur := fixture.g.panicTraceHead; cur != nil; {
+		snap, next, valid := retainedPanicTraceFrame(fixture.g, cur)
+		if !valid {
+			t.Fatalf("invalid retained frame at %d", len(gotFrames))
+		}
+		gotFrames = append(gotFrames, snap)
+		cur = next
+	}
+	wantFrames := []PanicTraceFrameSnapshot{
+		{Function: "reflect.flag.mustBeAssignableSlow", File: "/src/reflect.go", Line: 5},
+		{Function: "reflect.Copy", File: "/src/reflect.go", Line: 15},
+		{Function: "__llgo_coro_outcome_propagate_v1", File: "/src/prop.go", Line: 30, Hidden: true},
+	}
+	if len(gotFrames) != len(wantFrames) {
+		t.Fatalf("retained frames = %+v, want %+v", gotFrames, wantFrames)
+	}
+	for i := range wantFrames {
+		if gotFrames[i] != wantFrames[i] {
+			t.Fatalf("retained frame[%d] = %+v, want %+v", i, gotFrames[i], wantFrames[i])
+		}
+	}
+
+	runtime.KeepAlive(leafWords)
+	runtime.KeepAlive(rampWords)
+	runtime.KeepAlive(descriptors)
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	runtime.KeepAlive(otherType)
+	runtime.KeepAlive(otherData)
+	for _, f := range fixture.frames {
+		runtime.KeepAlive(f.memory)
+	}
+}
+
+func TestLogicalPanicTraceNewAllowsDeferredRecoveryOwnerAndRejectsUnrelatedAncestor(t *testing.T) {
+	fixture := newExplicitPanicFixture(t, 2)
+	owner, deferred := fixture.frames[0], fixture.frames[1]
+	ownerFrame := FrameFromStorage(owner.storage)
+	oldType, oldData := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	newType, newData := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+
+	traceMem, desc := retainDetachedTestPanicTrace(t, fixture.g, ownerFrame, oldType, oldData)
+
+	// Without a recover-armed boundary on owner, a child's LogicalPanicTraceNew
+	// must reject discarding owner's active trace.
+	ownerFrame.completion = CompletionRecord{status: completionArmed, child: deferred.handle}
+	if PrepareLogicalPanicTrace(fixture.g, LogicalPanicTraceNew, newType, newData) {
+		t.Fatal("LogicalPanicTraceNew discarded non-recovery ancestor trace")
+	}
+
+	// Inside a deferred recovery scope owned by owner, a replacement logical
+	// panic cleanly stages discard of owner's trace.
+	ownerFrame.completion = CompletionRecord{
+		status:   completionRecoverArmed,
+		child:    deferred.handle,
+		typeWord: oldType,
+		dataWord: oldData,
+	}
+	if !PrepareLogicalPanicTrace(fixture.g, LogicalPanicTraceNew, newType, newData) ||
+		!PanicTraceDiscardPending(fixture.g) {
+		t.Fatal("LogicalPanicTraceNew failed to stage discard inside deferred recovery scope")
+	}
+	raw, total, ok := TakeDiscardedPanicTraceFrame(fixture.g)
+	if !ok || raw != unsafe.Pointer(&traceMem[0]) || total != uintptr(len(traceMem)) {
+		t.Fatalf("discarded recovery-owner trace = (%p, %d, %t)", raw, total, ok)
+	}
+
+	runtime.KeepAlive(traceMem)
+	runtime.KeepAlive(desc)
+	runtime.KeepAlive(oldType)
+	runtime.KeepAlive(oldData)
+	runtime.KeepAlive(newType)
+	runtime.KeepAlive(newData)
+	for _, f := range fixture.frames {
+		runtime.KeepAlive(f.memory)
+	}
+}

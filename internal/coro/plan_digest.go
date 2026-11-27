@@ -37,6 +37,10 @@ const PlanDigestSchema = "llgo.coro.plan-digest.v45"
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
 const (
+	// FrameDescriptorTraceHiddenV1 hides synthetic compiler helper frames (such
+	// as the sync-ramp outcome propagator) from user panic traces and Callers.
+	// Runtime validation owns the identically valued flag in runtime/internal/coro.
+	FrameDescriptorTraceHiddenV1 uint32 = 1 << 0
 	// FrameDescriptorNoRuntimeContextV1 is the compiler/runtime physical-frame
 	// ABI bit proving that the complete inlined managed execution closure does
 	// not observe or replace the ambient runtime G. Runtime validation owns the

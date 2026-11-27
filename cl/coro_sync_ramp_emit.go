@@ -1811,13 +1811,13 @@ func (p *context) coroOutcomePropagateCoroutine() llssa.Function {
 
 	b.SetBlockEx(panicked, llssa.AtEnd, false)
 	b.CoroAtomicLogicalPanicTraceAppend(traceAppend, body.task, desc, typeWord, dataWord, line,
-		p.prog.IntVal(coroLogicalPanicTracePropagate, p.prog.Uint32()))
+		p.prog.IntVal(coroLogicalPanicTraceAdoptPropagate, p.prog.Uint32()))
 	body.panicWithLine(b, typeWord, dataWord, line)
 
 	b.SetBlockEx(faulted, llssa.AtEnd, false)
 	nullPtr := p.prog.Nil(p.prog.VoidPtr())
 	b.CoroAtomicLogicalPanicTraceAppend(traceAppend, body.task, desc, nullPtr, nullPtr, line,
-		p.prog.IntVal(coroLogicalPanicTraceNilPropagate, p.prog.Uint32()))
+		p.prog.IntVal(coroLogicalPanicTraceNilAdoptPropagate, p.prog.Uint32()))
 	body.publishStateValue(b, coroSuspendPanic, coroLifecycleFinalSuspended, line)
 	b.Call(faultPrepare, body.task, body.coro.Handle(), b.Convert(p.prog.VoidPtr(), body.header),
 		p.prog.IntVal(uint64(coroFaultNilV1), p.prog.Uint32()))
