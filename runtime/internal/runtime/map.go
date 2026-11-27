@@ -556,9 +556,18 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	return mapaccess1_slow(t, h, key)
 }
 
+// Bit masks matching runtime/abi.MapType.Flags so hot map fast paths avoid
+// cross-package $outcome method calls.
+const (
+	mapFlagIndirectKey    = 1 << 0
+	mapFlagIndirectElem   = 1 << 1
+	mapFlagNeedKeyUpdate  = 1 << 3
+	mapFlagHashMightPanic = 1 << 4
+)
+
 func mapaccess1_fast(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	if h == nil || h.count == 0 {
-		if t.HashMightPanic() {
+		if t.Flags&mapFlagHashMightPanic != 0 {
 			if _, ok := typehashFast(t.Key, key, 0); !ok {
 				return nil
 			}
@@ -568,7 +577,7 @@ func mapaccess1_fast(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map read and map write")
 	}
-	if h.oldbuckets != nil || t.IndirectKey() || t.IndirectElem() {
+	if h.oldbuckets != nil || t.Flags&(mapFlagIndirectKey|mapFlagIndirectElem) != 0 {
 		return nil
 	}
 	hash, ok := typehashFast(t.Key, key, uintptr(h.hash0))
@@ -576,7 +585,7 @@ func mapaccess1_fast(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 		return nil
 	}
 	b := (*bmap)(add(h.buckets, (hash&bucketMask(h.B))*uintptr(t.BucketSize)))
-	if b.overflow(t) != nil {
+	if ovf := b.overflow(t); ovf != nil && bucketTophash(ovf, 0) != emptyRest {
 		return nil
 	}
 	slot, found, needSlow := mapGenericLookupPrimary(t, b, key, tophash(hash))
@@ -647,7 +656,7 @@ func mapaccess2(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, bool) 
 
 func mapaccess2_fast(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, bool) {
 	if h == nil || h.count == 0 {
-		if t.HashMightPanic() {
+		if t.Flags&mapFlagHashMightPanic != 0 {
 			if _, ok := typehashFast(t.Key, key, 0); !ok {
 				return nil, false
 			}
@@ -657,7 +666,7 @@ func mapaccess2_fast(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, b
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map read and map write")
 	}
-	if h.oldbuckets != nil || t.IndirectKey() || t.IndirectElem() {
+	if h.oldbuckets != nil || t.Flags&(mapFlagIndirectKey|mapFlagIndirectElem) != 0 {
 		return nil, false
 	}
 	hash, ok := typehashFast(t.Key, key, uintptr(h.hash0))
@@ -665,7 +674,7 @@ func mapaccess2_fast(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, b
 		return nil, false
 	}
 	b := (*bmap)(add(h.buckets, (hash&bucketMask(h.B))*uintptr(t.BucketSize)))
-	if b.overflow(t) != nil {
+	if ovf := b.overflow(t); ovf != nil && bucketTophash(ovf, 0) != emptyRest {
 		return nil, false
 	}
 	slot, found, needSlow := mapGenericLookupPrimary(t, b, key, tophash(hash))
@@ -809,7 +818,7 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 
 func mapAssignPrimaryCommit(t *maptype, h *hmap, b *bmap, key unsafe.Pointer, top uint8, slot uintptr, hit bool) unsafe.Pointer {
 	if hit {
-		if t.NeedKeyUpdate() {
+		if t.Flags&mapFlagNeedKeyUpdate != 0 {
 			k := add(unsafe.Pointer(b), dataOffset+slot*uintptr(t.KeySize))
 			typedmemmove(t.Key, k, key)
 		}
@@ -837,7 +846,7 @@ func mapAssignPrimaryCommit(t *maptype, h *hmap, b *bmap, key unsafe.Pointer, to
 }
 
 func mapassign_fast(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
-	if h == nil || h.buckets == nil || h.growing() || t.IndirectKey() || t.IndirectElem() {
+	if h == nil || h.buckets == nil || h.growing() || t.Flags&(mapFlagIndirectKey|mapFlagIndirectElem) != 0 {
 		return nil
 	}
 	if h.flags&hashWriting != 0 {
@@ -849,7 +858,7 @@ func mapassign_fast(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	}
 	h.flags ^= hashWriting
 	b := (*bmap)(add(h.buckets, (hash&bucketMask(h.B))*uintptr(t.BucketSize)))
-	if b.overflow(t) == nil {
+	if ovf := b.overflow(t); ovf == nil || bucketTophash(ovf, 0) == emptyRest {
 		top := tophash(hash)
 		slot, hit, needSlow := mapGenericAssignPrimary(t, b, key, top)
 		if !needSlow {
@@ -985,14 +994,55 @@ func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
 	mapdelete_slow(t, h, key)
 }
 
-func mapDeletePrimaryClear(t *maptype, h *hmap, b *bmap, slot uintptr) bool {
-	// Handle the non-trailing slot or singleton slot-0 case without the
-	// multi-slot emptyOne->emptyRest backward scan loop.
-	nextIsRest := slot == bucketCnt-1 || bucketTophash(b, slot+1) == emptyRest
-	if nextIsRest && slot != 0 {
-		h.flags &^= hashWriting
-		return false
+// Compile-time guard: clearPrimaryEmptyRest unrolls bucketCnt-1 backward steps.
+const (
+	_ = uint(bucketCnt - 8)
+	_ = uint(8 - bucketCnt)
+)
+
+// clearPrimaryEmptyRest marks slot and any contiguous preceding emptyOne slots
+// in a primary bucket as emptyRest without using a loop, so mapdelete_fast stays
+// on the loop-free $outcome path across all 8 primary bucket slots.
+func clearPrimaryEmptyRest(b *bmap, slot uintptr) {
+	setBucketTophash(b, slot, emptyRest)
+	if slot == 0 || bucketTophash(b, slot-1) != emptyOne {
+		return
 	}
+	slot--
+	setBucketTophash(b, slot, emptyRest)
+	if slot == 0 || bucketTophash(b, slot-1) != emptyOne {
+		return
+	}
+	slot--
+	setBucketTophash(b, slot, emptyRest)
+	if slot == 0 || bucketTophash(b, slot-1) != emptyOne {
+		return
+	}
+	slot--
+	setBucketTophash(b, slot, emptyRest)
+	if slot == 0 || bucketTophash(b, slot-1) != emptyOne {
+		return
+	}
+	slot--
+	setBucketTophash(b, slot, emptyRest)
+	if slot == 0 || bucketTophash(b, slot-1) != emptyOne {
+		return
+	}
+	slot--
+	setBucketTophash(b, slot, emptyRest)
+	if slot == 0 || bucketTophash(b, slot-1) != emptyOne {
+		return
+	}
+	slot--
+	setBucketTophash(b, slot, emptyRest)
+	if slot == 0 || bucketTophash(b, slot-1) != emptyOne {
+		return
+	}
+	setBucketTophash(b, slot-1, emptyRest)
+}
+
+func mapDeletePrimaryClear(t *maptype, h *hmap, b *bmap, slot uintptr) bool {
+	nextIsRest := slot == bucketCnt-1 || bucketTophash(b, slot+1) == emptyRest
 	if t.Key.PtrBytes != 0 {
 		k := add(unsafe.Pointer(b), dataOffset+slot*uintptr(t.KeySize))
 		memclrHasPointers(k, t.Key.Size_)
@@ -1004,7 +1054,7 @@ func mapDeletePrimaryClear(t *maptype, h *hmap, b *bmap, slot uintptr) bool {
 		memclrNoHeapPointers(e, t.Elem.Size_)
 	}
 	if nextIsRest {
-		setBucketTophash(b, slot, emptyRest)
+		clearPrimaryEmptyRest(b, slot)
 	} else {
 		setBucketTophash(b, slot, emptyOne)
 	}
@@ -1021,7 +1071,7 @@ func mapDeletePrimaryClear(t *maptype, h *hmap, b *bmap, slot uintptr) bool {
 
 func mapdelete_fast(t *maptype, h *hmap, key unsafe.Pointer) bool {
 	if h == nil || h.count == 0 {
-		if t.HashMightPanic() {
+		if t.Flags&mapFlagHashMightPanic != 0 {
 			if _, ok := typehashFast(t.Key, key, 0); !ok {
 				return false
 			}
@@ -1031,7 +1081,7 @@ func mapdelete_fast(t *maptype, h *hmap, key unsafe.Pointer) bool {
 	if h.flags&hashWriting != 0 {
 		fatal("concurrent map writes")
 	}
-	if h.growing() || t.IndirectKey() || t.IndirectElem() {
+	if h.growing() || t.Flags&(mapFlagIndirectKey|mapFlagIndirectElem) != 0 {
 		return false
 	}
 	hash, ok := typehashFast(t.Key, key, uintptr(h.hash0))
@@ -1040,7 +1090,7 @@ func mapdelete_fast(t *maptype, h *hmap, key unsafe.Pointer) bool {
 	}
 	h.flags ^= hashWriting
 	b := (*bmap)(add(h.buckets, (hash&bucketMask(h.B))*uintptr(t.BucketSize)))
-	if b.overflow(t) == nil {
+	if ovf := b.overflow(t); ovf == nil || bucketTophash(ovf, 0) == emptyRest {
 		slot, found, needSlow := mapGenericLookupPrimary(t, b, key, tophash(hash))
 		if !needSlow {
 			if !found {
