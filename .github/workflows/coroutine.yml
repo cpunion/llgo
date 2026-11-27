@@ -615,7 +615,8 @@ jobs:
               test/go/bound_method_direct_test.go \
               test/go/field_guard_memory_test.go \
               test/go/bounded_loop_sync_ramp_test.go \
-              test/go/channel_select_semantics_test.go
+              test/go/channel_select_semantics_test.go \
+              test/go/timer_hub_semantics_test.go
           for procs in 1 4; do
             GOMAXPROCS="$procs" timeout 90s /tmp/llgo-local-channel-gate \
               -test.v -test.count=3 -test.timeout=60s

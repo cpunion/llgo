@@ -11,17 +11,18 @@ var coroTimerGC struct {
 
 // Tracking is O(1), and inactive entries are pruned once per collection rather
 // than searching a global list on every Stop or expiry. The public Timer and
-// channel are not reachable through this list. A Reset holds state.lock while
-// publishing active control and ensuring membership; the observer never takes
-// state.lock, so an owner cannot wait for a preempted managed timer caller.
+// channel are not reachable through this list. A Reset holds state.sendLock
+// while publishing active control and ensuring membership; the observer never
+// takes hub.lock or sendLock, so an owner cannot wait for a preempted managed
+// timer caller.
 func coroTimerTrack(state *coroTimeTimerState) {
 	if !state.channel {
 		return
 	}
 	coroTimerLock(&coroTimerGC.lock)
-	if !state.gcListed {
+	if latomic.LoadUint32(&state.gcListed) == 0 {
 		state.gcNext = coroTimerGC.head
-		state.gcListed = true
+		latomic.StoreUint32(&state.gcListed, 1)
 		coroTimerGC.head = state
 	}
 	coroTimerUnlock(&coroTimerGC.lock)
@@ -53,14 +54,29 @@ func coroTimerGCObserveV1() bool {
 				latomic.StoreUint32(&coroTimerGC.lock, 0)
 				return false
 			}
-			if route := latomic.LoadUint32(&state.ownerRoute); route != 0 &&
-				llgoCoroTimerRequestControlledV2(route) == 0 {
-				latomic.StoreUint32(&coroTimerGC.lock, 0)
-				return false
+			if hub := state.hub; hub != nil {
+				latomic.StoreUint32(&hub.gcDirty, 1)
+				hc := latomic.LoadUint32(&hub.control)
+				nextHC := hc + (1 << coroTimerControlPhaseBits)
+				if nextHC>>coroTimerControlPhaseBits == 0 {
+					nextHC = (1 << coroTimerControlPhaseBits) | coroTimerActive
+				} else {
+					nextHC = (nextHC &^ coroTimerControlPhaseMask) | coroTimerActive
+				}
+				if !latomic.CompareAndSwapUint32(&hub.control, hc, nextHC) {
+					latomic.StoreUint32(&coroTimerGC.lock, 0)
+					return false
+				}
+				if route := latomic.LoadUint32(&hub.ownerRoute); route != 0 &&
+					llgoCoroTimerRequestControlledV2(route) == 0 {
+					latomic.StoreUint32(&coroTimerGC.lock, 0)
+					return false
+				}
 			}
 		}
 		if dead || coroTimerControlPhase(control) != coroTimerActive {
-			*link, state.gcNext, state.gcListed = state.gcNext, nil, false
+			*link, state.gcNext = state.gcNext, nil
+			latomic.StoreUint32(&state.gcListed, 0)
 			continue
 		}
 		link = &state.gcNext

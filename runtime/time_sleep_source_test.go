@@ -243,6 +243,8 @@ func TestTimeSleepAndTimerImplementationsStayProfileLocal(t *testing.T) {
 	for _, contract := range []string{
 		"//go:linkname llgoCoroTimerNewV1 runtime.llgoCoroTimerNewV1",
 		"func llgoCoroTimerNewV1(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer) unsafe.Pointer",
+		"//go:linkname llgoCoroAfterFuncV1 runtime.llgoCoroAfterFuncV1",
+		"func llgoCoroAfterFuncV1(when int64, f func()) unsafe.Pointer",
 		"//go:linkname llgoCoroTimerStopV1 runtime.llgoCoroTimerStopV1",
 		"func llgoCoroTimerStopV1(timer unsafe.Pointer) bool",
 		"//go:linkname llgoCoroTimerResetV1 runtime.llgoCoroTimerResetV1",
@@ -250,9 +252,9 @@ func TestTimeSleepAndTimerImplementationsStayProfileLocal(t *testing.T) {
 		"func llgoCoroControlledTimerWaitV2(",
 		"control, ownerRoute *uint32",
 		"__llgo_coro_timer_request_controlled_v2",
-		"go coroTimerManager(state)",
-		"state.manager = 0",
-		"coroRunTimerCallback(arg.(func()))",
+		"go coroTimerManager(hub)",
+		"hub.manager = 0",
+		"go coroRunTimerCallback(cb)",
 		"corort.MarkTimerChannel((*corort.Chan)(cp))",
 		"coroTimerLock(&state.sendLock)",
 		"coroTimerDrainChannel(t.c)",
@@ -271,7 +273,7 @@ func TestTimeSleepAndTimerImplementationsStayProfileLocal(t *testing.T) {
 		"__llgo_coro_timer_cancel_controlled_v1",
 		"__llgo_coro_timer_retire_controlled_or_abort_v1",
 		"__llgo_coro_timer_cancel_controlled_v2",
-		"go coroRunTimerCallback(",
+		"go coroTimerManager(state)",
 	} {
 		if strings.Contains(coroSource, obsolete) {
 			t.Errorf("%s still claims standard-library physical symbol %q", coroGo123TimerSource, obsolete)
