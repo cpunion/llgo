@@ -30,7 +30,7 @@ func NewProc(fn goroutineFunc, arg unsafe.Pointer, stackSize uintptr) {
 	if errno := newm(gp.m, stackSize); errno != 0 {
 		ctx := (*runtimeContext)(unsafe.Pointer(gp.context))
 		releaseG()
-		gp.startarg = nil
+		ctx.startfn = nil
 		ctx.startRoot = nil
 		FreeRoot(arg)
 		FreeRoot(unsafe.Pointer(ctx))
@@ -48,8 +48,7 @@ func newproc1(fn goroutineFunc, arg unsafe.Pointer, callergp *g) *g {
 
 	ctx := allocRuntimeContext()
 	gp := initRuntimeContext(ctx, callergp, _Grunnable)
-	gp.startfn = fn
-	gp.startarg = arg
+	ctx.startfn = fn
 	ctx.startRoot = arg
 	return gp
 }
@@ -73,9 +72,9 @@ func mstart(arg unsafe.Pointer) unsafe.Pointer {
 	casgstatus(gp, _Grunnable, _Grunning)
 	setpstatus(pp, _Prunning)
 
-	fn, arg := gp.startfn, gp.startarg
-	gp.startfn = nil
-	gp.startarg = nil
+	ctx := (*runtimeContext)(unsafe.Pointer(gp.context))
+	fn, arg := ctx.startfn, ctx.startRoot
+	ctx.startfn = nil
 	// newproc1 rejects a nil entry before publishing the context, but mstart
 	// executes after a cross-thread field handoff that coroutine SSA cannot
 	// treat as a dominating proof. Revalidate at the consumption boundary so
@@ -103,6 +102,7 @@ func mexit(mp *m) {
 	ctx := (*runtimeContext)(unsafe.Pointer(core))
 	root := unsafe.Pointer(ctx)
 	startRoot := ctx.startRoot
+	ctx.startfn = nil
 	ctx.startRoot = nil
 	releaseGAndCheckDeadlock()
 
@@ -114,6 +114,7 @@ func mexit(mp *m) {
 	mp.curg = nil
 	gp.m = nil
 	gp.context = nil
+	gp.callerStore = nil
 	releasePanicPCStore(gp)
 
 	setg(nil)

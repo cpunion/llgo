@@ -18,9 +18,33 @@
 
 package runtime
 
-// callerLocationStoreCurrent follows the logical goroutine: its shadow stack
-// and synthetic PCs must move with that goroutine when the backend eventually
-// permits migration between OS threads.
-//
-//llgo:gls
-var callerLocationStoreCurrent *callerLocationStore
+// loadCallerLocationStore and callerLocationStoreForGoroutine store the
+// per-goroutine logical shadow stack directly on g so PushCallerLocationFrame
+// and PopCallerLocationFrame avoid LocalPackageLogical's linked-list lookup
+// while still migrating with the logical goroutine across OS threads.
+func loadCallerLocationStore() *callerLocationStore {
+	gp := getgIfPresent()
+	if gp == nil {
+		return nil
+	}
+	return gp.callerStore
+}
+
+func callerLocationStoreForGoroutine() *callerLocationStore {
+	if gp := getgIfPresent(); gp != nil {
+		if store := gp.callerStore; store != nil {
+			return store
+		}
+		return initCallerLocationStore(gp)
+	}
+	return initCallerLocationStore(getg())
+}
+
+func initCallerLocationStore(gp *g) *callerLocationStore {
+	store := gp.callerStore
+	if store == nil {
+		store = new(callerLocationStore)
+		gp.callerStore = store
+	}
+	return store
+}

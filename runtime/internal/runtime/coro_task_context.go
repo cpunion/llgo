@@ -267,7 +267,7 @@ func coroHasRecoverAliasRuntimeV1(task *coro.G, token unsafe.Pointer) bool {
 // same immutable context/task identity without adding another activation word.
 func validCoroRuntimeTaskG(task *coro.G, gp *g) bool {
 	if task == nil || gp == nil || gp.context == nil || &gp.context.g != gp ||
-		gp.localContext != &gp.context.local || gp.startfn != nil ||
+		gp.localContext != &gp.context.local ||
 		gp.startarg != unsafe.Pointer(task) {
 		return false
 	}
@@ -446,6 +446,7 @@ func coroReleaseRuntimeContextAtRoute(task *coro.G, raw unsafe.Pointer, route ui
 	if gp.panicPCs != nil {
 		releasePanicPCStore(gp)
 	}
+	gp.callerStore = nil
 	gp.startarg = nil
 	gp.coroEmbedded = false
 	if coro.AuditEnabled {

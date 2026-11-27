@@ -66,6 +66,7 @@ func LeaveLocalContext(ctx, previous *LocalContext) {
 		panic("runtime: leaving inactive local context")
 	}
 	gp.localContext = nil
+	gp.callerStore = nil
 	releaseLocalBlocks(ctx)
 }
 
@@ -76,6 +77,7 @@ func leaveCurrentLocalContext() {
 		return
 	}
 	gp.localContext = nil
+	gp.callerStore = nil
 	releaseLocalBlocks(ctx)
 }
 

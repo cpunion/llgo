@@ -126,7 +126,7 @@ func PopCallerLocationFrame(entry uintptr) {
 }
 
 func popCallerLocationFrameFast(entry uintptr) bool {
-	store := callerLocationStoreCurrent
+	store := loadCallerLocationStore()
 	if store == nil || entry == 0 {
 		return true
 	}
@@ -144,7 +144,7 @@ func popCallerLocationFrameFast(entry uintptr) bool {
 }
 
 func popCallerLocationFrameSlow(entry uintptr) {
-	store := callerLocationStoreCurrent
+	store := loadCallerLocationStore()
 	if store == nil || entry == 0 {
 		return
 	}
@@ -216,7 +216,7 @@ func UpdateLogicalCallerLocation(tokenPointer unsafe.Pointer, entry uintptr, fil
 }
 
 func updateCurrentFrame(entry uintptr, name, file string, line int) {
-	store := callerLocationStoreCurrent
+	store := loadCallerLocationStore()
 	if store == nil {
 		return
 	}
@@ -269,7 +269,7 @@ func recordPCLocation(pc, entry uintptr, name, file string, line int) {
 // CallerStackActive distinguishes an exhausted logical stack from the absence
 // of one. Physical executor frames are not additional frames of a managed G.
 func CallerStackActive() bool {
-	store := callerLocationStoreCurrent
+	store := loadCallerLocationStore()
 	return store != nil && len(store.stack) != 0
 }
 
@@ -277,7 +277,7 @@ func Caller(skip int) (CallerFrame, bool) {
 	if skip < 0 {
 		return CallerFrame{}, false
 	}
-	store := callerLocationStoreCurrent
+	store := loadCallerLocationStore()
 	if store == nil || len(store.stack) == 0 {
 		return CallerFrame{}, false
 	}
@@ -301,7 +301,7 @@ func Callers(skip int, pcs []uintptr) int {
 	if skip < 0 {
 		skip = 0
 	}
-	store := callerLocationStoreCurrent
+	store := loadCallerLocationStore()
 	if store == nil || len(store.stack) == 0 {
 		return 0
 	}
@@ -852,7 +852,7 @@ func CoroDeferredPanicActive() bool {
 }
 
 func currentCoroRuntimeTask(gp *g) *coro.G {
-	if gp == nil || gp.startfn != nil || gp.startarg == nil || gp.context == nil {
+	if gp == nil || gp.startarg == nil || gp.context == nil {
 		return nil
 	}
 	task := (*coro.G)(gp.startarg)
@@ -864,7 +864,7 @@ func currentCoroRuntimeTask(gp *g) *coro.G {
 }
 
 func BindCallerLocation(pc uintptr, rawName string) {
-	store := callerLocationStoreCurrent
+	store := loadCallerLocationStore()
 	if store == nil || pc == 0 {
 		return
 	}
@@ -908,7 +908,7 @@ func FrameForPC(pc uintptr) (CallerFrame, bool) {
 			return frame, true
 		}
 	}
-	store := callerLocationStoreCurrent
+	store := loadCallerLocationStore()
 	if store == nil || pc == 0 {
 		return CallerFrame{}, false
 	}
@@ -943,15 +943,6 @@ func FrameForPC(pc uintptr) (CallerFrame, bool) {
 		}
 	}
 	return CallerFrame{}, false
-}
-
-func callerLocationStoreForGoroutine() *callerLocationStore {
-	store := callerLocationStoreCurrent
-	if store == nil {
-		store = new(callerLocationStore)
-		callerLocationStoreCurrent = store
-	}
-	return store
 }
 
 func (s *callerLocationStore) captureFrame(frame CallerFrame, pcValue uintptr) CallerFrame {

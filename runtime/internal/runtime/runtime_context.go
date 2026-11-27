@@ -41,9 +41,10 @@ type runtimeContext struct {
 	m m
 	p p
 
-	// startRoot keeps a native goroutine's compiler-generated startup record
-	// scanned until its entry call has returned. Stackless tasks carry their
-	// arguments in the task allocation and never pay for this field.
+	// startfn and startRoot belong exclusively to native pthread goroutines.
+	// Stackless tasks carry their entry and arguments in the task/frame
+	// allocation and never pay for these fields inside coroTaskAllocation.
+	startfn   goroutineFunc
 	startRoot unsafe.Pointer
 }
 

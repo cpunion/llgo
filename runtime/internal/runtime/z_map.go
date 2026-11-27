@@ -140,6 +140,9 @@ type llgoMapIter struct {
 }
 
 func newMapIterFast(t *maptype, h *hmap) (*llgoMapIter, bool) {
+	if h == nil || h.count == 0 {
+		return nil, true
+	}
 	it := new(llgoMapIter)
 	ok := mapiterinitFast(t, h, &it.hiter)
 	it.ready = true
@@ -147,6 +150,9 @@ func newMapIterFast(t *maptype, h *hmap) (*llgoMapIter, bool) {
 }
 
 func NewMapIter(t *maptype, h *hmap) *llgoMapIter {
+	if h == nil || h.count == 0 {
+		return nil
+	}
 	it, ok := newMapIterFast(t, h)
 	if ok {
 		return it
@@ -161,9 +167,11 @@ func finishNewMapIterSlow(it *llgoMapIter) *llgoMapIter {
 }
 
 func MapIterNext(it *llgoMapIter) (ok bool, k unsafe.Pointer, v unsafe.Pointer) {
-	if it.h == nil || it.h.count == 0 {
-		it.key = nil
-		it.elem = nil
+	if it == nil || it.h == nil || it.h.count == 0 {
+		if it != nil {
+			it.key = nil
+			it.elem = nil
+		}
 		return
 	}
 	if !it.ready {
