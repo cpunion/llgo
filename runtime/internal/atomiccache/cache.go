@@ -62,6 +62,30 @@ func findPair(head *pairEntry, first, second unsafe.Pointer) unsafe.Pointer {
 	return nil
 }
 
+// FindFast checks the first two entries of the bucket without a loop so
+// callers can probe common cached pairs on a zero-frame outcome path.
+// done is true whenever the result is authoritative (hit or short bucket end).
+func (table *PairTable) FindFast(first, second unsafe.Pointer) (value unsafe.Pointer, done bool) {
+	entry := table.loadBucket(first, second)
+	if entry == nil {
+		return nil, true
+	}
+	if entry.first == first && entry.second == second {
+		return entry.value, true
+	}
+	next := entry.next
+	if next == nil {
+		return nil, true
+	}
+	if next.first == first && next.second == second {
+		return next.value, true
+	}
+	if next.next == nil {
+		return nil, true
+	}
+	return nil, false
+}
+
 func (table *PairTable) Find(first, second unsafe.Pointer) unsafe.Pointer {
 	entry := table.loadBucket(first, second)
 	if entry == nil {

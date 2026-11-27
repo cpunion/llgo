@@ -833,8 +833,10 @@ func (c *Compilation) preflightCoroPlan() error {
 				common.Method.Name() == "MethodByName"
 		}
 		hasAllocZ := true
+		hasSliceCopy := true
 		if universe.CompleteRuntimeABI() {
 			hasAllocZ = false
+			hasSliceCopy = false
 			if rtPkg := universe.byPath[llssa.PkgRuntime]; rtPkg != nil {
 				if allocZ := universe.canonicalAlias(rtPkg.ssa.Func("AllocZ")); allocZ != nil {
 					if allocPlan, ok := plan.FunctionPlan(allocZ); ok &&
@@ -842,9 +844,15 @@ func (c *Compilation) preflightCoroPlan() error {
 						hasAllocZ = true
 					}
 				}
+				if sliceCopy := universe.canonicalAlias(rtPkg.ssa.Func("SliceCopy")); sliceCopy != nil {
+					if copyPlan, ok := plan.FunctionPlan(sliceCopy); ok &&
+						copyPlan.Emission == coro.EmitPlain {
+						hasSliceCopy = true
+					}
+				}
 			}
 		}
-		planCoroPhysicalSyncRamps(physicalStage, universe.prog, plan, universe.coroProgramIR, universe.Resolve, recoverCheck, reflectCheck, hasAllocZ)
+		planCoroPhysicalSyncRamps(physicalStage, universe.prog, plan, universe.coroProgramIR, universe.Resolve, recoverCheck, reflectCheck, hasAllocZ, hasSliceCopy)
 		if err := universe.coroProgramIR.commitPhysicalFunctionPlans(physicalStage, physicalExpected); err != nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine physical preflight: commit ProgramIR: %w", err)
 			return

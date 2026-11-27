@@ -1410,3 +1410,193 @@ func Root(b []byte) int { return ConsumeWS(b) }
 		}
 	})
 }
+
+func TestCoroSyncRampStageLExtensions(t *testing.T) {
+	program := newEmissionTestProgram()
+	program.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	demoPkg := program.addPackage(t, "demo", `package demo
+
+import "unsafe"
+
+//go:linkname yieldNow llgo.coroYield
+func yieldNow()
+
+type Box struct {
+	V int
+}
+
+type Stringer interface {
+	String() string
+}
+
+func (b *Box) String() string { return "box" }
+
+type Pair struct {
+	A int
+	B byte
+}
+
+var sentinelErr error
+var escTbl = [128]uint8{'"': 1, '\\': 1}
+
+func slowOpaque() unsafe.Pointer {
+	yieldNow()
+	return nil
+}
+
+// 1. Pointer-bitcast tail call (*Box)(slowOpaque()).
+func BitcastTail(fast bool, b *Box) *Box {
+	if fast {
+		return b
+	}
+	return (*Box)(slowOpaque())
+}
+
+// 2. Pure plain helper + pre-mutation Index/Slice + local struct return.
+func pureTag(x byte) byte {
+	return x ^ 1
+}
+
+func SliceAndStruct(b []byte, idx int, slow bool) (Pair, []byte) {
+	if slow {
+		yieldNow()
+	}
+	c := pureTag(b[idx])
+	sub := b[idx : idx+1]
+	return Pair{A: idx, B: c}, sub
+}
+
+// 3. Static non-empty MakeInterface (*Box -> Stringer).
+func StaticIface(b *Box, slow bool) Stringer {
+	if slow {
+		yieldNow()
+	}
+	return b
+}
+
+// 4. Pre-defer early return with DirectTypeAssert (models cancelCtx.Done).
+func unlockSlow(p *int) {
+	yieldNow()
+	*p = 0
+}
+
+func PreDeferTypeAssert(v any, mu *int) *Box {
+	if v != nil {
+		if b, ok := v.(*Box); ok {
+			return b
+		}
+	}
+	*mu = 1
+	defer unlockSlow(mu)
+	yieldNow()
+	return nil
+}
+
+// 5. BoundedLoop .try composition + statically-nil interface Phi compare.
+func ScanSimple(b []byte) (n int) {
+	if len(b) > 0 && b[0] == '"' {
+		n++
+		for len(b) > n && b[n] < 128 && escTbl[b[n]] == 0 {
+			n++
+		}
+		if uint(len(b)) > uint(n) && b[n] == '"' {
+			n++
+			return n
+		}
+	}
+	return 0
+}
+
+func slowFallback(b []byte, pos int) (int, error) {
+	yieldNow()
+	return pos, sentinelErr
+}
+
+func ComposeTryAndNilIfacePhi(b []byte, pos int) (int, error) {
+	var n int
+	var err error
+	if b[pos] == '"' {
+		if n = ScanSimple(b[pos:]); n == 0 {
+			return slowFallback(b, pos)
+		}
+	} else {
+		return slowFallback(b, pos)
+	}
+	if err == sentinelErr {
+		yieldNow()
+		return pos, err
+	}
+	return pos + n, err
+}
+
+// 6. Deferred value-returning sync-fast call passes non-null stack result slot.
+func FastRetInt(x *int, slow bool) int {
+	if slow {
+		yieldNow()
+	}
+	if x == nil {
+		return 0
+	}
+	*x++
+	return *x
+}
+
+func DeferDiscardCaller(x *int) {
+	defer FastRetInt(x, false)
+	yieldNow()
+}
+
+func Root(b []byte, box *Box, v any, mu *int, x *int) int {
+	_ = BitcastTail(true, box)
+	p, sub := SliceAndStruct(b, 0, false)
+	s := StaticIface(box, false).String()
+	_ = PreDeferTypeAssert(v, mu)
+	n, _ := ComposeTryAndNilIfacePhi(b, 0)
+	DeferDiscardCaller(x)
+	return p.A + len(sub) + n + len(s)
+}
+`)
+	program.ssa.Build()
+	inputs := []EmissionPackage{{SSA: demoPkg.ssa, Files: []*ast.File{demoPkg.file}}}
+	prog, compilation, _, pkg := compileCoroSyncRampTestPackages(
+		t, inputs, demoPkg.ssa.Func("Root"), 0, coro.DynamicCHAClosed,
+	)
+	defer prog.Dispose()
+
+	if ramp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("BitcastTail")); ramp == nil || ramp.kind != coroSyncRampTailSlow {
+		t.Fatalf("BitcastTail ramp=%+v, want coroSyncRampTailSlow", ramp)
+	}
+	if ramp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("SliceAndStruct")); ramp == nil || !ramp.returnsNullableHandle() {
+		t.Fatalf("SliceAndStruct ramp=%+v, want nullable-handle sync ramp", ramp)
+	}
+	if ramp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("StaticIface")); ramp == nil || !ramp.returnsNullableHandle() {
+		t.Fatalf("StaticIface ramp=%+v, want nullable-handle sync ramp", ramp)
+	}
+	if ramp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("PreDeferTypeAssert")); ramp == nil || !ramp.returnsNullableHandle() || len(ramp.slowTargets) != 0 {
+		t.Fatalf("PreDeferTypeAssert ramp=%+v, want pre-defer sync ramp with no slowTargets", ramp)
+	}
+	if ramp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("ScanSimple")); ramp == nil || ramp.kind != coroSyncRampBoundedLoop || !ramp.hasTryHelper {
+		t.Fatalf("ScanSimple ramp=%+v, want coroSyncRampBoundedLoop with hasTryHelper", ramp)
+	}
+	if ramp := sealedSyncRampForTest(t, compilation, demoPkg.ssa.Func("ComposeTryAndNilIfacePhi")); ramp == nil || ramp.kind != coroSyncRampTailSlow {
+		t.Fatalf("ComposeTryAndNilIfacePhi ramp=%+v, want coroSyncRampTailSlow", ramp)
+	}
+
+	irText := pkg.Module().String()
+	composeIR := extractLLVMFuncDef(t, irText, "demo.ComposeTryAndNilIfacePhi$coro")
+	if !strings.Contains(composeIR, `"demo.ScanSimple$coro.try"`) {
+		t.Fatalf("ComposeTryAndNilIfacePhi$coro did not compose ScanSimple$coro.try:\n%s", composeIR)
+	}
+	if strings.Contains(composeIR, "__llgo_coro_frame_alloc") {
+		t.Fatalf("ComposeTryAndNilIfacePhi$coro unexpectedly allocates a coroutine frame:\n%s", composeIR)
+	}
+
+	// Verify DeferDiscardCaller passes a non-null stack result slot to FastRetInt$coro.
+	deferIR := requireCoroPhysicalFunction(t, pkg.Module(), "demo.DeferDiscardCaller").String()
+	if !strings.Contains(deferIR, `"demo.FastRetInt$coro"`) {
+		t.Fatalf("DeferDiscardCaller did not call FastRetInt$coro:\n%s", deferIR)
+	}
+	if strings.Contains(deferIR, `"demo.FastRetInt$coro"(ptr %0, ptr null,`) {
+		t.Fatalf("DeferDiscardCaller passed null result slot to value-returning sync-fast callee:\n%s", deferIR)
+	}
+}

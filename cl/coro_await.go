@@ -738,10 +738,18 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecoveryResult(
 		// call has no result transport at all; completion has its own record.
 		resultSlot = p.prog.Nil(p.prog.VoidPtr())
 		outArg = resultSlot
-		if nullableChild && sourceSig.Results().Len() == 0 {
-			// Pass a non-nil sentinel so a void sync-fast ramp knows it is
-			// awaited (not spawned) without allocating a result slot.
-			outArg = body.task
+		if nullableChild {
+			if sourceSig.Results().Len() == 0 {
+				// Pass a non-nil sentinel so a void sync-fast ramp knows it is
+				// awaited (not spawned) without allocating a result slot.
+				outArg = body.task
+			} else if !p.prog.LocalGoTypeExceedsNativeStack(abi.resultSlotType) {
+				// Provide a stack-local sink so deferred calls to value-returning
+				// sync-fast functions (e.g. defer fd.decref(), defer timer.Stop())
+				// take the zero-frame sync-fast path instead of forcing .slow.
+				resultSlot = p.coroResultSlot(p.prog.Type(abi.resultSlotType, llssa.InGo))
+				outArg = b.Convert(p.prog.VoidPtr(), resultSlot)
+			}
 		}
 	} else {
 		resultSlot = p.coroResultSlot(p.prog.Type(abi.resultSlotType, llssa.InGo))

@@ -311,12 +311,22 @@ func Implements(T, V *abi.Type) bool {
 		return true
 	}
 	if V.Kind() != abi.Interface {
-		if i := findItab(t, V); i != nil {
-			return i.fun[0] != nil
+		if val, done := itabTable.FindFast(unsafe.Pointer(t), unsafe.Pointer(V)); done {
+			if val != nil {
+				return (*Itab)(val).fun[0] != nil
+			}
+			return implementsConcreteSlow(t, V)
 		}
-		return implementsConcreteSlow(t, V)
+		return implementsConcreteLookupSlow(t, V)
 	}
 	return implementsInterfaceSlow(T, V)
+}
+
+func implementsConcreteLookupSlow(t *abi.InterfaceType, V *abi.Type) bool {
+	if i := findItab(t, V); i != nil {
+		return i.fun[0] != nil
+	}
+	return implementsConcreteSlow(t, V)
 }
 
 func implementsConcreteSlow(t *abi.InterfaceType, V *abi.Type) bool {

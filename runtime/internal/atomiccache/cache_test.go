@@ -207,3 +207,59 @@ func TestWeakTableConcurrentPrunePreservesEveryLiveSuffix(t *testing.T) {
 		}
 	}
 }
+
+func TestPairTableFindFast(t *testing.T) {
+	var table PairTable
+	first := new(byte)
+	second := new(byte)
+	if v, done := table.FindFast(unsafe.Pointer(first), unsafe.Pointer(second)); v != nil || !done {
+		t.Fatalf("empty FindFast = (%p, %v), want (nil, true)", v, done)
+	}
+
+	// Force three colliding pairs into the same bucket by scanning candidate second keys.
+	targetBucket := table.bucket(unsafe.Pointer(first), unsafe.Pointer(second))
+	seconds := []unsafe.Pointer{unsafe.Pointer(second)}
+	vals := []unsafe.Pointer{unsafe.Pointer(new(byte))}
+	for len(seconds) < 3 {
+		cand := unsafe.Pointer(new(byte))
+		if table.bucket(unsafe.Pointer(first), cand) == targetBucket {
+			seconds = append(seconds, cand)
+			vals = append(vals, unsafe.Pointer(new(byte)))
+		}
+	}
+
+	// Insert 1st entry: hit returns (val, true), miss returns (nil, true).
+	table.Intern(unsafe.Pointer(first), seconds[0], vals[0])
+	if v, done := table.FindFast(unsafe.Pointer(first), seconds[0]); v != vals[0] || !done {
+		t.Fatalf("1-entry hit FindFast = (%p, %v), want (%p, true)", v, done, vals[0])
+	}
+	if v, done := table.FindFast(unsafe.Pointer(first), seconds[1]); v != nil || !done {
+		t.Fatalf("1-entry miss FindFast = (%p, %v), want (nil, true)", v, done)
+	}
+
+	// Insert 2nd entry: both entries hit with done=true, miss returns (nil, true).
+	table.Intern(unsafe.Pointer(first), seconds[1], vals[1])
+	for i := 0; i < 2; i++ {
+		if v, done := table.FindFast(unsafe.Pointer(first), seconds[i]); v != vals[i] || !done {
+			t.Fatalf("2-entry hit[%d] FindFast = (%p, %v), want (%p, true)", i, v, done, vals[i])
+		}
+	}
+	if v, done := table.FindFast(unsafe.Pointer(first), seconds[2]); v != nil || !done {
+		t.Fatalf("2-entry miss FindFast = (%p, %v), want (nil, true)", v, done)
+	}
+
+	// Insert 3rd entry: head and second hit, tail entry returns (nil, false) for slow fallback.
+	table.Intern(unsafe.Pointer(first), seconds[2], vals[2])
+	if v, done := table.FindFast(unsafe.Pointer(first), seconds[2]); v != vals[2] || !done {
+		t.Fatalf("3-entry head hit FindFast = (%p, %v), want (%p, true)", v, done, vals[2])
+	}
+	if v, done := table.FindFast(unsafe.Pointer(first), seconds[1]); v != vals[1] || !done {
+		t.Fatalf("3-entry second hit FindFast = (%p, %v), want (%p, true)", v, done, vals[1])
+	}
+	if v, done := table.FindFast(unsafe.Pointer(first), seconds[0]); v != nil || done {
+		t.Fatalf("3-entry tail FindFast = (%p, %v), want (nil, false)", v, done)
+	}
+	if v := table.Find(unsafe.Pointer(first), seconds[0]); v != vals[0] {
+		t.Fatalf("3-entry tail Find = %p, want %p", v, vals[0])
+	}
+}
