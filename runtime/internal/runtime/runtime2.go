@@ -64,6 +64,7 @@ type g struct {
 	defer_       *Defer
 	panic_       unsafe.Pointer
 	panicPCs     *panicPCStore
+	callerStore  *callerLocationStore
 	recoverFrame unsafe.Pointer
 	recoverPanic unsafe.Pointer
 	m            *m
@@ -76,10 +77,11 @@ type g struct {
 	goid       uint64
 	parentGoid uint64
 
-	startfn goroutineFunc
-	// startarg belongs to the pthread entry only until mstart consumes and
-	// clears it. A stackless logical G has no such entry, so its runtime sidecar
-	// phase-overlays this otherwise idle pointer with the scheduler G identity.
+	// startarg holds the scheduler *coro.G identity for stackless logical Gs
+	// and remains nil for native pthread/bootstrap Gs (whose startup function
+	// and root live on runtimeContext). Moving startfn onto runtimeContext
+	// keeps sizeof(g) and coroTaskAllocationSize unchanged (352 bytes on 64-bit)
+	// while giving every logical G a direct callerStore pointer.
 	startarg unsafe.Pointer
 
 	context *coroRuntimeContext

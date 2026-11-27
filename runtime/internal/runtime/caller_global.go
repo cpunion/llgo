@@ -21,3 +21,16 @@ package runtime
 // Bare-metal runtimes have one execution context and must not introduce a
 // native TLS relocation for the locality package cache.
 var callerLocationStoreCurrent *callerLocationStore
+
+func loadCallerLocationStore() *callerLocationStore {
+	return callerLocationStoreCurrent
+}
+
+func callerLocationStoreForGoroutine() *callerLocationStore {
+	store := callerLocationStoreCurrent
+	if store == nil {
+		store = new(callerLocationStore)
+		callerLocationStoreCurrent = store
+	}
+	return store
+}

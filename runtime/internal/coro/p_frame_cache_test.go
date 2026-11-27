@@ -101,15 +101,43 @@ func TestPFrameCachePutZeroesUsedAndRoundTrips(t *testing.T) {
 	if TakeCachedFrame(g, 8192) != nil {
 		t.Fatal("third TakeCachedFrame did not miss after draining bin")
 	}
-	// Verify all hot frame sizes map to distinct slots.
-	hot := []uintptr{256, 640, 992, 2944, 8192}
-	seen := make(map[uintptr]uintptr, len(hot))
-	for _, b := range hot {
+	// Verify every canonical cacheable size class <= 8192B maps to a distinct
+	// collision-free slot in [0, pFrameCacheSlots).
+	seen := make(map[int]uintptr, pFrameCacheSlots)
+	for b := uintptr(256); b <= 1024; b += 32 {
 		idx := pFrameCacheIndex(b)
+		if idx < 0 || idx >= pFrameCacheSlots {
+			t.Fatalf("bucket %d mapped to invalid slot %d", b, idx)
+		}
 		if prev, dup := seen[idx]; dup {
-			t.Fatalf("hot bucket %d collided with %d at slot %d", b, prev, idx)
+			t.Fatalf("bucket %d collided with %d at slot %d", b, prev, idx)
 		}
 		seen[idx] = b
+	}
+	for b := uintptr(1152); b <= 4096; b += 128 {
+		idx := pFrameCacheIndex(b)
+		if idx < 0 || idx >= pFrameCacheSlots {
+			t.Fatalf("bucket %d mapped to invalid slot %d", b, idx)
+		}
+		if prev, dup := seen[idx]; dup {
+			t.Fatalf("bucket %d collided with %d at slot %d", b, prev, idx)
+		}
+		seen[idx] = b
+	}
+	if idx := pFrameCacheIndex(8192); idx != 49 {
+		t.Fatalf("bucket 8192 mapped to slot %d, want 49", idx)
+	} else if prev, dup := seen[idx]; dup {
+		t.Fatalf("bucket 8192 collided with %d at slot %d", prev, idx)
+	} else {
+		seen[idx] = 8192
+	}
+	if len(seen) != pFrameCacheSlots {
+		t.Fatalf("covered %d slots, want %d", len(seen), pFrameCacheSlots)
+	}
+	for _, invalid := range []uintptr{0, 64, 255, 272, 1088, 5000, 16384} {
+		if idx := pFrameCacheIndex(invalid); idx != -1 {
+			t.Fatalf("invalid bucket %d mapped to slot %d, want -1", invalid, idx)
+		}
 	}
 	runtime.KeepAlive(buf)
 	runtime.KeepAlive(buf2)

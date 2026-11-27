@@ -149,6 +149,7 @@ func destroyG(ptr c.Pointer) {
 		c.Free(gp.panic_)
 		gp.panic_ = nil
 	}
+	gp.callerStore = nil
 	releasePanicPCStore(gp)
 	ctx := gp.context
 	if ctx != nil {

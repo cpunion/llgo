@@ -25,6 +25,24 @@ import (
 
 //export __llgo_coro_frame_alloc_v1
 func __llgo_coro_frame_alloc_v1(g unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) unsafe.Pointer {
+	task := (*coro.G)(g)
+	if !coro.AuditEnabled && coroalloc.FrameCacheEnabled() &&
+		align <= 16 && align != 0 && align&(align-1) == 0 && size <= 992 {
+		total := size + coro.CompilerFrameAllocationReceiptSize + (align - 1)
+		bucket := uintptr(256)
+		if total > 256 {
+			bucket = (total + 31) &^ 31
+		}
+		raw := coro.TakeCachedFrame(task, bucket)
+		if raw == nil {
+			raw = coroFrameAllocSlowBucketV1(bucket)
+		}
+		storage := coro.RegisterFrameCompilerPreparedPtr(task, raw, total, size, align, descriptor)
+		if storage == nil {
+			coroFrameAllocRollbackV1(raw, total)
+		}
+		return storage
+	}
 	var total uintptr
 	var ok bool
 	if !coro.AuditEnabled {
@@ -45,7 +63,6 @@ func __llgo_coro_frame_alloc_v1(g unsafe.Pointer, size, align uintptr, descripto
 	if !ok {
 		coroRuntimeAbort("invalid coroutine frame allocation size")
 	}
-	task := (*coro.G)(g)
 	var raw unsafe.Pointer
 	if coroalloc.FrameCacheEnabled() {
 		bucket := coroalloc.CacheAllocationSize(total)

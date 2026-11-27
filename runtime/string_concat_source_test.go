@@ -94,7 +94,7 @@ func TestStringCatChecksLengthBeforeAllocation(t *testing.T) {
 			}
 			switch callee := call.Fun.(type) {
 			case *ast.Ident:
-				if callee.Name == "AllocU" && allocationIndex < 0 {
+				if (callee.Name == "AllocU" || callee.Name == "AllocAtomicU") && allocationIndex < 0 {
 					allocationIndex = index
 				}
 			case *ast.SelectorExpr:
