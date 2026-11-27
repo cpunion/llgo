@@ -221,6 +221,8 @@ func coroChannelNativeE2EPanicWrapNilPointer(bool, string, string) {}
 func AllocU(uintptr) unsafe.Pointer
 
 func AllocZ(size uintptr) unsafe.Pointer { return AllocU(size) }
+func AllocAtomicU(size uintptr) unsafe.Pointer { return AllocU(size) }
+func AllocAtomicZ(size uintptr) unsafe.Pointer { return AllocU(size) }
 func AllocRoot(size uintptr) unsafe.Pointer { return AllocU(size) }
 
 //go:linkname FreeRoot C.free
@@ -723,6 +725,16 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 	), llssa.InGo)
 	allocZBody := allocZ.MakeBody(1)
 	allocZBody.Return(allocZBody.Call(calloc.Expr, prog.IntVal(1, prog.Uintptr()), allocZ.Param(0)))
+	allocAtomicU := pkg.NewFunc(llssa.PkgRuntime+".AllocAtomicU", newSignature(
+		[]types.Type{uintptrType}, []types.Type{pointer},
+	), llssa.InGo)
+	allocAtomicUBody := allocAtomicU.MakeBody(1)
+	allocAtomicUBody.Return(allocAtomicUBody.Call(malloc.Expr, allocAtomicU.Param(0)))
+	allocAtomicZ := pkg.NewFunc(llssa.PkgRuntime+".AllocAtomicZ", newSignature(
+		[]types.Type{uintptrType}, []types.Type{pointer},
+	), llssa.InGo)
+	allocAtomicZBody := allocAtomicZ.MakeBody(1)
+	allocAtomicZBody.Return(allocAtomicZBody.Call(calloc.Expr, prog.IntVal(1, prog.Uintptr()), allocAtomicZ.Param(0)))
 	// The production channel sources are compiled as a closed named-file
 	// island, so their ordinary Go helper symbols carry the temporary
 	// command-line package owner. Exact wrappers expose the runtime helper names

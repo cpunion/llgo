@@ -423,3 +423,66 @@ func Close(ch chan int) { close(ch) }
 		t.Fatalf("Close plain lowered call = %v, %t, %v; want exact ChanClose", target, ok, err)
 	}
 }
+
+func TestEmissionUniverseCompleteRuntimeABIFreezesAtomicHelpers(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
+import "unsafe"
+type Slice struct { data unsafe.Pointer; len, cap int }
+func AllocZ(size uintptr) unsafe.Pointer { return nil }
+func AllocAtomicZ(size uintptr) unsafe.Pointer { return nil }
+func MakeSlice(len, cap int, elemSize uintptr) Slice { return Slice{} }
+func MakeSliceAtomic(len, cap int, elemSize uintptr) Slice { return Slice{} }
+func SliceAppend(s Slice, elems unsafe.Pointer, elemCount int, elemSize uintptr) Slice { return s }
+func SliceAppendAtomic(s Slice, elems unsafe.Pointer, elemCount int, elemSize uintptr) Slice { return s }
+`)
+	callerPkg := testProg.addPackage(t, "example.com/emission/atomicheap", `package atomicheap
+type pod struct { a int64; b [8]byte }
+type traced struct { p *int }
+func AllocPOD() *pod { return new(pod) }
+func AllocTraced() *traced { return new(traced) }
+func MakeBytes(n int) []byte { return make([]byte, n) }
+func MakePtrs(n int) []*int { return make([]*int, n) }
+func AppendBytes(s []byte, x byte) []byte { return append(s, x) }
+func AppendPtrs(s []*int, x *int) []*int { return append(s, x) }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+		{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		owner string
+		want  string
+	}{
+		{"AllocPOD", "AllocAtomicZ"},
+		{"AllocTraced", "AllocZ"},
+		{"MakeBytes", "MakeSliceAtomic"},
+		{"MakePtrs", "MakeSlice"},
+		{"AppendBytes", "SliceAppendAtomic"},
+		{"AppendPtrs", "SliceAppend"},
+	} {
+		owner := callerPkg.ssa.Func(tc.owner)
+		lowered, err := universe.CoroLoweredCalls(owner)
+		if err != nil {
+			t.Fatalf("%s lowered calls: %v", tc.owner, err)
+		}
+		found := false
+		for _, call := range lowered {
+			if call.LogicalName == tc.want && call.Target == runtimePkg.ssa.Func(tc.want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%s lowered calls = %+v; want exact %s target", tc.owner, lowered, tc.want)
+		}
+	}
+}

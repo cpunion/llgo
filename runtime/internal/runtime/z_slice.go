@@ -99,6 +99,18 @@ func SliceAppend(src Slice, data unsafe.Pointer, num, etSize int) Slice {
 	return src
 }
 
+// SliceAppendAtomic appends pointer-free elem data using noscan allocation when
+// the backing array must grow.
+func SliceAppendAtomic(src Slice, data unsafe.Pointer, num, etSize int) Slice {
+	oldLen := src.len
+	src = GrowSliceAtomic(src, num, etSize)
+	if etSize == 0 {
+		return src
+	}
+	c.Memcpy(c.Advance(src.data, oldLen*etSize), data, uintptr(num*etSize))
+	return src
+}
+
 // GrowSlice grows slice and returns the grown slice.
 func GrowSlice(src Slice, num, etSize int) Slice {
 	oldLen := src.len
@@ -115,6 +127,36 @@ func GrowSlice(src Slice, num, etSize int) Slice {
 		p := AllocZ(mem)
 		if oldLen != 0 {
 			c.Memcpy(p, src.data, uintptr(oldLen*etSize))
+		}
+		src.data = p
+		src.cap = newCap
+	}
+	src.len = newLen
+	return src
+}
+
+// GrowSliceAtomic grows a pointer-free slice using noscan allocation while
+// zeroing the newly available tail [oldLen..newCap) to preserve Go zero-value
+// semantics.
+func GrowSliceAtomic(src Slice, num, etSize int) Slice {
+	oldLen := src.len
+	newLen := oldLen + num
+	if newLen < 0 {
+		panicgrowslicelen()
+	}
+	if newLen > src.cap {
+		newCap := nextslicecap(newLen, src.cap)
+		mem, overflow := math.MulUintptr(uintptr(etSize), uintptr(newCap))
+		if overflow || mem > maxAlloc {
+			panicgrowslicelen()
+		}
+		p := AllocAtomicU(mem)
+		oldBytes := oldLen * etSize
+		if oldBytes != 0 {
+			c.Memcpy(p, src.data, uintptr(oldBytes))
+		}
+		if mem > uintptr(oldBytes) {
+			c.Memset(c.Advance(p, oldBytes), 0, mem-uintptr(oldBytes))
 		}
 		src.data = p
 		src.cap = newCap
@@ -182,6 +224,20 @@ func MakeSlice(len, cap int, etSize int) Slice {
 		panicmakeslicecap()
 	}
 	return Slice{AllocZ(mem), len, cap}
+}
+
+// MakeSliceAtomic allocates a zero-initialized backing array for a pointer-free
+// slice element type using noscan collector storage.
+func MakeSliceAtomic(len, cap int, etSize int) Slice {
+	mem, overflow := math.MulUintptr(uintptr(etSize), uintptr(cap))
+	if overflow || mem > maxAlloc || len < 0 || len > cap {
+		mem, overflow := math.MulUintptr(uintptr(etSize), uintptr(len))
+		if overflow || mem > maxAlloc || len < 0 {
+			panicmakeslicelen()
+		}
+		panicmakeslicecap()
+	}
+	return Slice{AllocAtomicZ(mem), len, cap}
 }
 
 func panicmakeslicelen() {

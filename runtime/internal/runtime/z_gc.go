@@ -39,6 +39,20 @@ func AllocZ(size uintptr) unsafe.Pointer {
 	return c.Memset(ret, 0, size)
 }
 
+// AllocAtomicU allocates uninitialized pointer-free (noscan) memory.
+func AllocAtomicU(size uintptr) unsafe.Pointer {
+	ret := coroRuntimeGCMallocAtomic(size)
+	recordMemProfileAllocHint(size, uintptr(ret))
+	return ret
+}
+
+// AllocAtomicZ allocates zero-initialized pointer-free (noscan) memory.
+func AllocAtomicZ(size uintptr) unsafe.Pointer {
+	ret := coroRuntimeGCMallocAtomic(size)
+	recordMemProfileAllocHint(size, uintptr(ret))
+	return c.Memset(ret, 0, size)
+}
+
 func AllocRoot(size uintptr) unsafe.Pointer {
 	return bdwgc.MallocUncollectable(size)
 }

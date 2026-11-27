@@ -122,7 +122,11 @@ func (b Builder) Alloc(elem Type, heap bool) (ret Expr) {
 		if prog.SizeOf(elem) == 0 {
 			return pkg.moduleZeroSizedAlloc(elem)
 		}
-		ret = b.InlineCall(pkg.rtFunc("AllocZ"), size)
+		helper := AllocZHelperName(elem.RawType())
+		if helper != "AllocZ" && !pkg.hasRtFunc(helper) {
+			helper = "AllocZ"
+		}
+		ret = b.InlineCall(pkg.rtFunc(helper), size)
 	} else {
 		// Stack-local zero-sized variables keep a distinct alloca. Only heap
 		// allocations and package globals use the shared module sentinel.
@@ -148,6 +152,80 @@ func (b Builder) Alloc(elem Type, heap bool) (ret Expr) {
 	}
 	ret.Type = prog.Pointer(elem)
 	return
+}
+
+// HasRuntimeFunc reports whether the configured runtime package declares fnName.
+func (p Program) HasRuntimeFunc(fnName string) bool {
+	if p == nil || p.runtime() == nil {
+		return false
+	}
+	_, ok := p.runtime().Scope().Lookup(fnName).(*types.Func)
+	return ok
+}
+
+// TypePointerFree reports whether values of Go type t are guaranteed to contain
+// no GC-traced pointers. Basic numeric/bool types (conservatively excluding
+// string, unsafe.Pointer, and uintptr), arrays of pointer-free elements, and
+// structs whose fields are all pointer-free qualify for noscan allocation.
+func TypePointerFree(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch u := types.Unalias(t).Underlying().(type) {
+	case *types.Basic:
+		switch u.Kind() {
+		case types.Bool,
+			types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
+			types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64,
+			types.Float32, types.Float64,
+			types.Complex64, types.Complex128:
+			return true
+		default:
+			return false
+		}
+	case *types.Array:
+		return TypePointerFree(u.Elem())
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if !TypePointerFree(u.Field(i).Type()) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// AllocZHelperName selects runtime.AllocAtomicZ for pointer-free element types
+// and runtime.AllocZ otherwise.
+func AllocZHelperName(elem types.Type) string {
+	if TypePointerFree(elem) {
+		return "AllocAtomicZ"
+	}
+	return "AllocZ"
+}
+
+// MakeSliceHelperName selects runtime.MakeSliceAtomic when sliceType's element
+// type is pointer-free and runtime.MakeSlice otherwise.
+func MakeSliceHelperName(sliceType types.Type) string {
+	if sliceType != nil {
+		if s, ok := types.Unalias(sliceType).Underlying().(*types.Slice); ok && TypePointerFree(s.Elem()) {
+			return "MakeSliceAtomic"
+		}
+	}
+	return "MakeSlice"
+}
+
+// SliceAppendHelperName selects runtime.SliceAppendAtomic when sliceType's
+// element type is pointer-free and runtime.SliceAppend otherwise.
+func SliceAppendHelperName(sliceType types.Type) string {
+	if sliceType != nil {
+		if s, ok := types.Unalias(sliceType).Underlying().(*types.Slice); ok && TypePointerFree(s.Elem()) {
+			return "SliceAppendAtomic"
+		}
+	}
+	return "SliceAppend"
 }
 
 // AllocZAs allocates one zero-initialized runtime-managed value while exposing
