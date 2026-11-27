@@ -3000,6 +3000,22 @@ func applySSAStaticOutcomePlans(
 		}
 	}
 
+	// Pre-count evaluated ordinary source calls per function once in O(|C|)
+	// instead of rescanning evaluatedCalls for every candidate function. Every
+	// evaluated ordinary call must appear in CallPlan or be one exact
+	// compiler-elided intrinsic, preventing a builtin, raw C edge, or hidden
+	// helper from entering the synchronous twin by omission.
+	evaluatedSourceCalls := make(map[*ssa.Function]int)
+	for call := range evaluatedCalls {
+		if call == nil || elidedCalls[call] {
+			continue
+		}
+		if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
+			continue
+		}
+		evaluatedSourceCalls[call.Parent()]++
+	}
+
 	eligible := make(map[FunctionID]bool)
 	for _, plan := range base.functions {
 		function := byID[plan.ID]
@@ -3027,20 +3043,7 @@ func applySSAStaticOutcomePlans(
 			plan.Exec&(BlockForeign|ThreadAffine|NeedsCleanupFrame|OpaqueExec) != 0 {
 			continue
 		}
-		// Every evaluated ordinary call must appear in CallPlan or be one exact
-		// compiler-elided intrinsic. This prevents a builtin, raw C edge, or
-		// hidden helper from entering the synchronous twin by omission.
-		calls := 0
-		for call := range evaluatedCalls {
-			if call.Parent() != function || elidedCalls[call] {
-				continue
-			}
-			if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
-				continue
-			}
-			calls++
-		}
-		if calls != sourceOutgoing[plan.ID] {
+		if evaluatedSourceCalls[function] != sourceOutgoing[plan.ID] {
 			continue
 		}
 		eligible[plan.ID] = true

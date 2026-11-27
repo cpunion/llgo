@@ -797,3 +797,79 @@ func root(value any, fail bool) { go leaf(value, fail) }
 		})
 	}
 }
+
+func TestAnalyzeSSAStaticOutcomePrecountPreservesElidedAndBuiltinFiltering(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "static_outcome_precount.go", `package coroid
+
+func leaf(v any, fail bool) int {
+	if fail {
+		panic(v)
+	}
+	return 3
+}
+
+func intrinsicNoop(x int) int { return x }
+
+func callerWithBuiltinAndElided(dst, src []int, v any, fail bool) int {
+	n := copy(dst, src)
+	n += intrinsicNoop(len(dst))
+	return n + leaf(v, fail)
+}
+
+func callerWithUnplannedCall(dst, src []int, v any, fail bool) int {
+	n := copy(dst, src)
+	n += intrinsicNoop(len(dst))
+	return n + leaf(v, fail)
+}
+
+func root(dst, src []int, v any, fail bool) int {
+	return callerWithBuiltinAndElided(dst, src, v, fail) + callerWithUnplannedCall(dst, src, v, fail)
+}
+`)
+	leaf := packageFunction(t, pkg, "leaf")
+	intrinsic := packageFunction(t, pkg, "intrinsicNoop")
+	withElided := packageFunction(t, pkg, "callerWithBuiltinAndElided")
+	withUnplanned := packageFunction(t, pkg, "callerWithUnplannedCall")
+	root := packageFunction(t, pkg, "root")
+
+	config := planDigestSSAConfig()
+	config.OutcomeMode = OutcomeExplicitStatus
+	config.MaxPlainInstructions = -1
+	config.ClassifyLocalBody = func(fn *ssa.Function) (SSAFunctionBodyFacts, error) {
+		facts := scanSSAFunctionBody(fn)
+		facts.StaticOutcomeLocal = true
+		return facts, nil
+	}
+	config.ClassifyElidedCall = func(owner *ssa.Function, call ssa.CallInstruction) (bool, error) {
+		if owner == withElided && call.Common() != nil && call.Common().StaticCallee() == intrinsic {
+			return true, nil
+		}
+		return false, nil
+	}
+	// Mark intrinsicNoop as YieldOnly so it cannot enter static outcome
+	// closure, proving callerWithBuiltinAndElided passes only because its call
+	// was elided (and builtin copy/len were filtered) while
+	// callerWithUnplannedCall is excluded.
+	config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+		if fn == intrinsic {
+			return SSAFunctionPolicy{
+				Effect: YieldOnly,
+			}, nil
+		}
+		return SSAFunctionPolicy{}, nil
+	}
+
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, plan, leaf); !got.HasStaticOutcome() {
+		t.Fatalf("leaf plan = %+v, want static outcome", got)
+	}
+	if got := functionPlanFor(t, plan, withElided); !got.HasStaticOutcome() {
+		t.Fatalf("callerWithBuiltinAndElided plan = %+v, want static outcome (builtin + elided call filtered)", got)
+	}
+	if got := functionPlanFor(t, plan, withUnplanned); got.HasStaticOutcome() {
+		t.Fatalf("callerWithUnplannedCall plan = %+v, want excluded (non-elided opaque call)", got)
+	}
+}

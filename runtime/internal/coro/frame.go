@@ -1483,6 +1483,14 @@ type LogicalPanicTraceMode uint32
 const (
 	LogicalPanicTraceNew LogicalPanicTraceMode = iota
 	LogicalPanicTracePropagate
+	// LogicalPanicTraceAdoptPropagate is emitted only by the compiler's
+	// synchronous-ramp outcome propagator coroutine. A sync-fast ramp runs
+	// on its caller's physical frame, so a panicking $outcome callee leaves
+	// the retained trace attached to that caller (or an outer ordinary-await
+	// ancestor across SingleAwait ramps). Adopting carrier ownership validates
+	// that exact suspended call chain and payload identity before moving tail
+	// ownership to the active propagator frame.
+	LogicalPanicTraceAdoptPropagate
 )
 
 // LogicalPanicTraceFrameAllocationSize is the exact target-neutral allocation
@@ -1512,11 +1520,37 @@ func activeLogicalPanicTraceCarrier(g *G) (*Frame, bool) {
 	return frame, true
 }
 
+// adoptableLogicalPanicTraceAncestor proves that target is an ordinary
+// suspended-await ancestor of child (crossing no recover-armed boundary).
+func adoptableLogicalPanicTraceAncestor(g *G, child, target *Frame) bool {
+	if g == nil || child == nil || target == nil || child == target {
+		return false
+	}
+	for frame := child; frame.parent != nil; frame = frame.parent {
+		parent := frame.parent
+		if !validPanicAncestor(g, parent) || frame.header == nil ||
+			frame.header.Parent != parent.handle {
+			return false
+		}
+		record := &parent.completion
+		if !emptyCompletionRecord(record) &&
+			(record.child != frame.handle || record.status != completionArmed) {
+			return false
+		}
+		if parent == target {
+			return true
+		}
+	}
+	return false
+}
+
 // PrepareLogicalPanicTrace validates one compiler-emitted cold-path logical
 // frame. A new panic first detaches any older trace owned by the active
-// physical carrier; the runtime adapter drains those allocations before it
-// allocates the replacement node. Propagation is read-only and requires the
-// exact child identity already retained on this carrier.
+// physical carrier (or its active deferred recovery owner); the runtime adapter
+// drains those allocations before it allocates the replacement node. Ordinary
+// propagation is read-only and requires the exact child identity already
+// retained on this carrier. Adopt-propagate transfers tail ownership from a
+// validated ordinary-await ancestor to the active outcome-propagator carrier.
 func PrepareLogicalPanicTrace(
 	g *G, mode LogicalPanicTraceMode, typeWord, dataWord unsafe.Pointer,
 ) bool {
@@ -1527,7 +1561,10 @@ func PrepareLogicalPanicTrace(
 	switch mode {
 	case LogicalPanicTraceNew:
 		if activePanicTrace(g) && panicTraceCarrier(g) != carrier {
-			return false
+			recoveryOwner, validScope := panicTraceRecoveryOwner(carrier)
+			if !validScope || recoveryOwner == nil || panicTraceCarrier(g) != recoveryOwner {
+				return false
+			}
 		}
 		return stagePanicTraceDiscard(g)
 	case LogicalPanicTracePropagate:
@@ -1536,6 +1573,23 @@ func PrepareLogicalPanicTrace(
 		}
 		existingType, existingData, valid := panicTraceIdentity(g.panicTraceHead)
 		return valid && existingType == typeWord && existingData == dataWord
+	case LogicalPanicTraceAdoptPropagate:
+		if !activePanicTrace(g) {
+			return false
+		}
+		existingType, existingData, valid := panicTraceIdentity(g.panicTraceHead)
+		if !valid || existingType != typeWord || existingData != dataWord {
+			return false
+		}
+		traceCarrier := panicTraceCarrier(g)
+		if traceCarrier == carrier {
+			return true
+		}
+		if !adoptableLogicalPanicTraceAncestor(g, carrier, traceCarrier) {
+			return false
+		}
+		g.panicTraceTail.parent = carrier
+		return true
 	default:
 		return false
 	}
@@ -1576,7 +1630,7 @@ func RetainLogicalPanicTraceFrame(
 		if !emptyPanicTrace(g) {
 			return false
 		}
-	case LogicalPanicTracePropagate:
+	case LogicalPanicTracePropagate, LogicalPanicTraceAdoptPropagate:
 		if !activePanicTrace(g) || panicTraceCarrier(g) != carrier {
 			return false
 		}

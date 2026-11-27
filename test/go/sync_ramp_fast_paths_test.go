@@ -9,8 +9,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
@@ -332,5 +334,78 @@ func TestStageOSyncRampInterfaceAndASCIISetPaths(t *testing.T) {
 	}()
 	if !panicked {
 		t.Fatal("comparing two []int interfaces failed to panic")
+	}
+}
+
+func TestSyncRampOutcomePanicTracePropagationAndRecovery(t *testing.T) {
+	expectPanicMsg := func(name, want string, fn func()) string {
+		t.Helper()
+		var got string
+		var stack string
+		func() {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("%s: did not panic", name)
+				}
+				got = fmt.Sprint(r)
+				stack = string(debug.Stack())
+			}()
+			fn()
+		}()
+		if !strings.Contains(got, want) {
+			t.Fatalf("%s: panic = %q, want contains %q", name, got, want)
+		}
+		return stack
+	}
+
+	// Consecutive panic/recover cycles matching _demo/go/reflectcopy, where
+	// reflect.Copy's sync-fast ramp calls panicking $outcome helpers
+	// (mustBeAssignable -> mustBeAssignableSlow) and propagates through
+	// __llgo_coro_outcome_propagate_v1.
+	for round := 0; round < 3; round++ {
+		expectPanicMsg("dst-kind", "reflect: call of reflect.Copy on int Value", func() {
+			reflect.Copy(reflect.ValueOf(1), reflect.ValueOf([]int{1}))
+		})
+		stack := expectPanicMsg("array-unsettable", "unaddressable value", func() {
+			arr := [2]int{}
+			reflect.Copy(reflect.ValueOf(arr), reflect.ValueOf([]int{1, 2}))
+		})
+		if !strings.Contains(stack, "reflect.Copy") {
+			t.Fatalf("round %d: stack missing reflect.Copy:\n%s", round, stack)
+		}
+		if strings.Contains(stack, "__llgo_coro_outcome_propagate_v1") {
+			t.Fatalf("round %d: stack leaked hidden propagator frame:\n%s", round, stack)
+		}
+		expectPanicMsg("elem-mismatch", "reflect.Copy:", func() {
+			reflect.Copy(reflect.ValueOf([]int{0}), reflect.ValueOf([]int32{1}))
+		})
+	}
+
+	// Panic inside a sync-ramp $outcome callee invoked from a defer while an
+	// outer child-coroutine panic trace is still active on the recovery owner.
+	var outerChild func()
+	outerChild = func() {
+		panic("outer-child-panic")
+	}
+	var gotReplacement string
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected replacement panic from deferred reflect.Copy")
+			}
+			gotReplacement = fmt.Sprint(r)
+		}()
+		func() {
+			defer func() {
+				arr := [2]int{}
+				reflect.Copy(reflect.ValueOf(arr), reflect.ValueOf([]int{1, 2}))
+			}()
+			outerChild()
+		}()
+	}()
+	if !strings.Contains(gotReplacement, "unaddressable value") {
+		t.Fatalf("deferred replacement panic = %q, want contains unaddressable value", gotReplacement)
 	}
 }

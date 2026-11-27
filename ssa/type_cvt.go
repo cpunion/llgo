@@ -127,9 +127,28 @@ func (p Program) SourceType(typ types.Type) types.Type {
 	if source := p.gocvt.sources[typ]; source != nil {
 		return source
 	}
-	if pointer, ok := typ.(*types.Pointer); ok {
-		if elem := p.SourceType(pointer.Elem()); elem != pointer.Elem() {
+	switch t := typ.(type) {
+	case *types.Pointer:
+		if elem := p.SourceType(t.Elem()); elem != t.Elem() {
 			return types.NewPointer(elem)
+		}
+	case *types.Slice:
+		if elem := p.SourceType(t.Elem()); elem != t.Elem() {
+			return types.NewSlice(elem)
+		}
+	case *types.Array:
+		if elem := p.SourceType(t.Elem()); elem != t.Elem() {
+			return types.NewArray(elem, t.Len())
+		}
+	case *types.Chan:
+		if elem := p.SourceType(t.Elem()); elem != t.Elem() {
+			return types.NewChan(t.Dir(), elem)
+		}
+	case *types.Map:
+		key := p.SourceType(t.Key())
+		elem := p.SourceType(t.Elem())
+		if key != t.Key() || elem != t.Elem() {
+			return types.NewMap(key, elem)
 		}
 	}
 	return typ
@@ -145,6 +164,103 @@ func (p goTypes) recordSourceType(physical, source types.Type) {
 			return // Preserve the first exact canonical source instance.
 		}
 		p.sources[physical] = source
+	}
+}
+
+// recordSourceTypeGraph mirrors nested physical-to-source type mappings when
+// ABI descriptors are imported into another Program (e.g. entry_main).
+func (p goTypes) recordSourceTypeGraph(physical, source types.Type, seen map[types.Type]struct{}) {
+	if physical == nil || source == nil {
+		return
+	}
+	physical = types.Unalias(physical)
+	source = types.Unalias(source)
+	if physical == source {
+		return
+	}
+	if _, ok := seen[physical]; ok {
+		return
+	}
+	seen[physical] = struct{}{}
+	if p.sources[physical] == nil {
+		p.sources[physical] = source
+	}
+	switch pt := physical.(type) {
+	case *types.Pointer:
+		if st, ok := source.(*types.Pointer); ok {
+			p.recordSourceTypeGraph(pt.Elem(), st.Elem(), seen)
+		}
+	case *types.Slice:
+		if st, ok := source.(*types.Slice); ok {
+			p.recordSourceTypeGraph(pt.Elem(), st.Elem(), seen)
+		}
+	case *types.Array:
+		if st, ok := source.(*types.Array); ok {
+			p.recordSourceTypeGraph(pt.Elem(), st.Elem(), seen)
+		}
+	case *types.Chan:
+		if st, ok := source.(*types.Chan); ok {
+			p.recordSourceTypeGraph(pt.Elem(), st.Elem(), seen)
+		}
+	case *types.Map:
+		if st, ok := source.(*types.Map); ok {
+			p.recordSourceTypeGraph(pt.Key(), st.Key(), seen)
+			p.recordSourceTypeGraph(pt.Elem(), st.Elem(), seen)
+		}
+	case *types.Named:
+		if st, ok := source.(*types.Named); ok {
+			if po, so := pt.Origin(), st.Origin(); po != nil && so != nil && po != so {
+				if p.sources[po] == nil {
+					p.sources[po] = so
+				}
+			}
+			if pArgs, sArgs := pt.TypeArgs(), st.TypeArgs(); pArgs != nil && sArgs != nil && pArgs.Len() == sArgs.Len() {
+				for i := 0; i < pArgs.Len(); i++ {
+					p.recordSourceTypeGraph(pArgs.At(i), sArgs.At(i), seen)
+				}
+			}
+			p.recordSourceTypeGraph(pt.Underlying(), st.Underlying(), seen)
+		}
+	case *types.Struct:
+		if IsClosure(pt) {
+			if sig, ok := source.(*types.Signature); ok {
+				if pSig, ok := pt.Field(0).Type().(*types.Signature); ok {
+					p.recordSourceTypeGraph(pSig, sig, seen)
+				}
+			}
+			return
+		}
+		if st, ok := source.(*types.Struct); ok && pt.NumFields() == st.NumFields() {
+			for i := 0; i < pt.NumFields(); i++ {
+				p.recordSourceTypeGraph(pt.Field(i).Type(), st.Field(i).Type(), seen)
+			}
+		}
+	case *types.Signature:
+		if st, ok := source.(*types.Signature); ok {
+			pParams, sParams := pt.Params(), st.Params()
+			if pParams != nil && sParams != nil {
+				offset := 0
+				if pParams.Len() == sParams.Len()+1 {
+					offset = 1
+				}
+				if pParams.Len() == sParams.Len()+offset {
+					for i := 0; i < sParams.Len(); i++ {
+						p.recordSourceTypeGraph(pParams.At(i+offset).Type(), sParams.At(i).Type(), seen)
+					}
+				}
+			}
+			if pRes, sRes := pt.Results(), st.Results(); pRes != nil && sRes != nil && pRes.Len() == sRes.Len() {
+				for i := 0; i < sRes.Len(); i++ {
+					p.recordSourceTypeGraph(pRes.At(i).Type(), sRes.At(i).Type(), seen)
+				}
+			}
+		}
+	case *types.Interface:
+		if st, ok := source.(*types.Interface); ok && pt.NumMethods() == st.NumMethods() {
+			for i := 0; i < pt.NumMethods(); i++ {
+				p.recordSourceTypeGraph(pt.Method(i).Type(), st.Method(i).Type(), seen)
+			}
+		}
 	}
 }
 
@@ -341,6 +457,7 @@ func (p goTypes) cvtNamed(t *types.Named) (raw *types.Named, cvt bool) {
 	// Publish the converted placeholder before descending so every back-edge in
 	// the cycle observes the same conversion decision.
 	p.typs[unsafe.Pointer(key)] = unsafe.Pointer(named)
+	p.recordSourceType(origin, t.Origin())
 	p.recordSourceType(named, t)
 	tund, _ := p.cvtType(t.Underlying())
 	// Generic instances derive their underlying type lazily from the origin.

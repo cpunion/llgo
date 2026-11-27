@@ -5122,7 +5122,10 @@ func (p *context) isGenericLocalType(obj types.Object) bool {
 		return p.inCurrentFunction(obj.Pos())
 	}
 	for scope := obj.Parent(); scope != nil; scope = scope.Parent() {
-		if pkg := obj.Pkg(); pkg != nil && scope == pkg.Scope() {
+		if scope == types.Universe {
+			return false
+		}
+		if pkg := obj.Pkg(); pkg != nil && (scope == pkg.Scope() || scope.Parent() == types.Universe) {
 			return false
 		}
 		if scopeHasTypeParams(scope) {
@@ -5140,7 +5143,7 @@ func (p *context) isLocalType(obj types.Object) bool {
 	if parent == nil {
 		return obj.Pos().IsValid()
 	}
-	return parent != obj.Pkg().Scope()
+	return parent != obj.Pkg().Scope() && parent.Parent() != types.Universe
 }
 
 func scopeHasTypeParams(scope *types.Scope) bool {

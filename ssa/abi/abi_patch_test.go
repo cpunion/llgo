@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
+
+	"github.com/xgo-dev/llgo/internal/typepatch"
 )
 
 func testLocalNamed() *types.Named {
@@ -187,6 +189,36 @@ func TestScopeIndexHandlesRootAndInvalidScopes(t *testing.T) {
 	}
 	if _, ok := scopeIndex(types.NewScope(nil, token.NoPos, token.NoPos, "detached"), root, ""); ok {
 		t.Fatal("scopeIndex(detached, root) succeeded")
+	}
+}
+
+func TestTypeName_MergedPatchedPackageTypesAvoidPosSuffix(t *testing.T) {
+	b := New(unsafe.Sizeof(uintptr(0)), types.SizesFor("gc", runtime.GOARCH))
+	orig := types.NewPackage("sync", "sync")
+	alt := types.NewPackage("sync", "sync")
+
+	// Declare a top-level type and a function-local type in alt with non-zero
+	// FileSet positions, then apply typepatch.Merge which replaces alt.Scope()
+	// with a shallow copy whose pointer differs from obj.Parent().
+	poolObj := types.NewTypeName(token.Pos(3148538), alt, "Pool", nil)
+	poolNamed := types.NewNamed(poolObj, types.NewStruct(nil, nil), nil)
+	alt.Scope().Insert(poolObj)
+
+	fnScope := types.NewScope(alt.Scope(), token.Pos(3148600), token.Pos(3148700), "fn")
+	localObj := types.NewTypeName(token.Pos(3148650), alt, "localBox", nil)
+	localNamed := types.NewNamed(localObj, types.Typ[types.Int], nil)
+	fnScope.Insert(localObj)
+
+	merged := typepatch.Clone(alt)
+	typepatch.Merge(merged, orig, nil, false)
+
+	gotPool, pubPool := b.TypeName(poolNamed)
+	if gotPool != "_llgo_sync.Pool" || !pubPool {
+		t.Fatalf("merged top-level TypeName = (%q, %v), want (%q, true)", gotPool, pubPool, "_llgo_sync.Pool")
+	}
+	gotLocal, pubLocal := b.TypeName(localNamed)
+	if strings.Contains(gotLocal, ".p3148") || gotLocal != "_llgo_sync.localBox.0" || pubLocal {
+		t.Fatalf("merged function-local TypeName = (%q, %v), want (%q, false)", gotLocal, pubLocal, "_llgo_sync.localBox.0")
 	}
 }
 

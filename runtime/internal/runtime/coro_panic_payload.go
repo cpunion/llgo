@@ -31,12 +31,16 @@ import (
 var coroPanicNilErrorV1 PanicNilError
 var coroPanicNilPayloadV1 any = &coroPanicNilErrorV1
 
-// Compiler-private trace transport modes; the core trace model still has only
-// New and Propagate. These two adapters use the canonical memory-fault identity
-// without requiring interface payload cells in a synchronous outcome body.
+// Compiler-private trace transport modes. Compact nil-fault modes use the
+// canonical memory-fault identity without requiring interface payload cells in
+// a synchronous outcome body; adopt-propagate modes transfer trace carrier
+// ownership from a validated ordinary-await ancestor into the sync-ramp outcome
+// propagator coroutine.
 const (
-	coroLogicalTraceNilNewV1       uint32 = 2
-	coroLogicalTraceNilPropagateV1 uint32 = 3
+	coroLogicalTraceNilNewV1            uint32 = 2
+	coroLogicalTraceNilPropagateV1      uint32 = 3
+	coroLogicalTraceAdoptPropagateV1    uint32 = 4
+	coroLogicalTraceNilAdoptPropagateV1 uint32 = 5
 )
 
 // coroNormalizePanicPayloadV1 returns the concrete empty-interface words used
@@ -103,20 +107,38 @@ func __llgo_coro_panic_trace_append_v1(
 	g, descriptor, typeWord, dataWord unsafe.Pointer,
 	line, mode uint32,
 ) {
-	if mode == coroLogicalTraceNilNewV1 || mode == coroLogicalTraceNilPropagateV1 {
-		// Modes 2/3 are the compact nil-memory-fault counterparts of New /
-		// Propagate. A nil pair here means a memory error, not panic(nil).
-		// Normalization stays on the cold path and adds no task/frame fields.
+	var traceMode coro.LogicalPanicTraceMode
+	switch mode {
+	case uint32(coro.LogicalPanicTraceNew), uint32(coro.LogicalPanicTracePropagate):
+		typeWord, dataWord = coroNormalizePanicPayloadV1(typeWord, dataWord)
+		traceMode = coro.LogicalPanicTraceMode(mode)
+	case coroLogicalTraceNilNewV1:
+		// Compact nil-fault counterpart of New. A nil pair here means a memory
+		// error, not panic(nil). Normalization stays on the cold path.
 		if typeWord != nil || dataWord != nil {
 			coroRuntimeAbort("invalid compact nil-fault trace payload")
 		}
 		typeWord, dataWord = coroNilFaultPayloadV1()
-		mode -= coroLogicalTraceNilNewV1
-	} else {
+		traceMode = coro.LogicalPanicTraceNew
+	case coroLogicalTraceNilPropagateV1:
+		if typeWord != nil || dataWord != nil {
+			coroRuntimeAbort("invalid compact nil-fault trace payload")
+		}
+		typeWord, dataWord = coroNilFaultPayloadV1()
+		traceMode = coro.LogicalPanicTracePropagate
+	case coroLogicalTraceAdoptPropagateV1:
 		typeWord, dataWord = coroNormalizePanicPayloadV1(typeWord, dataWord)
+		traceMode = coro.LogicalPanicTraceAdoptPropagate
+	case coroLogicalTraceNilAdoptPropagateV1:
+		if typeWord != nil || dataWord != nil {
+			coroRuntimeAbort("invalid compact nil-fault trace payload")
+		}
+		typeWord, dataWord = coroNilFaultPayloadV1()
+		traceMode = coro.LogicalPanicTraceAdoptPropagate
+	default:
+		coroRuntimeAbort("invalid logical coroutine panic trace preparation")
 	}
 	task := (*coro.G)(g)
-	traceMode := coro.LogicalPanicTraceMode(mode)
 	if typeWord == nil || !coro.PrepareLogicalPanicTrace(task, traceMode, typeWord, dataWord) {
 		coroRuntimeAbort("invalid logical coroutine panic trace preparation")
 	}

@@ -211,6 +211,11 @@ const (
 	// or a helper call to the synchronous outcome body.
 	coroLogicalPanicTraceNilNew
 	coroLogicalPanicTraceNilPropagate
+	// Sync-ramp outcome propagation adopts a trace left on the suspended
+	// ordinary-await caller ancestor when an $outcome callee panicked or
+	// faulted on the caller's physical stack.
+	coroLogicalPanicTraceAdoptPropagate
+	coroLogicalPanicTraceNilAdoptPropagate
 )
 
 const (
@@ -385,6 +390,9 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	}
 	version := coroPhysicalABIVersionV1
 	descriptorFlags := uint32(0)
+	if entry.name == coroOutcomePropagateHelperNameV1 {
+		descriptorFlags |= coro.FrameDescriptorTraceHiddenV1
+	}
 	// Absence of an execution flag is a capability only for a closed managed
 	// body. Unknown/open execution and any propagated getg/reentry primitive
 	// retain the ordinary per-resume runtime-context install. Blocking,
