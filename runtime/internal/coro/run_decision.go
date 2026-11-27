@@ -65,7 +65,8 @@ func validRunDecision(decision RunDecision) bool {
 		switch decision.outcome {
 		case ParkOutcomeCompleted:
 			if decision.directChannel {
-				return decision.task == TaskCancelNone && decision.caseID == 1
+				return decision.task == TaskCancelNone && decision.caseID != 0 &&
+					decision.caseID <= MaxSelectOperationCases
 			}
 			return decision.task == TaskCancelNone && decision.caseID != 0
 		case ParkOutcomeDefault:

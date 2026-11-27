@@ -1038,9 +1038,9 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 		t.Fatalf("channel select waiters not published: first=%p second=%p",
 			selectChannels[0].recvq.first, selectChannels[1].recvq.first)
 	}
-	// Clear the mandatory initial parked-set visit so a later same-P matcher
-	// can publish the exact selected endpoint directly to the owner-local FIFO.
-	pollCoroChannelAdapterExecutor(t, driver)
+	// Compact direct-channel select needs no initial parked-set source epoch;
+	// a later same-P matcher publishes directly to the owner's direct-channel
+	// inbox.
 	deferredG, deferredOK := coro.NextRunnable(p)
 	if !deferredOK || deferredG == nil || deferredG == selectFrame.g {
 		t.Fatalf("dequeue unrelated ready G before select completion = (%p, %t)", deferredG, deferredOK)
@@ -1579,4 +1579,179 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 			status, migrateRecvValue, coroChanResumeRecvOK, migrateSendValue)
 	}
 	yieldCoroChannelAdapterFrame(t, directTargetP, migrateRecvFrame, migratedAction)
+}
+
+func TestCoroChannelAdapterCompactSelectEdgeCases(t *testing.T) {
+	if size := unsafe.Sizeof(CoroChanSelectV1{}); size > 160 {
+		t.Fatalf("CoroChanSelectV1 grew to %d bytes, want <= 160", size)
+	}
+	prevRegistry := coroProgramExecutorRegistryState
+	prevHandle := coroProgramExecutorHandleV1State
+	prevBound := coroProgramExecutorBoundV1State
+	prevTask := coroCurrentTaskTestV1
+	prevRoute := coroCurrentTaskRouteTestV1
+	coroProgramExecutorRegistryState = coro.ExecutorRegistry{}
+	coroProgramExecutorHandleV1State = coro.ExecutorHandle{}
+	coroProgramExecutorBoundV1State = false
+	coroCurrentTaskTestV1 = nil
+	coroCurrentTaskRouteTestV1 = 0
+	defer func() {
+		coroProgramExecutorRegistryState = prevRegistry
+		coroProgramExecutorHandleV1State = prevHandle
+		coroProgramExecutorBoundV1State = prevBound
+		coroCurrentTaskTestV1 = prevTask
+		coroCurrentTaskRouteTestV1 = prevRoute
+	}()
+
+	p := new(coro.P)
+	driver := new(coro.ExecutorDriver)
+	channelSource := new(coro.ChannelOperationSource)
+	handle, ok := coroProgramExecutorRegistryState.Register()
+	if !ok || !coro.BindExecutorSourceCatalog(
+		driver,
+		p,
+		&coroProgramExecutorRegistryState,
+		handle,
+		coro.ExecutorSourceCatalog{Channel: channelSource},
+	) {
+		t.Fatal("bind compact select adapter executor")
+	}
+	coroProgramExecutorHandleV1State = handle
+	coroProgramExecutorBoundV1State = true
+
+	dequeueTarget := func(target *coro.G) {
+		t.Helper()
+		for attempts := 0; attempts < 8; attempts++ {
+			g, ok := coro.NextRunnable(p)
+			if !ok || g == nil {
+				t.Fatalf("missing runnable target %p (got %p, %t)", target, g, ok)
+			}
+			if g == target {
+				return
+			}
+			if !coro.Enqueue(p, g) {
+				t.Fatalf("requeue non-target %p", g)
+			}
+		}
+		t.Fatalf("did not find target %p in ready queue", target)
+	}
+
+	// 1. Duplicate channel + nil case + 3-case select: enqueue, match one case,
+	//    unlink duplicate loser cleanly, clear all case storage, and reuse the
+	//    exact same CoroChanSelectV1 across a second select iteration.
+	selector := newCoroChannelAdapterFrame(t)
+	peer := newCoroChannelAdapterFrame(t)
+	if !coro.Enqueue(p, selector.g) || !coro.Enqueue(p, peer.g) {
+		t.Fatal("enqueue compact select test tasks")
+	}
+	ch := new(Chan)
+	ch.elemsize = int(unsafe.Sizeof(uint32(0)))
+	ch.mutex.Init(nil)
+
+	var v0, v1 uint32
+	ops := []ChanOp{
+		{C: nil, Val: unsafe.Pointer(&v0), Size: int32(unsafe.Sizeof(v0))},
+		{C: ch, Val: unsafe.Pointer(&v0), Size: int32(unsafe.Sizeof(v0))},
+		{C: ch, Val: unsafe.Pointer(&v1), Size: int32(unsafe.Sizeof(v1))},
+	}
+	var cases [3]CoroChanSelectCaseV1
+	var state CoroChanSelectV1
+
+	for round := 0; round < 2; round++ {
+		v0, v1 = 0, 0
+		dequeueTarget(selector.g)
+		selAct := activateCoroChannelAdapterFrame(t, p, selector)
+		selector.header.SuspendReason = uint16(coro.SuspendPark)
+		selector.header.Lifecycle = uint16(coro.FrameSuspended)
+		prepareCoroChanSelectV1(
+			unsafe.Pointer(selector.g), selector.handle, unsafe.Pointer(selector.header),
+			unsafe.Pointer(&cases[0]), unsafe.Pointer(&state), ops,
+		)
+		if parked, ok := coro.Resumed(p, selector.g, selAct); !ok || parked.Kind != coro.ActionPark {
+			t.Fatalf("round %d park duplicate-channel select = (%+v, %t)", round, parked, ok)
+		}
+		dequeueTarget(peer.g)
+		peerAct := activateCoroChannelAdapterFrame(t, p, peer)
+		sent := uint32(0x11223300 + round)
+		if !CoroChanTrySend(unsafe.Pointer(peer.g), ch, unsafe.Pointer(&sent), int(unsafe.Sizeof(sent))) {
+			t.Fatalf("round %d send did not match duplicate-channel select", round)
+		}
+		yieldCoroChannelAdapterFrame(t, p, peer, peerAct)
+		if !pollCoroChannelAdapterExecutorProgress(t, driver) {
+			t.Fatalf("round %d compact select did not use direct-channel materialization", round)
+		}
+		if ch.recvq.first != nil || ch.sendq.first != nil {
+			t.Fatalf("round %d duplicate loser remained queued: recv=%p send=%p", round, ch.recvq.first, ch.sendq.first)
+		}
+		for i := range cases {
+			if cases[i] != (CoroChanSelectCaseV1{}) {
+				t.Fatalf("round %d case %d not cleared after materialization: %+v", round, i, cases[i])
+			}
+		}
+		dequeueTarget(selector.g)
+		selAct, ok = coro.BeginRunG(p, selector.g)
+		if !ok || selAct.Kind != coro.ActionCheckResume {
+			t.Fatalf("round %d BeginRunG selector = (%+v, %t)", round, selAct, ok)
+		}
+		selAct, ok = coro.Checked(p, selector.g, selAct, false)
+		if !ok || selAct.Kind != coro.ActionResume {
+			t.Fatalf("round %d Checked selector = (%+v, %t)", round, selAct, ok)
+		}
+		isel, recvOK, status := CoroChanSelectResume(
+			unsafe.Pointer(selector.g), unsafe.Pointer(&cases[0]), unsafe.Pointer(&state), ops...,
+		)
+		if (isel != 1 && isel != 2) || !recvOK || status != coroChanResumeRecvOK ||
+			(isel == 1 && (v0 != sent || v1 != 0)) ||
+			(isel == 2 && (v1 != sent || v0 != 0)) {
+			t.Fatalf("round %d resume = (%d,%t,%d) vals=(%#x,%#x) want %#x", round, isel, recvOK, status, v0, v1, sent)
+		}
+		if state != (CoroChanSelectV1{}) {
+			t.Fatalf("round %d state not zero after CoroChanSelectResume: %+v", round, state)
+		}
+		selector.header.SuspendReason = uint16(coro.SuspendNone)
+		selector.header.Lifecycle = uint16(coro.FrameActive)
+		yieldCoroChannelAdapterFrame(t, p, selector, selAct)
+	}
+
+	// 2. All-nil blocking select canceled by task abort must resume cleanly.
+	nilSel := newCoroChannelAdapterFrame(t)
+	if !coro.Enqueue(p, nilSel.g) {
+		t.Fatal("enqueue all-nil select task")
+	}
+	dequeueTarget(nilSel.g)
+	nilAct := activateCoroChannelAdapterFrame(t, p, nilSel)
+	nilOps := []ChanOp{{C: nil, Val: unsafe.Pointer(&v0), Size: int32(unsafe.Sizeof(v0))}}
+	var nilCases [1]CoroChanSelectCaseV1
+	var nilState CoroChanSelectV1
+	nilSel.header.SuspendReason = uint16(coro.SuspendPark)
+	nilSel.header.Lifecycle = uint16(coro.FrameSuspended)
+	prepareCoroChanSelectV1(
+		unsafe.Pointer(nilSel.g), nilSel.handle, unsafe.Pointer(nilSel.header),
+		unsafe.Pointer(&nilCases[0]), unsafe.Pointer(&nilState), nilOps,
+	)
+	if parked, ok := coro.Resumed(p, nilSel.g, nilAct); !ok || parked.Kind != coro.ActionPark {
+		t.Fatalf("park all-nil select = (%+v, %t)", parked, ok)
+	}
+	if !coro.RequestTaskCancellation(p, nilSel.g, coro.TaskCancelAbort) {
+		t.Fatal("cancel all-nil select")
+	}
+	pollCoroChannelAdapterExecutor(t, driver)
+	dequeueTarget(nilSel.g)
+	nilAct, ok = coro.BeginRunG(p, nilSel.g)
+	if !ok || nilAct.Kind != coro.ActionCheckResume {
+		t.Fatalf("BeginRunG canceled all-nil select = (%+v, %t)", nilAct, ok)
+	}
+	nilAct, ok = coro.Checked(p, nilSel.g, nilAct, false)
+	if !ok || nilAct.Kind != coro.ActionResume {
+		t.Fatalf("Checked canceled all-nil select = (%+v, %t)", nilAct, ok)
+	}
+	isel, recvOK, status := CoroChanSelectResume(
+		unsafe.Pointer(nilSel.g), unsafe.Pointer(&nilCases[0]), unsafe.Pointer(&nilState), nilOps...,
+	)
+	if isel != -1 || recvOK || status != coroChanResumeTaskAbort || nilState != (CoroChanSelectV1{}) {
+		t.Fatalf("all-nil select cancel resume = (%d,%t,%d) state=%+v", isel, recvOK, status, nilState)
+	}
+	nilSel.header.SuspendReason = uint16(coro.SuspendNone)
+	nilSel.header.Lifecycle = uint16(coro.FrameActive)
+	yieldCoroChannelAdapterFrame(t, p, nilSel, nilAct)
 }
