@@ -609,6 +609,9 @@ jobs:
               test/go/semaphore_brief_wait_test.go \
               test/go/waitgroup_brief_wait_synctest_test.go \
               test/go/memory_equality_offsets_test.go \
+              test/go/protected_memory_unix_test.go \
+              test/go/interface_uncomparable_panic_test.go \
+              test/go/interface_string_compare_test.go \
               test/go/defer_panic_callers_test.go \
               test/go/runtime_caller_exhaustion_test.go \
               test/go/recover_defer_go126_test.go \

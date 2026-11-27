@@ -414,7 +414,7 @@ func nilinterequal(p, q unsafe.Pointer) bool {
 // the same equality relation here. In particular, floating-point zeroes compare
 // equal, NaNs compare unequal, blank struct fields are ignored, and comparing
 // an interface containing an uncomparable value panics.
-func typeequalScalar(t *_type, p, q unsafe.Pointer) (eq, handled bool) {
+func typeequalNonStringScalar(t *_type, p, q unsafe.Pointer) (eq, handled bool) {
 	if t.TFlag&abi.TFlagRegularMemory != 0 {
 		return memequal(p, q, t.Size_, t.Align_), true
 	}
@@ -439,17 +439,34 @@ func typeequalScalar(t *_type, p, q unsafe.Pointer) (eq, handled bool) {
 		return c128equal(p, q), true
 	case abi.Chan, abi.Pointer, abi.UnsafePointer:
 		return memequalptr(p, q), true
-	case abi.String:
-		return strequal(p, q), true
 	}
 	return false, false
 }
 
-func typeequalStructFieldFast(f structfield, p, q unsafe.Pointer) (eq, handled bool) {
-	if f.Name_ == "_" {
-		return true, true
+func typeequalScalar(t *_type, p, q unsafe.Pointer) (eq, handled bool) {
+	if t.Kind() == abi.String {
+		return strequal(p, q), true
 	}
-	return typeequalScalar(f.Typ, add(p, f.Offset), add(q, f.Offset))
+	return typeequalNonStringScalar(t, p, q)
+}
+
+func typeequalStructFieldCheap(f structfield, p, q unsafe.Pointer) (eq, handled, isString bool) {
+	if f.Name_ == "_" {
+		return true, true, false
+	}
+	pi, qi := add(p, f.Offset), add(q, f.Offset)
+	if f.Typ.Kind() == abi.String {
+		return len(*(*string)(pi)) == len(*(*string)(qi)), true, true
+	}
+	eq, handled = typeequalNonStringScalar(f.Typ, pi, qi)
+	return eq, handled, false
+}
+
+func typeequalStructFieldString(f structfield, p, q unsafe.Pointer) bool {
+	if f.Name_ == "_" || f.Typ.Kind() != abi.String {
+		return true
+	}
+	return strequal(add(p, f.Offset), add(q, f.Offset))
 }
 
 func typeequalInterfaceFast(t *_type, p, q unsafe.Pointer) (eq, handled bool) {
@@ -494,41 +511,65 @@ func typeequalStructFast(t *_type, p, q unsafe.Pointer) (eq, handled bool) {
 	}
 	fp := fs.array
 	const fieldSize = unsafe.Sizeof(structfield{})
+	// Pass 1 checks all non-string scalar fields and string lengths before
+	// reading any string bytes, preserving structequalImpl's short-circuit
+	// order and falling back immediately on any non-scalar (e.g. interface)
+	// field so panic ordering is unchanged.
+	hasString := false
 	if n >= 1 {
-		eq, ok := typeequalStructFieldFast(*(*structfield)(fp), p, q)
+		eq, ok, str := typeequalStructFieldCheap(*(*structfield)(fp), p, q)
 		if !ok {
 			return false, false
 		}
 		if !eq {
 			return false, true
 		}
+		hasString = hasString || str
 	}
 	if n >= 2 {
-		eq, ok := typeequalStructFieldFast(*(*structfield)(add(fp, fieldSize)), p, q)
+		eq, ok, str := typeequalStructFieldCheap(*(*structfield)(add(fp, fieldSize)), p, q)
 		if !ok {
 			return false, false
 		}
 		if !eq {
 			return false, true
 		}
+		hasString = hasString || str
 	}
 	if n >= 3 {
-		eq, ok := typeequalStructFieldFast(*(*structfield)(add(fp, 2*fieldSize)), p, q)
+		eq, ok, str := typeequalStructFieldCheap(*(*structfield)(add(fp, 2*fieldSize)), p, q)
 		if !ok {
 			return false, false
 		}
 		if !eq {
 			return false, true
 		}
+		hasString = hasString || str
 	}
 	if n >= 4 {
-		eq, ok := typeequalStructFieldFast(*(*structfield)(add(fp, 3*fieldSize)), p, q)
+		eq, ok, str := typeequalStructFieldCheap(*(*structfield)(add(fp, 3*fieldSize)), p, q)
 		if !ok {
 			return false, false
 		}
 		if !eq {
 			return false, true
 		}
+		hasString = hasString || str
+	}
+	if !hasString {
+		return true, true
+	}
+	if n >= 1 && !typeequalStructFieldString(*(*structfield)(fp), p, q) {
+		return false, true
+	}
+	if n >= 2 && !typeequalStructFieldString(*(*structfield)(add(fp, fieldSize)), p, q) {
+		return false, true
+	}
+	if n >= 3 && !typeequalStructFieldString(*(*structfield)(add(fp, 2*fieldSize)), p, q) {
+		return false, true
+	}
+	if n >= 4 && !typeequalStructFieldString(*(*structfield)(add(fp, 3*fieldSize)), p, q) {
+		return false, true
 	}
 	return true, true
 }
