@@ -615,6 +615,7 @@ jobs:
               test/go/bound_method_direct_test.go \
               test/go/field_guard_memory_test.go \
               test/go/bounded_loop_sync_ramp_test.go \
+              test/go/sync_ramp_fast_paths_test.go \
               test/go/channel_select_semantics_test.go \
               test/go/timer_hub_semantics_test.go
           for procs in 1 4; do

@@ -66,9 +66,13 @@ type Pool struct {
 }
 
 // Local per-P Pool appendix.
+const poolLocalCacheSize = 16
+
 type poolLocalInternal struct {
-	private any       // Can be used only by the respective P.
-	shared  poolChain // Local P can pushHead/popHead; any P can popTail.
+	private  any                    // Can be used only by the respective P.
+	cache    [poolLocalCacheSize]any // Fast thread-local LIFO stack before spilling to shared.
+	cacheLen int
+	shared   poolChain              // Local P can pushHead/popHead; any P can popTail.
 }
 
 type poolLocal struct {
@@ -79,17 +83,56 @@ type poolLocal struct {
 	pad [128 - unsafe.Sizeof(poolLocalInternal{})%128]byte
 }
 
+func (l *poolLocal) tryPut(x any) bool {
+	if l.private == nil {
+		l.private = x
+		return true
+	}
+	n := l.cacheLen
+	if uint(n) < poolLocalCacheSize {
+		l.cache[n] = x
+		l.cacheLen = n + 1
+		return true
+	}
+	return false
+}
+
+func (l *poolLocal) tryGet() (any, bool) {
+	if x := l.private; x != nil {
+		l.private = nil
+		return x, true
+	}
+	if n := l.cacheLen; n > 0 && uint(n-1) < poolLocalCacheSize {
+		n--
+		x := l.cache[n]
+		l.cache[n] = nil
+		l.cacheLen = n
+		return x, true
+	}
+	return nil, false
+}
+
 // Put adds x to the pool.
 func (p *Pool) Put(x any) {
 	if x == nil {
 		return
 	}
-	l, _ := p.pin()
-	if l.private == nil {
-		l.private = x
-	} else {
-		l.shared.pushHead(x)
+	if p != nil {
+		if ptr := atomic.LoadPointer(&p.local); ptr != nil {
+			if l := (*poolLocal)(runtime_poolLocalGet(ptr)); l != nil && l.tryPut(x) {
+				return
+			}
+		}
 	}
+	p.putSlow(x)
+}
+
+func (p *Pool) putSlow(x any) {
+	l, _ := p.pin()
+	if l.tryPut(x) {
+		return
+	}
+	l.shared.pushHead(x)
 }
 
 // Get selects an arbitrary item from the [Pool], removes it from the
@@ -101,14 +144,26 @@ func (p *Pool) Put(x any) {
 // If Get would otherwise return nil and p.New is non-nil, Get returns
 // the result of calling p.New.
 func (p *Pool) Get() any {
-	l, _ := p.pin()
-	x := l.private
-	l.private = nil
-	if x == nil {
-		x, _ = l.shared.popHead()
-		if x == nil {
-			x = p.getSlow(0)
+	if p != nil {
+		if ptr := atomic.LoadPointer(&p.local); ptr != nil {
+			if l := (*poolLocal)(runtime_poolLocalGet(ptr)); l != nil {
+				if x, ok := l.tryGet(); ok {
+					return x
+				}
+			}
 		}
+	}
+	return p.getSlowFull()
+}
+
+func (p *Pool) getSlowFull() any {
+	l, _ := p.pin()
+	if x, ok := l.tryGet(); ok {
+		return x
+	}
+	x, _ := l.shared.popHead()
+	if x == nil {
+		x = p.getSlow(0)
 	}
 	if x == nil && p.New != nil {
 		x = p.New()

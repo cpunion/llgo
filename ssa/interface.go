@@ -508,6 +508,17 @@ func (b Builder) buildVal(typ Type, val llvm.Value, lvl int) Expr {
 //
 //	t1 = typeassert t0.(int)
 //	t3 = typeassert,ok t2.(T)
+// DirectTypeAssert performs a zero-call type check from an empty interface x
+// to a concrete direct-interface type assertedTyp (e.g. *T, chan T, unsafe.Pointer).
+// It returns the extracted value (valid only when ok is true) and the boolean match.
+func (b Builder) DirectTypeAssert(x Expr, assertedTyp Type) (val Expr, ok Expr) {
+	tx := b.InterfaceTypeWord(x)
+	tabi := b.abiType(assertedTyp.raw.Type)
+	ok = b.BinOp(token.EQL, tx, tabi)
+	val = b.valFromData(assertedTyp, b.faceData(x.impl))
+	return
+}
+
 func (b Builder) TypeAssert(x Expr, assertedTyp Type, commaOk bool) Expr {
 	dbgInstrf("TypeAssert %v, %v, %v\n", x.impl, assertedTyp.raw.Type, commaOk)
 	logical := b.blk

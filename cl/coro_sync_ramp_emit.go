@@ -93,21 +93,24 @@ func (s *coroSyncSlowResumeState) dominatesDebugUse(iv instrOrValue, ref *ssa.De
 }
 
 type coroSyncEmitEnv struct {
-	vals map[ssa.Value]llssa.Expr
-	zero map[ssa.Value]bool
+	vals      map[ssa.Value]llssa.Expr
+	zero      map[ssa.Value]bool
+	nilIfaces map[ssa.Value]bool
 }
 
 func newCoroSyncEmitEnv() coroSyncEmitEnv {
 	return coroSyncEmitEnv{
-		vals: make(map[ssa.Value]llssa.Expr),
-		zero: make(map[ssa.Value]bool),
+		vals:      make(map[ssa.Value]llssa.Expr),
+		zero:      make(map[ssa.Value]bool),
+		nilIfaces: make(map[ssa.Value]bool),
 	}
 }
 
 func (e coroSyncEmitEnv) clone() coroSyncEmitEnv {
 	return coroSyncEmitEnv{
-		vals: cloneMap(e.vals),
-		zero: cloneMap(e.zero),
+		vals:      cloneMap(e.vals),
+		zero:      cloneMap(e.zero),
+		nilIfaces: cloneMap(e.nilIfaces),
 	}
 }
 
@@ -295,7 +298,15 @@ func (p *context) compileCoroSyncRampPhysicalBody(
 				task: tryFn.PhysicalParam(0), resultSlot: tryFn.PhysicalParam(1), tryMode: true,
 			}
 			emitter.initParams(tryFn, sourceParamBase)
-			emitter.emitNode(ramp.root, newCoroSyncEmitEnv())
+			if ramp.kind == coroSyncRampBoundedLoop {
+				bailBlk := tryFn.MakeBlock()
+				emitter.bailStart = bailBlk
+				emitter.emitBoundedLoopCFG()
+				tb.SetBlockEx(bailBlk, llssa.AtEnd, false)
+				emitter.emitBailStart()
+			} else {
+				emitter.emitNode(ramp.root, newCoroSyncEmitEnv())
+			}
 			tb.EndBuild()
 			tb.Dispose()
 			p.fn = savedFn
@@ -1009,6 +1020,7 @@ func (e *coroSyncFastEmitter) emitNode(node *coroSyncFastNode, parentEnv coroSyn
 			edge := v.Edges[coroSyncPhiEdgeIndex(v, node.predBlock)]
 			env.vals[v] = e.evalValueAs(edge, v.Type(), env.vals)
 			env.zero[v] = coroSyncIsZeroIntConst(edge) || env.zero[edge]
+			env.nilIfaces[v] = coroSyncIsNilInterfaceValue(edge, env.nilIfaces)
 		case *ssa.Extract:
 			env.vals[v] = e.b.Extract(e.evalValue(v.Tuple, env.vals), v.Index)
 		case *ssa.Field:
@@ -1019,10 +1031,99 @@ func (e *coroSyncFastEmitter) emitNode(node *coroSyncFastNode, parentEnv coroSyn
 				e.emitNilGuard(x, mutated, v.Pos())
 			}
 			env.vals[v] = e.b.FieldAddrKnownNonNil(x, v.Field)
+		case *ssa.IndexAddr:
+			base := e.evalValue(v.X, env.vals)
+			idx := e.evalValue(v.Index, env.vals)
+			if phys.nilGuard {
+				e.emitNilGuard(base, mutated, v.Pos())
+			}
+			normalized := idx
+			if phys.boundsGuard {
+				var limit llssa.Expr
+				switch phys.container {
+				case coroPhysicalContainerSlice:
+					limit = e.b.SliceLen(base)
+				case coroPhysicalContainerArrayPointer:
+					limit = e.p.prog.IntVal(uint64(phys.bound), e.p.prog.Int())
+				default:
+					panic("sync-ramp unsupported IndexAddr container")
+				}
+				var outOfRange llssa.Expr
+				normalized, outOfRange = e.b.IndexBounds(idx, limit)
+				if !outOfRange.IsNil() {
+					failBlk, contBlk := e.b.Func.MakeBlock(), e.b.Func.MakeBlock()
+					e.b.IfWithBranchWeights(outOfRange, failBlk, contBlk, 1, 1000)
+					e.b.SetBlockEx(failBlk, llssa.AtEnd, false)
+					if e.inSingleAwaitPost {
+						e.emitResumePostCall()
+					} else {
+						e.emitBailStart()
+					}
+					e.b.SetBlockContinuation(contBlk)
+				}
+			}
+			env.vals[v] = e.b.IndexAddrUnchecked(base, normalized)
+		case *ssa.Index:
+			base := e.evalValue(v.X, env.vals)
+			idx := e.evalValue(v.Index, env.vals)
+			if phys.nilGuard {
+				e.emitNilGuard(base, mutated, v.Pos())
+			}
+			normalized := idx
+			if phys.boundsGuard {
+				var limit llssa.Expr
+				switch phys.container {
+				case coroPhysicalContainerString:
+					limit = e.b.StringLen(base)
+				case coroPhysicalContainerSlice:
+					limit = e.b.SliceLen(base)
+				case coroPhysicalContainerArrayPointer:
+					limit = e.p.prog.IntVal(uint64(phys.bound), e.p.prog.Int())
+				default:
+					panic("sync-ramp unsupported Index container")
+				}
+				var outOfRange llssa.Expr
+				normalized, outOfRange = e.b.IndexBounds(idx, limit)
+				if !outOfRange.IsNil() {
+					failBlk, contBlk := e.b.Func.MakeBlock(), e.b.Func.MakeBlock()
+					e.b.IfWithBranchWeights(outOfRange, failBlk, contBlk, 1, 1000)
+					e.b.SetBlockEx(failBlk, llssa.AtEnd, false)
+					if e.inSingleAwaitPost {
+						e.emitResumePostCall()
+					} else {
+						e.emitBailStart()
+					}
+					e.b.SetBlockContinuation(contBlk)
+				}
+			}
+			switch phys.container {
+			case coroPhysicalContainerString:
+				env.vals[v] = e.b.IndexUnchecked(base, normalized, nil)
+			case coroPhysicalContainerSlice, coroPhysicalContainerArrayPointer:
+				env.vals[v] = e.b.LoadKnownNonNil(e.b.IndexAddrUnchecked(base, normalized))
+			default:
+				panic("sync-ramp unsupported Index container")
+			}
 		case *ssa.BinOp:
 			if phys.recipe == coroPhysicalInstructionInterfaceNilCompare {
 				val := e.evalValue(phys.valueOperand, env.vals)
 				env.vals[v] = e.b.BinOp(v.Op, e.b.InterfaceTypeWord(val), e.p.prog.Nil(e.p.prog.VoidPtr()))
+			} else if (v.Op == token.EQL || v.Op == token.NEQ) &&
+				coroSyncIsConcreteInterfaceType(v.X.Type()) && coroSyncIsConcreteInterfaceType(v.Y.Type()) {
+				xNil := coroSyncIsNilInterfaceValue(v.X, env.nilIfaces)
+				yNil := coroSyncIsNilInterfaceValue(v.Y, env.nilIfaces)
+				switch {
+				case xNil && yNil:
+					env.vals[v] = e.p.prog.BoolVal(v.Op == token.EQL)
+				case xNil:
+					val := e.evalValue(v.Y, env.vals)
+					env.vals[v] = e.b.BinOp(v.Op, e.b.InterfaceTypeWord(val), e.p.prog.Nil(e.p.prog.VoidPtr()))
+				case yNil:
+					val := e.evalValue(v.X, env.vals)
+					env.vals[v] = e.b.BinOp(v.Op, e.b.InterfaceTypeWord(val), e.p.prog.Nil(e.p.prog.VoidPtr()))
+				default:
+					panic("sync-ramp dynamic interface comparison requires nil operand")
+				}
 			} else if cval, ok := foldConstComparison(v); ok {
 				env.vals[v] = e.p.prog.BoolVal(cval)
 			} else {
@@ -1068,17 +1169,60 @@ func (e *coroSyncFastEmitter) emitNode(node *coroSyncFastNode, parentEnv coroSyn
 			t := e.p.type_(v.Type(), llssa.InGo)
 			if isUntypedNilConst(v.X) {
 				env.vals[v] = e.p.prog.Nil(t)
+				env.nilIfaces[v] = true
 			} else {
 				env.vals[v] = e.b.MakeInterface(t, e.evalValue(v.X, env.vals))
 			}
+		case *ssa.TypeAssert:
+			x := e.evalValue(v.X, env.vals)
+			assertedTyp := e.p.type_(v.AssertedType, llssa.InGo)
+			val, ok := e.b.DirectTypeAssert(x, assertedTyp)
+			if v.CommaOk {
+				tupType := e.p.prog.Struct(assertedTyp, e.p.prog.Bool())
+				zeroVal := e.p.prog.Zero(assertedTyp)
+				selected := e.b.SelectValue(ok, val, zeroVal)
+				env.vals[v] = e.b.Aggregate(tupType, selected, ok)
+			} else {
+				okBlk, failBlk := e.b.Func.MakeBlock(), e.b.Func.MakeBlock()
+				e.b.IfWithBranchWeights(ok, okBlk, failBlk, 1000, 1)
+				e.b.SetBlockEx(failBlk, llssa.AtEnd, false)
+				if e.inSingleAwaitPost {
+					e.emitResumePostCall()
+				} else {
+					e.emitBailStart()
+				}
+				e.b.SetBlockContinuation(okBlk)
+				env.vals[v] = val
+			}
 		case *ssa.Slice:
 			x := e.evalValue(v.X, env.vals)
-			if v.Low == nil || coroSyncIsZeroIntConst(v.Low) || env.zero[v.Low] {
+			isZeroLow := v.Low == nil || coroSyncIsZeroIntConst(v.Low) || env.zero[v.Low]
+			if isZeroLow && v.High == nil {
 				env.vals[v] = x
 			} else {
-				low := e.evalValue(v.Low, env.vals)
-				high := e.b.SliceLen(x)
-				limit := e.b.SliceCap(x)
+				var low llssa.Expr
+				if v.Low == nil {
+					low = e.p.prog.IntVal(0, e.p.prog.Int())
+				} else {
+					low = e.evalValue(v.Low, env.vals)
+				}
+				_, isSlice := types.Unalias(v.X.Type()).Underlying().(*types.Slice)
+				var high, limit llssa.Expr
+				if isSlice {
+					if v.High == nil {
+						high = e.b.SliceLen(x)
+					} else {
+						high = e.evalValue(v.High, env.vals)
+					}
+					limit = e.b.SliceCap(x)
+				} else {
+					limit = e.b.StringLen(x)
+					if v.High == nil {
+						high = limit
+					} else {
+						high = e.evalValue(v.High, env.vals)
+					}
+				}
 				nlow, nhigh, nmax, outOfRange := e.b.SliceBounds(low, high, llssa.Nil, limit)
 				if !outOfRange.IsNil() {
 					failBlk, contBlk := e.b.Func.MakeBlock(), e.b.Func.MakeBlock()
@@ -1170,6 +1314,10 @@ func (e *coroSyncFastEmitter) emitCall(
 	if isPureLenCapBuiltin(call) {
 		return e.b.BuiltinCall(call.Common().Value.(*ssa.Builtin).Name(), e.evalValue(call.Call.Args[0], vals))
 	}
+	if isPureCopyBuiltin(call) {
+		*mutated = true
+		return e.emitCopyBuiltin(call, vals)
+	}
 	if constVal, isConst := node.constBools[call]; isConst {
 		return e.p.prog.BoolVal(constVal)
 	}
@@ -1216,7 +1364,15 @@ func (e *coroSyncFastEmitter) emitCall(
 		e.b.SetBlockEx(failBlk, llssa.AtEnd, false)
 		e.emitBailStart()
 		e.b.SetBlockContinuation(contBlk)
-		*mutated = true
+		if entry := e.p.mustFunctionSymbol(tryTarget); entry.plan.ID != "" {
+			if targetPlan, err := entry.sealedPhysicalFunctionPlan(); err != nil ||
+				targetPlan == nil || targetPlan.syncRamp == nil ||
+				targetPlan.syncRamp.kind != coroSyncRampBoundedLoop {
+				*mutated = true
+			}
+		} else {
+			*mutated = true
+		}
 		return e.loadSlotTuple(outSlot, sourceSig.Results())
 	}
 	if phys.control == coroPhysicalControlDirectOutcome {
@@ -1237,6 +1393,37 @@ func (e *coroSyncFastEmitter) emitCall(
 		panic(fmt.Sprintf("sync-ramp plain callee %q did not resolve to a Go entry", callee.String()))
 	}
 	return e.b.Call(fnExpr.Expr, args...)
+}
+
+func (e *coroSyncFastEmitter) emitCopyBuiltin(call *ssa.Call, vals map[ssa.Value]llssa.Expr) llssa.Expr {
+	dst := e.evalValue(call.Call.Args[0], vals)
+	src := e.evalValue(call.Call.Args[1], vals)
+	if e.p.emissionUniverse != nil && e.p.emissionUniverse.CompleteRuntimeABI() {
+		rtPkg := e.p.emissionUniverse.byPath[llssa.PkgRuntime]
+		if rtPkg == nil {
+			panic("sync-ramp copy builtin requires runtime package")
+		}
+		sliceCopy := e.p.emissionUniverse.canonicalAlias(rtPkg.ssa.Func("SliceCopy"))
+		if sliceCopy == nil {
+			panic("sync-ramp copy builtin requires runtime.SliceCopy")
+		}
+		fn, _, kind := e.p.compileFunction(sliceCopy)
+		if fn == nil || kind != goFunc {
+			panic("sync-ramp copy builtin runtime.SliceCopy did not resolve to a plain Go entry")
+		}
+		prog := e.p.prog
+		etSize := prog.Val(int(prog.SizeOf(prog.Elem(dst.Type))))
+		var srcData, srcLen llssa.Expr
+		if _, isSlice := types.Unalias(call.Call.Args[1].Type()).Underlying().(*types.Slice); isSlice {
+			srcData = e.b.SliceData(src)
+			srcLen = e.b.SliceLen(src)
+		} else {
+			srcData = e.b.StringData(src)
+			srcLen = e.b.StringLen(src)
+		}
+		return e.b.Call(fn.Expr, dst, srcData, srcLen, etSize)
+	}
+	return e.b.BuiltinCall("copy", dst, src)
 }
 
 func (e *coroSyncFastEmitter) emitDirectOutcomeCall(callee *ssa.Function, args []llssa.Expr, pos token.Pos) llssa.Expr {
