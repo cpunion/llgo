@@ -89,7 +89,10 @@ type callerLocationToken struct {
 // physical caller, fills its compiler-owned token. Plain callers pass nil and
 // continue to use the entry-based Record helpers.
 func PushCallerLocationFrame(tokenPointer unsafe.Pointer, entry uintptr, name, file string, startLine int) {
-	store := callerLocationStoreForGoroutine()
+	store := loadCallerLocationStore()
+	if store == nil {
+		store = callerLocationStoreForGoroutine()
+	}
 	n := len(store.stack)
 	if n < cap(store.stack) {
 		store.stack = store.stack[:n+1]
@@ -197,18 +200,20 @@ func UpdateLogicalCallerLocation(tokenPointer unsafe.Pointer, entry uintptr, fil
 		return
 	}
 	token := (*callerLocationToken)(tokenPointer)
-	if token.store == nil || token.frameIndex < 0 {
+	if token.store == nil {
 		return
 	}
 	store := (*callerLocationStore)(token.store)
-	if token.frameIndex >= len(store.stack) {
+	idx := token.frameIndex
+	if idx < 0 || idx >= len(store.stack) {
 		return
 	}
-	frame := &store.stack[token.frameIndex]
+	frame := &store.stack[idx]
 	if frame.Entry != entry {
 		return
 	}
-	if frame.Line != line || (*String)(unsafe.Pointer(&frame.File)).data != (*String)(unsafe.Pointer(&file)).data {
+	frameFile := frame.File
+	if frame.Line != line || (*String)(unsafe.Pointer(&frameFile)).data != (*String)(unsafe.Pointer(&file)).data {
 		frame.File = file
 		frame.Line = line
 		frame.captured = 0
