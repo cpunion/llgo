@@ -10,14 +10,20 @@ import (
 // Named-source host island: the production observer is compiled unchanged.
 // The collector and target request are deterministic test boundaries.
 type weakHandle struct{ Live uintptr }
+type coroTimerHub struct {
+	control, ownerRoute, gcDirty uint32
+}
 type coroTimeTimerState struct {
-	control, ownerRoute uint32
-	weak                *weakHandle
-	gcNext              *coroTimeTimerState
-	channel, gcListed   bool
+	control  uint32
+	gcListed uint32
+	hub      *coroTimerHub
+	weak     *weakHandle
+	gcNext   *coroTimeTimerState
+	channel  bool
 }
 
 const (
+	coroTimerControlPhaseBits        = 2
 	coroTimerControlPhaseMask        = 3
 	coroTimerInactive         uint32 = 1
 	coroTimerActive           uint32 = 2
@@ -49,7 +55,12 @@ func resetTimerGC(t *testing.T) {
 }
 
 func gcTestTimer(live uintptr, phase uint32) *coroTimeTimerState {
-	return &coroTimeTimerState{control: 4 | phase, ownerRoute: 1, weak: &weakHandle{Live: live}, channel: true}
+	return &coroTimeTimerState{
+		control: 4 | phase,
+		hub:     &coroTimerHub{control: 4 | coroTimerActive, ownerRoute: 1},
+		weak:    &weakHandle{Live: live},
+		channel: true,
+	}
 }
 
 func TestTimerGCObserverPrunesDeadAndInactiveWithoutStrongUpgrade(t *testing.T) {
@@ -61,7 +72,7 @@ func TestTimerGCObserverPrunesDeadAndInactiveWithoutStrongUpgrade(t *testing.T) 
 	if !coroTimerGCObserveV1() {
 		t.Fatal("complete scan did not acknowledge epoch")
 	}
-	if coroTimerGC.head != live || live.gcNext != nil || !live.gcListed || dead.gcListed || stopped.gcListed {
+	if coroTimerGC.head != live || live.gcNext != nil || live.gcListed == 0 || dead.gcListed != 0 || stopped.gcListed != 0 {
 		t.Fatal("incorrect surviving membership")
 	}
 	if atomic.LoadUint32(&dead.control) != 4|coroTimerInactive || gcTestRequestCount != 1 {
@@ -94,7 +105,7 @@ func TestTimerGCObserverRetainsFailedOwnerRequest(t *testing.T) {
 	dead := gcTestTimer(0, coroTimerActive)
 	coroTimerTrack(dead)
 	atomic.StoreUint32(&gcTestRequestOK, 0)
-	if coroTimerGCObserveV1() || coroTimerGC.head != dead || !dead.gcListed {
+	if coroTimerGCObserveV1() || coroTimerGC.head != dead || dead.gcListed == 0 {
 		t.Fatal("failed request lost epoch or membership")
 	}
 	atomic.StoreUint32(&gcTestRequestOK, 1)
@@ -116,13 +127,13 @@ func TestTimerGCObserverDeadGenerationCannotOverflow(t *testing.T) {
 func TestTimerGCObserverCancelsBeforeOwnerPublication(t *testing.T) {
 	resetTimerGC(t)
 	dead := gcTestTimer(0, coroTimerActive)
-	dead.ownerRoute = 0
+	dead.hub.ownerRoute = 0
 	coroTimerTrack(dead)
-	if !coroTimerGCObserveV1() || coroTimerGC.head != nil || dead.gcListed {
+	if !coroTimerGCObserveV1() || coroTimerGC.head != nil || dead.gcListed != 0 {
 		t.Fatal("unpublished dead timer retained GC membership")
 	}
-	if dead.control != 4|coroTimerInactive || gcTestRequestCount != 0 {
-		t.Fatal("pre-publication cancellation must change control without inventing an owner")
+	if dead.control != 4|coroTimerInactive || dead.hub.gcDirty != 1 || gcTestRequestCount != 0 {
+		t.Fatal("pre-publication cancellation must change control and mark hub dirty without inventing an owner")
 	}
 }
 
@@ -130,7 +141,7 @@ func TestTimerGCObserverDoesNotTrackAfterFunc(t *testing.T) {
 	resetTimerGC(t)
 	callback := &coroTimeTimerState{control: 4 | coroTimerActive}
 	coroTimerTrack(callback)
-	if !coroTimerGCObserveV1() || coroTimerGC.head != nil || callback.gcListed ||
+	if !coroTimerGCObserveV1() || coroTimerGC.head != nil || callback.gcListed != 0 ||
 		callback.control != 4|coroTimerActive || gcTestRequestCount != 0 {
 		t.Fatal("AfterFunc callback acquired channel weak ownership")
 	}

@@ -40,6 +40,9 @@ func llgoCoroTimerStopV1(timer unsafe.Pointer) bool
 //go:linkname llgoCoroTimerResetV1 runtime.llgoCoroTimerResetV1
 func llgoCoroTimerResetV1(timer unsafe.Pointer, when, period int64) bool
 
+//go:linkname llgoCoroAfterFuncV1 runtime.llgoCoroAfterFuncV1
+func llgoCoroAfterFuncV1(when int64, f func()) unsafe.Pointer
+
 func newTimer(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer) *Timer {
 	return (*Timer)(llgoCoroTimerNewV1(when, period, f, arg, cp))
 }
@@ -74,5 +77,5 @@ func Sleep(d Duration) {
 // the standard-library launcher there would create a dead, over-approximated
 // dynamic spawn target. Keep that slot nil and retain only the user callback.
 func AfterFunc(d Duration, f func()) *Timer {
-	return newTimer(when(d), 0, nil, f, nil)
+	return (*Timer)(llgoCoroAfterFuncV1(when(d), f))
 }

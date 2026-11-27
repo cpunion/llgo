@@ -30,7 +30,7 @@ func TestTimeSleepTimerWeakOwnership(t *testing.T) {
 		case *ast.FuncDecl:
 			if n.Name.Name == "coroTimerManager" {
 				ptr, ok := n.Type.Params.List[0].Type.(*ast.StarExpr)
-				foundManager = ok && ptr.X.(*ast.Ident).Name == "coroTimeTimerState"
+				foundManager = ok && ptr.X.(*ast.Ident).Name == "coroTimerHub"
 			}
 		}
 		return true

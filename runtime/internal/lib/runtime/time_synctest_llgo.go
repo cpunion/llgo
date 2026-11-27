@@ -26,6 +26,7 @@ func coroSynctestTimeTimerOf(t *timeTimer) *coroSynctestTimeTimer {
 }
 
 func coroNewSynctestTimeTimer(t *timeTimer, when, period int64) {
+	t.state.synctest = true
 	fake := &coroSynctestTimeTimer{state: t.state, arg: t.state.arg}
 	var weakLive *uintptr
 	if t.state.channel {
@@ -50,7 +51,11 @@ func (fake *coroSynctestTimeTimer) fire(generation uint32, now, when int64) {
 	if state.afterFunc {
 		// Publication creates a real, counted bubble child before the
 		// controller may conclude quiescence again.
-		go coroRunTimerCallback(fake.arg.(func()))
+		cb := state.cb
+		if cb == nil {
+			cb = fake.arg.(func())
+		}
+		go coroRunTimerCallback(cb)
 		return
 	}
 	delta := now - when

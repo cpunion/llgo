@@ -67,3 +67,7 @@ func coroCurrentTaskRouteV1() coro.RouteID {
 	_, _, route := coroCurrentTaskV1()
 	return route
 }
+
+func CoroCurrentTaskRoute() uint32 {
+	return uint32(coroCurrentTaskRouteV1())
+}
